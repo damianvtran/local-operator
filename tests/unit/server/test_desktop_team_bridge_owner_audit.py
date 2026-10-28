@@ -256,6 +256,13 @@ def proxy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         hub_thread.join(10)
 
 
+def test_the_route_sets_the_private_header_the_boundary_then_normalises() -> None:
+    """#3022 r8 n1: the SET value the docs promise, distinct from the SERVED one."""
+
+    assert routes.OWNER_AUDIT_CACHE_CONTROL == "private, no-store"
+    assert _SERVED_CACHE_CONTROL == "no-store"
+
+
 #: The proxy fixture mounts the production ``managed_desktop_boundary``, which
 #: rewrites every ``/v1/desktop/`` answer to ``no-store`` -- #3045's documented
 #: convention, no weaker than the route's own ``private, no-store`` (which is what

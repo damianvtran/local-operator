@@ -640,6 +640,9 @@ OWNER_AUDIT_ATTACHMENT_MIME_TYPES = (*ATTACHMENT_MIME_TYPES, OWNER_AUDIT_FILE_MI
 #: The hub's owner-audit route family (agent-server #221). ONE spelling, used
 #: by the four ``owner_audit_*`` methods and by the gate below and nowhere else.
 _OWNER_AUDIT_HUB_PATH = "/messaging/agents/owned/conversations"
+PATH_METACHAR_SENTENCE = (  # i18n: ignore local guard; a code path, never shown to a person
+    "A hub path may not contain a separator or parameter character."
+)
 DOT_SEGMENT_SENTENCE = (
     "A hub path may not contain a dot segment."  # i18n: ignore local guard, no copy
 )
@@ -689,6 +692,18 @@ def _refuse_unscoped_owner_audit(path: str) -> None:
         raise BridgeRefusal(
             "invalid_request",
             DOT_SEGMENT_SENTENCE,
+            http_status=400,
+        )
+    # ``;`` and ``\`` are refused for the same reason as a dot segment (#3022 r8 m1):
+    # a spelling THIS check reads as a member path must not reach the hub as the
+    # audit family. ``owned;x/conversations`` and ``owned\conversations`` both did
+    # before the family match was narrowed to the conversations constant, and no
+    # hub path this client builds contains either: ids are grammar-checked and
+    # every separator it writes is ``/``.
+    if ";" in decoded or "\\" in decoded:
+        raise BridgeRefusal(
+            "invalid_request",
+            PATH_METACHAR_SENTENCE,
             http_status=400,
         )
     normalized = re.sub(r"/+", "/", decoded).lower()

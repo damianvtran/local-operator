@@ -323,6 +323,75 @@ async def test_a_built_audit_path_is_refused_before_any_request(tmp_path: Path, 
     assert requests == []
 
 
+@pytest.mark.parametrize("in_scope", [False, True])
+@pytest.mark.asyncio
+async def test_the_invitations_read_is_not_the_audit_family(tmp_path: Path, in_scope: bool) -> None:
+    """Pin the boundary the narrowed gate has to hold (#3022 r8 m2).
+
+    The owner's agent-invitations read (``…/agents/owned/invitations``, #3045)
+    shares the ``/agents/owned`` prefix with the audit family and is an ordinary
+    metadata read: it passes the gate OUTSIDE the audit scope, which is the whole
+    reason the check matches the conversations constant instead of the prefix. The
+    four audit paths are then still refused without the scope, so this cannot pass
+    by the gate having stopped working.
+    """
+
+    requests: list[httpx.Request] = []
+    client = TeamBridgeClient(
+        tmp_path,
+        base_url="https://hub.example/v1",
+        store=FakeStore(),
+        transport=httpx.MockTransport(lambda r: (requests.append(r), _hub_answer(r))[1]),
+    )
+    if in_scope:
+        with tb_client._owner_audit_scope():
+            await client._send("GET", "/messaging/agents/owned/invitations")
+    else:
+        await client._send("GET", "/messaging/agents/owned/invitations")
+    assert requests and requests[-1].url.path.endswith("/messaging/agents/owned/invitations")
+
+    with pytest.raises(tb_client.BridgeRefusal) as refused:
+        await client._send("GET", "/messaging/agents/" + "owned/conversations")
+    assert refused.value.code == "owner_audit_not_in_scope"
+
+
+#: Separator and parameter spellings (#3022 r8 m1). Each once contained the
+#: prefix the old gate matched and now does not contain the conversations family,
+#: so the gate needs its own refusal rather than the hub router's.
+_PATH_METACHAR_PATHS = [
+    "/messaging/agents/owned;x/conversations",
+    "/messaging/agents/owned%3Bx/conversations",
+    "/messaging/agents/owned\\conversations",
+    "/messaging/agents%5Cowned/conversations",
+    "/messaging/agents/owned/conversations%3Bx",
+]
+
+
+@pytest.mark.parametrize("path", _PATH_METACHAR_PATHS)
+@pytest.mark.parametrize("in_scope", [False, True])
+@pytest.mark.asyncio
+async def test_a_separator_or_parameter_spelling_is_refused(
+    tmp_path: Path, path: str, in_scope: bool
+) -> None:
+    """Refused before dispatch, in scope or not: no hub path this client builds has one."""
+
+    requests: list[httpx.Request] = []
+    client = TeamBridgeClient(
+        tmp_path,
+        base_url="https://hub.example/v1",
+        store=FakeStore(),
+        transport=httpx.MockTransport(lambda r: (requests.append(r), _hub_answer(r))[1]),
+    )
+    with pytest.raises(tb_client.BridgeRefusal) as refused:
+        if in_scope:
+            with tb_client._owner_audit_scope():
+                await client._send("GET", path)
+        else:
+            await client._send("GET", path)
+    assert refused.value.code == "invalid_request"
+    assert requests == []
+
+
 #: Dot-segment spellings (#3022 r3 m1). httpx resolves ``.``/``..`` when it
 #: builds the URL, so the first one left the gate as a member path and reached
 #: the wire as ``/messaging/agents/owned/conversations``. Each is refused before
