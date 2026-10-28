@@ -90,6 +90,37 @@ pyautogui sends `Control_L`. Two kinds of name stay refused:
 
 The refusal for `cmd` names both meanings and leaves the choice to the model.
 
+A literal `" "` names the space bar (it is the one printable character outside
+`string.punctuation`). Four other refusals carry a corrected example built from
+the model's own input, and none of them is applied automatically:
+
+- A chord of two or more plain characters and no modifier
+  (`["e", "c", "h", "o", " ", "A"]`) is typing, not a shortcut. The refusal
+  shows `{"kind": "type", "text": "echo A"}`. It is checked before the
+  duplicate rule, so a spelled word with a repeated letter is told the real
+  mistake. `["shift", "a"]`, `["ctrl", "alt", "t"]` and `["up", "left"]` are
+  untouched.
+- A multi-character name close to no key (`"cat"`, `"comp.scm"`) gets "if you
+  meant to type this text" and the `type` action. A near-miss still gets
+  "use … instead".
+- A `+`-joined chord whose parts are all keys (`"ctrl+t"`) gets
+  `"keys": ["ctrl", "t"]`. It used to get `use "ctrl" instead`.
+- A key repeated in one chord (`["Page_Up", "Page_Up"]`) gets one
+  `{"kind": "key", "keys": ["pageup"]}` action per press.
+
+Two more refusals stay, and their sentences now give the repair. An all-zero
+`scroll` states the sign convention: deltas are wheel clicks, and
+`delta_y > 0` scrolls UP. A `finish` or `ask_user` sharing a batch, including
+`[wait, finish]`, is told to send the finish alone. Leading waits are not
+dropped, because both measured `[wait, finish]` batches were an episode's first
+call with `reason: "placeholder"`, and both models then did the task.
+
+`type.text` is non-empty but may be whitespace: `"\n"` presses Return and `" "`
+presses space. This removed the `\S` pattern from the `TypeAction` schema, so
+`tool_schema_digest` changed from `347cc002…` to `bceb4942…` for the default
+surface. Parsing old bundles is unaffected, because every value the old schema
+accepted is still accepted.
+
 Unknown fields stay refused rather than dropped. Only a field that belongs to
 another action kind is dropped (`public_reply.drop_sibling_action_fields`),
 because the model's `kind` tag already says what it meant. Dropping a pause
