@@ -1626,7 +1626,14 @@ _LAUNCHER_NAMES = frozenset({"lop", "lo", "local-operator"})
 #: an option an operator or an app can plausibly add to a ``lop`` line. An
 #: option not listed here answers "not our launch", which only costs a name —
 #: see :func:`is_own_launch` for why that direction is the safe one.
-_LEADING_OPTION_FLAGS = frozenset({"-P", "-u", "-E", "-s", "-I", "-B"})
+#:
+#: ``-O``/``-OO`` are here because they are the one leading option an operator is
+#: most likely to add and the one that silently cost the desktop plane its
+#: exposure guarantee: ``python -O -m local_operator.cli serve`` answers "not our
+#: launch" without them, so ``adopt_spawn_bearer`` declined the pipe re-exec and
+#: the bearer stayed in that daemon's exec-time block for its whole life
+#: (``ps eww`` showed it once; #3022 code review round 5, MAJOR).
+_LEADING_OPTION_FLAGS = frozenset({"-P", "-u", "-E", "-s", "-I", "-B", "-O", "-OO"})
 
 #: The same, for options that take a SEPARATE value (``-X dev``, ``-W ignore``):
 #: the token after one of these is its value, not the program.

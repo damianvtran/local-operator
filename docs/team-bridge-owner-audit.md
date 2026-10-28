@@ -85,9 +85,9 @@ able to obtain it. Measured reaches, and what closes each one:
 | `bash`, `eval` (Python kernel) and their descendants inherit it from the session runtime's environment | withheld by name from every model child in BOTH `shell_environment` modes (`agent_shell.DAEMON_BEARER_ENVS`, dropped by ``without_daemon_bearer``) |
 | a `PostToolUse` hook command (a model can write a project settings file naming one) and the `network` tool's `lop network` child | spawned with the same name-based withholding (`hook_forwarding.run_hook`, `network/tool.py`) |
 | `ps eww $PPID` (Darwin) or `/proc/$PPID/environ` (Linux) on the session runtime | the runtime is launched without it (`session/runtime/launch.py`, `standby.py`, `mobile/daemon.py`) |
-| `ps eww <daemon pid>` on the `lop serve` daemon | the daemon takes it out of its environment at boot and overwrites the original bytes (`server/desktop.capture_launch_token`); the plane is governed from the captured value |
-| the exec successor of a NORMAL daemon's in-place reload (`server/reload.py`) | re-supplied only to that exec, then captured again |
-| a daemon started with `lop serve --reload` (uvicorn's development auto-reloader) | **not closed**: that daemon never captures, because uvicorn's reloader child reads the plane from its own environment. Development mode only; the desktop app never starts it |
+| `ps eww <daemon pid>` on the `lop serve` daemon | `server.desktop.adopt_spawn_bearer` moves the bearer onto an inherited pipe and re-execs the daemon once, same pid and argv, so the exec-time block never held the value; the plane is governed from the adopted copy (`TOKEN_FD_ENV`). This covers every launch the product recognises, `-O`/`-OO` included (`procname.is_own_launch`) |
+| the exec successor of a NORMAL daemon's in-place reload (`server/reload.py`) | handed over by pipe, never by environment, so it never re-enters a successor's exec-time block |
+| a launch the predicate refuses (`--reload`, uvicorn's development auto-reloader; a non-product launch line) | **not closed**: those never re-exec, so the value stays in that process's exec-time block. Development mode only; the desktop app never starts it |
 | the serve record (`run/serve/<pid>.json`) | an app-spawned daemon publishes `claim_key: ""`; a claimed daemon's key is spent by the claim |
 | argv / inherited fds | never carried there |
 

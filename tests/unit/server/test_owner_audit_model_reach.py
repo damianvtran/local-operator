@@ -60,8 +60,16 @@ def _inherit_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shell_env, "load_policy", lambda: shell_env.ShellEnvironmentPolicy())
 
 
-@pytest_asyncio.fixture(autouse=True)
-async def _clean_kernels():
+@pytest_asyncio.fixture
+async def clean_kernels():
+    """Reap the eval workers this test spawned.
+
+    NOT autouse: an async generator fixture on a test that has no event loop of its
+    own (the sync tests in this module) still owes a finalizer, and CI failed the
+    shard with ``Event loop is closed`` for every test in the file -- teardown only,
+    all six passed (run 40623539454, shard 0). Only the kernel test asks for it.
+    """
+
     yield
     for kernel in list(eval_tool._KERNELS.values()):
         await eval_tool._close_kernel(kernel)
@@ -104,7 +112,9 @@ async def test_the_bash_tool_cannot_use_the_desktop_bearer(proxy, tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_the_eval_kernel_cannot_use_the_desktop_bearer(proxy, tmp_path: Path) -> None:
+async def test_the_eval_kernel_cannot_use_the_desktop_bearer(
+    proxy, tmp_path: Path, clean_kernels: None
+) -> None:
     client, calls, _state, _ = proxy
     url = str(client.base_url) + f"{BASE}/{CID}/messages" + _q()
     code = (

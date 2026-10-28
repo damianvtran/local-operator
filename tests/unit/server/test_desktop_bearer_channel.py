@@ -11,7 +11,10 @@ tool child. These tests pin the in-process half of the contract:
 * an app that still passes the environment variable gets a daemon that re-execs itself
   onto a pipe -- same interpreter, same argv, the value gone from the new environment;
 * only a real launch of this product re-execs (never pytest, never an embedder);
-* the serve reload hands the bearer on by pipe, never by environment.
+* the serve reload hands the bearer on by pipe, never by environment;
+* an OPTIMIZED launch (``python -O -m local_operator.cli serve``) reaches the same
+  exec-time guarantee as a plain one -- the launch predicate is what decides that,
+  so ``-O``/``-OO`` are launch flags, not an unknown option.
 
 The exec-time half (``ps -E`` on a real daemon, a runtime and a tool child) cannot be
 asserted from inside the test process; the PR carries that probe as evidence.
@@ -21,6 +24,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -268,3 +272,104 @@ def test_the_reload_hands_the_bearer_on_by_pipe(monkeypatch: pytest.MonkeyPatch)
 
 def test_no_bearer_means_no_handoff() -> None:
     assert desktop.spawn_bearer_handoff() == ({}, None)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the exec-time environment is a POSIX read")
+@pytest.mark.parametrize("optimize", ["-O", "-OO"])
+def test_an_optimized_launch_leaves_no_bearer_in_the_exec_time_environment(
+    tmp_path: Path, optimize: str
+) -> None:
+    """The real ``-O -m local_operator.cli serve`` shape, measured on the daemon.
+
+    ``procname.is_own_launch`` decides whether ``adopt_spawn_bearer`` re-execs, and an
+    unknown leading option answers "not our launch" -- so ``-O`` used to leave the
+    bearer in the daemon's exec-time block for its whole life, which ``ps eww`` shows
+    (#3022 code review round 5, MAJOR). This starts a REAL daemon the way an operator
+    would and reads it the way a model child would: ``ps eww`` on the pid.
+    """
+
+    import socket
+    import subprocess
+    import time
+    import urllib.error
+    import urllib.request
+
+    port_probe = socket.socket()
+    port_probe.bind(("127.0.0.1", 0))
+    port = port_probe.getsockname()[1]
+    port_probe.close()
+
+    home = tmp_path / "home"
+    config = tmp_path / "config"
+    home.mkdir()
+    config.mkdir()
+    token = "synthetic-optimized-launch-" + "q" * 16
+    root = Path(__file__).resolve().parents[3]
+    env = {
+        "HOME": str(home),
+        "LOCAL_OPERATOR_CONFIG_DIR": str(config),
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "PYTHONPATH": str(root),
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        desktop.TOKEN_ENV: token,
+    }
+    log = tmp_path / "serve.log"
+    with log.open("wb") as sink:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                optimize,
+                "-m",
+                "local_operator.cli",
+                "serve",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+            ],
+            env=env,
+            stdout=sink,
+            stderr=subprocess.STDOUT,
+            cwd=str(tmp_path),
+        )
+    try:
+        deadline = time.monotonic() + 90
+        healthy = False
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2):
+                    healthy = True
+                    break
+            except (urllib.error.URLError, OSError):
+                time.sleep(0.5)
+        assert healthy, log.read_text()[-4000:]
+
+        # ``ps eww <pid>`` is what a model's bash child can run; ``-p`` on the pid we
+        # spawned also proves the re-exec kept it (an exec, not a new process).
+        listing = subprocess.run(
+            ["ps", "eww", "-p", str(process.pid)], capture_output=True, text=True, timeout=30
+        ).stdout
+        assert token not in listing, "the bearer is in the daemon's exec-time environment"
+        assert process.poll() is None, "the re-exec must keep the pid"
+
+        def status(headers: dict[str, str]) -> int:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/v1/desktop/team-bridge/status", headers=headers
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=10) as answer:
+                    return answer.status
+            except urllib.error.HTTPError as refusal:
+                return refusal.code
+
+        assert status({"Authorization": f"Bearer {token}"}) == 200
+        assert status({}) == 401
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)

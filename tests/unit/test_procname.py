@@ -794,6 +794,13 @@ class TestFallbackLadder:
             (["python", "-Wignore", "-m", "local_operator.cli"], True),
             (["python", "--check-hash-based-pycs=always", "-m", "local_operator.cli"], True),
             (["python", "-P", "/x/bin/lop"], True),
+            # Optimized launches are launches of this product too. Without these
+            # rows the daemon declines the bearer re-exec and ``ps eww`` keeps
+            # showing the value (#3022 code review round 5, MAJOR).
+            (["python", "-O", "-m", "local_operator.cli", "serve"], True),
+            (["python", "-OO", "-m", "local_operator.cli", "serve"], True),
+            (["python", "-P", "-O", "-m", "local_operator"], True),
+            (["python", "-O", "/x/bin/lop"], True),
             # ANY submodule of the package, not just the two spellings the old
             # test listed: a spawn of our own module is a launch of this
             # product, which is why the eval worker and the runtime's own

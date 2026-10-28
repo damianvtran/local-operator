@@ -1152,14 +1152,13 @@ def reset_store_maintenance() -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def reset_desktop_launch_capture() -> Iterator[None]:
-    """Give every test a process whose desktop bearer has not been captured.
+    """Give every test a process whose desktop bearer has not been adopted.
 
-    ``lop serve`` takes ``LOCAL_OPERATOR_DESKTOP_TOKEN`` out of the environment
-    (``desktop.adopt_spawn_bearer``)
-    once per process (``server.desktop.capture_launch_token``) and latches the
-    value; ``tests/unit/test_cli_serve.py`` runs ``serve_command`` in-process,
-    so without this a later test's ``monkeypatch.setenv`` of the token would be
-    ignored in favour of an earlier test's latched value (or its absence).
+    ``desktop.adopt_spawn_bearer`` latches the spawner's bearer in
+    ``_SPAWN_BEARER`` once per process, and ``tests/unit/test_cli_serve.py`` and
+    friends reach it in-process through ``cli.main()``, so without this reset a
+    later test's ``monkeypatch.setenv`` of the token would be answered from an
+    earlier test's latched value (or its absence).
     """
 
     from local_operator.server import desktop
