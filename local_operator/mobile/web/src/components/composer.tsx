@@ -35,7 +35,7 @@ import {
 } from "../pending-echo";
 import { Sheet } from "./ui/sheet";
 import { UsageSheet } from "./usage-sheet";
-import { SessionStatus } from "./session-status";
+import { SessionStatus, meterFacts } from "./session-status";
 import { WorkingDirectoryChip } from "./directory-sheet";
 import { cn } from "../lib/cn";
 import { messageRuntime, useCapabilities, useDraft } from "../store";
@@ -668,10 +668,6 @@ export function Composer({
 	   plain-HTTP case is deliberately excluded — a mic that appears and fails is
 	   worse than one that never does. */
 	const capabilities = useCapabilities();
-	const readingKey = [projection.model_label, projection.effort, projection.queued_count,
-		projection.usage ? JSON.stringify(projection.usage) : ""].join("|");
-	const foot = useFootFit(short, readingKey);
-	useEffect(() => { onFitLevel?.(foot.level); }, [foot.level, onFitLevel]);
 	const micAvailable =
 		capabilities?.stt?.available === true &&
 		typeof window !== "undefined" &&
@@ -679,6 +675,18 @@ export function Composer({
 		typeof navigator !== "undefined" &&
 		!!navigator.mediaDevices?.getUserMedia &&
 		typeof MediaRecorder !== "undefined";
+	/* EVERY INPUT THAT MOVES THE FACTS ROW'S GEOMETRY WITHOUT RESIZING THE ROW
+	   (QA Q2 = review R3-6): the model label, the reading's own rendered text
+	   (it spans spend, subagent spend and context, not just `usage`), and the
+	   mic, which takes 46 px from the line. Missing one let a cold load commit a
+	   stale level until the row's observer happened to fire. The count is passed
+	   on its own because the hook must know it even when it is not in the row. */
+	const queuedLabel = projection.queued_count > 0
+		? messageRuntime.t("relay.transcript.composer.queued", { count: projection.queued_count })
+		: "";
+	const readingKey = [projection.model_label, projection.effort, meterFacts(projection).label, micAvailable ? "mic" : ""].join("|");
+	const foot = useFootFit(short, readingKey, queuedLabel);
+	useEffect(() => { onFitLevel?.(foot.level); }, [foot.level, onFitLevel]);
 	const [dictation, setDictation] = useState<DictationState>("idle");
 	/* The transient outcome line (added / empty / discarded); lives in the same
 	   status row as the live states so nothing moves between them (D3). */
@@ -1547,19 +1555,28 @@ export function Composer({
 				    its real picker; only the presentation changes, never send/retry
 				    routing or the pending-envelope lifetime. */}
 				<div ref={foot.rowRef} data-foot-level={foot.level} data-short={short ? "" : undefined} className={COMPOSER_CHIP_ROW}>
-					{projection.queued_count > 0 ? (
-						<span data-foot="queued" className="flex min-h-11 min-w-0 shrink items-center text-meta tabular-nums text-ink-dim"
-							aria-label={messageRuntime.t("relay.transcript.composer.queued", { count: projection.queued_count })}>
-							<span className="truncate">{messageRuntime.t("relay.transcript.composer.queued", { count: projection.queued_count })}</span>
+					{/* THE COUNT IS WHOLE OR ELSEWHERE, never a fragment (design D8):
+					    `shrink-0 whitespace-nowrap`, so its box is its intrinsic width
+					    and the fit counts it as pressure. When even the last level cannot
+					    seat it beside the folder and the model's floor (L4: 320 + mic),
+					    it moves whole to the ⋮ menu and stays here as screen-reader text,
+					    so the count is still announced with the composer. */}
+					{queuedLabel && foot.level < 4 ? (
+						<span data-foot="queued" className="flex min-h-11 shrink-0 items-center whitespace-nowrap text-meta tabular-nums text-ink-dim">
+							{queuedLabel}
 						</span>
-					) : null}
+					) : queuedLabel ? <span data-queued-moved className="sr-only">{queuedLabel}</span> : null}
 					<div data-foot="cwd" className={COMPOSER_CWD_ROW}><WorkingDirectoryChip sessionId={pid} cwd={shownCwd} onMoved={requestMove} /></div>
-					{/* At the last level the label yields to a 44px icon, never the
-					   control itself: this chip is the model sheet's door. The mic is
-					   an action and remains at its full touch target at every level. */}
-					<button data-foot="model" type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, foot.level >= 3 ? "shrink-0" : "min-w-0 flex-1 truncate", "active:text-ink")}
+					{/* The model chip is the model sheet's only door, so it never
+					   yields, and it never shows a bare glyph either: a lone ◇ did not
+					   say "model" (design D10), the label's first characters (`Cl…`)
+					   do. L3 pins it at its 44 px floor (`w-11 shrink-0`; without the
+					   width a `shrink-0` chip would take the whole label's width); every
+					   other level lets it grow into what is left. The mic is an action
+					   and keeps its full touch target at every level. */}
+					<button data-foot="model" type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, foot.level === 3 ? "w-11 shrink-0" : "min-w-0 flex-1 truncate", "active:text-ink")}
 						aria-label={messageRuntime.t("relay.chrome.composer.model_label", { label: [projection.model_label, projection.effort].filter(Boolean).join(" · ") })}>
-						{foot.level >= 3 ? <span aria-hidden className="text-body">◇</span> : <span className="truncate">{projection.model_label || "model"}{projection.effort ? ` · ${projection.effort}` : ""}</span>}
+						<span className="truncate">{projection.model_label || "model"}{projection.effort ? ` · ${projection.effort}` : ""}</span>
 					</button>
 					<SessionStatus projection={projection} compact short={short} mode={foot.level >= 2 ? "hidden" : foot.level === 1 ? "short" : "full"} />
 				</div>

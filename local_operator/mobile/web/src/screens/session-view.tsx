@@ -31,7 +31,7 @@ import { ModelSheet } from "../components/model-sheet";
 import { Composer, ComposerFrame } from "../components/composer";
 import { GateSheet } from "../components/gate-sheet";
 import { SessionMenu } from "../components/session-menu";
-import { SessionStatus } from "../components/session-status";
+import { SessionStatus, meterFacts } from "../components/session-status";
 import { PendingCard } from "../components/pending-card";
 import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
@@ -291,7 +291,18 @@ function Header({
 				onTogglePin={() => togglePin()}
 				onOpenApprovals={() => setGateOpen(true)}
 				onOpenSpend={onOpenSpend}
-				showSpend={fitLevel >= 2 && Boolean(projection.usage && Object.keys(projection.usage).length > 0)}
+				/* WHAT THE FOOTER MOVED OUT, offered here (design D9 / D8, manager
+				   decision option A). The spend row exists when the meter is hidden
+				   (L2+) AND has a reading to open — keyed on the reading's own facts,
+				   not on `usage`: a resumed session restores durable context and
+				   spend before its first receipt (R3-2b). The queued line exists
+				   only at L4, where the whole count could not fit the row. The menu
+				   LATCHES both on open: opening it takes focus off the field, which
+				   closes the keyboard and refits the footer, and a row that vanished
+				   under the reader's finger is the jitter D9 ruled out. */
+				showSpend={fitLevel >= 2 && meterFacts(projection).hasRow}
+				queuedCount={projection.queued_count}
+				showQueued={fitLevel >= 4 && projection.queued_count > 0}
 				onResume={ended ? () => {
 					void resume.resume();
 					setHealthOpen(true);
@@ -553,7 +564,11 @@ export function SessionScreen({
 	/* The short layout and the footer's fit are ONE rendering decision. Keeping
 	   this only as a DOM attribute let CSS flip before React had fitted its facts
 	   row, painting one clipped frame on keyboard changes. Initialising from the
-	   visual viewport also makes a cold landscape load compact on its first paint. */
+	   visual viewport, and rendering `data-short` from this state on BOTH roots
+	   (the reserved frame's and the live column's — QA Q1 found the reserve
+	   without it painting the 154 px two-line composer, then jumping 44 px when
+	   the projection landed), makes a cold short or landscape load compact on
+	   its first paint. */
 	const [short, setShort] = useState(() =>
 		typeof window !== "undefined" && (window.visualViewport?.height ?? Infinity) <= SHORT_COLUMN_PX,
 	);
@@ -656,6 +671,7 @@ export function SessionScreen({
 		return (
 			<div
 				ref={rootRef}
+				data-short={short ? "" : undefined}
 				className="relative mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col overflow-hidden"
 			>
 				<div className="relative">
