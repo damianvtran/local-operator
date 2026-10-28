@@ -615,31 +615,55 @@ def _cli_credential_record(
     elif shape == "bogus-beside-finite":
         what = copy.deepcopy(template["what"])
         what["credential_bogus"] = {"payload": "unknown"}
+    elif shape == "malformed-finite":  # the finite op key is present, its payload does not parse
+        what = {"anchor": anchor, finite_share.OP: "not-a-dict"}
     else:  # "malformed-inheritance": the op key is present, its payload does not parse
         what = {"anchor": anchor, inheritance.OP: "not-a-dict"}
     return _record_with_what(template, what, rig.root)
 
 
-@pytest.mark.parametrize("shape", ["bogus-alone", "bogus-beside-finite", "malformed-inheritance"])
-def test_cli_approve_refuses_an_undisclosable_credential_key_before_the_signer(
+#: QA round 3, Q4: every credential-bearing record shape the CLI must refuse, including the
+#: two that carry a finite share -- a bogus key beside a valid one, and a malformed one --
+#: where the CLI used to answer with the family code while the desktop gave the finite op's.
+CLI_REFUSED_SHAPES = [
+    "bogus-alone",
+    "bogus-beside-finite",
+    "malformed-inheritance",
+    "malformed-finite",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", CLI_REFUSED_SHAPES)
+async def test_cli_and_desktop_refuse_each_undisclosable_credential_shape_identically(
     rig: Any,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     shape: str,
 ) -> None:
-    """Q3: the CLI refuses with the desktop's own family code and sentence, signer untouched."""
+    """Q3 + Q4: both generic approvers give the SAME code and sentence, signer untouched.
+
+    The desktop's bodiless ``/approve`` is the reference: its answer is the op's own frozen
+    refusal when one applies, else the family refusal. The CLI must not drift from it (QA
+    round 3 caught it telling a malformed finite share to use "a typed approval flow" where
+    the desktop says to request a new finite-share recovery).
+    """
     record = _cli_credential_record(rig, monkeypatch, shape)
+    _level(monkeypatch, PRESENCE)
     counters = _counted(monkeypatch)
     aid = record["approval_id"]
+    async with _client(rig, monkeypatch) as client:
+        response = await client.post(f"/v1/desktop/approvals/{aid}/approve")
+    assert response.status_code == 409, response.text
+    desktop_body = response.json()["detail"]
     capsys.readouterr()
     rc = _lop_network("approvals", "approve", aid, "--json")
     out = capsys.readouterr()
-    assert counters["signer"] == 0
     assert rc != 0
-    refusal = approval_ops.credential_unsupported(record, aid)
-    body = json.loads(out.out)
-    assert body["code"] == refusal.code == "credential_approval_unsupported"
-    assert refusal.sentence in json.dumps(body)
+    cli_body = json.loads(out.out)
+    assert cli_body["code"] == desktop_body["code"], (cli_body, desktop_body)
+    assert desktop_body["text"] in json.dumps(cli_body), (cli_body, desktop_body)
+    assert counters["signer"] == 0
     assert A.load_record(aid, root=rig.root)["state"] == "requested"
 
 

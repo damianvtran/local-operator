@@ -240,7 +240,9 @@ def require_generic_approvable(
 
     Raises the claiming op's refusal when ``record`` carries a registered typed op that
     ``surface`` may not sign; a key of a registered family refuses too unless this surface
-    discloses it (on the CLI, a ``cli_approvable`` op whose payload parses). Returns
+    discloses it (on the CLI, a ``cli_approvable`` op whose own refusal is in
+    :data:`CLI_SIGNS_HERE`, i.e. the exact shape its disclosure states). Every other answer
+    is the desktop's, code and sentence, so the two approvers never disagree. Returns
     ``None`` when the record is the generic approver's to sign. Deny/withdraw never call
     this.
     """
@@ -253,31 +255,37 @@ def require_generic_approvable(
     # registration order, then the desktop family scan -- so every credential record keeps
     # its frozen body; ``typed_required`` is the last word, never a fall-through to sign.
     unanswered = False
+    # The keys the CLI verb will DISCLOSE before signing; only those are exempt from the
+    # family scan below (QA round 1, Q3). Empty on the desktop, which discloses nothing.
+    disclosed_here: set[str] = set()
     for operation in registered():
         if operation.op not in what:
             continue
-        if surface == SURFACE_CLI and operation.cli_approvable:
-            # The CLI verb discloses this op itself before signing (operator decision).
-            continue
+        # BOTH surfaces ask the op first, in the same order (QA round 3, Q4): the CLI used to
+        # skip a ``cli_approvable`` op here, so a malformed finite share -- or a valid one
+        # beside an unknown ``credential_*`` key -- got the family's "typed approval flow"
+        # sentence on the CLI but the actionable ``finite_disclosure_invalid`` on the desktop.
         refusal = operation.generic_refusal(record, approval_id)
+        if (
+            surface == SURFACE_CLI
+            and operation.cli_approvable
+            and refusal is not None
+            and refusal.code in CLI_SIGNS_HERE
+        ):
+            # The op's answer is "approve this from the terminal", given only for the exact
+            # shape it can disclose: this IS the terminal verb, which prints that disclosure
+            # before signing (operator decision a-b815). Any other refusal is raised below,
+            # word for word as the desktop raises it.
+            disclosed_here.add(operation.op)
+            continue
         if refusal is not None:
             raise refusal
         unanswered = True
     # The family scan runs on BOTH surfaces (QA round 1, Q3): before it, the CLI signed an
-    # unknown ``credential_*`` key -- alone, or beside a valid finite share whose disclosure
-    # was the only one printed -- and a malformed ``credential_inheritance``, all blind. The
-    # CLI exempts exactly the keys its verb DISCLOSES before signing: a ``cli_approvable``
-    # op whose payload parses (``intent`` is what the verb's disclosure branches test), so
-    # the credential ops still sign there exactly as before. This must hold before any
-    # build ships another ``credential_*`` op, or a signature this build gave blind could be
-    # honoured by a later build that knows the op.
-    disclosed_here: set[str] = set()
-    if surface == SURFACE_CLI:
-        disclosed_here = {
-            operation.op
-            for operation in registered()
-            if operation.cli_approvable and operation.intent(dict(record)) is not None
-        }
+    # unknown ``credential_*`` key -- alone, or beside a valid op whose disclosure was the
+    # only one printed -- and a malformed ``credential_inheritance``, all blind. This must
+    # hold before any build ships another ``credential_*`` op, or a signature this build gave
+    # blind could be honoured by a later build that knows the op.
     with _LOCK:
         families = dict(_FAMILIES)
     for prefix, unsupported in families.items():
@@ -300,6 +308,15 @@ def require_generic_approvable(
 # ``approval_copy.KNOWN_CODES`` is the typed card's refusal vocabulary and never listed them,
 # and ``test_every_refusal_code_is_known`` walks ``network/credentials`` to keep it honest.
 # The credential modules are imported lazily so this module stays importable by the store.
+
+
+#: The credential ops' "approve this from the command line" answers. A generic DESKTOP
+#: approver raises them; the CLI verb, being that command line, signs instead -- but only on
+#: these codes, which each op returns solely for the exact shape its disclosure can state.
+#: Every other refusal (a malformed or over-wide record) is raised on BOTH surfaces.
+FINITE_TERMINAL_APPROVAL_REQUIRED = "finite_terminal_approval_required"
+INHERIT_TERMINAL_APPROVAL_REQUIRED = "inherit_terminal_approval_required"
+CLI_SIGNS_HERE = frozenset({FINITE_TERMINAL_APPROVAL_REQUIRED, INHERIT_TERMINAL_APPROVAL_REQUIRED})
 
 
 def finite_generic_refusal(record: Mapping[str, Any], approval_id: str) -> MeshRefusal | None:
@@ -329,7 +346,7 @@ def finite_generic_refusal(record: Mapping[str, Any], approval_id: str) -> MeshR
     # Until the desktop's GENERIC route can render the full validated withdrawal disclosure,
     # the CLI (or the typed route) is the only signing surface. Deny remains available.
     return MeshRefusal(
-        "finite_terminal_approval_required",
+        FINITE_TERMINAL_APPROVAL_REQUIRED,
         "This finite-share recovery can only be approved from the command line on this "
         "machine for now, where the complete withdrawal disclosure is validated and shown "
         "before you sign: "
@@ -350,7 +367,7 @@ def inheritance_generic_refusal(record: Mapping[str, Any], approval_id: str) -> 
     if _inheritance.intent(dict(record)) is None:
         return None
     return MeshRefusal(
-        "inherit_terminal_approval_required",
+        INHERIT_TERMINAL_APPROVAL_REQUIRED,
         "This credential permission can only be approved from the command line on this "
         "machine for now, where its account, recipient and duration are shown before you "
         "sign: "
