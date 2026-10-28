@@ -441,6 +441,11 @@ def _committed_public_copy(
             GIT_CONFIG_GLOBAL=os.devnull,
             GIT_TERMINAL_PROMPT="0",
             GIT_OPTIONAL_LOCKS="0",
+            # A missing promisor blob must fail, never turn a copy read into
+            # network/credential work. The empty transport allowlist also
+            # closes lazy-fetch fallback on Git builds predating its opt-out.
+            GIT_NO_LAZY_FETCH="1",
+            GIT_ALLOW_PROTOCOL="",
         )
         return subprocess.run(argv, capture_output=True, check=False, timeout=10, env=env)
 
@@ -488,6 +493,17 @@ def _committed_public_copy(
         tracked = _git("ls-files", "--error-unmatch", "--", relative)
         if tracked.returncode != 0:
             return b"", {}, f"{relative} is not committed at HEAD; commit the public copy first"
+        # --no-ext-diff/--no-textconv do not disable clean/process filters:
+        # Git can execute one while refreshing its worktree hash. A read-tier
+        # tool must refuse such paths before diff, not run repository commands
+        # with the caller's write authority. check-attr itself runs no filter.
+        attributes = _git("check-attr", "-z", "--all", "--", relative)
+        fields = attributes.stdout.split(b"\0")
+        # --all distinguishes absence from an actual driver literally named
+        # "unspecified" or "unset". A named-attribute query renders those
+        # strings identically to its absence/disabled sentinels.
+        if attributes.returncode != 0 or len(fields) % 3 != 1 or b"filter" in fields[1::3]:
+            return b"", {}, "public_copy_filter_not_supported"
         clean = _git("diff", "--no-ext-diff", "--no-textconv", "--quiet", commit, "--", relative)
         if clean.returncode == 1:
             return (

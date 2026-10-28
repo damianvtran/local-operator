@@ -360,3 +360,86 @@ async def test_git_environment_cannot_redirect_explicit_root(tmp_path, monkeypat
     )
     assert not result.is_error, result.text
     assert result.details["repository"] == "damianvtran/local-operator-ui"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("driver", ["clean", "process"])
+@pytest.mark.parametrize("filter_name", ["side-effect", "unspecified", "unset"])
+async def test_cleanliness_check_does_not_execute_git_clean_filter(tmp_path, driver, filter_name):
+    import os
+    import shlex
+
+    root = _ui_repo(tmp_path)
+    (root / ".gitattributes").write_text(f"*.json filter={filter_name}\n")
+    _git(root, "add", ".gitattributes")
+    _git(root, "commit", "-qm", "synthetic attribute")
+    marker = tmp_path / "filter-ran"
+    _git(
+        root,
+        "config",
+        f"filter.{filter_name}.{driver}",
+        f"sh -c 'echo ran > {shlex.quote(str(marker))}; cat'",
+    )
+    target = root / UI_CATALOGUE
+    # Break Git's cached stat match without changing the committed content.
+    stat = target.stat()
+    os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1000000000))
+    result = await execute_read_public_copy(
+        "filter",
+        {"path": UI_CATALOGUE, "repo_root": str(root)},
+        context=_context(tmp_path, tmp_path),
+    )
+    assert result.is_error and "public_copy_filter_not_supported" in result.text
+    assert not marker.exists(), "read-tier Git diff executed a configured clean filter"
+
+
+@pytest.mark.asyncio
+async def test_cleanliness_disables_fsmonitor_external_diff_and_textconv(tmp_path):
+    import os
+
+    root = _ui_repo(tmp_path)
+    marker = tmp_path / "git-helper-ran"
+    helper = tmp_path / "git-helper.sh"
+    helper.write_text(f"#!/bin/sh\necho ran > '{marker}'\ncat\n")
+    helper.chmod(0o700)
+    (root / ".gitattributes").write_text("*.json diff=side-effect\n")
+    _git(root, "add", ".gitattributes")
+    _git(root, "commit", "-qm", "synthetic diff attribute")
+    _git(root, "config", "core.fsmonitor", str(helper))
+    _git(root, "config", "diff.external", str(helper))
+    _git(root, "config", "diff.side-effect.textconv", str(helper))
+    file = root / UI_CATALOGUE
+    stat = file.stat()
+    os.utime(file, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1000000000))
+    result = await execute_read_public_copy(
+        "helpers",
+        {"path": UI_CATALOGUE, "repo_root": str(root)},
+        context=_context(tmp_path, tmp_path),
+    )
+    assert not result.is_error, result.text
+    assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_every_git_probe_disables_transports_and_lazy_fetch(tmp_path, monkeypatch):
+    from local_operator.tools import public_copy
+
+    root = _ui_repo(tmp_path)
+    run = public_copy.subprocess.run
+    observed = []
+
+    def constrained(argv, **kwargs):
+        observed.append(kwargs["env"])
+        assert kwargs["env"]["GIT_ALLOW_PROTOCOL"] == ""
+        assert kwargs["env"]["GIT_NO_LAZY_FETCH"] == "1"
+        return run(argv, **kwargs)
+
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "https:ssh:file")
+    monkeypatch.setattr(public_copy.subprocess, "run", constrained)
+    result = await execute_read_public_copy(
+        "transport",
+        {"path": UI_CATALOGUE, "repo_root": str(root)},
+        context=_context(tmp_path, tmp_path),
+    )
+    assert not result.is_error, result.text
+    assert observed

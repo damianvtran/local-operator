@@ -163,7 +163,14 @@ is **not** a redaction toggle:
 * Git runs with `--no-replace-objects`, so a `git replace` ref cannot substitute
   the served blob while the index/worktree comparison still looks clean.
   Inherited Git redirection variables are removed, external diff/textconv and
-  fsmonitor hooks are disabled, and optional index writes are disabled.
+  fsmonitor hooks are disabled, and optional index writes are disabled. Lazy
+  fetching is disabled and the transport allowlist is empty: missing objects
+  refuse rather than causing network or credential activity. Before comparing
+  working-tree cleanliness, `check-attr` inspects only the selected path's
+  `filter` attribute without executing it; paths requiring a clean/process
+  filter refuse. This deliberately tightens compatibility for filtered public
+  copy rather than executing repository commands under a read-tier tool.
+  Built-in CRLF normalization remains supported; arbitrary custom filters do not.
 * A trusted session confinement applies to the selected root and resolved copy
   path **before any Git/content read**. Confined Git commands use the existing
   kernel sandbox or refuse; the path check alone cannot constrain a linked
