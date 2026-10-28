@@ -3715,17 +3715,25 @@ class AuthStore:
         consulted here, so a lazy sweep is both sufficient and free of a
         background task that would have to be owned and cancelled.
         """
+        from local_operator.providers.account_affinity import current_lend_demotions
+
+        # A peer's 5xx demotions for the lend being resolved (owner side; see
+        # ``lend_selection_context``). Unioned on READ and never stored, so they
+        # reorder this one resolve exactly as the borrower's own demotion would
+        # reorder a local turn, and the owner's marks are untouched: the
+        # all-demoted branches only clear marks outside ``read_only``.
+        lend = set(current_lend_demotions())
         provider = self._storage_id(provider)
         marks = self._deprioritized.get(provider)
         if not marks:
-            return set()
+            return lend
         now = self._now_ms()
         for cid in [cid for cid, until in marks.items() if until <= now]:
             marks.pop(cid, None)
         if not marks:
             self._deprioritized.pop(provider, None)
-            return set()
-        return set(marks)
+            return lend
+        return set(marks) | lend
 
     def _selection_order(
         self,
@@ -3910,10 +3918,29 @@ class AuthStore:
         self, rows: list[StoredCredential], provider: str, session_id: str | None, model_id: str
     ) -> int | None:
         from local_operator.providers.account_affinity import (
+            current_lend_anchor,
             current_selection_endpoint,
             current_selection_signature,
+            receipt_endpoint_matches,
         )
 
+        anchor = current_lend_anchor()
+        if anchor is not None:
+            # A LEND: the receipt lives on the borrower, which validated its
+            # lifetime, model, prefix and endpoint before sending this anchor.
+            # The owner's half is the half only it can judge — the row must be
+            # one of THESE candidates (already past exclusion, blocks and
+            # depletion) with the same immutable ``created_at``, so a stale or
+            # forged anchor naming a re-created, excluded or spent row anchors
+            # nothing and the lend falls back to the policy pick. Returning here
+            # gives the anchor every consumer a local receipt has: first place
+            # in the order and the demotion exemption.
+            account_id, created_at = anchor
+            if session_id and any(
+                row.id == account_id and row.created_at == created_at for row in rows
+            ):
+                return account_id
+            return None
         signature = current_selection_signature()
         boundary = getattr(self, "_account_request_boundaries", {}).get(session_id)
         if (
@@ -3942,10 +3969,7 @@ class AuthStore:
             endpoint = current_selection_endpoint() or (
                 boundary.endpoint_mode if boundary is not None else None
             )
-            if (
-                endpoint is not None
-                and endpoint(self._selection_identity(chosen)) != receipt.endpoint_mode
-            ):
+            if not receipt_endpoint_matches(receipt, self._selection_identity(chosen), endpoint):
                 return None
             return receipt.account_id
         return None

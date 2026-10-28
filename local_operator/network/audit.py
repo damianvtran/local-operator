@@ -498,6 +498,13 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
             "scope",
             "refreshed",
             "latency_ms",
+            # Which OWNER row was lent (an int id, never an email), whether the
+            # borrower's affinity anchor chose it, and the selection policy the
+            # lend ran under: the per-turn record that remote load-balancing
+            # matches a local session's (first pick, stickiness, failover).
+            "credential_id",
+            "anchored",
+            "policy",
         }
     ),
     "credential.finite_requested": frozenset(
