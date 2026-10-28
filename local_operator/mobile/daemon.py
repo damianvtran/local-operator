@@ -2976,8 +2976,9 @@ def _device_refusal(certificate: Any) -> "JSONResponse | None":
 
     ONE PREDICATE, TWO SENTENCES. The question is now the runtime's own
     ``devices.is_admitted`` — not revoked AND its id IS its key's id AND (a
-    presence host, or a host that has not adopted the listing rule, or a device the
-    anchor lists). It is asked here for the same reason as before: the phone should
+    presence host, or a host whose anchor predates the rule (the migration guard), or
+    a device the anchor lists). It is asked here for the same reason as before: the
+    phone should
     hear about the refusal from the relay, in words that name the action that
     clears it, rather than watch a parked command fail later. The two refusals keep
     DIFFERENT typed codes because their remedies are different (lift the revocation
@@ -3016,7 +3017,7 @@ def _device_refusal(certificate: Any) -> "JSONResponse | None":
         # same anchor through the same loader, and it answers "admit" when it cannot
         # read one — the runtime is the authority that verifies the signature, and
         # with no anchor it refuses every device certificate anyway.
-        admitted = devices.is_admitted(config_dir(), certificate)
+        admitted = devices.is_admitted(certificate)
     except OSError:
         # ``load_anchor`` is NOT total: a root-owned DIRECTORY at the anchor path
         # passes its owner and mode checks and then raises ``IsADirectoryError``

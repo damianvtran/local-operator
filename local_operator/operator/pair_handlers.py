@@ -294,13 +294,15 @@ def describe_devices(args: argparse.Namespace) -> int:
     paired = devices.list_devices(root)
     pending = devices.list_pending(root)
 
-    # THE SWITCH, STATED ON THE VERB THAT LISTS PHONES. Landing the admission rule
-    # DORMANT is honest only where the product says so: on a host whose anchor carries
-    # no marker, a device certificate is still admitted WITHOUT being listed, and a
-    # bare table of ids reads as a list of confirmed phones. Read once here so every
-    # row below is judged by the same answer, including the `state` column.
+    # THE RULE, STATED ON THE VERB THAT LISTS PHONES. A host whose anchor predates
+    # the rule (the migration guard) still admits a device certificate WITHOUT it
+    # being listed, and a bare table of ids reads as a list of confirmed phones — so
+    # the rule is printed here, and every row below is judged by the same answer,
+    # including the `state` column. Read once so the preamble and the rows cannot
+    # disagree.
     from local_operator.operator.trust import (
         admission_enforced,
+        admission_sentence,
         load_anchor,
         open_device_ids,
     )
@@ -308,6 +310,11 @@ def describe_devices(args: argparse.Namespace) -> int:
     loaded = load_anchor()
     usable_anchor = loaded.anchor if loaded.usable else None
     enforcing = bool(usable_anchor is not None and admission_enforced(usable_anchor))
+    # A PRESENCE HOST EXEMPTS THE LIST BEFORE THE MARKER IS READ
+    # (`trust.device_is_admitted`), so the row state has to read it too: on such a
+    # host an unlisted phone IS admitted, and a row calling it `unconfirmed` would
+    # describe a refusal this host does not make (agent review round 1, m1).
+    presence = bool(usable_anchor is not None and usable_anchor.presence)
     anchor_listed = set(open_device_ids(usable_anchor)) if usable_anchor else set()
 
     if revoke:
@@ -519,17 +526,12 @@ def describe_devices(args: argparse.Namespace) -> int:
                     "--print-only and it writes the statement and takes that step itself."
                 )
 
-    if paired:
-        if enforcing:
-            print(
-                "phone admission        : enforced — a phone counts only if this "
-                "computer lists it"
-            )
-        else:
-            print(
-                "phone admission        : NOT ENFORCED YET — a paired phone is "
-                "honoured without being confirmed on this computer"
-            )
+    # THE RULE, STATED ON THE VERB THAT LISTS PHONES — and stated on a host with NO
+    # phones as well: that is the migration state this rule is about, and it was the
+    # one host the line was hidden from (agent review round 1, n3). ONE sentence
+    # shared with `lop operator status` (`trust.admission_sentence`), so the two
+    # verbs cannot describe the same rule differently.
+    print(f"phone admission        : {admission_sentence(usable_anchor)}")
     for device in paired:
         expires = time.strftime("%Y-%m-%d", time.localtime(device.not_after))
         # THREE STATES RATHER THAN TWO, because the runtime now asks three questions of
@@ -538,10 +540,10 @@ def describe_devices(args: argparse.Namespace) -> int:
         # row that said `active` for the third state would be the one reading a human
         # takes from this listing ("my phone can act") and it would be wrong. On a host
         # that does not enforce, the same certificate IS admitted, so the label follows
-        # the host's rule rather than the device's wishes — see the preamble above.
+        # the host's rule rather than the device's wishes — see the line above.
         if _anchor_revokes(root, device.device_id):
             state = "revoked"
-        elif enforcing and device.device_id not in anchor_listed:
+        elif enforcing and not presence and device.device_id not in anchor_listed:
             state = "unconfirmed"
         else:
             state = "active"
@@ -560,7 +562,8 @@ def describe_devices(args: argparse.Namespace) -> int:
             continue
         print(
             f"  {device_id}  {'':<20} {'revoked':<8} certificate cleared — "
-            f"`{devices.AUTHORISE_COMMAND.format(device_id=device_id)}` brings it back"
+            f"`{devices.AUTHORISE_COMMAND.format(device_id=device_id)}` brings this "
+            "device back, then pair the phone again"
         )
     for row in pending:
         print(
@@ -577,14 +580,32 @@ def _stage_anchor_revocation(root: Path, device_id: str, *, revoked: bool) -> bo
 
     Rebuilt from the installed anchor rather than from a fresh statement, so the
     operator's key, label and creation time survive; only the revocation list is
-    added to. Un-revoking DROPS the entry rather than writing ``"revoked": False``
-    — the list is a list of things that are revoked, and an entry that says
-    "present, but not revoked" is a shape a future reader has to know to read.
+    added to. Un-revoking on a host that does not require its list DROPS the entry
+    rather than writing ``"revoked": False`` — the list is a list of things that are
+    revoked, and an entry that says "present, but not revoked" is a shape a future
+    reader has to know to read.
+
+    BUT UNDER AN ENFORCING ANCHOR, DROPPING THE ENTRY LEAVES THE PHONE UNLISTED,
+    which the admission predicate refuses (agent review round 1, M1). The two
+    callers then both break: the revoked row promises ``--authorise`` "brings it
+    back", and the relay tells the human to "allow this phone again, then pair this
+    phone again" — while a re-pair mints the same derived id and meets
+    ``operator_device_unconfirmed``, a loop with no exit. So the un-revoke LISTS the
+    device: ``{"device_id": id}`` with no ``revoked`` key is exactly the shape the
+    confirm flow writes for a phone the human kept, and it is what the predicate
+    reads as admitted.
+
+    THE DERIVED-ID INVARIANT IS UNTOUCHED BY THAT: only the id the verb was given is
+    written, and ``device_is_admitted`` still requires ``device_id ==
+    key_id_for(spki)``, so listing an id cannot admit a statement carrying somebody
+    else's key. On a host that does not require its list the entry is still dropped:
+    the guard state has no list to keep, and adding one would be a policy this verb
+    has no business adopting.
     """
     from dataclasses import replace
 
     from local_operator.operator.handlers import stage_anchor
-    from local_operator.operator.trust import load_anchor
+    from local_operator.operator.trust import admission_enforced, load_anchor
 
     loaded = load_anchor()
     if not loaded.usable or loaded.anchor is None:
@@ -599,6 +620,8 @@ def _stage_anchor_revocation(root: Path, device_id: str, *, revoked: bool) -> bo
             entries.append({"device_id": device_id, "revoked": True})
     else:
         entries = [entry for entry in entries if entry.get("device_id") != device_id]
+        if admission_enforced(loaded.anchor):
+            entries.append({"device_id": device_id})
     stage_anchor(root, replace(loaded.anchor, devices=tuple(entries)))
     return True
 

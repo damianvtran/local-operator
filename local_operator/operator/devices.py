@@ -529,7 +529,7 @@ def is_revoked(config_root: Path, device_id: str) -> bool:
     return device_is_revoked(loaded.anchor, device_id)
 
 
-def is_admitted(config_root: Path, certificate: str) -> bool:
+def is_admitted(certificate: str) -> bool:
     """Whether the installed anchor ADMITS the device behind this certificate.
 
     The relay's half of :func:`local_operator.operator.trust.device_is_admitted`,
@@ -540,16 +540,27 @@ def is_admitted(config_root: Path, certificate: str) -> bool:
     (its declared id and the key that will actually sign), so the relay cannot
     drift from the runtime about who is admitted.
 
+    NO ``config_root``, deliberately (agent review round 1, n2). The anchor is ONE
+    root-owned file per UID — the loader takes no path and nothing here reads the
+    relay's config directory — so a parameter named for that root read as
+    root-scoping the answer never had. :func:`is_revoked` keeps its root because it
+    really does read ``revoked.json`` under it.
+
     THE CERTIFICATE IS PARSED, NOT VERIFIED, deliberately and exactly as
     :func:`is_revoked` does it: the relay is a courier and holds no operator key, so
     it cannot tell a genuine statement from a forged one — the runtime does that.
-    A forged statement gains nothing by being refused here, and an unparsable one
-    keeps today's behaviour (forwarded, refused by the runtime).
+    A forged statement gains nothing by being refused here. An UNPARSABLE one is
+    REFUSED: ``read_device_cert`` returning ``None`` means the statement does not
+    even name a device, and the earlier sentence here claimed it was forwarded — a
+    docstring describing a body the function never had (agent review round 1, m3).
+    Fail closed on a statement this courier cannot read; the runtime refuses it too.
 
     NO USABLE ANCHOR ADMITS, which is the same answer :func:`is_revoked` gives in
     that state and is not a widening: the runtime is the authority that verifies the
     signature, and with no anchor of its own it refuses every device certificate
-    (``_device_cert_point`` returns before verification). A courier that withheld
+    (``_device_cert_point`` returns before verification, and
+    ``test_no_usable_anchor_refuses_a_device_certificate_at_the_runtime_path`` pins
+    that end to end). A courier that withheld
     the command instead would add a refusal without adding a boundary — the
     reasoning already recorded beside the caller for the anchor-unreadable arm
     (agent review round 3, R3-1).

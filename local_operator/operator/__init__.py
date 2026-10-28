@@ -180,13 +180,14 @@ def operator_authority_report(*, uid: int | str | None = None) -> dict[str, Any]
     deleting it — is deliberate: a host can be ``operator-presence`` AND have a
     weak capability boundary, and a reader deserves both facts.
 
-    ``device_admission`` REPORTS THE SWITCH rather than the level. Whether a paired
-    phone counts only when the anchor LISTS it is independent of which key kind
-    this machine has: the rule is landed but DORMANT on every anchor written before
-    it, and this field exists so the reporting surfaces can say that plainly
-    instead of letting the runtime's silence read as a boundary it does not yet
-    have. ``False`` here means "a device certificate is still admitted without
-    being listed" — the host's own truth, not an error.
+    ``device_admission`` REPORTS THE RULE rather than the level. Whether a paired
+    phone counts only when the anchor LISTS it is independent of which key kind this
+    machine has, and this field exists so the reporting surfaces state the rule
+    rather than let the runtime's silence read as a boundary it does not have.
+    ``False`` here means this anchor was written before the rule existed, so the
+    migration guard is what admits its already-paired phones (see
+    :func:`admission_enforced`) — the host's own truth, not an error, and not a
+    switch an operator has to find.
     """
     level, loaded = authority_level_load(uid=uid)
     return {

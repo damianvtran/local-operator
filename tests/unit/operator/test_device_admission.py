@@ -20,11 +20,12 @@ per (anchor, certificate) case, run through every site, so a caller that keeps t
 old predicate — or grows a fourth question of its own — fails here rather than in
 production.
 
-THE SWITCH IS DORMANT, and two tests say so where a human reads it. An anchor with
-no ``admission`` marker behaves exactly as it does today (byte-identical
-statements, so no pinned approval digest moves; a paired phone stays admitted with
-no re-pair), and the reporting surfaces SAY that rather than let the runtime's
-silence read as a boundary.
+THE MIGRATION GUARD IS WHAT STAYS OPEN, and two tests say so where a human reads
+it. An anchor with no ``admission`` marker was written before the rule existed, so
+it behaves exactly as it does today (byte-identical statements, so no pinned
+approval digest moves; an already-paired phone stays admitted with no re-pair) —
+and the reporting surfaces NAME the guard rather than let the runtime's silence
+read as the rule.
 
 Two seams only, both in-process by design: ``trust._ANCHOR_ROOT_OVERRIDE`` — a
 module global a test patches, never an environment variable, because an
@@ -40,6 +41,7 @@ import argparse
 import hashlib
 import json
 import os
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -112,9 +114,9 @@ class _Rig:
         """One anchor per row of the policy table below."""
         listed = {"device_id": self.listed_id}
         revoked = {"device_id": self.revoked_id, "revoked": True}
-        if kind == "dormant":
+        if kind == "pre_rule":
             return self.base
-        if kind == "dormant_with_revocation":
+        if kind == "pre_rule_with_revocation":
             return replace(self.base, devices=(listed, revoked))
         if kind == "enforced":
             return replace(self.base, admission=trust.ADMISSION_LISTED, devices=(listed,))
@@ -186,10 +188,11 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Rig:
 #: The expectations ARE the design, written once so the three sites cannot
 #: disagree about it:
 #:
-#: * a DORMANT host (no marker) admits any device whose certificate this key
-#:   signed — today's behaviour, kept for every phone paired before the switch;
+#: * a host whose anchor PREDATES the rule (no marker) admits any device whose
+#:   certificate this key signed — today's behaviour, kept by the migration guard so
+#:   that every phone paired before the rule is not de-admitted by the upgrade;
 #: * an ENFORCING host admits only the id its anchor lists;
-#: * ``forged`` is refused everywhere, including on a dormant host: the
+#: * ``forged`` is refused everywhere, including where the migration guard applies: the
 #:   certificate's id must be its key's id, which is what stops a statement from
 #:   naming a permitted id while carrying somebody else's key. Every certificate
 #:   ``lop pair`` mints derives its id, so this refuses hand-made statements only;
@@ -198,13 +201,14 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Rig:
 #: * a revoked device is refused at every level, which is the rule that predates
 #:   this change and stays exactly as it was.
 CASES: tuple[tuple[str, str, bool], ...] = (
-    ("dormant", "listed", True),
-    ("dormant", "unlisted", True),
-    ("dormant", "forged", False),
-    ("dormant", "revoked", True),    ("dormant_with_revocation", "listed", True),
-    ("dormant_with_revocation", "unlisted", True),
-    ("dormant_with_revocation", "forged", False),
-    ("dormant_with_revocation", "revoked", False),
+    ("pre_rule", "listed", True),
+    ("pre_rule", "unlisted", True),
+    ("pre_rule", "forged", False),
+    ("pre_rule", "revoked", True),
+    ("pre_rule_with_revocation", "listed", True),
+    ("pre_rule_with_revocation", "unlisted", True),
+    ("pre_rule_with_revocation", "forged", False),
+    ("pre_rule_with_revocation", "revoked", False),
     ("enforced", "listed", True),
     ("enforced", "unlisted", False),
     ("enforced", "forged", False),
@@ -261,7 +265,7 @@ def test_every_site_agrees_on_every_case(
     assert trust.device_is_admitted(anchor, declared, key) is admitted
 
     # 2. The store wrapper the relay asks (a cert string, parsed here).
-    assert device_store.is_admitted(rig.config_root, certificate) is admitted
+    assert device_store.is_admitted(certificate) is admitted
 
     # 3. The runtime's certificate point. The FIRST call verifies, the SECOND is a
     #    cache hit — counted, so the per-use arm is proven to have run rather than
@@ -316,7 +320,7 @@ def test_the_unconfirmed_copy_does_not_send_the_phone_to_pair_again(rig: _Rig) -
 
 
 # ---------------------------------------------------------------------------
-# The dormant switch: no marker, no change — including the bytes
+# The migration guard: no marker, no change — including the bytes
 # ---------------------------------------------------------------------------
 
 
@@ -361,9 +365,9 @@ def test_a_marker_set_is_covered_by_the_digest(rig: _Rig) -> None:
     when it changes — otherwise a card could be minted against an anchor and
     installed over one with a different admission rule.
     """
-    dormant = rig.base
+    pre_rule = rig.base
     enforced = rig.anchor("enforced")
-    assert trust.statement_digest(dormant) != trust.statement_digest(enforced)
+    assert trust.statement_digest(pre_rule) != trust.statement_digest(enforced)
     assert json.loads(trust.anchor_bytes(enforced))["admission"] == "listed"
 
 
@@ -374,9 +378,14 @@ def test_the_marker_survives_a_revocation_and_an_authorisation_restage(
 
     That is the property the marker depends on: the two verbs exist to change the
     revocation list and nothing else, so a re-stage that dropped the marker would
-    silently switch enforcement OFF as a side effect of revoking a phone — the
-    exact downgrade an agent able to trigger either verb would want. Asserted by
+    roll the host back to the migration guard as a side effect of revoking a phone —
+    the exact downgrade an agent able to trigger either verb would want. Asserted by
     reading the STAGED file the install step would move, not the in-memory anchor.
+
+    AND UN-REVOKING LISTS (agent review round 1, M1): on an enforcing host, dropping
+    the entry would leave the phone unlisted, which the predicate refuses — so the
+    un-revoke writes it back as a LISTED device instead. On a host under the migration
+    guard there is no list to keep, so the entry is dropped there.
     """
     from local_operator.operator.pair_handlers import _stage_anchor_revocation
     from local_operator.operator.trust import staging_path
@@ -393,8 +402,14 @@ def test_the_marker_survives_a_revocation_and_an_authorisation_restage(
     assert _stage_anchor_revocation(rig.config_root, rig.unlisted_id, revoked=False)
     restaged = json.loads(staging_path(config_dir()).read_bytes())
     assert restaged["admission"] == "listed"
-    assert rig.unlisted_id not in [entry.get("device_id") for entry in restaged["devices"]]
+    assert {"device_id": rig.unlisted_id} in restaged["devices"], "un-revoking LISTS it"
     assert {"device_id": rig.listed_id} in restaged["devices"], "the listed phone kept its entry"
+
+    # The migration guard's host keeps the older shape: no list, so nothing to write.
+    _install(rig.anchor_root, rig.anchor("pre_rule_with_revocation"))
+    assert _stage_anchor_revocation(rig.config_root, rig.revoked_id, revoked=False)
+    guarded = json.loads(staging_path(config_dir()).read_bytes())
+    assert rig.revoked_id not in [entry.get("device_id") for entry in guarded["devices"]]
 
 
 # ---------------------------------------------------------------------------
@@ -429,19 +444,26 @@ def test_a_marker_on_an_anchor_root_does_not_own_is_no_anchor(
 
 
 # ---------------------------------------------------------------------------
-# What the reporting surfaces say — the dormant switch has to be visible
+# What the reporting surfaces say — the guard state has to be visible
 # ---------------------------------------------------------------------------
 
 
-def test_status_says_admission_is_not_enforced_yet(rig: _Rig, capsys: Any) -> None:
-    """A dormant switch that only the source knows about is a claim never made."""
+def test_status_names_the_migration_guard_on_a_pre_rule_anchor(rig: _Rig, capsys: Any) -> None:
+    """The guard is named where a human reads it, and never as an "off" state.
+
+    A guard only the source knows about is a claim never made: this surface states
+    the RULE and says which statements the migration guard still carries, so an
+    operator on an upgraded host is not told a boundary exists that their own anchor
+    does not apply yet.
+    """
     from local_operator.operator import handlers as operator_handlers
 
-    _install(rig.anchor_root, rig.anchor("dormant"))
+    _install(rig.anchor_root, rig.anchor("pre_rule"))
     assert operator_handlers.dispatch(argparse.Namespace(operator_command="status")) == 0
     printed = capsys.readouterr().out
-    assert "NOT ENFORCED YET" in printed
-    assert "without being confirmed on this computer" in printed
+    assert "phone admission        : enforced" in printed
+    assert "migration guard" in printed
+    assert "NOT ENFORCED" not in printed
 
 
 def test_status_and_the_listing_name_an_unlisted_phone_as_not_confirmed(
@@ -490,26 +512,18 @@ def test_status_and_the_listing_name_an_unlisted_phone_as_not_confirmed(
     assert "unconfirmed" in listed
 
 
-def test_the_devices_listing_says_the_switch_is_off_on_a_dormant_host(
+def test_the_devices_listing_names_the_migration_guard_on_a_pre_rule_anchor(
     rig: _Rig, capsys: Any
 ) -> None:
-    """The other half of the same honesty: unflipped hosts are told plainly."""
+    """The other half of the same honesty — and it reaches a host with no phones.
+
+    A zero-phone host is the state the guard exists for, and it is the one host the
+    line used to be hidden from (agent review round 1, n3), so the listing says it
+    too rather than print nothing at all.
+    """
     from local_operator.operator import handlers as operator_handlers
-    from local_operator.operator.devices import write_device_cert
-    from local_operator.operator.verify import read_device_cert
 
-    _install(rig.anchor_root, rig.anchor("dormant"))
-    certificate, _, _ = rig.certificate("unlisted")
-    parsed = read_device_cert(certificate)
-    assert parsed is not None
-    write_device_cert(
-        rig.config_root,
-        certificate=certificate,
-        parsed=parsed,
-        operator_key_id=rig.base.key_id,
-        name="still works",
-    )
-
+    _install(rig.anchor_root, rig.anchor("pre_rule"))
     assert (
         operator_handlers.dispatch(
             argparse.Namespace(
@@ -519,5 +533,226 @@ def test_the_devices_listing_says_the_switch_is_off_on_a_dormant_host(
         == 0
     )
     printed = capsys.readouterr().out
-    assert "NOT ENFORCED YET" in printed
+    assert "phone admission        : enforced" in printed
+    assert "migration guard" in printed
+    assert "NOT ENFORCED" not in printed
     assert "unconfirmed" not in printed
+
+
+def test_the_copy_states_the_presence_exemption_the_predicate_applies(
+    rig: _Rig, capsys: Any
+) -> None:
+    """m1: neither surface may claim a list requirement a presence host does not make.
+
+    ``anchor.presence`` exempts a device BEFORE the marker is read, so on a
+    Secure-Enclave host an unlisted phone IS admitted — the table's
+    ``("presence_enforced", "unlisted", True)`` row is the runtime half of this. The
+    copy has to agree with it, or the product makes exactly the over-claim this
+    change exists to remove, in the other direction.
+    """
+    from local_operator.operator import handlers as operator_handlers
+    from local_operator.operator.devices import write_device_cert
+    from local_operator.operator.verify import read_device_cert
+
+    _install(rig.anchor_root, rig.anchor("presence_enforced"))
+    certificate, declared, _ = rig.certificate("unlisted")
+    parsed = read_device_cert(certificate)
+    assert parsed is not None
+    write_device_cert(
+        rig.config_root,
+        certificate=certificate,
+        parsed=parsed,
+        operator_key_id=rig.base.key_id,
+        name="this mac's phone",
+    )
+
+    assert operator_handlers.dispatch(argparse.Namespace(operator_command="status")) == 0
+    printed = capsys.readouterr().out
+    assert "not required on this host" in printed
+    assert "must be confirmed on this computer" not in printed
+    assert "not confirmed on this computer" not in printed
+
+    assert (
+        operator_handlers.dispatch(
+            argparse.Namespace(
+                operator_command="devices", revoke="", authorise="", print_only=False
+            )
+        )
+        == 0
+    )
+    listed = capsys.readouterr().out
+    assert "not required on this host" in listed
+    assert "unconfirmed" not in listed
+    assert declared in listed
+
+
+# ---------------------------------------------------------------------------
+# The remedy an enforcing host promises, and the fail-closed floor beneath it
+# ---------------------------------------------------------------------------
+
+
+def test_authorise_re_lists_the_phone_so_it_admits_again_with_the_same_id(rig: _Rig) -> None:
+    """``--authorise`` must LIST the phone, not merely stop revoking it (M1).
+
+    Under enforcement the revoked row's own promise ("brings this device back") and
+    the relay's revoked copy ("allow this phone again, then pair this phone again")
+    both depend on the un-revoke leaving the device ADMITTED. Dropping the entry left
+    it unlisted — refused by the predicate — and a re-pair mints the SAME derived id,
+    so the phone met ``operator_device_unconfirmed`` with no route out of the loop.
+
+    Driven through the installed-anchor path, not the in-memory one: the same id the
+    phone already holds has to admit again with no new certificate.
+    """
+    from local_operator.operator.pair_handlers import _stage_anchor_revocation
+    from local_operator.operator.trust import staging_path
+    from local_operator.paths import config_dir
+    from local_operator.session.runtime import server as runtime_server
+
+    _install(rig.anchor_root, rig.anchor("enforced_with_revocation"))
+    certificate, declared, key = rig.certificate("revoked")
+    assert trust.device_is_admitted(rig.anchor("enforced_with_revocation"), declared, key) is False
+
+    assert _stage_anchor_revocation(rig.config_root, declared, revoked=False)
+    staged = trust.OperatorAnchor.from_json(json.loads(staging_path(config_dir()).read_bytes()))
+    assert staged is not None
+    _install(rig.anchor_root, staged)
+
+    # The statement the phone already holds is admitted again, same id.
+    assert trust.device_is_admitted(staged, declared, key) is True
+    assert {"device_id": declared} in staged.devices
+    assert {"device_id": rig.listed_id} in staged.devices, "the other listed phone kept its entry"
+    stub = _runtime_stub()
+    assert runtime_server.RuntimeServer._device_cert_point(stub, certificate, staged) is not None
+
+
+def test_authorise_does_not_admit_a_different_key_that_reuses_the_listed_id(rig: _Rig) -> None:
+    """The negative: re-listing an id must not hand that id to another key.
+
+    The invariant the whole predicate rests on is ``device_id == key_id_for(spki)``,
+    and a re-list writes the DERIVED id back rather than a new one. So a statement
+    that names the freshly listed id while carrying somebody else's key — the S4a
+    spike's forgery, now aimed at a re-listed device — is still refused, at the
+    predicate and at the runtime's own certificate point.
+    """
+    from local_operator.operator.pair_handlers import _stage_anchor_revocation
+    from local_operator.operator.sign import issue_device_cert, load_signer
+    from local_operator.operator.trust import staging_path
+    from local_operator.paths import config_dir
+    from local_operator.session.runtime import server as runtime_server
+
+    _install(rig.anchor_root, rig.anchor("enforced_with_revocation"))
+    assert _stage_anchor_revocation(rig.config_root, rig.revoked_id, revoked=False)
+    staged = trust.OperatorAnchor.from_json(json.loads(staging_path(config_dir()).read_bytes()))
+    assert staged is not None
+    _install(rig.anchor_root, staged)
+    assert rig.revoked_id in [entry.get("device_id") for entry in staged.devices]
+
+    signer = load_signer(config_root=rig.config_root, backend_name="file-only")
+    assert signer is not None
+    try:
+        forged = issue_device_cert(
+            device_spki=rig.unlisted_key.spki,
+            device_id=rig.revoked_id,
+            label="not this phone",
+            signer=signer,
+        )
+    finally:
+        signer.close()
+    assert trust.device_is_admitted(staged, rig.revoked_id, rig.unlisted_key.spki) is False
+    stub = _runtime_stub()
+    assert runtime_server.RuntimeServer._device_cert_point(stub, forged, staged) is None
+
+
+def test_a_refusal_clears_within_the_anchor_window(
+    rig: _Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m2: a phone the human just confirmed may not be refused for five more minutes.
+
+    ``_device_cert_point`` caches a REFUSED certificate, and the only anchor-driven
+    transition that existed before listing was admit -> revoked, where caching the
+    denial is right. Listing introduced the reverse, caused by the human's own
+    gesture, so a refusal that outlived ``ANCHOR_REFRESH_S`` kept the phone out while
+    the copy told the person to confirm it — against the split's "accepted within
+    30 s" cell. An ADMITTED point keeps the certificate TTL: re-verifying a signature
+    cannot change its answer.
+    """
+    from local_operator.session.runtime import server as runtime_server
+
+    anchor = rig.anchor("enforced")
+    _install(rig.anchor_root, anchor)
+    certificate, declared, _ = rig.certificate("unlisted")
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(
+        runtime_server,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock["t"], time=time.time),
+    )
+    stub = _runtime_stub()
+    assert runtime_server.RuntimeServer._device_cert_point(stub, certificate, anchor) is None
+    stored = stub._device_certs[certificate]
+    assert stored[0] is None, "the refusal is what was cached"
+    assert stored[1] - clock["t"] <= trust.ANCHOR_REFRESH_S, (
+        "a refusal may not outlive the window the confirming copy promises"
+    )
+
+    # The human confirms this phone: the anchor now lists it. No new certificate.
+    confirmed = replace(anchor, devices=anchor.devices + ({"device_id": declared},))
+    clock["t"] += trust.ANCHOR_REFRESH_S + 1
+    point = runtime_server.RuntimeServer._device_cert_point(stub, certificate, confirmed)
+    assert point is not None, "the confirmation must take effect inside the anchor window"
+    admitted_deadline = stub._device_certs[certificate][1]
+    assert admitted_deadline - clock["t"] > trust.ANCHOR_REFRESH_S, (
+        "an admitted point keeps the certificate TTL"
+    )
+
+
+def test_no_usable_anchor_refuses_a_device_certificate_at_the_runtime_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The codifying control for the courier's fail-open (review, reserved deviation 2).
+
+    ``devices.is_admitted`` answers "admit" when it can read no anchor, which is only
+    safe because the RUNTIME refuses every device certificate in that state before it
+    verifies anything. That was reasoned from two files and pinned nowhere, so this
+    drives a REAL certificate through the runtime's own certificate point with a real
+    empty anchor root (the real ownership gate, no fake): the courier forwards, the
+    runtime refuses, and nothing is verified on the way.
+    """
+    from local_operator.operator import devices as device_store
+    from local_operator.operator.sign import issue_device_cert, load_signer
+    from local_operator.operator.verify import verify_device_cert
+    from local_operator.session.runtime import server as runtime_server
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _anchor_root(monkeypatch, tmp_path / "no-anchors")  # nothing installed, no st_uid fake
+    create_key(config_root=tmp_path, preference=FILE_ONLY)  # a real operator key
+    phone = FileKeyBackend(tmp_path / "phone.pem").create()
+    declared = new_device_id(phone.spki)
+    signer = load_signer(config_root=tmp_path, backend_name="file-only")
+    assert signer is not None
+    try:
+        certificate = issue_device_cert(
+            device_spki=phone.spki, device_id=declared, label="phone", signer=signer
+        )
+    finally:
+        signer.close()
+
+    loaded = trust.load_anchor()
+    assert loaded.usable is False, "the empty root must not read as an anchor"
+    assert loaded.anchor is None
+
+    # The courier's answer, which is the state this control is about.
+    assert device_store.is_admitted(certificate) is True
+
+    calls: list[int] = []
+    real_verify = verify_device_cert
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        return real_verify(*args, **kwargs)
+
+    monkeypatch.setattr(runtime_server.operator_verify, "verify_device_cert", counting)
+    stub = _runtime_stub()
+    assert runtime_server.RuntimeServer._device_cert_point(stub, certificate, None) is None
+    assert calls == [], "the refusal happens before verification, so nothing can be admitted"

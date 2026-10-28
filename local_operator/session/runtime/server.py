@@ -1411,6 +1411,13 @@ _ANCHOR_REFRESH_S = ANCHOR_REFRESH_S
 #: How long a verified device certificate is remembered. The certificate is
 #: checked lazily and per certificate string; a TTL rather than a permanent cache
 #: because the anchor's revocation list can change under a long-running session.
+#:
+#: IT DOES NOT BOUND A REFUSAL. Everything the anchor decides in the ADMITTING
+#: direction — a phone the human has just confirmed — has to become visible inside
+#: ``ANCHOR_REFRESH_S``, so a cached ``point=None`` expires with that window rather
+#: than with this one (``_device_cert_point``); otherwise the confirmation copy tells
+#: a human to do something the runtime then ignores for five minutes (agent review
+#: round 1, m2).
 _DEVICE_CERT_TTL_S = 300.0
 
 #: Bound on the device-certificate cache. Keyed by an attacker-chosen string, so
@@ -6059,6 +6066,16 @@ class RuntimeServer:
         lifetime of a session that can run for days. The cache is keyed by the
         certificate string, so a different certificate is always verified rather
         than matched against a stale answer.
+
+        TWO WINDOWS, ONE ENTRY. What the anchor decides survives the entry for
+        ``ANCHOR_REFRESH_S`` at most: an ADMITTED point is re-checked against the
+        anchor on every use (so a revocation or a de-listing takes effect on the
+        next frame), and a REFUSAL expires after the same window rather than after
+        ``_DEVICE_CERT_TTL_S``, because listing is the transition a HUMAN causes and
+        the phone has to be admitted within the time the confirming copy promises
+        (agent review round 1, m2). Only the expensive half — the operator signature
+        and the expiry, which cannot change — is reused for the full certificate
+        TTL.
         """
         if not isinstance(certificate, str) or not certificate:
             return None
@@ -6095,7 +6112,23 @@ class RuntimeServer:
             # property of the statement the signature just covered.
             if not device_is_admitted(anchor, device_id, device_key):
                 point = None
-        self._device_certs[certificate] = (point, now + _DEVICE_CERT_TTL_S, device_id, device_key)
+        deadline = now + (
+            _DEVICE_CERT_TTL_S
+            if point is not None
+            # A REFUSAL IS CACHED FOR THE ANCHOR WINDOW, NOT THE CERTIFICATE TTL
+            # (agent review round 1, m2). What was cached as "this certificate is
+            # refused" was safe while the only anchor-driven transition was
+            # admit -> revoked; listing introduced the REVERSE, and the human's own
+            # gesture is what causes it. Frozen for five minutes, a phone the person
+            # had just confirmed kept being refused with the very copy telling them
+            # to confirm it — against the split's "accepted within 30 s" cell
+            # (``ANCHOR_REFRESH_S``). The two directions now cost their own
+            # window: a refusal expires with the anchor re-read it depends on, a
+            # verified point keeps the certificate TTL, because re-verifying it on
+            # every frame would buy nothing (a signature does not become valid).
+            else min(_DEVICE_CERT_TTL_S, _ANCHOR_REFRESH_S)
+        )
+        self._device_certs[certificate] = (point, deadline, device_id, device_key)
         if len(self._device_certs) > _MAX_CACHED_DEVICE_CERTS:
             # Bounded: a client can present a new certificate string on every
             # frame, and an unbounded cache keyed by attacker-chosen strings is a

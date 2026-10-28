@@ -71,9 +71,9 @@ ANCHOR_VERSION = 1
 #:
 #: ONLY THE ROOT WRITE SETS IT. The confirm flow is the one writer, and it writes
 #: it in the same privileged step that lists the phones the human kept — so an
-#: agent that can write its own anchor (file-only hosts) still cannot turn
-#: enforcement ON for itself, and one that can read the file key cannot turn it
-#: OFF, because turning it off needs the same root write.
+#: agent that can write its own anchor (file-only hosts) still cannot claim the
+#: rule for itself, and one that can read the file key cannot clear it either,
+#: because both need the same root write.
 ADMISSION_LISTED = "listed"
 
 #: Where the anchor lives. A CONSTANT per platform, deliberately not a function
@@ -297,8 +297,9 @@ class OperatorAnchor:
 
     ``devices`` is the revocation list the design asks for and is part of the
     pinned file rather than a separate store: an operator-signed certificate that
-    is not listed here is refused, so revoking a lost phone is an edit to a
-    root-owned file rather than an unauthenticated write to a cache.
+    is not listed here is refused on a host that requires its list, so revoking or
+    listing a phone is an edit to a root-owned file rather than an unauthenticated
+    write to a cache.
     """
 
     key_id: str
@@ -308,18 +309,16 @@ class OperatorAnchor:
     label: str = ""
     created_at: int = 0
     devices: tuple[dict[str, Any], ...] = ()
-    #: ``""`` (the default) means this host has NOT adopted the admission rule and
-    #: every device the certificate check accepts stays accepted — exactly the
-    #: behaviour of every anchor written before this field existed. ``"listed"``
-    #: means the runtime additionally requires the anchor to name the device (see
-    #: :func:`device_is_admitted`).
+    #: ``"listed"`` means the runtime additionally requires the anchor to name the
+    #: device (see :func:`device_is_admitted`).
     #:
-    #: DORMANT BY DEFAULT, ON PURPOSE. Turning the rule on for every host in the
-    #: build that introduced it would de-admit every phone already paired on a
-    #: file-only host — they are not listed, because nothing ever listed them — and
-    #: send those humans through a re-pair to restore access they never lost. The
-    #: switch is therefore written by the one flow that also lists the phones the
-    #: human keeps (the confirm card), and until a host runs it nothing here moves.
+    #: THE EMPTY VALUE IS THE MIGRATION GUARD, NOT AN "OFF" STATE. An anchor with
+    #: no marker was written before this rule existed, and the phones already paired
+    #: on it — which nothing ever listed — must not be de-admitted by the upgrade that
+    #: brings the rule. That is the guard's whole purpose, it ships ON, and it is the
+    #: only state in which a host that does not ask for a gesture per signature admits
+    #: an unlisted device (see :func:`admission_enforced` for exactly what ends it and
+    #: why no release writes an empty marker).
     admission: str = ""
 
     def to_json(self) -> dict[str, Any]:
@@ -412,13 +411,14 @@ class OperatorAnchor:
         presence = body.get("presence")
         # AN ABSENT ``admission`` KEY IS THE NORMAL CASE, not a malformation: every
         # anchor written before this field existed lacks it, and those hosts must
-        # keep parsing (and keep behaving as they do today). A present but
-        # non-string value is likewise read as "no marker" rather than refused: the
-        # field is a policy NAME, and a runtime that refuses the whole anchor over
-        # one it does not recognise would take operator authority away from a host
-        # whose key is perfectly good. Under-enforcement is reported instead
-        # (``lop operator status`` says admission is not enforced), so an
-        # unrecognised value is visible rather than silently claimed as active.
+        # keep parsing — they are exactly what the migration guard exists for. A
+        # present but non-string value is likewise read as "no marker" rather than
+        # refused: the field is a policy NAME, and a runtime that refuses the whole
+        # anchor over one it does not recognise would take operator authority away
+        # from a host whose key is perfectly good. Only a root write can produce that
+        # shape, and the reporting surfaces name the guard state it lands in
+        # (``trust.admission_sentence``), so it is visible rather than silently
+        # claimed as enforcement.
         admission = body.get("admission")
         return (
             cls(
@@ -1367,14 +1367,74 @@ def open_device_ids(anchor: OperatorAnchor) -> list[Any]:
 
 
 def admission_enforced(anchor: OperatorAnchor) -> bool:
-    """Whether this host's anchor adopted the ADMISSION rule (see ``OperatorAnchor.admission``).
+    """Whether this host's anchor requires its LIST (see ``OperatorAnchor.admission``).
 
     ONE reading of the field, so a status line and the runtime cannot disagree
     about whether listing is being required — a report that says "enforced" beside
-    a runtime that is not looking at the list is worse than the dormant state it
+    a runtime that is not looking at the list is worse than the guard state it
     claims to have left.
+
+    THE MIGRATION GUARD IS THE ONLY EXEMPTION, and it is the empty marker: an
+    anchor carrying no ``admission`` value is a statement written before this rule
+    existed, and the phones already paired on it must not be de-admitted by the
+    upgrade that brings the rule. The guard SHIPS ON — nothing switches it on, and
+    there is no build in which it is inactive; what ENDS it for a host is a
+    statement the confirm flow writes, because that flow writes ``"listed"`` in the
+    same privileged step that lists the phones the human kept. No release ships a
+    way to write an empty marker back over a marked statement, which is why no
+    release offers an "off" position an agent could reach.
+
+    ANY VALUE IS ENFORCEMENT, not just the one this build knows. ``ADMISSION_LISTED``
+    is the only policy written today, but a marker naming a future one still means
+    "this statement carries a policy", and reading it as the guard state would fail
+    OPEN on the one field whose whole purpose is to be conservative. An
+    unrecognised marker therefore enforces the list.
     """
-    return anchor.admission == ADMISSION_LISTED
+    return bool(anchor.admission)
+
+
+def admission_sentence(anchor: OperatorAnchor | None) -> str:
+    """THE sentence a reporting surface prints after ``phone admission        : ``.
+
+    ONE string for both surfaces (`lop operator status` and `lop operator devices`)
+    rather than one hand-written sentence each, because two copies of one rule drift
+    exactly where a reader cannot check them: both used to state a LIST requirement
+    that ``anchor.presence`` exempts before the marker is ever read
+    (:func:`device_is_admitted`), so a Secure-Enclave host would have honoured an
+    unlisted phone while both surfaces said it would not (agent review round 1,
+    m1). The facts are read here, from the anchor, so no caller can pair the wrong
+    two of them.
+
+    ``None`` is "no usable anchor": there is no rule to report yet, and the status
+    line beside this one already says the level is capped for that reason.
+    """
+    if anchor is None:
+        return "no operator anchor installed — nothing to admit or refuse yet"
+    if anchor.presence:
+        # THE EXEMPTION, NAMED WHERE THE OPERATOR READS THE RULE. The presence
+        # backends cost a human gesture per signature, so an unlisted phone IS
+        # admitted on such a host; a sentence claiming otherwise would be the same
+        # over-claim the enforcement copy exists to remove, in the other direction.
+        return (
+            "not required on this host — the operator key asks for a gesture per "
+            "signature (Touch ID, Windows Hello), so the gesture is the confirmation"
+        )
+    if not admission_enforced(anchor):
+        # THE GUARD'S HOST, STATED WITHOUT A CLAIM IT DOES NOT MAKE. Every device this
+        # key signed is still admitted here, not only the ones already paired — a
+        # whole-statement guard cannot be per-device, and the per-device alternative
+        # (trusting a record under the config root) would let the gated uid admit
+        # itself a device. So the sentence says exactly that, and names the guard
+        # rather than an "off" state no release ships.
+        return (
+            "enforced — a phone must be confirmed on this computer (listed in its "
+            "anchor) before its certificate counts; this anchor predates that rule, so "
+            "the migration guard still admits any device this key signed"
+        )
+    return (
+        "enforced — a phone must be confirmed on this computer (listed in its "
+        "anchor) before its certificate counts"
+    )
 
 
 def device_is_admitted(anchor: OperatorAnchor, device_id: str, spki: bytes) -> bool:
@@ -1408,16 +1468,19 @@ def device_is_admitted(anchor: OperatorAnchor, device_id: str, spki: bytes) -> b
       both facts written by a root-owned step rather than by anything the gated uid
       can reach: ``presence`` (a backend that costs a human gesture per signature —
       the signature IS the confirmation, so asking for a second touch buys no
-      security) and a MISSING marker (the dormant switch, below).
+      security) and a MISSING marker (the migration guard, below).
 
-    THE DORMANT SWITCH IS THE MIGRATION, and it is honest only because it is
-    reported: hosts whose anchor carries no ``admission`` marker behave EXACTLY as
-    they do today, including anchors written before this field existed (which
-    serialise to identical bytes, so no pinned ``statement_digest`` moves). A phone
-    paired before the upgrade therefore stays admitted after it with no re-pair.
-    What that costs is stated where the operator reads it — ``lop operator status``
-    says admission is not enforced yet on such a host — rather than being implied to
-    be a boundary this slice does not yet deliver.
+    THE MIGRATION GUARD IS WHY A PAIRED PHONE SURVIVES THE UPGRADE. Hosts whose
+    anchor carries no ``admission`` marker are statements written before the rule,
+    and they behave as they do today — including anchors written before this field
+    existed (which serialise to identical bytes, so no pinned ``statement_digest``
+    moves). A phone paired before the upgrade therefore stays admitted after it with
+    no re-pair, which is the guard's only purpose; :func:`admission_enforced` says
+    what ends the guard state and why no release writes it. The residual it costs on
+    such a host — an agent that can reach the operator key can still mint a
+    certificate that is admitted — is stated where the operator reads it, in
+    :func:`admission_sentence`, rather than implied to be a boundary this host
+    applies.
 
     ``presence: true`` with an UNLISTED device is admitted BY DESIGN (see above):
     the presence backends are the ones whose signature already costs a gesture.
