@@ -65,7 +65,7 @@ describe("the composer's spacing constants", () => {
 		/* O1: with the keyboard open (visual viewport at most 480) the meta facts move inline
 		   beside attach and the stop/send pair. As `basis-auto` their flex basis
 		   was their max-content (cwd 44 + the model label + the 96 px reading,
-		   248 px [redacted] at 320), so the line breaker pushed the 90 px action
+		   248 px measured at 320), so the line breaker pushed the 90 px action
 		   pair onto a SECOND footer line: composer 331.4 px against 287.4, and the
 		   above-composer slot shrank to 20.6 px. `basis-0` gives the meta facts
 		   only what is left, and the model label, the elastic element, truncates

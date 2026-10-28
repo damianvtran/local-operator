@@ -4,7 +4,7 @@
  *
  * WHY THIS EXISTS (review round 1 on #3030, R1-2). In the short layout the
  * facts share one line with attach, the mic and the stop/send pair, and take
- * only the width those leave (`basis-0 flex-1 min-w-0`). [redacted] at 320 px
+ * only the width those leave (`basis-0 flex-1 min-w-0`). Measured at 320 px
  * while streaming, that leftover is 156 px, or 110 px with the mic: less than
  * folder 44 + model floor 44 + the 96 px reading. With nothing giving way the
  * reading painted UNDER the stop button, two controls in one hit band. The row
@@ -34,7 +34,7 @@
  * (a false figure), its cost was invisible to the rule, and the level depended
  * on history (a cold load at 390 settled at L1 with `2 qu…`; the same width
  * reached through 300 px settled at L2 with the count whole). It is now
- * `shrink-0` and [redacted] at its intrinsic width, so it is pressure: the
+ * `shrink-0` and measured at its intrinsic width, so it is pressure: the
  * reading yields before it, and when even that is not enough it moves out
  * whole rather than in pieces. No ellipsized form reads truthfully (`2…`
  * drops "queued"), and a numeric badge would be new copy.
@@ -46,15 +46,15 @@
  *   "unknown": everything renders at level 0, the behaviour tests always saw.
  * - THE LEVEL IS A FUNCTION OF THE CURRENT INPUTS AND WIDTH, never of history
  *   (review R3-1/R3-5): same content + same width gives the same level, cold
- *   or after any keyboard/viewport path. Every input is therefore [redacted] at
+ *   or after any keyboard/viewport path. Every input is therefore measured at
  *   its intrinsic width, never at a width an earlier level left it.
- * - A width that is hidden cannot be [redacted], so the reading's forms and the
+ * - A width that is hidden cannot be measured, so the reading's forms and the
  *   moved-out count are cached from the last pass that showed them. A cached
- *   width is valid only for the exact content AND layout it was [redacted] in:
+ *   width is valid only for the exact content AND layout it was measured in:
  *   the reading is `w-24` (96 px) in the tall layout and intrinsic in the short
  *   one (R3-5 — one shared slot let a tall 96 px compact figure veto L1 on the
  *   next open), so the cache is keyed by layout + form + label, and it resets
- *   when the label changes. A form never [redacted] is TRIED (shown) before it
+ *   when the label changes. A form never measured is TRIED (shown) before it
  *   is ruled out, all before paint.
  *
  * `footFitLevel` is the pure rule (unit-tested); `useFootFit` only measures.
@@ -74,11 +74,11 @@ export type FootFitInput = {
 	/** Items that never yield or move (the folder glyph), in px. */
 	fixed: readonly number[];
 	/** The queued count's INTRINSIC width: 0 = no count, null = not yet
-	    [redacted] (it is shown, and so [redacted], before anything is ruled out). */
+	    measured (it is shown, and so measured, before anything is ruled out). */
 	queued: number | null;
 	/** The model control's floor (its min-width; it grows into what is left). */
 	model: number;
-	/** The reading's width in its full and compact forms; null = never [redacted]. */
+	/** The reading's width in its full and compact forms; null = never measured. */
 	full: number | null;
 	short: number | null;
 };
