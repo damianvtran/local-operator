@@ -1088,7 +1088,7 @@ _PAYLOAD_OPS = {
 #: withholding them until a sync lands would deny a supervisor the ability to
 #: stop a runaway session precisely when its loop is stuck — the situation this
 #: set exists for.
-_SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "abort", "steer", "cancel"})
+_SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "stop_if_idle", "abort", "steer", "cancel"})
 
 #: Ops exempt from their connection's op CHAIN. A different question from
 #: :data:`_SYNC_PRIORITY_OPS`: that set decides what may run before the sync
