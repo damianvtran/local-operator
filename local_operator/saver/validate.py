@@ -22,7 +22,7 @@ The checks, in the contract's numbering:
    field, header first, every line a record header or tab-quoted;
 5. marker vocabulary — every ``[radient:`` fullmatches one template of the
    closed set inlined from §3.3; the two role markers are refused;
-6. provenance (SHOULD in LO1) — a coarse "the server can only delete" test;
+6. provenance (MUST before auto) — source-derived record content and multiplicity;
 7. turn binding — the prefetch 4-tuple, checked by the chain at adoption;
 8. framing on the wire — the epoch rides as a user turn, never system;
 9. pairing across the splice — boundaries are tool-pairing-safe cuts of the
@@ -31,7 +31,6 @@ The checks, in the contract's numbering:
 
 from __future__ import annotations
 
-import bisect
 import hashlib
 import re
 import time
@@ -366,80 +365,6 @@ def check_user_records(records: Sequence[tuple[str, str]], span: Sequence[dict[s
         raise SaverRejected("user_record_count")
 
 
-_TOKEN_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:/-]{5,}")
-#: The reducer's truncation mark (``_short``): a cut token is a PREFIX of a real one.
-_ELLIPSIS = "…"
-
-
-#: Separators the token grammar ABSORBS (``ValueError:``, ``src/pkg/``): the
-#: reducer may emit the same identifier without them, so the index also holds
-#: each source token with trailing separators stripped.
-_TOKEN_SEPARATORS = ".:/-"
-#: Substring scans of the span allowed per RESPONSE once the indexed lookups
-#: miss. Honest reduce-v2 output needs none on the oracle corpus (see the PR's
-#: S-1 evidence); the cap is what keeps a hostile response linear: without it,
-#: N distinct invented tokens cost N full scans of an up-to-8 MiB span.
-MAX_PROVENANCE_SCANS = 32
-
-
-class _SourceIndex:
-    """The span's tokens as a set and a sorted list, built ONCE per span.
-
-    S-1: the earlier ``token in haystack`` ran one linear scan of the whole
-    span text per epoch token, O(tokens × span): ~102 s of event-loop CPU for
-    a hostile 1 MiB response (security round 1, p8). Now:
-
-    - an exact token, or one with its absorbed trailing separators stripped,
-      is a set lookup;
-    - a ``…``-cut token (the reducer's ``_short``) is one bisect for a source
-      token with that prefix;
-    - anything else falls back to the old substring test against the span
-      text, at most :data:`MAX_PROVENANCE_SCANS` times per response (shared
-      ``budget``). The fallback keeps the old acceptance for honest output the
-      grammar splits differently (``clean`` removing an ANSI escape inside a
-      word, say), and the budget keeps a hostile response's cost linear.
-    """
-
-    def __init__(self, parts: Sequence[str], budget: list[int]) -> None:
-        tokens: set[str] = set()
-        for part in parts:
-            for token in (t for chunk in _chunks(part) for t in _TOKEN_RE.findall(chunk)):
-                tokens.add(token)
-                trimmed = token.rstrip(_TOKEN_SEPARATORS)
-                if trimmed != token:
-                    tokens.add(trimmed)
-                # ``clean`` rewrites ``[RADIENT:system`` to ``[radient(quoted):system``,
-                # so the epoch's token is the part after the source token's
-                # first colon (``RADIENT:system`` → ``system``).
-                _, colon, tail = token.partition(":")
-                if colon and tail:
-                    tokens.add(tail.rstrip(_TOKEN_SEPARATORS))
-            tokens.update(_b64_note_digests(part))
-        self.tokens = frozenset(tokens)
-        self.sorted = sorted(tokens)
-        self.text = "\n".join(parts)
-        self.budget = budget
-        self._scanned: dict[str, bool] = {}
-
-    def has(self, token: str) -> bool:
-        bare = token.rstrip(_ELLIPSIS)
-        if bare in self.tokens or bare.rstrip(_TOKEN_SEPARATORS) in self.tokens:
-            return True
-        if bare != token:
-            position = bisect.bisect_left(self.sorted, bare)
-            if position < len(self.sorted) and self.sorted[position].startswith(bare):
-                return True
-        known = self._scanned.get(bare)
-        if known is not None:
-            return known
-        if self.budget[0] <= 0:
-            raise SaverRejected("provenance")
-        self.budget[0] -= 1
-        found = bare in self.text
-        self._scanned[bare] = found
-        return found
-
-
 #: reduce-v2's ``_B64_RE``: an inline base64 run the reducer replaces with an O7
 #: note ``[radient:base64 N chars sha256=H12]``.
 _B64_RE = re.compile(r"(?:data:[\w/+.-]+;base64,)?[A-Za-z0-9+/]{200,}={0,2}")
@@ -498,61 +423,18 @@ def _b64_note_digests(text: str) -> set[str]:
 
 
 def check_provenance(
-    text: str, span: Sequence[dict[str, Any]], budget: list[int] | None = None
+    text: str, span: Sequence[dict[str, Any]], *, deadline: float | None = None
 ) -> None:
-    """Check 6 (SHOULD in LO1, MUST before ``auto``): "the server can only delete".
+    """Check 6 MUST before auto: complete source-derived records, not vocabulary.
 
-    The full rule — each record's content is a substring of the span's source
-    after the method's documented truncation and quoting — needs a port of
-    reduce-v2's ``clean``/``_short``/``_b64_note``/argument summary. Until that
-    lands, this enforces the coarse half it implies: every identifier-shaped
-    token (6+ characters) in a packed epoch's content, outside the reducer's
-    own markers, must be a token of the span's projected text (or, cut with
-    ``…``, a prefix of one). A server that INVENTS a path, a command or a URL
-    is refused; one that only deletes passes. Header labels and tool names come
-    from the source too (a call's name is projected), so they need no
-    exemption. Linear in the epoch plus the span (S-1; see :class:`_SourceIndex`).
+    The former identifier-membership check accepted 55,000 copies of a token
+    uttered once (2.87x token amplification despite strict canonical-byte
+    shrink). The verifier consumes source occurrences once, recognises only
+    documented formatting, and fails closed on any unverifiable record.
     """
-    haystack_parts: list[str] = []
-    for row in span:
-        content = row.get("content")
-        if isinstance(content, str):
-            # openai.chat allows string content; lop's projection emits blocks,
-            # but the check reads the format, not one producer's habit.
-            haystack_parts.append(content)
-            content = []
-        for block in content or []:
-            if isinstance(block, dict) and isinstance(block.get("text"), str):
-                haystack_parts.append(block["text"])
-            if isinstance(block, dict) and isinstance(block.get("content"), (str, list)):
-                nested = block["content"]
-                for part in [nested] if isinstance(nested, str) else nested:
-                    found: Any = part if isinstance(part, str) else (part or {}).get("text")
-                    if isinstance(found, str):
-                        haystack_parts.append(found)
-        for call in row.get("tool_calls") or []:
-            function = call.get("function") or {}
-            haystack_parts.append(str(function.get("name", "")))
-            haystack_parts.append(str(function.get("arguments", "")))
-    source = _SourceIndex(haystack_parts, budget if budget is not None else [MAX_PROVENANCE_SCANS])
-    lines = text.split("\n")[1:]
-    for line in lines:
-        content = line[1:] if line.startswith("\t") else line
-        match = _RECORD_LINE.fullmatch(content) if not line.startswith("\t") else None
-        if match is not None:
-            content = match.group(2) or ""
-        # The reducer rewrites any marker-looking source text ("[radient:", in
-        # any case and spacing) to the fixed literal QUOTED_MARKER, which is
-        # its own text, not the source's; remove it before tokenising.
-        stripped = _strip_markers(content).replace(QUOTED_MARKER, " ")
-        for found in _TOKEN_RE.finditer(stripped):
-            token = found.group(0)
-            # ``_TOKEN_RE`` stops before "…"; read it back so a cut token is
-            # judged as a prefix, never as a whole token.
-            if stripped.startswith(_ELLIPSIS, found.end()):
-                token += _ELLIPSIS
-            if not source.has(token):
-                raise SaverRejected("provenance")
+    from local_operator.saver.provenance import check_records
+
+    check_records(text, span, deadline=deadline)
 
 
 def _strip_markers(text: str) -> str:
@@ -671,7 +553,6 @@ def validate_response(
     index_total = 0
     cuts: list[int] = []
     framed = not first
-    scans = [MAX_PROVENANCE_SCANS]
     for position, raw in enumerate(epochs):
         if deadline is not None and time.monotonic() > deadline:
             raise SaverRejected("busy")
@@ -716,7 +597,7 @@ def validate_response(
             records = check_packed_text(text, first=not framed)
             framed = True
             check_user_records(records, span_rows)
-            check_provenance(text, span_rows, scans)
+            check_provenance(text, span_rows, deadline=deadline)
             messages = (Message(id=prefix, role="user", content=[TextContent(text=text)]),)
         out.append(
             Epoch(

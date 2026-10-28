@@ -167,8 +167,10 @@ def test_s2_rule3_an_unquoted_any_case_marker_is_refused(marker: str) -> None:
 
 
 def test_s2_rule3_the_reducers_quoted_spelling_is_accepted() -> None:
-    payload, rows, encoded = _honest()
-    _set_text(payload, _text(payload) + "\n\t[radient(quoted):ok 3 lines]")
+    _, rows, _ = _honest()
+    rows[0]["content"][0]["text"] += " [RADIENT:ok 3 lines]"
+    encoded = [canonical_bytes(row) for row in rows]
+    payload = prepare({"messages": rows, "prior": []})
     _validate(payload, rows, encoded)
 
 
@@ -280,7 +282,8 @@ def test_s1_provenance_is_not_one_span_scan_per_token() -> None:
     rows = saver_projection([Message(role="user", content=[TextContent(text="paste:\n" + big)])])
     late = "value_029999"
     started = time.perf_counter()
-    check_provenance(HEADER + "\nuser: " + " ".join([late] * 60_000), rows)
+    with pytest.raises(SaverRejected, match="provenance"):
+        check_provenance(HEADER + "\nuser: " + " ".join([late] * 60_000), rows)
     known = time.perf_counter() - started
     started = time.perf_counter()
     with pytest.raises(SaverRejected) as info:
@@ -290,7 +293,7 @@ def test_s1_provenance_is_not_one_span_scan_per_token() -> None:
     invented = time.perf_counter() - started
     assert info.value.reason == "provenance"
     # Old algorithm: 60,000 scans of ~1.4 MB each. New: one index build plus at
-    # most MAX_PROVENANCE_SCANS scans. Generous bounds for a loaded CI host.
+    # complete source-record matching, never one scan per output token.
     assert known < 1.5, known
     assert invented < 1.5, invented
 

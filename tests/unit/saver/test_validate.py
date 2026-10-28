@@ -338,6 +338,11 @@ def _shift_first_epoch(payload, rows, encoded, delta: int) -> dict[str, Any]:
     count = epoch["source_count"] + delta
     epoch["source_count"] = count
     epoch["source_digest"] = digest(rows[:count])
+    # A packed body from the old span is no longer provenance-valid after the
+    # cut. Verbatim keeps this a check-9 negative control: checks 1–8 really
+    # pass, and only the call/result boundary must reject the shifted span.
+    epoch["form"] = "verbatim"
+    epoch.pop("messages", None)
     shifted["epochs"] = shifted["epochs"][:1]
     shifted["advanced"] = count
     return shifted
