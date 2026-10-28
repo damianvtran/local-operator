@@ -1240,7 +1240,9 @@ def test_zero_scroll_is_still_refused_and_states_the_sign_convention(
     """No direction can be inferred from all-zero deltas, so it is not guessed."""
 
     with pytest.raises(ValidationError) as caught:
-        ScrollAction(observation_id="observation-7", frame_id="frame-1", x=1, y=1, **deltas)
+        ScrollAction.model_validate(
+            {"observation_id": "observation-7", "frame_id": "frame-1", "x": 1, "y": 1, **deltas}
+        )
     message = str(caught.value)
     assert "scroll requires a non-zero delta" in message
     assert "delta_y > 0 scrolls up and < 0 scrolls down" in message

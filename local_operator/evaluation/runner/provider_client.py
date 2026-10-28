@@ -1376,9 +1376,7 @@ def _unknown_key_hint(reason: str, surface: ActionSurface) -> str:
             # 2026-10-28) -- a real key, and the wrong repair. Not split
             # silently: a key named ``+`` exists, so the string is the model's
             # to restate, and the example is built from its own parts.
-            parts.append(
-                f'a chord lists each key separately: send "keys": {json.dumps(chord)}'
-            )
+            parts.append(f'a chord lists each key separately: send "keys": {json.dumps(chord)}')
         elif len(meanings) == 2:
             parts.append(
                 f"it names no single key: use {json.dumps(meanings[0].lower())} for the "

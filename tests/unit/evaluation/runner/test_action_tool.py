@@ -54,6 +54,7 @@ from local_operator.evaluation.protocol import (
     FrameRef,
     FrameSize,
     Observation,
+    TypeAction,
 )
 from local_operator.evaluation.runner.action_tool import (
     _HINT_SHAPE,
@@ -1432,7 +1433,9 @@ async def test_whitespace_type_now_runs(text: str) -> None:
     result = await offline.call({"actions": [{"kind": "type", "text": text}]})
 
     assert not result.is_error
-    assert [batch.actions[0].text for batch in offline.execute.batches] == [text]
+    assert [batch.actions[0] for batch in offline.execute.batches] == [
+        TypeAction(observation_id=pending.observation_id, text=text)
+    ]
 
 
 @pytest.mark.asyncio
