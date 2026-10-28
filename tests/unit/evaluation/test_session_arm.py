@@ -3680,9 +3680,7 @@ class TestRenderPromptHeader:
             f"Act on the remote computer by calling `{self.TOOL}`: each call carries ONE "
             "batch of actions for the screen you were just shown and returns the state "
             "that results. Send exactly one call per turn. When the task is complete, "
-            f"call `{self.TOOL}` with a single finish action.\n"
-            + OBSERVATION_MARKER_GUIDE
-            + "\n"
+            f"call `{self.TOOL}` with a single finish action.\n" + OBSERVATION_MARKER_GUIDE + "\n"
         )
 
     # -- The shared observation-marker vocabulary --------------------------
