@@ -97,7 +97,11 @@ imports inside the functions that need them.
    while the entry carries schedules (a rowless entry cannot be stamped —
    `store.write_entry` treats an empty schedule list as "remove the entry").
 6. Her wake-index entry is held (`store.is_held` — `stopped_at`/`held_at`) ⇒
-   no record and no engagement.
+   no record and no engagement. Since 2026-10-27 a stop of Aida's or the
+   Librarian's DUTY session does not stamp `stopped_at`
+   (`runtime/control._engine_owner`): nobody "reopens" a duty session, so a
+   dormant stop switched her recurring pass off for good. The stop receipt says
+   the pass still runs and names the pause lever; `held_at` is the off switch.
 7. Reactive class ⇒ skip (a minimal, fail-closed mirror of
    `action_class.session_action_class`; any doubt reads reactive). The engine
    re-checks authoritatively at consume.
@@ -128,6 +132,39 @@ imports inside the functions that need them.
   scratch root — is refused rather than repointed (the 2026-10-08 incident),
   and wakes there fire only while a session is open; that is the workflow a
   custom-store user should run, since the shared unit will not supervise it.
+- THE SYSTEMD UNIT STOPS ONLY THE SUPERVISOR (`KillMode=process`, #3028). The
+  session runtimes it engages are detached but stay in its cgroup, so the
+  default `control-group` SIGTERMed every wake-spawned session on any unit
+  stop/restart and SIGKILLed it at 90 s, shorter than the runtime's own signal
+  drain. The relay's unit made the same choice for the same reason
+  (`supervisors.render_systemd_unit`). An installed unit picks it up on the
+  next `install` (the rendered text differs, so it is rewritten and reloaded).
+- THE SUPERVISOR FORWARDS THE STOP, rather than leaving its runtimes behind.
+  Each `serve()` invocation mints an owner token and puts it in its own
+  environment (`LOP_WAKE_SUPERVISOR_OWNER`, beside its own pid in
+  `LOP_WAKE_SUPERVISOR_PID`);
+  `launch` passes it only to runtimes that invocation forks and scrubs it from
+  every other spawn. Nothing is written to disk: the marker lives in the
+  runtime's own environment, read back per pid. On a SIGTERM/SIGINT (never on
+  `--once` or an ordinary retirement, which would kill the runtime it just
+  started for a wake), and on uninstall, `wakes.owned_runtimes.sweep` SIGTERMs
+  every runtime in THIS config root that carries the marker, whichever
+  invocation's token it holds: a runtime outlives the invocation that spawned
+  it, so the long-lived parked one is usually an earlier token. A process with
+  no marker (the `lop serve` daemon's runtimes, interactive or mesh-created
+  sessions) is never signalled. The marker means "a supervisor forked this
+  runtime directly": `launch` stamps it only where the building process IS
+  the supervisor (`LOP_WAKE_SUPERVISOR_PID` equals its pid) and strips it
+  everywhere else, and a runtime drops it from its own environment at boot,
+  so a session a wake turn messaged or spawned is never swept. The sweep
+  re-checks argv, marker, config root and session at signal time against the
+  exec-time environment, with a start-age check for pid recycling. It never
+  signals by process name, never reaches a sibling root's runtime, and never
+  SIGKILLs. A working runtime drains its turn and a
+  parked approval is denied by the runtime's signal path; the supervisor does
+  not wait for them, so the unit needs no longer stop timeout. A stopped or
+  uninstalled supervisor no longer owns future wake delivery, and any next
+  supervisor/engage applies the existing live-runtime lease rules.
 
 ## 7. The project-staleness source
 

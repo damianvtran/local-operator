@@ -556,14 +556,48 @@ def busy_sessions(root: Path, *, include_names: bool = False) -> tuple[int, str]
         return 0, ""
     detail = f"{len(busy)} session(s) are busy"
     if include_names:
-        names = []
-        for record in busy[:3]:
-            name = (record.conversation_name or "unnamed session")[:80]
-            names.append(f"{name} ({record.session_id[:80]})")
-        if len(busy) > 3:
-            names.append(f"and {len(busy) - 3} more")
-        detail += ": " + "; ".join(names)
+        detail += ": " + name_busy_records(busy)
     return len(busy), detail
+
+
+def name_busy_records(busy: Sequence[Any]) -> str:
+    """``name (id[, waiting for <pending>]); …`` for at most three busy records.
+
+    Shared by the relay-restart refusal and the generation-layout update
+    receipt, the two places that must say WHICH work they protected or left
+    behind. The ``pending`` marker is what tells an operator reading a receipt
+    that a session is not working but parked on a person (an approval nobody
+    can answer on a headless node is the measured case), so "busy" alone would
+    send them looking for a turn that is not running.
+    """
+    names = []
+    for record in busy[:3]:
+        name = (getattr(record, "conversation_name", "") or "unnamed session")[:80]
+        label = f"{name} ({str(getattr(record, 'session_id', ''))[:80]}"
+        pending = str(getattr(record, "pending", "") or "")
+        if pending:
+            label += f", waiting for {pending[:20]}"
+        names.append(label + ")")
+    if len(busy) > 3:
+        names.append(f"and {len(busy) - 3} more")
+    return "; ".join(names)
+
+
+def busy_records(root: Path) -> list[Any] | None:
+    """The member's live busy records, or ``None`` when the registry cannot be read.
+
+    The NAMING read for the generation-layout pass (see ``_execute_validated``):
+    it gates nothing, so an unreadable registry is reported as "could not say"
+    rather than refused — the refusal reading of a failed read belongs to the
+    in-place shape's :func:`busy_sessions`.
+    """
+    try:
+        from local_operator.session.runtime import registry
+
+        rows = registry.scan(root, reap=False, check_zombie=False)
+    except Exception:  # noqa: BLE001 — a naming read; the caller says it could not read
+        return None
+    return [record for record, state in rows if state == "live" and bool(record.busy)]
 
 
 @contextmanager
@@ -1041,8 +1075,29 @@ def _execute_validated(
     # re-engage candidates come from (agent review n1 — the call used to sit
     # after the install while its docstring said "at the start of a pass").
     snapshot = live_session_targets(root)
+    # THE BUSY GATE IS THE IN-PLACE SHAPE'S, NOT EVERY SHAPE'S. On the immutable
+    # generation layout the install writes a NEW tree and flips a pointer; a
+    # running runtime keeps importing from its own tree, prune keeps any
+    # generation a live record names, and the refresh tail below asks each
+    # runtime and keeps a busy one where it is. That is the install contract
+    # (docs/INSTALL_TRANSACTIONS.md, "Admission is separate from mutual
+    # exclusion": immutable generations do NOT take this gate) and it is what a
+    # local `lop update` already does — only this mesh path was stricter. The
+    # cost of the stricter rule was measured on a headless worker: a wake-spawned
+    # Librarian parked on an approval nobody could answer held `busy` for a day
+    # and refused every rolling update meanwhile. So on generation layout the
+    # pass proceeds and NAMES what it left on the old build (the receipt is the
+    # only place the operator learns that a session is still on it). The
+    # in-place shape rewrites the tree a running turn imports from, so there
+    # the gate stays exactly as it was.
+    left_behind: list[Any] | None = []
+    shape = install_shape()
     with update_lock(root, target):
-        count, detail = busy_sessions(root)
+        if shape == METHOD_GENERATION:
+            left_behind = busy_records(root)
+            count, detail = 0, ""
+        else:
+            count, detail = busy_sessions(root)
         if count != 0:
             reason = (
                 f"{detail}; the update waits — nothing has been touched"
@@ -1160,6 +1215,13 @@ def _execute_validated(
     for note in (sweep_note, engage_note):
         if note:
             reason += f" ({note})"
+    if left_behind:
+        reason += (
+            f"; {len(left_behind)} busy session(s) stay on {current or 'the previous build'} "
+            f"until they settle: {name_busy_records(left_behind)}"
+        )
+    elif left_behind is None:
+        reason += "; this device could not read its session registry to name busy sessions"
     receipt = {
         "state": "done",
         "code": "",
@@ -1170,6 +1232,16 @@ def _execute_validated(
         "now_current": now_current,
         "serving": serving,
         "sessions": {"moved": moved, "kept": kept},
+        # Structured twin of the reason's "stay on … until they settle" clause,
+        # for a `--json` reader: the ids the pass deliberately did not wait for.
+        "left_busy": [
+            {
+                "session_id": str(getattr(r, "session_id", "")),
+                "name": str(getattr(r, "conversation_name", "") or ""),
+                "pending": str(getattr(r, "pending", "") or ""),
+            }
+            for r in (left_behind or [])
+        ],
         "updated_at": time.time(),
     }
     # THE RECEIPT VALUE IS COMPOSED BEFORE THE ROLL IS STARTED (agent review
@@ -1402,6 +1474,11 @@ def update_peer(server: "RelayServer", device_id: str, *, rollout: str = "") -> 
         "method": str(detail_out.get("method") or ""),
         "version": str(detail_out.get("version") or ""),
         "sessions": detail_out.get("sessions") or {"moved": 0, "kept": 0},
+        # The member's structured twin of its "stay on … until they settle"
+        # clause (QA round 1 on #3028, Q2): rebuilt field by field above, this
+        # answer dropped it, so no `--json` reader and no rollout record ever
+        # saw which sessions a generation-layout update left behind.
+        "left_busy": list(detail_out.get("left_busy") or []),
         "device_id": device_id,
         "name": label,
     }

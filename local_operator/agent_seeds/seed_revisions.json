@@ -674,6 +674,22 @@
         "effort": null,
         "delegate": true,
         "class": "proactive"
+      },
+      {
+        "sha": "5a52df7f8dc1c6b01294007baa95f8a3118951eb",
+        "version": "1.1.0",
+        "instructions_sha256": "95a2d980b1c9e50e74c583574fb2e60ccbdc86abe66bec1fd6039461f27ffffd",
+        "description": "Organizing the Library — naming and tagging saved assets, finding what needs attention, or asking what the Library holds.",
+        "tools": [
+          "library",
+          "read",
+          "glob",
+          "grep",
+          "todo"
+        ],
+        "effort": null,
+        "delegate": true,
+        "class": "proactive"
       }
     ],
     "manager": [

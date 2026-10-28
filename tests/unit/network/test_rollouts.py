@@ -1519,3 +1519,216 @@ def test_stop_driver_warns_once_per_survivor_episode(
     finally:
         rollouts._DRIVERS.pop(id(server), None)
         rollouts._DRIVER_SURVIVOR_WARNED.pop(id(server), None)
+
+
+# ---------------------------------------------------------------------------
+# A target the member's channel does not serve YET is a wait, not a refusal
+# ---------------------------------------------------------------------------
+
+
+def _not_published(version: str = "0.99.0") -> dict[str, Any]:
+    """The member's real answer shape: a normal ack, ``state: refused`` + the code."""
+    return _answer(
+        "refused",
+        code="target_not_published",
+        reason=(
+            f"the target {version} is not resolvable on this device's channel "
+            "(the member's channel does not serve this version); nothing was installed"
+        ),
+    )
+
+
+def test_a_not_yet_published_target_is_retried_on_the_ladder_then_installs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0.90.17's shape: PyPI lagged the tag by ~22 min; the member must catch up unaided."""
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+    asked = _scripted(monkeypatch, [_not_published(), _not_published()])
+
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    live = _live(record["id"], root)
+    member = _member(live, "d_a")
+    assert live["state"] == "active", live
+    assert (member["state"], member["code"]) == ("deferred", "target_not_published"), member
+    assert member["waits"] == 1 and member["fails"] == 0, member
+    first_floor = 1000.0 + rollouts.FAIL_BACKOFF_S[0]
+    assert member["next_ask_at"] == first_floor, member
+    assert "waiting for 0.99.0 on PyPI" in rollouts.summary(live), rollouts.summary(live)
+
+    rollouts.step_record(cast(Any, server), record["id"], now=first_floor - 1.0)
+    assert asked == ["d_a"], "a waiting member must not be asked inside its floor"
+
+    rollouts.step_record(cast(Any, server), record["id"], now=first_floor + 1.0)
+    member = _member(_live(record["id"], root), "d_a")
+    assert member["waits"] == 2, member
+    assert member["next_ask_at"] == first_floor + 1.0 + rollouts.FAIL_BACKOFF_S[1], member
+
+    _scripted(monkeypatch, [_answer("done", version="0.99.0")])
+    rollouts.step_record(cast(Any, server), record["id"], now=member["next_ask_at"] + 1.0)
+    closed = _live(record["id"], root)
+    assert closed["state"] == "done", closed
+    assert _member(closed, "d_a")["state"] == "done", closed
+    rows = [r for r in server.audit.rows if r.event == rollouts.MEMBER_STATE]
+    # One row for entering the wait (the second identical answer adds none),
+    # one for done — never a row per poll.
+    assert [r.detail["state"] for r in rows] == ["deferred", "done"], rows
+    done_rows = [r for r in server.audit.rows if r.event == rollouts.ROLLOUT_DONE]
+    assert done_rows and done_rows[-1].outcome == "ok", done_rows
+
+
+def test_the_wait_rung_survives_an_interleaved_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m3 (agent review round 1): a busy ask between two 404s keeps the wait's rung.
+
+    The busy answer says nothing about PyPI, so the ladder must not restart at
+    5 min; the next 404 climbs to the third rung, not the first.
+    """
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+    _scripted(monkeypatch, [_not_published(), _answer("busy"), _not_published()])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    member = _member(_live(record["id"], root), "d_a")
+    rollouts.step_record(cast(Any, server), record["id"], now=member["next_ask_at"] + 1.0)
+    member = _member(_live(record["id"], root), "d_a")
+    assert member["code"] == "busy" and member["waits"] == 1, member
+    at = member["next_ask_at"] + 1.0
+    rollouts.step_record(cast(Any, server), record["id"], now=at)
+    member = _member(_live(record["id"], root), "d_a")
+    assert member["waits"] == 2, member
+    assert member["next_ask_at"] == at + rollouts.FAIL_BACKOFF_S[1], member
+
+
+def test_a_done_member_keeps_the_sessions_it_left_behind_in_record_and_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q2 (QA round 1): ``left_busy`` reaches the rollout record and the audit row.
+
+    The member's sentence is capped at DETAIL_CAP in the record, so with two or
+    three named sessions the names could be lost; the ids ride as data.
+    """
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+    done = _answer("done", version="0.99.0", reason="this device moved from 0.0.1 to 0.99.0")
+    done["left_busy"] = [{"session_id": "p4rk-r-0001", "name": "Librarian", "pending": "approval"}]
+    _scripted(monkeypatch, [done])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    closed = _live(record["id"], root)
+    assert _member(closed, "d_a")["left_busy"] == ["p4rk-r-0001"], closed
+    rows = [r for r in server.audit.rows if r.event == rollouts.MEMBER_STATE]
+    assert rows and rows[-1].detail.get("left_busy") == ["p4rk-r-0001"], rows
+
+
+def test_left_busy_survives_the_real_audit_logs_detail_filter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q8 (QA round 2 on #3028): the REAL ``AuditLog`` keeps only allow-listed keys.
+
+    The fake sink above records whatever it is handed, so it passed while the
+    real log dropped ``left_busy`` (``DETAIL_KEYS["update_member_state"]`` did
+    not list it). This cell writes through a real ``AuditLog`` and reads the
+    row back from disk, with a list longer than the cap.
+    """
+    from local_operator.network.audit import AuditLog
+
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    log = AuditLog(root)
+    server.audit = cast(Any, log)
+    record = _open(root, devices=["d_a"])
+    done = _answer("done", version="0.99.0", reason="this device moved from 0.0.1 to 0.99.0")
+    done["left_busy"] = [{"session_id": f"p4rk-{i:04d}"} for i in range(rollouts.LEFT_BUSY_CAP + 5)]
+    _scripted(monkeypatch, [done])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    log.close()
+    rows = [r for r in AuditLog(root).tail(200) if r.get("event") == rollouts.MEMBER_STATE]
+    assert rows, rows
+    kept = rows[-1].get("detail", {}).get("left_busy")
+    assert isinstance(kept, list) and kept[:2] == ["p4rk-0000", "p4rk-0001"], rows[-1]
+    assert len(kept) <= rollouts.LEFT_BUSY_CAP, len(kept)
+
+
+def test_left_busy_is_bounded_by_count() -> None:
+    """n1 (review round 2): a peer's list is capped before it reaches durable storage."""
+    many = [{"session_id": f"s{i:04d}"} for i in range(rollouts.LEFT_BUSY_CAP + 30)]
+    update = rollouts.classify_answer(
+        {"ok": True, "state": "done", "left_busy": many}, fails=0, now=0.0
+    )
+    assert len(update["left_busy"]) == rollouts.LEFT_BUSY_CAP
+
+
+def test_a_target_that_never_appears_stops_at_the_window_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+    _scripted(monkeypatch, [_not_published()])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    assert _live(record["id"], root)["state"] == "active"
+
+    asked = _scripted(monkeypatch, [])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0 + rollouts.WINDOW_S + 1.0)
+    closed = _live(record["id"], root)
+    assert closed["state"] == "done" and asked == [], (closed, asked)
+    line = rollouts.summary(closed)
+    assert "0.99.0 never appeared on PyPI" in line, line
+    assert "may not have been published at all" in line, line
+    assert "not updated, 0.99.0 is not on PyPI" in line, line
+    assert "no longer active" not in line, "the generic nudge must not sit beside the remedy"
+    rows = [r for r in server.audit.rows if r.event == rollouts.ROLLOUT_DONE]
+    assert rows and rows[-1].outcome == "partial", rows
+    assert "0.99.0 is not on PyPI" in rows[-1].detail["counts"], rows[-1].detail
+
+
+def test_a_newer_rollout_replaces_a_record_still_waiting_for_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"], now=1000.0)
+    _scripted(monkeypatch, [_not_published()])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    assert _member(_live(record["id"], root), "d_a")["state"] == "deferred"
+
+    newer = _open(root, devices=["d_a"], now=2000.0)
+    assert _live(record["id"], root)["state"] == "superseded"
+    asked = _scripted(monkeypatch, [_answer("done", version="0.99.0")])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0 + 7200.0)
+    assert asked == [], "a superseded waiting record must never ask again"
+    rollouts.step_record(cast(Any, server), newer["id"], now=2001.0)
+    assert asked == ["d_a"] and _live(newer["id"], root)["state"] == "done"
+
+
+def test_an_editable_install_refusal_stays_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+    asked = _scripted(
+        monkeypatch,
+        [_answer("refused", code="editable_install", reason="dev tree")] * 3,
+    )
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    closed = _live(record["id"], root)
+    member = _member(closed, "d_a")
+    assert (member["state"], member["code"]) == ("refused", "editable_install"), member
+    assert rollouts.member_terminal(member) and closed["state"] == "done", closed
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0 + 7200.0)
+    assert asked == ["d_a"], asked
+
+
+def test_the_origins_own_unparseable_stamp_is_still_a_terminal_refusal() -> None:
+    """``update_peer``'s pre-frame refusal carries no member state: no wait can fix it."""
+    update = rollouts.classify_answer(
+        {"ok": False, "code": "target_not_published", "message": "not a version"},
+        fails=0,
+        now=1000.0,
+    )
+    assert (update["state"], update["code"]) == ("refused", "target_not_published"), update
+    assert rollouts.member_terminal(update)

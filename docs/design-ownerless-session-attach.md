@@ -172,7 +172,10 @@ While that wait runs:
   again"* — has nothing behind it until the drain ends.
 
 The signal path bounds this at `SIGNAL_DRAIN_S = 120 s`
-(`runtime/types.py:341`, `process.py:1366`); the **build** path, which is the one
+(`runtime/types.py:341`, `process.py:1366`) — and since #3028 a signalled
+runtime first denies any parked approval/ask (`refuse_gates_for_exit`), because
+a gate-parked call counts as an executing step and would otherwise hold that
+bound off until the gate's own day-long timeout; the **build** path, which is the one
 that fires for the whole fleet after a `lop-update`, imposes no bound at all
 (`process.py:1285`: *"the build drain waits on its work alone"*). The manager's
 reading of the live box — ~17 runtimes alive whose `leaving` column reads

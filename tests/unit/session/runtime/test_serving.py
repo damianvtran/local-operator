@@ -650,6 +650,51 @@ async def test_concurrent_gate_answers_have_one_authoritative_winner() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_signal_exit_refuses_parked_and_later_gates() -> None:
+    """M1 on #3028: once a signal commits the exit, no gate parks on a person.
+
+    A parked approval is denied (``False``, the stop/timeout answer) and the
+    count says so; a gate opened afterwards answers at once instead of parking
+    a fresh card that would hold the drain open again; an ask answers ``None``.
+    """
+    handle, _ = make_handle(auto_approve=False)
+    parked = asyncio.ensure_future(handle._approval_gate("bash", "Allow?"))
+    await asyncio.sleep(0)
+    assert handle.is_busy() is True
+
+    assert handle.refuse_gates_for_exit() == 1
+    assert await asyncio.wait_for(parked, timeout=2) is False
+    assert handle.is_busy() is False
+
+    assert await asyncio.wait_for(handle._approval_gate("bash", "again"), timeout=1) is False
+    assert handle._pending_futures == {}
+    question = SimpleNamespace(id="q1", question="Proceed?", options=[], secret=False)
+    assert await asyncio.wait_for(handle._ask_gate([question]), timeout=1) is None
+
+
+@pytest.mark.asyncio
+async def test_a_signal_between_two_questions_does_not_park_the_second() -> None:
+    """m1 (agent review round 2 on #3028): the exit flag is re-read per question.
+
+    q1 is answered in the same tick the exit is committed; the refusal finds
+    nothing parked (q1's future is already settled), so a single entry check
+    let q2 park after the refusal. The loop now stops and returns what it has.
+    """
+    handle, _ = make_handle(auto_approve=False)
+    q1 = SimpleNamespace(id="q1", question="First?", options=[], secret=False)
+    q2 = SimpleNamespace(id="q2", question="Second?", options=[], secret=False)
+    asked = asyncio.ensure_future(handle._ask_gate([q1, q2]))
+    await asyncio.sleep(0)
+    (future,) = list(handle._pending_futures.values())
+    future.set_result({"q1": ["yes"]})
+    assert handle.refuse_gates_for_exit() == 0
+    answer = await asyncio.wait_for(asked, timeout=1)
+    assert answer == {"q1": ["yes"]}, answer
+    assert handle._pending_futures == {}
+    assert handle.is_busy() is False
+
+
+@pytest.mark.asyncio
 async def test_concurrent_explicit_steers_preserve_dispatch_order() -> None:
     handle, session = make_handle()
     receipts = await asyncio.gather(
@@ -1576,6 +1621,22 @@ async def test_attach_seeds_streaming_from_flag_for_mid_turn_subscriber() -> Non
     session.is_streaming = True
     handle.subscribe(lambda: None)
     assert handle._fold.projection.streaming is True
+
+
+def test_a_committed_departure_ignores_the_warm_window() -> None:
+    """#3028 node control (c): an idle signalled runtime must leave, not wait 120 s.
+
+    Residency keeps a runtime warm for an imminent wake; a signal drain is not
+    residency. The warm-window term therefore stops holding once ``_draining``
+    is latched, so the turn boundary ends the runtime and its successor owns
+    the next occurrence.
+    """
+    handle, _ = make_handle()
+    handle.next_wake_due_at = lambda: 0  # type: ignore[method-assign]
+    handle._draining = False
+    assert handle.may_refresh() == "wake due within the warm window"
+    handle._draining = True
+    assert handle.may_refresh() == ""
 
 
 # --- next_wake_due_at: the reaper's warmth signal ----------------------------

@@ -159,7 +159,20 @@ def test_every_allowlisted_seed_carries_the_read_only_network_tools() -> None:
         profile = seed(name)
         if not profile.tools:
             continue  # no allowlist: the role already has the full inventory
+        if name in OFFLINE_BY_DESIGN:
+            assert not set(READ_ONLY_NETWORK_TOOLS) & set(profile.tools), name
+            continue
         assert set(READ_ONLY_NETWORK_TOOLS) <= set(profile.tools), name
+
+
+#: Seeds whose allowlist omits the network tools ON PURPOSE, each with its reason.
+#: ``librarian`` (1.1.0, #3028): an unattended local-metadata curator — she names,
+#: describes and tags the operator's own Library assets — has no web duty (her
+#: seed's pass never fetches or searches the web), and keeping her off the network
+#: shrinks what a pass nobody can answer can reach. The exemption is asserted
+#: both ways: such a seed must NOT carry the tools, so the reason cannot go stale
+#: silently.
+OFFLINE_BY_DESIGN = frozenset({"librarian"})
 
 
 def test_the_scout_fallback_allowlist_matches_the_read_only_surface() -> None:
