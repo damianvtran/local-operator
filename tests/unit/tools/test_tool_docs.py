@@ -278,7 +278,14 @@ MEASURED_TOKENS: dict[str, int] = {
     # retry, with update/reset/sync naming no retry), the collision clause and
     # the host-dependent default. The same printed table measured it; the
     # 8 KiB soft cap still holds.
-    "agent": 1365,
+    # RE-MEASURED (F0, #3054): 1365 -> 1364. The ``scope`` field now states the
+    # host-dependent default ("this conversation if it has a store, else the
+    # account") instead of naming 'session' as THE default, which was false in a
+    # configuration run (unscoped registries, so an omitted scope writes the
+    # account). Worded to cost no more than the old text: the child-kind
+    # context budget had 2 billed tokens of headroom. The ``team`` entry moves by
+    # the same -1 for its twin field; the same printed table measured both.
+    "agent": 1364,
     "ask": 1079,
     "ask_withdraw": 452,
     "bash": 295,
@@ -522,7 +529,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (LOH-9 S5): 1109 -> 1400 — the promote row, the promote and
     # member-copy step, the corrected refusal copy and the collision clause;
     # the same printed table.
-    "team": 1400,
+    # RE-MEASURED (F0, #3054): 1400 -> 1399 -- the ``scope`` default wording,
+    # the same -1 as the agent twin.
+    "team": 1399,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -563,7 +572,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: promotion fields are on ``agent``/``team``, not on the launch tool.
 #: RE-MEASURED (LOH-9 S5): agent 1148 -> 1394, the same +246 the canonical arm
 #: takes because both arms render the completed notes; ``task`` stays 764.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1394, "task": 764}
+#: RE-MEASURED (F0, #3054): agent 1394 -> 1393, the same -1 ``scope``-default
+#: wording as the canonical arm; ``task`` stays 764.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1393, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
