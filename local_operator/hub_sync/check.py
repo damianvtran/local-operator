@@ -23,6 +23,7 @@ check. See :func:`check_hub_skills`.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Sequence
@@ -373,7 +374,113 @@ def team_fields_of(team: Any) -> dict[str, Any]:
     )
 
 
-def _team_confirmed_gone(registry: Any, team_id: str) -> bool:
+def agent_inventory_complete(registry: Any) -> bool:
+    """Whether an AGENT listing is authoritative enough to PRUNE status rows.
+
+    ``AgentRegistry`` answers "no agents" for BOTH "there are none" and "I could not
+    read them": a row whose ``agent.yml`` is unreadable is skipped and recorded in
+    ``_incomplete_agent_dirs``, and a vanished ``agents_dir`` scans as empty. Pruning
+    on either would delete the row of an item that still exists -- its retry
+    schedule, timestamps and backup pointer with it -- so the caller asks this first
+    and skips the prune when the answer is no.
+
+    A MISSING ``agents_dir`` is not authoritative here, unlike an empty listing: the
+    registry CREATES that directory when it is constructed, so a live registry that
+    cannot see it is looking at a directory that vanished between the scan and this
+    question, not at a profile that never had agents.
+
+    The row twin of what ``prune``'s ``confirmed_absent`` guard already does for
+    baselines: a listing that could not read an item never authorizes destroying
+    what that item owned.
+    """
+
+    if getattr(registry, "_metadata_complete", True) is False:
+        return False
+    directory = getattr(registry, "agents_dir", None)
+    if directory is None:
+        return False
+    try:
+        # The directory must also be READABLE: ``Path.is_dir`` succeeds on an
+        # unreadable one, and ``Path.exists`` below swallows EACCES, which would
+        # turn "cannot list" into "nothing there".
+        with os.scandir(directory):
+            return True
+    except OSError:  # noqa: BLE001 - an unreadable directory is not an authoritative one
+        return False
+
+
+def _absent(path: Path) -> bool:
+    """True only when ``path`` does not exist (ENOENT).
+
+    ``Path.exists()`` answers False on EACCES as of Python 3.14 -- the runtime this
+    ships on -- so an ``agents/`` or ``hub/baselines`` directory a process may READ
+    but not TRAVERSE makes every item under it look deleted, and its row pruned
+    (round-3 m1). ``Path.exists`` also cannot tell that case from a real absence on
+    older interpreters, so the decision is made here instead: only FileNotFoundError
+    is absence; every other OSError -- and a path that cannot exist at all, such as
+    a stored id carrying a NUL byte (round-4 m1) -- is UNKNOWN, which the callers
+    answer by keeping the row.
+    """
+
+    try:
+        os.stat(path)
+        return False
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        # ValueError covers an id that can never be a path at all -- ``os.stat``
+        # raises "embedded null character" for a stored ``local_id`` carrying a NUL
+        # byte, before any syscall. A corrupted or hand-edited ``status.json`` can
+        # hold one, and crashing here would abort EVERY full check and every runner
+        # tick that retries it (round-4 m1). Keep is the conservative answer.
+        return False
+
+
+def agent_confirmed_gone(registry: Any, agent_id: str) -> bool:
+    """True when the agent is DELETED, or still on disk but NO LONGER LINKED.
+
+    The directory, not the baseline, is what proves an agent deleted: a delete
+    removes the directory and KEEPS the baseline (round-1 E5), so a
+    baseline-based answer would call a deleted agent live forever.
+
+    A PRESENT directory can still be gone as a LINK. The desktop Tags editor lets
+    a person remove ``hub:<id>``/``hub_sha256:<hex>`` like any other tag, and
+    ``check_hub_agents`` enumerates only rows that still carry the marker; an
+    unlinked row would otherwise never be listed, never confirmed gone, and keep
+    its ``local-only`` row advertising unpublished changes for ever (round-3 M1).
+    A definition the registry can READ and that names no hub origin is positive
+    evidence of that state -- the same evidence ``check_hub_agents`` needs to stop
+    listing it, so the two answers cannot disagree.
+
+    Any doubt answers False: an unreadable definition (``get_agent`` raises), an
+    id that cannot be a path segment, or a tree that cannot be listed.
+    """
+
+    agents_dir = getattr(registry, "agents_dir", None)
+    if agents_dir is None or not agent_id or "/" in agent_id or agent_id.startswith("."):
+        return False
+    try:
+        if not agents_dir.is_dir():
+            return False
+        if _absent(agents_dir / agent_id):
+            # Confirmed gone from a tree that must also be LISTABLE: a directory
+            # whose entries we may not enumerate cannot report an absence.
+            with os.scandir(agents_dir):
+                return True
+    except OSError:
+        return False
+    try:
+        row = registry.get_agent(agent_id)
+    except Exception:  # noqa: BLE001 - an unreadable definition is unknown, never gone
+        return False
+    if row is None:
+        return False
+    from local_operator.agents import hub_origin
+
+    return hub_origin(row) is None
+
+
+def team_confirmed_gone(registry: Any, team_id: str) -> bool:
     """True only when ``teams/<id>`` is absent AND no swap-in-progress sibling exists.
 
     Any doubt (an unreadable directory, a hidden ``.<id>.*`` staging/backup entry
@@ -385,10 +492,25 @@ def _team_confirmed_gone(registry: Any, team_id: str) -> bool:
     if teams_dir is None or not team_id or "/" in team_id or team_id.startswith("."):
         return False
     try:
-        if not teams_dir.is_dir() or (teams_dir / team_id).exists():
+        if not teams_dir.is_dir() or not _absent(teams_dir / team_id):
             return False
         return not any(child.name.startswith(f".{team_id}.") for child in teams_dir.iterdir())
     except OSError:
+        return False
+
+
+def skill_confirmed_gone(config_dir: Path, local_id: str) -> bool:
+    """True only when a skill link has NO baseline FILE (existence, not readability).
+
+    ``iter_baselines`` skips a record it cannot read, which looks exactly like a
+    link that is gone. The file still existing is the proof that it is not; only its
+    ABSENCE -- from a directory the caller has already proved listable -- confirms
+    the link was removed.
+    """
+
+    try:
+        return _absent(prov.baseline_path(config_dir, "skill", local_id))
+    except prov.BaselineError:
         return False
 
 
@@ -420,7 +542,7 @@ def check_hub_teams(
         config_dir,
         "team",
         {t.id for t in teams},
-        confirmed_absent=lambda team_id: _team_confirmed_gone(registry, team_id),
+        confirmed_absent=lambda team_id: team_confirmed_gone(registry, team_id),
     )
     checks: list[ItemCheck] = []
     for meta in teams:
