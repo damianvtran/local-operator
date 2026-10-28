@@ -26,6 +26,7 @@ nothing here may turn a previously-ready answer into ``building``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -33,7 +34,7 @@ import re
 import sqlite3
 import threading
 import time
-import uuid
+import zlib
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,7 +44,7 @@ from local_operator.session import transcript_index as ti
 
 #: Bumped whenever the companion's tables/semantics change. An older companion
 #: is then *unsupported* (fallback), never misread.
-SCHEMA = 2
+SCHEMA = 3
 PROJECTION = 1
 
 #: How long a relay link thread may wait for one bounded projection. The page
@@ -65,7 +66,7 @@ logger = logging.getLogger(__name__)
 _MIGRATIONS: dict[tuple[str, str], asyncio.Task[None]] = {}
 #: Canonical identity whose companion publication already failed. Remembering it
 #: is what stops an exact HIT from re-attempting a doomed build on every open.
-_FAILED: dict[tuple[str, str], tuple[int, int, int]] = {}
+_FAILED: dict[tuple[str, str], tuple[int, int, float]] = {}
 #: (canonical identity, token, naming identity, checkpoints, naming) per session.
 _MANIFEST_MEMO: dict[tuple[str, str], tuple[Any, ...]] = {}
 _MEMO_LOCK = threading.Lock()
@@ -88,6 +89,11 @@ class Publication:
     identity: tuple[int, int, int]
     built_at: float
     path: Path
+    token: str = ""
+
+    @property
+    def token_id(self) -> str:
+        return self.token or self.path.stem.split(".")[0]
 
     @property
     def naming_path(self) -> Path:
@@ -131,6 +137,46 @@ class FrameFacts:
     summary: FrameSummary
 
 
+def _token_for(values: dict[str, Any]) -> str:
+    """The content address of one canonical publication.
+
+    DERIVED, NOT STORED. The companion is named after the derivation it describes
+    (index version + journal signature + scan + generation), so publishing it
+    needs NO canonical rewrite and a journal that moves mid-build simply produces
+    a token the next head no longer names. That is the whole compare-and-publish:
+    the writer re-reads the head before renaming, and readers only look up the
+    token their own head derives.
+    """
+    sig = values["sig"]
+    material = json.dumps(
+        [
+            SCHEMA,
+            values["version"],
+            sig.get("inode"),
+            sig.get("size"),
+            sig.get("mtime"),
+            values["scan"],
+            values["journal_generation"],
+        ],
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+
+
+def token_for(index: ti.TranscriptIndex) -> str:
+    """The derivation token an index would publish under."""
+    return _token_for(
+        {
+            "version": ti.TRANSCRIPT_INDEX_VERSION,
+            "sig": index.sig,
+            "scan": index.scan.to_payload(),
+            "journal_generation": index.journal_generation,
+        }
+    )
+
+
 def _identity(st: os.stat_result) -> tuple[int, int, int]:
     return st.st_ino, st.st_size, st.st_mtime_ns
 
@@ -162,7 +208,7 @@ def header(root: str | Path, sid: str) -> Result:
         values = {}
         if not text.startswith("{"):
             return Result("unsupported")
-        for expected in (*ti._HEAD_KEYS, "read_model"):
+        for expected in ti._HEAD_KEYS:
             while cursor < len(text) and text[cursor].isspace():
                 cursor += 1
             key, cursor = decoder.raw_decode(text, cursor)
@@ -176,27 +222,23 @@ def header(root: str | Path, sid: str) -> Result:
             while cursor < len(text) and text[cursor].isspace():
                 cursor += 1
             values[key], cursor = decoder.raw_decode(text, cursor)
-            while cursor < len(text) and text[cursor].isspace():
+            if expected != ti._HEAD_KEYS[-1]:
+                while cursor < len(text) and text[cursor].isspace():
+                    cursor += 1
+                if text[cursor] != ",":
+                    return Result("corrupt")
                 cursor += 1
-            if text[cursor] != ",":
-                return Result("corrupt")
-            cursor += 1
-        marker = values["read_model"]
-        if (
-            values["version"] != ti.TRANSCRIPT_INDEX_VERSION
-            or not isinstance(marker, dict)
-            or marker.get("schema") != SCHEMA
-            or not isinstance(marker.get("publication_id"), str)
-        ):
+        if values["version"] != ti.TRANSCRIPT_INDEX_VERSION:
             return Result("unsupported")
-        publication = Publication(
-            Path(root),
-            sid,
-            values,
-            _identity(st),
-            st.st_mtime,
-            _path(Path(root), sid, marker["publication_id"]),
-        )
+        try:
+            token = _token_for(values)
+            path = _path(Path(root), sid, token)
+        except (TypeError, ValueError, KeyError):
+            return Result("corrupt")
+        if not path.is_file():
+            # No companion for THIS derivation: the caller takes base's path.
+            return Result("missing")
+        publication = Publication(Path(root), sid, values, _identity(st), st.st_mtime, path, token)
         # These fields attest the actual journal scan, never a fresh guessed stat.
         sig = publication.signature
         if (
@@ -223,157 +265,208 @@ def _current(pub: Publication) -> bool:
         return False
 
 
-def failed(root: str | Path, sid: str, identity: tuple[int, int, int] | None) -> bool:
-    """Whether this exact canonical document already failed to publish (R3)."""
-    if identity is None:
-        return False
-    return _FAILED.get((str(root), sid)) == identity
+def failed(root: str | Path, sid: str, source: tuple[int, int, float] | None) -> bool:
+    """Whether THIS source already failed to publish a companion.
 
-
-def remember_failure(root: str | Path, sid: str, identity: tuple[int, int, int] | None) -> None:
-    """Remember ONE failed canonical identity per session, bounded across sessions.
-
-    A torn journal tail or an unwritable cache is not transient within a
-    publication: retrying it on every open rewrites a multi-MB document each
-    time, which also moves the cache mtime and disables the resident fast path.
-    The next successful derivation carries a new identity and is tried normally.
+    Keyed on the JOURNAL's signature, not on the cached document's identity: the
+    failure path rewrites the document, so a document identity is stale by the
+    next open and the old key retried forever (round-2 R3). The negative entry is
+    honoured until the source itself moves.
     """
-    if identity is None:
+    if source is None:
+        return False
+    return _FAILED.get((str(root), sid)) == source
+
+
+def remember_failure(root: str | Path, sid: str, source: tuple[int, int, float] | None) -> None:
+    """Remember ONE failed source per session, bounded across sessions."""
+    if source is None:
         return
     key = (str(root), sid)
     if key not in _FAILED and len(_FAILED) >= 32:
         _FAILED.pop(next(iter(_FAILED)))
-    _FAILED[key] = identity
+    _FAILED[key] = source
 
 
-def reuse(root: str | Path, sid: str, index: ti.TranscriptIndex) -> dict[str, Any] | None:
-    """The companion a non-derivation write may keep sharing.
+def source_of(index: ti.TranscriptIndex) -> tuple[int, int, float]:
+    """The journal witness an index was derived from."""
+    return (
+        int(index.sig.get("inode", 0)),
+        int(index.sig.get("size", 0)),
+        float(index.sig.get("mtime", 0.0)),
+    )
 
-    Exact HITs and naming-only patches re-publish the SAME derived facts; minting
-    another multi-megabyte companion for them is the disk growth this cache used
-    to cause. The token must still name a readable companion.
+
+def publish(root: str | Path, sid: str, index: ti.TranscriptIndex) -> str | None:
+    """Build one immutable companion for this derivation, if it is still current.
+
+    CALLED FROM A BACKGROUND PASS, never from the canonical write: the build is
+    the expensive part (~1.3 s measured on the append path) and putting it in the
+    writer delayed every refresh's publish. Everything here is compare-and-
+    publish against the head on disk — a journal that moved mid-build, or a
+    document replaced under us, leaves the finished file unreferenced and the
+    collector reclaims it.
+
+    Returns the token published, or ``None`` when the derivation is no longer the
+    current one.
     """
-    token = index.read_model_token
-    if not token:
-        return None
-    try:
-        # ONE stat, deliberately: this runs on the naming path, where opening
-        # SQLite would put disk I/O back on the event loop. A companion that is
-        # present but unusable is caught by the READER (``corrupt``/``unsupported``
-        # and the existing fallback), which is the only place that must be exact.
-        path = _path(Path(root), sid, token)
-        if path.stat().st_size <= 0:
-            return None
-    except (OSError, ValueError):
-        return None
-    return {"schema": SCHEMA, "publication_id": token}
-
-
-def publish(root: str | Path, sid: str, index: ti.TranscriptIndex) -> dict[str, Any]:
-    """Build one immutable companion from the final authoritative object.
-
-    Called BEFORE the canonical JSON is committed, so a failed replace leaves a
-    harmless unreferenced companion and readers keep the previous publication.
-    A failed build raises; the caller records the failure and publishes JSON
-    only, which is exactly the pre-read-model behaviour.
-    """
-    token = uuid.uuid4().hex
-    path = _path(Path(root), sid, token)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(".tmp")
-    meta = {
-        "schema": SCHEMA,
-        "projection": PROJECTION,
-        "publication_id": token,
+    values = {
         "version": ti.TRANSCRIPT_INDEX_VERSION,
         "sig": index.sig,
         "scan": index.scan.to_payload(),
         "journal_generation": index.journal_generation,
+    }
+    if index.coverage.get("complete") is not True or not index.journal_generation:
+        raise ValueError("incomplete index projection")
+    token = _token_for(values)
+    path = _path(Path(root), sid, token)
+    if path.is_file():
+        return token  # already published for this exact derivation
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(f".{os.getpid()}.tmp")
+    meta = {
+        "schema": SCHEMA,
+        "projection": PROJECTION,
+        "publication_id": token,
+        **values,
         "checkpoint_count": len(index.checkpoints),
         "run_count": len(index.runs),
         "last_run": len(index.runs) - 1,
-        "coverage_complete": index.coverage.get("complete") is True,
+        "coverage_complete": True,
     }
-    if not meta["coverage_complete"] or not index.journal_generation:
-        raise ValueError("incomplete index projection")
     try:
         with closing(sqlite3.connect(temp)) as db:
-            db.executescript("""
+            db.executescript(
+                """
+                -- 1024-byte pages: this file is thousands of TINY rows and the
+                -- default 4 KiB page left most of every page as slack.
+                PRAGMA page_size=1024;
                 PRAGMA journal_mode=DELETE;
                 CREATE TABLE meta(payload TEXT NOT NULL);
-                CREATE TABLE rows(id TEXT PRIMARY KEY, seq INTEGER NOT NULL) WITHOUT ROWID;
-                CREATE TABLE messages(seq INTEGER PRIMARY KEY, id TEXT,
-                                      role TEXT, injected INTEGER);
+                -- ONE table where the projection used to keep two: the id->ordinal
+                -- map and the role/injected witness answer the same question about
+                -- the same row, and shared every id.
+                CREATE TABLE nodes(id TEXT PRIMARY KEY, seq INTEGER NOT NULL,
+                                   role TEXT, injected INTEGER);
+                CREATE INDEX nodes_seq ON nodes(seq);
                 CREATE TABLE runs(position INTEGER PRIMARY KEY, first_seq INTEGER, last_seq INTEGER,
-                                  payload TEXT NOT NULL);
+                                  payload BLOB NOT NULL);
                 CREATE INDEX runs_first ON runs(first_seq);
                 CREATE TABLE checkpoints(position INTEGER PRIMARY KEY, id TEXT, seq INTEGER,
-                                         payload TEXT NOT NULL);
+                                         payload BLOB NOT NULL);
                 CREATE INDEX checkpoints_id ON checkpoints(id, position);
-            """)
+            """
+            )
             db.execute("INSERT INTO meta VALUES (?)", (json.dumps(meta),))
-            db.executemany("INSERT INTO rows VALUES (?,?)", index.journal_rows.items())
-            # Only rows the opener proof can ever consult: a genuine user or
-            # assistant doc that is not injected (``_journal_order_doc``'s rule).
-            # Tool/marker bodies and injected docs are dead weight here.
+            # Only the rows the opener proof can consult carry a role: a genuine
+            # user or assistant doc, never a tool body or an injected doc.
+            roles = {
+                m.id: (m.role, int(m.injected))
+                for m in index.messages
+                if m.role in ("user", "assistant")
+            }
             db.executemany(
-                "INSERT INTO messages VALUES (?,?,?,?)",
+                "INSERT INTO nodes VALUES (?,?,?,?)",
                 (
-                    (m.seq, m.id, m.role, int(m.injected))
-                    for m in index.messages
-                    if m.role in ("user", "assistant")
+                    (row_id, seq, *(roles.get(row_id) or (None, None)))
+                    for row_id, seq in index.journal_rows.items()
                 ),
             )
             db.executemany(
                 "INSERT INTO runs VALUES (?,?,?,?)",
                 (
-                    (n, r.first_seq, r.last_seq, json.dumps(r.to_payload()))
+                    (n, r.first_seq, r.last_seq, _packed(r.to_payload()))
                     for n, r in enumerate(index.runs)
                 ),
             )
             db.executemany(
                 "INSERT INTO checkpoints VALUES (?,?,?,?)",
                 (
-                    (n, c.id, c.seq, json.dumps(c.to_payload()))
+                    (n, c.id, c.seq, _packed(c.to_payload()))
                     for n, c in enumerate(index.checkpoints)
                 ),
             )
             db.commit()
-            # VACUUM compacts the b-tree after the bulk inserts; without it the
-            # file keeps the free pages a row-at-a-time insert left behind.
             db.execute("VACUUM")
-        with temp.open("rb") as handle:
-            os.fsync(handle.fileno())
-        temp.replace(path)
-        # The JSON commit may survive a crash only if its referenced immutable
-        # filename is already durable; fsync the directory as well as DB bytes.
-        directory_fd = os.open(path.parent, os.O_RDONLY)
+        # fsync THE FILE WE WROTE, through a descriptor opened for writing: a
+        # read-only handle's fsync is EINVAL/EBADF on Windows, and this ran there
+        # inside a bare ``except OSError`` once already.
+        fd = os.open(temp, os.O_RDWR)
         try:
-            os.fsync(directory_fd)
+            os.fsync(fd)
         finally:
-            os.close(directory_fd)
+            os.close(fd)
+        if _head_token(root, sid) != token:
+            return None  # the derivation moved while this was building
+        temp.replace(path)
+        _fsync_directory(path.parent)
     finally:
-        # Only the unique scratch file owned by this writer, never a publication.
         temp.unlink(missing_ok=True)
-    return {"schema": SCHEMA, "publication_id": token}
+    return token
 
 
-def write_naming(
-    root: str | Path, sid: str, marker: dict[str, Any] | None, naming: dict[str, Any]
-) -> bool:
-    """Publish the tiny naming sidecar for an existing companion.
+def _fsync_directory(directory: Path) -> None:
+    """Durability hint for the rename itself; unsupported on Windows."""
+    if os.name != "posix":
+        return
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:  # pragma: no cover - filesystems that refuse directory sync
+        pass
+    finally:
+        os.close(fd)
+
+
+def _head_token(root: str | Path, sid: str) -> str | None:
+    """The token the canonical head currently derives, without opening the DB."""
+    head = ti._read_resume_head(root, sid)
+    if head is None:
+        return None
+    sig, scan, generation, _size = head
+    return _token_for(
+        {
+            "version": ti.TRANSCRIPT_INDEX_VERSION,
+            "sig": sig,
+            "scan": scan.to_payload(),
+            "journal_generation": generation,
+        }
+    )
+
+
+def _packed(payload: dict[str, Any]) -> bytes:
+    """One record payload, zlib-compressed.
+
+    The companion held 69% of the index's bytes before this: records were stored
+    as plain JSON text, and these payloads are highly repetitive
+    (``"settled":true,"complete":true,...``). Compression is applied per record
+    so a bounded read still decodes only the rows it selected.
+    """
+    return zlib.compress(json.dumps(payload, separators=(",", ":")).encode("utf-8"), 6)
+
+
+def _unpacked(blob: Any) -> dict[str, Any]:
+    raw = zlib.decompress(bytes(blob)).decode("utf-8") if isinstance(blob, bytes) else str(blob)
+    loaded = json.loads(raw)
+    if not isinstance(loaded, dict):
+        raise ValueError("invalid packed record")
+    return loaded
+
+
+def write_naming(root: str | Path, sid: str, token: str | None, naming: dict[str, Any]) -> bool:
+    """Publish the tiny naming sidecar for an existing (or imminent) companion.
 
     Naming is the one mutable section: a patch must reach readers without
-    rewriting the companion it belongs to. Atomic replace means a reader sees
-    either the previous or the new complete sidecar, never a torn one.
+    rewriting the companion, and a naming-only write keeps the same token because
+    the token describes the DERIVATION, not the names.
     """
-    if not isinstance(marker, dict) or not isinstance(naming, dict):
-        return False
-    token = marker.get("publication_id")
-    if not isinstance(token, str):
+    if not isinstance(token, str) or not isinstance(naming, dict):
         return False
     path = _path(Path(root), sid, token).with_suffix(".naming.json")
-    temp = path.with_suffix(".naming.tmp")
+    temp = path.with_suffix(f".{os.getpid()}.naming.tmp")
     payload = {
         "schema": SCHEMA,
         "publication_id": token,
@@ -389,30 +482,13 @@ def write_naming(
     return True
 
 
-def reset_for_tests() -> None:
-    """Drop in-process memo/failure/migration state (tests only, never production)."""
-    with _MEMO_LOCK:
-        _MANIFEST_MEMO.clear()
-    _FAILED.clear()
-    for task in list(_MIGRATIONS.values()):
-        task.cancel()
-    _MIGRATIONS.clear()
-
-
-def _naming_identity(pub: Publication) -> tuple[int, int, int] | None:
-    try:
-        return _identity(pub.naming_path.stat())
-    except OSError:
-        return None
-
-
 def _naming(pub: Publication) -> dict[str, Any]:
     """The sidecar as a naming section; a missing/torn one is not usable."""
     raw = json.loads(pub.naming_path.read_text(encoding="utf-8"))
     if (
         not isinstance(raw, dict)
         or raw.get("schema") != SCHEMA
-        or raw.get("publication_id") != pub.header["read_model"]["publication_id"]
+        or raw.get("publication_id") != pub.token_id
         or not isinstance(raw.get("items"), dict)
     ):
         raise ValueError("unusable naming sidecar")
@@ -430,7 +506,7 @@ def _meta(db: sqlite3.Connection, pub: Publication) -> dict[str, Any]:
     if (
         meta["schema"] != SCHEMA
         or meta["projection"] != PROJECTION
-        or meta["publication_id"] != pub.header["read_model"]["publication_id"]
+        or meta["publication_id"] != pub.token_id
         or meta["coverage_complete"] is not True
     ):
         raise ValueError("unsupported projection")
@@ -474,8 +550,8 @@ def _read(
     return Result("stale")
 
 
-def _run(payload: str) -> ti.RunRecord:
-    run = ti.RunRecord.from_payload(json.loads(payload))
+def _run(payload: Any) -> ti.RunRecord:
+    run = ti.RunRecord.from_payload(_unpacked(payload))
     if run is None:
         raise ValueError("invalid run projection")
     return run
@@ -532,13 +608,15 @@ def frame_facts(
         for start in range(0, len(ids), 128):
             chunk = ids[start : start + 128]
             slots = ",".join("?" for _ in chunk)
-            rows.update(db.execute(f"SELECT id,seq FROM rows WHERE id IN ({slots})", chunk))
+            rows.update(db.execute(f"SELECT id,seq FROM nodes WHERE id IN ({slots})", chunk))
             for (payload,) in db.execute(
+                # LAST position wins for a duplicate id, matching the canonical
+                # dict's own construction (``{c.id: c.seq}`` over the list).
                 f"SELECT payload FROM checkpoints c WHERE id IN ({slots}) AND position="
                 "(SELECT MAX(position) FROM checkpoints WHERE id=c.id)",
                 chunk,
             ):
-                checkpoint = ti.Checkpoint.from_payload(json.loads(payload))
+                checkpoint = ti.Checkpoint.from_payload(_unpacked(payload))
                 if checkpoint is None:
                     raise ValueError("invalid checkpoint projection")
                 checkpoints.append(checkpoint)
@@ -597,13 +675,13 @@ def frame_facts(
         for run in list(records.values()):
             if run.opening_user_id:
                 row = db.execute(
-                    "SELECT seq FROM rows WHERE id=?", (run.opening_user_id,)
+                    "SELECT seq FROM nodes WHERE id=?", (run.opening_user_id,)
                 ).fetchone()
                 if row:
                     rows[run.opening_user_id] = row[0]
         for seq in set(rows.values()):
-            row = db.execute("SELECT id,role,injected FROM messages WHERE seq=?", (seq,)).fetchone()
-            if row:
+            row = db.execute("SELECT id,role,injected FROM nodes WHERE seq=?", (seq,)).fetchone()
+            if row and row[1] is not None:
                 messages[seq] = ti.MessageDoc(row[0], 0.0, row[1], "", bool(row[2]), seq)
         selection = FrameSelection(
             checkpoints,
@@ -646,40 +724,46 @@ def frame_facts(
     return _read(root, sid, select)
 
 
-def schedule_migration(root: str | Path, sid: str, index: ti.TranscriptIndex) -> None:
-    """Reuse an already parsed exact HIT after paint; never hydrate it again.
+def schedule_materialize(root: str | Path, sid: str, index: ti.TranscriptIndex) -> None:
+    """Publish a companion for an ALREADY-DERIVED index, after the paint.
 
-    Sync workers return the parsed object to start_refresh's loop, which calls
-    this hook. Direct loop-side refresh/probe callers can schedule here too.
-    A missing loop is not permission to start an unmanaged thread/service.
+    THE COMPANION IS NEVER ON THE REFRESH CRITICAL PATH (round-2 scope): the
+    canonical document is written exactly as base writes it, and this hook runs
+    afterwards with the completed derivation already in hand — so it neither
+    hydrates a second time nor makes an append wait ~1.3 s. Exact HITs reach it
+    the same way, which is what removes the old "migration rewrites the document
+    on every open" loop entirely: nothing here touches the canonical file.
+
+    A failed build is remembered per SOURCE signature (``failed``), so a torn-tail
+    journal does not retry on every open; the next derivation moves the signature
+    and is tried normally.
     """
-    if index.publication_identity is None or index.read_model_token:
+    if index.publication_identity is None and not index.journal_generation:
         return
-    if failed(root, sid, index.publication_identity):
-        # A companion that already failed for this exact document is not retried:
-        # each attempt would rewrite the whole canonical JSON for nothing.
+    source = source_of(index)
+    if failed(root, sid, source):
+        return
+    token = ti._read_resume_head(root, sid)
+    if token is not None and _companion_exists(root, sid, index):
         return
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
+        # A worker thread cannot own a task; the loop-side callers schedule it.
         return
     key = ti._key(root, sid)
-    started = time.monotonic()
     if key in _MIGRATIONS or len(_MIGRATIONS) >= 16:
         return
+    started = time.monotonic()
 
-    def materialize() -> None:
-        # Publication is optional. Never let a missing/unwritable companion turn
-        # an otherwise correct parsed HIT into an unbounded background retry.
+    def build() -> None:
         if time.monotonic() - started >= ti._PAINT_HOLD_CEILING_S:
             return
-        # A bounded metadata probe avoids republishing already-supported hits.
-        # No second full-index decode, and writer-side compare-and-publish rejects
-        # both a replaced journal and a naming publication that landed meanwhile.
-        supported = _read(root, sid, lambda db, pub, meta: None)
-        if supported.state == "ready":
-            return
-        ti.write_index(root, sid, index, expected_publication=index.publication_identity)
+        try:
+            publish(root, sid, index)
+        except (OSError, ValueError, sqlite3.Error):
+            remember_failure(root, sid, source)
+            logger.debug("read-model publication unavailable for %s", sid, exc_info=True)
 
     async def run() -> None:
         try:
@@ -689,16 +773,14 @@ def schedule_migration(root: str | Path, sid: str, index: ti.TranscriptIndex) ->
                     await asyncio.wait_for(held[1].wait(), ti._PAINT_HOLD_CEILING_S)
                 except asyncio.TimeoutError:
                     pass
-            # Cancellation cannot abandon a worker that still owns an index/file
-            # handle: drain its bounded publication before completing this task.
-            worker = asyncio.create_task(asyncio.to_thread(materialize))
+            worker = asyncio.create_task(asyncio.to_thread(build))
             try:
                 await asyncio.shield(worker)
             except asyncio.CancelledError:
                 await worker
                 raise
-        except Exception:
-            logger.debug("read-model migration unavailable for %s", sid, exc_info=True)
+        except Exception:  # noqa: BLE001 - an optimization never fails a read
+            logger.debug("read-model materialisation unavailable for %s", sid, exc_info=True)
         finally:
             _MIGRATIONS.pop(key, None)
 
@@ -706,14 +788,32 @@ def schedule_migration(root: str | Path, sid: str, index: ti.TranscriptIndex) ->
     _MIGRATIONS[key] = task
 
     def finished(done: asyncio.Task[None]) -> None:
-        # A task cancelled before its first instruction never enters finally.
         if _MIGRATIONS.get(key) is done:
             _MIGRATIONS.pop(key, None)
 
     task.add_done_callback(finished)
 
 
-def collect(root: str | Path, sid: str, marker: dict[str, Any] | None) -> None:
+def _companion_exists(root: str | Path, sid: str, index: ti.TranscriptIndex) -> bool:
+    head = ti._read_resume_head(root, sid)
+    if head is None:
+        return False
+    sig, scan, generation, _size = head
+    token = _token_for(
+        {
+            "version": ti.TRANSCRIPT_INDEX_VERSION,
+            "sig": sig,
+            "scan": scan.to_payload(),
+            "journal_generation": generation,
+        }
+    )
+    try:
+        return _path(Path(root), sid, token).is_file()
+    except ValueError:
+        return False
+
+
+def collect(root: str | Path, sid: str, token: str | None) -> None:
     """Bounded retention for this publisher: the referenced token plus a window.
 
     The companion files are a cache this writer made, never session evidence, and
@@ -727,7 +827,7 @@ def collect(root: str | Path, sid: str, marker: dict[str, Any] | None) -> None:
     swept by :func:`_sweep_orphans` from the same call.
     """
     directory = _directory(Path(root))
-    current = marker.get("publication_id") if isinstance(marker, dict) else None
+    current = token if isinstance(token, str) else None
     session = directory / sid
     try:
         files = sorted(
@@ -843,7 +943,7 @@ def checkpoint_manifest(root: str | Path, sid: str) -> Result:
         for expected, (position, payload) in enumerate(
             db.execute("SELECT position,payload FROM checkpoints ORDER BY position")
         ):
-            checkpoint = ti.Checkpoint.from_payload(json.loads(payload))
+            checkpoint = ti.Checkpoint.from_payload(_unpacked(payload))
             if position != expected or checkpoint is None:
                 raise ValueError("incomplete checkpoint projection")
             checkpoints.append(checkpoint)
@@ -866,6 +966,23 @@ def checkpoint_manifest(root: str | Path, sid: str) -> Result:
             naming,
         )
     return Result("ready", _manifest(sid, resolved, checkpoints, naming))
+
+
+def reset_for_tests() -> None:
+    """Drop in-process memo/failure/migration state (tests only, never production)."""
+    with _MEMO_LOCK:
+        _MANIFEST_MEMO.clear()
+    _FAILED.clear()
+    for task in list(_MIGRATIONS.values()):
+        task.cancel()
+    _MIGRATIONS.clear()
+
+
+def _naming_identity(pub: Publication) -> tuple[int, int, int] | None:
+    try:
+        return _identity(pub.naming_path.stat())
+    except OSError:
+        return None
 
 
 def _manifest(

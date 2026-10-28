@@ -13,7 +13,6 @@ touched.
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from pathlib import Path
 from typing import Any
@@ -490,10 +489,13 @@ async def test_frame_index_fallback_preserves_ready_facts_without_projection(
         previous = ti.refresh_index(harness.root, harness.session_id)
         assert previous is not None
         cache = ti.index_path(harness.root, harness.session_id)
-        # Exercise _frame_index itself, not the earlier summary fast path.
-        raw = json.loads(cache.read_text())
-        raw.pop("read_model")
-        cache.write_text(json.dumps(raw, separators=(",", ":")))
+        # Exercise _frame_index itself, not the earlier summary fast path, with
+        # NO companion available for this publication.
+        _publish(harness.root, harness.session_id, previous)
+        for companion in (cache.parent / "read-models" / harness.session_id).glob("*.sqlite"):
+            companion.unlink()
+        for sidecar in (cache.parent / "read-models" / harness.session_id).glob("*.json"):
+            sidecar.unlink()
         if cache_state != "small_disk":
             with cache.open("a", encoding="utf-8") as handle:
                 handle.write(" " * (6 << 20))
@@ -546,6 +548,7 @@ async def test_held_disk_hit_preserves_first_frame_grouping_without_full_hydrati
         harness.seed(turns=4)
         previous = ti.refresh_index(harness.root, harness.session_id)
         assert previous is not None
+        _publish(harness.root, harness.session_id, previous)
         cache = ti.index_path(harness.root, harness.session_id)
         with cache.open("a", encoding="utf-8") as handle:
             handle.write(" " * (6 << 20))
@@ -605,6 +608,7 @@ async def test_projection_preserves_grouped_frames_and_freshness_controls(
             await Transcript(directory).compact_file(min_reclaim_bytes=0)
         index = ti.refresh_index(harness.root, harness.session_id)
         assert index is not None
+        _publish(harness.root, harness.session_id, index)
         if shape == "duplicate":
             from dataclasses import replace
 
@@ -612,6 +616,9 @@ async def test_projection_preserves_grouped_frames_and_freshness_controls(
                 harness.root,
                 harness.session_id,
                 replace(index, checkpoints=index.checkpoints + [index.checkpoints[0]]),
+                # A synthetic derivation cannot be published under the same
+                # token; the duplicate-id rule is exercised on the canonical
+                # document, which the projection must keep agreeing with.
             )
         assert harness.client is not None
         url = f"/v1/desktop/sessions/{harness.session_id}/history"
@@ -719,6 +726,19 @@ async def test_a_snapshot_carries_the_same_page_as_history(tmp_path: Path) -> No
         assert snapshot["runs"] == page["runs"]
         assert snapshot["runs_state"] == page["runs_state"]
         assert snapshot["head_cut"] == page["head_cut"]
+
+
+def _publish(root: Path, sid: str, index) -> None:
+    """Write the companion the way the background pass does, synchronously.
+
+    Production publishes it on the event loop after the refresh returns; these
+    tests call the derivation directly, so they publish explicitly.
+    """
+    from local_operator.session import index_read_model as rm
+
+    token = rm.publish(root, sid, index)
+    assert token is not None
+    rm.write_naming(root, sid, token, index.naming)
 
 
 def _long_turn(turn: int, calls: int, *, spend_rows: bool = True) -> list[Any]:
@@ -1160,6 +1180,7 @@ async def test_projection_journal_ordinals_match_the_resident_join(tmp_path: Pat
         harness.seed(turns=6)
         index = ti.refresh_index(harness.root, harness.session_id)
         assert index is not None
+        _publish(harness.root, harness.session_id, index)
         key = ti._key(harness.root, harness.session_id)
         ti._remember(key, index, ti.index_path(harness.root, harness.session_id).stat().st_mtime)
         assert harness.client is not None

@@ -2215,12 +2215,26 @@ def test_the_payable_rule_is_the_manifest_rule() -> None:
 
 
 def _padded_disk_hit(root: Path) -> ti.TranscriptIndex:
-    """A small witnessed journal with an expensive, still-valid cache document."""
+    """A small witnessed journal with an expensive, still-valid cache document.
+
+    The companion is published explicitly: production does it from the caller on
+    the event loop after the refresh, which a plain helper call does not run.
+    """
     write_rows(root, [user("u1", 1.0), assistant("a1", 1.1)])
     previous = refreshed(root)
+    _materialize(root, previous)
     with ti.index_path(root, SID).open("a", encoding="utf-8") as handle:
         handle.write(" " * (6 << 20))
     return previous
+
+
+def _materialize(root: Path, index: ti.TranscriptIndex) -> None:
+    """Publish the companion for an already-derived index, synchronously."""
+    from local_operator.session import index_read_model as rm
+
+    token = rm.publish(root, SID, index)
+    assert token is not None
+    rm.write_naming(root, SID, token, index.naming)
 
 
 @pytest.mark.asyncio

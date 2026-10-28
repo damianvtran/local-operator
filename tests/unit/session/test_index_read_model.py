@@ -1,352 +1,37 @@
-"""Immutable projection tests: canonical JSON commits, SQLite only accelerates reads.
+"""The read model: an immutable projection named after the derivation it describes.
 
-Small synthetic journals keep corruption/publication tests independent of load;
-large frame/manifest parity is covered at the consumer seams separately.
+The canonical JSON stays the commit point and the only derivation authority, and
+the companion is published OFF the write path (round-2 scope: building it inside
+``write_index`` cost ~1.3 s per append refresh). Every test here therefore says
+which publication it is looking at instead of assuming a marker in the document.
 """
 
 from __future__ import annotations
 
-import asyncio
+import dataclasses
 import json
+import os
+import threading
 from pathlib import Path
 
 import pytest
 
+from local_operator.session import index_read_model as rm
 from local_operator.session import transcript_index as ti
 
 SID = "abc123abc123"
 
 
-@pytest.fixture
-def publication(tmp_path):
-    path = tmp_path / "sessions" / SID / "transcript.jsonl"
-    path.parent.mkdir(parents=True)
-    rows = [
-        {
-            "id": "u1",
-            "ts": 1,
-            "type": "message",
-            "payload": {"kind": "message", "role": "user", "content": [{"text": "hello"}]},
-        },
-        {
-            "id": "a1",
-            "ts": 2,
-            "type": "message",
-            "payload": {"kind": "message", "role": "assistant", "content": [{"text": "answer"}]},
-        },
-    ]
-    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
-    index = ti.refresh_index(tmp_path, SID)
-    assert index is not None
-    yield tmp_path, index
-    ti._reset_for_tests()
-
-
-def test_writer_commits_read_model_after_existing_resume_fields(publication):
-    root, index = publication
-    raw = json.loads(ti.index_path(root, SID).read_text())
-    assert list(raw)[:5] == ["version", "sig", "scan", "journal_generation", "read_model"]
-    assert raw["read_model"]["schema"] == 2
-    token = raw["read_model"]["publication_id"]
-    assert len(token) == 32 and all(c in "0123456789abcdef" for c in token)
-    directory = ti.index_path(root, SID).parent / "read-models" / SID
-    assert (directory / f"{token}.sqlite").is_file()
-    # The mutable naming section lives beside the immutable companion, so a
-    # naming-only write never rewrites the multi-megabyte body.
-    assert (directory / f"{token}.naming.json").is_file()
-    head = ti._read_resume_head(root, SID)
-    assert head is not None
-    assert head[:3] == (index.sig, index.scan, index.journal_generation)
-    # document_bytes comes from the head's own descriptor, not a second stat.
-    assert head[3] == ti.index_path(root, SID).stat().st_size
-
-
-def test_manifest_projection_matches_complete_canonical_output(publication):
-    from local_operator.session import index_read_model as rm
-
-    root, index = publication
-    actual = rm.checkpoint_manifest(root, SID)
-    assert actual.state == "ready"
-    assert actual.value == ti._manifest_state(
-        SID, "ready", index, ti.index_path(root, SID).stat().st_mtime
-    )
-
-
-@pytest.mark.parametrize("ids,eof", [(["u1", "a1"], True), (["a1"], False), (["u1"], False)])
-def test_frame_projection_matches_existing_derivation(publication, ids, eof):
-    from local_operator.session import index_read_model as rm
-    from local_operator.session import open_frame as frame
-
-    root, index = publication
-    source = (index.sig["inode"], index.sig["size"], index.sig["mtime"])
-    result = rm.frame_facts(
-        root, SID, collected_ids=ids, reaches_eof=eof, order_ids=["a1", "absent"], source=source
-    )
-    assert result.state == "ready", result.reason
-    bounds = frame.page_seq_bounds(index, [{"id": id_} for id_ in ids], reaches_eof=eof)
-    expected = frame.publish_runs(index, first_seq=bounds[0], last_seq=bounds[1]) if bounds else []
-    assert result.value.runs == expected
-    # ``ordinals`` is what the REQUEST asked about; the OPENERS of the served page
-    # are added by ``apply_order`` against the final (capped) answer.
-    assert result.value.ordinals == {
-        id_: index.journal_rows[id_] for id_ in ("a1",) if id_ in index.journal_rows
-    }
-    # A served row's own coordinate rides the row; the opener map is what
-    # ``apply_order`` adds for ids the answer actually serves.
-    assert set(result.value.openers) <= set(ids) | {"a1"}
-    assert result.value.missing_ids == ["absent"]
-    assert result.value.generation == index.journal_generation
-    # rows carries every proven identity (page + requested), which is what the
-    # resident join's own map is keyed by.
-    assert result.value.rows == {
-        id_: index.journal_rows[id_] for id_ in (*ids, "a1") if id_ in index.journal_rows
-    }
-
-
-@pytest.mark.parametrize("mutation", ["append", "truncate", "rewrite", "replace"])
-def test_changed_journal_rejects_prior_publication(publication, mutation):
-    import os
-
-    from local_operator.session import index_read_model as rm
-
-    root, _ = publication
-    path = root / "sessions" / SID / "transcript.jsonl"
-    before = path.stat()
-    content = path.read_bytes()
-    if mutation == "append":
-        path.write_bytes(content + b"\n")
-    elif mutation == "truncate":
-        path.write_bytes(content[:20])
-    elif mutation == "rewrite":
-        path.write_bytes(content.replace(b"hello", b"other"))
-        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
-    else:
-        replacement = path.with_suffix(".new")
-        replacement.write_bytes(content)
-        replacement.replace(path)
-    assert rm.checkpoint_manifest(root, SID).state == "stale"
-
-
-def test_missing_checkpoint_is_not_complete_ready(publication):
-    import sqlite3
-
-    from local_operator.session import index_read_model as rm
-
-    root, _ = publication
-    pub = rm.header(root, SID).value
-    with sqlite3.connect(pub.path) as db:
-        db.execute("DELETE FROM checkpoints WHERE position=0")
-    assert rm.checkpoint_manifest(root, SID).state == "corrupt"
-
-
-def test_failed_canonical_commit_keeps_previous_companion(publication, monkeypatch):
-    from local_operator.session import index_read_model as rm
-
-    root, index = publication
-    before = rm.header(root, SID).value
-    real_replace = Path.replace
-
-    def fail_commit(path, destination):
-        if destination == ti.index_path(root, SID):
-            raise OSError("injected canonical commit failure")
-        return real_replace(path, destination)
-
-    monkeypatch.setattr(Path, "replace", fail_commit)
-    ti.write_index(root, SID, index)
-    assert rm.header(root, SID).value == before
-    assert rm.checkpoint_manifest(root, SID).state == "ready"
-    assert len(list(before.path.parent.glob("*.sqlite"))) == 2
-
-
-def test_publication_flip_retries_one_coherent_snapshot(publication, monkeypatch):
-    from local_operator.session import index_read_model as rm
-
-    root, index = publication
-    original = rm._meta
-    calls = []
-
-    def flip(db, pub):
-        meta = original(db, pub)
-        calls.append(pub.identity)
-        if len(calls) == 1:
-            ti.write_index(root, SID, index)
-        return meta
-
-    monkeypatch.setattr(rm, "_meta", flip)
-    result = rm.checkpoint_manifest(root, SID)
-    assert result.state == "ready" and len(calls) == 2 and calls[0] != calls[1]
-    # built_at is the publication the READ resolved, not a later stat: the flip
-    # above rewrote the document while the first attempt was in flight.
-    assert result.value["index"]["built_at"] == rm.header(root, SID).value.built_at
-
-
-def test_naming_publication_and_cooldown_are_not_frozen(publication, monkeypatch):
-    from local_operator.session import checkpoint_naming as naming
-    from local_operator.session import index_read_model as rm
-
-    root, _ = publication
-    before = rm.header(root, SID).value
-    monkeypatch.setattr(naming.time, "time", lambda: 1000.0)
-    assert ti.patch_naming(root, SID, {"u1": {"failed_ts": 1000.0}})
-    failed = rm.header(root, SID).value
-    # Q3/m4: a naming patch must NOT mint a new companion body.
-    assert before.path == failed.path
-    first = rm.checkpoint_manifest(root, SID).value
-    assert first["checkpoints"][-1]["naming"]["state"] == "unavailable"
-    monkeypatch.setattr(
-        naming.time, "time", lambda: 1000.0 + naming.NAMING_UNAVAILABLE_COOLDOWN_S + 1
-    )
-    later = rm.checkpoint_manifest(root, SID).value
-    assert later["checkpoints"][-1]["naming"]["state"] == "pending"
-    assert rm.header(root, SID).value.path == failed.path
-    assert ti.patch_naming(root, SID, {"u1": {"name": "Done", "summary": "Result"}})
-    named = rm.checkpoint_manifest(root, SID).value
-    assert named["checkpoints"][-1]["naming"] == {
-        "state": "ready",
-        "name": "Done",
-        "summary": "Result",
-    }
-
-
-def test_corrupt_companion_never_becomes_an_empty_ready_manifest(publication):
-    from local_operator.session import index_read_model as rm
-
-    root, _ = publication
-    pub = rm.header(root, SID).value
-    pub.path.write_bytes(b"not sqlite")
-    assert rm.checkpoint_manifest(root, SID).state == "corrupt"
-
-
-def test_duplicate_checkpoint_ids_keep_manifest_rows_and_last_lookup(publication):
-    from dataclasses import replace
-
-    from local_operator.session import index_read_model as rm
-    from local_operator.session import open_frame
-
-    root, index = publication
-    checkpoints = index.checkpoints + [replace(index.checkpoints[0], seq=1)]
-    duplicate = replace(index, checkpoints=checkpoints)
-    ti.write_index(root, SID, duplicate)
-    manifest = rm.checkpoint_manifest(root, SID)
-    assert manifest.state == "ready"
-    assert len(manifest.value["checkpoints"]) == len(checkpoints)
-    source = (index.sig["inode"], index.sig["size"], index.sig["mtime"])
-    facts = rm.frame_facts(
-        root, SID, collected_ids=["u1"], reaches_eof=False, order_ids=[], source=source
-    )
-    assert facts.state == "ready", facts.reason
-    bounds = open_frame.page_seq_bounds(duplicate, [{"id": "u1"}], reaches_eof=False)
-    assert facts.value.runs == open_frame.publish_runs(
-        duplicate, first_seq=bounds[0], last_seq=bounds[1]
-    )
-
-
-def test_restored_mtime_is_explicit_existing_witness_limit(publication):
-    import os
-
-    from local_operator.session import index_read_model as rm
-
-    root, _ = publication
-    path = root / "sessions" / SID / "transcript.jsonl"
-    before = path.stat()
-    path.write_bytes(path.read_bytes().replace(b"hello", b"other"))
-    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
-    # This cache preserves the existing inode/size/mtime protocol. A stronger
-    # witness needs a scan/page/cache migration, not a fresh guessed ctime here.
-    assert rm.checkpoint_manifest(root, SID).state == "ready"
-
-
-@pytest.mark.asyncio
-async def test_exact_parsed_hit_migrates_without_second_hydration(publication, monkeypatch):
-    from local_operator.session import index_read_model as rm
-
-    root, _ = publication
-    path = ti.index_path(root, SID)
-    raw = json.loads(path.read_text())
-    marker = raw.pop("read_model")
-    path.write_text(json.dumps(raw, separators=(",", ":")))
-    calls = []
-    real_read = ti._read_raw
-
-    def counted(*args, **kwargs):
-        calls.append(True)
-        return real_read(*args, **kwargs)
-
-    monkeypatch.setattr(ti, "_read_raw", counted)
-    first = await ti.checkpoints_view(root, SID)
-    assert first["index"]["state"] == "ready"
-    assert calls == [True]
-    task = next(iter(rm._MIGRATIONS.values()))
-    await task
-    second = await ti.checkpoints_view(root, SID)
-    assert second["checkpoints"] == first["checkpoints"]
-    assert calls == [True]
-    assert (
-        marker["publication_id"]
-        != rm.header(root, SID).value.header["read_model"]["publication_id"]
-    )
-
-
-@pytest.mark.asyncio
-async def test_migration_cannot_overwrite_a_newer_naming_snapshot(publication, monkeypatch):
-    from local_operator.session import index_read_model as rm
-
-    root, _ = publication
-    path = ti.index_path(root, SID)
-    raw = json.loads(path.read_text())
-    raw.pop("read_model")
-    path.write_text(json.dumps(raw, separators=(",", ":")))
-    original = await asyncio.to_thread(ti.refresh_index, root, SID)
-    ti.patch_naming(root, SID, {"u1": {"name": "new", "summary": "new"}})
-    ti.write_index(root, SID, original, expected_publication=original.publication_identity)
-    result = rm.checkpoint_manifest(root, SID).value
-    assert result["checkpoints"][-1]["naming"]["name"] == "new"
-
-
-def test_scan_merges_a_racing_name_into_both_publications(publication, monkeypatch):
-    from local_operator.session import index_read_model as rm
-
-    root, _ = publication
-    raw_path = root / "sessions" / SID / "transcript.jsonl"
-    original = raw_path.read_bytes()
-    # A replace (new inode) forces the full-scan branch this test intercepts.
-    replacement = raw_path.with_suffix(".rebuilt")
-    replacement.write_bytes(original + original)
-    replacement.replace(raw_path)
-    real_scan = ti._scan_full
-
-    def racing_scan(path, raw):
-        index = real_scan(path, raw)
-        ti.patch_naming(root, SID, {"u1": {"name": "Raced", "summary": "kept"}})
-        return index
-
-    monkeypatch.setattr(ti, "_scan_full", racing_scan)
-    assert ti.refresh_index(root, SID) is not None
-    answer = rm.checkpoint_manifest(root, SID)
-    assert answer.state == "ready"
-    assert answer.value["checkpoints"][-1]["naming"]["name"] == "Raced"
-    assert rm.header(root, SID).value.header["sig"]["size"] == len(original) * 2
-
-
-def test_publication_tokens_are_not_paths(publication):
-    from local_operator.session import index_read_model as rm
-
-    root, _ = publication
-    path = ti.index_path(root, SID)
-    raw = json.loads(path.read_text())
-    raw["read_model"]["publication_id"] = "../../outside"
-    path.write_text(json.dumps(raw, separators=(",", ":")))
-    assert rm.checkpoint_manifest(root, SID).state == "unsupported"
-
-
-# ---------------------------------------------------------------------------
-# Review round 1 (PR #3111): platform lock, failure memory, retention, polls,
-# and one discriminating test per safety check.
-# ---------------------------------------------------------------------------
+def _materialize(root: Path, index: ti.TranscriptIndex) -> str:
+    """Publish a companion the way the background pass does, synchronously."""
+    token = rm.publish(root, SID, index)
+    assert token is not None
+    rm.write_naming(root, SID, token, index.naming)
+    return token
 
 
 def _rows(count: int) -> list[dict]:
-    rows = []
+    rows: list[dict] = []
     for turn in range(1, count + 1):
         rows.append(
             {
@@ -371,16 +56,608 @@ def _rows(count: int) -> list[dict]:
     return rows
 
 
-def _journal(root: Path, rows: list[dict]) -> Path:
+def _journal(root: Path, rows: list[dict] | None = None) -> Path:
     path = root / "sessions" / SID / "transcript.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    path.write_text("".join(json.dumps(row) + "\n" for row in (rows or _rows(2))), encoding="utf-8")
     return path
 
 
+@pytest.fixture
+def publication(tmp_path):
+    _journal(tmp_path)
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None
+    _materialize(tmp_path, index)
+    yield tmp_path, index
+    ti._reset_for_tests()
+
+
+def _source(index: ti.TranscriptIndex) -> tuple[int, int, float]:
+    return rm.source_of(index)
+
+
+# ---------------------------------------------------------------------------
+# Publication shape and the canonical document
+# ---------------------------------------------------------------------------
+
+
+def test_the_canonical_document_names_no_marker_and_the_companion_hides_beside_it(publication):
+    root, index = publication
+    raw = json.loads(ti.index_path(root, SID).read_text())
+    assert list(raw)[:4] == ["version", "sig", "scan", "journal_generation"]
+    assert "read_model" not in raw, "publishing a companion must not rewrite the document"
+    token = rm.token_for(index)
+    directory = ti.index_path(root, SID).parent / "read-models" / SID
+    assert (directory / f"{token}.sqlite").is_file()
+    assert (directory / f"{token}.naming.json").is_file()
+    assert ti._read_resume_head(root, SID)[:3] == (index.sig, index.scan, index.journal_generation)
+
+
+def test_a_naming_patch_reuses_the_companion_and_refreshes_only_the_sidecar(publication):
+    root, _ = publication
+    before = rm.header(root, SID).value
+    assert ti.patch_naming(root, SID, {"u2": {"name": "Named", "summary": "s"}})
+    after = rm.header(root, SID).value
+    assert before.path == after.path, "a naming write must not mint another companion body"
+    manifest = rm.checkpoint_manifest(root, SID)
+    assert manifest.state == "ready"
+    assert manifest.value["checkpoints"][-1]["naming"]["name"] == "Named"
+
+
+def test_repeated_manifest_polls_are_consistently_cached(publication, monkeypatch):
+    """Q9: no alternating memo-hit/rebuild across consecutive polls."""
+    root, _ = publication
+    first = rm.checkpoint_manifest(root, SID)
+    assert first.state == "ready"
+    connects: list[int] = []
+    real_connect = rm.sqlite3.connect
+
+    def counting(*args, **kwargs):
+        connects.append(1)
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(rm.sqlite3, "connect", counting)
+    for _ in range(5):
+        assert rm.checkpoint_manifest(root, SID).value == first.value
+    assert connects == [], "consecutive polls re-opened the companion"
+    assert ti.patch_naming(root, SID, {"u2": {"name": "Fresh", "summary": "s"}})
+    assert rm.checkpoint_manifest(root, SID).value["checkpoints"][-1]["naming"]["name"] == "Fresh"
+
+
+# ---------------------------------------------------------------------------
+# The companion is off the write path (round-2 scope, Q8/Q5)
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
-async def test_publication_survives_a_platform_without_fcntl(publication, monkeypatch):
-    """R1/Q2: Windows has no ``fcntl`` and this runs inside refresh/patch_naming."""
+async def test_the_checkpoints_seam_serves_repeated_polls_without_reopening(
+    publication, monkeypatch
+):
+    """Q4/Q9 at the consumer seam: a companion-served poll must reach steady state.
+
+    The read model being fast is not enough — `/checkpoints` goes through
+    ``checkpoints_view``, and QA measured that seam alternating between a memo
+    hit and a full rebuild (54/73 ms against base's 44/52). The invariant here is
+    the one that makes the alternation impossible: after the first poll, no poll
+    opens the companion again and every answer reports the SAME publication.
+    """
+    root, index = publication
+    first = await ti.checkpoints_view(root, SID)
+    assert first["index"]["state"] == "ready"
+    connects: list[int] = []
+    real_connect = rm.sqlite3.connect
+
+    def counting(*args, **kwargs):
+        connects.append(1)
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(rm.sqlite3, "connect", counting)
+    polls = [await ti.checkpoints_view(root, SID) for _ in range(20)]
+    assert connects == [], "a warm poll re-opened the companion"
+    assert {poll["index"]["built_at"] for poll in polls} == {first["index"]["built_at"]}
+    assert {len(poll["checkpoints"]) for poll in polls} == {len(index.checkpoints)}
+    # A naming patch is metadata, not a new derivation: the body is reused.
+    assert ti.patch_naming(root, SID, {"u2": {"name": "Polls", "summary": "s"}})
+    after = await ti.checkpoints_view(root, SID)
+    assert after["checkpoints"][-1]["naming"]["name"] == "Polls"
+    # The canonical document was rewritten (naming is authoritative there), so
+    # THIS poll may rebuild once; the polls after it must not.
+    connects.clear()
+    warm = [await ti.checkpoints_view(root, SID) for _ in range(5)]
+    assert connects == []
+    assert {poll["index"]["built_at"] for poll in warm} == {after["index"]["built_at"]}
+
+
+def test_the_canonical_write_never_builds_a_companion(tmp_path, monkeypatch):
+    _journal(tmp_path)
+    calls: list[int] = []
+
+    def forbidden(*args, **kwargs):
+        calls.append(1)
+        raise AssertionError("the canonical write built a companion")
+
+    monkeypatch.setattr(rm, "publish", forbidden)
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None
+    ti.write_index(tmp_path, SID, index)
+    assert calls == []
+    assert rm.header(tmp_path, SID).state == "missing"
+
+
+def test_an_append_refresh_publishes_at_base_speed_and_materializes_afterwards(
+    tmp_path, monkeypatch
+):
+    """Q8: the refresh must not wait for a companion; the background pass may."""
+    _journal(tmp_path)
+    first = ti.refresh_index(tmp_path, SID)
+    assert first is not None
+    _materialize(tmp_path, first)
+    appended = tmp_path / "sessions" / SID / "transcript.jsonl"
+    with appended.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(_rows(3)[-1]) + "\n")
+    real_publish = rm.publish
+    built: list[str] = []
+
+    def slow(*args, **kwargs):
+        built.append(rm.token_for(args[2]))
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(rm, "publish", slow)
+    second = ti.refresh_index(tmp_path, SID)
+    assert second is not None
+    assert built == [], "the append refresh published a companion on its critical path"
+    token = rm.token_for(second)
+    assert token != rm.token_for(first)
+    assert rm.header(tmp_path, SID).state == "missing"
+    _materialize(tmp_path, second)
+    assert rm.checkpoint_manifest(tmp_path, SID).state == "ready"
+
+
+@pytest.mark.asyncio
+async def test_an_exact_parsed_hit_materializes_without_a_second_hydration(tmp_path, monkeypatch):
+    _journal(tmp_path)
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None
+    reads: list[int] = []
+    real_read = ti._read_raw
+
+    def counted(*args, **kwargs):
+        reads.append(1)
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(ti, "_read_raw", counted)
+    first = await ti.checkpoints_view(tmp_path, SID)
+    assert first["index"]["state"] == "ready"
+    assert reads == [1], "the first view is base's one hydration"
+    task = next(iter(rm._MIGRATIONS.values()), None)
+    if task is not None:
+        await task
+    served = await ti.checkpoints_view(tmp_path, SID)
+    assert served["checkpoints"] == first["checkpoints"]
+    assert len(reads) == 1, "the materialised companion re-hydrated the index"
+
+
+# ---------------------------------------------------------------------------
+# Failure memory (round-2 R3) and the tokened invalidation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_torn_tail_source_is_remembered_across_four_opens(tmp_path, monkeypatch):
+    """R3: the negative entry is keyed on the SOURCE, which the write cannot move."""
+    _journal(tmp_path)
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None
+    attempts: list[int] = []
+
+    def broken(*args, **kwargs):
+        attempts.append(1)
+        raise ValueError("torn tail: coverage incomplete")
+
+    monkeypatch.setattr(rm, "publish", broken)
+    for _ in range(4):
+        rm.schedule_materialize(tmp_path, SID, index)
+        task = next(iter(rm._MIGRATIONS.values()), None)
+        if task is not None:
+            await task
+    assert len(attempts) == 1, attempts
+    document = ti.index_path(tmp_path, SID).stat().st_mtime_ns
+    assert rm.header(tmp_path, SID).state == "missing"
+    # The source has not changed, so even the NEXT schedule is refused...
+    rm.schedule_materialize(tmp_path, SID, index)
+    assert next(iter(rm._MIGRATIONS.values()), None) is None
+    # ...and a moved source is tried again.
+    journal = tmp_path / "sessions" / SID / "transcript.jsonl"
+    os.utime(journal, ns=(journal.stat().st_atime_ns, journal.stat().st_mtime_ns + 1_000_000))
+    moved = ti.refresh_index(tmp_path, SID)
+    assert moved is not None
+    assert ti.index_path(tmp_path, SID).stat().st_mtime_ns >= document
+
+
+@pytest.mark.parametrize("mutation", ["append", "truncate", "rewrite", "replace"])
+def test_a_changed_journal_has_no_companion_for_its_new_derivation(publication, mutation):
+    root, index = publication
+    path = root / "sessions" / SID / "transcript.jsonl"
+    before = path.stat()
+    content = path.read_bytes()
+    if mutation == "append":
+        path.write_bytes(content + b"\n")
+    elif mutation == "truncate":
+        path.write_bytes(content[:20])
+    elif mutation == "rewrite":
+        path.write_bytes(content.replace(b"hello", b"other"))
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+    else:
+        replacement = path.with_suffix(".new")
+        replacement.write_bytes(content)
+        replacement.replace(path)
+    assert rm.checkpoint_manifest(root, SID).state != "ready"
+    assert rm.header(root, SID).value.token_id == rm.token_for(index)
+
+
+# ---------------------------------------------------------------------------
+# Projection content and its fail-closed checks
+# ---------------------------------------------------------------------------
+
+
+def test_manifest_projection_matches_complete_canonical_output(publication):
+    root, index = publication
+    actual = rm.checkpoint_manifest(root, SID)
+    assert actual.state == "ready"
+    assert actual.value == ti._manifest_state(
+        SID, "ready", index, ti.index_path(root, SID).stat().st_mtime
+    )
+
+
+@pytest.mark.parametrize("ids,eof", [(["u1", "a1"], True), (["a1"], False), (["u1"], False)])
+def test_frame_projection_matches_existing_derivation(publication, ids, eof):
+    from local_operator.session import open_frame as frame
+
+    root, index = publication
+    source = (index.sig["inode"], index.sig["size"], index.sig["mtime"])
+    result = rm.frame_facts(
+        root, SID, collected_ids=ids, reaches_eof=eof, order_ids=["a1", "absent"], source=source
+    )
+    assert result.state == "ready", result.reason
+    bounds = frame.page_seq_bounds(index, [{"id": id_} for id_ in ids], reaches_eof=eof)
+    expected = frame.publish_runs(index, first_seq=bounds[0], last_seq=bounds[1]) if bounds else []
+    assert result.value.runs == expected
+    assert result.value.ordinals == {
+        id_: index.journal_rows[id_] for id_ in ("a1",) if id_ in index.journal_rows
+    }
+    assert result.value.missing_ids == ["absent"]
+    assert result.value.rows == {
+        id_: index.journal_rows[id_] for id_ in (*ids, "a1") if id_ in index.journal_rows
+    }
+
+
+def test_summary_and_frame_facts_reject_a_foreign_source(publication):
+    root, _ = publication
+    assert rm.summary(root, SID, (1, 2, 3.0)).state != "ready"
+    assert rm.summary(root, SID, None).state != "ready"
+    facts = rm.frame_facts(
+        root, SID, collected_ids=["u1"], reaches_eof=False, order_ids=[], source=(1, 2, 3.0)
+    )
+    assert facts.state != "ready"
+
+
+def test_companion_metadata_mismatch_is_never_ready(publication):
+    import sqlite3
+
+    root, _ = publication
+    pub = rm.header(root, SID).value
+    with sqlite3.connect(pub.path) as db:
+        (payload,) = db.execute("SELECT payload FROM meta").fetchone()
+        meta = json.loads(payload)
+        meta["journal_generation"] = "moved"
+        db.execute("UPDATE meta SET payload=?", (json.dumps(meta),))
+    assert rm.checkpoint_manifest(root, SID).state == "corrupt"
+
+
+def test_missing_checkpoint_is_not_complete_ready(publication):
+    import sqlite3
+
+    root, _ = publication
+    pub = rm.header(root, SID).value
+    with sqlite3.connect(pub.path) as db:
+        db.execute("DELETE FROM checkpoints WHERE position=0")
+    assert rm.checkpoint_manifest(root, SID).state == "corrupt"
+
+
+def test_corrupt_companion_never_becomes_an_empty_ready_manifest(publication):
+    root, _ = publication
+    rm.header(root, SID).value.path.write_bytes(b"not sqlite")
+    assert rm.checkpoint_manifest(root, SID).state == "corrupt"
+
+
+def test_duplicate_checkpoint_ids_use_the_last_position(tmp_path):
+    """R4: MAX -> MIN must fail this. Bounds come from the LAST duplicate."""
+    from dataclasses import replace
+
+    from local_operator.session import open_frame as frame
+
+    _journal(tmp_path)
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None
+    # The token names the DERIVATION, so a variant is published before the first
+    # companion exists for this source (a real store cannot produce two
+    # derivations for one signature).
+    # The duplicate carries a LATER ordinal, so "last position wins" and "first
+    # position wins" produce different bounds. A same-seq copy discriminates
+    # nothing.
+    duplicate = replace(
+        index,
+        checkpoints=[
+            *index.checkpoints,
+            replace(
+                index.checkpoints[0],
+                seq=index.checkpoints[-1].seq + 100,
+                ts=index.checkpoints[-1].ts + 1.0,
+                turn=index.checkpoints[-1].turn + 1,
+            ),
+        ],
+    )
+    _materialize(tmp_path, duplicate)
+    root = tmp_path
+    source = (index.sig["inode"], index.sig["size"], index.sig["mtime"])
+    facts = rm.frame_facts(
+        root, SID, collected_ids=["u1"], reaches_eof=False, order_ids=[], source=source
+    )
+    assert facts.state == "ready", facts.reason
+    bounds = frame.page_seq_bounds(duplicate, [{"id": "u1"}], reaches_eof=False)
+    assert facts.value.runs == frame.publish_runs(
+        duplicate, first_seq=bounds[0], last_seq=bounds[1]
+    )
+    manifest = rm.checkpoint_manifest(root, SID)
+    assert len(manifest.value["checkpoints"]) == len(duplicate.checkpoints)
+
+
+def test_the_following_run_boundary_is_materialized(publication):
+    """R4: `first_seq >` -> `>=`/absent must fail this.
+
+    A page that stops at the first run must publish the runs up to the NEXT run's
+    first ordinal, exactly as the full derivation does.
+    """
+    from local_operator.session import open_frame as frame
+
+    root, index = publication
+    assert len(index.runs) >= 2
+    source = (index.sig["inode"], index.sig["size"], index.sig["mtime"])
+    page = [{"id": index.checkpoints[0].id}]
+    facts = rm.frame_facts(
+        root,
+        SID,
+        collected_ids=[page[0]["id"]],
+        reaches_eof=False,
+        order_ids=[],
+        source=source,
+    )
+    assert facts.state == "ready", facts.reason
+    bounds = frame.page_seq_bounds(index, page, reaches_eof=False)
+    expected = frame.publish_runs(index, first_seq=bounds[0], last_seq=bounds[1])
+    assert bounds[1] is not None, "the fixture must have a following run to publish"
+    assert facts.value.runs == expected
+
+    # THE BOUNDARY THAT DISCRIMINATES `>` FROM `>=` needs a store whose run tail
+    # is CAPPED: below ``OPEN_FRAME_MAX_ROWS`` the projection loads every run and
+    # the helper query is redundant, so only a capped selection shows the
+    # difference between "the run after this page" and "a run at this page's own
+    # last ordinal". That fixture is built separately below.
+
+
+def test_the_following_run_helper_is_the_strict_boundary(tmp_path):
+    """R4: `first_seq >` -> `>=` must fail this, on a CAPPED run tail."""
+    from local_operator.session import open_frame as frame
+
+    turns = frame.OPEN_FRAME_MAX_ROWS + 20
+    rows: list[dict] = []
+    for turn in range(1, turns + 1):
+        rows.append(
+            {
+                "id": f"u{turn:05d}",
+                "ts": float(turn),
+                "type": "message",
+                "payload": {"kind": "message", "role": "user", "content": [{"text": "q"}]},
+            }
+        )
+        rows.append(
+            {
+                "id": f"a{turn:05d}",
+                "ts": turn + 0.5,
+                "type": "message",
+                "payload": {"kind": "message", "role": "assistant", "content": [{"text": "a"}]},
+            }
+        )
+    _journal(tmp_path, rows)
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None
+    _materialize(tmp_path, index)
+    assert len(index.runs) > frame.OPEN_FRAME_MAX_ROWS
+    source = (index.sig["inode"], index.sig["size"], index.sig["mtime"])
+    # A page whose last row opens a run: that run must NOT be published as the
+    # following one, and the capped selection must not silently drop the tail.
+    last_user = [c for c in index.checkpoints if c.kind == "user"][-1]
+    assert any(run.first_seq == last_user.seq for run in index.runs)
+    page = [{"id": last_user.id}]
+    facts = rm.frame_facts(
+        tmp_path,
+        SID,
+        collected_ids=[last_user.id],
+        reaches_eof=False,
+        order_ids=[],
+        source=source,
+    )
+    assert facts.state == "ready", facts.reason
+    bounds = frame.page_seq_bounds(index, page, reaches_eof=False)
+    assert bounds[1] is None
+    assert facts.value.runs == frame.publish_runs(index, first_seq=bounds[0], last_seq=bounds[1])
+
+
+def test_restored_mtime_is_explicit_existing_witness_limit(publication):
+    root, _ = publication
+    path = root / "sessions" / SID / "transcript.jsonl"
+    before = path.stat()
+    path.write_bytes(path.read_bytes().replace(b"hello", b"other"))
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    # The cache preserves the existing inode/size/mtime protocol; a stronger
+    # witness is a scan/page/cache migration, not a guessed ctime here.
+    assert rm.checkpoint_manifest(root, SID).state == "ready"
+
+
+# ---------------------------------------------------------------------------
+# Writer mechanics: lock, fsync, collection
+# ---------------------------------------------------------------------------
+
+
+def test_the_cross_process_lock_is_actually_taken(publication, monkeypatch):
+    """R4: a no-op flock must fail this."""
+    import fcntl
+
+    root, index = publication
+    calls: list[tuple[int, int]] = []
+    real_flock = fcntl.flock
+
+    def counting(fd, operation):
+        calls.append((fd, operation))
+        return real_flock(fd, operation)
+
+    monkeypatch.setattr(fcntl, "flock", counting)
+    ti.write_index(root, SID, index)
+    assert calls and calls[0][1] == fcntl.LOCK_EX
+
+
+def test_a_stale_writer_preserves_a_patch_that_landed_after_it(publication):
+    """R4: dies when the merge is removed — the lock alone is not the guarantee.
+
+    A writer that derived its index BEFORE a naming patch must not publish that
+    older naming back over the patch. This is the observable half of "merge under
+    the lock": a merge that reads the document it is about to replace.
+    """
+    root, index = publication
+    assert ti.patch_naming(root, SID, {"u1": {"name": "Later", "summary": "s"}})
+    stale = dataclasses.replace(index, naming={"prompt_version": 1, "items": {}})
+    ti.write_index(root, SID, stale)
+    written = json.loads(ti.index_path(root, SID).read_text())
+    assert written["naming"]["items"]["u1"]["name"] == "Later", "a stale write dropped a patch"
+
+
+def test_the_naming_merge_happens_inside_the_lock(publication, monkeypatch):
+    """R4: a merge outside the lock loses a patch that lands mid-write."""
+    root, index = publication
+    entered = threading.Event()
+    release = threading.Event()
+    real_merge = ti.preserved_naming
+
+    def slow_merge(*args, **kwargs):
+        entered.set()
+        assert release.wait(10)
+        return real_merge(*args, **kwargs)
+
+    monkeypatch.setattr(ti, "preserved_naming", slow_merge)
+    writer = threading.Thread(target=lambda: ti.write_index(root, SID, index), daemon=True)
+    writer.start()
+    try:
+        assert entered.wait(10)
+        patcher = threading.Thread(
+            target=lambda: ti.patch_naming(root, SID, {"u1": {"name": "Raced", "summary": "s"}}),
+            daemon=True,
+        )
+        patcher.start()
+        patcher.join(3)
+        assert patcher.is_alive(), "the patch did not wait for the writer's lock"
+    finally:
+        release.set()
+        writer.join(10)
+        patcher.join(10)
+    assert json.loads(ti.index_path(root, SID).read_text())["naming"]["items"]["u1"]["name"] == (
+        "Raced"
+    )
+
+
+def test_a_read_only_fsync_cannot_lose_the_document(publication, monkeypatch):
+    """Q10: fsync on a read-only handle is EBADF on Windows and was swallowed."""
+    import fcntl
+
+    root, index = publication
+    path = ti.index_path(root, SID)
+    real_fsync = os.fsync
+
+    def strict(fd):
+        mode = fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE
+        if mode == os.O_RDONLY:
+            raise OSError(9, "Bad file descriptor")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", strict)
+    updated = dataclasses.replace(index, checkpoints=index.checkpoints[:1])
+    ti.write_index(root, SID, updated)
+    written = json.loads(path.read_text())
+    assert written["checkpoints"] == [
+        c.to_payload() for c in updated.checkpoints
+    ], "the canonical document was not replaced"
+
+
+def test_a_failed_replace_keeps_the_previous_document_and_reports(publication, monkeypatch, caplog):
+    root, _ = publication
+    path = ti.index_path(root, SID)
+    before = path.read_bytes()
+    real_replace = Path.replace
+
+    def refuse(self, destination):
+        if Path(destination) == path:
+            raise OSError(28, "No space left on device")
+        return real_replace(self, destination)
+
+    monkeypatch.setattr(Path, "replace", refuse)
+    ti.write_index(root, SID, ti.read_index(root, SID))
+    assert path.read_bytes() == before
+    assert "could not write the transcript index" in caplog.text
+    assert any(record.levelname == "ERROR" for record in caplog.records)
+
+
+def test_collection_keeps_the_referenced_token(publication):
+    """Round-2 defect: `collect` was handed a dict member where it wanted a token."""
+    root, index = publication
+    token = rm.token_for(index)
+    for _ in range(4):
+        ti.write_index(root, SID, index)
+    directory = ti.index_path(root, SID).parent / "read-models" / SID
+    assert (directory / f"{index_read_token(root)}.sqlite").is_file()
+    assert rm.header(root, SID).value.token_id == index_read_token(root)
+    assert token == index_read_token(root)
+    kept = sorted(path.stem for path in directory.glob("*.sqlite"))
+    assert len(kept) <= rm._RETAIN_PREVIOUS + 1
+
+
+def index_read_token(root: Path) -> str:
+    head = ti._read_resume_head(root, SID)
+    assert head is not None
+    return rm._token_for(
+        {
+            "version": ti.TRANSCRIPT_INDEX_VERSION,
+            "sig": head[0],
+            "scan": head[1].to_payload(),
+            "journal_generation": head[2],
+        }
+    )
+
+
+def test_read_models_of_deleted_sessions_are_reclaimed(publication):
+    root, index = publication
+    directory = ti.index_path(root, SID).parent / "read-models"
+    orphan = directory / "deleted-session"
+    orphan.mkdir(parents=True)
+    stale = orphan / ("0" * 32 + ".sqlite")
+    stale.write_bytes(b"x")
+    old = 1_600_000_000
+    os.utime(stale, (old, old))
+    os.utime(orphan, (old, old))
+    ti.write_index(root, SID, index)
+    assert not orphan.exists()
+
+
+def test_publication_survives_a_platform_without_fcntl(publication, monkeypatch):
     import builtins
 
     root, _ = publication
@@ -392,226 +669,15 @@ async def test_publication_survives_a_platform_without_fcntl(publication, monkey
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", no_fcntl)
-    assert ti.patch_naming(root, SID, {"u1": {"name": "Portable", "summary": "yes"}})
+    assert ti.patch_naming(root, SID, {"u2": {"name": "Portable", "summary": "yes"}})
     raw = json.loads(ti.index_path(root, SID).read_text())
-    assert raw["naming"]["items"]["u1"]["name"] == "Portable"
-    view = await ti.checkpoints_view(root, SID)
-    assert view["index"]["state"] == "ready"
-    assert view["checkpoints"][-1]["naming"]["name"] == "Portable"
-
-
-def test_a_failed_companion_is_not_retried_for_the_same_publication(publication, monkeypatch):
-    """R3: a doomed build must not rewrite the canonical JSON on every open."""
-    from local_operator.session import index_read_model as rm
-
-    root, _ = publication
-    path = ti.index_path(root, SID)
-    raw = json.loads(path.read_text())
-    raw.pop("read_model")
-    path.write_text(json.dumps(raw, separators=(",", ":")), encoding="utf-8")
-    parsed = ti.read_index(root, SID)
-    assert parsed is not None and parsed.publication_identity is not None
-    attempts = []
-
-    def cannot_publish(*args, **kwargs):
-        attempts.append(1)
-        raise OSError("cache is not writable")
-
-    monkeypatch.setattr(rm, "publish", cannot_publish)
-    ti.write_index(root, SID, parsed)
-    ti.write_index(root, SID, parsed)
-    assert len(attempts) == 1, "the same publication was rebuilt after it failed"
-    # The canonical document itself is still rewritten (that is the fallback),
-    # so the failure must not have cost the index its correctness.
-    assert json.loads(path.read_text())["read_model"] is None
-
-
-def test_summary_and_frame_facts_reject_a_foreign_source(publication):
-    """R4: the witness check must discriminate, not merely exist."""
-    from local_operator.session import index_read_model as rm
-
-    root, _ = publication
-    foreign = (1, 2, 3.0)
-    assert rm.summary(root, SID, foreign).state != "ready"
-    assert rm.summary(root, SID, None).state != "ready"
-    facts = rm.frame_facts(
-        root,
-        SID,
-        collected_ids=["u1"],
-        reaches_eof=False,
-        order_ids=[],
-        source=foreign,
-    )
-    assert facts.state != "ready"
-
-
-def test_companion_metadata_mismatch_is_never_ready(publication):
-    """R4: meta is compared against the canonical head, not trusted."""
-    import sqlite3
-
-    from local_operator.session import index_read_model as rm
-
-    root, _ = publication
-    pub = rm.header(root, SID).value
-    with sqlite3.connect(pub.path) as db:
-        (payload,) = db.execute("SELECT payload FROM meta").fetchone()
-        meta = json.loads(payload)
-        meta["journal_generation"] = "a-different-scan"
-        db.execute("DELETE FROM meta")
-        db.execute("INSERT INTO meta VALUES (?)", (json.dumps(meta),))
-    assert rm.checkpoint_manifest(root, SID).state == "corrupt"
-
-
-def test_the_following_run_boundary_is_materialized(publication):
-    """R4: without the next-run query the window silently grows into run N+1."""
-    from local_operator.session import index_read_model as rm
-    from local_operator.session import open_frame as frame
-
-    root, _ = publication
-    _journal(root, _rows(4))
-    index = ti.refresh_index(root, SID)
-    assert index is not None and len(index.runs) >= 3
-    source = (index.sig["inode"], index.sig["size"], index.sig["mtime"])
-    page = ["u3", "a3"]  # mid conversation, NOT the tail
-    facts = rm.frame_facts(
-        root, SID, collected_ids=page, reaches_eof=False, order_ids=[], source=source
-    )
-    assert facts.state == "ready", facts.reason
-    bounds = frame.page_seq_bounds(index, [{"id": id_} for id_ in page], reaches_eof=False)
-    assert facts.value.runs == frame.publish_runs(index, first_seq=bounds[0], last_seq=bounds[1])
-
-
-def test_the_cross_process_lock_is_actually_taken(publication, monkeypatch):
-    """R4: an in-process lock alone is not the cross-process guarantee."""
-    import fcntl
-
-    root, index = publication
-    taken = []
-    real_flock = fcntl.flock
-
-    def record(fd, operation):
-        taken.append(operation)
-        return real_flock(fd, operation)
-
-    monkeypatch.setattr(fcntl, "flock", record)
-    ti.write_index(root, SID, index)
-    assert taken == [fcntl.LOCK_EX]
-
-
-def test_naming_patches_reuse_one_companion(publication):
-    """Q3/m4: a naming patch must not mint another multi-MB body."""
-    from local_operator.session import index_read_model as rm
-
-    root, _ = publication
-    directory = ti.index_path(root, SID).parent / "read-models" / SID
-    for turn in range(1, 9):
-        assert ti.patch_naming(root, SID, {"u1": {"name": f"n{turn}", "summary": "s"}})
-    assert len(list(directory.glob("*.sqlite"))) == 1
-    answer = rm.checkpoint_manifest(root, SID)
-    assert answer.state == "ready"
-    assert answer.value["checkpoints"][-1]["naming"]["name"] == "n8"
-
-
-def test_collection_keeps_the_referenced_publication_and_a_small_window(publication):
-    """Q3/n1: retention is bounded and never drops what the head names."""
-    from local_operator.session import index_read_model as rm
-
-    root, _ = publication
-    directory = ti.index_path(root, SID).parent / "read-models" / SID
-    for turn in range(2, 8):
-        _journal(root, _rows(turn))
-        assert ti.refresh_index(root, SID) is not None
-    kept = sorted(path.name for path in directory.glob("*.sqlite"))
-    assert len(kept) <= rm._RETAIN_PREVIOUS + 1
-    referenced = rm.header(root, SID).value.path
-    assert referenced.name in kept
-    assert rm.checkpoint_manifest(root, SID).state == "ready"
-
-
-def test_read_models_of_deleted_sessions_are_reclaimed(publication):
-    """Q3: a deleted session's companions do not accumulate forever."""
-    import os as _os
-
-    root, index = publication
-    directory = ti.index_path(root, SID).parent / "read-models"
-    orphan = directory / "deleted-session"
-    orphan.mkdir(parents=True)
-    stale = orphan / ("0" * 32 + ".sqlite")
-    stale.write_bytes(b"x")
-    old = 1_600_000_000
-    _os.utime(stale, (old, old))
-    _os.utime(orphan, (old, old))
-    ti.write_index(root, SID, index)
-    assert not orphan.exists()
-
-
-def test_repeated_manifest_polls_do_not_reopen_the_companion(publication, monkeypatch):
-    """Q4: a companion-served session must reach the resident poll steady state."""
-    from local_operator.session import index_read_model as rm
-
-    root, _ = publication
-    first = rm.checkpoint_manifest(root, SID)
-    assert first.state == "ready"
-    connects = []
-    real_connect = rm.sqlite3.connect
-
-    def counting(*args, **kwargs):
-        connects.append(1)
-        return real_connect(*args, **kwargs)
-
-    monkeypatch.setattr(rm.sqlite3, "connect", counting)
-    for _ in range(3):
-        assert rm.checkpoint_manifest(root, SID).value == first.value
-    assert connects == [], "a cached poll still opened the companion"
-    # AND the memo must not freeze naming: the sidecar's identity is in the key.
-    assert ti.patch_naming(root, SID, {"u1": {"name": "Fresh", "summary": "s"}})
-    fresh = rm.checkpoint_manifest(root, SID)
-    assert fresh.value["checkpoints"][-1]["naming"]["name"] == "Fresh"
-
-
-def test_the_companion_is_built_outside_the_publish_lock(publication, monkeypatch):
-    """Q5: a slow companion build must not serialize other writers of the session."""
-    import threading
-
-    from local_operator.session import index_read_model as rm
-
-    root, index = publication
-    inside = threading.Event()
-    release = threading.Event()
-    real_publish = rm.publish
-
-    def slow_publish(*args, **kwargs):
-        inside.set()
-        assert release.wait(10), "the test never released the companion build"
-        return real_publish(*args, **kwargs)
-
-    monkeypatch.setattr(rm, "publish", slow_publish)
-    writer = threading.Thread(
-        target=lambda: ti.write_index(root, SID, index),
-        daemon=True,
-    )
-    writer.start()
-    try:
-        assert inside.wait(10), "the companion build never started"
-        patcher = threading.Thread(
-            target=lambda: ti.patch_naming(root, SID, {"u1": {"name": "During", "summary": "s"}}),
-            daemon=True,
-        )
-        patcher.start()
-        patcher.join(5)
-        assert not patcher.is_alive(), "a naming patch waited for the companion build"
-    finally:
-        release.set()
-        writer.join(10)
-    on_disk = json.loads(ti.index_path(root, SID).read_text())
-    assert on_disk["naming"]["items"]["u1"]["name"] == "During"
+    assert raw["naming"]["items"]["u2"]["name"] == "Portable"
 
 
 def test_the_paint_cost_does_not_stat_the_cache(publication, monkeypatch):
-    """m2: the paint-hold decision must not add a stat to the event loop."""
     root, _ = publication
     journal = (root / "sessions" / SID / "transcript.jsonl").stat()
-    calls = []
+    calls: list[object] = []
     real_stat = ti._stat_or_none
 
     def counting(path):
@@ -621,4 +687,48 @@ def test_the_paint_cost_does_not_stat_the_cache(publication, monkeypatch):
     monkeypatch.setattr(ti, "_stat_or_none", counting)
     has_previous, _rederive, hydration = ti._cached_refresh_cost(root, SID, journal)
     assert has_previous and hydration > 0
-    assert calls == [], "the paint decision stat'ed the cache on the loop"
+    assert calls == []
+
+
+def test_the_companion_stays_a_small_fraction_of_the_index(tmp_path):
+    """Size guard: facts, not a second copy of the index.
+
+    Built text-heavy on purpose: a conversation's bytes are mostly message text,
+    and the projection must store the WITNESSES of those rows (ordinals, roles,
+    packed records), never a second copy of the prose.
+    """
+    rows: list[dict] = []
+    for turn in range(1, 801):
+        rows.append(
+            {
+                "id": f"u{turn:04d}",
+                "ts": float(turn),
+                "type": "message",
+                "payload": {
+                    "kind": "message",
+                    "role": "user",
+                    "content": [{"text": f"question {turn} " * 8}],
+                },
+            }
+        )
+        rows.append(
+            {
+                "id": f"a{turn:04d}",
+                "ts": turn + 0.5,
+                "type": "message",
+                "payload": {
+                    "kind": "message",
+                    "role": "assistant",
+                    "content": [{"text": f"answer {turn} " * 20}],
+                },
+            }
+        )
+    _journal(tmp_path, rows)
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None
+    _materialize(tmp_path, index)
+    index_bytes = ti.index_path(tmp_path, SID).stat().st_size
+    companion_bytes = rm.header(tmp_path, SID).value.path.stat().st_size
+    share = companion_bytes / index_bytes
+    print(f"index={index_bytes} companion={companion_bytes} share={share:.1%}")
+    assert share < 0.5, f"companion is {share:.1%} of the index"

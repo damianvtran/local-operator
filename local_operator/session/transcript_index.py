@@ -124,7 +124,6 @@ import contextvars
 import json
 import logging
 import os
-import sqlite3
 import threading
 import time
 from bisect import bisect_left, bisect_right
@@ -854,10 +853,6 @@ class TranscriptIndex:
     publication_identity: tuple[int, int, int] | None = field(
         default=None, repr=False, compare=False
     )
-    #: The read-model token this document referenced when it was read, if any.
-    #: A naming-only write reuses that immutable companion instead of rebuilding
-    #: it; a new derivation leaves it ``None`` and publishes a fresh one.
-    read_model_token: str | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.source_views = SourceProjectionViews.build(self.source_projection_facts)
@@ -993,7 +988,6 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
         checkpoints=parsed_checkpoints,
         messages=parsed_messages,
         publication_identity=raw.get("_publication_identity"),
-        read_model_token=_marker_token(raw.get("read_model")),
         sig=sig,
         coverage=coverage,
         naming=naming if isinstance(naming, dict) else {},
@@ -1062,12 +1056,6 @@ def _publish_lock(path: Path) -> Iterator[None]:
                 handle.close()
 
 
-def _marker_token(marker: Any) -> str | None:
-    """The token a canonical ``read_model`` field names, or ``None``."""
-    token = marker.get("publication_id") if isinstance(marker, dict) else None
-    return token if isinstance(token, str) else None
-
-
 def write_index(
     config_dir: str | Path,
     session_id: str,
@@ -1077,47 +1065,33 @@ def write_index(
 ) -> None:
     """Persist the index atomically (unique temp + replace), best-effort.
 
-    Atomic because a poll may read while a build writes, and the temp name
-    carries the writer's PID for ``search_index``'s measured reason: two
-    processes building one session wrote the same fixed temp path and produced
-    torn documents. Best-effort because an unwritable cache must cost the speed
-    of the next read, never the read itself.
+    THIS IS BASE'S WRITE PATH, plus one small locked step. The canonical document
+    is written exactly as it always was; the read-model companion is NOT built
+    here. Building it on this path cost a measured ~1.3 s per append refresh, so
+    the append's own publication landed after the open it was meant to serve.
+    ``index_read_model.schedule_materialize`` now derives the companion from the
+    completed index afterwards, off this path.
 
-    TWO PHASES, deliberately. The immutable read-model companion is BUILT FIRST,
-    OUTSIDE the lock: its build is the expensive part, and holding the lock for
-    it serialised every naming patch behind a scan (measured as ~1.2 s added to
-    an append refresh, which then missed the first frame's wait). The lock then
-    covers only what must be atomic together — the mutable ``naming`` merge a
-    concurrent ``patch_naming`` can race, the naming sidecar published from the
-    merged object, and the canonical replace. A companion built before another
-    writer's replace is simply an unreferenced file the collector reclaims.
+    The one addition inside the lock is the naming merge and its sidecar: naming
+    is mutable metadata a concurrent ``patch_naming`` can overwrite, so the merge
+    and the document it lands in must be one atomic step. Readers never take the
+    lock — atomic replace is what protects them.
 
-    ``expected_publication`` is compare-and-publish for a DELAYED writer (the
-    parsed-HIT migration): it republishes only the document it actually read, so
-    it can never overwrite newer naming, a newer scan, or a moved journal.
+    ``expected_publication`` is compare-and-publish for a delayed writer: it
+    republishes only the document it actually read.
+
+    A FAILURE TO REPLACE IS REPORTED, NEVER SWALLOWED. A previous round fsynced a
+    read-only descriptor and then swallowed the ``OSError`` in a trailing
+    handler; on Windows that meant the index was rebuilt on every open and never
+    written. Durability is taken on the handle that wrote the bytes, and a
+    failure that leaves the old document in place is logged at ERROR level.
     """
     from local_operator.session import index_read_model
 
     path = index_path(config_dir, session_id)
-    marker: dict[str, Any] | None = None
+    payload_ok = False
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            marker = index_read_model.reuse(config_dir, session_id, index)
-            if marker is None and not index_read_model.failed(
-                config_dir, session_id, index.publication_identity
-            ):
-                marker = index_read_model.publish(config_dir, session_id, index)
-        except (OSError, ValueError, sqlite3.Error):
-            # An optional acceleration must never cost the canonical index: the
-            # JSON-only publication and its fallback stay correct. The failure is
-            # remembered per canonical publication so an exact HIT does not retry
-            # a doomed multi-MB build on every open.
-            index_read_model.remember_failure(config_dir, session_id, index.publication_identity)
-            logger.debug("read-model publication unavailable for %s", session_id, exc_info=True)
-            marker = None
-
-        # Threads in one process publish naming/scan snapshots concurrently too.
         tmp = path.with_suffix(f".{os.getpid()}.{uuid4().hex}.tmp")
         try:
             with _publish_lock(path.with_suffix(".publish.lock")):
@@ -1137,11 +1111,10 @@ def write_index(
                         merged = preserved_naming(latest, {c.id for c in index.checkpoints})
                         live = {c.id for c in index.checkpoints if c.kind == KIND_USER}
                         own = index.naming.get("items") if isinstance(index.naming, dict) else None
-                        # UNION with THIS write winning. The disk read is what a
-                        # concurrent ``patch_naming`` just landed; this index is
-                        # what the caller derived (and, for a naming patch, the
-                        # newer item). Neither may clobber the other, and both are
-                        # filtered to turns that still exist.
+                        # UNION with THIS write winning (see round-1 R4): the disk
+                        # read is what a concurrent ``patch_naming`` just landed,
+                        # this index is what the caller derived. Neither clobbers
+                        # the other, and both are filtered to live turns.
                         items = dict(merged.get("items") or {})
                         if (
                             isinstance(own, dict)
@@ -1149,50 +1122,62 @@ def write_index(
                         ):
                             items.update({k: v for k, v in own.items() if k in live})
                         index.naming = {"prompt_version": NAMING_PROMPT_VERSION, "items": items}
-                if marker is not None:
-                    try:
-                        index_read_model.write_naming(config_dir, session_id, marker, index.naming)
-                    except OSError:
-                        # Naming is part of the projection's authority; without it
-                        # the manifest falls back rather than serving pending names
-                        # it cannot prove.
-                        logger.debug("read-model naming unavailable for %s", session_id)
-                        marker = None
-                tmp.write_text(
-                    json.dumps(_document(index, marker), separators=(",", ":")), encoding="utf-8"
-                )
-                with tmp.open("rb") as handle:
+                document = _document(index)
+                # The sidecar is keyed by the DERIVED token, so it is correct even
+                # if the companion lands later; it costs a few KB, not the body.
+                try:
+                    index_read_model.write_naming(
+                        config_dir, session_id, index_read_model.token_for(index), index.naming
+                    )
+                except (OSError, ValueError):
+                    logger.debug("read-model naming unavailable for %s", session_id)
+                with tmp.open("w", encoding="utf-8") as handle:
+                    handle.write(json.dumps(document, separators=(",", ":")))
+                    handle.flush()
+                    # fsync the descriptor that WROTE these bytes. A read-only
+                    # handle cannot be synced on Windows, and that is exactly the
+                    # round-2 Q10 defect.
                     os.fsync(handle.fileno())
                 tmp.replace(path)
+                payload_ok = True
         finally:
             tmp.unlink(missing_ok=True)
-        if marker is not None:
-            # Reclaim outside the lock: unlink cost must not sit in the critical
-            # section, and a failed removal is simply retained.
-            index_read_model.collect(config_dir, session_id, marker["publication_id"])
     except OSError:
-        logger.warning("could not write the transcript index for %s", session_id, exc_info=True)
+        if not payload_ok:
+            logger.error(
+                "could not write the transcript index for %s; the previous document is "
+                "still in place and this read serves it",
+                session_id,
+                exc_info=True,
+            )
+        return
+    # Reclaim outside the lock: unlink cost must not sit in the critical section.
+    try:
+        index_read_model.collect(config_dir, session_id, index_read_model.token_for(index))
+    except OSError:
+        pass
 
 
-def _document(index: TranscriptIndex, marker: dict[str, Any] | None) -> dict[str, Any]:
-    """The canonical document; ``read_model`` is an optional acceleration marker."""
+def _document(index: TranscriptIndex) -> dict[str, Any]:
+    """The canonical document, in base's key order (the head reader depends on it)."""
     return {
         # The LIVE constant, not ``index.version``: a cache must be stamped
         # with the version this build writes, and reading it back compares
         # against the same live constant (see ``_index_from_raw``).
         "version": TRANSCRIPT_INDEX_VERSION,
-        # THE RESUME HEAD: ``version``, ``sig``, ``scan``,
-        # ``journal_generation`` and ``read_model`` come FIRST and in this order,
-        # so that :func:`_read_resume_head` can say how many bytes the next
-        # refresh would re-read from a few KB at the top of the file, with no
-        # parse of the whole multi-MB document (the paint hold decides that on
-        # the event loop). Readers of the document are order-blind
-        # (``json.loads``); only the head reader depends on this, and it falls
-        # back to the pre-head rule for any file laid out otherwise.
+        # THE RESUME HEAD: ``version``, ``sig``, ``scan`` and
+        # ``journal_generation`` come FIRST and in this order, so that
+        # :func:`_read_resume_head` can say how many bytes the next refresh would
+        # re-read from a few KB at the top of the file, with no parse of the
+        # whole multi-MB document (the paint hold decides that on the event
+        # loop). Readers of the document are order-blind (``json.loads``); only
+        # the head reader depends on this, and it falls back to the pre-head
+        # rule for any file laid out otherwise. The read model derives its own
+        # token from exactly these fields, so publishing a companion needs no
+        # field here and no second canonical write.
         "sig": index.sig,
         "scan": index.scan.to_payload(),
         "journal_generation": index.journal_generation,
-        "read_model": marker,
         "coverage": index.coverage,
         "checkpoints": [c.to_payload() for c in index.checkpoints],
         "messages": [m.to_payload() for m in index.messages],
@@ -2915,7 +2900,7 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
 
             # Exact HITs never reach write_index. Reuse this parsed snapshot for
             # migration; the async refresher schedules it on return from workers.
-            index_read_model.schedule_migration(config_dir, session_id, previous)
+            index_read_model.schedule_materialize(config_dir, session_id, previous)
             return previous
         try:
             if (
@@ -3715,7 +3700,7 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Tas
         if result is not None:
             from local_operator.session import index_read_model
 
-            index_read_model.schedule_migration(config_dir, session_id, result)
+            index_read_model.schedule_materialize(config_dir, session_id, result)
         return result
 
     async def _wrapped() -> TranscriptIndex | None:
@@ -3856,7 +3841,7 @@ async def checkpoints_view(
     if probe.state == "ready":
         if probe.index is not None:
             _remember(key, probe.index, probe.built_at)
-            index_read_model.schedule_migration(config_dir, session_id, probe.index)
+            index_read_model.schedule_materialize(config_dir, session_id, probe.index)
         return _manifest_state(session_id, "ready", probe.index, probe.built_at)
 
     failed_at = _FAILURES.get(key)
