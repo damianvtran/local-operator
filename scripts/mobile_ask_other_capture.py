@@ -3,7 +3,7 @@
 Run from the repository root (it starts its own fixture, on a free port)::
 
     PYTHONPATH=. .venv/bin/python scripts/mobile_ask_other_capture.py OUTDIR LABEL \
-        --expect before|after [--repo PATH]
+        --expect before|after [--repo PATH] [--viewport WxH]
 
 ``--repo`` names the tree whose ``local_operator/mobile/web/dist`` the fixture serves and
 whose ``scripts/mobile_asks_open_fixture.py`` it starts; it defaults to the tree this file
@@ -11,6 +11,13 @@ lives in. The BEFORE set therefore needs this file copied into the detached pre-
 worktree, because the fixture serves the tree it sits in — the same arrangement
 ``scripts/mobile_asks_open_capture.py`` uses, and its banner line ("Fixture serves tree:")
 is recorded beside the frames so the provenance of each set is a printed fact.
+
+``--viewport WxH`` sets the emulated phone metrics, spelled exactly as
+``scripts/mobile_asks_capture.py`` spells it (``--viewport 360x760``); it defaults to
+``390x844``. Narrow portrait widths are separate review cells and need a FRESH fixture each:
+the ask flow SETTLES an ask, so two widths against one daemon would photograph a queue the
+first pass had already answered. Only the emulated device metrics and the recorded
+``viewport`` move — the frames, gestures and per-frame checks are otherwise one run.
 
 THE FEATURE UNDER THE LENS: an ``Other`` row on every non-secret option question of the ask
 card (``local_operator/mobile/web/src/components/ask-card.tsx``). On the AFTER build it
@@ -646,6 +653,16 @@ def main() -> None:
     if build not in ("before", "after"):
         raise SystemExit("--expect must be 'before' or 'after'")
     repo = Path(argv[argv.index("--repo") + 1]).resolve() if "--repo" in argv else SELF_ROOT
+    viewport = VIEWPORT
+    if "--viewport" in argv:
+        # ONE VIEWPORT PER RUN, the sibling asks capture's spelling: the phone's layout
+        # is width-dependent, so the review matrix names 320 and 360 portrait as cells of
+        # their own. Nothing but the emulated metrics and the recorded viewport changes.
+        index = argv.index("--viewport")
+        if index + 1 >= len(argv):
+            raise SystemExit("--viewport needs WIDTHxHEIGHT, e.g. --viewport 360x760")
+        width, height = (int(part) for part in argv[index + 1].split("x"))
+        viewport = (width, height)
     if not (repo / "local_operator/mobile/web/dist/index.html").exists():
         raise SystemExit(f"{repo} has no built mobile bundle; run pnpm build there first")
     outdir.mkdir(parents=True, exist_ok=True)
@@ -661,7 +678,7 @@ def main() -> None:
         "build": build,
         "repo": str(repo),
         "fixture": fixture.banner,
-        "viewport": VIEWPORT,
+        "viewport": viewport,
         "frames": {},
         "checks": {},
     }
@@ -699,7 +716,7 @@ def main() -> None:
 
     page: Page = Page(chrome.target_ws())
     try:
-        width, height = VIEWPORT
+        width, height = viewport
         page.metrics(width, height)
         page.goto(f"{base}/login")
         page.js(
