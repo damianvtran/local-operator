@@ -898,12 +898,37 @@ def test_peer_without_item_512_receives_a_withheld_skip_not_a_gap_refusal(device
         link, "capabilities", tuple(c for c in link.capabilities if c != wire.MEMORY_ITEM_512)
     )
     result = memory.push_to_peer(a, b.identity.device_id)
-    assert result["code"] == "withheld" and len(result["withheld"]) == 1, result
+    # Owed, not synced: a distinct non-healthy code with a pending count (review M1).
+    assert result["code"] == "withheld_pending" and result["pending"] == 1, result
+    assert result["code"] not in memory.HEALTHY_PEER_CODES
     receiving = bank(b)
     assert receiving.search("Elara", "global") and receiving.search("Kai", "global")
     assert not receiving.search("coastal walks", "global")
     # A later write still flows: the skip advanced the cursor, no gap remains.
     sender.put("global", {"title": "Ana", "body": "Ana lives in Napier"})
     again = memory.push_to_peer(a, b.identity.device_id)
-    assert again["code"] in ("withheld", "in_sync"), again
+    assert again["code"] == "withheld_pending", again
     assert receiving.search("Napier", "global")
+    # `lop memory status` names the peer as not syncing, with the lop-update remedy.
+    from local_operator.memory_cli import render_human, run
+
+    text, failed = run("status", config=a.root, identity=MemoryIdentity("memory-session"))
+    human = render_human(text, failed)
+    assert "withheld_pending" in human and "lop-update" in human, human
+    print("M1 before upgrade:", result, again)
+
+    # The peer updates: it now advertises memory-item-512. The single-revision
+    # fact that was skipped is redelivered and the peer is in sync again.
+    monkeypatch.undo()
+    link = a._ensure_link(b.identity.device_id)
+    assert link is not None and wire.MEMORY_ITEM_512 in link.capabilities
+    upgraded = memory.push_to_peer(a, b.identity.device_id)
+    assert receiving.search("coastal walks", "global"), upgraded
+    assert upgraded["code"] in ("in_sync", "catching_up") and upgraded["pending"] == 0, upgraded
+    settled = memory.push_to_peer(a, b.identity.device_id)
+    assert settled["code"] == "in_sync" and settled["ok"], settled
+    assert memory.legacy_pending(memory._store(a.root), b.identity.device_id) == {
+        "ids": [],
+        "overflow": False,
+    }
+    print("M1 after upgrade:", upgraded, settled)

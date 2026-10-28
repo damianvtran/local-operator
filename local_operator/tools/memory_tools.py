@@ -43,6 +43,8 @@ _QUERY_VALUE = re.compile(r"(?<=[?&])q=[^&]*")
 #: how long without knowing the URL scheme.
 _LIFETIMES = {"session": "session/this conversation", "global": "global/across sessions"}
 assert set(_LIFETIMES) == set(MEMORY_TOOL_SCOPES)
+#: Labels for the other banks an unscoped recall can union (a bound team/agent).
+_RECALL_LABELS = {**_LIFETIMES, "team": "team/shared", "agent": "agent/profile"}
 
 
 def store_for(context: ToolContext | None) -> MemoryStore:
@@ -336,7 +338,8 @@ async def execute_fact_memory(call_id, args, signal=None, on_update=None, contex
             # Never a silent promotion to the shared bank.
             raise MemoryError(
                 "No session is bound, so session memory is unavailable here; pass "
-                'scope="global" only for a durable personal fact.'
+                'scope="global" only for a durable personal fact, or write shared work '
+                "to memory://team or memory://agent when that identity is bound."
             )
         lifetime = _LIFETIMES[scope]
         path = "memory://" + scope
@@ -374,7 +377,8 @@ async def execute_fact_memory(call_id, args, signal=None, on_update=None, contex
                 # each item's own ``scope`` says which bank it came from.
                 path = "memory://"
                 lifetime = " + ".join(
-                    _LIFETIMES.get(name, name) for name, _ in store_for(context).identity.scopes()
+                    _RECALL_LABELS.get(name, name)
+                    for name, _ in store_for(context).identity.scopes()
                 )
             result = await execute_memory(
                 call_id, "read", {"path": path + "?q=" + quote(text)}, context

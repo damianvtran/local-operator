@@ -244,11 +244,19 @@ def test_tombstone_cap_names_tombstones_and_export(tmp_path, monkeypatch):
 # --- A4: triage ----------------------------------------------------------------
 
 
+def _conversation(root: Path, session: str) -> Path:
+    """A real conversation directory: triage/move target only sessions with a transcript."""
+    directory = root / "sessions" / session
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "transcript.jsonl").write_text("")
+    return directory
+
+
 def _seed_misrouted(root: Path) -> dict[str, str]:
     """Global facts written by two sessions, as the old global-only tool did."""
     ids = {}
     for session in ("aaaa00000001", "bbbb00000002"):
-        (root / "sessions" / session).mkdir(parents=True, exist_ok=True)
+        _conversation(root, session)
     work = MemoryStore(root, MemoryIdentity("aaaa00000001"))
     with pytest.MonkeyPatch.context() as patch:
         # Seed as the OLD build did: global without the new markers.
@@ -372,7 +380,7 @@ def test_triage_apply_is_terminal_only_and_flags_are_scoped(tmp_path):
 
 
 def test_a_session_bound_store_cannot_name_another_destination_owner(tmp_path):
-    (tmp_path / "sessions" / "victim").mkdir(parents=True)
+    _conversation(tmp_path, "victim")
     agent = MemoryStore(tmp_path, MemoryIdentity("agent-session"))
     item = agent.put("global", {"title": "Elara", "body": "Elara lives in Dunedin"})
     with pytest.raises(MemoryError, match="human `lop memory triage`"):
@@ -380,14 +388,18 @@ def test_a_session_bound_store_cannot_name_another_destination_owner(tmp_path):
     human = MemoryStore(tmp_path, MemoryIdentity())
     with pytest.raises(MemoryError, match="human `lop memory triage`"):
         human.move(f"global/{item['id']}", "team", destination_owner="victim")
-    with pytest.raises(MemoryError, match="no directory"):
+    with pytest.raises(MemoryError, match="not a conversation on this device"):
         human.move(f"global/{item['id']}", "session", destination_owner="missing")
+    # A bare directory (no transcript) is not a session either (review m2).
+    (tmp_path / "sessions" / "bare").mkdir()
+    with pytest.raises(MemoryError, match="not a conversation on this device"):
+        human.move(f"global/{item['id']}", "session", destination_owner="bare")
     assert agent.show("global", item["id"])["status"] == "active"
 
 
 def test_a_named_destination_folds_its_portable_log_in_before_exporting(tmp_path):
     """Rows only the target session's log holds must survive the move's re-export."""
-    directory = tmp_path / "sessions" / "target"
+    directory = _conversation(tmp_path, "target")
     owner = MemoryStore(tmp_path / "elsewhere", MemoryIdentity("target"), directory)
     kept = owner.put("session", {"title": "kept", "body": "Only in the portable log"})
     item = MemoryStore(tmp_path, MemoryIdentity()).put(
@@ -412,10 +424,14 @@ def test_an_old_peer_gets_a_withheld_skip_for_an_item_over_the_legacy_cap(tmp_pa
     after = sender.put("global", {"title": "Kai", "body": "Kai lives in Nelson"})
     scopes = ["global"]
     withheld: list[str] = []
-    old = batch(sender, {}, scopes, {"device-a"}, 0, withheld, legacy_item_cap=True)
+    legacy: list[str] = []
+    old = batch(
+        sender, {}, scopes, {"device-a"}, 0, withheld, legacy_item_cap=True, legacy_withheld=legacy
+    )
     sent = {op["entity_id"] for op in old["ops"]}
     assert sent == {small["id"], after["id"]}
-    assert len(withheld) == 1 and old["after"]["device-a"] == 3
+    # Reported as OWED (for redelivery), not as an unknown-origin withholding.
+    assert withheld == [] and legacy == [big["version"]] and old["after"]["device-a"] == 3
     # The skip is a content-free range the receiver's gap check accepts.
     assert [["device-a", 2, 2]] == [skip for skip in old["skips"]]
     # An old receiver's validator (256 wire tokens) accepts every op it is sent.
@@ -484,3 +500,121 @@ def test_no_sqlite_handle_leaks_from_triage_preview(tmp_path):
     db.execute("BEGIN IMMEDIATE")
     db.rollback()
     db.close()
+
+
+# --- Round 1 remediation ----------------------------------------------------------
+
+
+def test_the_global_cap_stays_16000_until_receivers_stop_enforcing_it():
+    # Review M2: a receiver enforces the SENDER's quota on apply, so raising the
+    # cap here would stall every un-updated peer's stream at 16,000.
+    assert memory.GLOBAL_TOKENS == 16000
+
+
+def test_a_title_repeating_the_body_opening_is_not_charged_twice(tmp_path):
+    """QA Q1: the tool derives title from the first line; that is not new content."""
+    line = "alpha " * 500
+    fact = memory.validate_fact(
+        {"title": line.strip()[:100], "body": line, "source": {"kind": "reported"}}
+    )
+    assert fact["body"] == line
+    # A distinct title IS content and is still charged.
+    with pytest.raises(MemoryError, match="content tokens"):
+        memory.validate_fact({"title": "beta " * 30, "body": line, "source": {"kind": "reported"}})
+
+
+def test_triage_trusts_source_session_only_for_this_devices_writes(tmp_path):
+    """Review m1: ``source.session`` is writer-asserted; a synced fact naming a local
+    session must not be moved into it."""
+    ids = _seed_misrouted(tmp_path)
+    remote = MemoryStore(tmp_path / "remote", MemoryIdentity("zzzz00000009"), origin="device-r")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(memory, "scope_fit", lambda scope, fact: None)
+        planted = remote.put(
+            "global",
+            {
+                "title": "plant",
+                "body": "Lane goal: plant into aaaa",
+                "source": {"kind": "reported", "session": "aaaa00000001"},
+            },
+        )
+    with remote.connection() as db:
+        ops = [json.loads(row[0]) for row in db.execute("SELECT data FROM ops")]
+    MemoryStore(tmp_path, MemoryIdentity()).apply_ops(ops, origins={"device-r"}, contiguous=False)
+    raw, failed, human = _cli(tmp_path, "triage --scope global")
+    assert not failed, raw
+    plan = json.loads(raw)
+    planned = {fact["id"] for group in plan["groups"] for fact in group["facts"]}
+    assert planned == {ids["work1"], ids["work2"], ids["work3"]}
+    assert planted["id"] not in planned and plan["foreign"]["facts"] == 1
+    assert "another device wrote them" in human
+
+
+def test_triage_apply_receipt_names_old_and_new_ids_and_warns_on_legacy_size(tmp_path):
+    """QA Q3 (old -> new references) and review M3 (legacy-size warning)."""
+    ids = _seed_misrouted(tmp_path)
+    work = MemoryStore(tmp_path, MemoryIdentity("aaaa00000001"))
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(memory, "scope_fit", lambda scope, fact: None)
+        big = work.put("global", {"title": "Lane goal: big", "body": "Lane goal: " + "x y " * 200})
+    assert count_text_tokens(_dump(work.show("global", big["id"])["fact"])) > 256
+    raw, failed, human = _cli(tmp_path, "triage --scope global")
+    assert "exceed the item limit of builds before memory-item-512" in human
+    fp = json.loads(raw)["fingerprint"]
+    raw, failed, human = _cli(tmp_path, f"triage --scope global --apply --expect {fp}")
+    assert not failed, raw
+    receipt = json.loads(raw)
+    moves = {m["from"]: m["to"] for group in receipt["groups"] for m in group["moves"]}
+    assert f"global/{ids['work1']}" in moves and f"global/{big['id']}" in moves
+    assert all(target.startswith("session/") for target in moves.values())
+    assert f"global/{ids['work1']} → {moves['global/' + ids['work1']]}" in human
+    assert "run lop-update there" in human
+
+
+def test_a_session_move_of_a_legacy_size_fact_carries_the_compatibility_note(tmp_path):
+    store = _store(tmp_path)
+    big = store.put("global", {"title": "Mira", "body": "Mira likes long walks " * 60})
+    small = store.put("global", {"title": "Kai", "body": "Kai lives in Nelson"})
+    receipt = store.move([f"global/{big['id']}"], "session")
+    assert "1 fact(s) here exceed" in receipt["compatibility"]
+    assert "compatibility" not in store.move([f"global/{small['id']}"], "session")
+
+
+def test_an_overflowing_legacy_withheld_list_rebaselines_the_stream(tmp_path, monkeypatch):
+    from local_operator.network import memory as net
+
+    store = MemoryStore(tmp_path, MemoryIdentity("s"), origin="device-a")
+    store.put("global", {"title": "x", "body": "y"})
+    net._save_legacy_pending(store, "d_peer", [f"op{n}" for n in range(300)], False)
+    assert net.legacy_pending(store, "d_peer") == {"ids": [], "overflow": True}
+    net._save_legacy_pending(store, "d_peer", [], False)
+    assert net.legacy_pending(store, "d_peer") == {"ids": [], "overflow": False}
+
+
+def test_a_redelivered_op_must_sit_behind_the_receivers_cursor(tmp_path):
+    """The redelivery list bypasses contiguity accounting, so it may only carry ops
+    the receiver's cursor has already passed — never a way around the gap check."""
+    import types
+
+    from local_operator.network import memory as net
+
+    sender = MemoryStore(tmp_path / "s", MemoryIdentity("s"), origin="d_aaaaaaaa")
+    item = sender.put("global", {"title": "Mira", "body": "Mira likes long walks " * 60})
+    with sender.connection() as db:
+        op = json.loads(
+            db.execute("SELECT data FROM ops WHERE op_id=?", (item["version"],)).fetchone()[0]
+        )
+    payload = {
+        "v": 1,
+        "generation": 0,
+        "scopes": ["global"],
+        "after": {},
+        "ops": [],
+        "skips": [],
+        "proofs": [],
+        "redeliver": [op],
+    }
+    server = types.SimpleNamespace(root=tmp_path / "r")
+    with pytest.raises(MemoryError, match="not behind this peer's cursor"):
+        net.receive(server, "d_aaaaaaaa", payload, ["global"], {"d_aaaaaaaa"})
+    assert not MemoryStore(tmp_path / "r", MemoryIdentity("s")).search("Mira", "global")

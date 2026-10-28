@@ -22,7 +22,9 @@ Constraints, each deliberate:
   ``destination_owner`` from any identity bound to a session, which every agent
   store is, so the agent tool routes cannot reach it.
 * A fact with no marker stays unless the human names it (``--include``); a fact
-  whose source session directory is gone stays (its log has nowhere to go).
+  whose source session is not a conversation here (no transcript) stays, and so
+  does one whose head revision another device wrote: ``source.session`` is
+  writer-asserted, so it is only trusted for this device's own writes.
 * Groups apply independently and each ``move`` is all-or-nothing, so one refused
   group (a conflict, a supersession link, a full bank) never half-moves another.
 """
@@ -34,7 +36,16 @@ import json
 from pathlib import Path
 from typing import Any
 
-from local_operator.memory import MemoryError, MemoryIdentity, MemoryStore, fact_markers
+from local_operator.compaction.tokens import count_text_tokens
+from local_operator.memory import (
+    LEGACY_ITEM_WIRE_TOKENS,
+    MemoryError,
+    MemoryIdentity,
+    MemoryStore,
+    _dump,
+    fact_markers,
+    legacy_log_note,
+)
 from local_operator.memory_inspect import _exportable, _read_only_connection
 
 #: ``MemoryStore.move`` accepts at most this many targets per call.
@@ -78,15 +89,18 @@ def plan(
     groups: dict[str, dict[str, Any]] = {}
     kept = {"facts": 0, "tokens": 0}
     stranded = {"facts": 0, "tokens": 0}
+    foreign = {"facts": 0, "tokens": 0}
     total = {"facts": 0, "tokens": 0}
     planned: list[tuple[str, str, str]] = []
     matched_includes: set[str] = set()
     if store.path.exists():
         with _read_only_connection(store.path) as db:
             rows = db.execute(
-                "SELECT entity_id,op_id,fact,tokens FROM current WHERE scope='global' "
-                "ORDER BY entity_id"
+                "SELECT c.entity_id,c.op_id,c.fact,c.tokens,o.origin FROM current c "
+                "JOIN ops o ON o.op_id=c.op_id WHERE c.scope='global' ORDER BY c.entity_id"
             ).fetchall()
+            local = db.execute("SELECT value FROM meta WHERE key='origin'").fetchone()
+            local_origin = str(local[0]) if local else ""
             for row in rows:
                 entity, revision, tokens = row["entity_id"], row["op_id"], row["tokens"]
                 fact = json.loads(row["fact"])
@@ -104,8 +118,17 @@ def plan(
                     kept["facts"] += 1
                     kept["tokens"] += tokens
                     continue
+                # ``source.session`` is WRITER-ASSERTED (``prepare_fact`` lets a
+                # caller's source override the host stamp), so it is trusted only for
+                # a revision THIS device wrote: a synced fact can name any session ID,
+                # and moving it would place it in a bank its writer never had.
+                if row["origin"] != local_origin:
+                    foreign["facts"] += 1
+                    foreign["tokens"] += tokens
+                    continue
+                # A real conversation (it has a transcript), not merely a directory.
                 directory = store._session_directory(source, db) if source else None
-                if directory is None:
+                if directory is None or not store.is_session(source, db):
                     stranded["facts"] += 1
                     stranded["tokens"] += tokens
                     continue
@@ -118,8 +141,13 @@ def plan(
                         "facts": [],
                         "tokens": 0,
                         "markers": [],
+                        "legacy_large": 0,
                     },
                 )
+                # A fact an un-updated build would refuse inside this session's
+                # portable log (see ``MemoryStore.move``'s compatibility warning).
+                if count_text_tokens(_dump(fact)) > LEGACY_ITEM_WIRE_TOKENS:
+                    group["legacy_large"] += 1
                 title = fact.get("title")
                 group["facts"].append(
                     {
@@ -153,6 +181,7 @@ def plan(
         "moving": {"facts": moving, "tokens": moving_tokens},
         "kept": kept,
         "stranded": stranded,
+        "foreign": foreign,
         "total": total,
         "cap_tokens": MemoryStore.token_cap("global"),
         "fingerprint": _fingerprint(planned),
@@ -210,6 +239,10 @@ def apply(
                 "tokens": sum(row["tokens"] for row in moved),
                 "planned": len(ids),
                 "refused": refused,
+                # Moves re-mint the entity ID; the old one no longer resolves, so
+                # the receipt is where the human finds each fact's new reference.
+                "moves": [{"from": row["from"], "to": row["to"]} for row in moved],
+                "legacy_large": group["legacy_large"],
             }
         )
     with _read_only_connection(store.path) as db:
@@ -238,9 +271,14 @@ def render(value: dict[str, Any], prefix: str) -> list[str]:
                 )
             else:
                 lines.append(f"{label}: moved {group['moved']} fact(s), {group['tokens']:,} tokens")
+            for move in group.get("moves", []):
+                lines.append(f"    {move['from']} → {move['to']}")
         if not lines:
             lines.append("Nothing to move.")
         lines.append(f"Global bank now {value['global_tokens']:,}/{cap:,} tokens.")
+        large = sum(group.get("legacy_large", 0) for group in value["groups"] if group["moved"])
+        if large:
+            lines.append(legacy_log_note(large))
         return lines
     total, moving = value["total"], value["moving"]
     lines = [
@@ -260,10 +298,19 @@ def render(value: dict[str, Any], prefix: str) -> list[str]:
         f"Would move {moving['facts']} fact(s), {moving['tokens']:,} tokens; global would hold "
         f"{after:,}/{cap:,} ({100.0 * after / cap:.0f}%)."
     )
+    if value["foreign"]["facts"]:
+        lines.append(
+            f"{value['foreign']['facts']} work-shaped fact(s) stay: another device wrote them, "
+            "so their recorded session is not trusted here."
+        )
+    large = sum(group["legacy_large"] for group in value["groups"])
+    if large:
+        lines.append(legacy_log_note(large))
     if value["stranded"]["facts"]:
         lines.append(
-            f"{value['stranded']['facts']} work-shaped fact(s) stay: their source session "
-            "directory is gone (move one by hand: `move global/ID --to session --session LIVE_ID`)."
+            f"{value['stranded']['facts']} work-shaped fact(s) stay: their source session is "
+            "not a conversation on this device (move one by hand: "
+            "`move global/ID --to session --session LIVE_ID`)."
         )
     lines.append(
         f"{value['kept']['facts']} fact(s) stay in global (no work marker); name one with "

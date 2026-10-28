@@ -109,6 +109,10 @@ def _checked_vector(value: Any) -> dict[str, int]:
     return value
 
 
+class _LegacyWithheld(MemoryError):
+    """An op skipped only because the peer predates ``memory-item-512``."""
+
+
 def batch(
     memory: MemoryStore,
     vector: dict[str, int],
@@ -118,6 +122,7 @@ def batch(
     withheld: list[str] | None = None,
     *,
     legacy_item_cap: bool = False,
+    legacy_withheld: list[str] | None = None,
 ) -> dict[str, Any]:
     """Bounded operations and content-free skipped ranges, never guessed bodies.
 
@@ -126,8 +131,10 @@ def batch(
     ``LEGACY_ITEM_WIRE_TOKENS`` wire tokens, and one refused op fails the whole
     batch and strands that peer behind a sequence gap. Such a fact is withheld
     as a content-free skip instead — the same channel an unverifiable row uses —
-    and is reported in ``withheld``. The skip advances that peer's cursor, so this
-    revision is not re-sent once the peer updates; the next revision is.
+    and is reported in ``withheld``. Its op_id is ALSO appended to
+    ``legacy_withheld``: the skip advances that peer's cursor, so the ordinary
+    stream would never offer this revision again, and ``_push_to_peer`` persists
+    the id and redelivers the op once the peer advertises the capability.
     """
     _checked_vector(vector)
     result: dict[str, Any] = {
@@ -163,10 +170,13 @@ def batch(
                         raise MemoryError("Memory operation/index identity mismatch.")
                     if (
                         legacy_item_cap
+                        and op["scope"] in scopes
                         and op["fact"] is not None
                         and count_text_tokens(_dump(op["fact"])) > LEGACY_ITEM_WIRE_TOKENS
                     ):
-                        raise MemoryError("Memory item exceeds the peer's legacy item cap.")
+                        if legacy_withheld is not None:
+                            legacy_withheld.append(op["op_id"])
+                        raise _LegacyWithheld()
                     if op["scope"] in scopes:
                         if op["kind"] == "put" and op["fact"] is None:
                             proof = db.execute(
@@ -187,8 +197,14 @@ def batch(
                         result["ops"].append(op)
                     else:
                         result["skips"].append([origin, seq, seq])
-                except (MemoryError, ValueError, TypeError):
-                    if withheld is not None and len(withheld) < 20:
+                except (MemoryError, ValueError, TypeError) as exc:
+                    # A legacy-cap skip is reported through ``legacy_withheld`` (and
+                    # redelivered later), not as an unverifiable/unknown-origin row.
+                    if (
+                        withheld is not None
+                        and len(withheld) < 20
+                        and not isinstance(exc, _LegacyWithheld)
+                    ):
                         withheld.append(_safe_ref(row[1]))
                     result["skips"].append([origin, seq, seq])
                 result["after"][origin] = seq
@@ -199,6 +215,52 @@ def batch(
                 ):
                     return before
     return result
+
+
+#: Bound on the op_ids remembered per peer as withheld for lack of
+#: ``wire.MEMORY_ITEM_512``. Past it the peer is marked ``overflow`` and, once it
+#: upgrades, re-baselined through a new stream generation (a full, idempotent
+#: resend) instead of an id-by-id redelivery: the list is a meta row rewritten on
+#: every push, so it must stay small.
+LEGACY_WITHHELD_CAP = 256
+#: Ops per redelivery request; each is <= ITEM_BYTES, so 24 stay well inside
+#: ``MAX_BATCH_BYTES`` with the envelope.
+_REDELIVER_OPS = 24
+
+
+def _legacy_key(peer: str) -> str:
+    return "memory-withheld:" + safe_segment(peer, structural=True)
+
+
+def legacy_pending(memory: MemoryStore, peer: str) -> dict[str, Any]:
+    """The ops withheld from ``peer`` for its legacy item cap, not yet redelivered.
+
+    WHY this is persisted: a withheld op is a content-free skip that ADVANCES the
+    peer's cursor, so the ordinary stream never offers it again. Without this
+    record a large fact written once (a goal, a decision) would stay missing on
+    that peer forever after it upgraded, while status reported ``in_sync``.
+    """
+    if not memory.path.exists():
+        return {"ids": [], "overflow": False}
+    with memory.connection() as db:
+        row = db.execute("SELECT value FROM meta WHERE key=?", (_legacy_key(peer),)).fetchone()
+    value = json.loads(row[0]) if row else {}
+    return {"ids": list(value.get("ids", [])), "overflow": bool(value.get("overflow"))}
+
+
+def _save_legacy_pending(memory: MemoryStore, peer: str, ids: list[str], overflow: bool) -> None:
+    ids = list(dict.fromkeys(ids))
+    if len(ids) > LEGACY_WITHHELD_CAP:
+        ids, overflow = [], True
+    with memory.connection() as db:
+        if ids or overflow:
+            db.execute(
+                "INSERT OR REPLACE INTO meta VALUES (?,?)",
+                (_legacy_key(peer), _dump({"ids": ids, "overflow": overflow})),
+            )
+        else:
+            db.execute("DELETE FROM meta WHERE key=?", (_legacy_key(peer),))
+        db.commit()
 
 
 def receive(
@@ -230,6 +292,15 @@ def receive(
     }
     after = _checked_vector(payload.get("after"))
     operations, proofs, skips = (payload.get(key) for key in ("ops", "proofs", "skips"))
+    # Ops this sender once withheld from us (``memory-item-512``) and now
+    # redelivers. They sit BEHIND our cursor by construction, so they are kept out
+    # of the contiguity accounting below; anything at or past the cursor is refused,
+    # so this list can never be used to step around the sequence check. Only a
+    # sender that saw us advertise the capability sends it, i.e. a build with this
+    # code; an older receiver never sees the key.
+    redeliver = payload.get("redeliver", [])
+    if not isinstance(redeliver, list) or len(redeliver) > _REDELIVER_OPS:
+        raise MemoryError("Invalid bounded memory redelivery list.")
     if any(
         not isinstance(value, list) or len(value) > 256 for value in (operations, proofs, skips)
     ):
@@ -247,6 +318,18 @@ def receive(
             raise MemoryError(f"Memory operation {reference} refused: {exc}") from None
         if op["origin_device"] not in origins or op["scope"] not in scopes:
             raise MemoryError("Memory origin/scope is not active and authorised.")
+    for op in redeliver:
+        try:
+            validate_op(op)
+        except MemoryError as exc:
+            reference = (
+                _safe_ref(op.get("op_id")) if isinstance(op, dict) else "invalid-operation-id"
+            )
+            raise MemoryError(f"Memory operation {reference} refused: {exc}") from None
+        if op["origin_device"] not in origins or op["scope"] not in scopes:
+            raise MemoryError("Memory origin/scope is not active and authorised.")
+        if op["seq"] > before.get(op["origin_device"], 0):
+            raise MemoryError("A redelivered memory operation is not behind this peer's cursor.")
     for op in operations:
         intervals.setdefault(op["origin_device"], []).append((op["seq"], op["seq"]))
     for row in skips:
@@ -272,7 +355,7 @@ def receive(
             raise MemoryError("Memory sequence vector does not cover the batch.")
     # Ops are atomic and idempotent. Cursor is committed only AFTER them: a
     # process crash between commits can cause a replay, never a lost operation.
-    changed = memory.apply_ops(operations + proofs, origins=origins, contiguous=False)
+    changed = memory.apply_ops(operations + proofs + redeliver, origins=origins, contiguous=False)
     if after != before:
         with memory.connection() as db:
             db.execute(
@@ -459,7 +542,73 @@ def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
                         "SELECT op_id FROM ops WHERE origin=? LIMIT 1", (row[0],)
                     ).fetchone()
                     withheld.append(_safe_ref(reference[0]))
+    legacy = wire.MEMORY_ITEM_512 not in link.capabilities
+    pending = legacy_pending(memory, device_id)
+    if not legacy and pending["overflow"]:
+        # Too many withheld ids to remember: re-baseline instead. A new stream
+        # generation makes every peer's cursor for us start empty, so the next pass
+        # is a full idempotent resend that includes every skipped op.
+        with memory.connection() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO meta VALUES ('stream-generation',?)",
+                (str(source_generation + 1),),
+            )
+            db.commit()
+        _save_legacy_pending(memory, device_id, [], False)
+        return {"ok": True, "code": "catching_up", "batches": batches, "withheld": withheld}
+    elif not legacy and pending["ids"]:
+        # The peer now accepts 512-content facts: redeliver what its legacy cap
+        # made us skip. They are behind its cursor, so they travel in the
+        # ``redeliver`` list the receiver applies without contiguity accounting.
+        with memory.connection() as db:
+            ops = []
+            for op_id in pending["ids"]:
+                row = db.execute("SELECT data FROM ops WHERE op_id=?", (op_id,)).fetchone()
+                op = json.loads(row[0]) if row else None
+                # Gone (compacted away as superseded) or redacted under a tombstone:
+                # the stream already carried what replaced it, so nothing is owed.
+                if op is not None and op["fact"] is not None and op["scope"] in scopes:
+                    ops.append(op)
+        remaining = [op["op_id"] for op in ops]
+        for start in range(0, len(ops), _REDELIVER_OPS):
+            chunk = ops[start : start + _REDELIVER_OPS]
+            answer = request(
+                "push",
+                payload={
+                    "v": 1,
+                    "generation": source_generation,
+                    "scopes": scopes,
+                    "ops": [],
+                    "skips": [],
+                    "proofs": [],
+                    "after": dict(vector),
+                    "redeliver": chunk,
+                },
+            )
+            if (
+                not isinstance(answer, dict)
+                or answer.get("op") == "error"
+                or answer.get("ok") is False
+            ):
+                _save_legacy_pending(memory, device_id, remaining, False)
+                return {
+                    "ok": False,
+                    "code": (
+                        _peer_code(answer.get("code"), "refused")
+                        if isinstance(answer, dict)
+                        else "push_failed"
+                    ),
+                    "message": (
+                        _peer_message(answer.get("message")) if isinstance(answer, dict) else ""
+                    ),
+                    "batches": batches,
+                }
+            remaining = remaining[len(chunk) :]
+            batches += 1
+        _save_legacy_pending(memory, device_id, remaining, False)
+        pending = {"ids": remaining, "overflow": False}
     while batches < 8:
+        newly: list[str] = []
         payload = batch(
             memory,
             vector,
@@ -467,18 +616,33 @@ def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
             active,
             source_generation,
             withheld,
-            legacy_item_cap=wire.MEMORY_ITEM_512 not in link.capabilities,
+            legacy_item_cap=legacy,
+            legacy_withheld=newly,
         )
+        if newly:
+            # Recorded BEFORE the push that advances the peer's cursor past them:
+            # a skip without this record is the permanent loss this list prevents.
+            pending = {"ids": pending["ids"] + newly, "overflow": pending["overflow"]}
+            _save_legacy_pending(memory, device_id, pending["ids"], pending["overflow"])
+            pending = legacy_pending(memory, device_id)
         if payload["after"] == vector:
+            owed = bool(pending["ids"] or pending["overflow"])
             return {
-                "ok": not withheld,
+                "ok": not withheld and not owed,
                 "code": (
                     "withheld"
                     if withheld
-                    else "in_sync" if generation(memory) == source_generation else "catching_up"
+                    else (
+                        "withheld_pending"
+                        if owed
+                        else (
+                            "in_sync" if generation(memory) == source_generation else "catching_up"
+                        )
+                    )
                 ),
                 "batches": batches,
                 "withheld": withheld,
+                "pending": len(pending["ids"]),
             }
         answer = request("push", payload=payload)
         if not isinstance(answer, dict) or answer.get("op") == "error" or answer.get("ok") is False:
@@ -497,11 +661,13 @@ def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
             return {"ok": False, "code": "ack_mismatch"}
         vector = reply["vector"]
         batches += 1
+    owed = bool(pending["ids"] or pending["overflow"])
     return {
-        "ok": not withheld,
-        "code": "withheld" if withheld else "catching_up",
+        "ok": not withheld and not owed,
+        "code": "withheld" if withheld else "withheld_pending" if owed else "catching_up",
         "batches": batches,
         "withheld": withheld,
+        "pending": len(pending["ids"]),
     }
 
 
@@ -545,6 +711,9 @@ def push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
                         "batches": result.get("batches", 0),
                         "last_withheld": result.get("withheld")
                         or previous_receipt.get("last_withheld", []),
+                        # Facts this peer has not received because it predates
+                        # memory-item-512; redelivered automatically once it updates.
+                        "pending": result.get("pending", 0),
                         # A healthy answer has no message, which CLEARS a stale
                         # refusal sentence from the previous receipt; otherwise a
                         # recovered peer would keep showing its old failure reason.

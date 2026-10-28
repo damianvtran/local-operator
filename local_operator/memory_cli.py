@@ -1069,6 +1069,10 @@ _PEER_REMEDY: dict[str, str] = {
     "skipped:no_admin": "Grant receiver-admin to this device on the peer, or exclude "
     "this peer from memory sync.",
     "peer_too_old": "Run lop-update on both peers.",
+    # Deliberately NOT a healthy code: facts over the old item cap are owed to this
+    # peer, and they arrive by themselves on the first sync after it updates.
+    "withheld_pending": "This peer runs an older build that refuses large memory facts; "
+    "run lop-update there and they are delivered on the next sync.",
     "refused": "Grant this device memory access on the peer.",
     "not_authorised": "Grant this device memory access on the peer.",
     "capability_denied": "Grant memory-sync-v1 on the peer.",
@@ -1694,6 +1698,8 @@ def render_human(text: str, failed: bool = False, prefix: str = "/memory") -> st
                 f"Next: {prefix} show {rows[0]['to']}{value.get('context', '')} --related "
                 "(the previous scope is shown as moved_from)"
             )
+        if value.get("compatibility"):
+            lines += _shaped(value["compatibility"])
         lines += _quota_receipt(value)
         return "\n".join(lines)
     if "items" in value:

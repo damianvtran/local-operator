@@ -191,9 +191,11 @@ def _decision_body(decision: Mapping[str, Any]) -> str:
 
     body = " ".join(str(decision.get("body") or "").split())
     clipped = body[:CARRIED_DECISION_CHARS]
-    # Halve toward the token bound: at most ~3 cheap passes for a 400-char row.
-    while count_text_tokens(clipped) > CARRIED_DECISION_TOKENS:
-        clipped = clipped[: len(clipped) * CARRIED_DECISION_TOKENS // count_text_tokens(clipped)]
+    # Shrink toward the token bound (at most ~3 cheap passes for a 400-char row),
+    # one token under it when clipping so the appended ellipsis stays inside it.
+    while count_text_tokens(clipped) > CARRIED_DECISION_TOKENS - (clipped != body):
+        limit = CARRIED_DECISION_TOKENS - 1
+        clipped = clipped[: max(1, len(clipped) * limit // count_text_tokens(clipped))]
     if clipped != body:
         return clipped.rstrip() + "…"
     return body

@@ -65,7 +65,13 @@ The human CLI verbs are `list`, `show`, `search`, `move`, `edit`, `forget`, `sta
 or `recall` CLI commands. `lop memory triage --scope global` previews work-shaped
 global facts grouped by the session that wrote them; a human applies it with
 `--apply --expect FINGERPRINT` (optionally `--only SESSION`, `--include ID`), which
-moves them back to those sessions and never deletes.
+moves them back to those sessions and never deletes. Only facts this device wrote,
+whose recorded session is a conversation here, are proposed.
+
+Mixed builds: facts over 256 wire tokens need `memory-item-512`. Sync withholds them
+from an older peer (`lop memory status` shows `withheld_pending`) and delivers them
+once it updates. A session memory log holding one cannot be imported by an older
+build; a move that places such a fact says so. Run `lop-update` on that device.
 
 ## Existing read/write/edit tools
 
@@ -129,7 +135,7 @@ Never mark an inference as observed. Captures are candidates, not confirmed fact
   scoped fact with source attribution. Do not silently copy a session bank.
 
 Items cap at 512 content tokens (title, body, subject, tags and aliases; metadata
-is not charged) and 8192 stored bytes. Global active quota is 24k tokens; each
+is not charged) and 8192 stored bytes. Global active quota is 16k tokens; each
 session/team/agent owner 50k. A quota refusal names the bank, its usage, what the
 write needs and the remedy (`lop memory triage --scope global` for global, `lop
 memory compact` for history). Recall, suggestions (≤3/180 tokens)

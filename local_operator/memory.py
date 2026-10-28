@@ -91,15 +91,37 @@ ITEM_BYTES = 8192
 #: that peer's ``validate_fact`` would refuse the WHOLE batch and then sit behind a
 #: permanent sequence gap. Never use it to validate a local write.
 LEGACY_ITEM_WIRE_TOKENS = 256
+
+
+def legacy_log_note(count: int) -> str:
+    """The warning for session-log facts an un-updated build cannot import.
+
+    WHY a warning and not a format change: ``memory-session.jsonl`` is read line
+    by line by every build, each line an op, so ANY marker line would break old
+    imports of every log, and a sibling marker file would trip an old build's
+    ``unlisted_content`` move guard. An old importer refuses only the logs that
+    really hold such a fact, with its own item-cap message; this note names that
+    cause and the remedy at the moment such a fact is placed in a session log.
+    """
+    return (
+        f"Note: {count} fact(s) here exceed the item limit of builds before "
+        "memory-item-512. A device still on such a build refuses the destination "
+        "session's memory log (it reports an item over 256 tokens); run lop-update there."
+    )
+
+
 #: Token caps per scope. One authority: the write gate (``_quota``), the move
 #: destination check, the warning state and inventory/status all read these, so
 #: a reported headroom cannot disagree with the number a write is refused on.
 #: Global is the shared bank everyone reads; every other scope is per-owner.
-#: Global was 16,000 and filled to 99% with MISROUTED work state, not demand: bank
-#: size never reaches the prompt (bodies enter only via budgeted recall and the
-#: clamped carry tier), so 24,000 is headroom while routing and triage land. Do
-#: not raise it further to paper over misrouting — `lop memory triage` is the fix.
-GLOBAL_TOKENS = 24000
+#: Deliberately still 16,000. The global bank filled to 99% with MISROUTED work
+#: state (fixed by session-default routing and `lop memory triage`, which takes the
+#: live bank to ~9.5k), not with demand. A raise is deferred, not rejected: the
+#: RECEIVER enforces the sender's quota on apply (``apply_ops`` -> ``_quota``), so a
+#: sender with a bigger cap would make every un-updated peer refuse the batch that
+#: crosses 16,000 and stall its whole stream behind it. Raise it only once receivers
+#: stop enforcing the sender's quota on apply, or once the fleet has updated.
+GLOBAL_TOKENS = 16000
 OWNER_TOKENS = 50000
 #: Percent thresholds that warn ONCE on the write that crosses them, highest
 #: first: a write jumping straight past both reports the endangering one.
@@ -865,8 +887,12 @@ def validate_fact(raw: Any) -> dict[str, Any]:
     # so the envelope (source, timestamps, status keys) is never charged to them;
     # wire BYTES are what storage, the session export and the mesh carry. Each
     # refusal names its bound and the overage — counts only, so it stays value-free.
+    # A title that merely repeats the body's opening (the plain-text tool derives it
+    # from the first line) adds no content, so it is not charged a second time:
+    # otherwise a single-line store paid ~27 tokens for its own first 100 characters.
+    title = "" if fact["body"].lstrip().startswith(fact["title"].strip()) else fact["title"]
     content = count_text_tokens(
-        "\n".join([fact["title"], fact["body"], fact["subject"], *fact["tags"], *fact["aliases"]])
+        "\n".join([title, fact["body"], fact["subject"], *fact["tags"], *fact["aliases"]])
     )
     if content > ITEM_TOKENS:
         raise MemoryError(
@@ -2475,9 +2501,10 @@ class MemoryStore:
                     "session only."
                 )
             dest_owner = safe_segment(destination_owner)
-            if self._session_directory(dest_owner) is None:
+            if not self.is_session(dest_owner):
                 raise MemoryError(
-                    f"Session {dest_owner[:8]} has no directory here; its facts stay in place."
+                    f"Session {dest_owner[:8]} is not a conversation on this device (no "
+                    "transcript); its facts stay in place."
                 )
         if expected_version is not None:
             safe_segment(expected_version)
@@ -2523,6 +2550,7 @@ class MemoryStore:
             # the batch cannot leave an earlier move half-applied.
             prepared: list[tuple[str, str, dict[str, Any], dict[str, Any]]] = []
             needed = 0
+            legacy_large = 0
             batch_facts: set[str] = set()
             source_counts: dict[tuple[str, str], int] = {}
             for source_scope, entity in resolved:
@@ -2578,6 +2606,8 @@ class MemoryStore:
                         "Resolve one of the two first."
                     )
                 needed += count_text_tokens(_dump(fact))
+                if count_text_tokens(_dump(fact)) > LEGACY_ITEM_WIRE_TOKENS:
+                    legacy_large += 1
                 # Two byte-identical facts in one batch would create two identical
                 # destination rows: ``put``'s idempotence would have refused the
                 # second, and ``move`` bypasses ``put``, so refuse it here.
@@ -2740,9 +2770,24 @@ class MemoryStore:
             "moved": moved,
             "quota": quota,
         }
+        if destination == "session" and legacy_large:
+            result["compatibility"] = legacy_log_note(legacy_large)
         if warning:
             result["warning"] = warning
         return result
+
+    #: Files that make a directory under ``sessions/`` a CONVERSATION: a transcript,
+    #: plain or archived by retention compression. A bare directory (a subagent's
+    #: memory namespace, or one a writer could name in ``source.session``) is not a
+    #: session a human can open, so a named-owner move must not target it.
+    SESSION_MARKERS = ("transcript.jsonl", "transcript.jsonl.zst", "transcript.jsonl.gz")
+
+    def is_session(self, owner: str, db: sqlite3.Connection | None = None) -> bool:
+        """Whether ``owner`` names a real conversation on this device."""
+        directory = self._session_directory(owner, db)
+        return directory is not None and any(
+            (directory / name).is_file() for name in self.SESSION_MARKERS
+        )
 
     def _session_directory(self, owner: str, db: sqlite3.Connection | None = None) -> Path | None:
         if owner == self.identity.session_id and self.session_dir:
