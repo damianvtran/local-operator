@@ -3244,7 +3244,8 @@ async def test_conversation_reactions_forward_and_preserve_summary(api):
         "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_abcdef12/reactions/"
         + quote("👍", safe="")
     )
-    response = await client.put(path, json={"tenant_id": "tnt_1", "expected_account_id": "acc_1"})
+    receipt = {"tenant_id": "tnt_1", "expected_account_id": "acc_1"}
+    response = await client.put(path, json=receipt)
     assert response.status_code == 200, response.text
     assert response.json()["result"] == summary
     assert FakeClient.behavior["last_react"] == (
@@ -3311,9 +3312,8 @@ async def test_conversation_reactions_refuse_agent_impersonation_and_oversized_i
     assert response.status_code == 422
     response = await client.put(path + quote("😀" * 33), json={})
     assert response.status_code == 422
-    response = await client.delete(
-        path + quote("👍") + "?tenant_id=tnt_1&expected_account_id=acc_1&actor_endpoint_id=bep_other"
-    )
+    receipt = "?tenant_id=tnt_1&expected_account_id=acc_1"
+    response = await client.delete(path + quote("👍") + receipt + "&actor_endpoint_id=bep_other")
     assert response.status_code == 422
     assert FakeClient.instances == []
 
