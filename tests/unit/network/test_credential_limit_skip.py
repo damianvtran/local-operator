@@ -42,12 +42,10 @@ from local_operator.network.credentials import placement as placement_mod
 from local_operator.network.credentials.client import MeshCredentialClient
 from local_operator.network.credentials.state import PlacementState
 from local_operator.network.credentials.store import MeshAwareAuthStore
-from local_operator.network.credentials.types import BrokerError
+from local_operator.network.credentials.types import BrokerError, Grant
 from local_operator.providers.auth_store import MAX_CREDENTIAL_BLOCK_MS, AuthStore
 from local_operator.providers.clients import OpenAICompatClient
 from local_operator.providers.failover import stream_with_failover
-from tests.unit.network.test_credentials_real_link import mesh  # noqa: F401 — fixture by import
-from tests.unit.network.test_relay_e2e import devices  # noqa: F401 — fixture by import
 from tests.unit.network.test_credentials_owner import (  # noqa: F401 — fixtures by import
     BORROWER_DEVICE,
     OWNER_DEVICE,
@@ -57,6 +55,10 @@ from tests.unit.network.test_credentials_owner import (  # noqa: F401 — fixtur
     owner,
     stub_provider,
 )
+from tests.unit.network.test_credentials_real_link import (  # noqa: F401 — fixture by import
+    mesh,
+)
+from tests.unit.network.test_relay_e2e import devices  # noqa: F401 — fixture by import
 
 # ``owner`` and ``mesh`` are fixtures registered by the imports above and reached
 # with ``getfixturevalue``; the names are kept bound so the registration holds.
@@ -234,7 +236,9 @@ class _NoLocalLogins:
 
 
 @pytest.fixture()
-def borrowed(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+def borrowed(
+    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Any:
     """Two live rows on the owner (A spent, B healthy); a borrower with none.
 
     The owner fixture is reached by NAME (``getfixturevalue``), the convention the
@@ -322,16 +326,19 @@ async def test_borrowed_a_24h_429_moves_to_the_next_row_and_rests_the_spent_one(
     assert stub.seen.count("bearer-a") == 1, f"the spent row was re-served: {stub.seen}"
 
     # The cooldown is the LOCAL rule's window, named by the account's label.
-    resting = borrowed.client.state.cooldowns(STUB_PROVIDER, "claude-opus-5-5")
+    resting = borrowed.client.state.cooldowns(
+        STUB_PROVIDER, "claude-opus-5-5", owner_device=OWNER_DEVICE
+    )
     assert [row["credential_id"] for row in resting] == [borrowed.row_a.id], resting
     assert resting[0]["label"] == "owner@example.test", resting
     left_s = resting[0]["until"] - time.time()
     assert MAX_CREDENTIAL_BLOCK_MS / 1000 - 60 < left_s <= MAX_CREDENTIAL_BLOCK_MS / 1000, resting
     # ...and it survives the process: a fresh state read sees it.
     reloaded = PlacementState.load("n_owner", borrowed.root)
-    assert [row["credential_id"] for row in reloaded.cooldowns(STUB_PROVIDER, "claude-opus-5-5")] == [
-        borrowed.row_a.id
-    ]
+    assert [
+        row["credential_id"]
+        for row in reloaded.cooldowns(STUB_PROVIDER, "claude-opus-5-5", owner_device=OWNER_DEVICE)
+    ] == [borrowed.row_a.id]
 
     # Same session, next request: A is not asked inside its window.
     stub.seen.clear()
@@ -342,9 +349,12 @@ async def test_borrowed_a_24h_429_moves_to_the_next_row_and_rests_the_spent_one(
 
     # F3 still holds: nothing the borrower did blocks the owner's row beyond
     # the owner's own bounded 60 s family block.
-    assert borrowed.owner.auth.blocked_remaining_ms(
-        borrowed.row_a.id, STUB_PROVIDER, "claude-opus-5-5"
-    ) <= 60_000
+    assert (
+        borrowed.owner.auth.blocked_remaining_ms(
+            borrowed.row_a.id, STUB_PROVIDER, "claude-opus-5-5"
+        )
+        <= 60_000
+    )
 
 
 def test_every_row_resting_reads_as_a_quota_rest_naming_the_accounts(borrowed: Any) -> None:
@@ -378,7 +388,9 @@ def test_every_row_resting_reads_as_a_quota_rest_naming_the_accounts(borrowed: A
     assert reason and "owner@example.test" in reason and "second@example.test" in reason, reason
     assert "bearer-" not in reason, reason
     # A model of another family is gated only by the account-wide rest.
-    other = borrowed.client.state.cooldowns(STUB_PROVIDER, "claude-haiku-5")
+    other = borrowed.client.state.cooldowns(
+        STUB_PROVIDER, "claude-haiku-5", owner_device=OWNER_DEVICE
+    )
     assert [row["credential_id"] for row in other] == [borrowed.row_b.id]
 
 
@@ -451,7 +463,9 @@ async def test_over_real_relays_the_spent_row_rests_and_the_next_row_serves(
         first = await _turn(store, stub, STUB_PROVIDER, "sess-real")
         assert _ended(first), f"the turn ended on the 429: {first}"
         assert len(stub.seen) == 2 and stub.seen[0] != stub.seen[1], stub.seen
-        resting = client.state.cooldowns(STUB_PROVIDER, "claude-opus-5-5")
+        resting = client.state.cooldowns(
+            STUB_PROVIDER, "claude-opus-5-5", owner_device=client.owner_of(STUB_PROVIDER)
+        )
         assert len(resting) == 1 and resting[0]["credential_id"] != second.id, resting
 
         stub.seen.clear()
@@ -460,3 +474,132 @@ async def test_over_real_relays_the_spent_row_rests_and_the_next_row_serves(
         assert stub.spent not in stub.seen, f"the spent row was asked again: {stub.seen}"
     finally:
         owner_auth.close()
+
+
+# ---------------------------------------------------------------------------
+# Round 1 remediation cells (review M1/M2/m1/m2/n1, QA Q1-Q4)
+# ---------------------------------------------------------------------------
+
+
+def test_m1_excluding_every_row_never_lends_the_env_tier_key(
+    borrowed: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1: a peer exclusion may only NARROW — never reach the env/fallback tiers.
+
+    The owner holds two OAuth rows AND an ambient API key (tier 5, id 0). Naming
+    every row must refuse ``quota_blocked``, never serve id 0.
+    """
+    from tests.unit.network.test_credentials_owner import _detail, _grant_frame
+
+    monkeypatch.setattr(AuthStore, "_env_api_key", lambda _self, _provider: "sk-ambient-env-key")
+    frame = _grant_frame(BORROWER_DEVICE, session="sess-m1", model_id="claude-opus-5-5")
+    # Control: with no exclusion the owner's own pick is a stored row.
+    plain = _detail(borrowed.owner.broker.on_broker(_Link(BORROWER_DEVICE), dict(frame)))
+    assert plain["kind"] == "grant" and plain["credential_ref"]["credential_id"] > 0, plain
+
+    frame["exclude_credential_ids"] = [borrowed.row_a.id, borrowed.row_b.id]
+    frame["req"] = 2
+    detail = _detail(borrowed.owner.broker.on_broker(_Link(BORROWER_DEVICE), frame))
+    assert detail["kind"] == "error", f"the env-tier key was lent: {detail}"
+    assert detail["code"] == "quota_blocked", detail
+    # Q3: the owner's sentence is the exclusion, never "nothing signed in".
+    assert "excluded by the holder" in detail["message"], detail
+    assert "signed in" not in detail["message"], detail
+
+
+def test_m2_a_rest_under_a_previous_owner_never_rides_to_the_new_one(
+    borrowed: Any,
+) -> None:
+    """M2: row ids are per-owner; a rest recorded under owner A hides nothing on B."""
+    other_owner = "d_99999999999999999999999999999999"
+    borrowed.client.state.cool_down(
+        STUB_PROVIDER,
+        owner_device=other_owner,
+        credential_id=borrowed.row_a.id,
+        block_scope="",
+        until=time.time() + 3_600,
+        label="someone@elsewhere.test",
+    )
+    assert (
+        borrowed.client.state.cooldowns(STUB_PROVIDER, "claude-opus-5-5", owner_device=OWNER_DEVICE)
+        == []
+    )
+    outcome = borrowed.client.request_grant_sync(
+        STUB_PROVIDER, session_id="sess-m2", model_id="claude-opus-5-5", provider=STUB_PROVIDER
+    )
+    assert isinstance(outcome, Grant), outcome
+    assert (
+        "exclude_credential_ids" not in borrowed.relay.grant_frames[-1]
+    ), f"a previous owner's ids rode to the current owner: {borrowed.relay.grant_frames[-1]}"
+    # ...and forgetting that owner drops its rests.
+    borrowed.client.state.forget_owner(other_owner)
+    assert not any(
+        slot[1] == other_owner for slot in borrowed.client.state._cooldowns  # noqa: SLF001
+    )
+
+
+def test_m1_q1_all_resting_neither_caches_a_logout_nor_marks_access_withdrawn(
+    borrowed: Any,
+) -> None:
+    """m1 = Q1: the all-resting answer is not persisted as a sign-in failure."""
+    from local_operator.network.credentials.effective import effective_access
+
+    until = time.time() + 3_600
+    for row in (borrowed.row_a, borrowed.row_b):
+        borrowed.client.state.cool_down(
+            STUB_PROVIDER,
+            owner_device=OWNER_DEVICE,
+            credential_id=row.id,
+            block_scope="",
+            until=until,
+            label="",
+        )
+    outcome = borrowed.client.request_grant_sync(
+        STUB_PROVIDER, session_id="sess-q1", model_id="claude-opus-5-5", provider=STUB_PROVIDER
+    )
+    assert isinstance(outcome, BrokerError) and outcome.code == "quota_blocked", outcome
+    status = borrowed.client.state.status(STUB_PROVIDER)
+    assert status != "no_local_credential", status
+    reloaded = PlacementState.load("n_owner", borrowed.root)
+    assert reloaded.status(STUB_PROVIDER) != "no_local_credential"
+    receipt = effective_access(STUB_PROVIDER, root=borrowed.root, mesh=borrowed.client)
+    assert receipt.state != "withdrawn", receipt
+
+
+def test_m2_minor_a_loaded_rest_is_recapped_at_the_one_hour_ceiling(tmp_path: Path) -> None:
+    """m2: a far-future ``until`` on disk (clock step, hand edit) rests at most 1 h."""
+    state = PlacementState("n_cap", root=tmp_path)
+    state._cooldowns[(STUB_PROVIDER, OWNER_DEVICE, 7)] = {  # noqa: SLF001 — simulate the file
+        "key": STUB_PROVIDER,
+        "owner_device": OWNER_DEVICE,
+        "credential_id": 7,
+        "block_scope": "",
+        "until": time.time() + 30 * DAY_S,
+        "label": "",
+    }
+    state.save()
+    loaded = PlacementState.load("n_cap", tmp_path)
+    rows = loaded.cooldowns(STUB_PROVIDER, "claude-opus-5-5", owner_device=OWNER_DEVICE)
+    assert len(rows) == 1, rows
+    assert rows[0]["until"] - time.time() <= MAX_CREDENTIAL_BLOCK_MS / 1000 + 1, rows
+
+
+def test_q4_n1_the_exclusion_validator_is_strict_and_caps_after_filtering() -> None:
+    """Q4: real ints only, filtered before the cap. n1: one cap, one validator."""
+    from local_operator.network import credentials as leg1
+    from local_operator.network.credentials import owner as owner_module
+    from local_operator.network.credentials.types import (
+        MAX_EXCLUDED_CREDENTIAL_IDS,
+        peer_credential_ids,
+    )
+
+    assert peer_credential_ids(["1", 1.9, True, -3, 0, 2, 2, 5]) == (2, 5)
+    junk_first = ["x"] * MAX_EXCLUDED_CREDENTIAL_IDS + [7, 8]
+    assert peer_credential_ids(junk_first) == (7, 8)
+    assert len(peer_credential_ids(list(range(1, 100)))) == MAX_EXCLUDED_CREDENTIAL_IDS
+    assert peer_credential_ids("1,2") == ()
+    for module in (leg1, owner_module):
+        assert not hasattr(module, "MAX_EXCLUDED_CREDENTIAL_IDS") or (
+            module.MAX_EXCLUDED_CREDENTIAL_IDS is MAX_EXCLUDED_CREDENTIAL_IDS
+        )
+        assert not hasattr(module, "MAX_PEER_EXCLUDED_IDS"), module

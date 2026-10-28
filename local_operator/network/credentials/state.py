@@ -208,6 +208,10 @@ class PlacementState:
         mine = [k for k, row in self._observations.items() if row.get("owner_device") == device]
         for key in mine:
             del self._observations[key]
+        # Its cooldowns too (review round 1, M2): they name rows in THAT device's id
+        # space, which mean nothing — or a different account — anywhere else.
+        for slot in [s for s in self._cooldowns if s[1] == device]:
+            del self._cooldowns[slot]
 
     # -- borrower-side cooldowns --------------------------------------------
 
@@ -240,8 +244,15 @@ class PlacementState:
         non-secret identity label (email or account id), kept so the refusal can
         name WHICH account is resting; it is never a token.
         """
-        if credential_id <= 0 or until <= time.time():
+        from local_operator.providers.auth_store import MAX_CREDENTIAL_BLOCK_MS
+
+        now = time.time()
+        if credential_id <= 0 or until <= now:
             return
+        # RE-CAPPED ON EVERY WRITE, INCLUDING A LOAD (review round 1, m2): the file is
+        # self-authored, but a backward clock step or a garbled row must not rest an
+        # account past the one-hour ceiling the shared rule keeps on purpose.
+        until = min(float(until), now + MAX_CREDENTIAL_BLOCK_MS / 1000.0)
         self._cooldowns[(key, owner_device, int(credential_id))] = {
             "key": key,
             "owner_device": owner_device,
@@ -252,9 +263,19 @@ class PlacementState:
         }
 
     def cooldowns(
-        self, key: str, model_id: str = "", *, now: float | None = None
+        self,
+        key: str,
+        model_id: str = "",
+        *,
+        owner_device: str,
+        now: float | None = None,
     ) -> list[dict[str, Any]]:
-        """The live cooldowns that gate ``model_id`` for ``key``, earliest-ending first.
+        """The live cooldowns ``owner_device`` holds for ``key`` that gate ``model_id``.
+
+        ``owner_device`` IS REQUIRED (review round 1, M2): row ids are integers in
+        ONE owner's ``auth.db``, so after the key moves to another owner, id N there
+        is a different account — a rest recorded against the old owner must never
+        hide (or be named for) a row of the new one. Earliest-ending first.
 
         The scope test is ``auth_store.block_scope_gates`` — the predicate the
         local store's ``is_blocked_for_model`` applies — so an account-wide
@@ -265,8 +286,9 @@ class PlacementState:
         stamp = time.time() if now is None else now
         live = [
             dict(row)
-            for (row_key, _owner, _id), row in self._cooldowns.items()
+            for (row_key, row_owner, _id), row in self._cooldowns.items()
             if row_key == key
+            and row_owner == owner_device
             and float(row.get("until") or 0.0) > stamp
             and block_scope_gates(str(row.get("block_scope") or ""), model_id)
         ]

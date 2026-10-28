@@ -89,6 +89,7 @@ from local_operator.network.credentials.types import (
     is_device_bound_provider,
     is_mcp_key,
     mcp_url_from_key,
+    peer_credential_ids,
     peer_int,
     synthetic_credential_id,
 )
@@ -677,7 +678,7 @@ class MeshCredentialBroker:
         #     one peer is offered, which is the same thing a local row's block does
         #     for a local session. Peer ids are validated like every peer number;
         #     an id the owner does not have hides nothing.
-        peer_excluded = _peer_excluded_ids(frame.get("exclude_credential_ids"))
+        peer_excluded = peer_credential_ids(frame.get("exclude_credential_ids"))
         if peer_excluded:
             excluded_ids = tuple(sorted(set(excluded_ids) | set(peer_excluded)))
 
@@ -693,6 +694,7 @@ class MeshCredentialBroker:
                     holder_scope=holder.scope if holder is not None else "session",
                     by=by,
                     excluded_ids=excluded_ids,
+                    peer_excluded=peer_excluded,
                 ),
                 timeout=max(1.0, self._op_deadline_s - HANDLER_WAIT_MARGIN_S),
             )
@@ -779,6 +781,7 @@ class MeshCredentialBroker:
             # A derived holder's exclusion set is part of WHAT is being asked: two askers
             # with different permitted rows must never share one resolve.
             tuple(fields.get("excluded_ids", ())),
+            tuple(fields.get("peer_excluded", ())),
         )
         loop = asyncio.get_running_loop()
         slot = self._inflight.get(ckey)
@@ -817,8 +820,13 @@ class MeshCredentialBroker:
         holder_scope: str,
         by: str,
         excluded_ids: tuple[int, ...] = (),
+        peer_excluded: tuple[int, ...] = (),
     ) -> Any:
-        """The owner's own read-only resolve. Returns a :class:`Grant` or a refusal."""
+        """The owner's own read-only resolve. Returns a :class:`Grant` or a refusal.
+
+        ``peer_excluded`` is the subset of ``excluded_ids`` the REQUESTER named (its
+        resting rows). It changes what may win: see the guard after the resolve.
+        """
         if github_app.is_github_key(key):
             return await self._resolve_github(
                 key=key,
@@ -859,6 +867,39 @@ class MeshCredentialBroker:
             )
         except Exception as exc:  # noqa: BLE001 — classified below, never propagated
             return self._classify_refresh_failure(exc, key)
+        if (
+            peer_excluded
+            and access is not None
+            and int(getattr(access, "credential_id", 0) or 0) <= 0
+        ):
+            # A PEER'S EXCLUSION MAY ONLY NARROW, NEVER REACH A NON-ROW TIER (review
+            # round 1, M1). ``exclude_credential_ids`` hides stored rows (tiers 3, 4,
+            # 6); with every row hidden the cascade fell through to the env/provider
+            # API key (tier 5) or the fallback resolver (tier 7), whose id is 0 — so a
+            # holder that named every row was lent a key the owner's own routing would
+            # never have served it (typically pay-as-you-go, not the shared login).
+            # Under a peer exclusion only a stored row (id > 0) may win; anything
+            # else reads as "nothing left", answered below.
+            access = None
+        if access is None and peer_excluded:
+            # EVERY LENDABLE ROW WAS EXCLUDED BY THE HOLDER (QA round 1, Q3). Not
+            # "nothing signed in": the rows exist and the holder saw them answer a
+            # usage limit. Judged on the owner's own id space — only an excluded id
+            # this device really has counts, so a stale list over a logged-out owner
+            # still reads as the logout it is. ``retry_after_ms`` stays 0: the window
+            # is the HOLDER's evidence, and the borrower renders it from its own
+            # cooldowns (``client._resting_refusal``) rather than caching this.
+            if set(peer_excluded) & set(self._row_stamps(provider)):
+                return BrokerError(
+                    code="quota_blocked",
+                    key=key,
+                    owner_device=self.self_device,
+                    owner_device_name=self.self_device_name,
+                    message=(
+                        f"every lendable login for {provider!r} was excluded by the holder, "
+                        "which saw them rate-limited; nothing was lent"
+                    ),
+                )
         if access is None:
             # THE EMPTY ANSWER IS SPLIT BY ITS CAUSE (audit Q5 #9). ``quota_blocked``
             # had no producer: the owner's cascade excludes blocked rows
@@ -2329,22 +2370,6 @@ def _already_expired(expiry: float | None, *, now: float | None = None) -> bool:
     if expiry is None:
         return False
     return float(expiry) <= (now if now is not None else time.time())
-
-
-#: The most row ids a peer's grant ask may hide; see ``credentials._peer_ids``.
-MAX_PEER_EXCLUDED_IDS = 32
-
-
-def _peer_excluded_ids(value: Any) -> tuple[int, ...]:
-    """A peer's ``exclude_credential_ids``, bounded: positive ints, de-duplicated.
-
-    Re-validated here although leg 1 already did it, because leg 2 is a PEER frame
-    and this device trusts none of its fields on another device's say-so.
-    """
-    if not isinstance(value, list):
-        return ()
-    ids = {peer_int(item) for item in value[:MAX_PEER_EXCLUDED_IDS]}
-    return tuple(sorted(item for item in ids if item > 0))
 
 
 def remote_block_scope(claimed: str, model_id: str) -> str:

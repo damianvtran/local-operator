@@ -634,7 +634,7 @@ class MeshCredentialClient:
         # (see ``PlacementState.cool_down``). An explicit refresh still carries
         # them: a forced refresh is a repair of the bearer, not a request to be
         # served by a row the provider said is spent.
-        resting = self.state.cooldowns(key, model_id)
+        resting = self.state.cooldowns(key, model_id, owner_device=self.owner_of(key))
         excluded = sorted({int(row["credential_id"]) for row in resting})
         try:
             from local_operator.network import store
@@ -671,15 +671,7 @@ class MeshCredentialClient:
                 owner_device_name=self.owner_label(key),
                 message=exc.__class__.__name__,
             )
-        outcome = self._from_reply(reply, key, label, session_id)
-        if isinstance(outcome, BrokerError) and resting and outcome.code == "no_local_credential":
-            # EVERY ROW THE OWNER COULD LEND IS ONE THIS DEVICE SAW RATE-LIMITED: the
-            # owner, with them hidden, has nothing left. That is a quota rest, not
-            # "nothing is signed in" — the latter is cached for 300 s with a re-login
-            # remedy, which is wrong for a limit that heals on its own. Answer the
-            # real reason, with the earliest end and the resting accounts' labels.
-            return self._resting_refusal(key, label, resting)
-        return outcome
+        return self._from_reply(reply, key, label, session_id, resting=resting)
 
     def _resting_refusal(self, key: str, label: str, resting: list[dict[str, Any]]) -> BrokerError:
         """``quota_blocked`` built from this device's own cooldowns. Not cached.
@@ -771,7 +763,9 @@ class MeshCredentialClient:
             frame["exclude_credential_ids"] = list(exclude_credential_ids)
         direct = self._ask_owner_directly(owner, frame)
         if direct is not None:
-            return self._detail_from_owner(direct, key, label)
+            return self._detail_from_owner(
+                direct, key, label, excluded=bool(exclude_credential_ids)
+            )
         return self._detail_error(self._render(self._offline(key, label, owner=owner), key, label))
 
     def _ask_owner_directly(self, owner: str, frame: dict[str, Any]) -> dict[str, Any] | None:
@@ -1416,8 +1410,26 @@ class MeshCredentialClient:
         )
         return error
 
-    def _from_reply(self, reply: Any, key: str, label: str, session_id: str) -> Grant | BrokerError:
-        """Turn a leg-1 control reply into a grant or a refusal."""
+    def _from_reply(
+        self,
+        reply: Any,
+        key: str,
+        label: str,
+        session_id: str,
+        *,
+        resting: list[dict[str, Any]] | None = None,
+    ) -> Grant | BrokerError:
+        """Turn a leg-1 control reply into a grant or a refusal.
+
+        ``resting`` is the cooldown set this ask excluded. When the owner answers
+        that the exclusion left nothing (``quota_blocked`` with no remainder of its
+        own — the owner's ``peer_excluded`` arm), the answer is this device's own
+        rest, rendered from its cooldowns and NOT remembered (review round 1, m1):
+        caching it would record a refusal (or a ``withdrawn`` receipt) that outlives
+        the cooldowns it describes, and the cooldowns already are the record. An
+        owner-measured ``quota_blocked`` (non-zero remainder: its own block) is the
+        owner's state and is cached as before.
+        """
         if not isinstance(reply, dict):
             return self._render(self._offline(key, label), key, label)
         detail = reply.get("detail")
@@ -1441,11 +1453,16 @@ class MeshCredentialClient:
             self.grants.put(key, session_id, grant)
             self._remember_grant(key, grant)
             return grant
-        error = self._render(BrokerError.from_detail(detail), key, label)
+        refused = BrokerError.from_detail(detail)
+        if resting and refused.code == "quota_blocked" and not refused.retry_after_ms:
+            return self._resting_refusal(key, label, resting)
+        error = self._render(refused, key, label)
         self._remember(key, error)
         return error
 
-    def _detail_from_owner(self, reply: dict[str, Any], key: str, label: str) -> dict[str, Any]:
+    def _detail_from_owner(
+        self, reply: dict[str, Any], key: str, label: str, *, excluded: bool = False
+    ) -> dict[str, Any]:
         """A leg-2 reply as a detail object, with the cache updated.
 
         The transport's own refusal (``{"op": "error", ...}``) carries no code, only
@@ -1475,6 +1492,12 @@ class MeshCredentialClient:
             self._remember_grant(key, grant)
             return detail
         error = self._render(BrokerError.from_detail(detail), key, label)
+        if excluded and error.code == "quota_blocked" and not error.retry_after_ms:
+            # The answer to the HOLDER'S exclusion, not an owner-side state (review
+            # round 1, m1): the holder's cooldowns are the record, and caching this
+            # here — the relay shares the session's observation file — would make
+            # the next ask short-circuit on a refusal that outlives them.
+            return self._detail_error(error)
         self._remember(key, error)
         return self._detail_error(error)
 
