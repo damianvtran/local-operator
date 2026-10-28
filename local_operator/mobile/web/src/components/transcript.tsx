@@ -59,11 +59,13 @@ const PROJECTION_ROWS = 80;
 /** Every row id the LIVE fold mints, which no journal row can ever match. The
  *  fold creates them for content that is not a journal entry: reasoning
  *  (`rz-`, never persisted), tool rows (`tc-`), notices (`nt-`, `rt-`, `err-`,
- *  `rej-`) and compaction (`cx-`) — all timestamp- or call-keyed
- *  (`local_operator/mobile/projection.py`, the `id=f"<p>-…"` sites). The child
- *  sheet also synthesises a head row `prompt:<job_id>` (`agent-view.tsx`). A
- *  cursor naming any of these is answered as end-of-history. */
-const LIVE_ONLY_ROW_PREFIXES = ["rz-", "tc-", "nt-", "rt-", "err-", "rej-", "cx-", "prompt:"];
+ *  `rej-`), compaction (`cx-`) and the peer families' `peer-`/`nonpeer-`
+ *  fallbacks when a custom message carried no id — all timestamp- or
+ *  call-keyed (`local_operator/mobile/projection.py`, the `id=f"<p>-…"`
+ *  sites). The child sheet also synthesises a head row `prompt:<job_id>`
+ *  (`agent-view.tsx`). A cursor naming any of these is answered as
+ *  end-of-history. */
+const LIVE_ONLY_ROW_PREFIXES = ["rz-", "tc-", "nt-", "rt-", "err-", "rej-", "cx-", "peer-", "nonpeer-", "prompt:"];
 
 /** Whether a rendered row's id can name a journal entry — the only kind a
  *  history cursor may use. Anything else is a cursor the daemon can only

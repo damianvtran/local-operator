@@ -1516,6 +1516,99 @@ def test_a_small_rosters_graph_is_not_spent_to_save_a_transcript() -> None:
     assert len(json.dumps({"op": "projection", "data": data}).encode()) <= 700_000
 
 
+def test_the_pinned_head_is_stated_on_the_wire() -> None:
+    """The pin is a FACT the daemon publishes, not something the client infers.
+
+    The client's first history cursor must be the oldest row of the tail, and a
+    pinned opener is not it. Length cannot say so: the frame cap can publish a
+    pinned tail of ``FRAME_CAP_TRANSCRIPT_FLOOR`` rows, and an older owner's
+    pinned 80-row frame is indistinguishable from an uncapped one. SPARSE: an
+    unpinned projection omits the key entirely, which is also what an older
+    daemon means.
+    """
+    from local_operator.mobile.types import TranscriptEntry
+
+    fold = make_fold()
+    fold._append(TranscriptEntry(id="opener", kind="user", text="the brief"))
+    for index in range(PROJECTION_TRANSCRIPT_LIMIT):
+        fold._append(TranscriptEntry(id=f"row-{index}", kind="assistant", text="body"))
+
+    assert fold.projection.transcript_head_pinned is True
+    assert fold.projection.to_json()["transcript_head_pinned"] is True
+    assert len(fold.projection.transcript) == PROJECTION_TRANSCRIPT_LIMIT
+    assert fold.projection.transcript[0].id == "opener"
+
+    small = make_fold()
+    small._append(TranscriptEntry(id="opener", kind="user", text="the brief"))
+    for index in range(4):
+        small._append(TranscriptEntry(id=f"row-{index}", kind="assistant", text="body"))
+
+    assert small.projection.transcript_head_pinned is False
+    assert "transcript_head_pinned" not in small.projection.to_json()
+
+
+def test_the_graph_is_offered_again_after_details() -> None:
+    """A graph that did not buy the frame alone may buy it once details are gone.
+
+    Tier 2 asks "is shedding the graph enough by itself". The answer can only
+    improve after a spend, so the same measured question is asked again after
+    tier 3. Without it, a roster whose graph plus expand payloads is the whole
+    weight sends the tail and the text to the floor and drops the graph anyway
+    (measured in round 2: 435 siblings with 8 KB details per row ended at 16
+    rows and 199 KB, where details then graph keeps 80 rows at 218 KB).
+
+    The cap is derived from the fixture's own sizes rather than hard-coded, so
+    the test lands inside the band it is about: ``total - derived > cap`` (tier
+    2 declines) and ``total - derived - details <= cap`` (tier 3 + graph fits).
+    """
+    from local_operator.mobile.projection import (
+        FRAME_CAP_DERIVED_ROSTER_FIELDS,
+        cap_projection_frame,
+    )
+    from local_operator.mobile.types import TranscriptEntry
+
+    fold = _flat_roster_fold(160)
+    fold.projection.transcript = [
+        TranscriptEntry(id="opener", kind="user", text="open the conversation"),
+        *[
+            TranscriptEntry(
+                id=f"answer-{index}",
+                kind="assistant",
+                text="short",
+                details={"expanded": "x" * 6_000},
+            )
+            for index in range(PROJECTION_TRANSCRIPT_LIMIT - 1)
+        ],
+    ]
+
+    def measure(value: object) -> int:
+        return len(json.dumps(value, ensure_ascii=False, sort_keys=True).encode())
+
+    whole = fold.projection.to_json()
+    total = measure(whole)
+    derived = sum(
+        measure(row.get(field) or [])
+        for row in whole["subagents"]
+        for field in FRAME_CAP_DERIVED_ROSTER_FIELDS
+    )
+    details = sum(measure(row.get("details") or {}) for row in whole["transcript"])
+    cap = total - derived - details // 2
+
+    assert 0 < cap
+    assert total - derived > cap, "tier 2 must decline, or the case is not the one tested"
+    assert total - derived - details <= cap, "tier 3 plus the graph must fit"
+
+    frame, degraded = cap_projection_frame(fold.projection, cap_bytes=cap)
+
+    assert degraded is True
+    assert all(row.get("peer_ids") == [] for row in frame["subagents"])
+    assert len(frame["transcript"]) == PROJECTION_TRANSCRIPT_LIMIT, (
+        "the tail was halved to make room for a graph it then dropped"
+    )
+    assert all(row.get("details") == {} for row in frame["transcript"])
+    assert measure(frame) <= cap
+
+
 def test_the_roster_falls_back_to_identity_rows_when_shedding_is_not_enough() -> None:
     """The last tier before the honest warning: identity rows only.
 

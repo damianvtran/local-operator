@@ -1042,7 +1042,9 @@ def cap_projection_frame(
        scales with roster WIDTH.
     3. Transcript rows lose their ``details`` expand payload (args/output/
        diff). The collapsed row still renders; expanding an old row is the
-       one gesture that can re-fetch from /history.
+       one gesture that can re-fetch from /history. The derived-graph test is
+       asked again here: after a spend, shedding the graph may now be enough on
+       its own, and it is still cheaper than a whole row.
     4. The transcript tail halves toward ``FRAME_CAP_TRANSCRIPT_FLOOR``,
        keeping the pinned opening user message — the same scroll contract the
        80-row cap already establishes, just tighter. Pinning here also sets
@@ -1262,6 +1264,19 @@ def cap_projection_frame(
     if fits():
         return data, True
 
+    # Tier 3b: re-offer the derived graph now that details are gone. Tier 2's
+    # test is about the SAME question — does shedding the graph alone buy the
+    # frame — and the answer can only improve after a spend. Without this, a
+    # roster whose graph plus details is the whole weight sends the tail and the
+    # text to the floor and drops the graph afterwards anyway.
+    if derived_bytes and total - derived_bytes <= cap_bytes:
+        for row in data.get("subagents") or []:
+            for field in FRAME_CAP_DERIVED_ROSTER_FIELDS:
+                row[field] = []
+        dirty.add("subagents")
+        if fits():
+            return data, True
+
     # Tier 4: halve the transcript tail toward the floor, pinning the opening
     # user message exactly like ``ProjectionFold._cap_tail`` does.
     entries = data.get("transcript") or []
@@ -1277,6 +1292,10 @@ def cap_projection_frame(
             # and length is the only thing it could otherwise test (see
             # ``ProjectionFold._cap_tail``).
             data["transcript_head_pinned"] = True
+            # IN THE ACCOUNTING TOO: this key is a real part of the frame, and
+            # leaving it out of ``sizes`` runs ``total`` low until the final
+            # full measurement — the very window the tiers decide in.
+            dirty.add("transcript_head_pinned")
         data["transcript"] = entries
         dirty.add("transcript")
         if fits():

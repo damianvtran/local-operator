@@ -139,6 +139,22 @@ describe("the first history cursor", () => {
 		expect(vi.mocked(getHistory).mock.calls[1][1]).toBe("served-oldest");
 	});
 
+	it("trusts a daemon that says the head is not pinned", async () => {
+		/* `false` is a STATEMENT, not an absence: an uncapped projection whose head
+		   really is the oldest row. The cursor is then the head itself. Collapsing
+		   `undefined` into `false` at the call site would also collapse this case and
+		   the fallback above, which is why the call sites pass the tri-state. */
+		vi.mocked(getHistory).mockResolvedValue({ entries: [], has_more: false });
+		const view = render(
+			<Transcript pid="cursor-unpinned" entries={liveOnlyHead()} headPinned={false} />,
+		);
+
+		fireEvent.scroll(view.container.querySelector(".lo-scroll")!);
+
+		await waitFor(() => expect(getHistory).toHaveBeenCalled());
+		expect(vi.mocked(getHistory).mock.calls[0][1]).toBe("opening");
+	});
+
 	it("skips live-only ids even for a daemon that does not state the pin", async () => {
 		/* Rolling upgrades: an older daemon omits `transcript_head_pinned`. The
 		   length/kind fallback still skips the live-only ids, which is the part it can
