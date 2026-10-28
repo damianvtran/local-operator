@@ -21,6 +21,7 @@ from local_operator.notifications.store import NotificationStore
 from local_operator.tui import notifications_attention as attention
 from local_operator.tui import notifications_model as model
 from local_operator.tui import notifications_render as render
+from tests.unit.tui.conftest import BOOT_DEADLOCK_GUARD_S
 
 S1, S2, S3, S4, S5 = (f"{n:012x}" for n in range(0xA1, 0xA6))
 
@@ -366,11 +367,15 @@ async def test_the_sidebar_note_counts_the_badge_and_hides_when_unknown(
         await _settle(pilot)
         painted: list[int] = []
 
-        class Sidebar:
-            def set_notifications_total(self, total: int) -> None:
-                painted.append(total)
-
-        monkeypatch.setattr(app, "_session_sidebar", Sidebar(), raising=False)
+        # Record on the REAL sidebar rather than swapping in a stand-in object.
+        # The app keeps handling messages while this test body runs, and on the
+        # way out of `run_test`: a queued `WelcomeView` resize runs
+        # `_sync_boot_layout` -> `_boot_lane_width`, which reads
+        # `self._session_sidebar.styles.width`. A bare stand-in had no `styles`,
+        # so a resize landing after the swap raised `AttributeError` (CI run
+        # 40555547851). Production never holds anything but a mounted
+        # `SessionSidebar` there, so the stand-in was the defect, not the read.
+        monkeypatch.setattr(app._session_sidebar, "set_notifications_total", painted.append)
         app._paint_notifications_total({"unread_count": 2, "waiting_unread_count": 1})
         assert painted == [3], "the badge's own figure"
         app._paint_notifications_total(None)
@@ -942,6 +947,25 @@ async def _settle(pilot, ticks: int = 6) -> None:
         await asyncio.sleep(0.03)
 
 
+async def _detail_read(app, pilot) -> None:
+    """Block until the page's detail read (and the re-read it causes) is done.
+
+    WHY. Opening a row runs ``_read_detail`` in a ``notifications-detail``
+    worker: an ``inbox.detail`` THREAD hop, then the mark-read write, whose
+    ``reload`` spawns a ``notifications-load`` worker. ``_settle``'s fixed count
+    of turns is a bet that both finish in time; on a loaded runner they do not,
+    and a test reads a pane still painted from the bare row. Waiting on the
+    workers is the readiness signal (``await_session_boot``'s rule for the boot
+    worker); the closing ``_settle`` lets the painted text lay out. The deadline
+    is a backstop for a wedged read, not the assertion.
+    """
+    for group in ("notifications-detail", "notifications-load"):
+        workers = [w for w in app.workers if w.group == group]
+        if workers:
+            await asyncio.wait_for(app.workers.wait_for_complete(workers), BOOT_DEADLOCK_GUARD_S)
+    await _settle(pilot)
+
+
 @pytest.mark.asyncio
 async def test_opening_the_page_reads_nothing_and_mark_all_asks_first(
     tmp_path: Path, monkeypatch
@@ -1419,6 +1443,19 @@ async def test_the_focused_pane_names_the_gestures_that_still_fire(
         # The marker survives scrolling: the edge column does not scroll.
         # pgdn is the pane's own key (DT3), so the scroll is driven the way the
         # operator drives it rather than by writing the offset.
+        #
+        # The pane is only taller than its box once the detail READ has landed:
+        # until then it paints the row's one-line fallback, `scroll_relative`
+        # clamps to 0, and the presses are silently spent. That read is a
+        # thread hop inside a worker, so a fixed count of `_settle` turns lost
+        # it on a loaded runner (CI jobs 122475722774, 122526528742). Wait on
+        # the worker itself, then assert the premise instead of assuming it.
+        await _detail_read(app, pilot)
+        assert view._detail.max_scroll_y > 0, (
+            "the detail read landed but the pane is not scrollable",
+            view._detail.virtual_size,
+            view._detail.size,
+        )
         for _ in range(4):
             await pilot.press("pagedown")
         await _settle(pilot)
