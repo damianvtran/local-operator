@@ -4826,37 +4826,30 @@ MECHANISM_GENERATION_PRUNE = "generation-prune"
 MECHANISM_IN_PLACE_INSTALL = "in-place-install"
 
 
-def _record_index() -> list[tuple[Any, Path]]:
-    """``(record, config root)`` for every record published under every config root.
+def _record_index_with_status() -> tuple[list[tuple[Any, Path]], tuple[Path, ...], tuple[str, ...]]:
+    """One fresh census, retaining both provenance and uncertainty.
 
-    The same traversal :func:`referenced_install_roots` makes, carrying the config
-    root alongside because a marker must be written into the CONVERSATION DIR that
-    lives under it — the run key alone says which session died, not where its
-    evidence goes.
-
-    GATHERED ONCE PER REMOVAL PASS AND REUSED FOR EVERY CANDIDATE, which is a
-    window rather than an accident (review round 1, NIT 3): the caller holds one
-    index for the whole pass, so a runtime that publishes between candidate *k* and
-    candidate *k+1* is attested by nothing for the candidates already behind it.
-    Re-gathering per candidate would close that window in one direction and open a
-    wider one in the other — a scan per candidate on a machine with two hundred
-    sessions, inside a removal pass — so the window is stated rather than closed,
-    and it is bounded by what the caller snapshot BEFORE the pass began: a tree
-    named by a record that existed then is not removed at all.
-
-    AN INCOMPLETE READ IS NOT A REASON TO ATTEST LESS. The flag is dropped here on
-    purpose: an unreadable record means fewer victims can be NAMED, and a marker
-    written for the ones this read did see is still a name where there would
-    otherwise be none. The prune does not reach this function at all on an
-    incomplete read — it removes nothing — so this is the in-place install's own
-    path, where the choice is "name what we can" or "name nothing".
+    Destructive generation collection needs the same read's references AND
+    gaps. Dropping gaps was acceptable for best-effort attribution, never for
+    deciding whether a tree may be removed. No process-lifetime guarantee is
+    implied by a complete census; later or undiscoverable consumers remain a
+    separate admission/removal problem.
     """
     index: list[tuple[Any, Path]] = []
+    roots: list[Path] = []
+    gaps: list[str] = []
     for config_root in _config_roots():
-        records, _gaps = _records_under(config_root)
-        for record, _value in records:
+        records, missing = _records_under(config_root)
+        gaps.extend(missing)
+        for record, value in records:
             index.append((record, config_root))
-    return index
+            roots.append(_real(Path(value)))
+    return index, tuple(roots), tuple(gaps)
+
+
+def _record_index() -> list[tuple[Any, Path]]:
+    """Best-effort attribution index; callers authorizing removal need status."""
+    return _record_index_with_status()[0]
 
 
 def note_doomed_runtimes(
@@ -4887,8 +4880,9 @@ def note_doomed_runtimes(
     the returned list is the records a marker was actually written for and not the
     records that named the tree.
 
-    ``records`` lets a caller that has already made the traversal hand it over; the
-    prune does, so one removal pass costs one scan rather than one per candidate.
+    ``records`` lets a caller hand over the exact traversal used for its
+    decision. The prune now checks a fresh complete census per candidate and
+    vetoes removal whenever that same read names the tree.
 
     THE RETURN VALUE IS ``(record, config root)`` PAIRS, not bare records, and the
     second element is carried for the one caller that has to take an attestation
@@ -4897,14 +4891,11 @@ def note_doomed_runtimes(
     ``control.withdraw_involuntary_stop``, which the prune and the in-place install
     call when the act they attested does not complete).
 
-    THE ONLY TREE THIS CAN STILL FIRE FOR is one the reader could not see, because a
-    tree any record names is now kept by :func:`prune_generations` itself. The window
-    that remains is real rather than theoretical: the caller takes its ``referenced``
-    snapshot before the removal pass, so a runtime that publishes its boot record in
-    between — the ~1.2 s a starting runtime spends with no heartbeat — is named by the
-    fresh index here and by nothing in that snapshot. This is the SECOND line of
-    defence for exactly the case the first one cannot see, and its output is what turns
-    a lost race from an unattributed wave into a named act.
+    An attestation is not permission to delete a referenced generation. The
+    collector's fresh census is a veto before this call, including references
+    absent from its initial snapshot. Consumers publishing after that final
+    census, or absent from all supported namespaces, still require a lifetime
+    lease design; attribution alone does not make their removal safe.
     """
     target = _real(tree)
     attested: list[tuple[Any, Path]] = []
@@ -5494,11 +5485,10 @@ def prune_generations(
 
     removed: list[Path] = []
     decisions: list[PruneDecision] = []
-    # GATHERED AT MOST ONCE, AND ONLY IF SOMETHING IS ACTUALLY REMOVED: a caller
-    # that already passed ``referenced`` has paid for one traversal, and a prune
-    # that keeps everything must not pay for a second one to attest nothing. The
-    # same traversal is reused for every doomed candidate below.
-    index: list[tuple[Any, Path]] | None = None
+    # Keep paths pay no additional scan. Each removal candidate gets a fresh
+    # census: a boot record can appear after the caller's initial snapshot or
+    # after an earlier candidate. That newly observed holder is a veto, never
+    # merely a reason to record the harm before deleting its generation.
     for path in entries:
         resolved = _real(path)
         if install_transaction.attempt_protected(path):
@@ -5537,8 +5527,15 @@ def prune_generations(
             # attested below either — with no removal there is no act to name.
             decisions.append(PruneDecision(path, False, _UNREADABLE_RECORD_REASON))
             continue
-        if index is None:
-            index = _record_index()
+        index, fresh_roots, fresh_gaps = _record_index_with_status()
+        if fresh_gaps:
+            references_complete = False
+            references_gaps = tuple(dict.fromkeys((*references_gaps, *fresh_gaps)))
+            decisions.append(PruneDecision(path, False, _UNREADABLE_RECORD_REASON))
+            continue
+        if any(root == resolved or resolved in root.parents for root in fresh_roots):
+            decisions.append(PruneDecision(path, False, "a live or saved session record names it"))
+            continue
         # DRY RUN STOPS HERE: the decision is made, the tree is not touched, and
         # no attestation is written — a marker for a tree that survives would be a
         # false attribution, the same argument the keep paths above make.

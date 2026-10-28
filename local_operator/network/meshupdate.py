@@ -372,26 +372,12 @@ def _flatten_output(*chunks: str) -> str:
 
 
 def _install_generation(version: str, *, runner: Any, update_mod: Any) -> None:
-    """``install_into_generation`` plus its retention tail and output capture.
+    """Install a generation and capture failures, without automatic collection.
 
-    THE PRUNE IS NOT OPTIONAL DECORATION (agent review round 1, M1):
-    ``install_into_generation``'s own docstring says "PRUNING IS THE CALLER'S",
-    every other generation install prunes immediately after it
-    (``perform_upgrade``, the CLI tail), and a member the mesh rolls is one
-    that gets re-rolled — without this it grows one whole venv per rollout,
-    unbounded (``DEFAULT_KEEP_GENERATIONS`` = 2 exists for exactly this). Run
-    best-effort, exactly as ``perform_upgrade`` runs it: a failed prune may not
-    fail a settled install, it only logs its own line.
-
-    SEQUENCED WITH #2181 (``fix/prune-running-generation``, MERGED 2026-10-10):
-    that fix is what makes the eviction pick safe for the calling process's own
-    tree, and this branch is rebased on it; the call shape below is
-    ``perform_upgrade``'s own (``prune_generations(referenced=…,
-    actor=ACTOR_UPGRADE)`` plus the notice lines), so the guard is the merged
-    one rather than a second-guess here.
-
-    ``_CapturedInstall`` carries uv's output onto the failure path (QA Q-3);
-    an injected runner replaces it, as upstream.
+    Match the PyPI/snapshot promotion freeze: discovery is a census, not a
+    lifetime lease. An absent record cannot prove that a live process will
+    never read another resource from its loaded generation. Capacity reporting
+    may remain read-only; promotion must not trigger destructive collection.
     """
     capture = _CapturedInstall()
     try:
@@ -402,15 +388,6 @@ def _install_generation(version: str, *, runner: Any, update_mod: Any) -> None:
                 f"{' '.join(str(exc).split())} — installer output: {capture.output}"
             ) from exc
         raise
-    try:
-        plan = update_mod.prune_generations(
-            referenced=update_mod.referenced_install_roots(), actor=update_mod.ACTOR_UPGRADE
-        )
-    except Exception:  # noqa: BLE001 — see the docstring
-        logger.debug("the generation prune after the install did not run", exc_info=True)
-    else:
-        for line in update_mod.prune_notice_lines(plan):
-            logger.info("%s", line)
 
 
 def _install_classic(
