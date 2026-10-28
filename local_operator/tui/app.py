@@ -45619,7 +45619,17 @@ class OperatorApp(App[None]):
             # The session's model just moved, so the published access claim must
             # move with it: a typed `/model provider/id` is exactly the route
             # that can land on a provider this host has no credential for.
-            self._publish_model_access(session)
+            # OFF the Textual thread: the claim's credential read is a SQLite
+            # scan on the keystroke the user is waiting on (PR #3053, the same
+            # move the serving host makes for its own switch). This removes ONE
+            # of the two store reads on this keystroke, not both: the access
+            # note just below (``_model_access_note`` -> ``view_rows``) still
+            # scans on the UI thread, deliberately. Its answer is INLINE in the
+            # receipt line (`` · <provider> <state>``) printed in this same
+            # call, so taking it off-thread would split the receipt into a
+            # later second notice -- a user-visible receipt change this PR does
+            # not make (review round 2, R2-2).
+            self._publish_model_access_off_thread(session)
         suffix, warning = ("", None) if write_only else self._model_access_note(provider)
         if _rehome:
             # ONE STATEMENT OF THE MOVE (design round 1, D1). Everything below is
@@ -47733,6 +47743,47 @@ class OperatorApp(App[None]):
             )
         except Exception:
             logger.debug("model access publication failed", exc_info=True)
+
+    def _publish_model_access_off_thread(self, session: Any) -> None:
+        """:meth:`_publish_model_access` with the credential read on a worker thread.
+
+        WHY. A switch is the one edge where the user is watching the band, and
+        the claim's read (``usable_providers``, one SQLite scan) ran on the
+        Textual thread inside ``/model``. The read moves to a thread; the store
+        write comes back to the app loop, which owns the store.
+
+        STALE-RESULT GUARD, the same one the serving host applies
+        (``ServingSessionHandle._publish_model_access_off_loop``): the answer
+        is applied only if the session and its selector are still the ones it
+        was computed for, so a slow read cannot overwrite a newer switch's
+        claim. Equality of the selector, not identity of the switch, is the
+        invariant: the claim is a function of the selector and the store alone.
+
+        Falls back to the synchronous form when no app loop is running (a
+        reduced host), and never raises, like it.
+        """
+        store = getattr(session, "_frontend_state_store", None) if session is not None else None
+        if store is None:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self._publish_model_access(session)
+            return
+        selector = self._current_selector()
+
+        async def publish() -> None:
+            try:
+                from local_operator.session.frontend_state import model_access_claim
+
+                usable = await asyncio.to_thread(self._usable_providers)
+                if self._session is not session or self._current_selector() != selector:
+                    return
+                store.refresh_model_access(model_access_claim(selector, usable))
+            except Exception:  # noqa: BLE001 — additive state never fails its edge
+                logger.debug("model access publication failed", exc_info=True)
+
+        self.run_worker(publish(), group="model-access-publish", exit_on_error=False)
 
     def _publish_model_catalogue(self, session: Any) -> None:
         """Push the owner's offerable models into canonical state (D3).

@@ -7115,7 +7115,7 @@ class Session:
                 if callable(withdraw):
                     withdraw()
                 self._journal_knobs_if_selection_changed(previous, model, previous_choice)
-                self.refresh_frontend_state()
+                self._refresh_frontend_model_selection()
                 # The label moved even though the pair did not (the pin came
                 # off), so the baked tier descriptions are stale for the same
                 # reason they are on a genuine switch — see the call on that
@@ -7152,7 +7152,7 @@ class Session:
                 if refreshed is not None:
                     self._active_fallback = refreshed
             self._journal_knobs_if_selection_changed(previous, model, previous_choice)
-            self.refresh_frontend_state()
+            self._refresh_frontend_model_selection()
             return
         # A genuine model change is a SELECTION, and selections outlive the
         # process: journal it so `--resume` comes back on this model instead
@@ -7217,7 +7217,7 @@ class Session:
         # turn (see journal_model_switch). No ``reason``: the head already reads
         # "now running as X (was Y)", so a "Reason: model switched" line would
         # only repeat it. ``reason`` is reserved for failover causes (R3).
-        self.refresh_frontend_state()
+        self._refresh_frontend_model_selection()
         # The tier tools bake the session's model label into their schema text
         # at BUILD time (``describe_effort_tiers``), while a sentinel tier
         # resolves to ``self.model`` at LAUNCH. Without this the two drift the
@@ -13242,7 +13242,7 @@ class Session:
         """
         self._on_mcp_startup_settled = sink
 
-    def refresh_tools(self, tools: Sequence[AgentTool]) -> bool:
+    def refresh_tools(self, tools: Sequence[AgentTool], *, republish: bool = True) -> bool:
         """Replace the full tool inventory mid-session.
 
         THE committed hook for MCP ``set_on_tools_changed`` (orchestrator
@@ -13269,11 +13269,16 @@ class Session:
         whole point: MCP tools are discovered lazily, so filtering only the
         construction-time builtins would leave the declaration unenforced on
         exactly the surface an embedder declares it for.
+
+        ``republish=False`` skips the canonical frontend refresh for a caller
+        that publishes its own (``_rebuild_effort_tier_tools``, a model edge):
+        that refresh rescans the whole roster and reads nothing from the tool
+        list, so on a switch it was pure cost on the session loop.
         """
         self._tools = self._filter_declared(tools)
         self._context.tools = self._tools
         self._refresh_tool_roster()
-        if hasattr(self, "_frontend_state_store"):
+        if republish and hasattr(self, "_frontend_state_store"):
             self.refresh_frontend_state()
         return self._published_tools is None
 
@@ -17163,6 +17168,21 @@ class Session:
         store = getattr(self, "_frontend_state_store", None)
         if store is not None:
             store.refresh_from_session(self)
+
+    def _refresh_frontend_model_selection(self) -> None:
+        """Publish a model/effort switch to the canonical frontend state, in O(1).
+
+        ``set_model``'s publish. It used to be :meth:`refresh_frontend_state`,
+        whose full rescan rebuilds every job row: on a long manager with a large
+        roster that made a switch's cost on the session loop grow with the
+        roster, and the desktop's 20 s request deadline expired on exactly those
+        sessions. Only the selection fields move on a switch; the scheduled
+        roster/jobs refreshes keep the rest current. Same guard as the full
+        refresh: the store does not exist yet during construction.
+        """
+        store = getattr(self, "_frontend_state_store", None)
+        if store is not None:
+            store.refresh_model_selection(self)
 
     def refresh_frontend_usage(self) -> None:
         """Refresh restored usage without scanning transcript/jobs/tool schemas.
@@ -30684,7 +30704,14 @@ class Session:
             return
         if not rebuilt:
             return
-        self.refresh_tools([rebuilt.get(tool.name, tool) for tool in self._tools])
+        # ``republish=False``: nothing in the canonical frontend state is
+        # derived from the tool list (``refresh_from_session`` never reads it),
+        # so the full republish ``refresh_tools`` runs by default would publish
+        # nothing new. On a model switch it was the second roster-sized pass a
+        # single ``/model`` paid on the session loop (see
+        # ``FrontendStateStore.refresh_model_selection``); ``set_model``
+        # publishes the selection itself.
+        self.refresh_tools([rebuilt.get(tool.name, tool) for tool in self._tools], republish=False)
 
     def _on_configured_model_changed(
         self, values: Mapping[str, Any], *, local: bool, changed: frozenset[str]

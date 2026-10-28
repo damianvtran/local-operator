@@ -288,6 +288,71 @@ async def test_nested_child_detail_events_refresh_after_warm(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
+async def test_a_tui_switch_leaves_the_roster_to_the_event_it_emits(monkeypatch) -> None:
+    """The TUI host's roster stays fresh after a switch with no synchronous walk
+    on the switch path (PR #3053 review round 1, R1-4).
+
+    ``set_model_effort`` refreshes with ``roster=False``; the claim in
+    ``_refresh_state`` is that every folded event still runs the roster pass.
+    A real switch emits a ``ModelChangeEvent`` (``Session.set_model`` →
+    ``_spawn_model_change``), and this host's subscription handler calls
+    ``_refresh_state()`` with the default ``roster=True`` for EVERY event. So
+    the switch's own event re-walks the roster, after the reply's cheap
+    refresh. Pinned here: zero walks from the switch call itself, one from the
+    event that follows it.
+    """
+    from local_operator.harness.types import ModelChangeEvent
+    from local_operator.mobile.projection import ProjectionFold
+
+    session = FakeSession()
+    setattr(
+        session,
+        "_subagent_comms",
+        SimpleNamespace(nodes=lambda: [], subscribe_detail_changes=lambda _l: lambda: None),
+    )
+
+    class App:
+        """Runs the routed commands inline. The real ``/model`` emits the
+        switch's ``ModelChangeEvent`` in the background; the test emits it
+        explicitly after the reply, which is when it lands."""
+
+        def __init__(self) -> None:
+            self._session = session
+            self.commands: list[str] = []
+
+        def _run_slash_command(self, text: str) -> None:
+            self.commands.append(text)
+
+        def call_from_thread(self, callback):  # noqa: ANN001, ANN202
+            return callback()
+
+    app = App()
+    handle = TuiSessionHandle(app)  # type: ignore[arg-type]
+    walks: list[str] = []
+    monkeypatch.setattr(
+        ProjectionFold, "set_subagent_details", lambda self, comms: walks.append("walk")
+    )
+    handle.subscribe(lambda: None)
+    walks.clear()  # the subscribe-time warm is not what this pins
+
+    await handle.set_model_effort("test", "switch-b", None)
+    assert app.commands == ["/model test/switch-b"]
+    assert walks == [], "the switch call itself must not walk the roster"
+
+    session.emit(
+        ModelChangeEvent(
+            provider="test",
+            model_id="switch-b",
+            effort=None,
+            reason="model switched",
+            is_fallback=False,
+            context_window=64_000,
+        )
+    )
+    assert walks == ["walk"], "the switch's own event must refresh the roster"
+
+
+@pytest.mark.asyncio
 async def test_dirty_hydration_retries_without_later_event(monkeypatch) -> None:
     node = SimpleNamespace(job_id="nested", session_dir=Path("/tmp/nested"))
     comms = SimpleNamespace(node=lambda job_id: node)
@@ -1169,7 +1234,7 @@ async def test_a_phone_shaped_slash_op_runs_its_commands_and_refuses_the_rest() 
     handle = TuiSessionHandle(App())  # type: ignore[arg-type]
     # The projection push is not what this test is about, and a fake app has no
     # runtime to fold.
-    handle._refresh_state = lambda: None  # type: ignore[method-assign]
+    handle._refresh_state = lambda **_: None  # type: ignore[method-assign]
 
     # THE PHONE'S OWN FRAME: ``locality="remote"`` and no capability claim at all.
     for command, args, lane in _PHONE_COMMANDS:
