@@ -590,9 +590,10 @@ its own input. The wire half of image attachments on that input has landed
 its own repo, so the door is text-only until then. A
 free-text-only question has no `Other` row to open: its input is the question's only
 control and is shown open (on the TUI that is the picker's single free-text row, which is
-itself the input). **Status 2026-10-08:** the TUI picker has its `Other` row today and the
-desktop's landed with UI #892; the relay web and the app gain the explicit `Other` field
-with their own `Other` PRs, and this section states the target those PRs build to. An ask
+itself the input). **Status 2026-10-08, amended 2026-10-28:** the TUI picker has its `Other`
+row today, the desktop's landed with UI #892, and the relay web's landed 2026-10-28 in this
+change; the native app's is still pending its own `Other` PR, and this section states the
+target that PR builds to. An ask
 surface never
 moves, sends or discards composer text: the composer's draft stays in its own buffer
 through expand, collapse, settle and a conversation switch, and the ask surface's draft is
@@ -656,8 +657,8 @@ for an ask: each app's existing placeholder is shown in every ask state. The ask
 own input carries its own copy, and the strings are **per surface**, not one string
 everywhere: today the desktop's free-text-only input reads `Type your answer`, the TUI's
 free-text row `Other (type your own)`, the relay web's `your answer` and the native app's
-`Your answer`; the desktop's `Other` field copy has landed (UI #892, `Type your answer`);
-the relay web's and the app's land with their `Other` PRs.
+`Your answer`; the desktop's `Other` field copy has landed (UI #892, `Type your answer`) and
+the relay web's landed 2026-10-28 with its `Other` row; the app's lands with its `Other` PR.
 
 **Multiple asks.** The minimized bar always shows the **head** ask plus the count; expansion
 opens the list/picker (TUI) or the sheet (others). Answering one advances to the **next
@@ -769,7 +770,7 @@ collapses — there was no list to return to.)
   `attach_client.py:2269` gains `ask_respond`, `daemon.py` `asks_open` on list rows.
 - **Minimized state (§5.0, R7):** the chip/bar above the composer is the default; tap opens
   the sheet. The web composer never routes to the ask (§5.0 amended); the sheet's
-  `Other` row (landing with the web `Other` PR) is the free-text door. Separately, the
+  `Other` row (landed 2026-10-28) is the free-text door. Separately, the
   `forceCollapsed` behaviour must not be used to "minimize" (it hides the panels, which is a
   different promise).
 - **Web (`mobile/web/src`):** session-list row chip (and the outstanding-asks row state,
