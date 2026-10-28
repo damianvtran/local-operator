@@ -293,6 +293,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "lease path, not a pathname or a translated/copyable session entry",
     ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
+    "local_operator/memory_maintenance.py": (
+        3,
+        "``LOCK_NAME``/``STAMP_NAME``/``ATTEMPT_NAME`` ('.compact.lock', '.compact.stamp', "
+        "'.compact.attempt'): the memory store's unattended-maintenance lock and cadence "
+        "stamps, inside the DEVICE-LEVEL store directory (<config>/memory/), never an entry "
+        "of a session directory. They describe THIS host's compaction/expiry passes (a "
+        "cross-process fcntl lock and wall-clock stamps), so no session copy may carry "
+        "them: a peer inheriting them would skip or back off passes it never ran",
+    ),
     "local_operator/network/mobility.py": (
         1,
         "``DROPPED_ROLES_DIRNAME`` ('dropped-session-roles'): the DEVICE-LEVEL stash a "
