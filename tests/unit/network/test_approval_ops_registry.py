@@ -703,16 +703,30 @@ def _undisclosable(
     """
     valid = _finite(rig, monkeypatch)
     what = copy.deepcopy(valid["what"])
+    envelope = copy.deepcopy(valid)
     if tamper == "payload":
         what[finite_share.OP]["evil"] = 1
-    else:
+    elif tamper == "what":
         what["evil"] = 1
-    return _record_with_what(valid, what, rig.root)
+    elif tamper == "anchor":
+        # #3087 r1, R1-1: one level down. Only ``key_id`` is shown, as the signing principal.
+        what["anchor"]["evil"] = "x" * 40
+    elif tamper == "deny-row":
+        what[finite_share.OP]["denies"][0]["evil"] = "x" * 40
+    elif tamper == "device":
+        # The digest-bound envelope blocks are signed too; the disclosure names only the
+        # member's display name from ``device``.
+        envelope["device"]["evil"] = "x" * 40
+    else:  # "requested-by"
+        envelope["requested_by"]["evil"] = "x" * 40
+    return _record_with_what(envelope, what, rig.root)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("surface", ["cli", "desktop", "approve-operation"])
-@pytest.mark.parametrize("tamper", ["payload", "what"])
+@pytest.mark.parametrize("surface", ["cli", "desktop", "approve-credential", "approve-operation"])
+@pytest.mark.parametrize(
+    "tamper", ["payload", "what", "anchor", "deny-row", "device", "requested-by"]
+)
 async def test_undisclosed_field_is_refused_on_every_approver_before_the_signer(
     rig: Any,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
@@ -727,7 +741,8 @@ async def test_undisclosed_field_is_refused_on_every_approver_before_the_signer(
     capsys.readouterr()
     if surface == "cli":
         assert _lop_network("approvals", "approve", aid, "--json") != 0
-        code = json.loads(capsys.readouterr().out)["code"]
+        body = json.loads(capsys.readouterr().out)
+        code, text = body["code"], body["message"]
     else:
         async with _client(rig, monkeypatch) as client:
             if surface == "desktop":
@@ -741,12 +756,13 @@ async def test_undisclosed_field_is_refused_on_every_approver_before_the_signer(
                     "request_digest": record["request_digest"],
                     "disclosure_digest": typed.get("disclosure_digest") or ZERO,
                 }
-                response = await client.post(
-                    f"/v1/desktop/approvals/{aid}/approve-operation", json=body
-                )
+                response = await client.post(f"/v1/desktop/approvals/{aid}/{surface}", json=body)
         assert response.status_code == 409, response.text
-        code = response.json()["detail"]["code"]
+        code, text = response.json()["detail"]["code"], response.json()["detail"]["text"]
     assert code == "finite_disclosure_invalid"
+    # QA #3087 r1, Q1: every approver gives the actionable sentence, never the generic
+    # "credential permission refused: <code>" fallback the typed routes used to return.
+    assert "request a new finite-share recovery" in text, text
     assert counters["signer"] == 0
     assert A.load_record(aid, root=rig.root)["state"] == A.STATE_REQUESTED
     with pytest.raises(MeshRefusal) as refused:

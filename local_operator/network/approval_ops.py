@@ -325,10 +325,11 @@ def finite_generic_refusal(record: Mapping[str, Any], approval_id: str) -> MeshR
     Moved verbatim from ``server.utils.desktop_approvals.approve`` (S4a-core): presence of
     the typed operation key is the boundary, NOT intent()'s successfully parsed value, so a
     malformed finite payload fails closed rather than falling through to the generic
-    onboarding signer. Only the EXACT shape finite apply accepts (``set(what) == {OP,
-    "anchor"}``) is sent to the CLI; an untyped value or any extra key -- an unknown
-    ``credential_*`` operation or an install scope -- would be signed by the CLI without
-    being disclosed, so both refuse with no signing remedy (agent review round 1, R1).
+    onboarding signer. Only the EXACT shape finite apply accepts (``finite_share.exact_shape``,
+    at every depth the digest binds) is sent to the CLI; an untyped value or any extra key --
+    an unknown ``credential_*`` operation, an install scope, a nested anchor or withdrawal
+    key -- would be signed by the CLI without being disclosed, so both refuse with no
+    signing remedy (agent review round 1, R1; #3087 r1, R1-1).
     """
     from local_operator.network.credentials import finite_share as _finite
 
@@ -339,13 +340,7 @@ def finite_generic_refusal(record: Mapping[str, Any], approval_id: str) -> MeshR
     # payload field is as undisclosable as an extra ``what`` key, so it is refused here too
     # rather than sent to a CLI that would then refuse it with a different answer.
     if not _finite.exact_shape(record):
-        return MeshRefusal(
-            "finite_disclosure_invalid",
-            "The finite-share request is not the exact typed shape this build can "
-            "validate and disclose (one finite-share operation and its anchor, nothing "
-            "else). Nothing was approved; request a new finite-share recovery with the "
-            "complete withdrawal disclosure.",
-        )
+        return _finite.disclosure_invalid()
     # Until the desktop's GENERIC route can render the full validated withdrawal disclosure,
     # the CLI (or the typed route) is the only signing surface. Deny remains available.
     return MeshRefusal(

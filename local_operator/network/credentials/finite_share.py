@@ -41,26 +41,95 @@ _FIELDS = frozenset(
     }
 )
 _WHAT = frozenset({OP, "anchor"})
+#: The exact key set of each signed withdrawal row: what consent stores, copied verbatim by
+#: :func:`request`. ``reason`` is the one key :func:`disclosure` does not display; it is
+#: signed safely only because :func:`exact_shape` pins it to the journal's fixed vocabulary
+#: (``finite_journal.DENY_REASONS``), so it can carry no bytes the operator was not shown.
+#: Displaying it would change the frozen disclosure digest of every existing card.
+_DENY_KEYS = frozenset({"selector", "revision", "reason", "approval_ref"})
+#: The digest-bound envelope blocks :func:`request` mints. Neither is displayed field by
+#: field, so each value must be DERIVABLE from what is: ``device`` repeats the recipient's
+#: id and fingerprint (plus its display name, which IS shown; absent on pre-#3002 cards),
+#: and ``requested_by`` is the owner device with fixed ``session_id``/``surface`` tokens.
+_DEVICE_KEYS = frozenset({"device_id", "fingerprint", "name"})
+_REQUESTED_BY = {"session_id": "", "surface": "cli"}
+
+#: Every sentence for "this card is not the exact shape this build can disclose": the CLI,
+#: the bodiless desktop ``/approve`` and the typed routes give it word for word (QA #3087
+#: r1, Q1 -- the typed routes used to fall back to ``consent.refuse``'s bare code).
+DISCLOSURE_INVALID_SENTENCE = (
+    "The finite-share request is not the exact typed shape this build can validate and "
+    "disclose (one finite-share operation and its anchor, nothing else). Nothing was "
+    "approved; request a new finite-share recovery with the complete withdrawal disclosure."
+)
 
 
-def intent(record: dict[str, Any]) -> dict[str, Any] | None:
+def disclosure_invalid() -> MeshRefusal:
+    return MeshRefusal("finite_disclosure_invalid", DISCLOSURE_INVALID_SENTENCE)
+
+
+def intent(record: Mapping[str, Any]) -> dict[str, Any] | None:
     what = record.get("what")
     return what.get(OP) if isinstance(what, dict) and isinstance(what.get(OP), dict) else None
 
 
 def exact_shape(record: Mapping[str, Any]) -> bool:
-    """True only for the EXACT shape this flow mints: ``what`` is ``{OP, "anchor"}`` and
-    the payload carries exactly :data:`_FIELDS`.
+    """True only for the EXACT shape :func:`request` mints, at EVERY depth the digest binds.
 
-    The ONE key-set predicate behind :func:`disclosure`, :func:`_apply` and the generic
-    approvers' refusal (``approval_ops.finite_generic_refusal``), so none of them can
-    accept a record another would refuse. Values are validated by each consumer.
+    ``request_digest`` covers the whole ``what`` plus the ``device``/``requested_by``/
+    ``credential_ref`` envelope, so a key set checked only at the top level let a nested
+    extra key -- in the anchor, a withdrawal row, the device block -- be signed unseen
+    (#3087 review r1, R1-1: an anchor extra key signed AND applied; a deny-row extra key
+    signed, then apply refused). Checked here: ``what`` is :data:`_WHAT`; the anchor is
+    exactly ``approvals.ANCHOR_KEYS``; the payload is exactly :data:`_FIELDS`; every
+    withdrawal row is exactly :data:`_DENY_KEYS` with valid values (1..MAX_DENIES of them);
+    the guard is ``None`` or exactly ``{id, revision}``; ``device`` and ``requested_by``
+    repeat the payload's devices; ``credential_ref`` is ``None``.
+
+    The ONE predicate behind :func:`disclosure`, :func:`_apply`, the typed route's
+    ``desktop_approval.operation`` and the generic approvers' refusal
+    (``approval_ops.finite_generic_refusal``), so none of them can accept a record another
+    would refuse. Values that ARE displayed (key, scope, ids) are validated by disclosure.
     """
     what = record.get("what")
-    data = intent(dict(record))
-    return (
-        data is not None and isinstance(what, dict) and set(what) == _WHAT and set(data) == _FIELDS
-    )
+    data = intent(record)
+    if data is None or not isinstance(what, dict) or set(what) != _WHAT or set(data) != _FIELDS:
+        return False
+    anchor = what["anchor"]
+    if not isinstance(anchor, dict) or set(anchor) != approvals.ANCHOR_KEYS:
+        return False
+    denies = data["denies"]
+    if not isinstance(denies, list) or not 0 < len(denies) <= finite_journal.MAX_DENIES:
+        return False
+    guard = data["guard"]
+    if guard is not None and (not isinstance(guard, dict) or set(guard) != {"id", "revision"}):
+        return False
+    device = record.get("device")
+    if (
+        not isinstance(device, dict)
+        or set(device) - _DEVICE_KEYS
+        or device.get("device_id") != data["recipient_device"]
+        or device.get("fingerprint") != data["public_key_fingerprint"]
+    ):
+        return False
+    if record.get("requested_by") != {"device_id": data["owner_device"], **_REQUESTED_BY}:
+        return False
+    if record.get("credential_ref") is not None:
+        return False
+    try:
+        for deny in denies:
+            # The value checks apply's consent/journal readers make on these rows, so a row
+            # disclosure lists is one apply can compare -- never one it rejects as malformed.
+            if not isinstance(deny, dict) or set(deny) != _DENY_KEYS:
+                return False
+            consent._selector(deny["selector"])
+            consent._revision(deny["revision"])
+            consent._ref(deny["approval_ref"])
+            if deny["reason"] not in finite_journal.DENY_REASONS:
+                return False
+    except MeshRefusal:
+        return False
+    return True
 
 
 def _recipient_label(record: dict[str, Any], data: dict[str, Any]) -> str:
@@ -118,7 +187,7 @@ def disclosure(record: dict[str, Any]) -> dict[str, Any] | None:
     # under ``what`` -- would be signed blind. Same key sets as _apply, so the two cannot
     # disagree about which records are describable.
     if not exact_shape(record):
-        consent.refuse("finite_disclosure_invalid")
+        raise disclosure_invalid()
     try:
         for name in ("owner_device", "network_id", "recipient_device"):
             store.safe_component(data[name])
@@ -129,18 +198,11 @@ def disclosure(record: dict[str, Any]) -> dict[str, Any] | None:
             or len(data["key"].encode()) > 200
             or any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in data["key"])
         ):
-            consent.refuse("finite_disclosure_invalid")
-        denies = data["denies"]
-        if not isinstance(denies, list) or not 0 < len(denies) <= finite_journal.MAX_DENIES:
-            consent.refuse("finite_disclosure_invalid")
+            raise disclosure_invalid()
+        # Row shapes and values were checked by exact_shape, the predicate apply shares.
         guard = data["guard"]
-        if guard:
-            consent._exact(guard, {"id", "revision"}, {"id", "revision"})
         withdrawals = []
-        for deny in denies:
-            consent._selector(deny["selector"])
-            consent._revision(deny["revision"])
-            consent._ref(deny["approval_ref"])
+        for deny in data["denies"]:
             withdrawals.append(
                 {
                     name: copy.deepcopy(deny[name])
@@ -150,8 +212,7 @@ def disclosure(record: dict[str, Any]) -> dict[str, Any] | None:
         fingerprint = str(data["public_key_fingerprint"])
         raw_device = record.get("device")
         device: dict[str, Any] = raw_device if isinstance(raw_device, dict) else {}
-        anchor = (record.get("what") or {}).get("anchor")
-        principal = str(anchor.get("key_id") or "") if isinstance(anchor, dict) else ""
+        principal = str(record["what"]["anchor"]["key_id"])
         result = {
             "version": DISCLOSURE_VERSION,
             "operation": OP,
@@ -185,10 +246,14 @@ def disclosure(record: dict[str, Any]) -> dict[str, Any] | None:
             "installs_or_joins": False,
         }
         if len(json.dumps(result, ensure_ascii=True).encode("utf-8")) > finite_journal.LIMIT:
-            consent.refuse("finite_disclosure_invalid")
+            raise disclosure_invalid()
         return result
+    except MeshRefusal as exc:
+        # A value check below exact_shape (an unsafe id, a bad key) answers with the same
+        # actionable sentence as a shape refusal, on every surface (QA #3087 r1, Q1).
+        raise disclosure_invalid() from exc
     except (KeyError, TypeError, ValueError, AttributeError):
-        consent.refuse("finite_disclosure_invalid")
+        raise disclosure_invalid() from None
 
 
 def _plain(text: Any, limit: int = 64) -> str:
@@ -286,7 +351,7 @@ def details(record: dict[str, Any]) -> list[str]:
         f"Signing principal: your operator key {facts['signing_principal']} on this machine",
     ]
     if len("\n".join(lines).encode("utf-8")) > finite_journal.LIMIT:
-        consent.refuse("finite_disclosure_invalid")
+        raise disclosure_invalid()
     return lines
 
 
@@ -647,11 +712,10 @@ def _apply(approval_id: str, expected: dict[str, Any], root: Path | None = None)
             "Request a new exact finite-share approval; no install or connection ran.",
         )
     data = intent(source)
-    if data is None or set(source.get("what", {})) != _WHAT:
+    # The SAME predicate disclosure() refuses on (exact_shape, every depth): apply can never
+    # accept a record the approver was not shown, nor disclosure state one apply rejects.
+    if data is None or not exact_shape(source):
         consent.refuse("finite_intent_missing")
-    # The SAME key sets disclosure() refuses on (exact_shape): apply can never accept a
-    # payload the approver was not shown, nor disclosure state one apply would reject.
-    consent._exact(data, set(_FIELDS), set(_FIELDS))
     for field in ("owner_device", "network_id", "recipient_device", "key", "scope"):
         if data[field] != expected.get(field):
             consent.refuse("finite_subject_mismatch")
