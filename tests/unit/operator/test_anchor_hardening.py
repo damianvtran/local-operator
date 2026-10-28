@@ -13,6 +13,7 @@ the same verifier over real ACLs on windows-latest.
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 import os
 import shutil
@@ -221,6 +222,13 @@ def test_load_anchor_on_windows_refuses_an_unreadable_descriptor(
 # ---------------------------------------------------------------------------
 
 
+def _inner_script(command: list[list[str]]) -> str:
+    """The elevated script a printed Windows command carries (gzip+base64 blob)."""
+    outer = command[0][-1]
+    blob = outer.split("FromBase64String('", 1)[1].split("'", 1)[0]
+    return gzip.decompress(base64.b64decode(blob)).decode("utf-8")
+
+
 def test_windows_install_command_is_elevated_and_hardens_the_dacl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -234,14 +242,49 @@ def test_windows_install_command_is_elevated_and_hardens_the_dacl(
     assert len(command) == 1
     outer = " ".join(command[0])
     assert "-Verb RunAs" in outer and "Copy-Item" not in outer
-    assert "exit $p.ExitCode" in outer, "the elevated child's exit code must propagate"
-    encoded = outer.split("-EncodedCommand ", 1)[1].split("'", 1)[0]
-    script = base64.b64decode(encoded).decode("utf-16-le")
-    assert "icacls $p /inheritance:r /grant:r" in script
-    assert f'"*{SYSTEM}:$($inherit)F"' in script and f'"*{ADMINS}:$($inherit)F"' in script
-    assert f'"*{USERS}:$($inherit)R"' in script
-    assert f'/setowner "*{ADMINS}"' in script
-    assert f"if ($actual -ne '{digest}')" in script, "the elevated step re-checks the digest"
+    assert ".ExitCode" in outer, "the elevated child's exit code must propagate"
+    script = _inner_script(command)
+    # R1-2: the DACL is REPLACED whole (protected, SYSTEM/Admins full, Users read)
+    # through a handle opened without following reparse points; no icacls.
+    assert "icacls" not in script
+    assert "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)" in script
+    assert "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)" in script
+    assert "0x02200000" in script, "FILE_FLAG_OPEN_REPARSE_POINT | BACKUP_SEMANTICS"
+    assert "is a junction or symbolic link, so it was refused" in script
+    assert "not SYSTEM or Administrators, so it was refused" in script
+    assert "Add-Type" not in script, "Add-Type compiles through the user's writable %TEMP%"
+    assert f"$expected='{digest}'" in script, "the elevated step re-checks the digest"
+    assert "if($actual -ne $expected)" in script
+
+
+@pytest.mark.parametrize(
+    "staged",
+    [
+        "C:/Users/o'brien/.local-operator/operator/anchor.json",
+        "C:/Users/100%done/.local-operator/operator/anchor.json",
+        "C:/Users/$p!x/.local-operator/operator/anchor.json",
+    ],
+)
+def test_windows_printed_line_has_nothing_either_shell_expands(
+    monkeypatch: pytest.MonkeyPatch, staged: str
+) -> None:
+    """R1-3: pasted into PowerShell OR cmd.exe, the printed line must reach PowerShell intact.
+
+    The values live only inside the gzip blob, so even a path carrying ``$``,
+    ``%`` or ``'`` adds nothing either shell rewrites; the line also stays under
+    cmd.exe's 8191-character limit.
+    """
+    monkeypatch.setattr(trust, "_on_windows", lambda: True)
+    target = Path("C:/ProgramData/local-operator/operators/alice.json")
+
+    command = trust.install_commands(Path(staged), target, "cd" * 32)
+    line = trust.format_install_commands(command)
+
+    argument = command[0][-1]
+    assert not set('$`"%!') & set(argument), argument[:120]
+    assert line == f'powershell -NoProfile -NonInteractive -Command "{argument}"'
+    assert len(line) < 8191
+    assert f"$staged={trust._ps_quote(str(Path(staged)))}" in _inner_script(command)
 
 
 def test_install_anchor_on_windows_prints_and_never_runs_the_elevation(
@@ -412,3 +455,168 @@ def test_install_anchor_end_to_end_refuses_a_swap_between_read_and_sudo(
 
     assert handlers.install_anchor(root) == 3
     assert not trust.anchor_path().exists()
+
+
+# ---------------------------------------------------------------------------
+# Round 1 remediation: R1-1 (pinned root), R1-4 (device delta), R1-5 (junctions),
+# R1-6 (the security reader never raises)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def windows_root(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Drive the Windows root from two FAKED sources, with the process cache cleared."""
+
+    def drive(system_dir: str | None, known: str | None) -> None:
+        monkeypatch.setattr(trust, "_on_windows", lambda: True)
+        monkeypatch.setattr(trust, "_system_windows_directory", lambda: system_dir)
+        monkeypatch.setattr(trust, "_known_folder_program_data", lambda: known)
+        trust._windows_program_data_resolution.cache_clear()
+
+    yield drive
+    trust._windows_program_data_resolution.cache_clear()
+
+
+def test_windows_root_is_the_system_drive_when_both_sources_agree(windows_root: Any) -> None:
+    windows_root("D:\\Windows", "d:\\programdata\\")
+    assert trust.anchor_dir() == Path("D:\\ProgramData") / "local-operator" / "operators"
+
+
+@pytest.mark.parametrize(
+    ("system_dir", "known", "needle"),
+    [
+        # %SystemDrive% steered by the environment: the Known Folder follows it.
+        ("C:\\Windows", "C:\\Users\\me\\x\\ProgramData", "not 'C:\\\\ProgramData'"),
+        ("C:\\Windows", "<cwd>\\%SystemDrive%\\ProgramData", "not 'C:\\\\ProgramData'"),
+        ("C:\\Windows", None, "could not be resolved"),
+        (None, "C:\\ProgramData", "system directory could not be read"),
+        ("\\\\server\\share\\Windows", "C:\\ProgramData", "names no drive letter"),
+    ],
+)
+def test_windows_root_mismatch_refuses_with_a_reason(
+    windows_root: Any, system_dir: str | None, known: str | None, needle: str
+) -> None:
+    """R1-1: any disagreement loads as no anchor, and the status line says why."""
+    windows_root(system_dir, known)
+
+    assert trust.anchor_dir() == trust._UNRESOLVED_ROOT
+    loaded = trust.load_anchor("alice")
+
+    assert not loaded.usable and not loaded.root_owned
+    assert needle in loaded.reason, loaded.reason
+
+
+def _installed(monkeypatch: pytest.MonkeyPatch, *devices: dict[str, Any]) -> None:
+    """Make ``load_anchor`` report a usable INSTALLED anchor carrying ``devices``."""
+    from dataclasses import replace
+
+    installed = replace(_anchor(), devices=tuple(devices))
+    monkeypatch.setattr(
+        handlers,
+        "load_anchor",
+        lambda *a, **k: trust.AnchorLoad(
+            anchor=installed, path=Path("/x"), root_owned=True, reason="ok", exists=True
+        ),
+    )
+
+
+def _sudo_secret_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *staged_devices: dict[str, Any]
+) -> tuple[int, list[str]]:
+    from dataclasses import replace
+
+    fed: list[str] = []
+    monkeypatch.setattr(handlers, "_is_privileged", lambda: False)
+    monkeypatch.setattr(handlers.shutil, "which", lambda name: "/usr/bin/sudo")
+    monkeypatch.setattr(
+        handlers, "_install_with_sudo_stdin", lambda command, name: fed.append(name) or 0
+    )
+    monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", tmp_path / "anchor-root")
+    handlers.stage_anchor(tmp_path / "config", replace(_anchor(), devices=tuple(staged_devices)))
+    # No ``purpose``: the guard must judge the write by what it does (R1-4).
+    return handlers.install_anchor(tmp_path / "config", sudo_secret="ADMIN_PW"), fed
+
+
+@pytest.mark.parametrize(
+    ("installed", "staged"),
+    [
+        # Un-revoking a phone: the staged copy drops the revocation.
+        ([{"device_id": "phone-1", "revoked": True}], []),
+        # Adding a device entry the installed list does not carry.
+        ([], [{"device_id": "phone-2"}]),
+    ],
+)
+def test_a_stored_secret_cannot_admit_a_device_even_without_a_purpose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    installed: list[dict[str, Any]],
+    staged: list[dict[str, Any]],
+) -> None:
+    _installed(monkeypatch, *installed)
+
+    code, fed = _sudo_secret_install(tmp_path, monkeypatch, *staged)
+
+    assert code == 2 and fed == []
+    assert "admits a device" in capsys.readouterr().err
+
+
+def test_a_stored_secret_may_still_revoke_a_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tightening is not admitting: adding a revocation keeps the interim path."""
+    _installed(monkeypatch)
+
+    code, fed = _sudo_secret_install(
+        tmp_path, monkeypatch, {"device_id": "phone-1", "revoked": True}
+    )
+
+    assert code == 0 and fed == ["ADMIN_PW"]
+
+
+def test_a_windows_junction_in_the_anchor_path_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-5: a junction is a reparse point ``S_ISLNK`` does not see."""
+    root = tmp_path / "local-operator" / "operators"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", root)
+    (root / "alice.json").write_bytes(anchor_bytes(_anchor()))
+    real_lstat = os.lstat
+
+    class _Junction:
+        def __init__(self, info: os.stat_result) -> None:
+            self.st_mode = info.st_mode  # a directory, not S_IFLNK
+            self.st_file_attributes = 0x10 | 0x400  # DIRECTORY | REPARSE_POINT
+
+    def lstat(path: Any, **kwargs: Any) -> Any:
+        info = real_lstat(path, **kwargs)
+        return _Junction(info) if not kwargs and Path(path) == root else info
+
+    monkeypatch.setattr(trust.os, "lstat", lstat)
+
+    loaded = trust.load_anchor("alice")
+
+    assert not loaded.usable and loaded.exists
+    assert "junction" in loaded.reason, loaded.reason
+
+
+def test_load_anchor_never_raises_when_the_security_reader_breaks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-6: the REAL ``_windows_security`` on a host without ``ctypes.WinDLL``.
+
+    ``getattr(ctypes, "WinDLL")`` raises ``AttributeError`` off Windows \u2014 exactly
+    the kind of reader fault that used to propagate out of ``load_anchor``.
+    """
+    root = tmp_path / "local-operator" / "operators"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", root)
+    trust.anchor_path("alice").write_bytes(anchor_bytes(_anchor()))
+    monkeypatch.setattr(trust, "_on_windows", lambda: True)
+    monkeypatch.delattr(trust.ctypes, "WinDLL", raising=False)
+
+    loaded = trust.load_anchor("alice")
+
+    assert not loaded.usable and not loaded.root_owned
+    assert "could not be read" in loaded.reason, loaded.reason

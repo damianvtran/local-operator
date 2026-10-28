@@ -122,6 +122,26 @@ def stage_anchor(root: Path, anchor: Any) -> Path:
 PURPOSE_ADMIT_DEVICE = "admit_device"
 
 
+def _admitted_devices(installed: Any, staged: Any) -> list[str]:
+    """Device ids the STAGED anchor lets in that the INSTALLED one keeps out (R1-4).
+
+    The device list is a revocation list, so "admitting" a device is either a
+    revocation the staged copy drops, or a device entry the staged copy carries
+    un-revoked that the installed copy does not. Tightening (a new revocation)
+    is not an admission. Pure over two anchors, sorted for a stable message.
+    """
+
+    def revoked(anchor: Any) -> set[str]:
+        return {str(e.get("device_id")) for e in anchor.devices if e.get("revoked")}
+
+    def listed_open(anchor: Any) -> set[str]:
+        return {str(e.get("device_id")) for e in anchor.devices if not e.get("revoked")}
+
+    unrevoked = revoked(installed) - revoked(staged)
+    added = listed_open(staged) - listed_open(installed)
+    return sorted(unrevoked | added)
+
+
 def install_anchor(
     root: Path, *, print_only: bool = False, sudo_secret: str = "", purpose: str = ""
 ) -> int:
@@ -143,6 +163,13 @@ def install_anchor(
     (no ``purpose``) keep the interim path unchanged; narrowing those is the
     mesh lane's call, not this guard's.
 
+    THE GUARD DOES NOT RELY ON THE CALLER'S ``purpose`` ALONE (R1-4): a future
+    admit path that forgets the keyword would bypass it. So ``sudo_secret`` is
+    ALSO refused whenever the staged anchor would admit a device the installed
+    anchor keeps out (see :func:`_admitted_devices`) — the write is judged by
+    what it does, not by what it says it is. A host with no usable installed
+    anchor (first onboarding) has nothing to compare and is unchanged.
+
     THE BYTES INSTALLED ARE THE BYTES READ (the staging-swap race): the staged
     file is read once here, its sha256 travels in the privileged command's argv,
     and the privileged step installs only content with that digest — a swap of
@@ -157,6 +184,20 @@ def install_anchor(
         return 2
     staged = staging_path(root)
     target = anchor_path()
+    if sudo_secret:
+        installed = load_anchor()
+        staged_anchor = load_staged_anchor(root)
+        if installed.usable and installed.anchor is not None and staged_anchor is not None:
+            admitted = _admitted_devices(installed.anchor, staged_anchor)
+            if admitted:
+                print(
+                    "this change admits a device ("
+                    + ", ".join(admitted)
+                    + "), which needs an administrator to approve it in person, so a "
+                    "stored admin password cannot be used for it; nothing was installed",
+                    file=sys.stderr,
+                )
+                return 2
     try:
         staged_bytes = staged.read_bytes()
     except OSError:

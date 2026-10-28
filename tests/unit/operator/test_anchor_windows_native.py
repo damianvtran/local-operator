@@ -15,8 +15,12 @@ install script is exercised here without elevation for the same reason.
 
 from __future__ import annotations
 
+import base64
+import gzip
+import hashlib
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -107,7 +111,7 @@ def test_hardened_file_under_a_user_writable_directory_is_refused(
 def test_known_folder_ignores_a_hostile_programdata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    trust._windows_program_data.cache_clear()
+    trust._windows_program_data_resolution.cache_clear()
     monkeypatch.setenv("PROGRAMDATA", str(tmp_path / "attacker"))
     monkeypatch.setenv("USERNAME", "mallory")
 
@@ -118,3 +122,199 @@ def test_known_folder_ignores_a_hostile_programdata(
     assert resolved.parts[-2:] == ("local-operator", "operators")
     assert resolved.parent.parent.is_dir(), "the Known Folder resolves to a real directory"
     assert "mallory" not in trust.anchor_path().name
+
+
+# ---------------------------------------------------------------------------
+# Round 1 remediation, on real Windows: R1-1 (SystemDrive), R1-5 (junction on
+# the load side), R1-2 (the elevated script refuses planted targets) and R1-3
+# (the PRINTED line runs from both PowerShell and cmd.exe).
+# ---------------------------------------------------------------------------
+
+_PROBE = (
+    "from local_operator.operator import trust\n"
+    "print('ROOT', trust.anchor_dir())\n"
+    "print('REASON', trust.load_anchor('probe').reason)\n"
+)
+
+
+def _expected_root() -> Path:
+    system_dir = trust._system_windows_directory()
+    assert system_dir, "GetSystemWindowsDirectoryW answered nothing"
+    return Path(system_dir[:2].upper() + "\\ProgramData") / "local-operator" / "operators"
+
+
+def test_a_hostile_systemdrive_cannot_move_the_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-1: ``SystemDrive`` set, or removed, in-process AND in a fresh process."""
+    expected = _expected_root()
+    trust._windows_program_data_resolution.cache_clear()
+    monkeypatch.setenv("SystemDrive", str(tmp_path / "attacker"))
+    in_process = trust.anchor_dir()
+    print("in-process hostile SystemDrive ->", in_process, "| expected", expected)
+    assert in_process in (expected, trust._UNRESOLVED_ROOT)
+    assert "attacker" not in str(in_process)
+    trust._windows_program_data_resolution.cache_clear()
+
+    for label, value in (("hostile", str(tmp_path / "attacker")), ("removed", None)):
+        env = {k: v for k, v in os.environ.items() if k.upper() != "SYSTEMDRIVE"}
+        if value is not None:
+            env["SystemDrive"] = value
+        result = subprocess.run(
+            [sys.executable, "-c", _PROBE], env=env, capture_output=True, text=True, check=False
+        )
+        print(f"subprocess {label} SystemDrive ->", result.stdout.strip().replace("\n", " | "))
+        assert result.returncode == 0, result.stderr
+        root = result.stdout.split("ROOT ", 1)[1].splitlines()[0]
+        assert root in (str(expected), str(trust._UNRESOLVED_ROOT)), root
+        if root == str(trust._UNRESOLVED_ROOT):
+            assert "ProgramData" in result.stdout, "a refusal names its reason"
+
+
+def _junction(link: Path, target: Path) -> None:
+    result = subprocess.run(
+        ["cmd", "/d", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_a_junction_in_the_anchor_path_is_refused_on_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-5: a junction is not ``S_ISLNK``; the load must still refuse it."""
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    (decoy / "anchor.json").write_bytes(anchor_bytes(_anchor()))
+    (tmp_path / "local-operator").mkdir()
+    operators = tmp_path / "local-operator" / "operators"
+    _junction(operators, decoy)
+    monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", operators)
+
+    load = trust.load_anchor("anchor")
+
+    print("junction on load ->", load.usable, load.reason)
+    assert not load.usable and "junction" in load.reason
+
+
+def _acl(path: Path) -> str:
+    return subprocess.run(
+        ["icacls", str(path)], capture_output=True, text=True, check=False
+    ).stdout.replace(str(path), "<p>")
+
+
+def _staged(tmp_path: Path) -> tuple[Path, str]:
+    staged = tmp_path / "staged" / "anchor.json"
+    staged.parent.mkdir()
+    staged.write_bytes(anchor_bytes(_anchor()))
+    return staged, hashlib.sha256(staged.read_bytes()).hexdigest()
+
+
+def _run_inner(command: list[list[str]]) -> subprocess.CompletedProcess[str]:
+    """The ELEVATED script, run directly (the runner is already elevated)."""
+    blob = command[0][-1].split("FromBase64String('", 1)[1].split("'", 1)[0]
+    script = gzip.decompress(base64.b64decode(blob)).decode("utf-8")
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    return subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+
+
+def test_install_refuses_a_planted_junction_and_leaves_the_decoy_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-2: ``operators`` pre-planted as a junction to a decoy directory."""
+    monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", None)
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    before = _acl(decoy)
+    (tmp_path / "local-operator").mkdir()
+    # Administrators-owned (what an elevated runner creates anyway), so the ONLY
+    # thing wrong with the tree is the junction.
+    _icacls(str(tmp_path / "local-operator"), "/setowner", ADMINS)
+    _junction(tmp_path / "local-operator" / "operators", decoy)
+    staged, digest = _staged(tmp_path)
+    target = tmp_path / "local-operator" / "operators" / "anchor.json"
+
+    result = _run_inner(trust.install_commands(staged, target, digest))
+
+    after = _acl(decoy)
+    print("planted junction -> rc", result.returncode, "|", result.stderr.strip().splitlines()[0])
+    print("decoy ACL unchanged ->", before == after, "| decoy entries:", os.listdir(decoy))
+    assert result.returncode != 0
+    assert "is a junction or symbolic link, so it was refused" in result.stderr
+    assert before == after, (before, after)
+    assert os.listdir(decoy) == []
+
+
+def test_install_replaces_a_planted_grant_and_refuses_a_foreign_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-2: an attacker's explicit ACE is GONE after install; a foreign owner refuses."""
+    monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", None)
+    operators = tmp_path / "local-operator" / "operators"
+    operators.mkdir(parents=True)
+    _icacls(str(operators.parent), "/setowner", ADMINS)
+    _icacls(str(operators), "/setowner", ADMINS)
+    _icacls(str(operators), "/grant", "*S-1-1-0:(OI)(CI)F")
+    staged, digest = _staged(tmp_path)
+    target = operators / "anchor.json"
+    print("planted grant before ->", "Everyone" in _acl(operators))
+
+    result = _run_inner(trust.install_commands(staged, target, digest))
+
+    print("planted grant -> rc", result.returncode, result.stdout.strip(), result.stderr.strip())
+    after = _acl(operators)
+    print("planted grant after ->", "Everyone" in after or "S-1-1-0" in after)
+    assert result.returncode == 0, result.stderr
+    assert "Everyone" not in after and "S-1-1-0" not in after, after
+    monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", operators)
+    assert trust.load_anchor("anchor").usable
+
+    foreign = tmp_path / "foreign"
+    (foreign / "local-operator").mkdir(parents=True)
+    _icacls(str(foreign / "local-operator"), "/setowner", USERS)
+    result = _run_inner(
+        trust.install_commands(staged, foreign / "local-operator" / "operators" / "a.json", digest)
+    )
+    print("foreign owner -> rc", result.returncode, "|", result.stderr.strip().splitlines()[0])
+    assert result.returncode != 0 and "not SYSTEM or Administrators" in result.stderr
+
+
+@pytest.mark.parametrize("shell", ["powershell", "cmd"])
+def test_the_printed_line_installs_when_pasted_into_either_shell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shell: str
+) -> None:
+    """R1-3 / QA Q1: execute the EXACT printed line, as each shell would parse it.
+
+    PowerShell: the line is the body of a ``.ps1`` (parsed as if typed at the
+    prompt). cmd.exe: ``cmd /d /c <line>``. ``Start-Process -Verb RunAs`` does
+    not prompt on the runner (administrator, UAC off). The target is a scratch
+    root via the test seam, never the real ProgramData anchor.
+    """
+    monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", tmp_path / "local-operator" / "operators")
+    staged, digest = _staged(tmp_path)
+    target = trust.anchor_path("anchor")
+    line = trust.format_install_commands(trust.install_commands(staged, target, digest))
+
+    if shell == "powershell":
+        script = tmp_path / "pasted.ps1"
+        script.write_text(line + "\nexit $LASTEXITCODE\n", encoding="utf-8")
+        argv = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
+        result = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=180)
+    else:
+        result = subprocess.run(
+            f"cmd /d /c {line}", capture_output=True, text=True, check=False, timeout=180
+        )
+
+    load = trust.load_anchor("anchor")
+    print(f"printed line via {shell} -> rc", result.returncode, "| load", load.usable, load.reason)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert target.read_bytes() == staged.read_bytes()
+    assert load.usable, load.reason

@@ -45,6 +45,7 @@ import ctypes
 import functools
 import hashlib
 import json
+import ntpath
 import os
 import re
 import stat
@@ -92,22 +93,26 @@ _FOLDERID_PROGRAMDATA = (
 )
 
 
-@functools.lru_cache(maxsize=1)
-def _windows_program_data() -> Path | None:  # pragma: no cover — Windows only
-    """``C:\\ProgramData`` as the SHELL knows it, never as the environment says.
+def _system_windows_directory() -> str | None:  # pragma: no cover — Windows only
+    """``C:\\Windows`` from ``GetSystemWindowsDirectoryW`` — the ENV-FREE drive source.
 
-    WHY THE KNOWN FOLDER API AND NOT A CONSTANT OR ``%PROGRAMDATA%`` (F4):
-    ``%PROGRAMDATA%`` is a value the gated subject writes for its own tool
-    subprocesses, so reading it let a same-user process point the runtime at a
-    directory it owns. A hard-coded ``C:\\ProgramData`` would be env-proof but
-    wrong on hosts whose system drive is not ``C:``. ``SHGetKnownFolderPath``
-    answers from the machine's registry (``HKLM``, administrator-writable), which
-    is the same trust level as the anchor file itself and moves with the drive.
-
-    Cached for the process: the folder does not move under a running process,
-    and ``anchor_dir`` is read on every anchor refresh. Any failure answers
-    ``None`` and the caller reads :data:`_UNRESOLVED_ROOT` — never a fallback.
+    It answers from the kernel's shared user data (``NtSystemRoot``), which no
+    process environment variable feeds, so it is the reference the Known Folder
+    answer is checked against (R1-1).
     """
+    buffer = ctypes.create_unicode_buffer(261)
+    try:
+        kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+        length = kernel32.GetSystemWindowsDirectoryW(buffer, len(buffer))
+    except (OSError, AttributeError):
+        return None
+    if not 0 < length < len(buffer):
+        return None
+    return buffer.value or None
+
+
+def _known_folder_program_data() -> str | None:  # pragma: no cover — Windows only
+    """``SHGetKnownFolderPath(FOLDERID_ProgramData)``, verbatim, or ``None``."""
 
     class _Guid(ctypes.Structure):
         _fields_ = [
@@ -129,9 +134,68 @@ def _windows_program_data() -> Path | None:  # pragma: no cover — Windows only
     try:
         if hresult != 0 or not out.value:
             return None
-        return Path(out.value)
+        return str(out.value)
     finally:
         ole32.CoTaskMemFree(out)
+
+
+def resolve_program_data(
+    system_windows_dir: str | None, known_folder: str | None
+) -> tuple[Path | None, str]:
+    """``<system drive>\\ProgramData`` when both sources agree, else ``None`` + why.
+
+    WHY TWO SOURCES (R1-1). ``SHGetKnownFolderPath`` is not answered purely from
+    ``HKLM``: the registry value it reads is ``%SystemDrive%\\ProgramData``
+    (``REG_EXPAND_SZ``), expanded against the CALLING PROCESS's environment — and
+    ``SystemDrive`` is a variable a same-user process can set for lop. The drive
+    from ``GetSystemWindowsDirectoryW`` is env-free, so it pins the expected
+    root; the Known Folder answer only CONFIRMS it. Any disagreement, or either
+    source missing, refuses (fail closed: the anchor loads as "not installed"
+    with this reason) rather than picking one — a mismatch means something is
+    steering the lookup, and a host that relocated ProgramData off the system
+    drive is rare enough to be told so plainly.
+
+    Pure over its two strings, so the Ubuntu suite drives every branch.
+    """
+    if not system_windows_dir:
+        return None, "the Windows system directory could not be read"
+    drive = ntpath.splitdrive(system_windows_dir)[0]
+    if not re.fullmatch(r"[A-Za-z]:", drive):
+        return None, f"the Windows system directory {system_windows_dir!r} names no drive letter"
+    expected = drive.upper() + "\\ProgramData"
+    if not known_folder:
+        return None, "the ProgramData folder could not be resolved"
+    if ntpath.normcase(ntpath.normpath(known_folder)) != ntpath.normcase(expected):
+        return None, (
+            f"the ProgramData folder resolves to {known_folder!r}, not {expected!r} on the "
+            "system drive, so the runtime will not read an anchor from it (something in "
+            "this process's environment may be steering the lookup)"
+        )
+    return Path(expected), ""
+
+
+@functools.lru_cache(maxsize=1)
+def _windows_program_data_resolution() -> tuple[Path | None, str]:  # pragma: no cover
+    """The resolved root and its refusal reason, cached for the process.
+
+    Cached because the folder does not move under a running process and
+    ``anchor_dir`` is read on every anchor refresh.
+    """
+    return resolve_program_data(_system_windows_directory(), _known_folder_program_data())
+
+
+def _windows_program_data() -> Path | None:
+    """``C:\\ProgramData`` as the OS knows it, never as the environment says.
+
+    WHY NOT A CONSTANT OR ``%PROGRAMDATA%`` (F4): ``%PROGRAMDATA%`` is a value the
+    gated subject writes for its own tool subprocesses, so reading it let a
+    same-user process point the runtime at a directory it owns. A hard-coded
+    ``C:\\ProgramData`` would be env-proof but wrong on hosts whose system drive
+    is not ``C:``. :func:`resolve_program_data` derives it from the env-free
+    system drive and cross-checks the Known Folder. ``None`` on any failure or
+    disagreement; the caller reads :data:`_UNRESOLVED_ROOT` — never a fallback.
+    """
+    return _windows_program_data_resolution()[0]
 
 
 def _windows_account_name() -> str | None:  # pragma: no cover — Windows only
@@ -359,7 +423,13 @@ def _path_is_symlink_free(path: Path) -> bool:
     for part in path.parts[1:]:
         current = current / part
         try:
-            if stat.S_ISLNK(os.lstat(current).st_mode):
+            info = os.lstat(current)
+            if stat.S_ISLNK(info.st_mode):
+                return False
+            # R1-5: a Windows directory JUNCTION is a mount-point reparse point,
+            # which ``S_ISLNK`` does not report, yet the kernel follows it like a
+            # link. Refuse every reparse point: the anchor's path never needs one.
+            if getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT:
                 return False
         except OSError:
             # A missing component is not a link: the load below reports it as
@@ -367,6 +437,11 @@ def _path_is_symlink_free(path: Path) -> bool:
             # that simply has not installed an anchor yet.
             return True
     return True
+
+
+#: ``FILE_ATTRIBUTE_REPARSE_POINT``: set on symlinks AND junctions (``os.lstat``
+#: reports it in ``st_file_attributes`` on Windows only).
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 
 
 def _open_no_follow(path: Path) -> tuple[int, os.stat_result] | None:
@@ -464,7 +539,22 @@ def windows_acl_refusal(what: str, security: WindowsSecurity) -> str | None:
     return None
 
 
-def _windows_security(  # pragma: no cover — Windows only; the windows-latest job runs it
+def _windows_security(target: Path | int) -> WindowsSecurity | None:
+    """Owner SID and DACL of ``target``, or ``None`` — this NEVER raises (R1-6).
+
+    ``load_anchor`` promises never to raise, and the ctypes reader below can:
+    ``WinDLL`` loading, ``msvcrt.get_osfhandle`` on a bad descriptor and the
+    ctypes conversions all throw rather than return an error code. Every such
+    failure becomes "could not be read", which the caller refuses — a reader
+    that crashes the anchor refresh would take the runtime down with it.
+    """
+    try:
+        return _read_windows_security(target)
+    except Exception:  # noqa: BLE001 — fail closed on ANY reader fault, see above
+        return None
+
+
+def _read_windows_security(  # pragma: no cover — Windows only; the windows-latest job runs it
     target: Path | int,
 ) -> WindowsSecurity | None:
     """Owner SID and DACL of a path, or of an OPEN descriptor, via advapi32.
@@ -601,6 +691,17 @@ def load_anchor(uid: int | str | None = None) -> AnchorLoad:
     authority_level` reports it) rather than refusing to start.
     """
     path = anchor_path(uid)
+    if _on_windows() and _ANCHOR_ROOT_OVERRIDE is None and _windows_program_data() is None:
+        # R1-1: the root could not be pinned (or the Known Folder disagreed with
+        # the env-free system drive). "No anchor", with the reason named, so the
+        # status line says WHY rather than "not installed" on a host that has one.
+        return AnchorLoad(
+            anchor=None,
+            path=path,
+            root_owned=False,
+            reason=_windows_program_data_resolution()[1]
+            or "the ProgramData folder could not be resolved",
+        )
     if not _path_is_symlink_free(path):
         # ``exists=True``, because something IS in the anchor's place and the
         # runtime will not trust it: that is a pinned-but-unusable anchor
@@ -613,7 +714,7 @@ def load_anchor(uid: int | str | None = None) -> AnchorLoad:
             anchor=None,
             path=path,
             root_owned=False,
-            reason="a component of the anchor path is a symbolic link",
+            reason="a component of the anchor path is a symbolic link or junction",
             exists=True,
         )
     opened = _open_no_follow(path)
@@ -835,44 +936,192 @@ def _ps_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def _windows_install_script(staging: Path, target: Path, digest_hex: str) -> str:
-    """The script the ELEVATED PowerShell runs (F4, problem 3).
+#: The elevated script's native calls, declared through ``Reflection.Emit`` rather
+#: than ``Add-Type``: ``Add-Type`` compiles C# through files in the ELEVATED
+#: user's ``%TEMP%``, which that same (gated) user can write, so the code the
+#: administrator runs could be swapped mid-compile. Emit builds the P/Invoke
+#: stubs in memory; nothing the user can touch is ever loaded. The security
+#: descriptor is written with ``SetKernelObjectSecurity`` on the held handle, NOT
+#: ``SetSecurityInfo``: the latter re-propagates inheritable ACEs into existing
+#: children and would walk through a planted child junction (the R1-2 deputy).
+_WINDOWS_PINVOKE = """$tb=[Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly([Reflection.AssemblyName]::new('LopAnchor'),'Run').DefineDynamicModule('LopAnchor').DefineType('LopAnchorNative','Public,Class')
+$di=[Runtime.InteropServices.DllImportAttribute]
+function LopDef($dll,$name,$ret,$params){$m=$tb.DefineMethod($name,'Public,Static,PinvokeImpl',$ret,[Type[]]$params)
+$m.SetCustomAttribute([Reflection.Emit.CustomAttributeBuilder]::new($di.GetConstructor([Type[]]@([string])),[object[]]@($dll),[Reflection.FieldInfo[]]@($di.GetField('SetLastError'),$di.GetField('CharSet')),[object[]]@($true,[Runtime.InteropServices.CharSet]::Unicode)))}
+$I=[IntPtr];$U=[uint32]
+LopDef kernel32 CreateFileW $I @([string],$U,$U,$I,$U,$U,$I)
+LopDef kernel32 CreateDirectoryW ([bool]) @([string],$I)
+LopDef kernel32 GetFileInformationByHandle ([bool]) @($I,[byte[]])
+LopDef kernel32 CloseHandle ([bool]) @($I)
+LopDef kernel32 MoveFileExW ([bool]) @([string],[string],$U)
+LopDef kernel32 LocalFree $I @($I)
+LopDef advapi32 GetSecurityInfo $U @($I,$U,$U,$I,$I,$I,$I,$I.MakeByRefType())
+LopDef advapi32 GetSecurityDescriptorLength $U @($I)
+LopDef advapi32 SetKernelObjectSecurity ([bool]) @($I,$U,[byte[]])
+$LopNative=$tb.CreateType()
+function LopErr{[Runtime.InteropServices.Marshal]::GetLastWin32Error()}"""  # noqa: E501
 
-    The old step was a non-elevated ``Copy-Item`` into ``%PROGRAMDATA%`` that set
-    no ACL, so the file inherited ``CREATOR OWNER: F`` and stayed writable by the
-    very user it gates. This one, as an administrator: creates both directories,
-    strips inheritance and grants Full to SYSTEM and Administrators and read to
-    Users, makes Administrators the owner, reads the staged bytes ONCE, refuses
-    unless they hash to the digest lop read (the staging-swap race), writes those
-    bytes to a hardened temp file inside the hardened directory and renames it
-    into place. The result is what :func:`windows_acl_refusal` accepts.
+#: The elevated install's body. Every object is OPENED FIRST without following a
+#: reparse point (``FILE_FLAG_OPEN_REPARSE_POINT``), refused if the HANDLE says it
+#: is a junction/symlink, and then checked and re-ACL'd THROUGH THAT HANDLE, so
+#: no path is re-resolved between the check and the write (R1-2). Directories
+#: are held open without ``FILE_SHARE_DELETE`` until the install ends, so they
+#: cannot be renamed or swapped underneath it. Every helper is ``Lop``-prefixed
+#: because PowerShell resolves an ALIAS before a function: a helper named ``Dir``
+#: would silently run ``Get-ChildItem``. Variables are case-INSENSITIVE too
+#: (a local ``$n`` once shadowed the native type ``$N``), hence ``$LopNative``.
+#: A PREVIOUS anchor file is refused only if it is a reparse point, not for its
+#: owner: it is replaced by rename inside the now-hardened directory, never
+#: written through, and an anchor left by the old non-elevated ``Copy-Item``
+#: install (user-owned) must stay re-installable.
+_WINDOWS_INSTALL_BODY = """$Trusted='S-1-5-18','S-1-5-32-544'
+function LopBytes($sddl){$r=[Security.AccessControl.RawSecurityDescriptor]::new($sddl);$b=[byte[]]::new($r.BinaryLength);$r.GetBinaryForm($b,0);,$b}
+function LopSA($b){$Mar=[Runtime.InteropServices.Marshal];$p=$Mar::AllocHGlobal($b.Length);$Mar::Copy($b,0,$p,$b.Length);$z=[IntPtr]::Size;$a=$Mar::AllocHGlobal(3*$z);$Mar::WriteInt32($a,0,3*$z);$Mar::WriteIntPtr($a,$z,$p);$Mar::WriteInt32($a,2*$z,0);$a}
+function LopOpen($path,$access,$disp,$share,$sa,$dir,$missingOk){
+if($missingOk -and -not [IO.Directory]::GetFileSystemEntries([IO.Path]::GetDirectoryName($path),[IO.Path]::GetFileName($path)).Count){return $null}
+$h=$LopNative::CreateFileW($path,$access,$share,$sa,$disp,0x02200000,[IntPtr]::Zero)
+if($h.ToInt64() -eq -1){throw "could not open $path without following links (error $(LopErr)); nothing was installed"}
+$info=[byte[]]::new(52)
+if(-not $LopNative::GetFileInformationByHandle($h,$info)){[void]$LopNative::CloseHandle($h);throw "could not read the attributes of $path; nothing was installed"}
+$at=[BitConverter]::ToUInt32($info,0)
+if($at -band 0x400){[void]$LopNative::CloseHandle($h);throw "$path is a junction or symbolic link, so it was refused; nothing was installed"}
+if($dir -and -not ($at -band 0x10)){[void]$LopNative::CloseHandle($h);throw "$path is not a directory; nothing was installed"}
+$h}
+function LopSd($h,$what){$p=[IntPtr]::Zero
+$rc=$LopNative::GetSecurityInfo($h,1,5,[IntPtr]::Zero,[IntPtr]::Zero,[IntPtr]::Zero,[IntPtr]::Zero,[ref]$p)
+if($rc -ne 0){throw "could not read the owner and access list of $what (error $rc); nothing was installed"}
+try{$len=$LopNative::GetSecurityDescriptorLength($p);$b=[byte[]]::new($len);[Runtime.InteropServices.Marshal]::Copy($p,$b,0,$len);[Security.AccessControl.RawSecurityDescriptor]::new($b,0)}finally{[void]$LopNative::LocalFree($p)}}
+function LopOwned($sd,$what){if($Trusted -notcontains $sd.Owner.Value){throw "$what is owned by $($sd.Owner.Value), not SYSTEM or Administrators, so it was refused; an administrator should remove it, then run this again"}}
+function LopVerify($sd,$what){LopOwned $sd $what
+if($null -eq $sd.DiscretionaryAcl){throw "$what has no access list"}
+foreach($a in $sd.DiscretionaryAcl){
+if($a -isnot [Security.AccessControl.CommonAce]){throw "$what carries an access entry of an unknown kind"}
+if($a.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly){continue}
+if($a.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed){continue}
+if(($Trusted -notcontains $a.SecurityIdentifier.Value) -and ($a.AccessMask -band 0x520d0156)){throw "$what is still writable by $($a.SecurityIdentifier.Value)"}}}
+$DirSd=LopBytes 'O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)'
+$FileSd=LopBytes 'O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)'
+function LopDir($path){
+[void]$LopNative::CreateDirectoryW($path,(LopSA $DirSd))
+$h=LopOpen $path 0xE0080 3 3 ([IntPtr]::Zero) $true $false
+LopOwned (LopSd $h $path) $path
+if(-not $LopNative::SetKernelObjectSecurity($h,[uint32]5,$DirSd)){throw "could not restrict $path (error $(LopErr)); nothing was installed"}
+LopVerify (LopSd $h $path) $path
+$h}
+$hr=LopDir $root
+$hd=LopDir $dir
+$old=LopOpen $target 0x80 3 7 ([IntPtr]::Zero) $false $true
+if($old){[void]$LopNative::CloseHandle($old)}
+$stale=LopOpen $tmp 0x10080 3 7 ([IntPtr]::Zero) $false $true
+if($stale){[void]$LopNative::CloseHandle($stale);[IO.File]::Delete($tmp)}
+$bytes=[IO.File]::ReadAllBytes($staged)
+$actual=-join([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)|ForEach-Object{$_.ToString('x2')})
+if($actual -ne $expected){throw 'the staged anchor changed after it was read; nothing was installed'}
+$hf=LopOpen $tmp 0x40020080 1 0 (LopSA $FileSd) $false $false
+$fs=[IO.FileStream]::new([Microsoft.Win32.SafeHandles.SafeFileHandle]::new($hf,$true),[IO.FileAccess]::Write)
+try{$fs.Write($bytes,0,$bytes.Length);$fs.Flush($true);LopVerify (LopSd $hf $tmp) $tmp}finally{$fs.Dispose()}
+if(-not $LopNative::MoveFileExW($tmp,$target,9)){throw "could not move the anchor into place (error $(LopErr))"}
+$hv=LopOpen $target 0x20080 3 7 ([IntPtr]::Zero) $false $false
+try{LopVerify (LopSd $hv $target) $target}finally{[void]$LopNative::CloseHandle($hv)}
+[void]$LopNative::CloseHandle($hd);[void]$LopNative::CloseHandle($hr)
+Write-Output "installed the operator anchor at $target\""""  # noqa: E501
+
+
+def _windows_install_script(staging: Path, target: Path, digest_hex: str) -> str:
+    """The script the ELEVATED PowerShell runs (F4 problem 3; R1-2).
+
+    The old step was a non-elevated ``Copy-Item`` that set no ACL. The round-1
+    step ran ``icacls`` on whatever already sat at the target paths, so a user
+    who pre-created ``local-operator\\`` (ProgramData lets Users add children)
+    could make ``operators`` a JUNCTION and have the administrator's approval
+    re-ACL an arbitrary directory, or leave an explicit grant ``/grant:r`` never
+    removes. This one, as an administrator:
+
+    - creates each directory WITH its hardened descriptor (``CreateDirectoryW``
+      + ``SECURITY_ATTRIBUTES``), so a fresh one is never briefly open;
+    - opens each directory, any pre-existing anchor and the temp file without
+      following a reparse point, and REFUSES a junction/symlink or a directory
+      owned by anyone but SYSTEM/Administrators (the handle is what is checked);
+    - REPLACES the whole DACL through that handle (protected; SYSTEM and
+      Administrators full, Users read) rather than editing it, so no foreign
+      explicit ACE survives — and re-reads it through the handle to prove it;
+    - hashes the staged bytes once, refuses unless they match ``digest_hex``
+      (the staging-swap race), writes them to a ``CREATE_NEW`` temp file born
+      with the hardened descriptor, and renames it into place.
+
+    No ``icacls`` at all any more, so there is no link-following path tool to
+    pass ``/L`` to. The result is what :func:`windows_acl_refusal` accepts.
     """
     tmp = target.parent / ".anchor-install.tmp"
-    lines = [
-        "$ErrorActionPreference = 'Stop'",
-        f"$root = {_ps_quote(str(target.parent.parent))}",
-        f"$dir = {_ps_quote(str(target.parent))}",
-        f"$tmp = {_ps_quote(str(tmp))}",
-        "function Harden($p, $inherit) {",
-        f'  icacls $p /inheritance:r /grant:r "*{_SID_SYSTEM}:$($inherit)F" '
-        f'"*{_SID_ADMINS}:$($inherit)F" "*{_SID_USERS}:$($inherit)R" | Out-Null',
-        '  if ($LASTEXITCODE -ne 0) { throw "icacls could not restrict $p" }',
-        f'  icacls $p /setowner "*{_SID_ADMINS}" | Out-Null',
-        '  if ($LASTEXITCODE -ne 0) { throw "icacls could not take ownership of $p" }',
-        "}",
-        "New-Item -ItemType Directory -Force -Path $dir | Out-Null",
-        "Harden $root '(OI)(CI)'",
-        "Harden $dir '(OI)(CI)'",
-        f"$bytes = [IO.File]::ReadAllBytes({_ps_quote(str(staging))})",
-        "$sha = [Security.Cryptography.SHA256]::Create()",
-        "$actual = -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })",
-        f"if ($actual -ne {_ps_quote(digest_hex)}) {{ throw 'the staged anchor changed "
-        "after it was read; nothing was installed' }",
-        "[IO.File]::WriteAllBytes($tmp, $bytes)",
-        "Harden $tmp ''",
-        f"Move-Item -Force -LiteralPath $tmp -Destination {_ps_quote(str(target))}",
-    ]
-    return "\n".join(lines)
+    head = "\n".join(
+        [
+            "$ErrorActionPreference='Stop'",
+            f"$root={_ps_quote(str(target.parent.parent))}",
+            f"$dir={_ps_quote(str(target.parent))}",
+            f"$target={_ps_quote(str(target))}",
+            f"$tmp={_ps_quote(str(tmp))}",
+            f"$staged={_ps_quote(str(staging))}",
+            f"$expected={_ps_quote(digest_hex)}",
+        ]
+    )
+    # ``try``/``catch`` around everything: ``throw`` from a redirected
+    # ``-EncodedCommand`` session reaches stderr as CLIXML, wrapped at console
+    # width, so a refusal would read as XML noise. The plain message on stderr
+    # and exit code 1 are what the operator (and the launcher's exit code) see.
+    return "\n".join(
+        [
+            head,
+            "try{",
+            _WINDOWS_PINVOKE,
+            _WINDOWS_INSTALL_BODY,
+            "}catch{[Console]::Error.WriteLine($_.Exception.Message);exit 1}",
+        ]
+    )
+
+
+#: Characters the outer launcher must never contain, because one of the two
+#: shells an operator pastes into would rewrite them: PowerShell expands ``$``
+#: and the backtick escape inside a double-quoted argument; cmd.exe expands
+#: ``%VAR%`` (and ``!VAR!`` under delayed expansion); a ``"`` would end the quoted
+#: argument in both. Asserted on every build of the line (R1-3).
+_PASTE_UNSAFE = frozenset('$`"%!')
+
+
+def _windows_outer_command(script: str) -> str:
+    """The non-elevated launcher: unpack ``script`` in memory, run it elevated.
+
+    WHY IT IS SPELLED THIS WAY (R1-3). Round 1 printed
+    ``-Command "$p = Start-Process ...; exit $p.ExitCode"``: correct from cmd.exe,
+    but pasted into PowerShell the OUTER shell expanded ``$p`` to nothing before
+    launching, so the install silently never ran. The launcher is now ONE
+    expression with no variable at all and no character either shell rewrites
+    (:data:`_PASTE_UNSAFE`), so the same printed line runs from both.
+
+    WHY NOT ``-EncodedCommand`` FOR THE OUTER STEP TOO, as the review suggested:
+    that is UTF-16 base64 of a script that already carries the inner script, and
+    the result (~9.3k characters) is past cmd.exe's 8191-character line limit.
+    The inner script rides as a gzip+base64 blob (no unsafe character) and the
+    launcher builds the elevated ``-EncodedCommand`` from it at run time, in
+    memory — never a file the user could swap. ``.ExitCode`` of the
+    ``-PassThru`` process is the launcher's own exit code, so a refusal is
+    not reported as success (``Start-Process -Wait`` alone drops it).
+    """
+    import base64
+    import gzip
+
+    blob = base64.b64encode(gzip.compress(script.encode("utf-8"), 9, mtime=0)).decode("ascii")
+    outer = (
+        "exit (Start-Process -FilePath powershell -Verb RunAs -Wait -PassThru -ArgumentList "
+        "('-NoProfile -NonInteractive -EncodedCommand '+[Convert]::ToBase64String("
+        "[Text.Encoding]::Unicode.GetBytes([IO.StreamReader]::new("
+        "[IO.Compression.GZipStream]::new([IO.MemoryStream]::new("
+        f"[Convert]::FromBase64String('{blob}')),"
+        "[IO.Compression.CompressionMode]::Decompress)).ReadToEnd())))).ExitCode"
+    )
+    unsafe = _PASTE_UNSAFE.intersection(outer)
+    if unsafe:  # pragma: no cover — a constant-shape guard; the test drives quoting
+        raise ValueError(f"the Windows install line would carry {sorted(unsafe)}")
+    return outer
 
 
 def install_commands(staging: Path, target: Path, digest_hex: str) -> list[list[str]]:
@@ -896,23 +1145,8 @@ def install_commands(staging: Path, target: Path, digest_hex: str) -> list[list[
     which reopens the same swap race for the script itself.
     """
     if _on_windows():
-        import base64
-
-        script = _windows_install_script(staging, target, digest_hex)
-        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-        return [
-            [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                # ``-PassThru`` + ``exit``: ``Start-Process -Wait`` alone drops the
-                # elevated child's exit code, so a refused digest would print as
-                # success.
-                "$p = Start-Process -FilePath powershell -Verb RunAs -Wait -PassThru "
-                f"-ArgumentList '-NoProfile -NonInteractive -EncodedCommand {encoded}'; "
-                "exit $p.ExitCode",
-            ]
-        ]
+        outer = _windows_outer_command(_windows_install_script(staging, target, digest_hex))
+        return [["powershell", "-NoProfile", "-NonInteractive", "-Command", outer]]
     group = "wheel" if sys.platform == "darwin" else "root"
     hasher = "shasum -a 256" if sys.platform == "darwin" else "sha256sum"
     script = _POSIX_INSTALL_SCRIPT.replace("{hash}", hasher)

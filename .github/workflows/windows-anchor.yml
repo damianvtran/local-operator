@@ -3,8 +3,10 @@ name: Windows anchor verifier
 # The operator trust anchor's Windows half (F4) is checked by advapi32 calls the
 # Linux suite can only drive with FAKE security descriptors. This job runs the
 # verifier against REAL ACLs on windows-latest: a default-ACL (user-writable)
-# anchor must be refused, an icacls-hardened one accepted, and the Known Folder
-# lookup must ignore a hostile %PROGRAMDATA%.
+# anchor must be refused, an icacls-hardened one accepted, the Known Folder
+# lookup must ignore a hostile %PROGRAMDATA% and %SystemDrive%, and the PRINTED
+# install line must actually install from both PowerShell and cmd.exe, refusing a
+# pre-planted junction or foreign-owned target directory.
 #
 # A SEPARATE WORKFLOW rather than a ci.yml job, deliberately: it is paths-gated
 # to the operator package (ci.yml gates nothing by path, and every PR paying a
@@ -12,8 +14,8 @@ name: Windows anchor verifier
 # mobile-web.yml and extension.yml gate their own subtrees.
 #
 # WHAT IT CANNOT PROVE: a UAC prompt or secure-desktop behaviour — GitHub's
-# Windows runners run as an administrator with UAC off. It proves the DACL/path
-# verifier only.
+# Windows runners run as an administrator with UAC off, so ``-Verb RunAs`` does
+# not prompt here. It proves the verifier and the elevated script, not the prompt.
 
 on:
   push:
@@ -65,6 +67,10 @@ jobs:
           python -m pytest tests/unit/operator/test_anchor_windows_native.py -n0 -rA -s -p no:cacheprovider --basetemp (Join-Path $env:RUNNER_TEMP "anchor-pytest")
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # A collection that SKIPS every test would also exit 0 — refuse that.
+          # The count is matched EXACTLY on the summary line (an unanchored "4 passed"
+          # also matched "14 passed"), and the exit code is checked as well.
           $out = python -m pytest tests/unit/operator/test_anchor_windows_native.py -n0 -q -p no:cacheprovider --basetemp (Join-Path $env:RUNNER_TEMP "anchor-pytest-2")
+          $rc = $LASTEXITCODE
           $out
-          if (-not ($out -match "4 passed")) { Write-Error "expected 4 native tests to run"; exit 1 }
+          if ($rc -ne 0) { exit $rc }
+          if (-not ($out | Where-Object { $_ -match '^10 passed in ' })) { Write-Error "expected exactly 10 native tests to pass"; exit 1 }
