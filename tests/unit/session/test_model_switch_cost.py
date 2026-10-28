@@ -239,6 +239,48 @@ def test_warm_model_info_only_after_a_full_resolve_in_this_bucket() -> None:
         configure.invalidate_model_info_cache()
 
 
+def test_a_degraded_base_scoped_resolve_is_never_warm(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A degraded resolve under ``base=`` refuses the warm row (review round 3).
+
+    Every session start resolves with ``base=config_dir`` (``configure_model``),
+    and ``_paint_memo`` is keyed without ``base``. The warm check used to look
+    for the degraded marker only under ``base=None``, so a degraded start's row
+    (the 128k default window, no output cap) was handed to every switch to that
+    model for the rest of the TTL bucket. Once the metadata recovers and the
+    model re-resolves, the warm build must equal a cold one.
+    """
+    from local_operator.model import catalogue, configure
+
+    configure.invalidate_model_info_cache()
+    real_body = configure._resolve_model_info_body
+
+    def degraded_body(provider: str, model_id: str, base: Any) -> Any:
+        catalogue.note_unavailable(f"{provider} discovery")
+        return real_body(provider, model_id, base).model_copy(update={"context_window": -1})
+
+    try:
+        monkeypatch.setattr(configure, "_resolve_model_info_body", degraded_body)
+        configure.resolve_model_info("anthropic", "claude-opus-5", base=tmp_path)
+        assert configure.warm_model_info("anthropic", "claude-opus-5") is None
+        assert configure.warm_model_info("anthropic", "anthropic/claude-opus-5") is None
+
+        # Metadata recovers: the degraded marker expires and the next resolve
+        # (the same base-scoped writer) re-runs the body and rewrites the row.
+        monkeypatch.setattr(configure, "_resolve_model_info_body", real_body)
+        for key in list(configure._degraded_until):
+            configure._degraded_until[key] = 0.0
+        configure.resolve_model_info("anthropic", "claude-opus-5", base=tmp_path)
+        warm = configure.warm_model_info("anthropic", "claude-opus-5")
+        assert warm is not None
+        warm_spec = configure.build_model_spec("anthropic", "claude-opus-5", info=warm)
+        configure.invalidate_model_info_cache()
+        assert warm_spec == configure.build_model_spec("anthropic", "claude-opus-5")
+    finally:
+        configure.invalidate_model_info_cache()
+
+
 @pytest.mark.asyncio
 async def test_a_warm_switch_never_runs_the_resolver_inline(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch

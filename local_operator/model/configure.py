@@ -2857,7 +2857,8 @@ def warm_model_info(provider: str, model_id: str) -> ModelInfo | None:
       have a warm row here;
     * local runtimes resolve through their own endpoint-scoped path;
     * a key that DEGRADED is re-resolved once its short TTL expires
-      (``_memo_attempt``), so a degraded key is never warm;
+      (``_memo_attempt``), so a model with a degraded marker under ANY
+      base/scope in this bucket is never warm;
     * otherwise the row is what the full resolver answered for this exact key
       in the CURRENT TTL bucket — ``_paint_memo`` is written only by
       :func:`resolve_model_info`, after the cached body ran.
@@ -2875,7 +2876,16 @@ def warm_model_info(provider: str, model_id: str) -> ModelInfo | None:
         if canonical in ("openai", "meta-muse") or canonical in LOCAL_PROVIDER_IDS:
             return None
         bucket = int(time.time() // DEFAULT_TTL_S)
-        if (canonical, name, bucket, "", None) in _degraded_until:
+        # ANY degraded marker for this model in this bucket refuses the row,
+        # whatever its scope and base (review round 3, R3-1). ``_paint_memo``
+        # is keyed WITHOUT base, but every session start resolves with
+        # ``base=config_dir`` (``configure_model``), so a degraded start marks
+        # the config_dir-scoped key while writing the shared row; checking only
+        # the ``base=None`` key served that 128k/no-cap row to every switch for
+        # the rest of the day. An EXPIRED marker still refuses: it is popped
+        # only by the re-resolve in ``_memo_attempt``, which rewrites the row,
+        # so until then the row is still the degraded answer.
+        if any(key[:3] == (canonical, name, bucket) for key in list(_degraded_until)):
             return None
         info = _paint_memo.get((canonical, name, bucket))
         return None if info is None else info.model_copy(deep=True)
