@@ -47,9 +47,17 @@ test that drives the real ``AgentLoop``:
 * ``edit`` changes a file by exact ``old_text`` -> ``new_text`` replacements (the
   file ``edit`` tool's rule: ``old_text`` must occur exactly once), so a change
   needs only the text it replaces and every other byte is carried over.
-* ``update`` refuses whole-file content for an EXISTING file longer than one page
+* ``update`` refuses to replace or remove an EXISTING file longer than one page
   (:data:`PAGE_CHARS`): only a file the model could have read in one ``show`` may
-  be replaced whole. New and short files are unaffected.
+  be replaced whole, and refusing the remove too is what stops a remove-then-re-add
+  across two calls doing the same (review R8). New and short files are unaffected.
+
+The replay bound is not the only lossy view: the session masks credential-looking
+text in every tool result before the model reads it, while the fingerprint line
+passes through. So ``update`` also refuses to replace a file whose masked view
+differs from its bytes, and every write refuses text that ADDS the
+``[redacted]`` marker (review R6). Both use the session's own mask
+(``ToolContext.variables.redact``), the function that made the model's view.
 
 No spill handle is ever returned either: the run has no ``read`` tool to open one.
 
@@ -413,9 +421,18 @@ _HINTS: dict[str, str] = {
     "alias-occupied": "Choose another name, or update the existing skill if it is editable.",
     "skill-not-found": "Check the name with op='list'.",
     "skill-file-too-long-to-replace": (
-        "Show the part you want to change and use op='edit' with exact old_text."
+        "Show the part you want to change and use op='edit' with exact old_text. A "
+        "long file cannot be removed here; the operator can on the Skills tab."
     ),
     "skill-edit-no-unique-match": "Show that part of the file again and copy old_text exactly.",
+    "skill-file-masked": (
+        "Change it with op='edit', quoting only text that was not masked; the masked "
+        "value is kept as it is."
+    ),
+    "skill-marker-introduced": (
+        "Quote only unmasked text in old_text/new_text; the real value cannot be "
+        "written from here."
+    ),
 }
 
 
@@ -431,6 +448,7 @@ def _work(params: SkillParams, config_dir: Path, context: ToolContext | None) ->
         return _show(config_dir, name, params.path, params.offset or 1, context)
     if params.op == "create":
         writes.require_unshadowed(config_dir, name)
+        writes.refuse_new_markers_in_files(files)
         return _write_receipt(writes.create(config_dir, name, files=files), "created", context)
     if params.op == "edit":
         result = writes.edit_files(
@@ -447,8 +465,22 @@ def _work(params: SkillParams, config_dir: Path, context: ToolContext | None) ->
         params.remove_paths or (),
         str(params.expected_fingerprint),
         whole_file_max_chars=PAGE_CHARS,
+        mask=_session_mask(context),
     )
     return _write_receipt(result, "updated", context)
+
+
+def _session_mask(context: ToolContext | None) -> Callable[[str], str] | None:
+    """The credential mask the loop applies to this tool's results (review R6).
+
+    A session hands its loop ``redact_tool_result`` and its tools
+    ``ToolContext.variables`` from ONE store, and both mask through
+    ``VariableStore.redact``'s pass -- so judging "did the model see this file as
+    it is?" with this function asks exactly the question the loop answered. No
+    store, no mask: the loop then masks nothing either.
+    """
+    store = context.variables if context is not None else None
+    return store.redact if store is not None else None
 
 
 def _arguments_refusal(params: SkillParams) -> str | None:

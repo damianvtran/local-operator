@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from local_operator.config_writer import config_write_lock
 from local_operator.hub_sync import provenance as prov
@@ -288,6 +288,41 @@ def _commit(
     return _result(config_dir, name, authored)
 
 
+def _masked_differs(mask: Callable[[str], str], text: str) -> bool:
+    try:
+        return mask(text) != text
+    except Exception:  # noqa: BLE001 - an unmaskable file was withheld from the model
+        return True
+
+
+def refuse_new_markers_in_files(files: Iterable[Mapping[str, str]]) -> None:
+    """:func:`_refuse_new_markers` for a CREATE: every file is new, so none had one."""
+    for item in files:
+        _refuse_new_markers(item["path"], None, item["content"])
+
+
+def _refuse_new_markers(path: str, before: str | None, after: str) -> None:
+    """Refuse text that ADDS the harness's redaction marker to a file (review R6).
+
+    The model reads every tool result through the session's credential mask, so a
+    model that copies what it saw hands this writer the literal marker in place of
+    the real value. The file ``write``/``edit`` tools only NOTE that (a document
+    about the marker is a legitimate write there); a skill is loaded into every
+    later session, so the run refuses instead. The count rule is
+    ``tools.builtin._marker_introduced``'s, reused rather than restated: leaving a
+    marker the file already had, or removing one, introduces nothing.
+    """
+    from local_operator.tools.builtin import _marker_introduced
+
+    added = _marker_introduced(before or "", after)
+    if added:
+        raise SkillValidationError(
+            "skill-marker-introduced",
+            f"this would put {added} redaction marker(s) into {path}; that marker is the "
+            "mask for text hidden from you, not the file's text",
+        )
+
+
 def _refuse_duplicates(paths: list[str], what: str) -> None:
     # A dict built from a list keeps the LAST of two same-path entries, so two
     # conflicting versions of one file would silently lose one (review R4).
@@ -307,6 +342,7 @@ def patch(
     expected_fingerprint: str,
     *,
     whole_file_max_chars: int | None = None,
+    mask: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
     """Change SOME files of a managed skill and keep the rest (CAS on the folder).
 
@@ -322,7 +358,19 @@ def patch(
     of its reads can deliver whole through the loop's replay bound: a longer file
     reached the model only in pages, and a whole-file rewrite composed from a
     partial view commits whatever the model filled the gaps with (review R1).
-    :func:`edit_files` is the path for those.
+    :func:`edit_files` is the path for those. The same bound refuses REMOVING such
+    a file (review R8): the run could not have read it whole either, and a remove
+    followed by a re-add in a later call is a whole-file replacement in two steps.
+
+    ``mask`` is the session's own credential mask -- the function that turned this
+    file into the text the model read (review R6). A whole-file replacement of an
+    existing file whose masked view differs from its bytes is refused: the model
+    saw ``[redacted]`` where the file holds a real value, so any rewrite of it is
+    built from content it never received. ``edit`` replaces only text it can quote
+    exactly, so a masked span can only be carried over, never rewritten. A mask
+    that raises counts as "differs": the loop withholds a result it cannot mask,
+    so the model saw none of it. Any write that ADDS the marker is refused too
+    (:func:`_refuse_new_markers`).
 
     THE CAS IS CHECKED TWICE. Once against the document the overlay is built on --
     an overlay on bytes the caller never saw would merge their edit into someone
@@ -342,14 +390,24 @@ def patch(
             "skill-validation", f"a path cannot be both written and removed: {both[0]}"
         )
     if whole_file_max_chars is not None:
-        for path in changed:
+        for path in [*changed, *removed]:
             existing = merged.get(path)
             if existing is not None and len(existing) > whole_file_max_chars:
+                verb = "replaced" if path in changed else "removed"
                 raise SkillValidationError(
                     "skill-file-too-long-to-replace",
                     f"{path} is {len(existing)} characters, more than one read shows "
-                    f"whole ({whole_file_max_chars}), so it cannot be replaced whole",
+                    f"whole ({whole_file_max_chars}), so it cannot be {verb} whole here",
                 )
+    for path, content in changed.items():
+        existing = merged.get(path)
+        if existing is not None and mask is not None and _masked_differs(mask, existing):
+            raise SkillValidationError(
+                "skill-file-masked",
+                f"{path} holds text that was masked as [redacted] when you read it, so it "
+                "cannot be replaced whole",
+            )
+        _refuse_new_markers(path, existing, content)
     for path in removed:
         if path not in merged:
             raise SkillValidationError("skill-validation", f"no file to remove: {path}")
@@ -375,20 +433,27 @@ def edit_files(
 
     The semantics are the file ``edit`` tool's, minus its whitespace-tolerant
     fallback (a skill is short and the CAS already proves the model read this
-    revision): ``old_text`` must be non-empty and occur EXACTLY ONCE in the file
+    revision): ``old_text`` must be non-empty and occur EXACTLY ONCE -- counting
+    overlapping matches, with the file tool's own ``_exact_windows`` -- in the file
     as it stands after the previous edits in this call, or nothing is written.
     All edits land in one swap.
     """
+    from local_operator.tools.builtin import _exact_windows
+
     edits = list(edits)
     storage, current = _current_document(config_dir, name, expected_fingerprint)
-    merged = {file.path: file.content for file in current.files}
+    original = {file.path: file.content for file in current.files}
+    merged = dict(original)
     for index, item in enumerate(edits, start=1):
         path, old, new = item["path"], item["old_text"], item["new_text"]
         if path not in merged:
             raise SkillValidationError("skill-validation", f"edit {index}: no file {path}")
         if not old:
             raise SkillValidationError("skill-validation", f"edit {index}: old_text is empty")
-        count = merged[path].count(old)
+        # OVERLAPPING occurrences (review R7): ``str.count`` would read a
+        # self-overlapping ``old_text`` as unique and land the edit on the first of
+        # two matches. The file ``edit`` tool's own exact matcher decides.
+        count = len(_exact_windows(merged[path], old))
         if count != 1:
             raise SkillValidationError(
                 "skill-edit-no-unique-match",
@@ -396,6 +461,10 @@ def edit_files(
                 "exactly once (copy it exactly from show, with enough context to be unique)",
             )
         merged[path] = merged[path].replace(old, new, 1)
+    # Whole-file, after every edit: a ``new_text`` that re-types a masked line
+    # adds a marker the file never had (review R6), whichever edit put it there.
+    for path, content in merged.items():
+        _refuse_new_markers(path, original[path], content)
     return _commit(config_dir, storage, name, merged, expected_fingerprint)
 
 

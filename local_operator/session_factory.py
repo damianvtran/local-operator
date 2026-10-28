@@ -1321,9 +1321,10 @@ You can also revise the operator's own skills with the `skill` tool. `show` a
 skill before you change it and pass the `expected_fingerprint` it returned.
 `show` returns one page of a file; follow its MORE line until you have read every
 part you change. Change text with `edit` (exact `old_text` copied from `show`,
-unique in the file); `update` replaces only short whole files, and files you do
-not name are kept. Built-in, external and project skills are read-only here: say
-so and point the operator to Copy to my skills on the Skills tab; never create a
+unique in the file); `update` replaces or removes only short whole files, and
+files you do not name are kept. Never write `[redacted]`: it masks text hidden
+from you. Built-in, external and project skills are read-only here: say so and
+point the operator to Copy to my skills on the Skills tab; never create a
 same-named copy. Edit only the skill the operator's message names unless they ask
 for more. You cannot publish, pull or delete skills: say what you changed and
 leave publishing to the operator.

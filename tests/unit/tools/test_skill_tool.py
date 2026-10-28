@@ -598,16 +598,40 @@ class _ScriptedModel:
         return gen()
 
 
-async def _drive(env: SimpleNamespace, plan: Any) -> _ScriptedModel:
+async def _drive(env: SimpleNamespace, plan: Any, *, masked: bool = False) -> _ScriptedModel:
+    """Run the real loop. ``masked=True`` wires the SESSION's redaction exactly as a
+    session does (review R6): a real ``Session`` over a ``VariableStore`` supplies
+    both the loop's ``redact_tool_result`` and the tool's ``context.variables``, so
+    the model reads what a real run's model reads and the tool judges by the same
+    mask."""
     from local_operator.harness.loop import AgentLoop, LoopContext
     from local_operator.harness.types import LoopConfig, Message, ModelSpec
 
     model = _ScriptedModel(plan)
-    context = LoopContext(system_blocks=["sys"], tools=[env.tool], tool_context=env.context)
+    redact = None
+    tool_context = env.context
+    if masked:
+        from local_operator.session.session import Session
+        from local_operator.session.transcript import Transcript
+        from local_operator.variables import VariableStore
+
+        session = Session(
+            model=ModelSpec(provider="test", model_id="test-model", context_window=200_000),
+            stream_fn=model,
+            tools=[env.tool],
+            transcript=Transcript(env.home / "masked-session"),
+            system_blocks_provider=lambda: ["sys"],
+            variables=VariableStore(cwd=str(env.home), env={}),
+        )
+        redact = session._redact_tool_result_text
+        tool_context = session._build_tool_context()
+        assert tool_context.memory_config_dir == str(env.config_dir)
+    context = LoopContext(system_blocks=["sys"], tools=[env.tool], tool_context=tool_context)
     config = LoopConfig(
         model=ModelSpec(provider="test", model_id="test-model", context_window=200_000),
         convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
         stream_fn=model,
+        redact_tool_result=redact,
     )
     await AgentLoop().run_to_end([Message.user("revise the big skill")], context, config, None)
     return model
@@ -896,3 +920,176 @@ async def test_list_and_create_agree_on_a_moved_profile(
         files=[{"path": "SKILL.md", "content": _skill_md(builtin)}],
     )
     assert error and text.startswith("alias-occupied:"), text
+
+
+# -- review round 2: the credential mask is a second lossy view (R6), R7, R8 -----------
+
+_SECRET_MD = (
+    "---\nname: db\ndescription: Database access.\n---\n"
+    "Connect with these settings:\n"
+    "password: changeme123\n"
+    "Then run the migration.\n"
+)
+
+
+async def test_a_masked_file_cannot_be_replaced_whole_through_the_loop(env) -> None:
+    """R6 (a): the model reads ``[redacted]`` where the file holds a value, while the
+    fingerprint passes; a whole-file rewrite from that view is refused, bytes kept."""
+    writes.create(env.config_dir, "db", files=[{"path": "SKILL.md", "content": _SECRET_MD}])
+    folder = env.config_dir / "skills" / "db"
+    before = _tree(folder)
+    results: list[str] = []
+
+    def plan(seen: str | None) -> dict[str, Any] | None:
+        if seen is None:
+            return {"op": "show", "name": "db"}
+        results.append(seen)
+        if len(results) == 1:
+            page = _page_body(seen)
+            assert "changeme123" not in page and "[redacted]" in page, "the model saw the mask"
+            return {
+                "op": "update",
+                "name": "db",
+                "expected_fingerprint": _fingerprint_line(seen),
+                "files": [{"path": "SKILL.md", "content": page.replace("Then", "Next,")}],
+            }
+        return None
+
+    await _drive(env, plan, masked=True)
+    assert results[1].startswith("skill-file-masked:"), results[1]
+    assert "op='edit'" in results[1]
+    assert _tree(folder) == before
+
+
+async def test_edit_fails_closed_on_masked_text_through_the_loop(env) -> None:
+    """R6: ``edit`` cannot quote a masked line (0 matches) and cannot re-type one
+    (adds a marker); an edit of unmasked text lands and carries the value over."""
+    writes.create(env.config_dir, "db", files=[{"path": "SKILL.md", "content": _SECRET_MD}])
+    folder = env.config_dir / "skills" / "db"
+    before = _tree(folder)
+    results: list[str] = []
+
+    def plan(seen: str | None) -> dict[str, Any] | None:
+        if seen is None:
+            return {"op": "show", "name": "db"}
+        results.append(seen)
+        fingerprint = _fingerprint_line(results[0])
+        steps = [
+            {"path": "SKILL.md", "old_text": "password: [redacted]\n", "new_text": "x\n"},
+            {
+                "path": "SKILL.md",
+                "old_text": "Then run the migration.\n",
+                "new_text": "password: [redacted]\nThen run the migration.\n",
+            },
+            {
+                "path": "SKILL.md",
+                "old_text": "Then run the migration.\n",
+                "new_text": "Then run the migration twice.\n",
+            },
+        ]
+        if len(results) <= len(steps):
+            return {
+                "op": "edit",
+                "name": "db",
+                "expected_fingerprint": fingerprint,
+                "edits": [steps[len(results) - 1]],
+            }
+        return None
+
+    await _drive(env, plan, masked=True)
+    assert results[1].startswith("skill-edit-no-unique-match:"), results[1]
+    assert results[2].startswith("skill-marker-introduced:"), results[2]
+    assert results[3].startswith("updated skill"), results[3]
+    after = (folder / "SKILL.md").read_text()
+    assert "password: changeme123\n" in after and "migration twice" in after
+    assert "[redacted]" not in after
+    assert before != _tree(folder)
+
+
+async def test_a_write_that_adds_the_marker_is_refused_but_an_existing_one_is_kept(env) -> None:
+    """R6 (b), the count rule: introducing the marker is refused on create and
+    update; a file that already holds one (a doc about the mask) stays editable."""
+    error, text = await _call(
+        env,
+        op="create",
+        name="fresh",
+        files=[{"path": "SKILL.md", "content": _skill_md("fresh", body="key: [redacted]\n")}],
+    )
+    assert error and text.startswith("skill-marker-introduced:"), text
+    assert not (env.config_dir / "skills" / "fresh").exists()
+    folder = _make_local(env)
+    error, text = await _call(
+        env,
+        op="update",
+        name="demo",
+        expected_fingerprint=SkillDocument.from_directory(folder).fingerprint,
+        files=[{"path": "references/new.md", "content": "token [redacted]\n"}],
+    )
+    assert error and text.startswith("skill-marker-introduced:"), text
+    doc = _skill_md("about", body="The mask reads [redacted].\n")
+    writes.create(env.config_dir, "about", files=[{"path": "SKILL.md", "content": doc}])
+    about = env.config_dir / "skills" / "about"
+    error, text = await _call(
+        env,
+        op="edit",
+        name="about",
+        expected_fingerprint=SkillDocument.from_directory(about).fingerprint,
+        edits=[{"path": "SKILL.md", "old_text": "The mask", "new_text": "The harness mask"}],
+    )
+    assert not error, text
+
+
+async def test_an_overlapping_old_text_is_not_unique(env) -> None:
+    """R7: ``- x\\n- x`` matches ``- x\\n- x\\n- x\\n`` at two offsets; ``str.count``
+    said one."""
+    body = "- x\n- x\n- x\n"
+    writes.create(
+        env.config_dir, "lst", files=[{"path": "SKILL.md", "content": _skill_md("lst", body=body)}]
+    )
+    folder = env.config_dir / "skills" / "lst"
+    before = _tree(folder)
+    error, text = await _call(
+        env,
+        op="edit",
+        name="lst",
+        expected_fingerprint=SkillDocument.from_directory(folder).fingerprint,
+        edits=[{"path": "SKILL.md", "old_text": "- x\n- x", "new_text": "- y\n- y"}],
+    )
+    assert error and "occurs 2 times" in text, text
+    assert _tree(folder) == before
+
+
+async def test_a_long_file_cannot_be_removed_so_remove_then_readd_cannot_replace_it(env) -> None:
+    """R8: the whole-file bound covers removal too, so the two-call
+    remove-then-re-add the reviewer probed stops at its first step."""
+    long_text = "".join(f"reference line {index}\n" for index in range(800))
+    assert len(long_text) > 4096
+    writes.create(
+        env.config_dir,
+        "refs",
+        files=[
+            {"path": "SKILL.md", "content": _skill_md("refs")},
+            {"path": "references/long.md", "content": long_text},
+            {"path": "references/short.md", "content": "short\n"},
+        ],
+    )
+    folder = env.config_dir / "skills" / "refs"
+    before = _tree(folder)
+    error, text = await _call(
+        env,
+        op="update",
+        name="refs",
+        expected_fingerprint=SkillDocument.from_directory(folder).fingerprint,
+        remove_paths=["references/long.md"],
+    )
+    assert error and text.startswith("skill-file-too-long-to-replace:"), text
+    assert "cannot be removed whole here" in text
+    assert _tree(folder) == before
+    error, text = await _call(
+        env,
+        op="update",
+        name="refs",
+        expected_fingerprint=SkillDocument.from_directory(folder).fingerprint,
+        remove_paths=["references/short.md"],
+    )
+    assert not error, text

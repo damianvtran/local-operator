@@ -525,9 +525,12 @@ unchanged. The design it implements lives in the UI repository
   (`harness/replay_bound.py`, 8 KiB): `show` pages a file by lines and `list`
   pages its rows, each saying where the next page starts. No write is built from
   text the model never received: `edit` makes exact `old_text` -> `new_text`
-  replacements (unique match, all-or-nothing), and `update` replaces whole only
-  files short enough to show in one page (it also adds and removes files; every
-  file it does not name is kept). The fingerprint CAS is checked before the
+  replacements (unique match counting overlapping occurrences, all-or-nothing),
+  and `update` replaces or removes whole only files short enough to show in one
+  page (it also adds files; every file it does not name is kept). The session's
+  credential mask is the second lossy view: `update` refuses to replace a file
+  whose masked view differs from its bytes, and every write refuses text that
+  adds the `[redacted]` marker (judged with the session's own `redact`). The fingerprint CAS is checked before the
   change is built and again under the storage lock. `create` refuses a name a
   built-in/external/project skill already has (Copy to my skills stays the
   operator's click). Built-in, external, project, bundle-form and unpulled-link
