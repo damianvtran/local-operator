@@ -9323,6 +9323,14 @@ def _cmd_approvals_approve(args: argparse.Namespace) -> int:
     record = approval_store.load_record(args.approval)
     if record.get("kind") not in approval_store.KINDS:
         raise MeshRefusal("approval_invalid", "This build cannot approve this authority kind")
+    from local_operator.network import approval_ops
+
+    # THE ONE TYPED-OP CHECK, BEFORE THE SIGNER (S4a-core), shared with the desktop's bodiless
+    # approve. An op this verb cannot disclose refuses here; the credential ops opt in
+    # (``cli_approvable``) because the lines below print their full disclosure first.
+    approval_ops.require_generic_approvable(
+        record, str(args.approval), surface=approval_ops.SURFACE_CLI
+    )
     from local_operator.network.credentials import finite_share
 
     finite_summary = finite_share.summary(record)
