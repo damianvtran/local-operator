@@ -117,22 +117,22 @@ def test_identifier_pool_is_not_a_second_word_membership_escape_hatch() -> None:
         )
 
 
-def test_the_pool_is_bounded_by_its_own_size_not_by_repetition_rules() -> None:
-    """R2-1 changed the rule: the reducer lists part and deep pools that overlap.
-
-    Reuse is therefore allowed, and the bound that stops amplification is the
-    epoch's pooled-token budget (twice the pool plus a fixed allowance). Keep
-    the assertion on that bound rather than on a no-repeat rule the reference
-    reducer itself violates.
+def test_s17_an_identifier_pool_line_is_content_and_must_be_source_derived() -> None:
+    """S-17: the pool was exempt from the line matcher and independently admitted
+    68 -> 92 o200k tokens (1.35x). It is now carried content: a pool line whose
+    payload is not a line of the source record is refused, not exempted.
     """
-    from local_operator.saver.provenance import _Pool
+    from local_operator.saver.validate import HEADER, SaverRejected, check_provenance
 
-    pool = _Pool(["src/app/views.py and PR #42 twice"])
-    kept = 2 * len(pool.tokens) + 64
-    with pytest.raises(SaverRejected, match="provenance"):
-        pool.consume(" ".join(["src/app/views.py"] * (kept + 1)))
-    _Pool(["src/app/views.py and PR #42 twice"]).consume(" ".join(["src/app/views.py"] * kept))
-
+    rows = [
+        {"role": "user", "content": [{"type": "text", "text": "please patch src/app/views.py for the parser"}]}
+    ] + [
+        {"role": "user", "content": [{"type": "text", "text": f"filler line {n}"}]} for n in range(6)
+    ]
+    with pytest.raises(SaverRejected):
+        check_provenance(
+            HEADER + "\nuser: [radient:ids mentioned in this part] src/app/views.py", rows
+        )
 
 def test_two_text_blocks_have_distinct_source_occurrences() -> None:
     from local_operator.saver.provenance import check_records

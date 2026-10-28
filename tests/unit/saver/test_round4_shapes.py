@@ -102,3 +102,45 @@ def test_a_normal_prefix_cut_is_still_accepted() -> None:
     """`MIN_CUT` must not reject honest output: a cut line is a prefix."""
     source = "the quick brown fox jumps over the lazy dog and then keeps running"
     check_provenance(HEADER + "\nuser: the quick brown fox jumps over the lazy dog", _span(source))
+
+
+def test_s16_the_cursor_refuses_one_source_line_backstopping_many_emitted_lines() -> None:
+    """S-16 / the 5.08x class, with the cursor as the ONLY guard.
+
+    60 source lines, 50 emitted copies of line 0. The epoch is a strict line
+    reduction (50 < 60) and every emitted line is a whole source line, so the
+    line budget and `MIN_CUT` are both satisfied; only distinctness refuses it.
+    Without `cursor = found + 1` the epoch is accepted at ~28x its span tokens,
+    which the mutation matrix in the PR comment records.
+    """
+    sentence = "the deployment finished and the log line says everything is fine " * 6
+    rows = [{"role": "user", "content": [{"type": "text", "text": sentence.splitlines()[0]}]}] + [
+        {"role": "user", "content": [{"type": "text", "text": "x"}]} for _ in range(59)
+    ]
+    record = "user: " + "\n\t".join([sentence.splitlines()[0]] * 50)
+    _reject(rows, record)
+    tokenizer = pytest.importorskip(
+        "radient_context_reduction.tokenize", reason="reference tokenizer not on PYTHONPATH"
+    )
+    span_tokens = tokenizer.token_count_text(sentence.splitlines()[0] + "x" * 59)
+    epoch_tokens = tokenizer.token_count_text(record)
+    assert epoch_tokens > span_tokens, (epoch_tokens, span_tokens)
+
+
+def test_the_marker_cap_refuses_stuffing_that_the_line_budget_cannot_see() -> None:
+    """The cap is the only guard here: one emitted line, 50 markers on it.
+
+    The epoch is one line against a seven-line span, so the line budget passes,
+    and the carried content is a whole source line, so the matcher passes.
+    Deleting `_check_bounds` accepts this, which the mutation matrix records.
+    """
+    record = "user: a source line with ordinary words in it " + (
+        "[radient:omitted 1 lines, 40 chars] " * 50
+    )
+    _reject(_span("a source line with ordinary words in it"), record)
+
+
+def test_the_note_cap_refuses_stuffing_that_the_line_budget_cannot_see() -> None:
+    """Same isolation for the reducer's notes, sized so no slot is a free token."""
+    record = "user: a source line with ordinary words in it " + ("[40 chars] " * 50)
+    _reject(_span("a source line with ordinary words in it"), record)

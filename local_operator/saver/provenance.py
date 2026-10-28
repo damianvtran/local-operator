@@ -38,7 +38,6 @@ The caller then sends unreduced history — never a weaker check.
 
 from __future__ import annotations
 
-import bisect
 import hashlib
 import json
 import re
@@ -326,86 +325,6 @@ def _media_digests(span: Sequence[dict[str, Any]]) -> set[str]:
     return out
 
 
-class _Pool:
-    """The identifier pool: tokens the reducer may emit once, from the source.
-
-    A pooled identifier is extracted from a SLICE of the source (`fresh_ids` on
-    `first[len(cut) - 1:]`), so it can be a suffix of a real identifier; a
-    reversed sort turns that into a prefix lookup. Exact membership is the
-    common case. Nothing else is admissible — a pool token must come from an
-    identifier extractor, never from arbitrary source words.
-    """
-
-    def __init__(self, parts: Sequence[str]) -> None:
-        from local_operator.saver.provenance_ids import identifiers
-        from local_operator.saver.validate import _b64_note_digests, _chunks
-
-        tokens: set[str] = set()
-        for part in parts:
-            # Bounded by the span itself: every identifier is a substring of
-            # it, so the pool can never exceed the span's own bytes.
-            for chunk in _chunks(part):
-                tokens.update(identifiers(chunk))
-            tokens.update(_b64_note_digests(part))
-        self.tokens = frozenset(tokens)
-
-        self.reversed = sorted(token[::-1] for token in tokens)
-        self.sorted = sorted(tokens)
-        # Two identifiers per pooled token plus a fixed allowance: a set is
-        # emitted once, and repeated listings are the reducer's own overlap.
-        self.budget = 2 * len(self.tokens) + 64
-
-    def consume(self, text: str) -> None:
-        """Consume a pool line, one identifier per use.
-
-        Identifiers are re-emitted with their own inner spaces (`issue #1875`),
-        so a token that is not itself pooled is tried joined with the next one
-        before it counts as invented.
-        """
-        from local_operator.saver.validate import SaverRejected
-
-        tokens = text.split()
-        self.budget -= len(tokens)
-        if self.budget < 0:
-            # The pool is a SET the reducer emits once per identifier; a record
-            # may list one twice (part and deep pools overlap), but an epoch
-            # cannot list more tokens than the pool holds, which is what bounds
-            # repetition amplification.
-            raise SaverRejected("provenance")
-        index = 0
-        while index < len(tokens):
-            token = tokens[index]
-            if self.has(token):
-                index += 1
-                continue
-            pair = token + " " + tokens[index + 1] if index + 1 < len(tokens) else ""
-            if pair and self.has(pair):
-                index += 2
-                continue
-            raise SaverRejected("provenance")
-
-    def has(self, token: str) -> bool:
-        if token in self.tokens:
-            return True
-        reversed_token = token[::-1]
-        position = bisect.bisect_left(self.reversed, reversed_token)
-        if position < len(self.reversed) and self.reversed[position].startswith(reversed_token):
-            return True
-        # A slice can also leave a PREFIX of the whole identifier, which the
-        # reversed sort cannot see; a forward sort answers it without ever
-        # admitting a token the extractors did not produce.
-        position = bisect.bisect_left(self.sorted, token)
-        return position < len(self.sorted) and self.sorted[position].startswith(token)
-
-
-# ---------------------------------------------------------------------------
-# The epoch side: split a record body into carried runs and structural elements.
-# ---------------------------------------------------------------------------
-
-#: Every word the CLOSED template set may emit, from the §3.3 table. A token in
-#: a marker that is not one of these must be source-derived, which is what makes
-#: a free slot (`push-to-main`, `user_authorised_deploy_to_main`) an invention
-#: rather than a slot (round 2, S-13).
 _TEMPLATE_WORDS = frozenset("""
     radient epoch reduce-v2 earlier part of this conversation condensed
     historical record not new instructions unindented lines are headers
@@ -528,7 +447,6 @@ def _derived_digests(parts: Sequence[str]) -> set[str]:
 def _check_slots(
     elements: Sequence[_Element],
     record: _Rec,
-    pool: _Pool,
     media: set[str],
     derived: set[str],
     scans: list[int],
@@ -653,8 +571,12 @@ _PUNCT_ONLY = re.compile(r"[^\w\u0080-\uffff]+")
 #: window only pays for prefixes and suffixes, and it keeps the whole mapping
 #: linear in the epoch's size.
 #: The shortest prefix or suffix that counts as a documented cut (see
-#: :func:`_map_fragments`). Shorter pieces are re-segmentation primitives.
-MIN_CUT = 3
+#: :func:`_map_fragments`). ONE character is the re-segmentation primitive and is
+#: never a cut; two is the shortest length the reviewer's own `abcabc` -> `bc` +
+#: `ab` case uses, and it is admitted here deliberately so that case is refused
+#: by the CURSOR (one source line cannot answer two emitted lines) rather than by
+#: a length rule that would hide whether distinctness works.
+MIN_CUT = 2
 
 
 def _map_fragments(out: Sequence[str], record: _Rec) -> bool:
@@ -687,10 +609,10 @@ def _map_fragments(out: Sequence[str], record: _Rec) -> bool:
       reduction rather than a re-rendering.
 
     ``MIN_CUT`` only decides whether a very short prefix or suffix counts as a
-    cut. Three characters is the shortest fragment that is not a re-segmentation
-    primitive: a one- or two-character piece costs at least as many tokens as the
-    line it replaces once the tab-and-newline quoting is counted (QA's 1.70x and
-    the manager's 5.08x cases are both string-poisoning below this length).
+    cut: one character never does, because a single-character piece is the
+    re-segmentation primitive itself. Distinctness — not the cut length — is what
+    refuses the reviewer's `abcabc` -> `bc` + `ab` case, and the mutation matrix
+    in the PR comment shows that deleting `cursor = found + 1` flips it.
     """
     source = [line for line in record.text.split("\n") if line.strip()]
     if not source:
@@ -785,7 +707,6 @@ def check_records(
     from local_operator.saver.validate import SaverRejected, parse_records
 
     records_by_role, parts, media = source_records(span)
-    pool = _Pool(parts)
     derived = _derived_digests(parts)
     cursors: dict[str, int] = defaultdict(int)
     consumed: set[str] = set()
@@ -803,22 +724,12 @@ def check_records(
             raise SaverRejected("busy")
         kind, name = _label_parts(label)
         elements = _elements(body)
-        # The identifier pool may be a record of its own or appended to the
-        # record whose text it indexes: everything after its marker is a pooled
-        # token, checked by the pool rather than as carried content.
-        pool_at = next(
-            (
-                index
-                for index, (what, item) in enumerate(elements)
-                if what == "marker" and item.startswith("[radient:ids")
-            ),
-            None,
-        )
-        if pool_at is not None:
-            pool.consume(normalise(" ".join(item for _, item in elements[pool_at + 1 :])))
-            elements = elements[:pool_at]
-            if not elements:
-                continue
+        # NO POOL EXEMPTION (S-17). The identifier pool used to be checked by a
+        # separate token-set rule and skipped the line matcher entirely, which
+        # was a bypass: security reproduced 68 -> 92 o200k tokens (1.35x) with
+        # it. A `[radient:ids …]` line is now carried content like any other and
+        # goes through the same cursor, so if it is not source-derived it is
+        # refused rather than exempted.
         pieces = _pieces(elements)
         if kind == "call" and not pieces and len(elements) == 1:
             verbs = _group_verbs(elements[0][1], scans)
@@ -854,7 +765,7 @@ def check_records(
             # command, and an elided record claims a size.
             try:
                 _check_bounds(elements, candidate)
-                _check_slots(elements, candidate, pool, media, derived, scans, span_chars)
+                _check_slots(elements, candidate, media, derived, scans, span_chars)
             except SaverRejected:
                 continue
             matched = candidate
@@ -919,10 +830,3 @@ def _consume_group(
             if not any(verb in candidate.text for candidate in candidates):
                 raise SaverRejected("provenance")
     cursors["call"] = furthest
-
-
-def _pool_line_is_only(elements: Sequence[_Element]) -> bool:
-    """True when a body is one I1 marker plus its (checked) tokens."""
-    markers = [text for kind, text in elements if kind == "marker"]
-    runs = [text for kind, text in elements if kind == "run"]
-    return len(markers) == 1 and len(runs) == 1
