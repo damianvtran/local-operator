@@ -1306,6 +1306,9 @@ class StatusLine:
         #: question" — beside a card whose own highlight is the accent green
         #: (design round 2, D7). Set with the same string it qualifies.
         self._connection_muted: bool = False
+        #: The band's segments come from a conversation's STORED state rather
+        #: than a bound owner — see :meth:`set_last_known`.
+        self._last_known: bool = False
         self._spinner_timer = None
         #: Interval the live timer was created with; a focus change compares
         #: against it to decide whether the timer must be replaced.
@@ -1434,6 +1437,34 @@ class StatusLine:
         if self._connecting == connecting:
             return
         self._connecting = connecting
+        self._sync_spinner_timer()
+        self.refresh()
+
+    def set_last_known(self, last_known: bool) -> None:
+        """Paint the ordinary segment row from STORED facts, marked as last-known.
+
+        WHY (TUI-FINALITY-DESIGN D2). A saved conversation's first frame used to
+        replace the whole row with ``Saved excerpt · Connecting…`` and withhold
+        model, effort, cwd, context, cost and title until the owner bound —
+        then swap the row for the ladder in one step, re-laying out every
+        segment and re-truncating the title for data that had not changed.
+        Those facts are durable (the journal's frontend checkpoint, or the last
+        bound frame) and the app can paint them at first frame; what it cannot
+        do is vouch that they are still CURRENT before the bind.
+
+        So while this flag is up the ordinary ladder row is drawn, with every
+        value in the band's dim ink (the "last-known" treatment), and the
+        connection sentence rides the working-indicator slot after cwd — the
+        slot ``starting…`` already occupies — instead of taking the row over.
+        The bind clears the flag: only the ink and that one slot change, and a
+        value moves only when the live state actually differs (a real update).
+        Live authority — streaming, approval, running children — is never
+        derived from the stored row (the app passes none in), so nothing here
+        can show a stale "working" before the bind.
+        """
+        if self._last_known == last_known:
+            return
+        self._last_known = last_known
         self._sync_spinner_timer()
         self.refresh()
 
@@ -1939,7 +1970,7 @@ class StatusLine:
         accent = Style(color=theme_mod.semantic_color("accent"))
 
         connection = getattr(self, "_connection", "")
-        if connection:
+        if connection and not getattr(self, "_last_known", False):
             # Connection authority outranks live cost/model details from a saved
             # checkpoint. Reuse the existing row so reconnect never moves the
             # transcript or steals the reader's scroll anchor.
@@ -2444,6 +2475,17 @@ class StatusLine:
                     )
                 )
 
+        # LAST-KNOWN INK (TUI-FINALITY-DESIGN D2): every value painted from a
+        # stored row takes the band's dim step, so the row reads as "what this
+        # conversation last said" rather than as a live reading. Colour only:
+        # the text and therefore every segment's width are the ones the bound
+        # frame paints for the same data, so the bind changes ink, not layout.
+        last_known = getattr(self, "_last_known", False)
+        if last_known:
+            parts = [
+                (icon, text.plain if isinstance(text, Text) else text, dim, None)
+                for icon, text, _style, _icon_style in parts
+            ]
         left = Text()
         for index, (icon, text, style, icon_style) in enumerate(parts):
             if index:
@@ -2462,6 +2504,41 @@ class StatusLine:
         # new attribute directly turned three of those into AttributeErrors —
         # a widget's renderer must tolerate the reduced hosts its own suite
         # builds, the same way the fork/subagent fields here already do.
+        if last_known:
+            # The connection state, demoted from a whole-row takeover to the
+            # working-indicator slot `starting…` uses, so the stored segments
+            # stay where the bound frame paints them (TUI-FINALITY-DESIGN D2).
+            #
+            # THE FOOTPRINT IS CAPPED AT `starting…`'s — its glyph, a space and
+            # its caption — measured per locale from the catalogue, because the
+            # bar for this slot is "no more title than an ordinary bring-up
+            # costs" (manager decision on D2). In English the glyph does not
+            # fit beside `connecting…` (13 cells against 11), so the caption
+            # stands alone and still; a locale whose caption is short enough
+            # gets the glyph back. Static rather than animated is the honest
+            # trade here: this state lasts until the bind on a healthy switch,
+            # and the longer re-dial dwell the glyph was added for
+            # (`set_connecting`) is a VERDICT row, not a last-known one — it
+            # still takes the whole-row form with its spinner.
+            #
+            # The caption is the catalogued `tui.status.model.connecting`
+            # word — the one the splash already uses for the same state — so
+            # this slot needs no new copy in any locale.
+            caption = _t(tui_status.model_connecting())
+            budget = 2 + cell_len(_t(tui_status.band_starting()))
+            if parts:
+                left.append(f" {_SEP_LEFT} ", style=seam)
+            glyph = getattr(self, "_connecting", False) and 2 + cell_len(caption) <= budget
+            if glyph:
+                from local_operator.tui.shimmer import shimmer_enabled
+
+                glyph = shimmer_enabled()
+            if glyph:
+                left.append(_SPINNER_FRAMES[self._spinner_index], style=muted)
+                left.append(" ", style=dim)
+                budget -= 2
+            left.append(truncate_cells(caption, budget), style=muted)
+            return left
         if getattr(self, "_starting", False):
             # Before the runtime exists there is nothing to report but the
             # wait itself, and the caption carries the whole meaning — so it is
@@ -2727,7 +2804,8 @@ class StatusLine:
                 right.append(f" {_SEP_RIGHT} ", style=seam)
             if icon:
                 right.append(f"{icon} ", style=dim)
-            right.append(text, style=style)
+            # Last-known ink, as `_left_text` explains: colour only, never width.
+            right.append(text, style=dim if getattr(self, "_last_known", False) else style)
         return right
 
     def _compose(self, left: Text, right: Text, width: int, dim: Style) -> Text:

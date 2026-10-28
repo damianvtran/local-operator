@@ -5678,6 +5678,12 @@ class OperatorApp(App[None]):
         #: Electron strip cannot disagree (design §5.1). ``None`` keeps every
         #: reader on its legacy path, which is what an old runtime gets.
         self._spend_channels_state: Any | None = None
+        #: The last BOUND frontend state painted per conversation id, and the
+        #: journal's checkpoint state read for a saved preview — the durable
+        #: facts a saved conversation's first frame paints as last-known
+        #: (TUI-FINALITY-DESIGN D2; see `_paint_last_known_band`). Bounded by
+        #: the conversations this process has opened, each one frozen state.
+        self._last_known_states: dict[str, Any] = {}
         #: Delegated spend, keyed by job id and holding the LAST cost observed
         #: for that child. A dict rather than a running sum because a child's
         #: figure grows while it works, so each tick has to replace its entry
@@ -8247,6 +8253,12 @@ class OperatorApp(App[None]):
                 cwd=await self._preview_cwd(directory, session_id),
                 takeover_factory=no_takeover,
             )
+            if session_id not in self._last_known_states:
+                stored = await asyncio.to_thread(
+                    _read_stored_frontend_state, directory / "sessions" / session_id, session_id
+                )
+                if stored is not None:
+                    self._last_known_states.setdefault(session_id, stored)
         else:
             record, owner = await asyncio.to_thread(find_runtime_record, directory, session_id)
             if record is None or owner is None:
@@ -8576,6 +8588,8 @@ class OperatorApp(App[None]):
             with replay.view.batch_append():
                 for block in replay.blocks:
                     replay.view.append_block(block)
+            if refresh and self._interaction is source:
+                self._carry_open_groups(self._transcript_view(), replay.view.blocks())
             if not saved_position:
                 replay.view.follow_tail()
             # Retained/canonical views benefit from a measured parked layout.
@@ -10915,8 +10929,73 @@ class OperatorApp(App[None]):
             # The glyph is what tells the user the app is working rather than
             # wedged; see `StatusLine.set_connecting`.
             self._status.set_connecting(connecting)
+            self._paint_last_known_band(source, connecting=bool(status) and connecting)
         editor = self._editor()
         editor.placeholder = self._composer_placeholder_for(editor, connection=status)
+
+    def _paint_last_known_band(self, source: SessionInteraction, *, connecting: bool) -> None:
+        """Paint a connecting saved conversation's STORED facts, marked last-known.
+
+        TUI-FINALITY-DESIGN D2. A saved facade's own frontend state is an empty
+        placeholder until the owner binds (``AttachedSession.saved_preview``
+        keeps config/auth resolution off the open path on purpose), so the band
+        used to show only ``Saved excerpt · Connecting…`` and then swap to the
+        full segment row at the bind — re-laying out every segment and
+        re-truncating the title for facts that had not changed. Those facts
+        are durable: this process painted them the last time the conversation
+        was bound (`_last_known_states`), or the journal's frontend checkpoint
+        carries them (`_read_stored_frontend_state`).
+
+        So for exactly the ordinary connecting state — not a verdict (failed,
+        stopped, answer-the-question), which keeps its whole-row sentence —
+        the stored state is painted through the SAME `_apply_frontend_state`
+        the bound frame uses, so widths and truncation are the bound frame's
+        for the same data, and the band is put in its last-known mode (dim
+        values, the connecting word in the indicator slot). What is never
+        taken from the stored row: ``streaming`` — forced off — and every other
+        live authority, which `_apply_frontend_state` does not read from a
+        state here anyway (approval and ask cards come from the gate path, the
+        running-children count from the live roster). The bind's own snapshot
+        then replaces all of it; the mode clears in `_commit_sidebar_session`'s
+        bound branch through this same method (``connecting`` False).
+
+        A conversation with no stored state (a legacy journal with no
+        checkpoint, never bound here) keeps the whole-row connecting sentence:
+        there is nothing honest to paint in the slots.
+        """
+        if self._status is None:
+            return
+        stored = None
+        if connecting and source.display_only and not source.connection_error:
+            session_id = str(getattr(source.session, "session_id", "") or "")
+            stored = self._last_known_states.get(session_id) if session_id else None
+        if stored is None:
+            self._status.set_last_known(False)
+            return
+        # `model_copy`, so the overrides never mutate the memo's object — which
+        # may be the bound store's own frozen snapshot. Every field
+        # `_apply_frontend_state` reads that is LIVE AUTHORITY or a live-only
+        # side effect is neutralised: the turn running (`streaming`, the
+        # in-flight clock), the attention receipt, the peer display records,
+        # the ask queue and the roster's running counts. The durable facts —
+        # model, effort, cwd, context, cost, title, team/agent, MCP roster —
+        # are what is left.
+        shown = stored.model_copy(
+            update={
+                "streaming": False,
+                "activity_started_at": None,
+                "attention": {},
+                "peer_cycle_display": None,
+                "asks": None,
+                "jobs": [],
+            }
+        )
+        # Painted with the display-only facade as the CURRENT session, so the
+        # memo write at the top of `_apply_frontend_state` is skipped (it
+        # records bound frames only) and the stored row cannot overwrite a
+        # newer bound one.
+        self._apply_frontend_state(shown)
+        self._status.set_last_known(True)
 
     def _gate_card_is_answerable(self, source: SessionInteraction) -> bool:
         """Whether an ANSWERABLE card is on screen for ``source``'s live gate.
@@ -13380,6 +13459,13 @@ class OperatorApp(App[None]):
     def _apply_frontend_state(self, state: Any) -> None:
         if self._status is None or state is None:
             return
+        if not self._interaction.display_only:
+            # Only a BOUND frame's state is recorded: a saved facade's own state
+            # is an empty placeholder, and remembering it would erase the facts
+            # this memo exists to keep.
+            session_id = str(getattr(state, "session_id", "") or "")
+            if session_id:
+                self._last_known_states[session_id] = state
         # Metadata can arrive without a new source row. The card-result hook
         # below retries against actual settled seats if this update won first.
         self._apply_peer_display_records(state)
@@ -15054,6 +15140,38 @@ class OperatorApp(App[None]):
             # network fetch) is picked up by the same call: the fill tops the
             # view up on the next paint, which is the pre-existing behaviour.
             self._start_resume_fill()
+
+    @staticmethod
+    def _carry_open_groups(on_screen: TranscriptView, blocks: Sequence[Any]) -> None:
+        """Re-open, in a re-prepared replay, the quiet groups the reader has open.
+
+        TUI-FINALITY-DESIGN D5. The owner connect re-prepares the conversation
+        it is already showing (``refresh=True``) and commits a NEW view built
+        from the same history, and the replay fold forms every group collapsed.
+        So a group the reader opened while the conversation was still
+        connecting — a cold bind measured ~5 s after first paint on the bench's
+        real fixture — snapped shut at the bind: hidden rows 8 -> 11 with the
+        history unchanged, which is flicker by the design's own definition.
+
+        Carried by the group's KEY (``qg:<first row id>``), which is stable for
+        a given span by construction (see ``tui/quiet_groups.py``), so a group
+        the new history no longer forms is simply not matched and a newly
+        formed one keeps the fold's default: real changes still show. Only the
+        reader's expansion moves across; facts, spans and membership are the
+        fresh replay's own.
+        """
+        from local_operator.tui.widgets.transcript import QuietGroupBlock
+
+        open_keys = {
+            block.group.key
+            for block in on_screen.blocks()
+            if isinstance(block, QuietGroupBlock) and block.expanded
+        }
+        if not open_keys:
+            return
+        for block in blocks:
+            if isinstance(block, QuietGroupBlock) and block.group.key in open_keys:
+                block.adopt_members(block._members, expanded=True)
 
     def _settle_reveal_measurement(self, view: TranscriptView) -> int:
         """Lay the parked frame out against the dock as it is NOW, and read the viewport.
@@ -63546,6 +63664,50 @@ def _fast_status_line(label: str, enabled: bool) -> str:
     if enabled:
         return f"fast mode: on for {label} — faster output at premium pricing"
     return f"fast mode: off for {label} — /fast turns it on at premium pricing"
+
+
+def _read_stored_frontend_state(directory: Path, session_id: str) -> Any | None:
+    """The journal's newest frontend checkpoint state, or ``None``.
+
+    The durable source of a COLD saved conversation's band facts
+    (TUI-FINALITY-DESIGN D2): the runtime appends this row at every turn end,
+    so it carries the model, effort, cwd, context, cost and title the bound
+    frame would paint. Read by ``find_row_for_custom_type``, the BYTE scan
+    (66 ms over a 118 MB journal, against 457 ms for the parse walk) that
+    decodes only the matching row and answers ``None`` — rather than a full
+    parse — for a journal with no checkpoint at all, which is the absence the
+    legacy fixture is. A journal written by something that re-serialized it
+    (non-compact separators) is the scan's documented blind spot; it answers
+    ``None`` here and the band keeps the pre-existing connecting row, which is
+    the safe direction for a cosmetic read.
+
+    THE FORK RULE IS THE RUNTIME'S, applied verbatim: a forked transcript
+    carries the PARENT's rows, and the runtime's own restore keeps their
+    durable facts (model, cost, title, cwd …) while re-stamping identity and
+    dropping the parent's children (``_inherited_identity_fixups``). The bound
+    frame therefore paints those same facts, so the last-known frame must too —
+    rejecting the row would make the bind a reflow for unchanged data. Never
+    raises: this is a first-frame nicety and must not be able to fail an open.
+    """
+    try:
+        from local_operator.session.frontend_state import (
+            FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+            FrontendSessionState,
+            _inherited_identity_fixups,
+        )
+        from local_operator.session.transcript import find_row_for_custom_type
+
+        located = find_row_for_custom_type(directory, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+        if located is None:
+            return None
+        payload = (located[1].payload.get("details") or {}).get("state")
+        if not isinstance(payload, dict):
+            return None
+        state = FrontendSessionState.model_validate(payload)
+        return state.model_copy(update=_inherited_identity_fixups(state, session_id))
+    except Exception:  # noqa: BLE001 — a cosmetic read must never fail an open
+        logger.debug("stored frontend state unreadable for %s", session_id, exc_info=True)
+        return None
 
 
 def _fast_label(session) -> str:
