@@ -4050,6 +4050,16 @@ class SessionStreamFn:
         # session, its own request calls still never count as child activity.
         self._descendant_request_counter = self._child_request_counter
         self._context_tracker = ContextTokenTracker()
+        # Radient Saver (contract §7, §9): this conversation's chain, built on the
+        # first turn the gate allows and never shared — a fork starts its own.
+        # ``_saver_availability`` is the gate's account half, read at enable and
+        # after a 402 only, never per turn (§8). The redaction and the spend sink
+        # are bound by the owning Session (:meth:`bind_saver`); until then the
+        # projection uses the credential-shape floor and records no spend.
+        self._saver_chain: Any | None = None
+        self._saver_availability: Any | None = None
+        self._saver_redaction: Any | None = None
+        self._saver_spend: Callable[[Any], None] | None = None
         self._notice_handler: Callable[[str, str], Awaitable[None] | None] | None = None
         # The session's route bridge: called with the pinned fallback target
         # (or None on recovery) so the host can keep its model display and its
@@ -5236,6 +5246,103 @@ class SessionStreamFn:
             else False
         )
         return map_tier_to_effort(self._message_tier, model.reasoning_efforts, allow_max=allow_max)
+
+    # -- Radient Saver (contract §6, §7, §9) ------------------------------------
+
+    def bind_saver(
+        self,
+        *,
+        redaction: Any | None = None,
+        spend: Callable[[Any], None] | None = None,
+    ) -> None:
+        """Bind the owning session's redactor and spend sink for Radient Saver.
+
+        Called by ``Session.__init__`` (the same division of labour as the notice
+        bridge): the session owns the ``VariableStore`` whose two passes the
+        upload must re-apply (§3.1, C-S2-3) and the channel ledger the ``saver``
+        spend line lands in. A stream with no owner keeps the shape-table floor.
+        """
+        self._saver_redaction = redaction
+        self._saver_spend = spend
+        chain = self._saver_chain
+        if chain is not None:
+            if redaction is not None:
+                chain.redaction = redaction
+            chain.spend = spend
+
+    def _saver_bypassed(self, request: ChatRequest) -> bool:
+        """The silent bypasses (§6): nothing is uploaded and no notice is shown."""
+        return (
+            request.purpose != "turn"
+            or request.isolated
+            or request.has_one_turn_secrets
+            or request.model.provider in {"radient", "radient-key"}
+            or not request.messages
+        )
+
+    async def _apply_saver(self, request: ChatRequest) -> ChatRequest:
+        """Splice this conversation's Saver epochs into ``request``, or return it unchanged.
+
+        Never raises and never fails the turn (§6): every failure path returns
+        the request as given. With the gate off this reads one setting and
+        returns, so no Saver client, task or socket ever exists.
+        """
+        if self._saver_bypassed(request):
+            return request
+        try:
+            from local_operator.saver.gate import configured_mode, resolve_saver
+
+            if configured_mode(self._settings) == "off":
+                return request
+            if self._saver_availability is None:
+                from local_operator.saver.gate import read_availability
+
+                self._saver_availability = await read_availability()
+            decision = resolve_saver(self._settings, self._saver_availability)
+            if not decision.on:
+                return request
+            chain = self._ensure_saver_chain()
+            spliced = await chain.apply(request)
+            if chain.needs_availability_refresh:
+                # A 402 is the one runtime event that re-reads the balance (§8).
+                self._saver_availability = None
+                chain.needs_availability_refresh = False
+            return spliced
+        except Exception:  # noqa: BLE001 — an optimisation must never fail a turn
+            logger.debug("saver: apply failed; sending the request unreduced", exc_info=True)
+            return request
+
+    def _ensure_saver_chain(self) -> Any:
+        chain = self._saver_chain
+        if chain is not None:
+            return chain
+        from local_operator.saver.chain import SaverChain, shared_client
+        from local_operator.saver.projection import shape_only_redaction
+
+        # A stream with no session id still gets its own chain; the id is only
+        # the correlation header and the turn-binding key, both per-object.
+        chain = SaverChain(
+            session_id=self._session_id or f"stream-{id(self):x}",
+            client=shared_client(),
+            redaction=self._saver_redaction or shape_only_redaction(),
+            notice=self._saver_notice,
+            spend=self._saver_spend,
+        )
+        self._saver_chain = chain
+        return chain
+
+    async def _saver_notice(self, message: Any) -> None:
+        """Deliver one keyed Saver notice through the session's notice bridge.
+
+        The bridge carries ``(text, kind)``; the text is rendered from the
+        catalogue in the active locale, and the reason behind it is a closed
+        enum — never a server sentence (S-31).
+        """
+        from local_operator.i18n.messages import render
+        from local_operator.i18n.text import active_locale
+
+        text = render(message.code, dict(message.params), locale=active_locale())
+        await self._notice(text, "warning")
 
     async def _notice(self, text: str, kind: str = "warning") -> None:
         if self._notice_handler is None:
@@ -6932,6 +7039,16 @@ class SessionStreamFn:
         from local_operator.providers.failover import stream_with_failover
 
         preparation_started = time.perf_counter()
+        # RADIENT SAVER SEAM (contract §7). Spliced HERE — before the request
+        # is measured, admitted, sized and handed to ``stream_with_failover``
+        # below — so the context tracker, output sizing and EVERY failover hop,
+        # credential rotation or OAuth account switch serialise the SAME reduced,
+        # provider-neutral history for their own provider. Never in
+        # ``wrap_client``: that is per provider, and a fallback would then send
+        # the unreduced history. Bypassed silently for every non-turn purpose,
+        # an isolated errand, a one-turn-secret request and a Radient-served
+        # session (§6); with the gate off nothing here runs at all.
+        request = await self._apply_saver(request)
         measured = await asyncio.to_thread(measure_request, request)
         tracks_context = not request.isolated and request.purpose == "turn"
         binding = ContextBinding(self._context_tracker, measured) if tracks_context else None
@@ -7823,6 +7940,14 @@ class SessionStreamFn:
         self._transport.owners -= 1
         if self._transport.owners == 0:
             await self._http.aclose()
+        chain, self._saver_chain = self._saver_chain, None
+        if chain is not None:
+            # Cancels this conversation's in-flight prefetch; the process-wide
+            # Saver client stays open for other sessions.
+            try:
+                await chain.aclose()
+            except Exception:  # noqa: BLE001 — teardown, never fatal
+                pass
         if self._usage_cache is not None:
             try:
                 self._usage_cache.close()
