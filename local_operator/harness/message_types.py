@@ -286,8 +286,10 @@ SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE = "session_mcp_unavailable"
 #: review; the label is the reason the list exists, and it is also why the row
 #: must not become a model turn: the notice exists because a session must not
 #: SILENTLY change accounts (the operator is the reader who can act on it).
-#: §2.1 keeps a pool holder's label operator-facing only. It is its own type rather than a ``session_incident`` for the reason
-#: the MCP pair states: nothing failed, no turn died, and the incident shape's
+#: §2.1 keeps a pool holder's label operator-facing only.
+#:
+#: It is its own type rather than a ``session_incident`` for the reason the MCP
+#: pair states: nothing failed, no turn died, and the incident shape's
 #: "This is why the previous turn ended" tail would be a lie. It is not a
 #: ``session_credential`` either — that type is about a stored env-var
 #: credential, and is model-visible by design.

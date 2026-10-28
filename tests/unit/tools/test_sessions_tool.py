@@ -1399,11 +1399,16 @@ async def test_sessions_peek_hides_the_account_notice_and_keeps_cursors_aligned(
     """``sessions peek`` is model context too, and its cursors must not shift.
 
     Round 1, R1. The account-change notice names the account, and this surface
-    rendered it as a ``system`` step — a sentence carrying an email, inside a
-    tool result. It is not a step now, and because the window arithmetic counts
-    with the SAME predicate (``_peek_message_entries``), the pages either side of
-    a hidden row still meet exactly: no gap, no repeat, and the footer's cursor is
-    the oldest SHOWN row rather than the oldest row the walk read past.
+    rendered it as a ``system`` step — a sentence carrying an email, inside a tool
+    result. It is not a step now, and because the window arithmetic counts with the
+    SAME predicate (``_peek_message_entries``), the pages either side of a hidden
+    row still meet exactly: no gap, no repeat, and the footer's cursor is the
+    oldest SHOWN row rather than the oldest row the walk read past.
+
+    The journal is 20 message rows with the notice between rows 8 and 9, and the
+    page is anchored so the 12-step window STRADDLES it. Were the notice still a
+    step, that window would begin at row 2 and carry the label — so the shown rows,
+    the cursor and the absence of the label all discriminate.
     """
     from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
     from local_operator.harness.types import CustomMessage, Message
@@ -1417,9 +1422,9 @@ async def test_sessions_peek_hides_the_account_notice_and_keeps_cursors_aligned(
     # Seeded through the real writer: the hidden row must be the shape the
     # transcript actually persists, or the cell would prove nothing about it.
     journal = Transcript(directory)
-    for i in range(1, 13):
+    for i in range(1, 21):
         await journal.append_message(Message.user(f"row {i}"))
-        if i == 6:
+        if i == 8:
             await journal.append_message(
                 CustomMessage(
                     custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
@@ -1435,41 +1440,43 @@ async def test_sessions_peek_hides_the_account_notice_and_keeps_cursors_aligned(
                 ),
                 preserve_mtime=True,
             )
+    # A stored title keeps ``session_name`` (derived from the first message) out
+    # of the header, exactly as ``_write_journal`` does for the other peek cells.
+    write_session_title(directory, "journal eeee", user_set=False, past_names=[])
     ids = [
         entry.id
         for entry in journal.entries()
         if (entry.payload or {}).get("custom_type") != SESSION_BINDING_NOTICE_MESSAGE_TYPE
     ]
-    assert len(ids) == 12
+    assert len(ids) == 20
 
     tail = await _peek(root, {"op": "peek", "session": session_id, "steps": 3})
     assert not tail.is_error, tail.text
     assert label not in tail.text
     assert label not in json.dumps(tail.details or {})
-    # The last three MESSAGE rows, not shifted by the hidden notice.
-    assert _rows_in(tail.text) == {10, 11, 12}
+    assert _rows_in(tail.text) == {18, 19, 20}
     assert (tail.details or {}).get("steps_shown") == 3
 
-    # A page whose window STRADDLES the hidden row: the three steps before row 9
-    # are rows 6, 7 and 8 — the notice sits between 6 and 7 and must neither
-    # appear nor consume one of the three slots.
-    first = await _peek(root, {"op": "peek", "session": session_id, "before_id": ids[8]})
+    # A 12-step window anchored at row 15 is rows 3..14 — the notice sits inside
+    # it. Were it still a step, the window would begin at row 2 and carry the
+    # label, which is what makes this page the discriminating one.
+    first = await _peek(root, {"op": "peek", "session": session_id, "before_id": ids[14]})
     assert not first.is_error, first.text
     assert label not in first.text
-    assert _rows_in(first.text) == {6, 7, 8}
+    assert _rows_in(first.text) == set(range(3, 15))
     cursor = re.search(r"before_id=([0-9a-f]{32}) for earlier", first.text)
     assert cursor is not None, first.text
-    assert cursor.group(1) == ids[5], "the cursor is the oldest SHOWN step, row 6"
+    assert cursor.group(1) == ids[2], "the cursor is the oldest SHOWN step, row 3"
 
     second = await _peek(root, {"op": "peek", "session": session_id, "before_id": cursor.group(1)})
     assert not second.is_error, second.text
-    assert _rows_in(second.text) == {3, 4, 5}
+    assert _rows_in(second.text) == {1, 2}
 
     # The digest counts the rows a reader can SEE: the hidden one is not a step.
     digest = await _peek(root, {"op": "peek", "session": session_id, "digest": True})
     assert not digest.is_error, digest.text
     assert label not in digest.text
-    assert "12 steps seen" in digest.text
+    assert "20 steps seen" in digest.text
 
 
 @pytest.mark.asyncio
