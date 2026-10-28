@@ -1544,6 +1544,13 @@ def _borrow_listing_fixture(
         "together",
         "linear",
         "kept",
+        "reshared",
+        "moved",
+        "backrest",
+        "back",
+        "gone",
+        "wiped",
+        "member",
     ):
         document.declare(
             key,
@@ -1552,7 +1559,7 @@ def _borrow_listing_fixture(
             owner_device_name="damian-mbp\x1b[2J",
             provider=key,
             # Copy class (QA round 1, Q3): an api key is copied, never granted.
-            kind="api-key-static" if key in ("cohere", "together") else "oauth-rotating",
+            kind="api-key-static" if key in ("cohere", "together", "wiped") else "oauth-rotating",
             by=OWNER,
         )
     for key in (
@@ -1570,6 +1577,12 @@ def _borrow_listing_fixture(
         "together",
         "linear",
         "kept",
+        "reshared",
+        "moved",
+        "backrest",
+        "back",
+        "gone",
+        "member",
     ):
         document.grant(key, me, scope="session", by=OWNER)
     document.save()
@@ -1648,10 +1661,77 @@ def _borrow_listing_fixture(
     rests.cool_down("kept", owner_device=OWNER, credential_id=6, block_scope="", until=now + 1800)
     rests.save()
     mcp_state.record(NETWORK, "kept", state="revoked", code="not_a_holder", root=root)
+    # reshared (review r2, Rm1 a): revoked 10 minutes ago, shared again since — the
+    # holder row's ``granted_at`` (set by the grant above, i.e. now) is newer.
+    mcp_state.record(
+        NETWORK, "reshared", state="revoked", code="not_a_holder", owner_device=OWNER, root=root
+    )
+    # moved (Rm1 b): a sign-in verdict recorded against a PREVIOUS owner.
+    mcp_state.record(
+        NETWORK,
+        "moved",
+        state="expired",
+        code="interactive_required",
+        owner_device=OTHER,
+        root=root,
+    )
+    # backrest (QA r2, R2-Q1 a): rested, then refused owner_offline; the owner has
+    # been seen since. The live rest must show, not "offline".
+    rests = PlacementState.load(NETWORK, root)
+    rests.cool_down(
+        "backrest",
+        owner_device=OWNER,
+        credential_id=8,
+        block_scope="",
+        until=now + 1800,
+        label="zai@example.test",
+    )
+    rests.save()
+    mcp_state.record(
+        NETWORK,
+        "backrest",
+        state="unavailable",
+        code="owner_offline",
+        owner_device=OWNER,
+        root=root,
+    )
+    # back (R2-Q1 b): refused owner_offline, no rest, owner seen since.
+    mcp_state.record(
+        NETWORK, "back", state="unavailable", code="owner_offline", owner_device=OWNER, root=root
+    )
+    # gone (R2-Q1 TTL): refused owner_offline 10 minutes ago, owner never seen since.
+    mcp_state.record(
+        NETWORK, "gone", state="unavailable", code="owner_offline", owner_device=OWNER, root=root
+    )
+    # wiped (QA r2, R2-Q2): a copy-class key the owner explicitly withdrew; this device
+    # is no longer a holder and the owner's wipe recorded ``copy_revoked``.
+    mcp_state.record(
+        NETWORK, "wiped", state="revoked", code="copy_revoked", owner_device=OWNER, root=root
+    )
+    # member (review r2, m1): reconcile found THIS device no longer a member.
+    mcp_state.record(
+        NETWORK,
+        "member",
+        state="revoked",
+        code="member_not_active",
+        owner_device=OWNER,
+        root=root,
+    )
     # Back-dated after the last ``record``: each write re-reads and rewrites the file.
     payload = json.loads(mcp_state.mcp_auth_path(NETWORK, root).read_text())
     payload["entries"]["linear"]["at"] = now - 360
+    payload["entries"]["reshared"]["at"] = now - 600
+    payload["entries"]["backrest"]["at"] = now - 120
+    payload["entries"]["back"]["at"] = now - 120
+    payload["entries"]["gone"]["at"] = now - 600
     mcp_state.mcp_auth_path(NETWORK, root).write_text(json.dumps(payload))
+    # The owner's member row: seen 60 s ago, after the two "back" records were written.
+    from local_operator.network import store
+    from local_operator.network.types import MemberRecord, NetworkRecord
+
+    record = NetworkRecord(network_id=NETWORK, name="home", self_device_id=me)
+    record.members.append(MemberRecord(device_id=OWNER, name="damian-mbp", last_seen_at=now - 60))
+    store.save(record, root)
     return root, me
 
 
@@ -1705,16 +1785,38 @@ def test_the_credentials_listing_shows_every_borrow_state(
     ) in blocks["secret:SLACK"], out
     # The previous owner's rest is not this owner's: zhipu was simply never borrowed.
     assert "borrow: shared, not borrowed yet" in blocks["zhipu"], out
-    assert "borrow: copied here (synced 4m ago)" in blocks["cohere"], out
+    assert "borrow: usable here (copy received 4m ago)" in blocks["cohere"], out
     assert "borrow: shared, not copied here yet" in blocks["together"], out
     assert (
-        "borrow: sign in again on damian-mbp (there: /login linear); last asked 6m ago"
+        "borrow: sign in again on damian-mbp (there: /login linear); last tried 6m ago"
         in blocks["linear"]
     ), out
     assert (
-        "borrow: damian-mbp no longer shares it with this device — ask damian-mbp to share it"
-        " again (last asked 0s ago)" in blocks["kept"]
+        "borrow: no longer shared with this device — ask damian-mbp to share it again;"
+        " last tried 0s ago" in blocks["kept"]
     ), out
+    # Rm1: a re-share since the revoke, and a verdict about a previous owner, are stale.
+    assert "borrow: shared, not borrowed yet" in blocks["reshared"], out
+    assert "borrow: shared, not borrowed yet" in blocks["moved"], out
+    # R2-Q1: "not now" records never hide a rest and expire once the owner is seen
+    # again (or after 5 min); only hard records persist.
+    assert re.search(
+        r"borrow: rate-limited \(zai@example.test\) — tries again at", blocks["backrest"]
+    )
+    assert "offline" not in blocks["backrest"] and "offline" not in blocks["back"], out
+    assert "borrow: shared, not borrowed yet" in blocks["back"], out
+    assert "borrow: shared, not borrowed yet" in blocks["gone"], out
+    # R2-Q2: an explicitly withdrawn copy-class key reads revoked, with the remedy the
+    # owner accepts after a withdrawal.
+    assert (
+        "borrow: access was revoked — ask damian-mbp to restore it (lop network credential"
+        " share wiped --with borrower-laptop --request-approval); last tried 0s ago"
+    ) in blocks["wiped"], out
+    # m1: membership loss is this device's, not a refusal by the owner.
+    assert (
+        "borrow: this device is no longer a member of the network — ask an admin to re-admit"
+        " it; last tried 0s ago"
+    ) in blocks["member"], out
 
 
 def test_the_credentials_json_adds_borrow_without_changing_observation(
@@ -1749,7 +1851,15 @@ def test_the_credentials_json_adds_borrow_without_changing_observation(
         "together": "not_copied",
         "linear": "sign_in_needed",
         "kept": "refused",
+        "reshared": "never_borrowed",
+        "moved": "never_borrowed",
+        "backrest": "resting",
+        "back": "never_borrowed",
+        "gone": "never_borrowed",
+        "wiped": "revoked",
+        "member": "refused",
     }
+    assert rows["wiped"]["borrow"]["refusal"] == "copy_revoked"
     assert rows["cohere"]["borrow"]["gen"] == 3
     assert rows["cohere"]["borrow"]["synced_at"] == pytest.approx(now - 240)
     assert rows["linear"]["borrow"]["last_asked_at"] == pytest.approx(now - 360)
@@ -2323,3 +2433,22 @@ def test_path_constructors_and_readers_never_initialize_missing_profile(
     PlacementState.load(NETWORK, absent)
     SyncState.load(NETWORK, root=absent)
     assert not absent.parent.exists()
+
+
+def test_a_garbled_rest_start_never_drops_the_routing_rest(tmp_path: Path) -> None:
+    """``rested_at`` is display-only (QA round 2, R2-Q3): a non-numeric value in the
+    file costs the "partly" reading, never the rest the next turn routes around."""
+    root = tmp_path / "garbled"
+    root.mkdir()
+    state = PlacementState(NETWORK, root=root)
+    state.cool_down(
+        "openai", owner_device=OWNER, credential_id=4, block_scope="", until=time.time() + 600
+    )
+    state.save()
+    payload = json.loads(state.path.read_text())
+    payload["cooldowns"][0]["rested_at"] = "garbage"
+    state.path.write_text(json.dumps(payload))
+    loaded = PlacementState.load(NETWORK, root)
+    rests = loaded.cooldowns("openai", "", owner_device=OWNER)
+    assert [row["credential_id"] for row in rests] == [4]
+    assert rests[0]["rested_at"] == 0.0

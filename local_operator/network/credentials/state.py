@@ -383,6 +383,13 @@ class PlacementState:
         for row in payload.get("cooldowns") or []:
             # A malformed row is skipped, never guessed at: the failure mode of a
             # bad cooldown must be one more ask of the owner, not a hidden login.
+            # ``rested_at`` is parsed OUTSIDE that rule (QA round 2, R2-Q3): it is a
+            # display field, and a garbled value must cost the "partly" reading,
+            # never the routing rest itself.
+            try:
+                rested_at = float(row.get("rested_at") or 0.0)
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                rested_at = 0.0
             try:
                 state.cool_down(
                     str(row["key"]),
@@ -391,7 +398,7 @@ class PlacementState:
                     block_scope=str(row.get("block_scope") or ""),
                     until=float(row["until"]),
                     label=str(row.get("label") or ""),
-                    rested_at=float(row.get("rested_at") or 0.0),
+                    rested_at=rested_at,
                 )
             except (KeyError, TypeError, ValueError):
                 continue
