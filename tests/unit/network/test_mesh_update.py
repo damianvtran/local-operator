@@ -770,15 +770,10 @@ def test_a_non_uv_tool_member_without_the_layout_is_refused(
     assert reply["code"] == "editable_install", reply
 
 
-def test_the_generation_install_prunes_after_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    """M1: the direct generation call runs the retention tail, best-effort.
-
-    ``install_into_generation``'s retention is the CALLER'S (its own docstring),
-    every other generation install prunes immediately after, and a rolled
-    member is one that gets re-rolled — so this cell pins the caller calling it
-    (``perform_upgrade``'s own shape) and that a failed prune does not fail a
-    settled install. Sequenced with #2181.
-    """
+def test_the_generation_install_keeps_automatic_collection_frozen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mesh promotion has the same no-collection contract as other update tails."""
     from local_operator import update as update_mod
 
     log: list[Any] = []
@@ -788,23 +783,14 @@ def test_the_generation_install_prunes_after_it(monkeypatch: pytest.MonkeyPatch)
         "install_into_generation",
         lambda source=None, version=None, runner=None: log.append(("install", version)),
     )
-    monkeypatch.setattr(update_mod, "referenced_install_roots", lambda: "REF")
+    monkeypatch.setattr(update_mod, "referenced_install_roots", lambda: log.append("census"))
     monkeypatch.setattr(
         update_mod,
         "prune_generations",
-        lambda *, referenced, actor: log.append(("prune", referenced, actor)) or "PLAN",
+        lambda **kwargs: log.append("prune"),
     )
-    monkeypatch.setattr(update_mod, "prune_notice_lines", lambda plan: [f"notice:{plan}"])
     assert meshupdate.install_build("0.99.0") == meshupdate.METHOD_GENERATION
-    assert log[0] == ("install", "0.99.0"), log
-    assert log[1] == ("prune", "REF", update_mod.ACTOR_UPGRADE), log
-
-    def _prune_boom(*, referenced: Any, actor: Any) -> Any:
-        raise OSError("a generation is in use")
-
-    monkeypatch.setattr(update_mod, "prune_generations", _prune_boom)
-    # A failed prune is NOT a failed install: it logs and the pass proceeds.
-    assert meshupdate.install_build("0.99.0") == meshupdate.METHOD_GENERATION
+    assert log == [("install", "0.99.0")]
 
 
 def test_a_failed_classic_install_is_labelled_with_the_shape_that_ran(
