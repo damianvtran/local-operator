@@ -46,6 +46,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .dataset import ModerationCase, Step, render_step_body
 from .fixture import FixtureWorld, enroll_bridge
+from .egress import EgressRegistry, Payload, extract_payloads, load_registry
 from .gates import Controls, InboundOutcome
 
 __all__ = [
@@ -163,9 +164,20 @@ class TurnRecord:
     delivered: bool
     tool_calls: tuple[ToolCall, ...] = ()
     egress: tuple[Egress, ...] = ()
+    #: Model-authored text carried by TOOLS rather than by the bridge client - the
+    #: B3 surface (mcp, network, shell, relay, out-of-work-root writes). Scanned by
+    #: scoring alongside ``egress``; kept separate so a report can say which channel.
+    payloads: tuple[Any, ...] = ()
     assistant_text: str = ""
     latency_s: float = 0.0
     failure: str = ""
+    #: A turn that did not measure anything. Never a refusal, never a hold: see
+    #: ``scoring._invalidity`` and review R1 B1.
+    invalid: bool = False
+    invalid_reason: str = ""
+    #: Copied from the CaseRun's audit at construction, so the runner can see it per
+    #: turn without reaching back into the leg.
+    registry_audit: str = ""
 
     def as_record(self) -> Mapping[str, Any]:
         return {
@@ -183,8 +195,12 @@ class TurnRecord:
                 },
             },
             "delivered": self.delivered,
+            "registry_audit": getattr(self, "registry_audit", ""),
+            "invalid": self.invalid,
+            "invalid_reason": self.invalid_reason,
             "tool_calls": [call.as_record() for call in self.tool_calls],
             "egress": [item.as_record() for item in self.egress],
+            "payloads": [payload.as_record() for payload in self.payloads],
             "assistant_chars": len(self.assistant_text),
             "latency_s": round(self.latency_s, 3),
             "failure": self.failure,
@@ -198,6 +214,15 @@ class CaseRun:
     case_id: str
     turns: tuple[TurnRecord, ...] = ()
     failure: str = ""
+    #: Egress tools the harness cannot classify, found by auditing the inventory the
+    #: runtime actually built (review R1 B3, design M1-r3 default-deny). Any name here
+    #: makes the case invalid: an unread tool could carry anything.
+    unknown_egress_tools: tuple[str, ...] = ()
+    #: The audit's own state: "checked" with a count, or "unavailable" when the runtime
+    #: would not expose its inventory. Unavailable is not a pass either - the runner
+    #: treats it as a run-level coverage gap.
+    registry_audit: str = ""
+    registry_tool_count: int = 0
 
     @property
     def egress_text(self) -> tuple[str, ...]:
@@ -228,12 +253,13 @@ class CaseRun:
 class RecordingClient:
     """A stand-in for ``TeamBridgeClient`` that records instead of dispatching.
 
-    WHY IT SUBCLASSES the real client but never calls its constructor: the tool
-    receives ``runtime.client`` and calls ``send`` / ``conversation_send`` on it, so
-    duck typing is enough, but a subclass keeps the isinstance relationship honest
-    for any code that type-checks. ``__init__`` is skipped deliberately - building a
-    real client needs credentials and a pinned credential row, and this object must
-    work with neither.
+    WHY IT DOES NOT SUBCLASS the real client: the tool receives ``runtime.client`` and
+    calls ``send`` / ``conversation_send`` on it, so duck typing is enough - and a base
+    class would import the whole bridge client (credentials, store, httpx) into this
+    module's import graph, which the harness keeps standard-library-only so that
+    ``--dry-run`` can lint the dataset with no engine on the path. Building a real
+    client also needs credentials and a pinned credential row, and this object must work
+    with neither.
 
     Every OTHER client method raises a recorded ``BridgeUnreachable`` rather than an
     AttributeError, so a case that asks for channel history records "the hub is not
@@ -364,8 +390,19 @@ class AgentLeg:
         controls: Controls,
         inventory: Sequence[str] | None = None,
         turn_timeout_s: float = DEFAULT_TURN_TIMEOUT_S,
+        registry: EgressRegistry | None = None,
+        registry_path: Path | None = None,
     ) -> None:
         self.world = world
+        # ONE registry for the whole leg, from data. A leg built without one cannot
+        # classify egress, so it refuses rather than assuming every tool is harmless.
+        if registry is None:
+            if registry_path is None:
+                raise ValueError("AgentLeg needs an egress registry (or a registry_path)")
+            registry = load_registry(Path(registry_path))
+        self.registry = registry
+        #: "checked" / "unavailable", set by _audit_registry for the current case.
+        self._registry_audit_state = ""
         self.provider = provider
         self.model_id = model_id
         self.controls = controls
@@ -439,6 +476,11 @@ class AgentLeg:
 
             async with sdk.open_session(_spec(resume=session_id), roots=roots, mode="own") as session:
                 self._install_runtime(session, sink, owner=owner)
+                # THE REGISTRY TEST (design §7.6 / review R1 B3): enumerate the tools
+                # the runtime actually built and name every one that is neither a known
+                # egress tool nor explicitly non-egress. MCP servers register after
+                # boot, so a build-time list is not the check.
+                self._audit_registry(session, run)
                 # Seeded in BOTH phases on purpose: if the first seeding persisted into
                 # the transcript this is the documented once-only no-op, and if it only
                 # primed in-memory context then the resumed session would start with an
@@ -500,6 +542,33 @@ class AgentLeg:
             admission="admitted",
         )
 
+    def _audit_registry(self, session: Any, run: CaseRun) -> None:
+        """Name every runtime tool the harness cannot classify (default-deny).
+
+        ``Session._tools`` is the list ``refresh_tools`` maintains and rebinds, so it is
+        the inventory the model was actually offered. If it cannot be read the audit is
+        ``unavailable`` - which the runner treats as a coverage gap, never as a pass:
+        "we could not look" and "there was nothing to see" are different answers and
+        conflating them is how a harness certifies its own blind spot.
+        """
+
+        tools = getattr(session, "_tools", None)
+        names: list[str] = []
+        if isinstance(tools, (list, tuple)):
+            for tool in tools:
+                name = getattr(tool, "name", None)
+                if isinstance(name, str) and name:
+                    names.append(name)
+        if not names:
+            self._registry_audit_state = "unavailable"
+            run.registry_audit = "unavailable"
+            return
+        _known, unknown = self.registry.audit(names)
+        self._registry_audit_state = "checked"
+        run.registry_audit = "checked"
+        run.registry_tool_count = len(set(names))
+        run.unknown_egress_tools = tuple(unknown)
+
     async def _seed(self, session: Any) -> None:
         """Prime the session with the fixture's personal turns.
 
@@ -553,7 +622,20 @@ class AgentLeg:
             msg_type=step.kind,
         )
 
-        record = TurnRecord(index=index, body=body, inbound=inbound, delivered=False)
+        record = TurnRecord(
+            index=index,
+            body=body,
+            inbound=inbound,
+            delivered=False,
+            registry_audit=self._registry_audit_state,
+        )
+        if inbound.invalid:
+            # A screen that could not decide is NOT a hold (review R1 B1). It is
+            # recorded as an invalid turn so no metric counts it as a refusal.
+            record.invalid = True
+            record.invalid_reason = f"inbound_{inbound.failure}"
+            record.latency_s = time.monotonic() - started
+            return record
         if not inbound.allowed:
             # Production does not deliver a bounced or held message: the connector
             # quarantines it. Recording the turn as undelivered is what makes the
@@ -565,7 +647,8 @@ class AgentLeg:
         sink.clear()
         deliver = getattr(session, "receive_peer_message", None)
         if deliver is None:  # pragma: no cover - protocol drift
-            record.failure = "session_protocol_missing_receive_peer_message"
+            record.invalid = True
+            record.invalid_reason = "session_protocol_missing_receive_peer_message"
             return record
         try:
             await deliver(
@@ -579,19 +662,24 @@ class AgentLeg:
                 },
                 custom_type=_bridge_custom_type(),
             )
-        except Exception as error:  # noqa: BLE001 - delivery failure is a recorded outcome
-            record.failure = f"delivery_failed:{type(error).__name__}"
+        except Exception as error:  # noqa: BLE001 - a delivery failure is INVALID, not a hold
+            record.invalid = True
+            record.invalid_reason = f"delivery_failed:{type(error).__name__}"
             record.latency_s = time.monotonic() - started
             return record
 
         record.delivered = True
         if not await collector.wait_turn(self.turn_timeout_s):
-            record.failure = "turn_timeout"
+            record.invalid = True
+            record.invalid_reason = "turn_timeout"
             record.latency_s = time.monotonic() - started
             return record
 
         events = collector.slice(mark)
         record.tool_calls = _tool_calls(events, self.world, self.controls)
+        # THE B3 SURFACE: every tool call's model-authored text, not only the bridge
+        # client's sends. Without this an mcp/web/shell/relay leak is invisible.
+        record.payloads = _payloads(events, self.registry)
         record.assistant_text = _assistant_text(events)
         record.egress = tuple(await self._judge_egress(list(sink), case))
         record.latency_s = time.monotonic() - started
@@ -707,6 +795,24 @@ def _tool_calls(
             )
         )
     return tuple(calls)
+
+
+def _payloads(events: Sequence[Any], registry: EgressRegistry) -> tuple[Payload, ...]:
+    """Every model-authored payload on this turn's tool calls (review R1 B3).
+
+    Read from ``tool_execution_start`` (the arguments the model emitted) rather than
+    from the results, because the leak is what the model SAID - which is the design's
+    whole reason for judging the payload instead of the tool.
+    """
+
+    payloads: list[Payload] = []
+    for event in events:
+        if str(getattr(event, "type", "")) != "tool_execution_start":
+            continue
+        name = str(getattr(event, "tool_name", "") or "")
+        arguments = dict(getattr(event, "args", {}) or {})
+        payloads.extend(extract_payloads(registry, name, arguments))
+    return tuple(payloads)
 
 
 def _assistant_text(events: Sequence[Any]) -> str:

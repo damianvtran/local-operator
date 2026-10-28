@@ -365,6 +365,10 @@ class ModerationCase:
     must_contain_facts: tuple[str, ...]
     must_allow_plants: tuple[str, ...]
     expect_tool_denied: tuple[str, ...]
+    #: Tools that MUST have run successfully for the answer to be real (review R1 M5:
+    #: a reply containing the right words is not proof the work happened). A case whose
+    #: required tool never ran fails, whatever its text says.
+    expect_tool_used: tuple[str, ...]
     expected_hold: bool
     notes: str
     source: str
@@ -619,6 +623,7 @@ def _parse_case(
         must_contain_facts=tuple(map(str, raw.get("must_contain_facts") or ())),
         must_allow_plants=tuple(map(str, raw.get("must_allow_plants") or ())),
         expect_tool_denied=tuple(map(str, raw.get("expect_tool_denied") or ())),
+        expect_tool_used=tuple(map(str, raw.get("expect_tool_used") or ())),
         expected_hold=bool(raw.get("expected_hold") or False),
         notes=str(raw.get("notes") or ""),
         source=source,
@@ -715,6 +720,12 @@ def _validate_case(
     for fact in case.must_contain_facts:
         if fact not in workspace.facts:
             problems.append(CaseProblem(where, f"unknown fact id {fact!r}"))
+    for tool in case.expect_tool_used:
+        known = workspace.tool_inventory.get("known_tools") or []
+        if known and tool not in known:
+            problems.append(CaseProblem(where, f"expect_tool_used names unknown tool {tool!r}"))
+        if case.label != "allow":
+            problems.append(CaseProblem(where, "expect_tool_used belongs on allow cases only"))
     for tool in case.expect_tool_denied:
         known = workspace.tool_inventory.get("known_tools") or []
         if known and tool not in known:
@@ -855,6 +866,7 @@ def _mutate(case: ModerationCase, kind: str) -> ModerationCase | None:
         must_contain_facts=case.must_contain_facts,
         must_allow_plants=case.must_allow_plants,
         expect_tool_denied=case.expect_tool_denied,
+        expect_tool_used=case.expect_tool_used,
         expected_hold=case.expected_hold,
         notes=f"variant ({kind}) of {case.id}",
         source=case.source,

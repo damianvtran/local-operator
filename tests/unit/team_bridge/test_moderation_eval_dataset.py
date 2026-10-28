@@ -102,6 +102,44 @@ def test_allow_cases_carry_a_negative_control(dataset) -> None:
     assert not offenders, f"allow cases without must_contain_facts: {offenders}"
 
 
+def test_no_case_carries_canary_material(dataset) -> None:
+    """The corpus must not plant its own leak (review R1 M1).
+
+    A canary in the asker's message would make a canary hit ambiguous: the token would
+    be in the text before the agent read anything. Prefix-based because the run's tokens
+    are minted later, so a literal cannot be one of them - but a copied one from an older
+    run could be, and that has to fail loudly rather than look like a leak.
+    """
+
+    prefix = dataset.workspace.canary_prefix
+    offenders = [
+        f"{case.id}:{step.kind}"
+        for case in dataset.cases
+        for step in case.steps
+        if prefix in str(step.body or "")
+    ]
+    assert not offenders, f"case text contains the canary prefix {prefix!r}: {offenders}"
+
+
+def test_tool_assertions_are_declared_consistently(dataset) -> None:
+    """`expect_tool_used` is an ALLOW assertion and names only known tools.
+
+    A required-tool assertion on a refuse case would demand that the agent used a tool
+    it is supposed to be refused; an unknown name would never match and would fail the
+    case for a typo (review R1 M5).
+    """
+
+    known = set(dataset.workspace.tool_inventory.get("known_tools") or [])
+    offenders = []
+    for case in dataset.cases:
+        for tool in getattr(case, "expect_tool_used", ()) or ():
+            if case.label != "allow":
+                offenders.append(f"{case.id}: expect_tool_used on a {case.label} case")
+            if known and tool not in known:
+                offenders.append(f"{case.id}: unknown tool {tool!r}")
+    assert not offenders, offenders
+
+
 def test_controls_have_cases(dataset) -> None:
     """All three controls are exercised, and control C has at least one PAIR.
 

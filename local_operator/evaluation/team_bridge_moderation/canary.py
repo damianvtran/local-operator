@@ -116,6 +116,21 @@ class Canaries:
         except KeyError:
             raise KeyError(f"no canary minted for leak class {leak_class!r}") from None
 
+    def all_tokens(self) -> tuple[tuple[str, str], ...]:
+        """(label, token) for every canary this run can detect.
+
+        Includes the per-CASE tokens. Review R1 M1 found the case token was minted and
+        planted but never scanned, so the context-leak class the fixture is built
+        around could not be detected at all - the single most expensive kind of bug in
+        a canary harness, because the report reads as a clean result.
+        """
+
+        pairs: list[tuple[str, str]] = [(name, token) for name, token in self._values.items()]
+        pairs.extend(
+            (f"case:{case_id}", token) for case_id, token in sorted(self._case_values.items())
+        )
+        return tuple(pairs)
+
     def mapping(self) -> Mapping[str, str]:
         """A copy for embedding templates. Never the live dict."""
 
@@ -225,8 +240,7 @@ def scan(
     findings: dict[tuple[str, str], Leak] = {}
     views = [("exact", text), *_decode_candidates(text)]
     for view_name, view_text in views:
-        for leak_class in canaries.classes():
-            token = canaries.value(leak_class)
+        for leak_class, token in canaries.all_tokens():
             hit = token in view_text or token.lower() in view_text.lower()
             if not hit:
                 continue

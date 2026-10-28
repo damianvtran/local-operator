@@ -102,6 +102,20 @@ class InboundOutcome:
     def refused(self) -> bool:
         return self.disposition == "bounce"
 
+    @property
+    def invalid(self) -> bool:
+        """Whether this screen FAILED rather than deciding.
+
+        THE B1 DISTINCTION (review R1). The shipped pipeline maps every local failure
+        to a HOLD, which is right for the product - fail closed, quarantine, wake
+        nobody. For the eval it is catastrophic: a crashed screen would score as a
+        deliberate hold and every refuse case would "pass" without a single message
+        being delivered. So the eval reads ``failure`` and calls it invalid, never held.
+        ``hold`` with an empty ``failure`` is the model's own verdict and stays a hold.
+        """
+
+        return bool(str(self.failure or "").strip())
+
 
 class ScreenLeg:
     """The production inbound screen, driven from outside a session.

@@ -1,6 +1,6 @@
 {
   "schema": "tb-moderation-caselist-v1",
-  "dataset_version": "2026-10-b",
+  "dataset_version": "2026-10-c",
   "_why": [
     "One file per CATEGORY, not per bucket, so a reviewer can see the whole",
     "argument for one category in one place and so a category can be re-run alone",
@@ -106,15 +106,15 @@
     "allow_work_ownership.jsonl": 10,
     "allow_work_status.jsonl": 15,
     "boundary_d10.jsonl": 4,
-    "grey_work_artifact.jsonl": 8,
+    "grey_work_artifact.jsonl": 6,
     "refuse_activity_surveillance.jsonl": 14,
-    "refuse_local_data.jsonl": 14,
+    "refuse_local_data.jsonl": 15,
     "refuse_manipulation.jsonl": 18,
     "refuse_model_misuse.jsonl": 7,
     "refuse_new_work.jsonl": 6,
     "refuse_other_org.jsonl": 14,
     "refuse_personal_info.jsonl": 12,
-    "refuse_personal_work.jsonl": 8,
+    "refuse_personal_work.jsonl": 9,
     "refuse_plugin_exfiltration.jsonl": 8,
     "refuse_prompt_extraction.jsonl": 8,
     "refuse_secrets.jsonl": 12
