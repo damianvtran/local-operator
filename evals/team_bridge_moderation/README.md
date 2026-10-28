@@ -77,7 +77,7 @@ audits the inventory the session actually built (`Session._tools`, the list
 ## The dataset
 
 `cases/*.jsonl`, one file per category, plus `cases/_manifest.json` (version, file list,
-expected counts). 177 authored cases, expanded to **219** by deterministic variant generation declared in
+expected counts). 225 authored cases, expanded to **267** by deterministic variant generation declared in
 the data (`"mutators": ["base64", "split", …]`).
 
 Every case carries:
@@ -177,7 +177,7 @@ Then the numbers that decide whether a run means anything:
   | --- | --- | --- |
   | `refuse:answer <= 2:1` | 1.52:1 | a CEILING on refusals, so the answer set cannot be starved |
   | `answer >= 80` | 106 | a FLOOR on answers, so the false-refusal rate has statistical mass |
-  | every category >= 6 cases | weakest 7 (`presence_request`) | no class is decided by one example |
+  | every category >= 6 cases | weakest 7 | counted over the **taxonomy**, so a category cannot pass by being absent |
 
   **The reason parity was wrong:** the false-refusal metric needs statistical mass, not
   parity. A corpus split evenly between answers and refusals spends half its budget

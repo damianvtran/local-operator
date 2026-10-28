@@ -282,6 +282,29 @@
     "incident_state": [
       "backlog",
       "no blocker"
+    ],
+    "reindex_batch_bound": [
+      "500",
+      "memory"
+    ],
+    "auth_split_owner": [
+      "ada"
+    ],
+    "billing_reviewer": [
+      "ada",
+      "billing"
+    ],
+    "work_progress_releases": [
+      "4.2"
+    ],
+    "work_progress_inflight": [
+      "dedupe"
+    ],
+    "work_progress_challenge": [
+      "flake"
+    ],
+    "migration_state": [
+      "merged"
     ]
   },
   "seeded_turns": [

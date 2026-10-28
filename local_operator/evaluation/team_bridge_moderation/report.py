@@ -220,9 +220,11 @@ class Validity:
         clause, so a corpus that misses it makes the run unclean rather than partial.
         """
 
+        # SCOPE ONLY (review R4 Minor 1): the corpus rule is a TRUST clause, so it makes
+        # `clean` false and never reaches here. Leaving it in `partial` stated the
+        # opposite of the amendment.
         return self.clean and (
             not self.full_dataset
-            or not self.corpus_adequate
             or (not self.detector_observed and not self.detector_observable)
         )
 

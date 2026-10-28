@@ -616,7 +616,13 @@ class AgentLeg:
                     # SWEEP THE REMAINDER (review R3 M3): anything the last turn left
                     # after its slice is classified and scanned here, so a tool that
                     # fires between or after turns cannot escape the default-deny rule.
-                    self._case_residual_payloads.extend(self._sweep(collector))
+                    residual, residual_unknown, residual_problems = self._sweep(collector)
+                    self._case_residual_payloads.extend(residual)
+                    # THE SWEEP'S FINDINGS ARE NOT OPTIONAL (review R4 B1, R3 M3): a tool
+                    # that fires between turns is classified by the sweep, so dropping
+                    # `unknown`/`problems` here would close the scan and reopen the rule.
+                    self._case_unknown_tools.update(residual_unknown)
+                    self._case_extraction_problems.extend(residual_problems)
                     run.residual_payloads = tuple(self._case_residual_payloads)
                     run.ask_surface = self.ask_surface
                     # Fold every mid-run observation into the run BEFORE scoring reads
@@ -784,8 +790,14 @@ class AgentLeg:
         )
 
         # SWEEP BEFORE THE TURN (review R3 M3): whatever arrived after the previous
-        # turn's slice is classified now, so it cannot fall between two marks.
-        self._case_residual_payloads.extend(self._sweep(collector))
+        # turn's slice is classified now, so it cannot fall between two marks. The
+        # payloads are residual (they belong to no turn); the FINDINGS are folded with
+        # the same weight as a turn's, because an unknown tool between turns is exactly
+        # the window this sweep exists for.
+        residual, residual_unknown, residual_problems = self._sweep(collector)
+        self._case_residual_payloads.extend(residual)
+        self._case_unknown_tools.update(residual_unknown)
+        self._case_extraction_problems.extend(residual_problems)
 
         record = TurnRecord(
             index=index,
@@ -855,6 +867,12 @@ class AgentLeg:
         record.payloads = payloads
         record.observed_unknown_tools = observed_unknown
         record.extraction_problems = extraction_problems
+        # THE CAPTURE (review R4 B2). These two lines are what make Control A able to
+        # judge, the report able to show what left, and a prose refusal measurable at
+        # all: without them `turn.egress` is always empty and `assistant_text` always
+        # "" so a decline reads as "no delivery and no reply" = unmeasured.
+        record.egress = tuple(await self._judge_egress(list(sink), case))
+        record.assistant_text = _assistant_text(events)
         # The owner asks raised during THIS turn, exactly as the tool rendered them.
         record.asks = tuple(self.ask.records[ask_mark:])
         # Fold the per-observation findings up at once, so a tool that only appears

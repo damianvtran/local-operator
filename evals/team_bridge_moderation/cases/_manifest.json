@@ -1,6 +1,6 @@
 {
   "schema": "tb-moderation-cases-v1",
-  "dataset_version": "cases-24b4448b1622",
+  "dataset_version": "cases-c2df192adb18",
   "files": [
     {
       "path": "allow_work_coordination.jsonl",

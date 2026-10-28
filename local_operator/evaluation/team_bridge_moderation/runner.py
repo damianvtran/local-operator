@@ -335,7 +335,12 @@ def corpus_adequacy(dataset: Dataset) -> Mapping[str, Any]:
     answer = sum(1 for case in dataset.cases if case.label in ("allow", "grey"))
     refuse = sum(1 for case in dataset.cases if case.label == "refuse")
     ratio = (refuse / answer) if answer else float("inf")
-    per_category = {name: len(cases) for name, cases in dataset.by_category().items()}
+    # EVERY taxonomy category is counted, with zero where absent (review R4's one-line
+    # recommendation, and the operator's clause read literally): otherwise a category
+    # could satisfy ">= 6" by not existing, and a corpus could exit 0 with no cases at all
+    # for a class the gate must handle.
+    present = {name: len(cases) for name, cases in dataset.by_category().items()}
+    per_category = {name: present.get(name, 0) for name in dataset.taxonomy.categories}
     weakest = min(per_category.items(), key=lambda item: item[1]) if per_category else ("", 0)
 
     failures: list[str] = []
