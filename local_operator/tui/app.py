@@ -14953,14 +14953,7 @@ class OperatorApp(App[None]):
         # round 1, D1, cold/draft2 f001 at dock 7 / editor 3 against a settled
         # 5 / 1). The layout is needed — it is the measurement — but its
         # intermediate arrangement must not reach the screen.
-        screen = self.screen
-        paint = screen._compositor_refresh
-        screen._compositor_refresh = _suppress_intermediate_paint
-        try:
-            screen._refresh_layout()
-        finally:
-            screen._compositor_refresh = paint
-        viewport = view.container_size.height or view.size.height
+        viewport = self._settle_reveal_measurement(view)
         if not view.size.height:
             # `container_size` survives hiding, the widget's own size does not: a
             # view under an ancestor that is not laid out keeps a stale
@@ -15027,14 +15020,7 @@ class OperatorApp(App[None]):
                 # Paint suppressed because the intermediate offsets this
                 # produces are not states the reader may see; the outgoing view
                 # is the one on screen.
-                screen = self.screen
-                paint = screen._compositor_refresh
-                screen._compositor_refresh = _suppress_intermediate_paint
-                try:
-                    screen._refresh_layout()
-                finally:
-                    screen._compositor_refresh = paint
-                viewport = view.container_size.height or view.size.height
+                viewport = self._settle_reveal_measurement(view)
                 pass_cost = time.monotonic() - started
         except Exception:
             # See the docstring: a projection failure must degrade to the
@@ -15068,6 +15054,60 @@ class OperatorApp(App[None]):
             # network fetch) is picked up by the same call: the fill tops the
             # view up on the next paint, which is the pre-existing behaviour.
             self._start_resume_fill()
+
+    def _settle_reveal_measurement(self, view: TranscriptView) -> int:
+        """Lay the parked frame out against the dock as it is NOW, and read the viewport.
+
+        The pre-reveal burst fills against the viewport this returns, from a
+        paint-suppressed synchronous layout. That layout was not reading the
+        dock the adopt had just changed. Textual records a widget's "my size
+        changed" as ``_layout_required`` and only carries it up to its
+        ``height: auto`` ancestors — clearing their arrangement cache and
+        bumping their box-model key — from ``Widget._check_refresh``, which runs
+        on IDLE. `_commit_sidebar_session` adopts, `_refresh_band` shows the
+        incoming session's todo/subagent panels, and calls this in the same
+        tick, before any idle: so `Screen._refresh_layout` re-used
+        ``#input-dock``'s cached arrangement and box model from before the panels
+        existed, and the transcript kept its taller height. Repeating the layout
+        does not help, because nothing between two synchronous passes runs the
+        idle hook (measured: 33, 33, 33 rows across three passes in the unit
+        rig, against 19 after this flush).
+
+        What that cost (TUI-FINALITY-DESIGN D1, bench real fixture at 160x48):
+        the warm reopen filled a 39-row viewport where the settled frame has 24,
+        mounting one more page than the reserve needed (18 -> 38 blocks, virtual
+        height 51 -> 129). The FIRST frame painted those 38 blocks, and the
+        connect's ``refresh=True`` re-prepare, measuring the real 24, committed
+        18 — a trim after paint that moved the scrollbar thumb 76 -> 193 px
+        while the visible text stayed put.
+
+        So the invalidation `_check_refresh` WOULD perform is applied here
+        first, exactly as Textual applies it (the auto-dimension ancestor walk,
+        stopping at the first fixed-size ancestor), and the flags are left set so
+        the idle hook still posts its own ``Layout`` as before. This is the
+        Textual-private surface the burst already depends on
+        (``_refresh_layout``/``_compositor_refresh``), pinned by the version in
+        ``uv.lock``. Still pre-reveal and paint-suppressed: no frame is added and
+        no layout is forced after paint.
+        """
+        screen = self.screen
+        for widget in screen.walk_children(with_self=False):
+            if not getattr(widget, "_layout_required", False):
+                continue
+            for ancestor in widget.ancestors:
+                if not isinstance(ancestor, Widget):
+                    break
+                ancestor._clear_arrangement_cache()
+                ancestor._layout_updates += 1
+                if not ancestor.styles.auto_dimensions:
+                    break
+        paint = screen._compositor_refresh
+        screen._compositor_refresh = _suppress_intermediate_paint
+        try:
+            screen._refresh_layout()
+        finally:
+            screen._compositor_refresh = paint
+        return view.container_size.height or view.size.height
 
     def _start_resume_fill(self, *, target: float | None = None, attempt: int = 0) -> None:
         """Top up a newly revealed projection, not every subsequent resize.
@@ -28900,9 +28940,16 @@ class OperatorApp(App[None]):
         is a separate, unrequested change.
 
         ``connection`` is the sidebar's connection sentence, and only the band
-        path passes one: it is a variant of the RESTING copy ("Draft a
-        message…" while a link is being re-dialled), so it sits below every
-        mode and above the resting invitation.
+        path passes one. It USED to swap the resting copy for "Draft a
+        message…" while a link was being re-dialled; the conversation-open
+        finality audit (TUI-FINALITY-DESIGN D3) measured that swap on 18/18
+        first frames and 9/9 warm settled frames as the one composer change
+        between a reopen's first paint and its bound frame. The composer
+        accepts a draft in both states, so the swap carried no information —
+        the connection state is already stated by the band row directly
+        beneath it — and it was pure post-paint motion. The parameter stays so
+        the band call site keeps naming the input it reacts to, and so a future
+        state that genuinely changes what Enter does has one place to go.
         """
         if editor.read_only:
             return READ_ONLY_PLACEHOLDER
@@ -28918,7 +28965,8 @@ class OperatorApp(App[None]):
             # placeholder measured 4.18:1 on the dark input surface and 3.46:1
             # on the light one, under the 4.5:1 a call to action needs.
             return SETUP_PLACEHOLDER
-        return "Draft a message…" if connection else editor.resting_placeholder
+        del connection  # see the docstring: one resting string across connection states
+        return editor.resting_placeholder
 
     def _drawable_questions(self, row: AskRow) -> list[Any] | None:
         """The row's questions as the CARD would draw them, or ``None`` when it cannot.
