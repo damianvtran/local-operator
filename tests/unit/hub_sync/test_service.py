@@ -1744,3 +1744,129 @@ def test_a_refresh_cannot_clobber_a_concurrent_config_write(
     assert not refresher.is_alive()
     assert manager.get_config_value("theme") == "dark", "memory fell behind a newer write"
     assert (read_config_values(tmp_path) or {})["theme"] == "dark"
+
+
+# -- round-1 remediation: dead rows and non-link publications -------------------------
+
+
+def test_a_full_check_prunes_the_rows_of_items_that_no_longer_exist(env) -> None:
+    """Q1: the mark must die with the item, not outlive it in status.json.
+
+    Before the fix the prune gate read ``{"agent","team"}`` while the default kinds
+    had gained ``skill`` (#2398), so no caller reached it and an orphaned row lived
+    forever -- invisible until an up-to-date row carrying ``local-only`` became
+    listable. A deleted agent then advertised unpublished changes indefinitely.
+    """
+
+    ctx, hub, agents, teams, root = env
+    agent_row = _pull_agent(agents, hub, root)
+    team_row = _pull_team(teams, hub, root)
+    agents.set_agent_system_prompt(agent_row.id, BASE + "\n\nLOCAL")
+
+    svc.check_items(ctx, kinds=("agent", "team"))
+    keys = {"agent:" + agent_row.id, "team:" + str(team_row.id)}
+    assert keys <= set(st.StatusStore(root).load()["items"])
+
+    agents.delete_agent(agent_row.id)
+    teams.delete_team(str(team_row.id))
+    svc.check_items(ctx)  # the FULL default check: every kind, no scope
+
+    remaining = set(st.StatusStore(root).load()["items"])
+    assert not (keys & remaining), "a row for a deleted item must not survive a full check"
+
+
+def test_a_named_or_id_scoped_check_prunes_nothing_it_did_not_look_at(env) -> None:
+    """A partial check must never delete what it did not check (the live set is global)."""
+
+    ctx, hub, agents, _t, root = env
+    dead = _pull_agent(agents, hub, root)
+    agents.set_agent_system_prompt(dead.id, BASE + "\n\nLOCAL")
+    svc.check_items(ctx, kinds=("agent",))
+    agents.delete_agent(dead.id)
+    dead_key = "agent:" + dead.id
+
+    # A fresh live link, so each partial check has something it really looks at.
+    live = _pull_agent(agents, hub, root)
+    live_key = "agent:" + live.id
+
+    svc.check_items(ctx, kinds=("agent",), names=[live.name])
+    assert dead_key in st.StatusStore(root).load()["items"], "a named check pruned a row it skipped"
+
+    svc.check_items(ctx, kinds=("agent", "team", "skill"), only_ids={live.id})
+    assert dead_key in st.StatusStore(root).load()["items"], "an id check pruned a row it skipped"
+
+    svc.check_items(ctx)  # the full check IS the one that prunes
+    items = st.StatusStore(root).load()["items"]
+    assert dead_key not in items and live_key in items
+
+
+def test_an_accepted_publish_retires_the_unpublished_changes_mark(env) -> None:
+    """Q2: the hub's 200 is the fact that retires the mark, for agents and teams.
+
+    ``PUT /v1/agents/{id}/publish``, the team publish route and ``lop agents|teams
+    push`` all record acceptance through this one function; before the fix none of
+    them touched the status row, so a successful Republish left the copy claiming
+    unpublished changes for up to the whole check interval.
+    """
+
+    ctx, hub, agents, teams, root = env
+    agent_row = _pull_agent(agents, hub, root)
+    team_row = _pull_team(teams, hub, root)
+    agents.set_agent_system_prompt(agent_row.id, BASE + "\n\nLOCAL")
+    teams.update_team(team_row.id, TeamEditFields(description="a local description"))
+    svc.check_items(ctx, kinds=("agent", "team"))
+    items = st.StatusStore(root).load()["items"]
+    assert items["agent:" + agent_row.id]["classification"] == "local-only"
+    assert items["team:" + str(team_row.id)]["classification"] == "local-only"
+
+    assert (
+        svc.seed_receipt_after_publish(
+            root,
+            "agent",
+            agent_row.id,
+            accepted={"instructions": BASE, "description": "d"},
+            local_fields={"instructions": BASE + "\n\nLOCAL", "description": "d"},
+            revision='"hub-rev-2"',
+        )
+        is True
+    )
+    assert st.StatusStore(root).load()["items"]["agent:" + agent_row.id]["classification"] is None
+
+    # A server that answers no ETag accepts too: the mark goes even though no
+    # receipt can be seeded, because our bookkeeping is not the fact.
+    svc.check_items(ctx, kinds=("team",))
+    assert (
+        svc.seed_receipt_after_publish(
+            root, "team", str(team_row.id), accepted={}, local_fields={}, revision=None
+        )
+        is False
+    )
+    team_row_stored = st.StatusStore(root).load()["items"]["team:" + str(team_row.id)]
+    assert team_row_stored["classification"] is None
+
+
+def test_a_keep_mine_merge_on_both_changed_stores_the_publish_fact(env) -> None:
+    """m3: the write kept the LOCAL side, so the very next check says ``local-only``.
+
+    Storing ``applied``/``None`` contradicted that check for one interval.
+    """
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    agents.set_agent_system_prompt(row.id, BASE + "\n\nLOCAL")
+    # The hub moves the OTHER field, so the keep-mine merge really writes a
+    # document that equals neither side -- the case the ``applied`` row is for.
+    hub.agents["h1"] = (BASE, "the hub's description")
+
+    (c,) = svc.check_items(ctx, kinds=("agent",))
+    assert c.classification is not None and c.classification.state == "both-changed"
+
+    report = svc.apply_items(ctx, kind="agent", prefer="local", allow_llm=False)
+
+    assert report.reports[0].outcome == "merged" and report.reports[0].applied is True
+    item = st.StatusStore(root).load()["items"]["agent:" + row.id]
+    assert item["state"] == "applied"
+    assert item["classification"] == "local-only", "the kept-local write is still unpublished"
+    # The check that follows agrees, which is what the stored row now predicts.
+    (again,) = svc.check_items(ctx, kinds=("agent",))
+    assert again.classification is not None and again.classification.state == "local-only"

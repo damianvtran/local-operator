@@ -1155,8 +1155,13 @@ could show "Modified" / "local changes not published". It stays an `up-to-date`
 row and is NEVER an incoming update: `apply`/`apply-all` select on the VERDICT
 (`available`), `auto_will_apply` requires the `available`/`updating` state, and
 nothing reads this field to decide an action. It is retired when the sentence
-stops being true — an accepted push clears it, and every arm that writes hub
-content or finds an equal pair stores none.
+stops being true: an accepted publication clears it — a link push (the runner
+tick, `lop skills push`, the desktop `hub.push`) and a manual publish/republish
+(agent publish and republish, team publish, the CLI push commands; all through
+`seed_receipt_after_publish`) — as does a pull that WROTE the hub's bytes and an
+unpull, which leaves no local copy to publish. A write that kept the local side
+(`prefer=local` / `replace=local`) stores it again, and a full default check
+prunes the rows of items that no longer exist.
 
 ### B4.3 Failure classes
 

@@ -480,6 +480,35 @@ def record_publish_origin(
     return True
 
 
+def _retire_local_only(config_dir: Any, kind: Kind, local_id: str) -> None:
+    """Clear one status row's publish-side ``local-only`` mark, if it has one.
+
+    ONE definition for the paths that retire the mark WITHOUT a store mutate
+    already in flight: an ACCEPTED manual publication (agent publish/republish,
+    team publish -- the routes and the CLI both arrive at
+    :func:`seed_receipt_after_publish` only after the hub's 2xx) and an unpull
+    (no local bytes are left to be unpublished). The push folds that already write
+    the row (``record_push_outcome``, ``_reconcile_landed_commit``) clear it inside
+    their own mutate instead of taking the lock twice.
+
+    BEST-EFFORT by construction: ``StatusStore.mutate`` skips on a busy lock and
+    this never raises, because the caller's own operation already succeeded and
+    the next check re-derives the row anyway.
+    """
+
+    key = st.item_key(kind, local_id)
+
+    def fold(doc: dict[str, Any]) -> None:
+        item = doc.get("items", {}).get(key)
+        if item is not None:
+            st.clear_local_only(item)
+
+    try:
+        st.StatusStore(config_dir).mutate(fold)
+    except OSError:
+        logger.debug("could not clear the local-only mark for %s %s", kind, local_id)
+
+
 def published_hub_id(kind: Kind, result: Mapping[str, Any]) -> str | None:
     """The hub id an accepted publication created or updated.
 
@@ -532,7 +561,15 @@ def seed_receipt_after_publish(
     scope the user chose -- so a published row is a CONFIRMED link instead of
     one the inventory reports as unresolved. It is recorded independently of the
     receipt: a server that answers no ETag still proved where the row went.
+
+    THE UNPUBLISHED-CHANGES MARK IS RETIRED HERE FIRST, before either guard below:
+    the hub's acceptance is what makes that sentence false, and it does not depend
+    on what this machine manages to record afterwards. Leaving it until the next
+    check meant a successful Republish left the copy advertising local changes for
+    up to the whole check interval (round-1 Q2).
     """
+
+    _retire_local_only(config_dir, kind, local_id)
 
     if origin is not None:
         # Compatibility is a fence for BOTH mutations. A rejected destination's
@@ -717,8 +754,21 @@ def check_items(
         for c in out:
             attach_served_origin(ctx, c, source=source)
     if record:
-        live = None
-        if names is None and only_ids is None and set(kinds) == {"agent", "team"}:
+        # PRUNE ONLY ON A FULL CHECK, AND ONLY WHAT IT COVERED. ``live`` is a
+        # GLOBAL set: ``prune_items`` deletes every stored key it does not name,
+        # so a partial check (one kind, a name scope, an id set) must pass None
+        # and touch nothing it did not look at. A full default check -- every
+        # kind, no name or id scope -- enumerates every link that still has an
+        # item, so a stored row it did not see belongs to a deleted agent/team
+        # or a removed link and is dropped. THIS IS THE ONLY PATH THAT REMOVES A
+        # DEAD ROW: when the default kinds gained ``skill`` (#2398) the gate
+        # still read ``{"agent", "team"}`` and no caller matched it, so orphaned
+        # rows lived forever -- invisible until an up-to-date row carrying a
+        # ``local-only`` mark became listable (round-1 Q1: deleted agents and
+        # teams kept advertising unpublished changes). The kind set is derived
+        # from KIND_ORDER so a new kind cannot reopen that gap.
+        live: set[str] | None = None
+        if names is None and only_ids is None and set(kinds) == set(KIND_ORDER):
             live = {st.item_key(c.kind, c.local_id) for c in out}
         record_checks(ctx, out, live=live)
     return out
@@ -1423,7 +1473,18 @@ def _apply_skill(
     _mark_integrated(ctx, c, integrated=True)
     _seed_receipt_if_agreed(ctx, c, merged.to_json())
     summary = _summary(results)
-    fold(lambda item: st.settle_applied(item, summary, None))
+    # Did the write keep the LOCAL side? Then the hub still has not seen it and the
+    # row keeps its unpublished-changes mark (round-1 m3). The comparison mirrors
+    # the check's own: the alias is re-rendered on write, so the local document is
+    # compared under the REMOTE's name, exactly as ``check_hub_skills`` does.
+    compared = local_write
+    remote_name = str((c.remote or {}).get("name") or "")
+    if remote_name and compared.name != remote_name:
+        compared = compared.with_name(remote_name)
+    remote_differs = c.remote_fp is not None and (
+        prov.fingerprint_snapshot("skill", compared.to_json()) != c.remote_fp
+    )
+    fold(lambda item: st.settle_applied(item, summary, None, remote_differs=remote_differs))
     return ItemMergeReport(
         c.kind,
         c.local_id,
@@ -1818,7 +1879,12 @@ def apply_one(
     except Exception as exc:  # noqa: BLE001 - one item's failure never ends the run
         logger.warning("hub apply failed for %s %s", c.kind, c.name, exc_info=True)
         return fail("hub-error", f"could not write the update: {exc}")
-    fold(lambda item: st.settle_applied(item, summary, backup))
+    # The WRITTEN copy vs the hub's bytes: a merge that kept the local side is
+    # still unpublished, and the row must say so until a push lands (round-1 m3).
+    remote_differs = c.remote_fp is not None and (
+        prov.fingerprint_fields(c.kind, written) != c.remote_fp
+    )
+    fold(lambda item: st.settle_applied(item, summary, backup, remote_differs=remote_differs))
     return _with(report, outcome="merged", applied=True, backup=backup)
 
 
@@ -4025,6 +4091,11 @@ def unpull_skill(ctx: HubSyncContext, *, link_id: str) -> dict[str, Any]:
             raise LinkError(
                 getattr(error, "code", "") or "local-concurrent-edit", str(error)
             ) from None
+        # THE BYTES ARE GONE, SO THE MARK GOES WITH THEM (round-1 Q3). An unpull
+        # leaves no local copy to be "unpublished"; the next check re-derives the
+        # row from the link (an absent copy reads ``available``), but until then
+        # the status row would advertise local changes that no longer exist.
+        _retire_local_only(ctx.config_dir, record.kind, record.local_id)
         snapshot = links_snapshot(ctx)
         row = next((link for link in snapshot["links"] if link["link_id"] == link_id), None)
         if row is None:

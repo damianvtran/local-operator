@@ -341,7 +341,10 @@ def apply_check(
         # ``up-to-date``, which is exactly what keeps it out of apply/auto-push:
         # those select on the verdict (``available``) and on ``auto_will_apply``,
         # never on this field. An equal pair keeps nothing: equality is the absence
-        # of a fact, and every arm that publishes or writes hub content clears it.
+        # of a fact. Every arm that makes L == R again retires it (an accepted
+        # publication -- a link push or a manual publish/republish -- a pull that
+        # WROTE the hub's bytes, an unpull), while a write that kept the local side
+        # stores it again (``settle_applied(remote_differs=True)``).
         local_only = classification == "local-only"
         item.update(
             state="applied" if keep_applied else "up-to-date",
@@ -370,12 +373,24 @@ def settle_applied(
     summary: Mapping[str, int],
     backup: str | None,
     now: datetime | None = None,
+    *,
+    remote_differs: bool = False,
 ) -> None:
+    """A merge WROTE; ``remote_differs`` says the written copy is not the hub's.
+
+    A pull that integrated the hub's bytes leaves nothing to publish, so the mark
+    is cleared. A write that kept the LOCAL side (an explicit ``prefer=local`` or
+    ``replace=local`` on a both-changed row) is not that: the caller states the
+    comparison it already has, and the row keeps ``local-only`` -- otherwise it
+    would contradict the very next check, which classifies L != R as local-only
+    (round-1 m3).
+    """
+
     now = now or datetime.now(timezone.utc)
     item["applied_seen"] = False
     item.update(
         state="applied",
-        classification=None,
+        classification="local-only" if remote_differs else None,
         error_class=None,
         last_error=None,
         attempts=0,

@@ -1018,3 +1018,45 @@ def test_an_accepted_push_retires_the_local_only_mark(tmp_path: Path) -> None:
     # And the row leaves the attention list: an up-to-date skill with nothing to
     # publish carries no fact the person needs to act on.
     assert [i for i in svc.status_snapshot(ctx)["items"] if i["kind"] == "skill"] == []
+
+
+# -- round-1 remediation: unpull, and a link that no longer exists ----------------------
+
+
+def test_an_unpull_retires_the_unpublished_changes_mark(tmp_path: Path) -> None:
+    """Q3: there are no local bytes left, so the mark is wrong the moment they go."""
+
+    ctx, _manager, _remote, base, _document = _rig(tmp_path)
+    _subscribe(ctx, base)
+    _install(ctx)
+    _edit_locally(ctx)
+    (check,) = svc.check_items(ctx, kinds=("skill",))
+    key = f"skill:{check.local_id}"
+    assert st.StatusStore(ctx.config_dir).load()["items"][key]["classification"] == "local-only"
+
+    record = _record(ctx.config_dir)
+    assert record.identity is not None
+    svc.unpull_skill(ctx, link_id=record.identity.link_id)
+
+    item = st.StatusStore(ctx.config_dir).load()["items"][key]
+    assert _record(ctx.config_dir).content_state == "absent"
+    assert item["classification"] is None, "an unpulled link has nothing to publish"
+
+
+def test_a_full_check_prunes_a_row_whose_link_is_gone(tmp_path: Path) -> None:
+    """Q1 for skills: the row dies with the link, not with a later check of it."""
+
+    ctx, _manager, _remote, base, _document = _rig(tmp_path)
+    _subscribe(ctx, base)
+    _install(ctx)
+    _edit_locally(ctx)
+    (check,) = svc.check_items(ctx, kinds=("skill",))
+    key = f"skill:{check.local_id}"
+    assert st.StatusStore(ctx.config_dir).load()["items"][key]["classification"] == "local-only"
+
+    for path in (ctx.config_dir / "hub" / "baselines").glob("skill-*.json"):
+        path.unlink()
+
+    svc.check_items(ctx)  # the FULL default check: every kind, no scope
+
+    assert key not in st.StatusStore(ctx.config_dir).load()["items"]
