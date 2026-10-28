@@ -754,6 +754,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``.corrupt`` fragment suffixed onto a quarantined store file",
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
+    "local_operator/network/relay.py": (
+        1,
+        "``DELIBERATE_STOP_MARKER`` (``relay-stop-requested.json``): the relay's "
+        "deliberate-stop marker at ``<config>/run``, beside ``run/peers`` -- device-local "
+        "runtime state about THIS device's supervised relay process, written by a stop "
+        "verb and consumed by the relay's exit; never a session entry and never synced",
+    ),
     "local_operator/i18n/catalogues.py": (
         2,
         "``CONTEXT_SUFFIX`` (``.context.json``): the suffix of the en-only context "
