@@ -1551,6 +1551,11 @@ def _borrow_listing_fixture(
         "gone",
         "wiped",
         "member",
+        "localonly",
+        "localold",
+        "lostmember",
+        "mcp401",
+        "livecopy",
     ):
         document.declare(
             key,
@@ -1559,7 +1564,11 @@ def _borrow_listing_fixture(
             owner_device_name="damian-mbp\x1b[2J",
             provider=key,
             # Copy class (QA round 1, Q3): an api key is copied, never granted.
-            kind="api-key-static" if key in ("cohere", "together", "wiped") else "oauth-rotating",
+            kind=(
+                "api-key-static"
+                if key in ("cohere", "together", "wiped", "localonly", "localold")
+                else "oauth-rotating"
+            ),
             by=OWNER,
         )
     for key in (
@@ -1583,6 +1592,10 @@ def _borrow_listing_fixture(
         "back",
         "gone",
         "member",
+        "localonly",
+        "localold",
+        "mcp401",
+        "livecopy",
     ):
         document.grant(key, me, scope="session", by=OWNER)
     document.save()
@@ -1626,6 +1639,8 @@ def _borrow_listing_fixture(
         "mistral", owner_device=OWNER, credential_id=5, block_scope="", until=now + 1800
     )
     state.observe("mistral", "revoked", owner_device=OWNER, retry_after_ms=300_000)
+    # livecopy (design round 3, D13): the same withdrawal code, LIVE: the same words.
+    state.observe("livecopy", "copy_revoked", owner_device=OWNER, retry_after_ms=300_000)
     # The owner's refusal token is ITS string (review round 1, M1): an escape and a
     # newline must not reach the terminal, and an unrecognised shape is never printed.
     state.observe(
@@ -1717,6 +1732,28 @@ def _borrow_listing_fixture(
         owner_device=OWNER,
         root=root,
     )
+    # localonly / localold (review round 3, R3-1): a copy-class holder whose owner
+    # refused the copy pull with ``local_only``; the pull writer stores its catch-all
+    # ``unavailable`` state. The owner was seen since (localonly) / it is 400 s old
+    # (localold). Still true either way: never "not copied here yet".
+    for name in ("localonly", "localold"):
+        mcp_state.record(
+            NETWORK, name, state="unavailable", code="local_only", owner_device=OWNER, root=root
+        )
+    # lostmember (review round 3, m2): no longer a holder BECAUSE this device's own
+    # membership is gone; a re-share is not the remedy.
+    mcp_state.record(
+        NETWORK,
+        "lostmember",
+        state="revoked",
+        code="member_not_active",
+        owner_device=OWNER,
+        root=root,
+    )
+    # mcp401 (design round 3, D14): the MCP server refused the lent bearer.
+    mcp_state.record(
+        NETWORK, "mcp401", state="unauthorized", code="http_401", owner_device=OWNER, root=root
+    )
     # Back-dated after the last ``record``: each write re-reads and rewrites the file.
     payload = json.loads(mcp_state.mcp_auth_path(NETWORK, root).read_text())
     payload["entries"]["linear"]["at"] = now - 360
@@ -1724,6 +1761,8 @@ def _borrow_listing_fixture(
     payload["entries"]["backrest"]["at"] = now - 120
     payload["entries"]["back"]["at"] = now - 120
     payload["entries"]["gone"]["at"] = now - 600
+    payload["entries"]["localonly"]["at"] = now - 120
+    payload["entries"]["localold"]["at"] = now - 400
     mcp_state.mcp_auth_path(NETWORK, root).write_text(json.dumps(payload))
     # The owner's member row: seen 60 s ago, after the two "back" records were written.
     from local_operator.network import store
@@ -1769,7 +1808,14 @@ def test_the_credentials_listing_shows_every_borrow_state(
         blocks["anthropic"],
     ), out
     assert "borrow: partly rate-limited (a@example.test) — other accounts serving" in blocks["groq"]
-    assert "borrow: access was revoked — ask damian-mbp for a new share" in blocks["mistral"], out
+    assert (
+        "borrow: access was revoked — on damian-mbp run: lop network credential share mistral"
+        " --with borrower-laptop --request-approval" in blocks["mistral"]
+    ), out
+    assert (
+        "borrow: access was revoked — on damian-mbp run: lop network credential share livecopy"
+        " --with borrower-laptop --request-approval" in blocks["livecopy"]
+    ), out
     assert "rate-limited" not in blocks["mistral"], out
     assert "borrow: refused (unrecognised code)" in blocks["evil"], out
     assert "FORGED" not in out, out
@@ -1809,14 +1855,26 @@ def test_the_credentials_listing_shows_every_borrow_state(
     # R2-Q2: an explicitly withdrawn copy-class key reads revoked, with the remedy the
     # owner accepts after a withdrawal.
     assert (
-        "borrow: access was revoked — ask damian-mbp to restore it (lop network credential"
-        " share wiped --with borrower-laptop --request-approval); last tried 0s ago"
+        "borrow: access was revoked — on damian-mbp run: lop network credential share wiped"
+        " --with borrower-laptop --request-approval; last tried 0s ago"
     ) in blocks["wiped"], out
-    # m1: membership loss is this device's, not a refusal by the owner.
+    # Membership loss is this device's, not a refusal by the owner, and names no remedy
+    # it cannot back (design round 3, D11) — on the holder AND the non-holder arm (m2).
+    for name in ("member", "lostmember"):
+        assert (
+            "borrow: this device is not an active member of this network — see: lop network"
+            " status; last tried 0s ago"
+        ) in blocks[name], out
+    # R3-1: a catch-all "unavailable" with a hard owner code stays, seen-since or old.
+    for name, age in (("localonly", "2m"), ("localold", "6m")):
+        assert f"borrow: refused by damian-mbp (local_only); last tried {age} ago" in blocks[name]
+    # D14: an MCP 401 gives the sign-in line with its command.
     assert (
-        "borrow: this device is no longer a member of the network — ask an admin to re-admit"
-        " it; last tried 0s ago"
-    ) in blocks["member"], out
+        "borrow: sign in again on damian-mbp (there: /login mcp401); last tried 0s ago"
+        in blocks["mcp401"]
+    ), out
+    # n1 / D15: never two parentheticals in a row on any line.
+    assert ") (" not in out, out
 
 
 def test_the_credentials_json_adds_borrow_without_changing_observation(
@@ -1840,7 +1898,7 @@ def test_the_credentials_json_adds_borrow_without_changing_observation(
         "datadog": "sign_in_needed",
         "evil": "refused",
         "groq": "partly_resting",
-        "mistral": "refused",
+        "mistral": "revoked",
         "many": "resting",
         "offline": "refused",
         "openai": "idle",
@@ -1858,6 +1916,11 @@ def test_the_credentials_json_adds_borrow_without_changing_observation(
         "gone": "never_borrowed",
         "wiped": "revoked",
         "member": "refused",
+        "localonly": "refused",
+        "localold": "refused",
+        "lostmember": "refused",
+        "mcp401": "sign_in_needed",
+        "livecopy": "revoked",
     }
     assert rows["wiped"]["borrow"]["refusal"] == "copy_revoked"
     assert rows["cohere"]["borrow"]["gen"] == 3

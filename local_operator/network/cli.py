@@ -1791,12 +1791,30 @@ _TRANSIENT_RECORD_CODES: frozenset[str] = frozenset(
 #: client itself would have asked again, so the listing has no fresher word to give.
 _TRANSIENT_RECORD_MAX_S = 300.0
 
-#: Codes that mean the OWNER WITHDREW access. After an explicit revoke the owner keeps
-#: a consent tombstone and refuses a bare re-share (``supersede_required``), so the
-#: only remedy that works is the signed recovery request (QA round 2, R2-Q2).
-_REVOKED_CODES: frozenset[str] = frozenset(
-    {"revoked", "not_a_holder", "copy_revoked", "consent_withdrawn"}
+#: Codes that can only mean an EXPLICIT withdrawal by the owner: ``revoked`` (the
+#: broker's own word) and ``copy_revoked`` (the owner's wipe of a copy). After one, the
+#: owner keeps a consent tombstone and refuses a bare re-share (``supersede_required``),
+#: so the only remedy that works is the signed recovery request (QA round 2, R2-Q2),
+#: live or durable alike (design round 3, D13).
+#:
+#: ``not_a_holder`` IS DELIBERATELY NOT HERE, and has ONE meaning everywhere (review
+#: round 3, m2): "this device is no longer a holder", remedy "ask the owner to share it
+#: again". The owner answers it after an explicit revoke AND reconcile writes it when a
+#: share simply ended, and the borrower cannot tell the two apart; when the bare share
+#: is refused, that refusal spells the exact ``--request-approval`` command itself.
+_REVOKED_CODES: frozenset[str] = frozenset({"revoked", "copy_revoked"})
+
+#: Durable codes that still say something about a key this device no longer holds:
+#: the withdrawal codes, the plain "no longer shared", an ended approval, and a lost
+#: membership (whose remedy is NOT a re-share, review round 3, m2).
+_NON_HOLDER_CODES: frozenset[str] = _REVOKED_CODES | frozenset(
+    {"not_a_holder", "consent_withdrawn", "member_not_active"}
 )
+
+#: Durable codes that mean "sign in again on the owner". ``http_401`` is written only by
+#: ``mcp_bearer`` when the MCP server refuses the lent bearer, so the key is always
+#: ``mcp:<url>`` and the remedy is the same ``/mcp login`` (design round 3, D14).
+_SIGN_IN_CODES: frozenset[str] = frozenset({"interactive_required", "http_401"})
 
 #: The longest refusal token ``--json`` carries back. The token is the OWNER's string
 #: (``BrokerError.code`` off the wire, persisted by the borrower), so it is bounded
@@ -1839,14 +1857,15 @@ def _borrow_view(
     2     not a holder                                             ``not_shared``
     3     live ``interactive_required``                            ``sign_in_needed``
     4     live refusal other than ``quota_blocked``                ``refused``
-    5     durable HARD record (see :func:`_durable_record`)        ``sign_in_needed`` /
-                                                                   ``revoked`` /
+    5     durable HARD record (see :func:`_durable_record`), no    ``sign_in_needed`` /
+          live observation                                         ``revoked`` /
                                                                    ``refused``
     6     live rest; ``partly_`` when a grant followed every rest  ``resting`` /
                                                                    ``partly_resting``
     7     live ``quota_blocked`` with no rest of our own           ``refused``
     8     live grant                                               ``active``
-    9     durable TRANSIENT record, owner not seen since, young    ``refused``
+    9     durable TRANSIENT record, no live observation, owner     ``refused``
+          not seen since, young
     10    copy-class key: copy present / absent                    ``copied`` /
                                                                    ``not_copied``
     11    a grant that is no longer live / nothing                 ``idle`` /
@@ -1854,6 +1873,12 @@ def _borrow_view(
     ====  =======================================================  ====================
 
     Notes on the ranks:
+
+    * EVERY LIVE OBSERVATION (3, 4, 6-8) OUTRANKS EVERY DURABLE RECORD (5, 9): the
+      observation is the freshest fact there is, and a live grant also clears the
+      record through ``last_grant_at`` (review round 3, m1).
+    * A live ``revoked``/``copy_revoked`` is rank 4 with state ``revoked``, the same
+      words as a durable one (design round 3, D13).
 
     * ``refusal`` is the owner's token, control-stripped and bounded; one not shaped
       like a refusal code (``approval_copy.is_refusal_code``) is
@@ -1884,9 +1909,8 @@ def _borrow_view(
         # the bare share the not-shared line offers is refused after an explicit
         # revoke (``supersede_required``), so say revoked and give the remedy that
         # works (QA round 2, R2-Q2).
-        if record is not None and str(record.get("code") or "") in _REVOKED_CODES:
+        if record is not None and str(record.get("code") or "") in _NON_HOLDER_CODES:
             _apply_record(view, record)
-            view["state"] = "revoked"
         return view
     status = state.status(key, now=stamp)
     last = state.last_grant_at(key)
@@ -1900,7 +1924,7 @@ def _borrow_view(
         if status == "interactive_required":
             view["state"] = "sign_in_needed"
             return view
-        view["state"] = "refused"
+        view["state"] = "revoked" if status in _REVOKED_CODES else "refused"
         view["refusal"] = _peer_label(status)[:_REFUSAL_MAX_CHARS]
         view["refusal_recognised"] = is_refusal_code(status)
         return view
@@ -1969,8 +1993,16 @@ def _durable_record(
 
 
 def _is_transient(record: Mapping[str, Any]) -> bool:
-    code = str(record.get("code") or "")
-    return str(record.get("state") or "") == "unavailable" or code in _TRANSIENT_RECORD_CODES
+    """Whether a durable record says "not now" rather than "not any more".
+
+    BY CODE ONLY, never by the record's ``state`` (review round 3, R3-1): both
+    copy-pull writers (``sync.py``'s pull and ``client.pull_copy_sync``) store
+    ``state_for_code(code) or "unavailable"``, so ``unavailable`` is also the catch-all
+    for owner refusals they do not map (``local_only``, ``not_copyable``, ``no_value``).
+    Those persist until the owner changes something; reading them as transient let
+    "not copied here yet" promise a copy the owner will never send.
+    """
+    return str(record.get("code") or "") in _TRANSIENT_RECORD_CODES
 
 
 def _transient_still_true(
@@ -1994,13 +2026,12 @@ def _apply_record(view: dict[str, Any], record: Mapping[str, Any]) -> None:
 
     code = str(record.get("code") or record.get("state") or "")
     view["last_asked_at"] = float(record.get("at") or 0.0)
-    if code == "interactive_required":
+    if code in _SIGN_IN_CODES:
         view["state"] = "sign_in_needed"
+        if code != "interactive_required":
+            view["refusal"] = code
         return
-    # ``not_a_holder`` stays "refused": it is also what a reconcile writes for a
-    # share that ended without an explicit withdrawal, and its words (D9) ask for a
-    # plain re-share; the explicit-withdrawal codes get the signed-recovery remedy.
-    view["state"] = "revoked" if code in _REVOKED_CODES - {"not_a_holder"} else "refused"
+    view["state"] = "revoked" if code in _REVOKED_CODES else "refused"
     view["refusal"] = _peer_label(code)[:_REFUSAL_MAX_CHARS]
     view["refusal_recognised"] = is_refusal_code(code)
 
@@ -2047,12 +2078,19 @@ def _refusal_words(code: str, owner: str) -> str:
     """
     if code in ("owner_offline", "owner_unreachable", "unavailable"):
         return f"{owner} is offline — reconnect it"
-    if code in ("revoked", "not_a_member", "consent_withdrawn", "copy_revoked"):
+    if code == "not_a_member":
         return f"access was revoked — ask {owner} for a new share"
+    if code == "consent_withdrawn":
+        # An ended APPROVAL (withdrawn, expired or changed; ``reconcile``), not a revoked
+        # share: the remedy ``messages.py`` gives is a re-approval on the owner, and the
+        # signed finite recovery is refused when no deny exists (design round 3, D13).
+        return f"{owner}'s approval for this device ended — re-approve this device on {owner}"
     if code == "member_not_active":
-        # Written by reconcile when THIS device lost its membership: the owner refused
-        # nothing, so naming it as the refuser would send the reader the wrong way.
-        return "this device is no longer a member of the network — ask an admin to re-admit it"
+        # Written by reconcile when THIS device's own membership does not read as active,
+        # which fails closed (an unreadable store counts too). A removed id cannot be
+        # re-admitted at all, so no remedy is guessed here: ``lop network status`` is the
+        # surface that tells removed, refused and unreadable apart (design round 3, D11).
+        return "this device is not an active member of this network — see: lop network status"
     if code in ("not_a_holder", "not_owner"):
         # Parallel to ``not shared with this device`` (design round 2, D9); "no longer"
         # keeps "withdrawn" apart from "never shared".
@@ -2061,9 +2099,7 @@ def _refusal_words(code: str, owner: str) -> str:
         return f"sharing changed on {owner} — ask {owner} for a new share"
     if code == "epoch_stale":
         return f"out of sync with {owner} — reconnect and try again"
-    if code in ("grant_invalid", "http_401"):
-        # ``http_401`` is the MCP server refusing the lent bearer (``mcp_bearer``):
-        # the same remedy as a provider refusing the owner's login.
+    if code == "grant_invalid":
         return f"the provider refused {owner}'s login — sign in again on {owner}"
     if code == "no_local_credential":
         return f"{owner} has no login for this — sign in on {owner}"
@@ -2131,11 +2167,14 @@ def _borrow_words(
         # bare re-share (``supersede_required``); the signed recovery request is the
         # one command that works (QA round 2, R2-Q2).
         me = self_name or "<this device>"
+        # Says WHERE to run it, like D1/D2 (design round 3, D12): run on this device,
+        # ``--with <me>`` resolves to itself and is refused.
         text = (
-            f"access was revoked — ask {owner} to restore it "
-            f"(lop network credential share {key} --with {me} --request-approval)"
+            f"access was revoked — on {owner} run: "
+            f"lop network credential share {key} --with {me} --request-approval"
         )
-        return f"{text}; {asked_tail}" if asked_tail else text
+        tail = asked_tail or worked
+        return f"{text}; {tail}" if tail else text
     if state == "sign_in_needed":
         text = f"sign in again on {owner} (there: {repair_command(key)})"
         return f"{text}; {asked_tail}" if asked_tail else text
@@ -2168,11 +2207,10 @@ def _borrow_words(
             text = _refusal_words(str(view.get("refusal") or ""), owner)
         else:
             text = "refused (unrecognised code)"
-        if asked_tail:
-            # One parenthetical at most (review round 2, n1): the durable tail joins
-            # with "; " as the sign-in arm does.
-            return f"{text}; {asked_tail}"
-        return f"{text} ({worked})" if worked else text
+        # One parenthetical at most, and one tail shape on every arm (review round 3,
+        # n1; design round 3, D15): "; last tried" / "; last worked".
+        tail = asked_tail or worked
+        return f"{text}; {tail}" if tail else text
     if worked:
         return worked
     return "shared, not borrowed yet"
