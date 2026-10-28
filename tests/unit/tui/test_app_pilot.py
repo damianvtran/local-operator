@@ -10294,6 +10294,27 @@ def test_help_uses_one_column_wider_than_every_command_name() -> None:
         assert row[len(names) :].startswith("  "), row
 
 
+def test_help_rows_follow_a_live_language_move() -> None:
+    """`/help` reads the registry per render, so the registry's refresher carries it.
+
+    No re-push is needed here (unlike the picker's copied rows): the block is
+    built from ``SLASH_COMMANDS`` on every call, which is what makes it the
+    surface that proves ``register_refresh`` is wired. Both directions are
+    asserted, because a stale block and a block that never moved look identical
+    in one direction only when the language was already English.
+    """
+    from local_operator.i18n.text import set_active_locale
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    assert "List all commands" in _renderable_plain(app._help_block().renderable)
+    set_active_locale("fr")
+    try:
+        assert "Lister toutes les commandes" in _renderable_plain(app._help_block().renderable)
+    finally:
+        set_active_locale("en")
+    assert "List all commands" in _renderable_plain(app._help_block().renderable)
+
+
 def test_help_mentions_the_window_title_toggle() -> None:
     """The title lives outside the app's frame, so the help is where a user who
     notices it and wants it off can discover the toggle without source-diving."""

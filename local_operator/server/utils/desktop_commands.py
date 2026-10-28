@@ -9,7 +9,8 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import quote
 
-from local_operator.slash_commands import SLASH_COMMANDS, command_argument_words
+from local_operator.i18n.resolve import resolve_language
+from local_operator.slash_commands import SLASH_COMMANDS, command_argument_words, describe
 from local_operator.tui.autocomplete import SlashCommand
 
 # These are execution handlers, not a copy of the catalogue. A new registry row
@@ -44,10 +45,26 @@ def argument_words(spec: SlashCommand) -> list[str]:
 
 
 def command_catalogue() -> list[dict[str, Any]]:
+    """Every desktop-offered command, in the language THIS request resolved.
+
+    One ``resolve_language()`` per request, then one render per row: the
+    catalogue is the desktop's own copy, so it must follow the daemon's
+    resolved language rather than the row's import-time ``description`` — that
+    field is the ACTIVE locale's, and nothing under ``server/`` ever activates
+    one (the TUI owns ``set_active_locale``). Reading it here is exactly the
+    "always English" defect this replaces.
+
+    Resolution is per request rather than cached on purpose: the config watcher
+    can move the language mid-process (``resolve_language`` prefers the
+    watcher's snapshot and only builds a manager when none exists), and this
+    endpoint is low-frequency — measured at ~1 ms of resolution for the whole
+    catalogue, so there is nothing to memoise.
+    """
+    locale = resolve_language()
     return [
         {
             "name": spec.name,
-            "description": spec.description,
+            "description": describe(spec, locale),
             "aliases": list(spec.aliases),
             "arguments": spec.arguments.value,
             "echo": spec.echo,

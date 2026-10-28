@@ -46877,13 +46877,19 @@ class OperatorApp(App[None]):
         which is what lets the config watcher's echo of this process's own
         write call it unconditionally.
 
-        Not covered here, by design: the slash registry's descriptions, which
-        resolve through ``messages.render`` at import (the S2 seam note says
-        where that rework starts) — they move with their own slice.
+        Not covered by ``set_active_locale``: the slash picker, which holds a
+        COPY of the registry rather than the registry itself (see below).
         """
         from local_operator.i18n import text as i18n_text
 
         i18n_text.set_active_locale(locale)
+        # The slash registry re-materialises its own descriptions in place (its
+        # ``register_refresh`` hook), which reaches ``/help`` because that block
+        # reads ``SLASH_COMMANDS`` per render. The PICKER does not: the editor
+        # hands it a plain ``list(...)`` copy, so it would keep painting the boot
+        # language for the rest of the session. Re-handing the rows is the whole
+        # fix, and it is silent when no editor is mounted.
+        self._refresh_offered_commands()
         # Localized transcript furniture is baked into finalized blocks just as
         # theme ink is. Reuse that same rebuild sweep so a locale move repaints
         # mounted rows at their CURRENT width, with no resize or stale cache.

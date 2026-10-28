@@ -3615,7 +3615,7 @@ class MobileDaemon:
         self.subagent_details: dict[tuple[str, str], dict[str, Any]] = {}
         self._pending_reqs: dict[tuple[int, Any], asyncio.Future[dict[str, Any]]] = {}
         self._dial_tasks: dict[int, asyncio.Task[None]] = {}
-        self._slash_commands: list[dict[str, Any]] | None = None
+        self._slash_commands: dict[str, list[dict[str, Any]]] = {}
         # A session route outlives every process generation. Retain its latest
         # repaint so an open phone remains a normal conversation while idle.
         self.session_projections: dict[str, SessionProjection] = {}
@@ -5347,48 +5347,60 @@ class MobileDaemon:
         command the route does not run. A command that later gains structured
         phone behaviour (issue #1598) joins by changing its scope, not this list.
 
-        Imported lazily (the TUI registry pulls the app's command table) and
-        cached — the registry is static.
+        Imported the TUI registry lazily (it pulls the app's command table).
+        Cached PER LOCALE: the rows are a projection of the registry plus this
+        request's resolved language, which the config watcher can move mid-
+        process, so a single cache would serve the language of whichever request
+        happened to arrive first.
         """
-        if self._slash_commands is None:
-            # The PUBLIC seam, not the module's private `_slash_capabilities`:
-            # production code reaching into a leading-underscore name is a
-            # boundary the next refactor breaks silently (review round 1, R1-5).
-            from local_operator.session.frontend_state import (
-                CommandScope,
-                slash_capabilities,
-            )
-            from local_operator.slash_commands import SLASH_COMMANDS
-            from local_operator.tui.autocomplete import ArgumentMode
+        # Resolve at the request boundary, the precedent this daemon already
+        # follows for the relay's login page: nothing here activates a locale
+        # process-wide, so the rows are rendered for THIS request's language.
+        locale = resolve_language()
+        cached = self._slash_commands.get(locale)
+        if cached is not None:
+            return cached
+        # The PUBLIC seam, not the module's private `_slash_capabilities`:
+        # production code reaching into a leading-underscore name is a
+        # boundary the next refactor breaks silently (review round 1, R1-5).
+        from local_operator.session.frontend_state import (
+            CommandScope,
+            slash_capabilities,
+        )
+        from local_operator.slash_commands import SLASH_COMMANDS, describe
+        from local_operator.tui.autocomplete import ArgumentMode
 
-            routed = {
-                capability.command
-                for capability in slash_capabilities()
-                if capability.scope is CommandScope.AUTHORITATIVE_SESSION
+        routed = {
+            capability.command
+            for capability in slash_capabilities()
+            if capability.scope is CommandScope.AUTHORITATIVE_SESSION
+        }
+        cached = [
+            {
+                "name": cmd.name,
+                # THE PHONE'S OWN COPY where the registry's names a control
+                # this surface does not have (UX round 1, U5). The registry
+                # description is written for a terminal: "(shift+tab cycles)"
+                # is a key chord a touch device cannot send, and `/title
+                # --refresh` points at a flag whose only reason to be spelled
+                # out is the terminal help table. Every entry NOT listed here
+                # ships the registry's words in the request's language, so this
+                # stays a short exception list rather than a second catalogue.
+                # The two overrides are deliberately NOT localised: their own
+                # copy is a separate, translated-copy change (issue #1598).
+                "description": _PHONE_SLASH_DESCRIPTIONS.get(cmd.name, describe(cmd, locale)),
+                "aliases": list(cmd.aliases),
+                "arguments": (
+                    cmd.arguments.name.lower()
+                    if isinstance(cmd.arguments, ArgumentMode)
+                    else "none"
+                ),
             }
-            self._slash_commands = [
-                {
-                    "name": cmd.name,
-                    # THE PHONE'S OWN COPY where the registry's names a control
-                    # this surface does not have (UX round 1, U5). The registry
-                    # description is written for a terminal: "(shift+tab cycles)"
-                    # is a key chord a touch device cannot send, and `/title
-                    # --refresh` points at a flag whose only reason to be spelled
-                    # out is the terminal help table. Every entry NOT listed here
-                    # ships the registry's words unchanged, so this stays a short
-                    # exception list rather than a second catalogue.
-                    "description": _PHONE_SLASH_DESCRIPTIONS.get(cmd.name, cmd.description),
-                    "aliases": list(cmd.aliases),
-                    "arguments": (
-                        cmd.arguments.name.lower()
-                        if isinstance(cmd.arguments, ArgumentMode)
-                        else "none"
-                    ),
-                }
-                for cmd in SLASH_COMMANDS
-                if cmd.name in routed
-            ]
-        return self._slash_commands
+            for cmd in SLASH_COMMANDS
+            if cmd.name in routed
+        ]
+        self._slash_commands[locale] = cached
+        return cached
 
 
 # ---------------------------------------------------------------------------
