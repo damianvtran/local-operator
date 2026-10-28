@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -122,23 +123,22 @@ def stage_anchor(root: Path, anchor: Any) -> Path:
 PURPOSE_ADMIT_DEVICE = "admit_device"
 
 
+def _unrevoked_devices(installed: Any, staged: Any) -> list[Any]:
+    """Ids whose installed revocation the incoming statement would lift (R1)."""
+    staged_revoked = trust_module.revoked_device_ids(staged)
+    return [d for d in trust_module.revoked_device_ids(installed) if d not in staged_revoked]
+
+
 def _admitted_devices(installed: Any, staged: Any) -> list[str]:
     """Device ids the STAGED anchor lets in that the INSTALLED one keeps out (R1-4).
 
-    The device list is a revocation list, so "admitting" a device is either a
-    revocation the staged copy drops, or a device entry the staged copy carries
-    un-revoked that the installed copy does not. Tightening (a new revocation)
-    is not an admission. Pure over two anchors, sorted for a stable message.
+    Tightening (a new revocation) is not an admission. Raw ``==`` is deliberate:
+    the runtime compares the JSON values without coercing their types.
     """
-
-    # R2-2: the SAME id lists the runtime revokes by, compared with the same raw
-    # ``==`` — no ``str()``, which once made a revoked ``"1234"`` re-staged as
-    # the number ``1234`` look unchanged here while revoking nothing at runtime.
-    staged_revoked = trust_module.revoked_device_ids(staged)
     installed_open = trust_module.open_device_ids(installed)
-    unrevoked = [d for d in trust_module.revoked_device_ids(installed) if d not in staged_revoked]
     added = [d for d in trust_module.open_device_ids(staged) if d not in installed_open]
-    return sorted({repr(d) if not isinstance(d, str) else d for d in unrevoked + added})
+    changed = _unrevoked_devices(installed, staged) + added
+    return sorted({repr(d) if not isinstance(d, str) else d for d in changed})
 
 
 def install_anchor(
@@ -204,6 +204,18 @@ def install_anchor(
         installed = load_anchor()
         staged_anchor = trust_module.parse_staged_anchor(staged_bytes)
         if installed.usable and installed.anchor is not None and staged_anchor is not None:
+            if trust_module.admission_enforced(
+                installed.anchor
+            ) and not trust_module.admission_enforced(staged_anchor):
+                # Dropping the admission marker turns the rule off. It needs the
+                # same in-person gesture as admitting a phone; otherwise a stored
+                # password could quietly undo every confirmed list.
+                print(
+                    "turning off phone admission needs an administrator to approve it "
+                    "in person, so a stored admin password cannot be used; nothing was installed",
+                    file=sys.stderr,
+                )
+                return 2
             admitted = _admitted_devices(installed.anchor, staged_anchor)
             if admitted:
                 print(
@@ -317,7 +329,12 @@ def _install_with_sudo_stdin(command: list[list[str]], secret_name: str) -> int:
 
 
 def install_anchor_from(
-    source: Path, root: Path, *, print_only: bool = False, sudo_secret: str = ""
+    source: Path,
+    root: Path,
+    *,
+    print_only: bool = False,
+    sudo_secret: str = "",
+    allow_revocation_lift: bool = False,
 ) -> int:
     """Install a statement RECEIVED from another machine (remote onboarding §3.3 step 7).
 
@@ -367,9 +384,201 @@ def install_anchor_from(
             file=sys.stderr,
         )
         return 1
+    installed = load_anchor()
+    if installed.usable and installed.anchor is not None:
+        lifted = _unrevoked_devices(installed.anchor, anchor)
+        if lifted and not allow_revocation_lift:
+            # A plant REPLACES the receiving list with the approved bytes, but it
+            # must not resurrect a phone this computer revoked. Adding a phone is
+            # the explicit control: re-list it locally before retrying the plant.
+            names = ", ".join(str(item) for item in lifted)
+            print(
+                f"the incoming anchor would lift this computer's revocation of {names}; "
+                "nothing was staged or installed. Allow that phone here first if you "
+                "intend to trust it again",
+                file=sys.stderr,
+            )
+            return 2
+    # No merge: the statement's bytes are exactly what the sending operator
+    # approved, so the receiving list is replaced rather than partly preserved.
     staged = stage_anchor(root, anchor)
     print(f"anchor statement accepted from {source} (staged at {staged})", file=sys.stderr)
     return install_anchor(root, print_only=print_only, sudo_secret=sudo_secret)
+
+
+def _admission_install(
+    root: Path,
+    expected_old: bytes,
+    *,
+    print_only: bool,
+    sudo_secret: str,
+    runner: Any = None,
+) -> int:
+    """Install with both old and new digests pinned across the OS prompt."""
+    if sudo_secret:
+        return install_anchor(
+            root, sudo_secret=sudo_secret, purpose=PURPOSE_ADMIT_DEVICE
+        )
+    from local_operator.operator.elevate import run_elevated
+
+    target = anchor_path()
+    try:
+        staged_bytes = trust_module.staging_path(root).read_bytes()
+    except OSError:
+        return 1
+    command = trust_module.install_commands(
+        trust_module.staging_path(root),
+        target,
+        hashlib.sha256(staged_bytes).hexdigest(),
+        hashlib.sha256(expected_old).hexdigest(),
+    )
+    if print_only:
+        print(format_install_commands(command))
+        return 0
+    result = run_elevated(command) if runner is None else runner(command)
+    if result.cancelled or result.exit_code != 0:
+        # S3 signs the certificate only after a zero result. In particular a
+        # cancelled prompt cannot reach certificate issuance or leave a staged
+        # statement that a later non-admission install could silently apply.
+        if result.cancelled:
+            try:
+                trust_module.staging_path(root).unlink()
+            except OSError:
+                pass
+        return result.exit_code or 1
+    try:
+        installed_raw = target.read_bytes()
+        loaded = trust_module.OperatorAnchor.from_json(
+            json.loads(installed_raw.decode("utf-8"))
+        )
+    except (OSError, UnicodeDecodeError, ValueError):
+        return 1
+    return 0 if loaded is not None and trust_module.anchor_bytes(loaded) == staged_bytes else 1
+
+
+def _admission_anchor(installed: Any, ids: list[str]) -> Any:
+    """Installed statement plus marker and selected ids; never a fresh anchor."""
+    entries = [dict(entry) for entry in installed.devices]
+    for device_id in ids:
+        entries = [entry for entry in entries if entry.get("device_id") != device_id]
+        entries.append({"device_id": device_id})
+    return replace(
+        installed,
+        admission=trust_module.ADMISSION_LISTED,
+        devices=tuple(entries),
+    )
+
+
+def _installed_admission_anchor() -> tuple[Any, bytes] | None:
+    """The canonical installed statement, only after its ownership gate passes."""
+    loaded = load_anchor()
+    try:
+        raw = anchor_path().read_bytes()
+        installed = trust_module.OperatorAnchor.from_json(json.loads(raw.decode("utf-8")))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if (
+        not loaded.usable
+        or installed is None
+        or loaded.anchor != installed
+        or trust_module.anchor_bytes(installed) != raw
+    ):
+        return None
+    return installed, raw
+
+
+def confirm_devices(
+    root: Path,
+    ids: list[str],
+    *,
+    print_only: bool = False,
+    sudo_secret: str = "",
+    runner: Any = None,
+) -> int:
+    """Confirm the human's chosen phones and end the pre-rule migration state."""
+    from local_operator.operator.devices import list_devices
+
+    current = _installed_admission_anchor()
+    if current is None:
+        # Never derive an admission from the user-writable staged statement.
+        print(
+            "the installed operator anchor could not be read; nothing was confirmed",
+            file=sys.stderr,
+        )
+        return 1
+    installed, old = current
+    known = {device.device_id for device in list_devices(root)}
+    selected = list(dict.fromkeys(ids))
+    if not selected or any(device_id not in known for device_id in selected):
+        print("choose one or more paired phones to confirm; nothing was installed", file=sys.stderr)
+        return 2
+    proposed = _admission_anchor(installed, selected)
+    if trust_module.anchor_bytes(proposed) == old:
+        return 0  # Idempotence: an already confirmed selection needs no prompt.
+    stage_anchor(root, proposed)
+    return _admission_install(
+        root,
+        old,
+        print_only=print_only,
+        sudo_secret=sudo_secret,
+        runner=runner,
+    )
+
+
+def admit_device(
+    root: Path,
+    device_id: str,
+    *,
+    print_only: bool = False,
+    sudo_secret: str = "",
+    runner: Any = None,
+) -> int:
+    """Confirm exactly one new phone before S3 is allowed to issue its cert."""
+    from local_operator.operator.devices import list_devices
+
+    current = _installed_admission_anchor()
+    if current is None:
+        print(
+            "the installed operator anchor could not be read; nothing was confirmed",
+            file=sys.stderr,
+        )
+        return 1
+    installed, old = current
+    if (
+        not trust_module.admission_enforced(installed)
+        and any(
+            device.device_id not in trust_module.open_device_ids(installed)
+            for device in list_devices(root)
+        )
+    ):
+        print(
+            "confirm your existing phones before adding another; adding one must not "
+            "de-admit the phones you already paired",
+            file=sys.stderr,
+        )
+        return 2
+    if device_id not in {device.device_id for device in list_devices(root)}:
+        # A first-time phone has no stored cert until S3 signs it, AFTER this
+        # write. Its pending request, not the cert store, is what validates it.
+        from local_operator.operator.devices import list_pending
+
+        if device_id not in {str(row.get("device_id") or "") for row in list_pending(root)}:
+            print(
+                "the phone has no pending pairing request; nothing was confirmed",
+                file=sys.stderr,
+            )
+            return 2
+    proposed = _admission_anchor(installed, [device_id])
+    if trust_module.anchor_bytes(proposed) == old:
+        return 0
+    stage_anchor(root, proposed)
+    return _admission_install(
+        root,
+        old,
+        print_only=print_only,
+        sudo_secret=sudo_secret,
+        runner=runner,
+    )
 
 
 def _existing_key(root: Path, preference: str) -> KeyHandle | None:
@@ -447,7 +656,16 @@ def _report_existing_key(root: Path, handle: KeyHandle, label: str) -> int:
     loaded = load_anchor()
     staged_now = False
     if not staged.exists() and not loaded.exists:
-        staged = stage_anchor(root, anchor_for_handle(handle, label=label))
+        # New statements are born enforcing; only an existing pre-rule installed
+        # file gets the migration guard. Constructing from this installed/created
+        # statement preserves the key and backend rather than minting a new key.
+        staged = stage_anchor(
+            root,
+            replace(
+                anchor_for_handle(handle, label=label),
+                admission=trust_module.ADMISSION_LISTED,
+            ),
+        )
         staged_now = True
     print(f"operator key already exists in the {handle.backend} store; nothing replaced")
     print(f"  key id : {handle.key_id}")
@@ -520,7 +738,10 @@ def _init(args: argparse.Namespace) -> int:
         again = _existing_key(root, args.backend)
         if again is not None:
             return _report_existing_key(root, again, args.label)
-    anchor = anchor_for_handle(handle, label=args.label)
+    anchor = replace(
+        anchor_for_handle(handle, label=args.label),
+        admission=trust_module.ADMISSION_LISTED,
+    )
     staged = stage_anchor(root, anchor)
 
     print(f"operator key created in the {handle.backend} store")

@@ -137,10 +137,26 @@ def add_parser(subparsers: Any) -> None:
         ),
     )
     devices_parser.add_argument(
+        "--approve",
+        default="",
+        metavar="DEVICE_ID",
+        help="Confirm one paired phone on this computer with an in-person admin gesture",
+    )
+    devices_parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Confirm the listed phones and end the pre-rule migration state",
+    )
+    devices_parser.add_argument(
+        "--sudo-secret",
+        default="",
+        help="Name of a stored admin password; admission writes refuse it",
+    )
+    devices_parser.add_argument(
         "--print-only",
         action="store_true",
         help=(
-            "With --revoke or --authorise, print the privileged command instead of " "running it"
+            "With a device write, print the privileged command instead of running it"
         ),
     )
 

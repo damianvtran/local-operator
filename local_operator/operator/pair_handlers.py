@@ -285,11 +285,17 @@ def describe_devices(args: argparse.Namespace) -> int:
     this verb is exactly as host-side-only as ``--revoke`` is: the phone has no
     reach into either.
     """
-    from local_operator.operator.handlers import install_anchor
+    from local_operator.operator.handlers import (
+        PURPOSE_ADMIT_DEVICE,
+        confirm_devices,
+        install_anchor,
+    )
 
     root = config_dir()
     revoke = str(getattr(args, "revoke", "") or "")
     authorise = str(getattr(args, "authorise", "") or "")
+    approve = str(getattr(args, "approve", "") or "")
+    confirm = bool(getattr(args, "confirm", False))
 
     paired = devices.list_devices(root)
     pending = devices.list_pending(root)
@@ -317,6 +323,29 @@ def describe_devices(args: argparse.Namespace) -> int:
     presence = bool(usable_anchor is not None and usable_anchor.presence)
     anchor_listed = set(open_device_ids(usable_anchor)) if usable_anchor else set()
 
+    if approve or confirm:
+        selected = (
+            [approve]
+            if approve
+            else [device.device_id for device in paired if device.device_id in anchor_listed]
+        )
+        if confirm and not selected:
+            selected = [device.device_id for device in paired]
+        code = confirm_devices(
+            root,
+            selected,
+            print_only=bool(getattr(args, "print_only", False)),
+            sudo_secret=str(getattr(args, "sudo_secret", "") or ""),
+        )
+        if code != 0:
+            return code
+        print(
+            "Confirmed on this computer. These phones will also be trusted on any "
+            "computer that joins this one later; computers that joined earlier keep "
+            "their own list."
+        )
+        return 0
+
     if revoke:
         if not _stage_anchor_revocation(root, revoke, revoked=True):
             print(
@@ -340,9 +369,10 @@ def describe_devices(args: argparse.Namespace) -> int:
         from local_operator.operator.trust import ANCHOR_REFRESH_S
 
         print(
-            f"revoked {revoke}. Revocation lives in the anchor; until the install step "
-            "above completes it has not taken effect. Once installed, a session already "
-            f"running picks it up within {int(ANCHOR_REFRESH_S)}s and a new one at once. "
+            f"Removed on this computer. It can no longer approve here. Your other "
+            "computers keep trusting this phone until their list changes — if the phone "
+            "is lost or stolen, revoke it there too, or bring this computer's list to "
+            f"them again. A running session picks this up within {int(ANCHOR_REFRESH_S)}s. "
             "To bring this device back, run "
             f"`{devices.AUTHORISE_COMMAND.format(device_id=revoke)}` (needs the same "
             "install step)."
@@ -382,7 +412,12 @@ def describe_devices(args: argparse.Namespace) -> int:
             else:
                 print(f"nothing recorded a revocation of {authorise} on this machine.")
         elif staged:
-            code = install_anchor(root, print_only=False)
+            code = install_anchor(
+                root,
+                print_only=False,
+                purpose=PURPOSE_ADMIT_DEVICE,
+                sudo_secret=str(getattr(args, "sudo_secret", "") or ""),
+            )
             if code != 0:
                 return code
             from local_operator.operator.trust import ANCHOR_REFRESH_S

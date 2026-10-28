@@ -971,9 +971,19 @@ def load_local_anchor(config_root: Path | None = None) -> OperatorAnchor | None:
 #: place — so what lands is byte-for-byte what was validated, atomically.
 _POSIX_INSTALL_SCRIPT = (
     "set -eu; "
-    'staged="$1"; target="$2"; expected="$3"; group="$4"; '
+    'staged="$1"; target="$2"; expected="$3"; group="$4"; old="${5-}"; '
     'tmp="$(dirname "$target")/.anchor-install.$$"; '
     "trap 'rm -f \"$tmp\"' EXIT; "
+    # Admission writes pin BOTH sides. Onboarding has no installed statement;
+    # admission has one, and replacing a different statement than the human saw
+    # would turn an elevation prompt into approval for an unread write.
+    'if [ -n "$old" ]; then '
+    'if [ ! -f "$target" ]; then '
+    "echo 'the installed anchor is missing; nothing was installed' >&2; exit 3; fi; "
+    'before="$({hash} "$target" | cut -d " " -f 1)"; '
+    'if [ "$before" != "$old" ]; then '
+    "echo 'the installed anchor changed after it was read; nothing was installed' >&2; "
+    "exit 3; fi; fi; "
     'install -m 0600 -o root -g "$group" "$staged" "$tmp"; '
     'actual="$({hash} "$tmp" | cut -d " " -f 1)"; '
     'if [ "$actual" != "$expected" ]; then '
@@ -1105,8 +1115,16 @@ $hr=$null;$hd=$null
 try{
 $hr=LopDir $root
 $hd=LopDir $dir
-$old=LopOpen $target 0x80 3 7 ([IntPtr]::Zero) $false $true
-if($old){[void]$LopNative::CloseHandle($old)}
+$old=LopOpen $target 0x20080 3 7 ([IntPtr]::Zero) $false $true
+if($old){
+try{
+if($expectedOld){
+$stream=[IO.FileStream]::new([Microsoft.Win32.SafeHandles.SafeFileHandle]::new($old,$false),[IO.FileAccess]::Read)
+try{$before=-join([Security.Cryptography.SHA256]::Create().ComputeHash($stream)|ForEach-Object{$_.ToString('x2')})}finally{$stream.Dispose()}
+if($before -ne $expectedOld){throw 'the installed anchor changed after it was read; nothing was installed'}
+}
+}finally{[void]$LopNative::CloseHandle($old)}
+}elseif($expectedOld){throw 'the installed anchor is missing; nothing was installed'}
 $stale=LopOpen $tmp 0x10080 3 7 ([IntPtr]::Zero) $false $true
 if($stale){[void]$LopNative::CloseHandle($stale);[IO.File]::Delete($tmp)}
 $bytes=[IO.File]::ReadAllBytes($staged)
@@ -1122,7 +1140,9 @@ try{LopVerify (LopSd $hv $target) $target}finally{[void]$LopNative::CloseHandle(
 Write-Output "installed the operator anchor at $target\""""  # noqa: E501
 
 
-def _windows_install_script(staging: Path, target: Path, digest_hex: str) -> str:
+def _windows_install_script(
+    staging: Path, target: Path, digest_hex: str, expected_old_hex: str = ""
+) -> str:
     """The script the ELEVATED PowerShell runs (F4 problem 3; R1-2).
 
     The old step was a non-elevated ``Copy-Item`` that set no ACL. The round-1
@@ -1160,6 +1180,7 @@ def _windows_install_script(staging: Path, target: Path, digest_hex: str) -> str
             f"$tmp={_ps_quote(str(tmp))}",
             f"$staged={_ps_quote(str(staging))}",
             f"$expected={_ps_quote(digest_hex)}",
+            f"$expectedOld={_ps_quote(expected_old_hex)}",
         ]
     )
     # ``try``/``catch`` around everything: ``throw`` from a redirected
@@ -1274,7 +1295,9 @@ def install_refusal() -> str | None:
     return None
 
 
-def install_commands(staging: Path, target: Path, digest_hex: str) -> list[list[str]]:
+def install_commands(
+    staging: Path, target: Path, digest_hex: str, expected_old_hex: str = ""
+) -> list[list[str]]:
     """The privileged commands onboarding needs, spelled in ONE place.
 
     A list of argv lists rather than one joined string, so the caller runs them
@@ -1298,7 +1321,7 @@ def install_commands(staging: Path, target: Path, digest_hex: str) -> list[list[
         powershell = windows_powershell_path()
         if powershell is None:
             raise ValueError(install_refusal() or "Windows PowerShell could not be located")
-        script = _windows_install_script(staging, target, digest_hex)
+        script = _windows_install_script(staging, target, digest_hex, expected_old_hex)
         outer = _windows_outer_command(script, powershell)
         return [[powershell, "-NoProfile", "-NonInteractive", "-Command", outer]]
     group = "wheel" if sys.platform == "darwin" else "root"
@@ -1316,6 +1339,7 @@ def install_commands(staging: Path, target: Path, digest_hex: str) -> list[list[
             str(target),
             digest_hex,
             group,
+            *([expected_old_hex] if expected_old_hex else []),
         ],
     ]
 
@@ -1427,14 +1451,10 @@ def admission_sentence(anchor: OperatorAnchor | None) -> str:
         # itself a device. So the sentence says exactly that, and names the guard
         # rather than an "off" state no release ships.
         return (
-            "enforced — a phone must be confirmed on this computer (listed in its "
-            "anchor) before its certificate counts; this anchor predates that rule, so "
-            "the migration guard still admits any device this key signed"
+            "waiting for you to confirm your phones — phones paired before this version "
+            "keep working until you do"
         )
-    return (
-        "enforced — a phone must be confirmed on this computer (listed in its "
-        "anchor) before its certificate counts"
-    )
+    return "on — a phone must be confirmed on this computer"
 
 
 def device_is_admitted(anchor: OperatorAnchor, device_id: str, spki: bytes) -> bool:

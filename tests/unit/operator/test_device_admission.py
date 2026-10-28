@@ -299,6 +299,11 @@ def test_every_site_agrees_on_every_case(
         assert body["code"] == (
             OPERATOR_DEVICE_REVOKED_CODE if revoked else OPERATOR_DEVICE_UNCONFIRMED_CODE
         )
+        if revoked:
+            assert (
+                "Removing it on one computer does not remove it on your other computers."
+                in body["error"]
+            )
 
 
 def test_the_unconfirmed_copy_does_not_send_the_phone_to_pair_again(rig: _Rig) -> None:
@@ -461,8 +466,8 @@ def test_status_names_the_migration_guard_on_a_pre_rule_anchor(rig: _Rig, capsys
     _install(rig.anchor_root, rig.anchor("pre_rule"))
     assert operator_handlers.dispatch(argparse.Namespace(operator_command="status")) == 0
     printed = capsys.readouterr().out
-    assert "phone admission        : enforced" in printed
-    assert "migration guard" in printed
+    assert "phone admission        : waiting for you to confirm your phones" in printed
+    assert "phones paired before this version keep working until you do" in printed
     assert "NOT ENFORCED" not in printed
 
 
@@ -493,7 +498,7 @@ def test_status_and_the_listing_name_an_unlisted_phone_as_not_confirmed(
 
     assert operator_handlers.dispatch(argparse.Namespace(operator_command="status")) == 0
     printed = capsys.readouterr().out
-    assert "phone admission        : enforced" in printed
+    assert "phone admission        : on" in printed
     assert "not confirmed on this computer" in printed
     assert declared in printed
 
@@ -508,7 +513,7 @@ def test_status_and_the_listing_name_an_unlisted_phone_as_not_confirmed(
         == 0
     )
     listed = capsys.readouterr().out
-    assert "phone admission        : enforced" in listed
+    assert "phone admission        : on" in listed
     assert "unconfirmed" in listed
 
 
@@ -533,8 +538,8 @@ def test_the_devices_listing_names_the_migration_guard_on_a_pre_rule_anchor(
         == 0
     )
     printed = capsys.readouterr().out
-    assert "phone admission        : enforced" in printed
-    assert "migration guard" in printed
+    assert "phone admission        : waiting for you to confirm your phones" in printed
+    assert "phones paired before this version keep working until you do" in printed
     assert "NOT ENFORCED" not in printed
     assert "unconfirmed" not in printed
 

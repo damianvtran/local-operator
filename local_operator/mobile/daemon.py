@@ -2943,7 +2943,8 @@ OPERATOR_DEVICE_UNCONFIRMED_CODE = "operator_device_unconfirmed"
 _OPERATOR_DEVICE_REVOKED = (
     "This phone's approval access was removed on the computer, and only that "
     "machine can restore it — pairing again will be refused until then. Ask Local "
-    "Operator on that machine to allow this phone again, then pair this phone again."
+    "Operator on that machine to allow this phone again, then pair this phone again. "
+    "Removing it on one computer does not remove it on your other computers."
 )
 
 #: The unconfirmed phone's sentence, and the one thing it must NOT say is "pair
