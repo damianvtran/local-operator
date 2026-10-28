@@ -940,6 +940,7 @@ async def test_stop_runs_the_graceful_ladder_only(
         # v1 is the graceful ladder only: no SIGKILL from the tool, and the
         # marker records which front end asked.
         assert captured["force"] is False
+        assert captured["graceful_only"] is True
         assert captured["timeout_s"] == control.DEFAULT_TIMEOUT_S
         assert captured["_command"] == "sessions tool"
         assert (result.details or {})["method"] == "socket"
@@ -2851,7 +2852,6 @@ async def test_remote_ops_map_to_the_pilot_argv_and_bounds(
     assert calls == [
         (["network", "sessions", "--json", "--peer", PEER, "--send", "s1", "--", "go"], 600.0),
         (["network", "sessions", "--json", "--peer", PEER, "--engage", "s1"], 180.0),
-        (["network", "sessions", "--json", "--peer", PEER, "--stop", "s1"], 300.0),
         (
             [
                 "network",
@@ -2879,25 +2879,24 @@ async def test_remote_ops_map_to_the_pilot_argv_and_bounds(
         _context(root),
     )
     assert result.is_error and "<provider>/<model-id>" in result.text
-    assert len(calls) == 4
+    assert len(calls) == 3
 
 
 @pytest.mark.asyncio
-async def test_remote_stop_names_the_cli_force_escalation_on_skipped(
+async def test_remote_stop_refuses_without_sending_weaker_stop(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """§8.4: no force in the tool — the one outcome whose remedy is a flag
-    names the CLI escalation instead."""
-    _fake_mesh(
-        monkeypatch,
-        {"ok": False, "outcome": "skipped", "detail": "A turn is in flight there."},
-        rc=1,
-    )
+    """The mesh transport cannot promise the new idle-only capability yet."""
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("remote stop must refuse before transport")
+
+    monkeypatch.setattr("local_operator.tools.builtin._mesh_cli_json", forbidden)
     result = await execute_sessions(
         "t", {"op": "stop", "peer": PEER, "session": "s1"}, None, None, _context(root)
     )
-    assert result.is_error  # the ladder did not end it
-    assert "lop network sessions --peer cloud-node-1 --stop s1 --force" in result.text
+    assert result.is_error
+    assert "no stop was sent" in result.text
 
 
 def test_mesh_field_refusals_name_the_local_route() -> None:

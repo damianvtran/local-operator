@@ -18512,15 +18512,21 @@ async def _sessions_stop_mesh(
 async def _sessions_stop(
     tool_call_id: str, params: SessionsParams, context: "ToolContext | None" = None
 ) -> ToolResult:
-    """End one running session via the existing kill-switch ladder.
+    """End an idle owner without inheriting the CLI's signal escalation.
 
-    ``force=False``: v1 is the graceful ladder only — no SIGKILL from the
-    tool (design §6.1). The outcome line is the ladder's own receipt, painted
-    verbatim, because the TUI, the CLI and this tool must report the same
-    event in the same words.
+    ``force=False`` alone still permits SIGKILL in the legacy ladder. The
+    explicit graceful-only mode also requires an owner-side idle latch, so
+    pending work is refused rather than discarded by a cooperative socket stop.
     """
     if str(params.peer or "").strip():
-        return await _sessions_stop_mesh(tool_call_id, params, context)
+        # The remote transport does not yet carry the idle-only capability.
+        # Refuse rather than forwarding a weaker stop under this tool's promise.
+        return _error(
+            tool_call_id,
+            "sessions",
+            "remote stop cannot guarantee an idle-only, no-signal exit on this build; "
+            "no stop was sent. Use the operator's remote controls after reviewing its work.",
+        )
     from local_operator.session.runtime import control
 
     target = await _sessions_target(params, context)
@@ -18555,6 +18561,7 @@ async def _sessions_stop(
         target.record,
         timeout_s=control.DEFAULT_TIMEOUT_S,
         force=False,
+        graceful_only=True,
         _command="sessions tool",
         on_wait=waited.append,
     )
@@ -18567,7 +18574,8 @@ async def _sessions_stop(
         "wakes_dormant": outcome.wakes_dormant,
         "monitors_dormant": outcome.monitors_dormant,
     }
-    return _text(tool_call_id, "sessions", "\n".join([*waited, outcome.line]), details=details)
+    render = _error if outcome.method in ("refused", "busy", "draining") else _text
+    return render(tool_call_id, "sessions", "\n".join([*waited, outcome.line]), details=details)
 
 
 # ---------------------------------------------------------------------------

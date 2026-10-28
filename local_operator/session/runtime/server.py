@@ -7128,6 +7128,7 @@ class RuntimeServer:
                 "watch_job",
                 "unwatch_job",
                 "stop",
+                "stop_if_idle",
                 "retire_if_pristine",
                 "refresh_if_idle",
                 # Same exemption, same reason: it either retired (nothing to
@@ -8734,7 +8735,7 @@ class RuntimeServer:
                 str(frame["model_id"]),
                 sender=frame.get("sender") or {},
             )
-        if op == "stop":
+        if op in ("stop", "stop_if_idle"):
             # PR 3 (the kill switch): the graceful rung of the stop ladder
             # (session/runtime/control.py). The plan is deny parked gates →
             # abort/dispose the session → release the lease → unpublish the
@@ -8754,6 +8755,20 @@ class RuntimeServer:
             request_stop = getattr(h, "request_stop", None)
             if not callable(request_stop):
                 raise ValueError("this owner cannot stop itself gracefully")
+            if op == "stop_if_idle":
+                # The tool's narrower authority must be checked AND latched on
+                # the owner's loop. A sampled busy flag before an await races a
+                # new turn/child delivery and would abort work despite consent
+                # covering only a graceful idle stop. Old owners refuse this
+                # distinct verb rather than silently ignoring a new flag.
+                begin_retire = getattr(h, "begin_retire", None)
+                if not callable(begin_retire):
+                    raise ValueError("this owner cannot guarantee an idle-only stop")
+                accepted = await self._handle_call_on_session_loop(
+                    lambda: begin_retire("user-stop", "idle-only stop")
+                )
+                if not accepted:
+                    raise ValueError("this owner is busy; no stop was requested")
             # Tell every attached viewer the disconnect they are about to see
             # is DELIBERATE, before the session goes away. Without this a
             # follower cannot distinguish a stop from owner death and its

@@ -1250,7 +1250,13 @@ def _withdraw_staged_stop_marker(record: SessionRecord, root: Path) -> None:
 
 
 async def _graceful_stop(
-    record: SessionRecord, timeout_s: float, root: Path, *, command: str, sweep_id: str = ""
+    record: SessionRecord,
+    timeout_s: float,
+    root: Path,
+    *,
+    command: str,
+    sweep_id: str = "",
+    graceful_only: bool = False,
 ) -> bool:
     """Rung 1: ask the runtime to stop itself, wait out the clean exit.
 
@@ -1277,7 +1283,10 @@ async def _graceful_stop(
     start-time proof), which leaves the target alive. `stop_session` withdraws
     our own marker on that path — see :func:`_withdraw_staged_stop_marker`.
     """
-    reply = await _exchange(record, {"op": "stop"}, reply_timeout_s=timeout_s)
+    # A distinct verb is essential: an old owner must refuse, not ignore an
+    # unknown flag and run its ordinary stop (which aborts active work).
+    op = "stop_if_idle" if graceful_only else "stop"
+    reply = await _exchange(record, {"op": op}, reply_timeout_s=timeout_s)
     if reply is None or reply.get("op") != "ack":
         return False
     _write_stop_marker(record, root, "socket", command=command, sweep_id=sweep_id)
@@ -1354,6 +1363,7 @@ async def stop_session(
     force: bool = False,
     _root: Path | None = None,
     _command: str = "control.stop_session",
+    graceful_only: bool = False,
     on_wait: Callable[[str], None] | None = None,
     _sweep_id: str = "",
 ) -> StopOutcome:
@@ -1415,6 +1425,18 @@ async def stop_session(
     """
     root = _root if _root is not None else config_dir()
     name = record.conversation_name or record.session_id
+
+    # Agent tools promise a non-destructive stop, whereas the CLI owns an
+    # explicit escalation ladder. Keep that authority in the caller's policy,
+    # never infer it from force=False (which still reaches SIGKILL below).
+    if graceful_only and force:
+        return StopOutcome(
+            pid=record.pid,
+            session_id=record.session_id,
+            name=name,
+            method="refused",
+            line="graceful-only stop cannot be combined with force",
+        )
 
     # FIRST, AND AHEAD OF RUNG 1 DELIBERATELY: a runtime that has ALREADY been
     # signalled and is finishing the turn in flight is the one target whose own
@@ -1543,7 +1565,10 @@ async def stop_session(
     # Rung 1 — the graceful op. Both its failure shapes are scheduled misses:
     # an unreachable socket means already-gone-or-crashed, an error reply
     # means an older runtime. Either way the ladder continues.
-    if await _graceful_stop(record, timeout_s, root, command=_command, sweep_id=_sweep_id):
+    graceful_args: dict[str, Any] = {"command": _command, "sweep_id": _sweep_id}
+    if graceful_only:
+        graceful_args["graceful_only"] = True
+    if await _graceful_stop(record, timeout_s, root, **graceful_args):
         wakes = await _park_wakes(record, root)
         monitors = await _park_monitors(record, root)
         still_runs = _engine_owner(root, record.session_id)
@@ -1583,6 +1608,21 @@ async def stop_session(
             line=f'"{name}" already exited',
             wakes_dormant=wakes,
             monitors_dormant=monitors,
+        )
+
+    if graceful_only:
+        # No identity probe or signal is a permitted fallback. Even an ack can
+        # outlive its exit deadline; report that uncertainty without converting
+        # a bounded wait into authority to kill or discard pending work.
+        _withdraw_staged_stop_marker(record, root)
+        return StopOutcome(
+            pid=record.pid,
+            session_id=record.session_id,
+            name=name,
+            method="refused",
+            line=f'refused "{name}" — an idle-only stop was not confirmed; the owner '
+            "may be busy, unavailable, too old, or still exiting. No signal was sent; "
+            "reconcile its state before retrying.",
         )
 
     # A SIGNAL MUST NOT CUT WORK IN FLIGHT — and this ladder is one of the
