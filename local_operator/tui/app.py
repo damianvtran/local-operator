@@ -10020,9 +10020,7 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 -- nor does failing to schedule it
             logger.debug("viewer watch signal could not be scheduled", exc_info=True)
 
-    def _reconcile_retained_history(
-        self, incoming: SessionPresentation, history: list[Any]
-    ) -> bool:
+    def _reconcile_retained_history(self, history: list[Any]) -> bool:
         """Bring a retained view up to ``history`` by identity; False if it cannot.
 
         Called from the commit when the session reports more messages than the
@@ -10042,25 +10040,41 @@ class OperatorApp(App[None]):
 
         "Knows" is mounted OR pending: the pending head and tail are part of the
         view's window even though they are not painted yet, and treating them
-        as unknown would queue those rows twice. A view windowed around a saved
-        anchor (``_resume_pending_tail`` non-empty) is not AT the tail, so its
-        appended rows join the end of that pending tail for the forward pages
-        rather than being painted below the anchor's window.
+        as unknown would queue those rows twice. MOUNTED is read off the blocks
+        themselves (``navigation_anchor_id`` is the source message's id on every
+        message row, projected or live), not only off ``_resume_mounted_ids``:
+        that set is filled by projection alone, so a turn the reader WATCHED —
+        its prompt and streamed reply painted by the live path — was missing
+        from it, and a parked append then re-painted the watched turn below
+        itself (review round 1, B1). Reading the blocks covers every live-paint
+        path at once (prompt echo, steer, stream finalize, peer and wake rows)
+        instead of one bookkeeping call per path that a new path could omit.
 
-        Returns False — the caller then re-projects one screenful from scratch
-        — when the view cannot be reconciled in place: no known row is in the
-        window at all (a different history), more rows were appended than a
-        screenful (the retained tail is no longer anywhere near the tail, and
-        painting them all is the unbounded synchronous projection this exists
-        to prevent), or older rows surfaced on a view that never deferred any
-        and so carries no head notice to page them from.
+        A view windowed around a saved anchor (``_resume_pending_tail``
+        non-empty) is not AT the tail, so its appended rows join the end of that
+        pending tail for the forward pages rather than being painted below the
+        anchor's window.
+
+        Returns False — the caller then re-projects from scratch, bounded by
+        ``_viewport_message_budget`` — when the view cannot be reconciled in
+        place: no known row is in the window at all (a different history), more
+        rows were appended than that budget (the retained tail is no longer
+        anywhere near the tail, and painting them all is the unbounded
+        synchronous projection this exists to prevent), or older rows surfaced
+        on a view that never deferred any and so carries no head notice to page
+        them from.
         """
         pending_ids = {
             str(getattr(message, "id", ""))
             for message in (*self._resume_pending_head, *self._resume_pending_tail)
             if getattr(message, "id", None)
         }
-        known = self._resume_mounted_ids | pending_ids
+        anchored = {
+            block.navigation_anchor_id
+            for block in self._transcript_view().blocks()
+            if block.navigation_anchor_id
+        }
+        known = self._resume_mounted_ids | pending_ids | anchored
         positions = [
             index
             for index, message in enumerate(history)
@@ -10092,13 +10106,17 @@ class OperatorApp(App[None]):
         return True
 
     def _reproject_retained_view(self, incoming: SessionPresentation, history: list[Any]) -> None:
-        """Discard a retained view and project one screenful of ``history`` afresh.
+        """Discard a retained view and project the tail of ``history`` afresh, bounded.
+
+        The bound is ``_viewport_message_budget`` MESSAGES, and the projection
+        snaps its start back to a turn boundary (``_resume_tail_start``), so the
+        synchronous cost is at most about two budgets — never the whole history.
 
         The bounded fallback for a retained view that no longer matches its
         session (a compaction/recovery rewrote rows, or
         `_reconcile_retained_history` could not reconcile it in place). The
         ordinary /clear hook is bypassed because it would settle this source's
-        gates; everything older than the screenful is left in the pending head
+        gates; everything older than the bounded tail is left in the pending head
         for the scroll-up pages.
         """
         incoming.replay.view.set_on_clear(None)
@@ -10378,7 +10396,7 @@ class OperatorApp(App[None]):
                 # synchronously, 20,148 blocks, 25-30 s before the first frame,
                 # and painted below the tail. The retained view's own ids are
                 # the only honest reference, so the reconciliation is by them.
-                if not self._reconcile_retained_history(incoming, history):
+                if not self._reconcile_retained_history(history):
                     self._reproject_retained_view(incoming, history)
             elif total < incoming.history_size:
                 # A compaction/recovery changed the snapshot while its widgets

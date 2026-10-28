@@ -24,16 +24,26 @@ saved-preview facade:
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from local_operator.harness.types import Message, TextContent
 from local_operator.session.attached import AttachedSession
 from local_operator.session.history_window import DISPLAY_HISTORY_MESSAGES
-from local_operator.tui.app import OperatorApp, _viewport_message_budget
+from local_operator.tui.app import (
+    RESUME_PAGE_MESSAGES,
+    OperatorApp,
+    _viewport_message_budget,
+)
 from local_operator.tui.session_interaction import SessionInteraction
-from tests.e2e.harness import seed_transcript
+from local_operator.tui.widgets.transcript import UserBlock
+from tests.e2e.harness import (
+    ScriptedStream,
+    seed_transcript,
+    text_turn,
+    wait_for_adoption,
+)
 from tests.unit.session.test_remote import _never_take_over
 from tests.unit.tui.test_first_paint_reveal import FRAME, LONG_PROSE, _viewer
 
@@ -227,6 +237,7 @@ def _host(*, mounted, head=(), tail=(), notice=True, height=48):
         _resume_head_notice=object() if notice else None,
         size=SimpleNamespace(height=height),
         _project_settled_rows=lambda rows, **_: projected.append(list(rows)),
+        _transcript_view=lambda: SimpleNamespace(blocks=lambda: []),
     )
     return host, projected
 
@@ -235,7 +246,7 @@ def test_rows_appended_to_an_anchored_window_join_its_pending_tail() -> None:
     """A view windowed around a saved anchor is not at the tail: nothing is painted below it."""
     rows = [_message(index) for index in range(40)]
     host, projected = _host(mounted=rows[10:20], head=rows[:10], tail=rows[20:30])
-    assert OperatorApp._reconcile_retained_history(host, None, rows)  # type: ignore[arg-type]
+    assert OperatorApp._reconcile_retained_history(host, rows)  # type: ignore[arg-type]
     assert projected == []
     assert [m.id for m in host._resume_pending_tail] == [m.id for m in rows[20:]]
     assert [m.id for m in host._resume_pending_head] == [m.id for m in rows[:10]]
@@ -244,7 +255,7 @@ def test_rows_appended_to_an_anchored_window_join_its_pending_tail() -> None:
 def test_more_than_a_screenful_appended_falls_back_to_a_bounded_reprojection() -> None:
     rows = [_message(index) for index in range(200)]
     host, projected = _host(mounted=rows[:20])
-    assert not OperatorApp._reconcile_retained_history(host, None, rows)  # type: ignore[arg-type]
+    assert not OperatorApp._reconcile_retained_history(host, rows)  # type: ignore[arg-type]
     assert projected == []
 
 
@@ -252,4 +263,138 @@ def test_older_rows_without_a_head_notice_fall_back_to_a_bounded_reprojection() 
     """A view that never deferred anything has no row to page older history from."""
     rows = [_message(index) for index in range(60)]
     host, _ = _host(mounted=rows[50:], notice=False)
-    assert not OperatorApp._reconcile_retained_history(host, None, rows)  # type: ignore[arg-type]
+    assert not OperatorApp._reconcile_retained_history(host, rows)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_a_watched_turn_is_not_painted_twice_after_a_parked_append(
+    tmp_path, monkeypatch
+) -> None:
+    """Review round 1, B1: rows painted LIVE are rows the view already knows.
+
+    A turn watched on screen paints its prompt and reply through the live path,
+    which never touched ``_resume_mounted_ids``. The id reconciliation then took
+    the last PROJECTED row as the newest known one, classed the live rows as
+    "appended", and painted the watched turn a second time when a turn that
+    finished while parked brought the count gap. Real owners behind a real
+    socket, the production sidebar select, as the reviewer reproduced it.
+    """
+    from tests.unit.tui.test_sidebar_peer_receipt import _switch, live_owners
+
+    for key in tuple(__import__("os").environ):
+        if key.startswith("CMUX_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1")
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_TERMINAL_TITLE", "1")
+    for name in (
+        "_check_for_update",
+        "_start_terminal_title",
+        "_start_multiplexer_broadcast",
+        "_start_herdr_reporter",
+    ):
+        monkeypatch.setattr(OperatorApp, name, lambda _self: None)
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    async with live_owners(config, ["home00", "busy01"], monkeypatch) as resume:
+        handle = resume.servers["busy01"]._handle  # type: ignore[attr-defined]
+        # The fixture's owners carry a one-turn tape; this cell runs two
+        # turns, plus spares for the session's own extra calls (naming).
+        handle._session._stream_fn = ScriptedStream(
+            [text_turn("answer one"), text_turn("answer two")]
+            + [text_turn("spare") for _ in range(6)]
+        )
+        app = OperatorApp(lambda: resume("home00"), resume_factory=resume)
+        async with app.run_test(size=(120, 36)) as pilot:
+            await wait_for_adoption(app, pilot)
+            app._set_sidebar_open(True)
+            if app._sidebar_timer is not None:
+                app._sidebar_timer.pause()
+
+            async def turn(text: str) -> None:
+                viewer = cast(Any, app._sidebar_sources["busy01"].session)
+                count = viewer.history_message_count
+                await handle.prompt(text)
+                for _ in range(800):
+                    await pilot.pause()
+                    if (
+                        viewer.history_message_count >= count + 2
+                        and not viewer.frontend_state.streaming
+                    ):
+                        break
+                else:
+                    raise AssertionError(f"the turn {text!r} never settled on the viewer")
+                for _ in range(10):
+                    await pilot.pause()
+
+            await _switch(app, "busy01", pilot)
+            await turn("live question one")  # watched: painted by the live path
+            await _switch(app, "home00", pilot)
+            await turn("parked question two")  # lands while the view is parked
+            await _switch(app, "busy01", pilot)
+
+            users = [
+                block.navigation_anchor_id
+                for block in app._transcript_view().blocks()
+                if isinstance(block, UserBlock)
+            ]
+            assert len(users) == len(set(users)) == 3, users
+
+
+@pytest.mark.asyncio
+async def test_a_retained_view_too_far_behind_falls_back_to_a_bounded_tail(tmp_path) -> None:
+    """Review round 1, M1: the fallback re-projection is itself bounded.
+
+    More than a budget of rows appended past the retained tail cannot be
+    reconciled in place, so the commit re-projects from scratch — and that
+    pass must carry the screenful bound, or the fallback is the same unbounded
+    synchronous projection the reconciliation exists to remove.
+    """
+    async with _viewer(tmp_path, "warm-home-3") as home:
+
+        async def factory():
+            return home
+
+        app = OperatorApp(factory)
+        async with app.run_test(size=FRAME) as pilot:
+            for _ in range(100):
+                await pilot.pause()
+                if app._session is home:
+                    break
+            budget = _viewport_message_budget(app.size.height)
+            remote, messages = await _preview(tmp_path, "warm-behind")
+            _lease(app, remote)
+            prepared = await app._prepare_sidebar_session(remote.session_id)
+            later = [_message(ROWS + index) for index in range(budget * 3)]
+            remote._bind_history(list(messages) + later, None, drop_history_duplicates=True)
+
+            calls: list[tuple[int, int | None]] = []
+            real = OperatorApp._project_settled_rows
+
+            def spy(self, history, **kwargs):  # noqa: ANN001
+                calls.append((len(history), kwargs.get("bound")))
+                return real(self, history, **kwargs)
+
+            OperatorApp._project_settled_rows = spy  # type: ignore[method-assign]
+            try:
+                app._commit_sidebar_session(
+                    remote.session_id, prepared, app._sidebar_navigation.generation
+                )
+            finally:
+                OperatorApp._project_settled_rows = real  # type: ignore[method-assign]
+            assert calls, "the commit projected nothing"
+            # The fallback's own pass carries the bound; anything else the
+            # commit runs is an ordinary older-history page (the reveal's
+            # prefill), which is RESUME_PAGE_MESSAGES by construction.
+            assert calls[0][1] == budget, (calls, budget)
+            assert all(
+                bound == budget or n <= max(budget, RESUME_PAGE_MESSAGES) for n, bound in calls
+            ), (calls, budget)
+            # At commit: at most two budgets from the projection (its start
+            # snaps back to a turn edge) plus the ONE older page the commit's
+            # own under-fill pass mounts synchronously — measured 22 + 24.
+            committed = set(_anchor_ids(app))
+            assert len(committed) <= 2 * budget + RESUME_PAGE_MESSAGES, len(committed)
+            await _settle(pilot)
+            assert _anchor_ids(app)[-1] == later[-1].id
+            await remote.dispose()
