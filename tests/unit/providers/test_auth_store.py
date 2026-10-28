@@ -4,7 +4,10 @@ rotation, blocking. No network: fakes for the refresh capability."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -4295,3 +4298,147 @@ async def test_guard_exit_failure_closes_actual_connection_before_constructor_ra
         # The retained raw connection was checked closed BEFORE this finally;
         # same-lock reacquisition and empty guard bookkeeping check ownership.
         assert after_threads == before_threads
+
+
+@contextlib.contextmanager
+def live_wal_writer(db_path: Path, *statements: str) -> Iterator[None]:
+    """Hold ``db_path`` open in ANOTHER process with committed, uncheckpointed WAL frames.
+
+    A writer in this process would share SQLite's per-process wal-index mapping
+    with the reader under test, which changes what ``readonly_shm`` does; a
+    running desktop's writer is a separate process, so the fixture is too.
+    ``wal_autocheckpoint=0`` keeps the committed frames in ``-wal`` for as long
+    as the child lives. On exit the child closes, which checkpoints and removes
+    the sidecars, as a real writer's shutdown does.
+    """
+    script = (
+        "import sqlite3, sys\n"
+        "conn = sqlite3.connect(sys.argv[1])\n"
+        "conn.execute('PRAGMA journal_mode=WAL')\n"
+        "conn.execute('PRAGMA wal_autocheckpoint=0')\n"
+        "for statement in sys.argv[2:]:\n"
+        "    conn.execute(statement)\n"
+        "conn.commit()\n"
+        "print('ready', flush=True)\n"
+        "sys.stdin.readline()\n"
+        "conn.close()\n"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", script, str(db_path), *statements],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None and child.stdout.readline().strip() == "ready"
+        wal = db_path.with_name(db_path.name + "-wal")
+        assert wal.stat().st_size > 0, "the fixture needs committed frames in -wal"
+        assert db_path.with_name(db_path.name + "-shm").exists()
+        yield
+    finally:
+        if child.stdin is not None:
+            child.stdin.close()
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
+
+
+def _file_state(directory: Path) -> dict[str, tuple[int, str]]:
+    import hashlib
+
+    return {
+        item.name: (item.stat().st_ino, hashlib.sha256(item.read_bytes()).hexdigest())
+        for item in sorted(directory.iterdir())
+    }
+
+
+async def test_read_only_store_without_sidecars_creates_no_file(tmp_path: Path) -> None:
+    """#2894: a read never creates a file. No -wal/-shm on disk keeps the immutable open."""
+    path = tmp_path / "auth.db"
+    seeder = AuthStore(db_path=path, config_dir=tmp_path, config_overrides={})
+    seeder.upsert_credential("openai", _oauth())
+    seeder.close()
+    listing = sorted(item.name for item in tmp_path.iterdir())
+    assert not {"auth.db-wal", "auth.db-shm"} & set(listing), "fixture: no sidecars on disk"
+    before = _file_state(tmp_path)
+
+    auth = AuthStore.open_read_only(path)
+    try:
+        assert [row.provider for row in auth.list_credentials("openai")] == ["openai"]
+        assert auth.read_only_unavailable() is False
+        assert auth.read_only_sidecar_present() is False
+    finally:
+        auth.close()
+
+    assert sorted(item.name for item in tmp_path.iterdir()) == listing
+    assert _file_state(tmp_path) == before
+
+
+async def test_read_only_store_reads_a_live_writers_wal_without_touching_it(
+    tmp_path: Path,
+) -> None:
+    """A live writer's WAL is read, not declared unknown, and no byte on disk changes.
+
+    The committed DELETE exists only in ``-wal``. An immutable read (the old
+    behaviour) still sees the row and had to call the store stale; the WAL-aware
+    open sees the current, empty answer and is therefore not stale.
+    """
+    import sqlite3
+
+    path = tmp_path / "auth.db"
+    seeder = AuthStore(db_path=path, config_dir=tmp_path, config_overrides={})
+    seeder.upsert_credential("openai", _oauth())
+    seeder.upsert_credential("anthropic", _oauth(refresh="r2"))
+    seeder.close()
+    with live_wal_writer(path, "DELETE FROM auth_credentials WHERE provider = 'openai'"):
+        before = _file_state(tmp_path)
+        assert {"auth.db", "auth.db-shm", "auth.db-wal"} <= set(before)
+        # Control: the immutable snapshot cannot see the committed DELETE.
+        with contextlib.closing(
+            sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
+        ) as control:
+            assert control.execute(
+                "SELECT count(*) FROM auth_credentials WHERE provider = 'openai'"
+            ).fetchone() == (1,)
+
+        auth = AuthStore.open_read_only(path)
+        try:
+            assert auth.list_credentials("openai") == []
+            assert [row.provider for row in auth.list_credentials("anthropic")] == ["anthropic"]
+            assert auth.read_only_unavailable() is False
+            assert auth.read_only_sidecar_present() is False
+        finally:
+            auth.close()
+
+        assert _file_state(tmp_path) == before
+
+
+async def test_read_only_store_flags_an_orphaned_wal_as_possibly_stale(tmp_path: Path) -> None:
+    """A -wal with no -shm (a crashed writer) cannot be read live; it stays flagged.
+
+    Opening it WAL-aware would need a -shm, which the no-create promise forbids,
+    so the immutable open is kept and the non-empty -wal is reported.
+    """
+    import shutil
+
+    path = tmp_path / "auth.db"
+    seeder = AuthStore(db_path=path, config_dir=tmp_path, config_overrides={})
+    seeder.upsert_credential("openai", _oauth())
+    seeder.close()
+    frozen = tmp_path / "frozen"
+    frozen.mkdir()
+    with live_wal_writer(path, "DELETE FROM auth_credentials"):
+        shutil.copy2(path, frozen / "auth.db")
+        shutil.copy2(path.with_name("auth.db-wal"), frozen / "auth.db-wal")
+    before = _file_state(frozen)
+
+    auth = AuthStore.open_read_only(frozen / "auth.db")
+    try:
+        assert auth.read_only_sidecar_present() is True
+        assert auth.read_only_unavailable() is False
+    finally:
+        auth.close()
+
+    assert _file_state(frozen) == before

@@ -247,10 +247,13 @@ def _open_store(root: Path, *, read_only: bool = False) -> Any | None:
 
 
 def _read_only_store_unavailable(store: Any) -> bool:
-    """Whether an immutable store cannot prove its CURRENT credential contents.
+    """Whether a read-only store cannot prove its CURRENT credential contents.
 
-    Corrupt/foreign schemas and a non-empty, uncheckpointed WAL must both read as
-    UNKNOWN. Returning rows (or ``[]``) in either case would fabricate readiness.
+    Corrupt/foreign schemas and a WAL the store could not read (an immutable
+    snapshot beside a non-empty ``-wal``) must both read as UNKNOWN. Returning
+    rows (or ``[]``) in either case would fabricate readiness. A live writer's
+    WAL is NOT this case: the store reads it (``AuthStore._connect_read_only``),
+    so a busy owner answers definitely instead of "could not be read".
     """
     if store is None:
         return False

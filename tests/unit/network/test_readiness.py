@@ -535,34 +535,97 @@ def test_ready_reads_a_populated_closed_store_without_side_effects(tmp_path: Pat
     assert tmp_path.stat().st_mtime_ns == root_mtime
 
 
-def test_ready_reports_an_open_wal_as_unavailable_not_empty_or_stale(tmp_path: Path) -> None:
-    """Immutable reads cannot see a live WAL; say UNKNOWN, never invent empty."""
+def _wal_bytes_snapshot(root: Path) -> dict[str, Any]:
+    """Every file NAME, plus the database and ``-wal`` bytes, beside a live writer.
+
+    ``-shm`` content is left out on purpose: when the writer shares this
+    process (the relay can hold its own store open), SQLite shares one
+    wal-index mapping per process, and a reader's read-mark in it is ordinary
+    reader coordination, not a credential write. The cross-process case pins
+    ``-shm`` byte-for-byte in tests/unit/providers/test_auth_store.py.
+    """
+    snapshot = _root_file_snapshot(root)
+    return {
+        "names": sorted(snapshot),
+        "bytes": {name: value for name, value in snapshot.items() if not name.endswith("-shm")},
+    }
+
+
+def _orphan_the_wal(root: Path, writer: Any) -> None:
+    """Leave ``auth.db`` beside a non-empty ``-wal`` and NO ``-shm``: a crashed writer.
+
+    The bytes are captured while ``writer`` is open (the committed rows live in
+    the WAL), then put back after it closes, which had checkpointed and removed
+    both sidecars. A read-only reader cannot open that WAL without creating a
+    ``-shm``, so it must keep the immutable snapshot and say it may be stale.
+    """
+    database = root / "auth.db"
+    wal = root / "auth.db-wal"
+    frozen = {database: database.read_bytes(), wal: wal.read_bytes()}
+    assert frozen[wal], "the fixture needs committed frames in -wal"
+    writer.close()
+    for path, data in frozen.items():
+        path.write_bytes(data)
+    assert not (root / "auth.db-shm").exists()
+
+
+def test_ready_reads_an_open_wal_as_current_without_creating_files(tmp_path: Path) -> None:
+    """A live writer's WAL is the normal state of a running owner: read it, do not say UNKNOWN.
+
+    The reader must still create nothing (#2894): both sidecars already exist,
+    and the database and ``-wal`` bytes are unchanged by the read.
+    """
     url = "https://mcp.notion.com/mcp"
     (tmp_path / "mcp.json").write_text(
         json.dumps({"mcpServers": {"notion": {"type": "http", "url": url}}}),
         encoding="utf-8",
     )
     auth = _seed_mcp_row(tmp_path, url)
+    auth.upsert_credential("openai", {"type": "oauth", "access": "ready-fixture-provider"})
     try:
-        assert auth.read_only_sidecar_present(), "the fixture needs an uncheckpointed WAL"
-        before = _root_file_snapshot(tmp_path)
-        root_mtime = tmp_path.stat().st_mtime_ns
+        assert (tmp_path / "auth.db-wal").stat().st_size > 0, "the fixture needs a live WAL"
+        before = _wal_bytes_snapshot(tmp_path)
 
-        fact = viewer = readiness.ViewerFacts(tmp_path)
+        viewer = readiness.ViewerFacts(tmp_path)
         try:
-            assert viewer.holds_mcp_login(url) is None
+            assert viewer.holds_mcp_login(url) is True
         finally:
             viewer.close()
         fact = readiness.collect_peer_facts(tmp_path)["mcp"]
 
         server = fact["servers"][0]
-        assert server["has_row"] is None
-        assert server["auth_diagnostics"]["access_state"] == "unknown"
-        assert server["auth_diagnostics"]["sharing_mode"] == "unavailable"
-        assert _root_file_snapshot(tmp_path) == before
-        assert tmp_path.stat().st_mtime_ns == root_mtime
+        assert server["has_row"] is True
+        assert server["auth_diagnostics"]["sharing_mode"] == "finite_only"
+        assert readiness.has_local_provider_credential(tmp_path, "openai", read_only=True) is True
+        assert _wal_bytes_snapshot(tmp_path) == before
     finally:
         auth.close()
+
+
+def test_ready_reports_an_orphaned_wal_as_unavailable_not_empty_or_stale(tmp_path: Path) -> None:
+    """Immutable reads cannot see a WAL they cannot open; say UNKNOWN, never invent empty."""
+    url = "https://mcp.notion.com/mcp"
+    (tmp_path / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"notion": {"type": "http", "url": url}}}),
+        encoding="utf-8",
+    )
+    _orphan_the_wal(tmp_path, _seed_mcp_row(tmp_path, url))
+    before = _root_file_snapshot(tmp_path)
+    root_mtime = tmp_path.stat().st_mtime_ns
+
+    viewer = readiness.ViewerFacts(tmp_path)
+    try:
+        assert viewer.holds_mcp_login(url) is None
+    finally:
+        viewer.close()
+    fact = readiness.collect_peer_facts(tmp_path)["mcp"]
+
+    server = fact["servers"][0]
+    assert server["has_row"] is None
+    assert server["auth_diagnostics"]["access_state"] == "unknown"
+    assert server["auth_diagnostics"]["sharing_mode"] == "unavailable"
+    assert _root_file_snapshot(tmp_path) == before
+    assert tmp_path.stat().st_mtime_ns == root_mtime
 
 
 # This is the verdict specification, not a set of examples chosen to fit the code.
@@ -571,19 +634,23 @@ _CREDENTIAL_TRUTH_TABLE = {
     ("self", "healthy"): (True, ""),
     ("self", "absent"): (False, readiness.CODE_NO_CREDENTIAL),
     ("self", "corrupt"): (False, readiness.CODE_UNKNOWN),
-    ("self", "open_wal"): (False, readiness.CODE_UNKNOWN),
+    ("self", "open_wal"): (True, ""),
+    ("self", "orphan_wal"): (False, readiness.CODE_UNKNOWN),
     ("member", "healthy"): (True, ""),
     ("member", "absent"): (False, readiness.CODE_UNKNOWN),
     ("member", "corrupt"): (False, readiness.CODE_UNKNOWN),
-    ("member", "open_wal"): (False, readiness.CODE_UNKNOWN),
+    ("member", "open_wal"): (True, ""),
+    ("member", "orphan_wal"): (False, readiness.CODE_UNKNOWN),
     ("viewer", "healthy"): (True, ""),
     ("viewer", "absent"): (True, ""),
     ("viewer", "corrupt"): (False, readiness.CODE_UNKNOWN),
-    ("viewer", "open_wal"): (False, readiness.CODE_UNKNOWN),
+    ("viewer", "open_wal"): (True, ""),
+    ("viewer", "orphan_wal"): (False, readiness.CODE_UNKNOWN),
     ("third", "healthy"): (True, ""),
     ("third", "absent"): (True, ""),
     ("third", "corrupt"): (False, readiness.CODE_UNKNOWN),
-    ("third", "open_wal"): (False, readiness.CODE_UNKNOWN),
+    ("third", "open_wal"): (True, ""),
+    ("third", "orphan_wal"): (False, readiness.CODE_UNKNOWN),
 }
 
 
@@ -641,14 +708,17 @@ def _truth_fixture(
             observations.save()
 
     auth = None
-    if store_state in {"healthy", "open_wal"}:
+    if store_state in {"healthy", "open_wal", "orphan_wal"}:
         auth = _seed_mcp_row(root, URL)
         auth.upsert_credential("openai", {"type": "oauth", "access": "ready-openai-fixture"})
         if store_state == "healthy":
             auth.close()
             auth = None
+        elif store_state == "orphan_wal":
+            _orphan_the_wal(root, auth)
+            auth = None
         else:
-            assert auth.read_only_sidecar_present()
+            assert (root / "auth.db-wal").stat().st_size > 0
     elif store_state == "corrupt":
         (root / "auth.db").write_bytes(b"not a database")
     else:
@@ -683,7 +753,7 @@ def test_credential_verdict_truth_table(
     auth = _truth_fixture(root, placement_shape, store_state)
     try:
         facts = readiness.collect_peer_facts(root)
-        expected_fact = {"healthy": True, "absent": False}.get(store_state)
+        expected_fact = {"healthy": True, "open_wal": True, "absent": False}.get(store_state)
         assert facts["has_local"] is expected_fact
         assert facts["mcp"]["servers"][0]["has_row"] is expected_fact
         viewer = _truth_viewer(placement_shape)
@@ -704,7 +774,7 @@ def test_credential_verdict_truth_table(
 
 
 @pytest.mark.parametrize("placement_shape", ["member", "viewer", "third"])
-@pytest.mark.parametrize("store_state", ["healthy", "absent", "corrupt", "open_wal"])
+@pytest.mark.parametrize("store_state", ["healthy", "absent", "corrupt", "open_wal", "orphan_wal"])
 def test_observation_failure_precedes_store_uncertainty(
     tmp_path: Path, placement_shape: str, store_state: str
 ) -> None:
@@ -719,7 +789,7 @@ def test_observation_failure_precedes_store_uncertainty(
             viewer=_truth_viewer(placement_shape),
             peer_label="holder",
         )
-        if store_state == "healthy":
+        if store_state in {"healthy", "open_wal"}:
             assert row["ok"] is True
             assert row["detail"] == "holder serves openai from its own login"
         else:
@@ -733,9 +803,10 @@ def test_observation_failure_precedes_store_uncertainty(
             auth.close()
 
 
-@pytest.mark.parametrize("viewer_state", ["corrupt", "open_wal"])
+@pytest.mark.parametrize("viewer_state", ["corrupt", "orphan_wal"])
 def test_viewer_unknown_is_not_no_credential(tmp_path: Path, viewer_state: str) -> None:
     """A viewer store that cannot be read must not get a sign-in-first remedy."""
+    from local_operator.providers.auth_store import AuthStore
     from tests.unit.mcp.test_credential_status import URL
 
     peer_root = tmp_path / "peer"
@@ -746,10 +817,8 @@ def test_viewer_unknown_is_not_no_credential(tmp_path: Path, viewer_state: str) 
         json.dumps({"mcpServers": {"linear": {"type": "http", "url": URL}}}),
         encoding="utf-8",
     )
-    auth = None
-    if viewer_state == "open_wal":
-        auth = _seed_mcp_row(viewer_root, URL)
-        assert auth.read_only_sidecar_present()
+    if viewer_state == "orphan_wal":
+        _orphan_the_wal(viewer_root, _seed_mcp_row(viewer_root, URL))
     else:
         (viewer_root / "auth.db").write_bytes(b"not a database")
     viewer = None
@@ -768,10 +837,10 @@ def test_viewer_unknown_is_not_no_credential(tmp_path: Path, viewer_state: str) 
         assert row["detail"] in rendered[0]
         assert "sign in here first" not in "\n".join(rendered)
 
-        if viewer_state == "open_wal":
-            assert auth is not None
-            auth.close()
-            auth = None
+        if viewer_state == "orphan_wal":
+            # Control: the next writer recovers the orphaned WAL and checkpoints
+            # it on close, after which the same store reads definitely.
+            AuthStore(db_path=viewer_root / "auth.db", config_dir=viewer_root).close()
             control_viewer = readiness.ViewerFacts(viewer_root, device_id=VIEWER)
             try:
                 control = readiness.mcp_credential_rows(
@@ -784,8 +853,6 @@ def test_viewer_unknown_is_not_no_credential(tmp_path: Path, viewer_state: str) 
     finally:
         if viewer is not None:
             viewer.close()
-        if auth is not None:
-            auth.close()
 
 
 def test_an_unopenable_store_answers_could_not_be_read(tmp_path: Path) -> None:

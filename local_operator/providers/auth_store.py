@@ -1400,6 +1400,10 @@ class AuthStore:
         #: write (no mkdir, no schema DDL, no WAL, no chmod). Read paths
         #: (:meth:`list_credentials`) work; write paths must not be reached.
         self._read_only = read_only
+        #: Whether the read-only handle reads the live WAL (both sidecars were
+        #: already present) rather than an immutable main-file snapshot. Set by
+        #: :meth:`_connect_read_only`; read by :meth:`read_only_sidecar_present`.
+        self._ro_sees_wal = False
         self._config_dir = config_dir
         self._config_overrides = dict(config_overrides or {})
         self._runtime_overrides: dict[str, str] = {}
@@ -1481,11 +1485,33 @@ class AuthStore:
     def _connect_read_only(self) -> _SerializedConnection | None:
         """The metadata-only handle, or ``None`` when there is nothing to read.
 
-        ``mode=ro&immutable=1`` over an existing file only: no mkdir, no
-        O_CREAT, no WAL PRAGMA, no schema DDL, no commit, no chmod. The
-        ``immutable=1`` is required, not decorative — a plain ``mode=ro`` open
-        still creates ``-wal``/``-shm`` sidecars (measured), which the no-writes
-        promise forbids. sqlite also refuses every write through this handle.
+        Two opens, chosen by what is ALREADY on disk, because the no-writes
+        promise (#2894: a read never creates a file) and a current answer pull
+        in opposite directions:
+
+        * Both ``-wal`` and ``-shm`` exist (any owner with a live writer, i.e.
+          practically every running desktop): ``mode=ro&readonly_shm=1``. This
+          reads the committed WAL, so a busy store answers with its CURRENT
+          rows instead of being declared unknown/stale forever. It creates
+          nothing because both sidecars are there, and ``readonly_shm`` maps
+          the wal-index read-only, so even the ``-shm`` bytes are left alone
+          against a writer in another process (measured: all three files
+          byte-identical). Plain ``mode=ro`` would rewrite read-marks in
+          ``-shm``; that is why the flag is here.
+        * Otherwise ``mode=ro&immutable=1``: no sidecars means the last writer
+          checkpointed and closed, so the main file IS the current state. A
+          plain ``mode=ro`` here would CREATE ``-wal``/``-shm`` (measured),
+          which the promise forbids. A ``-wal`` without ``-shm`` (a crash
+          leftover) also lands here and is reported by
+          :meth:`read_only_sidecar_present` as possibly stale.
+
+        No mkdir, no O_CREAT of the database, no WAL PRAGMA, no schema DDL, no
+        commit, no chmod on either branch; sqlite refuses every write through
+        both handles. The sidecar check precedes the open, so the WAL branch is
+        only ever taken over files that already exist. The one residual window
+        is the last writer deleting its sidecars between the check and the
+        open: the open then fails, and the store falls back to the immutable
+        branch, which that very checkpoint has just made current.
 
         Returns ``None`` when there is nothing to read: an ABSENT database
         (legitimately empty) or one that will not open. Callers distinguish the
@@ -1494,16 +1520,40 @@ class AuthStore:
         """
         if not self._db_path.exists():
             return None
+        if self._wal_sidecars_present():
+            conn = self._open_read_only_uri("mode=ro&readonly_shm=1")
+            if conn is not None:
+                self._ro_sees_wal = True
+                return conn
+        return self._open_read_only_uri("mode=ro&immutable=1")
+
+    def _wal_sidecars_present(self) -> bool:
+        """Whether BOTH WAL sidecars already exist, so a WAL read creates nothing."""
+        try:
+            return all(
+                self._db_path.with_suffix(self._db_path.suffix + suffix).is_file()
+                for suffix in ("-wal", "-shm")
+            )
+        except OSError:
+            return False
+
+    def _open_read_only_uri(self, query: str) -> _SerializedConnection | None:
+        """One read-only open with ``query``; ``None`` when it will not open."""
         try:
             conn = sqlite3.connect(
-                f"file:{self._db_path}?mode=ro&immutable=1",
+                f"file:{self._db_path}?{query}",
                 timeout=5.0,
                 uri=True,
                 check_same_thread=False,
             )
+        except Exception:  # noqa: BLE001 — corrupt/unreadable db = no handle
+            logger.debug("auth store: read-only open failed %s", self._db_path, exc_info=True)
+            return None
+        try:
             conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
             return _SerializedConnection(conn)
         except Exception:  # noqa: BLE001 — corrupt/unreadable db = no handle
+            conn.close()
             logger.debug("auth store: read-only open failed %s", self._db_path, exc_info=True)
             return None
 
@@ -1559,15 +1609,26 @@ class AuthStore:
         return required.issubset(cols)
 
     def read_only_sidecar_present(self) -> bool:
-        """True when a non-empty ``-wal`` sits beside the store's database.
+        """True when this read-only handle may be missing committed WAL frames.
 
-        ``immutable=1`` (the read-only open) cannot see an uncheckpointed WAL,
-        so a committed DELETE in the WAL is invisible to it: the reader still
-        sees the removed credential row. A non-empty ``-wal`` is that exact
-        on-disk signal, which the seam surfaces as staleness so a possibly-
-        deleted account is never presented as current. A zero-length WAL holds
-        no frames and is not staleness.
+        Only the IMMUTABLE handle can be stale: ``immutable=1`` cannot see an
+        uncheckpointed WAL, so a committed DELETE in it is invisible and the
+        reader would still see the removed credential row. A non-empty ``-wal``
+        beside that handle is the on-disk signal, which callers surface as
+        staleness (the phone seam) or unknown (``lop network ready``) so a
+        possibly-deleted account is never presented as current. A zero-length
+        WAL holds no frames and is not staleness.
+
+        The WAL-reading handle (both sidecars present, see
+        :meth:`_connect_read_only`) already reads every committed frame, so it
+        is never stale. Answering from the file size alone made every busy
+        owner permanently "could not be read": a live writer's ``-wal`` is
+        practically never empty, since SQLite reuses it after a checkpoint
+        rather than truncating it. The name is kept because the phone seam and
+        readiness probe it by name.
         """
+        if self._ro_sees_wal:
+            return False
         try:
             wal = self._db_path.with_suffix(self._db_path.suffix + "-wal")
             return wal.exists() and wal.stat().st_size > 0
