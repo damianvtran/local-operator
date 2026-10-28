@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from local_operator.config import ConfigManager, read_config_values
+from local_operator.hub_sync import check as chk
 from local_operator.hub_sync import policies as pol
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import service as svc
@@ -1113,3 +1114,38 @@ def test_an_unreadable_baseline_file_keeps_its_row(tmp_path: Path) -> None:
         assert item["last_pulled_at"] == "2026-01-01T00:00:00Z"
     finally:
         os.chmod(baseline, 0o600)
+
+
+def test_a_read_only_baselines_dir_never_reads_a_link_as_gone(tmp_path: Path) -> None:
+    """m1 (round 3): a baselines directory we may READ but not TRAVERSE is UNKNOWN.
+
+    On Python 3.14 ``Path.exists()`` answers False on EACCES, so an existing
+    ``skill-*.json`` under such a directory read as a removed link and the row was
+    pruned. Only ENOENT may mean the link is gone.
+    """
+
+    ctx, _manager, _remote, base, _document = _rig(tmp_path)
+    _subscribe(ctx, base)
+    _install(ctx)
+    (check,) = svc.check_items(ctx, kinds=("skill",))
+    key = f"skill:{check.local_id}"
+
+    def fold(doc: dict[str, Any]) -> None:
+        item = doc["items"][key]
+        item["last_pulled_at"] = "2026-01-01T00:00:00Z"
+
+    st.StatusStore(ctx.config_dir).mutate(fold)
+
+    baselines = ctx.config_dir / "hub" / "baselines"
+    # ENOENT is answerable only on a traversable tree; EACCES must stay "unknown".
+    assert chk._absent(baselines / "skill-no-such-link.json") is True
+    os.chmod(baselines, 0o444)
+    try:
+        assert chk._absent(baselines / f"skill-{check.local_id}.json") is False
+        assert chk.skill_confirmed_gone(ctx.config_dir, check.local_id) is False
+        svc.check_items(ctx)  # the full default check
+        item = st.StatusStore(ctx.config_dir).load()["items"].get(key)
+        assert item is not None, "a permission error is not a removed link"
+        assert item["last_pulled_at"] == "2026-01-01T00:00:00Z"
+    finally:
+        os.chmod(baselines, 0o755)

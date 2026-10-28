@@ -266,29 +266,46 @@ def _differs_from_remote(c: chk.ItemCheck) -> bool:
 
 
 def _confirmed_gone_predicate(
-    *, agents: Any, teams: Any, config_dir: Path
+    *,
+    agents: Any,
+    teams: Any,
+    config_dir: Path,
+    agents_complete: bool = True,
+    baselines_complete: bool = True,
 ) -> Callable[[str, str], bool]:
     """Per-key "is this item really gone?", the second half of the prune gate.
 
     Every answer is EVIDENCE, never "this pass did not list it" (round-2 Q4):
 
-    * agent -- ``agents/<id>`` absent from a directory that can be listed (a delete
-      removes the directory and keeps the baseline);
+    * agent -- deleted, or still on disk but NO LONGER LINKED: ``agents/<id>``
+      absent from a directory that can be listed (a delete removes the directory
+      and keeps the baseline), or the registry reads the definition and it
+      carries no ``hub:`` marker. The Tags editor lets a person remove that
+      marker, and an unlinked row is no longer a link -- it would otherwise keep
+      its ``local-only`` row for ever, the very symptom this PR removes
+      (round-3 M1);
     * team -- ``team_confirmed_gone``: absent AND no ``.<id>.*`` swap artifact, i.e.
       its registry's documented mid-save gap keeps the row;
     * skill -- NO baseline file (existence, not readability: an unreadable record is
       skipped by ``iter_baselines`` and looks exactly like a removed link).
 
-    A kind this predicate does not know is never confirmed gone.
+    THE COMPLETENESS GATE IS PER KIND (round-3 m2): one unreadable, unrelated
+    ``agent.yml`` is a reason to keep AGENT rows, not to freeze the team and
+    skill rows whose own evidence is intact. A kind this predicate does not
+    know is never confirmed gone.
     """
 
     def confirmed_gone(kind: str, local_id: str) -> bool:
         if kind == "agent":
-            return agents is not None and chk.agent_confirmed_gone(agents, local_id)
+            return (
+                agents_complete
+                and agents is not None
+                and chk.agent_confirmed_gone(agents, local_id)
+            )
         if kind == "team":
             return teams is not None and chk.team_confirmed_gone(teams, local_id)
         if kind == "skill":
-            return chk.skill_confirmed_gone(config_dir, local_id)
+            return baselines_complete and chk.skill_confirmed_gone(config_dir, local_id)
         return False
 
     return confirmed_gone
@@ -775,7 +792,11 @@ def check_items(
     # cadence and the ``applied`` backup pointer it was carrying.
     # The registries are hoisted so the SAME instances the arms enumerated answer
     # the later questions; a fresh one would re-scan into a second opinion.
-    complete = True
+    # COMPLETENESS IS TRACKED PER KIND (round-3 m2): one bystander's broken
+    # ``agent.yml`` used to freeze every kind's prune, including rows whose own
+    # evidence was intact.
+    agents_complete = True
+    baselines_complete = True
     agents: Any = None
     teams: Any = None
     if "agent" in kinds:
@@ -788,7 +809,7 @@ def check_items(
                 only_ids=only_ids,
             )
         )
-        complete = chk.agent_inventory_complete(agents)
+        agents_complete = chk.agent_inventory_complete(agents)
     if "team" in kinds:
         teams = ctx.teams()
         out.extend(
@@ -808,7 +829,7 @@ def check_items(
                 only_ids=only_ids,
             )
         )
-        complete = complete and prov.baselines_dir_listable(ctx.config_dir)
+        baselines_complete = prov.baselines_dir_listable(ctx.config_dir)
     for c in out:
         _adopt_if_equal(ctx, c)
     # THE ORIGIN REPAIR: a baseline written before links carried an origin has
@@ -834,16 +855,21 @@ def check_items(
         # ``local-only`` mark became listable (round-1 Q1: deleted agents and
         # teams kept advertising unpublished changes). The kind set is derived
         # from KIND_ORDER so a new kind cannot reopen that gap -- AND ONLY WITH
-        # BOTH DOUBTS ANSWERED: a complete listing (``complete``) and a per-item
-        # confirmation that the item is gone (``confirmed_gone``). A row missing
-        # from a listing that could not read it is kept, with all its bookkeeping
-        # (round-2 Q4).
+        # BOTH DOUBTS ANSWERED, per kind: that kind's listing was complete
+        # (``agents_complete``/``baselines_complete``, checked inside the
+        # predicate) and the per-item answer confirms the item is gone. A row
+        # missing from a listing that could not read it is kept, with all its
+        # bookkeeping (round-2 Q4, round-3 m2).
         live: set[str] | None = None
         confirmed_gone: Any = None
-        if names is None and only_ids is None and set(kinds) == set(KIND_ORDER) and complete:
+        if names is None and only_ids is None and set(kinds) == set(KIND_ORDER):
             live = {st.item_key(c.kind, c.local_id) for c in out}
             confirmed_gone = _confirmed_gone_predicate(
-                agents=agents, teams=teams, config_dir=ctx.config_dir
+                agents=agents,
+                teams=teams,
+                config_dir=ctx.config_dir,
+                agents_complete=agents_complete,
+                baselines_complete=baselines_complete,
             )
         record_checks(ctx, out, live=live, confirmed_gone=confirmed_gone)
     return out

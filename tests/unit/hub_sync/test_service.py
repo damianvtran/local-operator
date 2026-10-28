@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,7 @@ import pytest
 from local_operator.agent_profiles import MAX_INSTRUCTIONS_CHARS
 from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager, read_config_values
+from local_operator.hub_sync import check as chk
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import service as svc
 from local_operator.hub_sync import store as st
@@ -1917,6 +1919,97 @@ def test_an_unreadable_agent_definition_never_prunes_its_row(env) -> None:
     assert item is not None, "an unreadable definition is not evidence the agent is gone"
     assert item["applied_backup"] == "hub/backups/agent-x.json"
     assert item["last_pulled_at"] == "2026-01-01T00:00:00Z"
+
+
+def test_an_unlinked_agent_loses_its_status_row(env) -> None:
+    """M1 (round 3): removing the hub marker is an UNLINK, and the row must go.
+
+    ``check_hub_agents`` enumerates only rows that carry a ``hub:`` marker, so an
+    agent whose tags lost it is never checked again. Without the unlink clause its
+    ``local-only`` row would keep advertising unpublished changes for ever, and the
+    Tags editor that removed the marker is the only gesture a user has -- nothing
+    clears it.
+    """
+
+    ctx, row, key = _local_only_agent(env)
+    root = ctx.config_dir
+    assert st.StatusStore(root).load()["items"][key]["classification"] == "local-only"
+
+    # The desktop Tags chip editor PATCHes the whole list, so this is exactly the
+    # reachable gesture: the row survives, the hub origin does not.
+    ctx.agents().update_agent(row.id, _fields(tags=["role"]))
+    assert ctx.agents().get_agent(row.id).tags == ["role"]
+
+    svc.check_items(ctx)  # the full default check
+
+    assert (
+        key not in st.StatusStore(root).load()["items"]
+    ), "an agent that is no longer linked must not keep a status row"
+    # Only the STATUS row goes: the baseline is the link record, so the links
+    # inventory still lists it and must not fall over on the missing row.
+    links = svc.links_snapshot(ctx)
+    assert any(link["local_id"] == row.id for link in links["links"])
+
+
+def test_a_read_only_agents_dir_never_reads_a_live_agent_as_gone(env) -> None:
+    """m1 (round 3): EACCES is UNKNOWN, never absence.
+
+    On Python 3.14 (the installed runtime) ``Path.exists()`` answers False when the
+    parent directory cannot be traversed, which read a live agent as deleted and
+    pruned its row. Only ENOENT may mean gone; a permission error must keep it.
+    """
+
+    ctx, row, key = _local_only_agent(env)
+    root = ctx.config_dir
+    agents_dir = root / "agents"
+    # EACCES and ENOENT must be told apart: the second is the only thing that may
+    # ever read as gone, the first is unknown. Checked on a traversable tree first,
+    # because an untraversable parent cannot answer the ENOENT question at all.
+    assert chk._absent(agents_dir / "no-such-agent") is True
+    os.chmod(agents_dir, 0o444)
+    try:
+        assert chk._absent(agents_dir / row.id) is False
+        assert chk.agent_confirmed_gone(ctx.agents(), row.id) is False
+        svc.check_items(ctx)
+    finally:
+        os.chmod(agents_dir, 0o755)
+
+    item = st.StatusStore(root).load()["items"].get(key)
+    assert item is not None, "a permission error is not evidence the agent is gone"
+    assert item["classification"] == "local-only"
+
+
+def test_a_broken_agent_definition_does_not_block_a_team_prune(env) -> None:
+    """m2 (round 3): the completeness gate is per KIND.
+
+    One bystander's unreadable ``agent.yml`` is a reason to keep AGENT rows; it is
+    not evidence about a team whose own directory is confirmed gone, so the team row
+    must still be pruned in the same pass.
+    """
+
+    ctx, hub, agents, teams, root = env
+    agent_row = _pull_agent(agents, hub, root)  # the bystander, never linked to the row under test
+    team_row = _pull_team(teams, hub, root)
+    svc.check_items(ctx)
+    keys = {"agent:" + agent_row.id, "team:" + str(team_row.id)}
+    assert keys <= set(st.StatusStore(root).load()["items"])
+
+    (root / "agents" / agent_row.id / "agent.yml").write_text(
+        "name: [unterminated\n", encoding="utf-8"
+    )
+    teams.delete_team(str(team_row.id))
+    fresh = svc.HubSyncContext(
+        config_dir=root,
+        config_manager=ConfigManager(root),
+        client_for_tenant=ctx.client_for_tenant,
+    )
+    svc.check_items(fresh)
+
+    items = st.StatusStore(root).load()["items"]
+    assert (
+        "team:" + str(team_row.id) not in items
+    ), "an unrelated agent fault must not freeze the team prune"
+    assert "agent:" + agent_row.id in items
 
 
 def test_a_publish_accepted_for_another_row_keeps_the_mark(env) -> None:

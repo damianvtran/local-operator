@@ -409,26 +409,69 @@ def agent_inventory_complete(registry: Any) -> bool:
         return False
 
 
-def agent_confirmed_gone(registry: Any, agent_id: str) -> bool:
-    """True only when ``agents/<id>`` is absent from a directory we could READ.
+def _absent(path: Path) -> bool:
+    """True only when ``path`` does not exist (ENOENT).
 
-    The directory, not the baseline, is what proves an agent gone: a delete removes
-    the directory and KEEPS the baseline (round-1 E5), so a baseline-based answer
-    would call a deleted agent live forever. Any doubt answers False -- an
-    unreadable definition (its directory is still there), an id that cannot be a
-    path segment, or a tree that cannot be listed.
+    ``Path.exists()`` answers False on EACCES as of Python 3.14 -- the runtime this
+    ships on -- so an ``agents/`` or ``hub/baselines`` directory a process may READ
+    but not TRAVERSE makes every item under it look deleted, and its row pruned
+    (round-3 m1). ``Path.exists`` also cannot tell that case from a real absence on
+    older interpreters, so the decision is made here instead: only FileNotFoundError
+    is absence; every other OSError is UNKNOWN, which the callers answer by keeping
+    the row.
+    """
+
+    try:
+        os.stat(path)
+        return False
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
+def agent_confirmed_gone(registry: Any, agent_id: str) -> bool:
+    """True when the agent is DELETED, or still on disk but NO LONGER LINKED.
+
+    The directory, not the baseline, is what proves an agent deleted: a delete
+    removes the directory and KEEPS the baseline (round-1 E5), so a
+    baseline-based answer would call a deleted agent live forever.
+
+    A PRESENT directory can still be gone as a LINK. The desktop Tags editor lets
+    a person remove ``hub:<id>``/``hub_sha256:<hex>`` like any other tag, and
+    ``check_hub_agents`` enumerates only rows that still carry the marker; an
+    unlinked row would otherwise never be listed, never confirmed gone, and keep
+    its ``local-only`` row advertising unpublished changes for ever (round-3 M1).
+    A definition the registry can READ and that names no hub origin is positive
+    evidence of that state -- the same evidence ``check_hub_agents`` needs to stop
+    listing it, so the two answers cannot disagree.
+
+    Any doubt answers False: an unreadable definition (``get_agent`` raises), an
+    id that cannot be a path segment, or a tree that cannot be listed.
     """
 
     agents_dir = getattr(registry, "agents_dir", None)
     if agents_dir is None or not agent_id or "/" in agent_id or agent_id.startswith("."):
         return False
     try:
-        if not agents_dir.is_dir() or (agents_dir / agent_id).exists():
+        if not agents_dir.is_dir():
             return False
-        with os.scandir(agents_dir):
-            return True
+        if _absent(agents_dir / agent_id):
+            # Confirmed gone from a tree that must also be LISTABLE: a directory
+            # whose entries we may not enumerate cannot report an absence.
+            with os.scandir(agents_dir):
+                return True
     except OSError:
         return False
+    try:
+        row = registry.get_agent(agent_id)
+    except Exception:  # noqa: BLE001 - an unreadable definition is unknown, never gone
+        return False
+    if row is None:
+        return False
+    from local_operator.agents import hub_origin
+
+    return hub_origin(row) is None
 
 
 def team_confirmed_gone(registry: Any, team_id: str) -> bool:
@@ -443,7 +486,7 @@ def team_confirmed_gone(registry: Any, team_id: str) -> bool:
     if teams_dir is None or not team_id or "/" in team_id or team_id.startswith("."):
         return False
     try:
-        if not teams_dir.is_dir() or (teams_dir / team_id).exists():
+        if not teams_dir.is_dir() or not _absent(teams_dir / team_id):
             return False
         return not any(child.name.startswith(f".{team_id}.") for child in teams_dir.iterdir())
     except OSError:
@@ -460,8 +503,8 @@ def skill_confirmed_gone(config_dir: Path, local_id: str) -> bool:
     """
 
     try:
-        return not prov.baseline_path(config_dir, "skill", local_id).exists()
-    except (prov.BaselineError, OSError):
+        return _absent(prov.baseline_path(config_dir, "skill", local_id))
+    except prov.BaselineError:
         return False
 
 

@@ -1163,16 +1163,20 @@ fence proves the hub row is the one this link names) — as does a pull that WRO
 the hub's bytes and an unpull, which leaves no local copy to publish. A write
 that KEPT the local side (`prefer=local` / `replace=local`, whether it wrote or
 found nothing to write) stores it again. A full default check prunes the rows of
-items that no longer exist, and only when BOTH hold: every inventory it
-enumerated could be read completely (an unreadable `agent.yml`, a vanished
+items that no longer exist or are NO LONGER LINKED, and only when BOTH hold: that
+kind's inventory could be read completely (an unreadable `agent.yml`, a vanished
 `agents/` directory or an unlistable baselines directory makes the answer
-partial, not empty), AND the item itself is CONFIRMED gone -- `agents/<id>`
-absent from a tree that can be listed, `teams/<id>` absent with no `.<id>.*`
-swap artifact, a skill with no baseline file at all. A row missing from a
-listing that failed to read its item is KEPT, with its retry schedule, its
-pull/push cadence and its backup pointer: absence from one pass is not evidence.
-(The row-level twin of `provenance.prune`'s `confirmed_absent` guard, which has
-always refused to drop a baseline on an incomplete listing.)
+partial, not empty -- and the gate is PER KIND, so one bystander's broken
+definition does not freeze another kind's prune), AND the item itself is
+CONFIRMED gone -- `agents/<id>` absent from a tree that can be listed, a readable
+agent definition that names no `hub:` origin (the Tags editor can remove the
+marker, which unlinks the row), `teams/<id>` absent with no `.<id>.*` swap
+artifact, a skill with no baseline file at all. A row missing from a listing that
+failed to read its item is KEPT, with its retry schedule, its pull/push cadence
+and its backup pointer: absence from one pass is not evidence, and a permission
+error (EACCES) is unknown, never absence -- only ENOENT is. (The row-level twin
+of `provenance.prune`'s `confirmed_absent` guard, which has always refused to
+drop a baseline on an incomplete listing.)
 
 ### B4.3 Failure classes
 
