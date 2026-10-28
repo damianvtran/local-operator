@@ -379,6 +379,7 @@ def render_systemd_unit(
     post_lines: Sequence[str] = (),
     restart: str = "on-failure",
     restart_sec: int = 5,
+    restart_prevent_exit_status: int | None = None,
     kill_mode: str | None = None,
     oom_score_adjust: int | None = None,
     separate_sections: bool = True,
@@ -402,6 +403,13 @@ def render_systemd_unit(
     ``oom_score_adjust`` follows the same rule: emitted only when a daemon names
     one (the relay, today), so every other unit renders byte-identically.
 
+    ``restart_prevent_exit_status`` too. It is the other half of a
+    ``restart="always"`` opt-out from the default above: the status a DELIBERATE
+    exit uses, emitted as both ``RestartPreventExitStatus`` (that exit stays
+    down) and ``SuccessExitStatus`` (and is recorded as clean rather than as a
+    failed unit). The relay is its one caller; the reasoning lives at
+    ``network/relay.render_systemd``.
+
     ``separate_sections=False`` exists for the tunnel unit, whose layout
     predates this function; blank lines between sections are cosmetic to
     systemd, and rewriting a unit that is already correct is the thing worth
@@ -414,6 +422,10 @@ def render_systemd_unit(
         lines.append("")
     lines += ["[Service]", *pre_lines, f"ExecStart={exec_start}", f"Restart={restart}"]
     lines.append(f"RestartSec={restart_sec}")
+    if restart_prevent_exit_status is not None:
+        status = int(restart_prevent_exit_status)
+        lines.append(f"RestartPreventExitStatus={status}")
+        lines.append(f"SuccessExitStatus={status}")
     if kill_mode is not None:
         # RESTART-VS-STOP SEMANTICS, stated here so nobody "fixes" the line
         # below into the defect it removes. ``KillMode=process`` kills only the

@@ -17,6 +17,7 @@ manager.
 
 from __future__ import annotations
 
+import json
 import plistlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -107,7 +108,13 @@ def test_render_systemd_has_the_contract_every_unit_shares(tmp_path: Path) -> No
     # The config-dir pin is present and QUOTED (an unquoted assignment truncates
     # at the first space — the mobile daemon's own measured lesson).
     assert 'Environment="LOCAL_OPERATOR_CONFIG_DIR=' in text
-    assert "Restart=on-failure" in text
+    # SELF-HEAL WITHOUT RESURRECTING A DELIBERATE STOP (2026-10-27 node): every
+    # exit nobody asked for is restarted; only the deliberate-stop status is not.
+    lines = text.splitlines()
+    assert "Restart=always" in lines
+    assert f"RestartPreventExitStatus={relay.DELIBERATE_STOP_EXIT_STATUS}" in lines
+    assert f"SuccessExitStatus={relay.DELIBERATE_STOP_EXIT_STATUS}" in lines
+    assert "Restart=on-failure" not in lines
     assert "WantedBy=default.target" in text
     # THE SESSION-SAFETY FIX (2026-10-11, stale-relay memo): the relay's cgroup
     # holds the device's session runtimes, so its unit must kill only the main
@@ -1783,3 +1790,192 @@ def test_the_log_parent_exists_before_a_linux_refresh_reloads_the_unit(
 
     assert ("daemon-reload",) in calls, calls
     assert log_parent.is_dir(), "the refresh reloaded a unit whose log parent was missing"
+
+
+# The deliberate-stop exit status (2026-10-27 node: a relay that exited 0
+# unrequested stayed down ~4 min under Restart=on-failure) ------------------
+
+
+def test_the_deliberate_stop_status_cannot_collide_with_another_exit() -> None:
+    """75 is outside Python's 0/1/2, a signal's 128+N and systemd's 200-243."""
+    status = relay.DELIBERATE_STOP_EXIT_STATUS
+    assert status not in (0, 1, 2)
+    assert status < 128
+    assert not 200 <= status <= 243
+
+
+def test_an_unrequested_exit_returns_zero_so_the_unit_restarts_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(relay.sys, "platform", "linux")
+    assert relay._exit_status(tmp_path) == 0  # noqa: SLF001
+
+
+def test_a_marked_stop_exits_with_the_deliberate_status_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The marker describes exactly ONE exit: it is consumed on the way out."""
+    monkeypatch.setattr(relay.sys, "platform", "linux")
+    relay.mark_deliberate_stop("lop network stop", tmp_path)
+    assert relay.deliberate_stop_marker_path(tmp_path).is_file()
+
+    assert relay._exit_status(tmp_path) == relay.DELIBERATE_STOP_EXIT_STATUS  # noqa: SLF001
+    assert not relay.deliberate_stop_marker_path(tmp_path).exists()
+    assert relay._exit_status(tmp_path) == 0  # noqa: SLF001
+
+
+def test_a_stale_marker_never_suppresses_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop that never reached a relay must not excuse a later unrequested exit."""
+    monkeypatch.setattr(relay.sys, "platform", "linux")
+    relay.mark_deliberate_stop("lop network stop", tmp_path)
+    marker = relay.deliberate_stop_marker_path(tmp_path)
+    stale = json.loads(marker.read_text(encoding="utf-8"))
+    stale["at"] -= relay.DELIBERATE_STOP_MARKER_TTL_S + 1
+    marker.write_text(json.dumps(stale), encoding="utf-8")
+
+    assert relay.deliberate_stop_requested(tmp_path) is False
+    assert relay._exit_status(tmp_path) == 0  # noqa: SLF001
+
+
+def test_macos_never_returns_the_status_launchd_would_relaunch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KeepAlive {SuccessfulExit: false} reads any non-zero exit as a crash."""
+    monkeypatch.setattr(relay.sys, "platform", "darwin")
+    relay.mark_deliberate_stop("lop network stop", tmp_path)
+    assert relay._exit_status(tmp_path) == 0  # noqa: SLF001
+
+
+def test_the_stop_verb_marks_the_stop_before_the_arm_signals(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``lop network stop`` is deliberate: the marker exists when systemctl runs."""
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text("(unit)\n", encoding="utf-8")
+    seen: list[tuple[tuple[str, ...], bool]] = []
+
+    def _record(*args: str, **kwargs: Any) -> Any:
+        seen.append((tuple(args), relay.deliberate_stop_requested(config)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(supervisors, "systemctl_user", _record)
+    _pin_supervision(monkeypatch, managed=_Script(1000, None), record=None, answering=False)
+
+    assert relay.service_action("stop")["ok"] is True
+    assert seen == [(("stop", relay.SYSTEMD_UNIT), True)], seen
+
+
+def test_start_and_restart_never_mark_a_stop(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A restart's exit is systemd's own (never restarted twice); no marker."""
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text("(unit)\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisors,
+        "systemctl_user",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    _pin_supervision(
+        monkeypatch, managed=_Script(1000, 2000), record=_RelayRecordScript(1000, 2000)
+    )
+
+    relay.service_action("restart")
+
+    assert not relay.deliberate_stop_marker_path(config).exists()
+
+
+def test_uninstall_marks_the_stop_before_disable_now(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``uninstall``'s ``disable --now`` is deliberate: marked first."""
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text("(unit)\n", encoding="utf-8")
+    seen: list[tuple[tuple[str, ...], bool]] = []
+
+    def _record(*args: str, **kwargs: Any) -> Any:
+        seen.append((tuple(args), relay.deliberate_stop_requested(config)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(supervisors, "systemctl_user", _record)
+
+    relay.uninstall(root=config)
+
+    assert (("disable", "--now", relay.SYSTEMD_UNIT), True) in seen, seen
+
+
+def test_amain_exits_with_the_status_its_stop_was_asked_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The supervised entry point returns what ``_exit_status`` decides, and a
+    marker present at START (a stop that never arrived) is cleared first."""
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(relay.sys, "platform", "linux")
+    relay.mark_deliberate_stop("left over", config)
+
+    class _Server:
+        def __init__(self, **kwargs: Any) -> None:
+            self.root = config
+
+        def serve_forever(self) -> None:
+            # The leftover marker was cleared before serving began; this stop
+            # is the one that was asked for while it served.
+            assert not relay.deliberate_stop_marker_path(config).exists()
+            relay.mark_deliberate_stop("lop network stop", config)
+
+    monkeypatch.setattr(relay, "RelayServer", _Server)
+    assert relay.amain(["--port", "4197"]) == relay.DELIBERATE_STOP_EXIT_STATUS
+
+    class _Unasked(_Server):
+        def serve_forever(self) -> None:
+            return None
+
+    relay.mark_deliberate_stop("left over", config)
+    monkeypatch.setattr(relay, "RelayServer", _Unasked)
+    assert relay.amain(["--port", "4197"]) == 0
+
+
+def test_refresh_unit_migrates_an_on_failure_unit_to_the_self_heal(
+    linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Existing installs gain Restart=always through the existing drift path."""
+    _shim_rig(tmp_path, monkeypatch)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    status = relay.DELIBERATE_STOP_EXIT_STATUS
+    legacy = (
+        relay.render_systemd()
+        .replace("Restart=always\n", "Restart=on-failure\n")
+        .replace(f"RestartPreventExitStatus={status}\n", "")
+        .replace(f"SuccessExitStatus={status}\n", "")
+    )
+    assert "Restart=always" not in legacy and "KillMode=process\n" in legacy
+    unit.write_text(legacy, encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    calls, record = _manager_recorder()
+    monkeypatch.setattr(supervisors, "systemctl_user", record)
+    _pin_supervision(monkeypatch, managed=_Script(111), record=_RelayRecordScript(111))
+    monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda pid: None)
+
+    outcome = relay.refresh_unit_if_stale()
+
+    assert calls == [("daemon-reload",)], calls
+    written = unit.read_text(encoding="utf-8")
+    assert written == relay.render_systemd()
+    assert "Restart=always\n" in written and "KillMode=process\n" in written
+    assert outcome.kind == "current", outcome

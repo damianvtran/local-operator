@@ -14472,6 +14472,53 @@ SYSTEMD_UNIT = "local-operator-network.service"
 #: daemons from collapsing into one ``Local Operator`` row in Activity Monitor.
 LABEL_TEMPLATE = "{brand} [network relay] port={port}"
 
+#: The exit status of a relay that was ASKED to stop, and the only exit the
+#: Linux unit does not restart (``RestartPreventExitStatus``).
+#:
+#: WHY A STATUS AND NOT ``Restart=on-failure`` ALONE (2026-10-27, cloud node,
+#: AL2023 with linger): the relay exited 0 with no ``Stopping`` line — nobody
+#: had run a stop verb — and under ``on-failure`` a clean exit stays down, so
+#: the node was dark to the mesh for ~4 minutes until a hand start. A SIGTERM
+#: from anything but the unit's own stop (an OOM-adjacent reaper, a stray
+#: ``kill``, a session-scope teardown) is exactly that clean exit. Plain
+#: ``Restart=always`` would be wrong the other way: ``lop network stop``,
+#: ``uninstall`` and an incident stop are deliberate, and must stay down.
+#:
+#: So the unit says ``Restart=always`` and names this status as the one it
+#: honours. A deliberate path marks the stop FIRST (:func:`mark_deliberate_stop`)
+#: and the relay, on its way out, exits with this status only when that marker
+#: is fresh (:func:`_exit_status`). Everything else — a signal nobody asked
+#: for, a crash, an unhandled exception — is restarted. A ``systemctl stop``
+#: is never restarted whatever the status (systemd does not restart a unit it
+#: was told to stop), so the status matters only for an exit systemd did not
+#: initiate.
+#:
+#: THE VALUE: 75 is ``EX_TEMPFAIL`` in sysexits.h — outside the 0/1/2 a Python
+#: process uses (2 is argparse's usage error and this unit's "cannot start"
+#: refusal), outside 128+N (killed by a signal), and outside systemd's own
+#: 200-243 ``EXIT_*`` range, so no other cause of exit can collide with it.
+#: Also listed as ``SuccessExitStatus`` so a deliberate stop does not leave the
+#: unit in ``failed`` state.
+#:
+#: macOS: launchd's ``KeepAlive: {SuccessfulExit: false}`` would read 75 as a
+#: crash and relaunch, so on that platform the relay never returns it
+#: (:func:`_exit_status`) — launchd stops are ``launchctl kill``/``bootout``,
+#: which launchd itself does not restart, and that arm is unchanged.
+DELIBERATE_STOP_EXIT_STATUS = 75
+
+#: How long a stop marker stays valid. A deliberate stop reaches the relay
+#: within the service verb's own verify window (:data:`SERVICE_VERIFY_WINDOW_S`)
+#: or not at all; a marker older than this is left over from a stop that never
+#: arrived (the relay was already down) and must not turn a LATER unrequested
+#: exit into a deliberate one — that would recreate the stays-down defect.
+DELIBERATE_STOP_MARKER_TTL_S = 120.0
+
+#: The marker's file name, under ``<config>/run`` beside the relay's discovery
+#: records (``run/peers``): it describes the same process and is written by the
+#: same user. One file, not per-pid, because a stop names the UNIT (there is one
+#: relay unit per config root, pinned by its ``LOCAL_OPERATOR_CONFIG_DIR``).
+DELIBERATE_STOP_MARKER = "relay-stop-requested.json"
+
 #: The relay's ``OOMScoreAdjust``: make the kernel's OOM killer pick almost any
 #: other process first.
 #:
@@ -14542,6 +14589,69 @@ def plist_path() -> Path:
 def systemd_path() -> Path:
     """``~/.config/systemd/user/<unit>`` for the CURRENT home (redirectable)."""
     return supervisors.systemd_unit_path(SYSTEMD_UNIT)
+
+
+def deliberate_stop_marker_path(root: Path | None = None) -> Path:
+    """``<config>/run/relay-stop-requested.json`` — a PATH; nothing is created."""
+    return (Path(root) if root is not None else config_dir()) / "run" / DELIBERATE_STOP_MARKER
+
+
+def mark_deliberate_stop(reason: str, root: Path | None = None) -> None:
+    """Record that the NEXT relay exit was asked for, before asking for it.
+
+    Every deliberate-stop path calls this BEFORE it signals the relay (see
+    :data:`DELIBERATE_STOP_EXIT_STATUS`): the relay reads the marker on its way
+    out, so a marker written after the signal would race the exit it describes.
+    Best effort and never raising: a stop that could not write the marker still
+    stops (``systemctl stop``/``disable --now`` are never restarted by systemd
+    whatever the status), it only loses the guarantee for a non-systemd signal.
+    """
+    path = deliberate_stop_marker_path(root)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+        tmp.write_text(
+            json.dumps({"reason": str(reason), "at": time.time(), "by_pid": os.getpid()}),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+    except OSError:
+        logger.debug("relay: could not write the stop marker %s", path, exc_info=True)
+
+
+def clear_deliberate_stop(root: Path | None = None) -> None:
+    """Remove the marker. The relay calls this at START, so a stale one cannot
+    outlive the relay it was written for and excuse a later unrequested exit."""
+    try:
+        deliberate_stop_marker_path(root).unlink(missing_ok=True)
+    except OSError:
+        logger.debug("relay: could not clear the stop marker", exc_info=True)
+
+
+def deliberate_stop_requested(root: Path | None = None, *, now: float | None = None) -> bool:
+    """Whether a FRESH marker says this exit was asked for (TTL-bounded)."""
+    try:
+        raw = json.loads(deliberate_stop_marker_path(root).read_text(encoding="utf-8"))
+        at = float(raw.get("at") or 0.0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+    age = (time.time() if now is None else now) - at
+    return 0.0 <= age <= DELIBERATE_STOP_MARKER_TTL_S
+
+
+def _exit_status(root: Path | None = None) -> int:
+    """The status the supervised relay exits with: 75 only for an asked-for stop.
+
+    0 otherwise — and under ``Restart=always`` a 0 is restarted, which is the
+    self-heal. macOS always answers 0: launchd's ``KeepAlive: {SuccessfulExit:
+    false}`` would relaunch on 75 (see :data:`DELIBERATE_STOP_EXIT_STATUS`).
+    The marker is consumed either way, so it describes exactly one exit.
+    """
+    deliberate = deliberate_stop_requested(root)
+    clear_deliberate_stop(root)
+    if deliberate and sys.platform.startswith("linux"):
+        return DELIBERATE_STOP_EXIT_STATUS
+    return 0
 
 
 def is_supported() -> bool:
@@ -14626,6 +14736,18 @@ def render_systemd(port: int = DEFAULT_PORT) -> str:
         exec_start=(
             f"{supervisors.quoted(str(image))} -m local_operator.network.relay " f"--port {port}"
         ),
+        # SELF-HEAL WITHOUT RESURRECTING A DELIBERATE STOP (2026-10-27): every
+        # exit nobody asked for comes back — the node's relay exited 0 and stayed
+        # down ~4 minutes under ``on-failure`` — while an asked-for stop exits
+        # with DELIBERATE_STOP_EXIT_STATUS and stays down. Chosen over "keep
+        # on-failure and make every unrequested exit non-zero" because that
+        # option needs the relay to classify EVERY way it can leave (signals,
+        # exceptions, interpreter shutdown) correctly, and one missed path is
+        # the stays-down defect again; here an unclassified exit fails SAFE
+        # (restarted). ``refresh_unit_if_stale`` rewrites installed units to this
+        # render, so existing installs gain these lines on their next update.
+        restart="always",
+        restart_prevent_exit_status=DELIBERATE_STOP_EXIT_STATUS,
         # ``KillMode=process`` IS THE SESSION-SAFETY FIX (2026-10-11), and the
         # relay is the one unit that must carry it: this device's session
         # runtimes are children of the relay, so under systemd's default
@@ -15143,6 +15265,9 @@ def uninstall(
             )
         elif sys.platform.startswith("linux") and is_supported():
             if supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT):
+                # A DELIBERATE STOP: marked before the signal, so the exit it
+                # causes reads as asked-for (DELIBERATE_STOP_EXIT_STATUS).
+                mark_deliberate_stop("uninstall")
                 supervisors.systemctl_user("disable", "--now", SYSTEMD_UNIT)
                 systemd_path().unlink(missing_ok=True)
                 supervisors.systemctl_user("daemon-reload")
@@ -15827,6 +15952,12 @@ def _supervised_action(
     refused = guard(action)
     if refused is not None:
         return refused
+    if action == "stop":
+        # THE OPERATOR'S STOP VERB (`lop network stop`) IS DELIBERATE, on both
+        # platforms: marked before the arm signals, so the relay exits with
+        # DELIBERATE_STOP_EXIT_STATUS and the unit's Restart=always leaves it
+        # down. After the guard, so a redirected HOME writes nothing.
+        mark_deliberate_stop("lop network stop")
     port = _service_port()
     before = _supervision_state(port)
     replaced: list[dict[str, Any]] = []
@@ -16757,8 +16888,11 @@ def amain(argv: list[str] | None = None) -> int:
     # with one record per request — the same reason the mobile daemon calls both.
     quiet_wire_clients()
     server = RelayServer(settings=settings)
+    # A marker left by a stop that never reached a relay (it was already down)
+    # must not excuse THIS relay's next unrequested exit; see _exit_status.
+    clear_deliberate_stop(server.root)
     server.serve_forever()
-    return 0
+    return _exit_status(server.root)
 
 
 if __name__ == "__main__":  # pragma: no cover - the supervised entry point
