@@ -25069,6 +25069,29 @@ async def _browser_download(
     )
 
 
+def _upload_scheme_refusal(
+    tool_call_id: str, raw: str, context: ToolContext | None
+) -> ToolResult | None:
+    """Refuse a ``scheme://`` upload path, naming the absolute path to use instead.
+
+    Reuses :func:`_scheme_refusal` (one rule for every path-taking tool) but passes the
+    remedy for the one case an agent actually hits: a file it wrote to its scratchpad.
+    ``upload`` never resolved ``scratchpad://``, so the remedy cannot be "read it first":
+    it is the pad's absolute path, taken from the context when there is one.
+    """
+    pad = scratchpad_dir_of(context)
+    where = f" (this session's scratchpad is {pad})" if pad else ""
+    return _scheme_refusal(
+        tool_call_id,
+        "browser",
+        raw,
+        remedy=(
+            "Pass the file's ABSOLUTE filesystem path (or one relative to the working "
+            f"directory), not a URL{where}."
+        ),
+    )
+
+
 async def _browser_upload(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -25102,11 +25125,30 @@ async def _browser_upload(
     session_id = str(getattr(context, "session_id", "") or "")
     resolved: list[Path] = []
     for raw in params.paths:
-        path, reason = files.check_upload(raw, cwd=_safe_cwd(context), policy=limits)
+        # `upload` serves NO URL scheme: without this a `scratchpad://x.png` (the spelling
+        # `read`/`write` take) would be read as the relative path `<cwd>/scratchpad:/x.png`
+        # and refused as "does not exist", with the same-turn hint pointing at a race that is
+        # not there. The remedy is the absolute path, and the pad root is printed when the
+        # context has one so the model does not have to guess it.
+        scheme_problem = _upload_scheme_refusal(tool_call_id, raw, context)
+        if scheme_problem is not None:
+            return scheme_problem
+        # `session_id` is what lets the gate recognise THIS session's own scratchpad as
+        # the agent's working area rather than as the credential store beside it (see
+        # `browser_files.own_scratchpad_root`); an empty id grants nothing.
+        path, reason = files.check_upload(
+            raw, cwd=_safe_cwd(context), policy=limits, session_id=session_id
+        )
         if path is None:
             # Refused as a whole call: attaching the rest would send a set the
             # caller did not name, and the refusal names the one rule that fired.
-            return _error(tool_call_id, "browser", f"refused: nothing was attached — {reason}")
+            # Every gate reason is itself spelled "refused: …" (it is also what other callers
+            # print bare), so the prefix is dropped here rather than doubled.
+            return _error(
+                tool_call_id,
+                "browser",
+                f"refused: nothing was attached — {reason.removeprefix('refused: ')}",
+            )
         resolved.append(path)
     wire: dict[str, Any] = {
         "tab": state.surface_id,
