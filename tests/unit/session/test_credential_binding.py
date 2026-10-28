@@ -1000,6 +1000,12 @@ async def test_n1_first_serve_journals_no_notice_and_a_change_journals_one(
     root.mkdir()
     session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
     recorder = _recorder(session.transcript)
+    # A LOCAL serving row carries no label of its own, so the notice resolves one
+    # at serve time (``attach_credential_binding`` installs this resolver from the
+    # credential row). Round 1 (D1) made the row's fold key depend on it: the
+    # digest below is derived from the WHOLE label, which is what lets a genuine
+    # account change never fold behind a rendered sentence.
+    recorder.set_label_resolver(lambda credential_id: "me@example.test")
     recorder.set_change_handler(
         functools.partial(
             session._on_credential_binding_change,  # noqa: SLF001 — the production wiring
@@ -1045,6 +1051,15 @@ async def test_n1_first_serve_journals_no_notice_and_a_change_journals_one(
         assert [row["payload"].get("custom_type") for row in after].count(
             SESSION_BINDING_CUSTOM_TYPE
         ) == 2
+        # ROUND 1 (D1): the row records the digest OF THE FULL label — the same
+        # one the sentence would show if the label needed eliding — because the
+        # transcript's fold compares identity, never the bounded sentence.
+        from local_operator.network.credentials.messages import (
+            account_label_discriminator,
+        )
+
+        digest = notices[0]["payload"]["details"].get("account_digest")
+        assert digest == account_label_discriminator("me@example.test"), notices[0]["payload"]
     finally:
         store.close()
         await session.dispose()

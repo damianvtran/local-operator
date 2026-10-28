@@ -18382,15 +18382,19 @@ class _PeekDigest(NamedTuple):
 def _peek_message_entries(entries: Sequence[TranscriptEntry]) -> list[TranscriptEntry]:
     """The entries that RENDER as steps — the renderer's own filter.
 
-    ``_render_transcript_steps`` counts only ``message`` rows (compaction and
-    bookkeeping rows are invisible to a reader), so any step arithmetic must
-    count with the same predicate; keeping it in one place is what stops the
-    walk's window from disagreeing with the renderer's count.
+    ``_render_transcript_steps`` numbers only the rows it renders, so any step
+    arithmetic must count with the SAME predicate; keeping it in one place is
+    what stops the walk's window from disagreeing with the renderer's count.
+    Since round 1 of #3098 that predicate also refuses the account-change
+    notice (``harness/comms.py`` ``is_peek_step_entry``: its sentence names the
+    account, and peek lands in model context), so this function must drop it
+    too — otherwise the window would reserve a slot for a step that is never
+    rendered and every cursor computed from these rows would sit one step off.
     """
 
-    from local_operator.session.transcript import ENTRY_MESSAGE
+    from local_operator.harness.comms import is_peek_step_entry
 
-    return [entry for entry in entries if entry.type == ENTRY_MESSAGE]
+    return [entry for entry in entries if is_peek_step_entry(entry)]
 
 
 def _peek_window(

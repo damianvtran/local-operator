@@ -472,7 +472,9 @@ async def test_a_legacy_flood_of_binding_notices_folds_to_one_row() -> None:
             for block in app.query_one(TranscriptView).blocks()
             if isinstance(block, NoticeBlock)
         ]
-    assert notices == [same, switched], notices
+    # Round 1 (D2): the folded row states how many rows it stands for, and a
+    # different sentence is still its own row rather than another repetition.
+    assert notices == [f"{same}  \u00d712", switched], notices
 
 
 @pytest.mark.asyncio
@@ -515,7 +517,98 @@ async def test_an_alternating_flood_of_identical_notices_folds_to_one_row() -> N
             for block in app.query_one(TranscriptView).blocks()
             if isinstance(block, NoticeBlock)
         ]
-    assert notices == [same, named], notices
+    # Round 1 (D2): one row, carrying how many notices folded into it.
+    assert notices == [f"{same}  \u00d720", named], notices
+
+
+@pytest.mark.asyncio
+async def test_notices_naming_different_accounts_never_fold_into_one_row() -> None:
+    """One sentence, two account identities: BOTH paint.
+
+    Round 1, D1. The fold compares the row's FULL identity
+    (``details["account_digest"]``, derived by the writer from the whole label),
+    never the bounded sentence — a sentence is a rendering, and comparing
+    renderings is what let a genuine change disappear behind a truncation
+    collision. The sentences here are deliberately EQUAL: exactly the shape a
+    collision produced, and it must not collapse.
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage
+    from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+    sentence = "[session credential] This session is now using aaaa\u20261111 on my-mac."
+
+    def _notice(digest: str) -> CustomMessage:
+        return CustomMessage(
+            custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": sentence,
+                "provider": "stub",
+                "owner_device": "d_local",
+                "credential_id": 125,
+                "account_digest": digest,
+            },
+        )
+
+    session = FakeSession()
+    session._history = [_notice("aaaaaaaa"), _notice("bbbbbbbb")]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
+        await pilot.pause()
+        notices = [
+            block._text
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+    assert notices == [sentence, sentence], notices
+
+
+@pytest.mark.asyncio
+async def test_a_collapsed_run_states_how_many_notices_it_stands_for() -> None:
+    """A fold says how many rows it swallowed — quietly, in this row only.
+
+    Round 1, D2: collapsing a run to one line is right, but a reader could not
+    tell one change from forty. The marker is a bare multiplier, never "3
+    account changes": in the live incident behind #3098 those rows were the SAME
+    account reported repeatedly, so the count is a volume fact about the
+    recording, not a claim that each row was a switch.
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage
+    from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+    sentence = "[session credential] This session is now using the stub login on my-mac."
+
+    def _notice() -> CustomMessage:
+        return CustomMessage(
+            custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": sentence,
+                "provider": "stub",
+                "owner_device": "my-mac",
+                "credential_id": 125,
+                "account_digest": "aaaaaaaa",
+            },
+        )
+
+    session = FakeSession()
+    session._history = [_notice(), _notice(), _notice()]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
+        await pilot.pause()
+        notices = [
+            block._text
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+    assert len(notices) == 1, notices
+    assert notices[0] == f"{sentence}  \u00d73", notices
+    # The count is the ROW's, not a second notice: nothing else was painted.
+    assert "3 account" not in notices[0]
 
 
 @pytest.mark.asyncio

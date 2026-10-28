@@ -1393,6 +1393,87 @@ async def test_peek_cursor_pages_round_trip_without_gaps_or_repeats(root: Path) 
 
 
 @pytest.mark.asyncio
+async def test_sessions_peek_hides_the_account_notice_and_keeps_cursors_aligned(
+    root: Path,
+) -> None:
+    """``sessions peek`` is model context too, and its cursors must not shift.
+
+    Round 1, R1. The account-change notice names the account, and this surface
+    rendered it as a ``system`` step — a sentence carrying an email, inside a
+    tool result. It is not a step now, and because the window arithmetic counts
+    with the SAME predicate (``_peek_message_entries``), the pages either side of
+    a hidden row still meet exactly: no gap, no repeat, and the footer's cursor is
+    the oldest SHOWN row rather than the oldest row the walk read past.
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage, Message
+    from local_operator.session.transcript import Transcript
+
+    label = "bound-account@example.test"
+    session_id = "eeee55556666"
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "created_at.json").write_text("1700000000.0", encoding="utf-8")
+    # Seeded through the real writer: the hidden row must be the shape the
+    # transcript actually persists, or the cell would prove nothing about it.
+    journal = Transcript(directory)
+    for i in range(1, 13):
+        await journal.append_message(Message.user(f"row {i}"))
+        if i == 6:
+            await journal.append_message(
+                CustomMessage(
+                    custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+                    attribution="system",
+                    details={
+                        "text": (
+                            "[session credential] This session is now using " f"{label} on my-mac."
+                        ),
+                        "provider": "stub",
+                        "owner_device": "d_local",
+                        "credential_id": 125,
+                        "account_digest": "deadbeef",
+                    },
+                ),
+                preserve_mtime=True,
+            )
+    ids = [
+        entry.id
+        for entry in journal.entries()
+        if (entry.payload or {}).get("custom_type") != SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    ]
+    assert len(ids) == 12
+
+    tail = await _peek(root, {"op": "peek", "session": session_id, "steps": 3})
+    assert not tail.is_error, tail.text
+    assert label not in tail.text
+    assert label not in json.dumps(tail.details or {})
+    # The last three MESSAGE rows, not shifted by the hidden notice.
+    assert _rows_in(tail.text) == {10, 11, 12}
+    assert (tail.details or {}).get("steps_shown") == 3
+
+    # A page whose window STRADDLES the hidden row: the three steps before row 9
+    # are rows 6, 7 and 8 — the notice sits between 6 and 7 and must neither
+    # appear nor consume one of the three slots.
+    first = await _peek(root, {"op": "peek", "session": session_id, "before_id": ids[8]})
+    assert not first.is_error, first.text
+    assert label not in first.text
+    assert _rows_in(first.text) == {6, 7, 8}
+    cursor = re.search(r"before_id=([0-9a-f]{32}) for earlier", first.text)
+    assert cursor is not None, first.text
+    assert cursor.group(1) == ids[5], "the cursor is the oldest SHOWN step, row 6"
+
+    second = await _peek(root, {"op": "peek", "session": session_id, "before_id": cursor.group(1)})
+    assert not second.is_error, second.text
+    assert _rows_in(second.text) == {3, 4, 5}
+
+    # The digest counts the rows a reader can SEE: the hidden one is not a step.
+    digest = await _peek(root, {"op": "peek", "session": session_id, "digest": True})
+    assert not digest.is_error, digest.text
+    assert label not in digest.text
+    assert "12 steps seen" in digest.text
+
+
+@pytest.mark.asyncio
 async def test_peek_around_window_reports_both_edges(root: Path) -> None:
     directory, ids, _ = _big_journal(root, "dddd77778888", rows=100, pad=40)
     result = await _peek(root, {"op": "peek", "session": "dddd77778888", "around_id": ids[49]})

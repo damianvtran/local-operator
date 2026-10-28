@@ -21851,6 +21851,7 @@ class Session:
         together cannot invert against the row write they narrate.
         """
         from local_operator.network.credentials.messages import (
+            account_label_digest_for_binding,
             render_binding_change_notice,
         )
 
@@ -21868,6 +21869,22 @@ class Session:
                 "owner_device": binding.owner_device,
                 "owner_device_name": binding.owner_device_name,
                 "credential_id": binding.credential_id,
+                # THE FULL IDENTITY, for the transcript's fold (design round 1,
+                # D1). The sentence is a BOUNDED rendering of the label, and a
+                # fold that compares sentences alone would collapse a genuine
+                # change whose rendering happened to coincide — which is exactly
+                # what a bare truncation made possible. This is the same digest
+                # the elision prints, so the row's identity and the reader's
+                # eyes never disagree; it is derived from the operator-facing
+                # label and carries nothing else (§2.1: no pool holder's label
+                # rides the record beyond the row the operator already reads).
+                # Omitted for a row that names no account: there the sentence is
+                # the only identity the row has.
+                **(
+                    {"account_digest": digest}
+                    if (digest := account_label_digest_for_binding(binding))
+                    else {}
+                ),
             },
         )
         try:

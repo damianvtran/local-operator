@@ -268,13 +268,25 @@ SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE = "session_mcp_unavailable"
 #: ``network/credentials/messages.py`` (the credential copy home) and carried
 #: in ``details["text"]``, exactly like the MCP and shape notices.
 #:
-#: OPERATOR-FACING, AND THE EXCLUSION IS THE FEATURE: ``harness/render.py``'s
-#: allow-list deliberately does not name this type, so the row reaches the
-#: transcript, the TUI's notice fold and replay, and stops there. Two reasons it
+#: OPERATOR-FACING, AND THE EXCLUSION IS THE FEATURE. WHICH SURFACES MAY SHOW
+#: THIS ROW'S TEXT IS AN EXPLICIT, SHORT LIST, because since round 1 of #3098 the
+#: sentence NAMES THE ACCOUNT (``network/credentials/messages.py``):
+#:
+#: * the operator-facing transcript row itself — the TUI's notice block, live
+#:   and on replay. That reader is the one the notice exists for.
+#: * NOTHING ELSE. Not the model (``harness/render.py``'s allow-list does not
+#:   name this type), not a peek/step result (``harness/comms.py``'s
+#:   ``is_peek_step_entry``: a peek is pasted into a TOOL RESULT, which is model
+#:   context — round 1's MAJOR), not the search index
+#:   (``session/transcript_index.py``'s visibility rule), and not the desktop
+#:   transcript rows (``harness/rows.py`` ``is_binding_notice_row``). A peer
+#:   replica sees exactly the row the operator already sees and nothing more.
+#:
+#: A new reader that wants this row's text must add itself here and say why in
+#: review; the label is the reason the list exists, and it is also why the row
 #: must not become a model turn: the notice exists because a session must not
-#: SILENTLY change accounts (the operator is the reader who can act on it), and
-#: its sentence may carry the account label, which §2.1 keeps operator-facing
-#: only. It is its own type rather than a ``session_incident`` for the reason
+#: SILENTLY change accounts (the operator is the reader who can act on it).
+#: §2.1 keeps a pool holder's label operator-facing only. It is its own type rather than a ``session_incident`` for the reason
 #: the MCP pair states: nothing failed, no turn died, and the incident shape's
 #: "This is why the previous turn ended" tail would be a lie. It is not a
 #: ``session_credential`` either — that type is about a stored env-var

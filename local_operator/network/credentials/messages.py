@@ -616,6 +616,55 @@ def _device_phrase(name: str, fallback: str) -> str:
 #: account reads the same length on both surfaces.
 _NOTICE_LABEL_LIMIT = 64
 
+#: Hex characters in :func:`account_label_discriminator`'s answer. Eight hex is a
+#: 32-bit digest: the suffix costs 9 cells of the display bound (``…`` + 8) and
+#: buys a spelling that two accounts cannot share without also sharing every
+#: character of the visible prefix.
+_ACCOUNT_LABEL_DIGEST = 8
+
+#: How much of a label is sanitised before the display bound is applied. Well
+#: above ``providers/auth_store.IDENTITY_LIMIT`` (256), so a real label is hashed
+#: whole; a label past even this is bounded before hashing, which is a stated
+#: limit rather than a silent one.
+_NOTICE_LABEL_SOURCE_LIMIT = 4096
+
+
+def account_label_discriminator(label: str) -> str:
+    """A short, stable, NON-SECRET spelling of ``label``'s full identity.
+
+    WHY IT EXISTS (design round 1, D1): the display bound truncates, so two
+    DIFFERENT long labels could truncate to the identical 64 cells — and a real
+    account change then rendered the same sentence as the one before it, which
+    the transcript's notice fold collapsed into a single row. The operator was
+    told once about two switches, with no way to see the second.
+
+    A digest of the FULL label, appended after an elision, makes the rendered
+    spelling injective in practice: two labels collide only if their visible
+    prefixes AND their digests match. It is derived from an operator-facing
+    label, so it discloses nothing the sentence does not already disclose — and
+    it is NOT a secret, a token, or a key: nothing here ever sees material, and
+    the same derivation is used for the row's own fold key
+    (``account_label_digest_for_binding``) so the display and the fold agree.
+    """
+    import hashlib
+
+    return hashlib.blake2s(label.encode("utf-8"), digest_size=4).hexdigest()[:_ACCOUNT_LABEL_DIGEST]
+
+
+def account_label_digest_for_binding(binding: "CredentialBinding") -> str:
+    """The fold key for a notice about ``binding`` — the FULL identity, not the display.
+
+    Written into the journaled row (``details["account"]``) by
+    ``Session.journal_credential_binding_change``. The transcript's fold compares
+    THIS, so a genuine change can never fold even if two rendered sentences
+    happened to coincide; the rendered text is compared too, for the older rows
+    that carry no digest at all.
+
+    Empty when the row names no account: then the sentence is the whole identity
+    the row has, and there is nothing more honest to compare.
+    """
+    return account_label_discriminator(binding.identity_label) if binding.identity_label else ""
+
 
 def _account_label(label: str) -> str:
     """The sign-in label as it may appear in a notice: one printable line.
@@ -626,10 +675,26 @@ def _account_label(label: str) -> str:
     helper for "untrusted text rendered as one line a person must read
     literally": escapes stripped, format characters made visible, whitespace
     collapsed, length bounded.
+
+    WHY ELIDED WITH A DIGEST rather than plainly truncated: see
+    :func:`account_label_discriminator` — truncation made two distinct accounts
+    render identically (design round 1, D1). The visible head is kept because a
+    reader recognises an account by its beginning; the digest carries the rest
+    of the identity that the bound had to drop.
+
+    WHERE IT MAY APPEAR: the operator-facing transcript row, and nowhere else —
+    the surface list lives on ``SESSION_BINDING_NOTICE_MESSAGE_TYPE`` in
+    ``harness/message_types.py``. A peek/step result is model context and must
+    never receive this string (``harness/comms.py`` ``is_peek_step_entry``).
     """
     from local_operator.ansi import sanitize_prompt_line
 
-    return sanitize_prompt_line(label or "", limit=_NOTICE_LABEL_LIMIT)
+    text = sanitize_prompt_line(label or "", limit=_NOTICE_LABEL_SOURCE_LIMIT)
+    if len(text) <= _NOTICE_LABEL_LIMIT:
+        return text
+    digest = account_label_discriminator(text)
+    keep = _NOTICE_LABEL_LIMIT - len(digest) - 1
+    return f"{text[:keep]}…{digest}"
 
 
 def _login_phrase(label: str, provider: str, owner: str) -> str:
@@ -644,6 +709,29 @@ def _login_phrase(label: str, provider: str, owner: str) -> str:
     if label:
         return f"{label} on {owner}"
     return f"the {provider} login on {owner}"
+
+
+def render_binding_notice_repeat(text: str, seen: int) -> str:
+    """``text`` with a quiet repetition marker — the operator-facing row ONLY.
+
+    WHY (design round 1, D2): a run of identical notices is ONE row now, so a
+    reader could not tell a single change from a run of forty, and a fold that
+    hides its own arithmetic is a quieter version of the flood it replaced. The
+    count says how many rows folded into this one.
+
+    WHAT IT DOES NOT SAY: "N account changes". In the live incident behind
+    #3098 the rows in such a run were the SAME account reported over and over —
+    a subagent's resolve misattributed to its parent — so the count is a VOLUME
+    fact about the recording, never a claim that each row was a real switch.
+    That distinction is why the marker is a bare multiplier rather than a
+    sentence: there is nothing honest to say about the rows beyond how many
+    there were.
+
+    It lives HERE, beside the sentence it annotates, because this module is the
+    credential copy home; the fold in ``tui/session_presentation.py`` calls it
+    rather than spelling a marker of its own.
+    """
+    return f"{text}  \u00d7{seen}"
 
 
 def render_binding_change_notice(

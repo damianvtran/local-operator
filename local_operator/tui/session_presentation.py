@@ -1177,6 +1177,7 @@ def project_settled_rows(
         turn_cut_tool_call,
         user_row_text,
     )
+    from local_operator.network.credentials.messages import render_binding_notice_repeat
     from local_operator.tui.app import (
         MONITOR_PROMPT_MESSAGE_TYPE,
         RESUME_OLDER_NOTICE,
@@ -1390,14 +1391,24 @@ def project_settled_rows(
     }
     # Only ADJACENT account notices may fold: any other row (a real turn above
     # all) resets this, so two switches a turn apart both paint. Within a run,
-    # a sentence identical to the one just painted tells the reader nothing the
+    # a notice identical to the one just painted tells the reader nothing the
     # first did not — and that was the flood's exact shape: a subagent's
     # account misattributed to its parent journaled A->B, B->A pairs whose
-    # sentences were identical because a local row carried no label. The row
-    # id is therefore NOT part of the fold key; the sentence now names the
-    # account (``render_binding_change_notice``), so a genuinely different
-    # account renders a different sentence and is never folded away.
-    last_binding_notice: tuple[Any, ...] | None = None
+    # sentences were identical because a local row carried no label. The row id
+    # is therefore NOT part of the fold key; the sentence names the account now
+    # (``render_binding_change_notice``), and the row also carries a digest OF
+    # THAT FULL IDENTITY (``details["account_digest"]``), which is what this
+    # key compares. Comparing the displayed string alone was not enough: the
+    # sentence is bounded, so two different long labels could render alike and
+    # a REAL switch folded away with them (design round 1, D1). A row written
+    # before the digest existed has none, and the sentence is then the whole
+    # identity that row carries.
+    #
+    # The tuple is ``(identity, painted block, reproductions)``: the block and
+    # its count are kept so a repeat can say how many rows folded into it
+    # (design round 1, D2) — one row that silently swallowed forty would be a
+    # quieter lie than the flood it replaced.
+    last_binding_notice: tuple[tuple[Any, ...], Any, int] | None = None
     with batch:
         for message in history:
             if getattr(message, "custom_type", None) != SESSION_BINDING_NOTICE_MESSAGE_TYPE:
@@ -1691,12 +1702,26 @@ def project_settled_rows(
             if getattr(message, "custom_type", None) == SESSION_BINDING_NOTICE_MESSAGE_TYPE:
                 details = getattr(message, "details", None) or {}
                 text = str(details.get("text", "")).strip()
-                identity = (text, details.get("provider"), details.get("owner_device"))
-                if text and identity == last_binding_notice:
+                identity = (
+                    text,
+                    details.get("provider"),
+                    details.get("owner_device"),
+                    # Absent on a row written before the digest existed, and on
+                    # a row that names no account: then the sentence is the
+                    # whole identity there is, and the count below says how many
+                    # rows it stands for.
+                    str(details.get("account_digest") or ""),
+                )
+                if text and last_binding_notice is not None and identity == last_binding_notice[0]:
+                    seen = last_binding_notice[2] + 1
+                    block = last_binding_notice[1]
+                    block.restate(render_binding_notice_repeat(text, seen), "warning")
+                    last_binding_notice = (identity, block, seen)
                     continue
                 if text:
-                    last_binding_notice = identity
-                    self._append_block(NoticeBlock(text, kind="warning", fold_width=fold_width))
+                    block = NoticeBlock(text, kind="warning", fold_width=fold_width)
+                    self._append_block(block)
+                    last_binding_notice = (identity, block, 1)
                     appended = True
                 continue
             # A SEND THAT WAS NOT ACKNOWLEDGED, written by the opt-in

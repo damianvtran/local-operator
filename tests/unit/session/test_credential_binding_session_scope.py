@@ -298,3 +298,52 @@ async def test_the_journaled_notice_names_the_local_account_from_its_row(tmp_pat
     assert all("identity_label" not in row for row in _binding_rows(transcript))
     notice = render_binding_change_notice(new, old, self_device=SELF)
     assert "b@example.test" in notice
+
+
+def test_two_long_labels_never_render_the_same_account() -> None:
+    """Labels past the display bound stay distinguishable (round 1, D1).
+
+    THE REPRO: two accounts whose labels share their first 64 cells rendered the
+    IDENTICAL sentence, so the transcript's fold collapsed a real second switch
+    into the first row — the operator was told once about two changes, and a
+    plain truncation cannot fix that. The elision carries a digest of the WHOLE
+    label, so two accounts differ in the rendered sentence whenever their
+    identities differ; that same digest is the row's fold key, so what the
+    reader sees and what the fold compares cannot drift apart.
+    """
+    from local_operator.network.credentials.messages import (
+        account_label_digest_for_binding,
+        account_label_discriminator,
+        render_binding_change_notice,
+    )
+
+    head = "a-very-long-local-part-that-runs-well-past-the-sixty-four-cell-bound-"
+    label_a = head + "alpha@example.test"
+    label_b = head + "bravo@example.test"
+
+    def local(row: int, label: str) -> CredentialBinding:
+        return CredentialBinding(
+            provider=PROVIDER,
+            owner_device=SELF,
+            owner_device_name="my-laptop",
+            credential_id=row,
+            identity_label=label,
+        )
+
+    to_a = render_binding_change_notice(local(104, label_a), local(125, label_b), self_device=SELF)
+    to_b = render_binding_change_notice(local(125, label_b), local(104, label_a), self_device=SELF)
+
+    assert to_a != to_b, "two different accounts must never render one sentence"
+    assert account_label_discriminator(label_a) in to_a
+    assert account_label_discriminator(label_b) in to_b
+    # ...and the fold key is that same digest, so the row cannot compare
+    # something its own sentence does not show.
+    assert account_label_digest_for_binding(local(104, label_a)) == (
+        account_label_discriminator(label_a)
+    )
+    # Short labels are untouched: no churn for the ordinary email case.
+    short = render_binding_change_notice(
+        local(104, "a@example.test"), local(125, "b@example.test"), self_device=SELF
+    )
+    assert "a@example.test on my-laptop" in short
+    assert account_label_discriminator("a@example.test") not in short
