@@ -3444,7 +3444,8 @@ class TeamBridgeClient:
         authorization and a matching conditional 304 under that same login.
         """
         from local_operator.paths import config_dir
-        from local_operator.team_bridge.avatar_cache import AVATAR_CACHE, Entity
+        from local_operator.team_bridge import avatar_cache
+        from local_operator.team_bridge.avatar_cache import Entity
         from local_operator.team_bridge.types import is_account_id
 
         if (
@@ -3460,7 +3461,7 @@ class TeamBridgeClient:
         scope = (str((self._config_dir or config_dir()).resolve()), self._base_url)
         row = self._pinned_row()
         if row is None:
-            AVATAR_CACHE.admit(scope, None)
+            avatar_cache.admit(scope, None)
             raise BridgeSignInRequired(SIGN_IN_SENTENCE)
         incarnation = store.native_login_incarnation(row.id)
 
@@ -3473,24 +3474,24 @@ class TeamBridgeClient:
                 or current.data.get("account_id") != expected_account_id
                 or store.native_login_incarnation(row.id) != incarnation
             ):
-                AVATAR_CACHE.admit(scope, None)
+                avatar_cache.admit(scope, None)
                 raise BridgeRefusal(
                     ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409
                 )
 
         check_owner()
         authority = (row.id, expected_account_id, incarnation)
-        AVATAR_CACHE.admit(scope, authority)
+        avatar_cache.admit(scope, authority)
         key = (scope, authority, target_account_id, v, size)
         try:
             access = await self._guarded_access(expected_account_id)
         except (BridgeRefusal, BridgeSignInRequired):
-            AVATAR_CACHE.admit(scope, None)
+            avatar_cache.admit(scope, None)
             raise
         check_owner()
         if access is None or access.credential_id != row.id:
             raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
-        cached = AVATAR_CACHE.get(key)
+        cached = avatar_cache.AVATAR_CACHE.get(key)
         try:
             response = await self._dispatch(
                 "GET",
@@ -3503,15 +3504,15 @@ class TeamBridgeClient:
                 if_none_match=cached.etag if cached else None,
             )
         except httpx.HTTPError as failure:
-            AVATAR_CACHE.discard(key)
+            avatar_cache.AVATAR_CACHE.discard(key)
             raise BridgeUnreachable() from failure
         except BridgeRefusal:
-            AVATAR_CACHE.discard(key)
+            avatar_cache.AVATAR_CACHE.discard(key)
             raise
         check_owner()
         # Remove before interpreting the response: errors, malformed 304s and
         # no-store must never leave an entity available for a later retry.
-        AVATAR_CACHE.discard(key)
+        avatar_cache.AVATAR_CACHE.discard(key)
         if response.status_code >= 400:
             raise _refusal(response)
         etag = response.headers.get("etag")
@@ -3519,7 +3520,7 @@ class TeamBridgeClient:
         if response.status_code == 304 and cached is not None:
             if (etag is None or etag == cached.etag) and not response.content:
                 if storable:
-                    AVATAR_CACHE.put(key, cached)
+                    avatar_cache.AVATAR_CACHE.put(key, cached)
                 return cached.body, cached.mime
         mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
         if response.status_code != 200 or mime not in ATTACHMENT_MIME_TYPES or not response.content:
@@ -3531,8 +3532,102 @@ class TeamBridgeClient:
         # Only a bounded HTTP entity-tag can authorize conditional reuse. No
         # synthetic validators: an upstream without ETag simply cold-fetches.
         if storable and etag and re.fullmatch(r'(?:W/)?"[\x21\x23-\x7e]{0,254}"', etag):
-            AVATAR_CACHE.put(key, Entity(response.content, mime, etag))
+            avatar_cache.AVATAR_CACHE.put(key, Entity(response.content, mime, etag))
         return response.content, mime
+
+    def _avatar_authority(self, expected_account_id: str) -> tuple[Any, Any]:
+        """``(scope, authority)`` for the CURRENT login, exactly as ``fetch_avatar`` keys it.
+
+        Local only (no refresh, no network): the notification composite uses it
+        to key its cache under the same prefix the raw cache uses, so one
+        ``avatar_cache.admit`` purges both. Refuses like ``fetch_avatar`` does
+        when the captured viewer is not the signed-in login.
+        """
+
+        from local_operator.paths import config_dir
+        from local_operator.team_bridge import avatar_cache
+
+        self._require_destination()
+        store = self._auth_store()
+        scope = (str((self._config_dir or config_dir()).resolve()), self._base_url)
+        row = self._pinned_row()
+        if row is None:
+            avatar_cache.admit(scope, None)
+            raise BridgeSignInRequired(SIGN_IN_SENTENCE)
+        incarnation = store.native_login_incarnation(row.id)
+        if not incarnation or row.data.get("account_id") != expected_account_id:
+            avatar_cache.admit(scope, None)
+            raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
+        authority = (row.id, expected_account_id, incarnation)
+        avatar_cache.admit(scope, authority)
+        return scope, authority
+
+    async def notification_avatar(
+        self,
+        sender_account_id: str,
+        *,
+        kind: str,
+        theme: str,
+        size: int,
+        initials: str,
+        v: str | None,
+        expected_account_id: str,
+    ) -> bytes:
+        """One precomposed OS-notification PNG for a Team Bridge sender.
+
+        ``v`` present: the photo comes ONLY from :meth:`fetch_avatar` (closed
+        account route, revalidated under this login), and the composite is
+        keyed by the digest of the bytes the hub just authorized -- a cached
+        composite can never be served for a photo the hub no longer vouches
+        for. ``v`` absent: an initials placeholder, no network at all, still
+        fenced to the signed-in viewer. The authority is re-read after the
+        photo read so a login change during the fetch cannot file a composite
+        under the new login.
+        """
+
+        from local_operator.team_bridge import notification_avatar as na
+        from local_operator.team_bridge.types import is_account_id
+
+        if (
+            not is_account_id(sender_account_id)
+            or not is_account_id(expected_account_id)
+            or kind not in na.KINDS
+            or theme not in na.THEMES
+            or type(size) is not int
+            or size not in na.SIZES
+            or not na.valid_initials(initials)
+            or (v is not None and re.fullmatch(r"[0-9a-f]{16}", v) is None)
+        ):
+            raise ValueError("invalid notification avatar request")
+        variant = na.Variant(kind=kind, theme=theme, size=size, initials=initials)  # type: ignore[arg-type]
+        photo: bytes | None = None
+        if v is not None:
+            photo, _mime = await self.fetch_avatar(
+                sender_account_id, v=v, size=size, expected_account_id=expected_account_id
+            )
+        scope, authority = self._avatar_authority(expected_account_id)
+        identity = hashlib.sha256(photo).hexdigest() if photo is not None else None
+        key = (
+            scope,
+            authority,
+            "notification",
+            na.RENDER_VERSION,
+            sender_account_id,
+            identity,
+            # Initials only shape a placeholder; a photo key ignores them so a
+            # renamed sender with the same picture reuses its render.
+            initials if photo is None else None,
+            kind,
+            theme,
+            size,
+        )
+        return await na.render(
+            variant,
+            origin=self._base_url,
+            account_id=sender_account_id,
+            photo=photo,
+            cache_key=key,
+        )
 
     async def fetch_attachment(
         self,

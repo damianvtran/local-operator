@@ -444,6 +444,11 @@ def static_feature_flags() -> dict[str, Any]:
         # predates #227 answers either with 409 `outdated_hub`, which the
         # renderer shows as "the server needs an update" rather than probing.
         "team_bridge_owner_invitations": 1,
+        # `GET /v1/desktop/team-bridge/accounts/{id}/notification-avatar`: one
+        # precomposed PNG (photo or initials, LO corner badge, agent marker)
+        # for a Team Bridge OS notification's image slot. Own key so a desktop
+        # facing an older core keeps today's app icon instead of 404-probing.
+        "team_bridge_notification_avatar": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key

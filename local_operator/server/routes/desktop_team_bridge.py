@@ -2580,6 +2580,89 @@ async def get_account_avatar(
     )
 
 
+_NOTIFICATION_AVATAR_REQUIRED = frozenset(
+    {"kind", "theme", "size", "initials", "expected_account_id"}
+)
+_NOTIFICATION_AVATAR_PHOTO = frozenset({"v", "avatar_account_id"})
+
+
+@router.get("/v1/desktop/team-bridge/accounts/{target_account_id}/notification-avatar")
+async def get_notification_avatar(
+    target_account_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """One precomposed PNG for a Team Bridge OS notification's image slot.
+
+    Capability ``team_bridge_notification_avatar``. The desktop main process
+    calls this (never the renderer with a URL) after it has ALREADY posted
+    the notification, so nothing here is on the delivery path.
+
+    Closed query, every name single-valued:
+
+    * ``kind`` ``person|person_agent``; ``theme`` ``light|dark``; ``size``
+      ``64|256``; ``initials`` 0-2 letters/digits (may be empty);
+      ``expected_account_id`` the captured VIEWER receipt, as on ``/avatar``.
+    * ``v`` + ``avatar_account_id``: both or neither. With them, the photo is
+      read through the same closed ``/avatar`` relay; without, an initials
+      placeholder is drawn and no network is touched.
+
+    ``avatar_account_id`` must equal the path account: the Team Bridge sender
+    contract pins a ``person_agent``'s avatar to its OWNER's account (which is
+    the path id), so an avatar naming any other account is refused rather than
+    drawn under someone else's name.
+    """
+
+    from local_operator.team_bridge import notification_avatar as na
+
+    query = request.query_params
+    names = set(query)
+    photo_names = names & _NOTIFICATION_AVATAR_PHOTO
+    if (
+        not _NOTIFICATION_AVATAR_REQUIRED <= names
+        or names - _NOTIFICATION_AVATAR_REQUIRED - _NOTIFICATION_AVATAR_PHOTO
+        or photo_names not in (set(), set(_NOTIFICATION_AVATAR_PHOTO))
+        or any(len(query.getlist(key)) != 1 for key in names)
+    ):
+        _raise_read("invalid_request")
+    if (
+        not is_account_id(target_account_id)
+        or not is_account_id(query["expected_account_id"])
+        or query["kind"] not in na.KINDS
+        or query["theme"] not in na.THEMES
+        or query["size"] not in {"64", "256"}
+        or not na.valid_initials(query["initials"])
+        or (photo_names and re.fullmatch(r"[0-9a-f]{16}", query["v"]) is None)
+        or (photo_names and query["avatar_account_id"] != target_account_id)
+    ):
+        _raise_read("invalid_request")
+    try:
+        data = await _conversation_reply(
+            _conversation_client(config_manager).notification_avatar(
+                target_account_id,
+                kind=query["kind"],
+                theme=query["theme"],
+                size=int(query["size"]),
+                initials=query["initials"],
+                v=query["v"] if photo_names else None,
+                expected_account_id=query["expected_account_id"],
+            )
+        )
+    except na.AvatarImageRejected:
+        # The hub's bytes were not a bounded PNG/JPEG: same class as an
+        # avatar body this relay refuses to serve.
+        _raise_read("malformed_page")
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
 @router.get(
     "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}"
     "/attachments/{attachment_id}"
