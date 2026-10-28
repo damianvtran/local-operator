@@ -1,0 +1,122 @@
+{
+  "schema": "tb-moderation-caselist-v1",
+  "dataset_version": "2026-10-b",
+  "_why": [
+    "One file per CATEGORY, not per bucket, so a reviewer can see the whole",
+    "argument for one category in one place and so a category can be re-run alone",
+    "(--category matches these files' categories). boundary_d10.jsonl is the ONE",
+    "exception: it collects the four open decision items D10 across two categories,",
+    "because a boundary RULING is reviewed as a set rather than per category.",
+    "",
+    "This manifest is the version stamp the report records. Changing a case file",
+    "without changing dataset_version makes two reports incomparable, which is the",
+    "one thing an eval must not allow - so --dry-run fails when the manifest's",
+    "counts disagree with the files."
+  ],
+  "files": [
+    {
+      "path": "allow_work_coordination.jsonl",
+      "category": "work_coordination",
+      "label": "allow"
+    },
+    {
+      "path": "allow_work_how.jsonl",
+      "category": "work_how",
+      "label": "allow"
+    },
+    {
+      "path": "allow_work_ownership.jsonl",
+      "category": "work_ownership",
+      "label": "allow"
+    },
+    {
+      "path": "allow_work_status.jsonl",
+      "category": "work_status",
+      "label": "allow"
+    },
+    {
+      "path": "boundary_d10.jsonl",
+      "category": "*",
+      "label": "*"
+    },
+    {
+      "path": "grey_work_artifact.jsonl",
+      "category": "grey_work_artifact",
+      "label": "grey"
+    },
+    {
+      "path": "refuse_activity_surveillance.jsonl",
+      "category": "activity_surveillance",
+      "label": "refuse"
+    },
+    {
+      "path": "refuse_local_data.jsonl",
+      "category": "local_data",
+      "label": "refuse"
+    },
+    {
+      "path": "refuse_manipulation.jsonl",
+      "category": "manipulation",
+      "label": "refuse"
+    },
+    {
+      "path": "refuse_model_misuse.jsonl",
+      "category": "model_misuse",
+      "label": "refuse"
+    },
+    {
+      "path": "refuse_new_work.jsonl",
+      "category": "new_work",
+      "label": "refuse"
+    },
+    {
+      "path": "refuse_other_org.jsonl",
+      "category": "other_org",
+      "label": "refuse"
+    },
+    {
+      "path": "refuse_personal_info.jsonl",
+      "category": "personal_info",
+      "label": "refuse"
+    },
+    {
+      "path": "refuse_personal_work.jsonl",
+      "category": "personal_work",
+      "label": "refuse"
+    },
+    {
+      "path": "refuse_plugin_exfiltration.jsonl",
+      "category": "plugin_exfiltration",
+      "label": "refuse"
+    },
+    {
+      "path": "refuse_prompt_extraction.jsonl",
+      "category": "prompt_extraction",
+      "label": "refuse"
+    },
+    {
+      "path": "refuse_secrets.jsonl",
+      "category": "secrets",
+      "label": "refuse"
+    }
+  ],
+  "expected_counts": {
+    "allow_work_coordination.jsonl": 8,
+    "allow_work_how.jsonl": 11,
+    "allow_work_ownership.jsonl": 10,
+    "allow_work_status.jsonl": 15,
+    "boundary_d10.jsonl": 4,
+    "grey_work_artifact.jsonl": 8,
+    "refuse_activity_surveillance.jsonl": 14,
+    "refuse_local_data.jsonl": 14,
+    "refuse_manipulation.jsonl": 18,
+    "refuse_model_misuse.jsonl": 7,
+    "refuse_new_work.jsonl": 6,
+    "refuse_other_org.jsonl": 14,
+    "refuse_personal_info.jsonl": 12,
+    "refuse_personal_work.jsonl": 8,
+    "refuse_plugin_exfiltration.jsonl": 8,
+    "refuse_prompt_extraction.jsonl": 8,
+    "refuse_secrets.jsonl": 12
+  }
+}
