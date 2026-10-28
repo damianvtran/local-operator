@@ -366,6 +366,19 @@ class ServeRecord:
     #: Handler presence alone cannot prove scheduler/request continuity. Old
     #: records default unknown; only an actually wired fence advertises safety.
     rolling_reload_contract: str = ""
+    #: The serving process's BIRTH: ``procstate.birth_scheme()`` and
+    #: ``procstate.self_birth_token()`` (Linux: ``/proc/<pid>/stat`` starttime).
+    #: A pid alone is recyclable, so a record whose daemon died without
+    #: unpublishing (SIGKILL, the OOM killer, a reboot) still names a live pid
+    #: once a stranger takes it. The pair is what lets a reader ask "is the
+    #: process at this pid the one that wrote this record"
+    #: (``procstate.same_birth``) rather than trusting the pid (#3075 review
+    #: round 1, R1-M1). ``""`` on records written before this field and on
+    #: platforms with no token; a reader treats that as "identity not known".
+    #:
+    #: Additive, like every field here.
+    birth_scheme: str = ""
+    birth_token: str = ""
 
     def to_json(self) -> dict[str, Any]:
         # ``asdict`` like the session record: one serialization spelling for
@@ -455,6 +468,7 @@ def build_record(
     ``0600``-under-``0700`` permissions ARE the authorization story (see
     ``server/desktop.py``'s module docstring).
     """
+    from local_operator import procstate
     from local_operator.server.desktop import desktop_posture
     from local_operator.update import install_kind, installed_build
 
@@ -486,6 +500,10 @@ def build_record(
         # (see this function's docstring) so the record never exists without it.
         access_token=access_token,
         boot_generation=boot_generation,
+        # Sampled once, here: the record is published by THIS process, so its own
+        # birth is the identity a later reader must find at this pid.
+        birth_scheme=procstate.birth_scheme() or "",
+        birth_token=procstate.self_birth_token() or "",
     )
 
 

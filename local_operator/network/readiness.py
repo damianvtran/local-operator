@@ -1419,10 +1419,48 @@ def resilience_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) ->
 # STALE; ``ready`` and ``peers`` did not. The same daemon lived in the SSH
 # login's ``session-2122.scope``: no unit held it, so nothing would restart it.
 #
-# THE FACT IS THE RECORD, read through the same two helpers ``lop services``
-# uses (``serve_registry.scan`` for the records, ``services._current_stamp`` for
-# the install, ``services._serves_current_build`` for the comparison), so the
-# two surfaces cannot disagree about which daemon is stale.
+# THE FACT IS THE RECORD, AND ONLY A PROVEN ONE. Each record is read through the
+# helpers ``lop services`` uses (``serve_registry.scan``, ``services._current_stamp``,
+# ``services._serves_current_build``), but a record is trusted ONLY when three
+# things hold at once: the record's pid is alive, its heartbeat is fresh
+# (``live``), and the process now holding that pid was BORN when the record says
+# (``procstate.same_birth``).
+# Anything less is reported as "not known", never as a verdict about whatever now
+# holds the pid: a record left by a SIGKILLed daemon names a pid a stranger can
+# take, and the first version of this row called that stranger's cgroup a
+# supervised, current daemon (#3075 review round 1, R1-M1 / QA Q4).
+#
+# This is NOT the address probe ``lop services status`` makes, so the two can
+# still word one daemon differently; they cannot disagree about a recycled pid,
+# which is the case that produced a false ok.
+
+#: Per-field viewer bound: every peer-supplied string is cut to this BEFORE it is
+#: composed, whatever the producer claims to have bounded (QA Q3: a peer frame
+#: under the link bound rendered a 1.75 MB line).
+SERVE_FIELD_LIMIT = 64
+#: How many daemons a row names before "and N more" (QA Q3, R1-m1).
+SERVE_DAEMONS_RENDERED = 8
+#: The known names of a ``lop serve`` unit. NONE SHIPS YET, so no holder passes
+#: today unless it is literally one of these; any other ``.service`` (sshd,
+#: crond, a transient test unit) is "held by X, not a lop serve unit" — never ok
+#: (R1-m5). Lives here so the follow-up that ships the unit adds its name once.
+SERVE_UNIT_NAMES: frozenset[str] = frozenset({"lop-serve.service", "local-operator-serve.service"})
+
+
+def _peer_text(value: Any, limit: int = SERVE_FIELD_LIMIT) -> str | None:
+    """A peer-supplied string made safe to put on a terminal, or ``None``.
+
+    ``None`` for anything that is not a ``str`` — a wrong type is "not known",
+    and coercing it with ``str()`` is how ``['v']`` once rendered as a version
+    (QA Q1). Control sequences go through the product's one terminal stripper
+    (``ansi.strip_control_sequences``: C0/C1, CSI, OSC/DCS with payload), then
+    whitespace collapses so a field cannot forge a second report line (QA Q2).
+    """
+    if not isinstance(value, str):
+        return None
+    from local_operator.ansi import strip_control_sequences
+
+    return " ".join(strip_control_sequences(value).split())[:limit]
 
 
 def _cgroup_of(pid: int) -> str | None:
@@ -1436,7 +1474,7 @@ def _cgroup_of(pid: int) -> str | None:
         return None
     try:
         text = Path(f"/proc/{int(pid)}/cgroup").read_text(encoding="utf-8", errors="replace")
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError):
         return None
     fallback: str | None = None
     for line in text.splitlines():
@@ -1454,35 +1492,73 @@ def _cgroup_of(pid: int) -> str | None:
 _LOGIN_SCOPE_RE = re.compile(r"^session-[A-Za-z0-9_.-]+\.scope$")
 
 
-def serve_supervision(cgroup: str | None) -> tuple[str, str]:
+def serve_supervision(cgroup: Any) -> tuple[str, str]:
     """What holds a process, read from its cgroup path: ``(kind, segment)``.
 
-    ``kind`` is ``unit`` (a ``*.service`` — something restarts it),
-    ``login_session`` (a logind ``session-*.scope`` — an SSH or console login,
-    which nothing restarts) or ``unknown``. The INNERMOST ``.service``/``.scope``
+    ``kind`` is ``unit`` (a known ``lop serve`` unit, :data:`SERVE_UNIT_NAMES`),
+    ``other_unit`` (some other ``*.service`` — something holds it, but nothing we
+    know restarts a serve daemon), ``login_session`` (a logind
+    ``session-*.scope``) or ``unknown``. The INNERMOST ``.service``/``.scope``
     segment decides, because a user service sits under ``user@<uid>.service``
-    and a session scope under ``user-<uid>.slice``: the outer segments name the
-    manager, not the holder.
+    and a session scope under ``user-<uid>.slice``. A non-string (a skewed or
+    hostile peer's value) is ``unknown`` — it must never raise (QA Q1).
     """
-    if not cgroup:
+    if not isinstance(cgroup, str) or not cgroup:
         return ("unknown", "")
     for segment in reversed([part for part in cgroup.split("/") if part]):
         if segment.endswith(".service"):
-            return ("unit", segment)
+            return ("unit" if segment in SERVE_UNIT_NAMES else "other_unit", segment)
         if segment.endswith(".scope"):
             return ("login_session" if _LOGIN_SCOPE_RE.match(segment) else "unknown", segment)
     return ("unknown", "")
 
 
+def _daemon_identity(record: Any, state: str) -> str:
+    """Is the process at ``record.pid`` the daemon this record describes?
+
+    ``proven`` / ``not_reporting`` (heartbeat lapsed: ``wedged``) /
+    ``not_this_daemon`` (a different process holds the pid) / ``unproven`` (the
+    record predates birth tokens, or the platform has none). Only ``proven`` may
+    produce a verdict; the rest are reported as not known.
+
+    START TIME, never the pid alone: ``same_birth`` compares the record's birth
+    token with the one sampled now (Linux: ``/proc/<pid>/stat`` starttime in clock
+    ticks), which a recycled pid cannot match. NO CMDLINE CHECK, deliberately:
+    ``services.is_serve_command`` (the strict brand proof ``reclaim`` signals on)
+    refuses a console-script daemon whose argv is ``python …/bin/lop serve`` —
+    measured on lop-remote-node-2, it rejected a real, birth-matching ``lop
+    serve`` — and adding it here would turn every such daemon into "another
+    process holds that pid". The birth match already excludes a stranger.
+    """
+    from local_operator import procstate
+
+    if state != "live":
+        return "not_reporting"
+    born = procstate.same_birth(
+        getattr(record, "birth_scheme", "") or None,
+        getattr(record, "birth_token", "") or None,
+        int(record.pid),
+    )
+    if born is False:
+        return "not_this_daemon"
+    if born is None:
+        return "unproven"
+    return "proven"
+
+
 def serve_daemons_fact(root: Path) -> dict[str, Any]:
-    """Every live ``lop serve`` daemon recorded under ``root``, plus the install.
+    """Every recorded ``lop serve`` daemon under ``root``, plus the install.
 
     READER MODE (``reap=False``): the readiness path must not be the reason a
-    record moves, the module's ``test_reads_create_nothing`` discipline. A
-    ``stale`` record (its pid is gone) hosts nothing and is left out; ``live``
-    and ``wedged`` are both processes that exist and both carry their state.
-    Names and versions only — the record's ``claim_key``/``access_token`` are
-    never copied.
+    record moves (``test_reads_create_nothing``). A ``stale`` record (its pid is
+    gone) hosts nothing and is left out. Every other record carries its
+    ``identity`` (:func:`_daemon_identity`), and its cgroup is read ONLY when the
+    identity is proven — a stranger's cgroup is not this device's to report.
+
+    NAMES AND VERSIONS ONLY: no ``prefix``/``install_kind`` (the viewer reads
+    neither, and the prefix names the account; R1-m3), never the record's
+    ``claim_key``/``access_token``. NEVER RAISES, whatever a record holds: this
+    runs inside the peer's ``net_readiness`` handler (QA Q1).
     """
     from local_operator import services
     from local_operator.server import registry as serve_registry
@@ -1495,18 +1571,21 @@ def serve_daemons_fact(root: Path) -> dict[str, Any]:
     for record, state in scanned:
         if state == "stale":
             continue
-        daemons.append(
-            {
-                "pid": int(record.pid),
-                "state": state,
-                "version": _bounded(record.version or "", 40),
-                "source_ref": _bounded(record.source_ref or "", 80),
-                "install_kind": _bounded(record.install_kind or "", 20),
-                "prefix": _safe_text(record.prefix or "", limit=300),
-                "reloadable": bool(getattr(record, "reloadable", False)),
-                "cgroup": _cgroup_of(record.pid),
-            }
-        )
+        try:
+            identity = _daemon_identity(record, state)
+            daemons.append(
+                {
+                    "pid": int(record.pid),
+                    "state": _bounded(state, 16),
+                    "identity": identity,
+                    "version": _bounded(record.version or "", 40),
+                    "source_ref": _bounded(record.source_ref or "", 80),
+                    "reloadable": bool(getattr(record, "reloadable", False)),
+                    "cgroup": _cgroup_of(record.pid) if identity == "proven" else None,
+                }
+            )
+        except Exception:  # noqa: BLE001 — one torn record costs itself only
+            continue
     daemons.sort(key=lambda daemon: daemon["pid"])
     # The install is read only when there is a daemon to compare against it: a
     # device that never ran `lop serve` pays nothing for this check.
@@ -1525,6 +1604,33 @@ def serve_daemons_fact(root: Path) -> dict[str, Any]:
     }
 
 
+#: Why a recorded daemon is not judged — keyed by ``_daemon_identity``'s answer.
+_IDENTITY_UNKNOWN_SENTENCE: dict[str, str] = {
+    "not_reporting": "is recorded but not answering (its heartbeat stopped)",
+    "not_this_daemon": "is recorded, but another process now holds that pid",
+    "unproven": "is recorded, but its process identity cannot be proven "
+    "(the record predates start-time stamps)",
+}
+
+
+def _serve_unknown_row(member: Any, *, peer_label: str, detail: str) -> dict[str, Any]:
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_SERVE_DAEMON,
+        ok=False,
+        code=CODE_UNKNOWN,
+        detail=detail,
+        source=SOURCE_UNKNOWN,
+    )
+
+
+def _pid_list(pids: Sequence[int]) -> str:
+    shown = ", ".join(f"pid {pid}" for pid in pids[:SERVE_DAEMONS_RENDERED])
+    extra = len(pids) - SERVE_DAEMONS_RENDERED
+    return shown + (f" and {extra} more" if extra > 0 else "")
+
+
 def serve_daemon_row(
     member: Any,
     facts: Mapping[str, Any],
@@ -1534,30 +1640,75 @@ def serve_daemon_row(
 ) -> dict[str, Any]:
     """(i) Is the ``lop serve`` daemon on ``peer_label`` current and supervised?
 
-    Three verdicts, all non-gating (``NON_GATING_EQUIPMENT``): STALE (its build
-    differs from the install's; ``lop services restart`` reloads it in place,
-    which is what fixed lop-remote-node-2), UNSUPERVISED (Linux: only a login
-    session's scope holds it), and ok. A peer whose answer predates this check,
-    or an install that cannot be read, is ``unknown`` — never a false ok.
+    Verdicts, all non-gating (``NON_GATING_EQUIPMENT``): STALE (its build differs
+    from the install's; ``lop services restart`` reloads it in place — what fixed
+    lop-remote-node-2), UNSUPERVISED (Linux: only a login session's scope holds
+    it), and ok. Everything that cannot be established is ``unknown`` — an older
+    peer, an unreadable install, a record whose process identity is not proven,
+    and ANY wrong-typed field (the whole fact or one entry) — never a false ok.
+
+    THE VIEWER TRUSTS NOTHING THE PEER SENT (QA Q1-Q3): each field is type-checked,
+    every string goes through :func:`_peer_text`, and the daemon list is capped at
+    :data:`SERVE_DAEMONS_RENDERED` names, so a hostile answer costs this one row,
+    renders in well under 1 KB, and leaves every other row of the report intact.
     """
     from local_operator import services
 
     fact = facts.get("serve_daemons")
     if not isinstance(fact, Mapping):
-        return _capability_row(
-            device_id=member.device_id,
-            device_name=peer_label,
-            capability=CAPABILITY_SERVE_DAEMON,
-            ok=False,
-            code=CODE_UNKNOWN,
+        return _serve_unknown_row(
+            member,
+            peer_label=peer_label,
             detail=(
                 "the peer's answer did not carry its serve daemons (it predates this "
                 "check), so whether they are current is not known"
             ),
-            source=SOURCE_UNKNOWN,
         )
-    daemons = [entry for entry in fact.get("daemons") or () if isinstance(entry, Mapping)]
-    if not daemons:
+    malformed = _serve_unknown_row(
+        member,
+        peer_label=peer_label,
+        detail=(
+            f"the serve-daemon facts from {peer_label} are malformed, so whether its "
+            "`lop serve` daemons are current is not known"
+        ),
+    )
+    raw_daemons = fact.get("daemons")
+    install = fact.get("install")
+    platform = fact.get("platform")
+    if not isinstance(raw_daemons, list) or not isinstance(platform, str):
+        return malformed
+    if install is not None and not isinstance(install, Mapping):
+        return malformed
+    entries: list[dict[str, Any]] = []
+    for entry in raw_daemons:
+        if not isinstance(entry, Mapping):
+            return malformed
+        pid = entry.get("pid")
+        version = _peer_text(entry.get("version"))
+        ref = _peer_text(entry.get("source_ref") or "")
+        cgroup = entry.get("cgroup")
+        # A peer that predates identity proofs sends no ``identity``: its pid was
+        # never checked against a start time, so it is UNPROVEN, never proven.
+        identity = entry.get("identity", "unproven")
+        if (
+            not isinstance(pid, int)
+            or isinstance(pid, bool)
+            or version is None
+            or ref is None
+            or (cgroup is not None and not isinstance(cgroup, str))
+            or not isinstance(identity, str)
+        ):
+            return malformed
+        entries.append(
+            {
+                "pid": pid,
+                "record": SimpleNamespace(version=version, source_ref=ref),
+                "cgroup": _peer_text(cgroup, 300) if cgroup is not None else None,
+                "reloadable": entry.get("reloadable") is True,
+                "identity": identity,
+            }
+        )
+    if not entries:
         return _capability_row(
             device_id=member.device_id,
             device_name=peer_label,
@@ -1566,31 +1717,38 @@ def serve_daemon_row(
             detail=f"no `lop serve` daemon is running on {peer_label}",
             source=source,
         )
-    install = fact.get("install")
+    install_version = _peer_text(install.get("version")) if install is not None else None
+    install_ref = _peer_text(install.get("source_ref") or "") if install is not None else None
     stamp = (
-        SimpleNamespace(
-            version=str(install.get("version") or ""),
-            source_ref=str(install.get("source_ref") or ""),
-        )
-        if isinstance(install, Mapping) and install.get("version")
+        SimpleNamespace(version=install_version, source_ref=install_ref or "")
+        if install_version
         else None
     )
-    linux = str(fact.get("platform") or "").startswith("linux")
-    stale: list[str] = []
-    unsupervised: list[str] = []
-    unknown: list[str] = []
+    linux = platform.startswith("linux")
+    stale: list[int] = []
+    stale_labels: set[str] = set()
+    held: list[str] = []
+    other: list[str] = []
+    unknown: list[int] = []
+    unknown_reasons: set[str] = set()
     fine: list[str] = []
     movable = True
     observed: list[dict[str, Any]] = []
-    for entry in daemons:
-        record = SimpleNamespace(
-            version=str(entry.get("version") or ""),
-            source_ref=str(entry.get("source_ref") or ""),
-        )
-        pid = entry.get("pid")
+    for item in entries:
+        pid = item["pid"]
+        record = item["record"]
         label = services._record_label(record)  # noqa: SLF001 — services' own spelling
-        who = f"the `lop serve` daemon on {peer_label} (pid {pid})"
-        kind, holder = serve_supervision(entry.get("cgroup")) if linux else ("n/a", "")
+        identity = item["identity"]
+        if identity != "proven":
+            # NOT A VERDICT ABOUT WHATEVER HOLDS THE PID (R1-M1): only the
+            # recorded daemon's own fresh, born-matching process is judged.
+            unknown.append(pid)
+            unknown_reasons.add(
+                _IDENTITY_UNKNOWN_SENTENCE.get(identity, "is recorded in an unknown state")
+            )
+            observed.append({"pid": pid, "identity": _bounded(identity, 16)})
+            continue
+        kind, holder = serve_supervision(item["cgroup"]) if linux else ("n/a", "")
         is_current = stamp is not None and services._serves_current_build(  # noqa: SLF001
             record, stamp
         )
@@ -1604,42 +1762,49 @@ def serve_daemon_row(
             }
         )
         if stamp is None:
-            unknown.append(
-                f"{who} runs {label}, and the install's build could not be read, so "
-                "whether it is current is not known"
-            )
+            unknown.append(pid)
+            unknown_reasons.add("runs a build the install cannot be compared with")
         elif not is_current:
-            movable = movable and bool(entry.get("reloadable"))
-            stale.append(
-                f"{who} runs {label} but the install is "
-                f"{services._record_label(stamp)}: "  # noqa: SLF001
-                "the remote sessions it hosts run that other build"
-            )
+            movable = movable and item["reloadable"]
+            stale.append(pid)
+            stale_labels.add(label)
         if kind == "login_session":
-            unsupervised.append(f"pid {pid} in {holder}")
+            held.append(f"pid {pid} in {holder}")
+        elif kind == "other_unit":
+            other.append(f"pid {pid} under {holder}")
         elif kind == "unknown" and linux:
-            unknown.append(
-                f"{who} runs in {entry.get('cgroup') or 'an unreadable cgroup'}, which this "
-                "check cannot place as a service unit or a login session"
-            )
+            unknown.append(pid)
+            unknown_reasons.add("runs in a cgroup this check cannot place")
         if stamp is not None and is_current and kind in ("unit", "n/a"):
             fine.append(
-                f"{who} runs the installed build ({label})"
-                + (f" under {holder}" if kind == "unit" else "")
+                f"the `lop serve` daemon on {peer_label} (pid {pid}) runs the installed "
+                f"build ({label})" + (f" under {holder}" if kind == "unit" else "")
             )
-    held: list[str] = []
-    if unsupervised:
+    sentences: list[str] = []
+    if stale:
+        sentences.append(
+            f"the `lop serve` daemon{'s' if len(stale) > 1 else ''} on {peer_label} "
+            f"({_pid_list(stale)}) run{'' if len(stale) > 1 else 's'} "
+            f"{', '.join(sorted(stale_labels)[:SERVE_DAEMONS_RENDERED])} but the install is "
+            f"{services._record_label(stamp)}: "  # noqa: SLF001
+            "the remote sessions it hosts run that other build"
+        )
+    if held:
         # ONE SENTENCE FOR EVERY DAEMON A LOGIN HOLDS: the consequence is the same
-        # for each, and the first render repeated it per pid (the rig's two
-        # daemons in one scope read as one sentence twice).
-        one = len(unsupervised) == 1
+        # for each, and the first render repeated it per pid.
+        one = len(held) == 1
+        shown = ", ".join(held[:SERVE_DAEMONS_RENDERED]) + (
+            f" and {len(held) - SERVE_DAEMONS_RENDERED} more"
+            if len(held) > SERVE_DAEMONS_RENDERED
+            else ""
+        )
         subject = (
-            f"the `lop serve` daemon on {peer_label} ({unsupervised[0]}) is"
+            f"the `lop serve` daemon on {peer_label} ({shown}) is"
             if one
-            else f"the `lop serve` daemons on {peer_label} ({', '.join(unsupervised)}) are"
+            else f"the `lop serve` daemons on {peer_label} ({shown}) are"
         )
         it, they, hosts = ("it", "it", "hosts") if one else ("them", "they", "host")
-        held.append(
+        sentences.append(
             # "A LOGOUT CAN", not "a logout does": measured on lop-remote-node-2,
             # logind's default KillUserProcesses=no left the stale daemon alive in
             # a session already `closing`. A reboot always ends it.
@@ -1647,15 +1812,40 @@ def serve_daemon_row(
             f"restarts {it}, so a reboot ends {it} and every remote session {they} {hosts}, "
             "and a logout can too"
         )
-    if not (stale or held or unknown):
+    if other:
+        # NAMED NEUTRALLY, NEVER OK (R1-m5): no `lop serve` unit ships, so another
+        # unit holding the daemon (sshd from a host without pam_systemd, crond) is
+        # not a supervisor that restarts it.
+        sentences.append(
+            f"the `lop serve` daemon on {peer_label} is held by another service "
+            f"({', '.join(other[:SERVE_DAEMONS_RENDERED])}"
+            + (
+                f" and {len(other) - SERVE_DAEMONS_RENDERED} more"
+                if len(other) > SERVE_DAEMONS_RENDERED
+                else ""
+            )
+            + "), not a lop serve unit"
+        )
+    if unknown:
+        sentences.append(
+            f"the `lop serve` daemon on {peer_label} ({_pid_list(unknown)}) "
+            + "; ".join(sorted(unknown_reasons))
+            + ", so whether it is current and supervised is not known"
+        )
+    if not sentences:
         return _capability_row(
             device_id=member.device_id,
             device_name=peer_label,
             capability=CAPABILITY_SERVE_DAEMON,
             ok=True,
-            detail="; ".join(fine),
+            detail="; ".join(fine[:SERVE_DAEMONS_RENDERED])
+            + (
+                f" and {len(fine) - SERVE_DAEMONS_RENDERED} more"
+                if len(fine) > SERVE_DAEMONS_RENDERED
+                else ""
+            ),
             source=source,
-            observed={"daemons": observed},
+            observed={"daemons": observed[:SERVE_DAEMONS_RENDERED]},
         )
     remedies: list[str] = []
     if stale:
@@ -1666,7 +1856,7 @@ def serve_daemon_row(
             else f"on {peer_label}, restart `lop serve` by hand: this daemon cannot reload "
             "itself in place"
         )
-    if unsupervised:
+    if held or other:
         # NAMED, NOT PRESCRIBED: no `lop serve` service unit ships yet, and a
         # hand-written unit would be a second supervisor the update path does not
         # know about. The follow-up is the unit; until it lands the honest remedy
@@ -1676,20 +1866,22 @@ def serve_daemon_row(
             f"until it ships, re-check {peer_label} after any reboot or logout and start "
             "`lop serve` again if it is gone"
         )
+    if unknown and not (stale or held or other):
+        remedies.append(f"on {peer_label}, run `lop services status` to see each daemon")
     # The code names the first fix a reader can act on now: the in-place reload
     # runs today, the supervision gap waits on the follow-up, and "not known"
     # comes last.
-    code = CODE_SERVE_STALE if stale else CODE_UNSUPERVISED if unsupervised else CODE_UNKNOWN
+    code = CODE_SERVE_STALE if stale else CODE_UNSUPERVISED if (held or other) else CODE_UNKNOWN
     return _capability_row(
         device_id=member.device_id,
         device_name=peer_label,
         capability=CAPABILITY_SERVE_DAEMON,
         ok=False,
         code=code,
-        detail="; ".join(stale + held + unknown),
+        detail="; ".join(sentences),
         remedies=remedies,
         source=source,
-        observed={"daemons": observed},
+        observed={"daemons": observed[:SERVE_DAEMONS_RENDERED]},
     )
 
 
@@ -2179,6 +2371,30 @@ def build_row(
     )
 
 
+def _ssh_github_clause(facts: Mapping[str, Any], peer_label: str) -> str:
+    """The SSH-shell sentence, TRUE FOR THIS PEER (#3075 review R1-m4).
+
+    "No GitHub access by design" holds only when the peer has no gh login of its
+    own: a node with ``~/.config/gh/hosts.yml`` carrying an entry gives an SSH
+    shell GitHub access through that login. So the strong sentence is stated
+    only on the tooling fact's ``has_entry is False``; any other reading says the
+    one thing that is always true — the brokered credential is not handed to an
+    interactive shell.
+    """
+    tooling = facts.get("tooling")
+    auth = tooling.get("gh_auth") if isinstance(tooling, Mapping) else None
+    has_entry = auth.get("has_entry") if isinstance(auth, Mapping) else None
+    if has_entry is False:
+        return (
+            f"An SSH shell on {peer_label} has no GitHub access by design: only "
+            "sessions Local Operator launches there get the brokered credential"
+        )
+    return (
+        f"An SSH shell on {peer_label} is not handed the brokered GitHub credential: "
+        "only sessions Local Operator launches there get it"
+    )
+
+
 def git_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[str, Any]:
     """(c) Will offloaded work that commits have an author?"""
     fact = facts.get("git")
@@ -2192,8 +2408,11 @@ def git_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[s
             detail="the peer's answer did not carry this check",
             source=SOURCE_UNKNOWN,
         )
-    name = _bounded(fact.get("user_name") or "", 200).strip()
-    email = _bounded(fact.get("user_email") or "", 200).strip()
+    # PEER TEXT, SO TERMINAL-SAFE (#3075 review R1-m1 / QA Q2): a `user.name`
+    # carrying ESC/BEL reached the terminal raw before this; ``_peer_text``
+    # strips control sequences and rejects a non-string.
+    name = (_peer_text(fact.get("user_name") or "", 200) or "").strip()
+    email = (_peer_text(fact.get("user_email") or "", 200) or "").strip()
     if name and email:
         return _capability_row(
             device_id=member.device_id,
@@ -2211,8 +2430,7 @@ def git_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[s
                 # a broken credential. The brokered credential is handed to the
                 # sessions the product launches, never to an interactive shell, so
                 # the shell's refusal is the design, not a fault.
-                f"An SSH shell on {peer_label} has no GitHub access by design: only "
-                "sessions Local Operator launches there get the brokered credential"
+                + _ssh_github_clause(facts, peer_label)
             ),
             source=SOURCE_PEER,
         )

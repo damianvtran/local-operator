@@ -18,13 +18,16 @@ Two properties are pinned here rather than only observed in the link tests:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from local_operator import procstate
 from local_operator.network import readiness, wire
 
 PEER = "d_" + "b" * 32
@@ -3072,10 +3075,9 @@ def _serve_fact(
             {
                 "pid": 537864,
                 "state": "live",
+                "identity": "proven",
                 "version": version,
                 "source_ref": source_ref,
-                "install_kind": "uv-tool",
-                "prefix": "/home/x/.local/share/lop/generations/g/tools/local-operator",
                 "reloadable": reloadable,
                 "cgroup": cgroup,
             }
@@ -3172,9 +3174,10 @@ def test_serve_daemon_row_without_an_install_to_compare_is_unknown() -> None:
 def test_serve_supervision_reads_the_innermost_unit_or_scope() -> None:
     assert readiness.serve_supervision(_LOGIN_SCOPE) == ("login_session", "session-2122.scope")
     assert readiness.serve_supervision(_SERVE_UNIT) == ("unit", "lop-serve.service")
-    assert readiness.serve_supervision("/system.slice/lop.service/sub") == (
-        "unit",
-        "lop.service",
+    # R1-m5: only a lop serve unit supervises; any other .service is named, never ok.
+    assert readiness.serve_supervision("/system.slice/sshd.service") == (
+        "other_unit",
+        "sshd.service",
     )
     assert readiness.serve_supervision("/user.slice/run-r1.scope")[0] == "unknown"
     assert readiness.serve_supervision(None)[0] == "unknown"
@@ -3205,6 +3208,8 @@ def test_serve_daemons_fact_reads_records_and_creates_nothing(
         install_kind="uv-tool",
         desktop=False,
         reloadable=True,
+        birth_scheme=procstate.birth_scheme() or "",
+        birth_token=procstate.self_birth_token() or "",
     )
     serve_registry.publish(record, root)
     monkeypatch.setattr(readiness, "_cgroup_of", lambda pid: _LOGIN_SCOPE)
@@ -3216,6 +3221,9 @@ def test_serve_daemons_fact_reads_records_and_creates_nothing(
     assert daemon["version"] == "0.90.1"
     assert daemon["cgroup"] == _LOGIN_SCOPE
     assert daemon["reloadable"] is True
+    assert daemon["identity"] == "proven"
+    # R1-m3: the viewer reads neither, and the prefix names the account.
+    assert "prefix" not in daemon and "install_kind" not in daemon
 
 
 def test_collect_peer_facts_carries_serve_daemons(tmp_path: Path) -> None:
@@ -3238,11 +3246,50 @@ def test_local_serve_daemon_rows_only_when_a_daemon_is_recorded(
 def test_git_row_says_an_ssh_shell_has_no_github_access_by_design() -> None:
     row = readiness.git_row(
         _member(),
-        _facts(git={"user_name": "D", "user_email": "d@e.test"}),
+        _facts(
+            git={"user_name": "D", "user_email": "d@e.test"},
+            tooling={"gh_auth": {"hosts_file": False, "has_entry": False}},
+        ),
         peer_label="cloud-node-1",
     )
     assert "An SSH shell on cloud-node-1 has no GitHub access by design" in row["detail"]
     assert "only sessions Local Operator launches there" in row["detail"]
+
+
+@pytest.mark.parametrize(
+    "tooling",
+    [
+        {"gh_auth": {"hosts_file": True, "has_entry": True}},
+        {"gh_auth": {"hosts_file": True, "has_entry": None}},
+        None,
+    ],
+)
+def test_git_row_github_sentence_is_neutral_unless_the_peer_has_no_gh_login(
+    tooling: Any,
+) -> None:
+    """R1-m4: a peer with its OWN gh login gives an SSH shell GitHub access, so
+    "by design" must not be claimed there (nor when the fact is unknown)."""
+    over: dict[str, Any] = {"git": {"user_name": "D", "user_email": "d@e.test"}}
+    if tooling is not None:
+        over["tooling"] = tooling
+    row = readiness.git_row(_member(), _facts(**over), peer_label="cloud-node-1")
+    assert "no GitHub access by design" not in row["detail"]
+    assert (
+        "An SSH shell on cloud-node-1 is not handed the brokered GitHub credential" in row["detail"]
+    )
+
+
+def test_git_row_strips_terminal_controls_from_the_peers_identity() -> None:
+    """R1-m1/Q2 (pre-existing in git_row): peer text reaches a terminal."""
+    hostile = "D\x1b[2J\x1b]0;pwned\x07an\r\x1b[1A"
+    row = readiness.git_row(
+        _member(),
+        _facts(git={"user_name": hostile, "user_email": "d@e.test\x9b31m"}),
+        peer_label="cloud-node-1",
+    )
+    assert row["ok"] is True
+    assert "commits as Dan <d@e.test>" in row["detail"]
+    assert not any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in row["detail"])
 
 
 def test_compose_reports_this_devices_serve_daemon_unless_a_peer_was_named(
@@ -3276,3 +3323,229 @@ def test_serve_daemon_row_names_every_login_held_daemon_in_one_sentence() -> Non
     assert row["detail"].count("held only by a login session") == 1
     assert "pid 537864 in session-2122.scope, pid 600001 in session-2122.scope" in row["detail"]
     assert "a reboot ends them and every remote session they host" in row["detail"]
+
+
+# ---------------------------------------------------------------------------
+# #3075 round 1: identity, hostile shapes, bounds (R1-M1/Q4, Q1, Q2, Q3, R1-m2,
+# R1-m3, R1-m5)
+# ---------------------------------------------------------------------------
+
+
+def _record_for(pid: int, **over: Any) -> Any:
+    from local_operator.server import registry as serve_registry
+
+    fields: dict[str, Any] = {
+        "pid": pid,
+        "host": "127.0.0.1",
+        "port": 8977,
+        "instance_id": "i",
+        "version": "0.90.18",
+        "source_ref": "",
+        "prefix": "/p",
+        "install_kind": "uv-tool",
+        "desktop": False,
+        "reloadable": True,
+    }
+    fields.update(over)
+    return serve_registry.ServeRecord(**fields)
+
+
+def test_a_recycled_pid_is_never_judged_as_the_recorded_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-M1 / Q4: a FRESH record whose pid now belongs to an unrelated process.
+
+    The birth token was recorded for the daemon that died; the process now at
+    that pid (a ``sleep``) was born later, so ``same_birth`` says False. The row
+    must be ``unknown`` and must name nothing about the stranger — never ok,
+    never its cgroup.
+    """
+    from local_operator import services
+    from local_operator.server import registry as serve_registry
+
+    stranger = subprocess.Popen(["sleep", "60"])
+    try:
+        root = tmp_path / "root"
+        root.mkdir()
+        record = _record_for(
+            stranger.pid,
+            birth_scheme=procstate.birth_scheme() or "",
+            birth_token="1",  # the dead daemon's birth: not the stranger's
+        )
+        serve_registry.publish(record, root)
+        monkeypatch.setattr(
+            services,
+            "_current_stamp",
+            lambda: SimpleNamespace(version="0.90.18", source_ref=""),
+        )
+        monkeypatch.setattr(readiness, "_cgroup_of", lambda pid: _SERVE_UNIT)
+        fact = readiness.serve_daemons_fact(root)
+        [daemon] = fact["daemons"]
+        assert daemon["identity"] == "not_this_daemon"
+        assert daemon["cgroup"] is None, "a stranger's cgroup is not ours to report"
+        row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+        assert row["ok"] is False and row["code"] == readiness.CODE_UNKNOWN, row
+        assert "another process now holds that pid" in row["detail"]
+        assert "lop-serve.service" not in row["detail"]
+    finally:
+        stranger.kill()
+        stranger.wait()
+
+
+def test_a_record_with_no_birth_is_unproven_and_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Parent binding: never the pid alone. A record from before birth stamps
+    (no ``birth_token``) is ``unknown``, whatever holds the pid."""
+    from local_operator.server import registry as serve_registry
+
+    root = tmp_path / "root"
+    root.mkdir()
+    serve_registry.publish(_record_for(os.getpid()), root)
+    monkeypatch.setattr(readiness, "_cgroup_of", lambda pid: _SERVE_UNIT)
+    [daemon] = readiness.serve_daemons_fact(root)["daemons"]
+    assert daemon["identity"] == "unproven"
+    row = readiness.serve_daemon_row(
+        _member(),
+        _facts(serve_daemons={**_serve_fact(), "daemons": [{**daemon, "cgroup": None}]}),
+        peer_label="node-2",
+    )
+    assert row["code"] == readiness.CODE_UNKNOWN and row["ok"] is False
+
+
+def test_a_wedged_record_is_unknown_never_a_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-M1: a heartbeat that stopped is not the daemon reporting."""
+    from local_operator.server import registry as serve_registry
+
+    root = tmp_path / "root"
+    root.mkdir()
+    record = _record_for(
+        os.getpid(),
+        birth_scheme=procstate.birth_scheme() or "",
+        birth_token=procstate.self_birth_token() or "",
+    )
+    record.heartbeat_at = time.time() - 7200
+    serve_registry.record_path(record.pid, root).parent.mkdir(parents=True)
+    serve_registry.record_path(record.pid, root).write_text(json.dumps(record.to_json()))
+    [daemon] = readiness.serve_daemons_fact(root)["daemons"]
+    assert daemon["state"] == "wedged" and daemon["identity"] == "not_reporting"
+    row = readiness.serve_daemon_row(
+        _member(), _facts(serve_daemons=readiness.serve_daemons_fact(root)), peer_label="n"
+    )
+    assert row["code"] == readiness.CODE_UNKNOWN
+    assert "not answering" in row["detail"]
+
+
+def test_a_daemon_from_a_peer_without_identity_proofs_is_unproven() -> None:
+    """A peer on 1a16c238 sends entries with no ``identity``: unproven, unknown."""
+    fact = _serve_fact()
+    del fact["daemons"][0]["identity"]
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="n")
+    assert row["code"] == readiness.CODE_UNKNOWN and row["ok"] is False
+
+
+def test_another_service_holding_the_daemon_is_never_ok() -> None:
+    """R1-m5: sshd.service / a transient unit is a holder, not a supervisor."""
+    row = readiness.serve_daemon_row(
+        _member(),
+        _facts(serve_daemons=_serve_fact(cgroup="/system.slice/sshd.service")),
+        peer_label="node-2",
+    )
+    assert row["ok"] is False
+    assert row["code"] == readiness.CODE_UNSUPERVISED
+    assert "held by another service (pid 537864 under sshd.service)" in row["detail"]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda f: f.update(daemons="not-a-list"),
+        lambda f: f.update(daemons={"a": 1}),
+        lambda f: f.update(daemons=[1, 2]),
+        lambda f: f.update(daemons=[None]),
+        lambda f: f.update(platform=["linux"]),
+        lambda f: f.update(install=["0.90.19"]),
+        lambda f: f["daemons"][0].update(cgroup=12345),
+        lambda f: f["daemons"][0].update(cgroup=["a"]),
+        lambda f: f["daemons"][0].update(pid={"a": [1]}),
+        lambda f: f["daemons"][0].update(pid=True),
+        lambda f: f["daemons"][0].update(version=["v"]),
+        lambda f: f["daemons"][0].update(source_ref={"r": 1}),
+        lambda f: f["daemons"][0].update(identity=7),
+    ],
+)
+def test_a_malformed_serve_fact_is_unknown_never_ok_and_never_raises(mutate: Any) -> None:
+    """Q1 / R1-m2: every wrong type, at the fact or entry level, is unknown."""
+    fact = _serve_fact()
+    mutate(fact)
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    assert row["ok"] is False and row["code"] == readiness.CODE_UNKNOWN, row
+
+
+def test_a_malformed_serve_fact_leaves_every_other_row_intact() -> None:
+    """Q1: one bad field costs THIS row only — build/git/model still compose."""
+    fact = _serve_fact()
+    fact["daemons"][0]["cgroup"] = 12345
+    facts = _facts(serve_daemons=fact, git={"user_name": "D", "user_email": "d@e.test"})
+    member = _member()
+    git = readiness.git_row(member, facts, peer_label="node-2")
+    model = readiness.model_credential_row(member, facts, viewer=_FakeViewer(), peer_label="node-2")
+    build = readiness.build_row(
+        member,
+        peer_build={"version": "0.90.19"},
+        own_build={"version": "0.90.19"},
+        peer_label="node-2",
+    )
+    serve = readiness.serve_daemon_row(member, facts, peer_label="node-2")
+    assert git["ok"] is True and build["ok"] is True
+    assert model["capability"] == readiness.CAPABILITY_MODEL_CREDENTIAL
+    assert serve["code"] == readiness.CODE_UNKNOWN
+
+
+def test_the_producer_never_raises_on_a_hostile_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q1, producer side: a record whose fields are the wrong type costs itself."""
+    root = tmp_path / "root"
+    run = root / "run" / "serve"
+    run.mkdir(parents=True)
+    (run / f"{os.getpid()}.json").write_text(
+        json.dumps(
+            {
+                **_record_for(os.getpid()).to_json(),
+                "version": ["v"],
+                "birth_token": {"x": 1},
+            }
+        )
+    )
+    fact = readiness.serve_daemons_fact(root)
+    assert isinstance(fact["daemons"], list)
+
+
+def test_peer_strings_are_terminal_safe_and_the_row_is_bounded() -> None:
+    """Q2 + Q3: escapes stripped; 1,500 daemons with 1,000-char fields render
+    in well under 1 KB."""
+    evil = "\x1b[2J\x1b[31mPWNED\x1b]0;hijacked-title\x07\r\x1b[1A"
+    fact = _serve_fact()
+    fact["install"] = {"version": "0.90.19" + evil, "source_ref": evil}
+    fact["daemons"] = [
+        {
+            "pid": 1000 + index,
+            "state": "live",
+            "identity": "proven",
+            "version": ("0.90.1" + evil) * 60,
+            "source_ref": "r" * 1000,
+            "reloadable": True,
+            "cgroup": "/user.slice/" + "x" * 1000 + "/session-1.scope",
+        }
+        for index in range(1500)
+    ]
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    rendered = "\n".join(readiness.render_check_lines([row]))
+    assert len(rendered.encode()) < 1024, len(rendered)
+    assert not any(ord(ch) < 0x20 and ch != "\n" for ch in rendered)
+    assert not any(0x7F <= ord(ch) <= 0x9F for ch in rendered)
+    assert "more" in rendered
+    assert len(json.dumps(row["observed"])) < 2048
