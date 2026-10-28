@@ -42,6 +42,11 @@ async def test_graceful_only_cannot_combine_with_force(tmp_path, monkeypatch):
 class _IdleStopHandle(FakeHandle):
     # Exercise the production atomic latch, not a test reimplementation of it.
     begin_retire = ServingSessionHandle.begin_retire
+    # The borrowed latch reads and writes these on ``self``. FakeHandle does not
+    # declare them, so pyright cannot see the access and the type-check job went
+    # red on this new file. The values match the real handle's defaults.
+    _exit_committed: bool = False
+    _disposing: bool = False
 
     def __init__(self, busy):
         super().__init__()
@@ -82,7 +87,8 @@ async def test_real_socket_stop_checks_and_latches_owner_idle(busy, monkeypatch)
 async def test_real_socket_old_owner_is_refused_without_fallback(monkeypatch):
     # An owner without the latch cannot attest that its stop preserves work.
     handle = FakeHandle()
-    handle.request_stop = Mock(side_effect=AssertionError("must not stop old owner"))
+    stop = Mock(side_effect=AssertionError("must not stop old owner"))
+    monkeypatch.setattr(handle, "request_stop", stop, raising=False)
     server, record = await _serve(handle)
     signals = AsyncMock(side_effect=AssertionError("must not signal old owner"))
     monkeypatch.setattr(control, "_signal_and_confirm", signals)
@@ -91,7 +97,7 @@ async def test_real_socket_old_owner_is_refused_without_fallback(monkeypatch):
             _record_for(record), timeout_s=1, _root=config_dir(), graceful_only=True
         )
         assert outcome.method == "refused"
-        handle.request_stop.assert_not_called()
+        stop.assert_not_called()
         signals.assert_not_awaited()
     finally:
         server.close()
