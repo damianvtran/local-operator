@@ -55,10 +55,16 @@ def main(args: argparse.Namespace) -> int:
 
     from local_operator.paths import config_dir
 
+    from local_operator.team_bridge.store import StoreRefused
+
     root = config_dir()
     try:
         result = setup(root)
-    except (OSError, ValueError, sqlite3.Error):
+    except (OSError, ValueError, sqlite3.Error, StoreRefused):
+        # StoreRefused is a RuntimeError raised for an unreadable or corrupt
+        # state database (review round 5, MAJOR-2). It is a refusal to answer,
+        # not a crash: the command reports it like every other refusal rather
+        # than dying with a traceback.
         # Exception prose can carry filesystem or transport content. The stable
         # machine code is enough.
         result = {"ok": False, "code": "setup_failed"}
@@ -106,12 +112,12 @@ def setup(root: Path) -> dict[str, Any]:
     from local_operator.team_bridge.connector.install import sync_connector_service
 
     outcome = sync_connector_service(root)
-    placed = outcome.code in {
-        "installed",
-        "current",
-        "registered",
-        "not_addressable",
-    }
+    # ``not_addressable`` is NOT success (review round 5, MAJOR-1): it means the
+    # unit file was written but the real service manager was never addressed — a
+    # sandboxed or redirected home. Nothing is registered or running, and the
+    # guide tells the user to re-run from their own shell, so claiming "the
+    # receiver is in place" here would be false.
+    placed = outcome.code in {"installed", "current", "registered"}
     return {
         "ok": placed,
         "code": CODE_READY if placed else CODE_NOT_READY,

@@ -188,6 +188,43 @@ def test_a_refused_placement_is_reported_rather_than_called_ready(
     assert result["service"] == "source_checkout"
 
 
+def test_a_written_but_unaddressed_unit_is_not_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``not_addressable`` means the service manager was never reached (round 5)."""
+
+    _enrol(tmp_path)
+    _enable(tmp_path)
+
+    class Outcome:
+        code = "not_addressable"
+        detail = "unit written; systemd not addressed"
+
+    monkeypatch.setattr(install, "sync_connector_service", lambda root: Outcome())
+
+    result = setup_cli.setup(tmp_path)
+
+    assert result["ok"] is False
+    assert result["code"] == setup_cli.CODE_NOT_READY
+    assert result["service"] == "not_addressable"
+
+
+def test_a_corrupt_store_is_a_refusal_not_a_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable state database must report, not explode (round 5, MAJOR-2)."""
+
+    from local_operator.team_bridge.store import state_db_path
+
+    path = state_db_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"not a sqlite database")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: tmp_path)
+
+    assert setup_cli.main(_args(json=True)) == 1
+    assert '"setup_failed"' in capsys.readouterr().out
+
+
 def test_plain_english_is_the_default_output_and_json_is_opt_in(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
