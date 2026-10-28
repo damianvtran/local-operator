@@ -5307,7 +5307,16 @@ class SessionStreamFn:
             logger.debug("saver: apply failed (%s); sending unreduced", type(exc).__name__)
             spliced = request
         chain = self._saver_chain
-        if chain is not None and spliced.frozen_prefix_messages is None:
+        # R2-4: only a MAIN-TURN request may lift the prune restriction. An
+        # `aside`, `clearance` or `compaction_advisor` call rides the session's
+        # stream fn with `purpose != "turn"`, never touches the chain, and used
+        # to clear the ids anyway — a sweep in between then blanked frozen
+        # prefix rows, truncating the chain and paying for a re-upload.
+        if (
+            chain is not None
+            and request.purpose == "turn"
+            and spliced.frozen_prefix_messages is None
+        ):
             chain.frozen_ids = frozenset()
         return spliced
 

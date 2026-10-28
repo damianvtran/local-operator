@@ -112,11 +112,21 @@ def test_identifier_pool_is_not_a_second_word_membership_escape_hatch() -> None:
         )
 
 
-def test_identifier_pool_cannot_repeat_one_source_identifier() -> None:
+def test_the_pool_is_bounded_by_its_own_size_not_by_repetition_rules() -> None:
+    """R2-1 changed the rule: the reducer lists part and deep pools that overlap.
+
+    Reuse is therefore allowed, and the bound that stops amplification is the
+    epoch's pooled-token budget (twice the pool plus a fixed allowance). Keep
+    the assertion on that bound rather than on a no-repeat rule the reference
+    reducer itself violates.
+    """
+    from local_operator.saver.provenance import _Pool
+
+    pool = _Pool(["src/app/views.py and PR #42 twice"])
+    kept = 2 * len(pool.tokens) + 64
     with pytest.raises(SaverRejected, match="provenance"):
-        _check_record_body(
-            "src/main.py", "user: [radient:ids mentioned in this part] src/main.py src/main.py"
-        )
+        pool.consume(" ".join(["src/app/views.py"] * (kept + 1)))
+    _Pool(["src/app/views.py and PR #42 twice"]).consume(" ".join(["src/app/views.py"] * kept))
 
 
 def test_two_text_blocks_have_distinct_source_occurrences() -> None:

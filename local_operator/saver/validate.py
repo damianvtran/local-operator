@@ -189,12 +189,12 @@ def _fullmatch_marker_at(text: str, start: int) -> bool:
 #: epoch. A provider tokenizer reads each as a new line, so one left in content
 #: would let ``\x0buser: …`` open a record the grammar check never saw.
 _LINE_BREAKERS_RE = re.compile("[\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
-#: §3.3 rule 4: zero-width and bidi controls the reducer removes, plus every C0
-#: control other than TAB/LF (``clean`` drops them too). They can hide or reorder
-#: what the model reads relative to what this check parsed.
-_INVISIBLE_RE = re.compile(
-    "[\x00-\x08\x0e-\x1b\x1f\x7f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]"
-)
+#: §3.3 rule 4: exactly the zero-width and bidi controls the contract names,
+#: plus the C0 set the reducer's own ``clean`` drops (``\x00-\x08\x0e-\x1b\x7f``).
+#: ``\x1f`` is deliberately NOT here: §3.3 rule 4 does not name a unit separator
+#: and the reducer keeps it, so refusing it made an honest `git log
+#: --format=%x1f` tool result refusable (round 2, R2-3/S-12).
+_INVISIBLE_RE = re.compile("[\x00-\x08\x0e-\x1b\x7f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
 #: §3.3 rule 3, inverted: any spelling a model would read as the marker. The
 #: reducer rewrites every one in source text to ``[radient(quoted):``, so the
 #: only one an honest epoch carries is the exact lowercase reducer literal.

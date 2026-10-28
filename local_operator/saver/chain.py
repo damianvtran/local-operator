@@ -88,6 +88,9 @@ REJECTED_BACKOFF_S = 60.0
 #: deterministically fails it for every session, and each rejected 200 was
 #: already charged (§5a settles before the response).
 PROCESS_REJECTION_LIMIT = 3
+#: Reasons that mean "we do not recognise this honest output", never "the peer
+#: broke the contract". ``busy`` is our own deadline: also not the peer's fault.
+COMPATIBILITY_REASONS = frozenset({"provenance", "busy"})
 #: S-1: the overall budget for validating one response off the loop. Past it the
 #: response is refused as ``busy`` (fail open). Honest responses validate in
 #: tens of milliseconds (see the PR's oracle evidence); this is the ceiling a
@@ -136,8 +139,16 @@ class _ProcessState:
     """
 
     paused = False
-    #: Consecutive §6.1 rejections across every chain in the process (S-6).
+    #: Consecutive §6.1 rejections whose cause is a FORBIDDEN SHAPE: a marker in
+    #: any case, a line breaker, an invisible character, a bad header, a digest
+    #: that does not cover the span. These are security signals (§12) and enough
+    #: of them in a row means the endpoint is not the contract's server.
     rejections = 0
+    #: Consecutive rejections whose cause is COMPATIBILITY: a record the
+    #: verifier could not derive from the source. That is a statement about this
+    #: client's knowledge of the reducer, not about the peer — one user's emoji
+    #: must never pause Saver for every other session (round 2, S-12).
+    compat_rejections = 0
     #: Digests of uploaded spans whose response was rejected in this process.
     #: Never re-uploaded (manager disposition 3): the same bytes answer the same.
     rejected_digests: set[str] = set()
@@ -187,6 +198,10 @@ class SaverChain:
     #: The canonical bytes of the frozen span, per epoch, as last verified. Kept
     #: so the verify step can compare without re-concatenating every turn.
     _epoch_bytes: list[list[bytes]] = field(default_factory=list)
+    #: True once a PACKED epoch is on the wire: check 8's framing header is
+    #: required for the first packed epoch of the chain, whatever verbatim
+    #: epochs preceded it (S-14, round 2).
+    _adopted_any: bool = False
     _prefetch: _Prefetch | None = None
     _cache: ProjectionCache = field(default_factory=ProjectionCache)
     _paused_until: float = 0.0
@@ -374,7 +389,7 @@ class SaverChain:
                     uploaded_bytes=encoded[self.frontier : self.frontier + len(prefetch.encoded)],
                     verbatim=verbatim_wire,
                     id_prefix=f"saver:{self.chain_generation}:{self.frontier}",
-                    first=not self.epochs,
+                    first=not self._adopted_any,
                     deadline=deadline,
                 ),
                 VALIDATION_DEADLINE_S + 0.5,
@@ -382,13 +397,14 @@ class SaverChain:
         except (SaverRejected, asyncio.TimeoutError) as exc:
             reason = exc.reason if isinstance(exc, SaverRejected) else "busy"
             logger.debug("saver: response rejected (%s)", reason)
-            await self._on_rejected(prefetch)
+            await self._on_rejected(prefetch, reason)
             return
         if epochs:
             # Only a response that FROZE something proves the server validates;
             # an empty one (nothing to freeze yet) passes every check vacuously
             # and must not reset the consecutive-rejection count.
             _ProcessState.rejections = 0
+            _ProcessState.compat_rejections = 0
         self._refreshed_after_401 = False
         self.failing_open = False
         if prefetch.ended_at_barrier:
@@ -408,6 +424,10 @@ class SaverChain:
         offset = 0
         for epoch in epochs:
             self.epochs.append(epoch)
+            # S-14: a PACKED epoch is on the wire. A verbatim epoch indexes
+            # nothing and leaves `prior` empty, so it must not satisfy check 8's
+            # header requirement for the first packed epoch that follows it.
+            self._adopted_any = True
             self._epoch_bytes.append(list(prefetch.encoded[offset : offset + epoch.source_count]))
             offset += epoch.source_count
         self.frontier += advanced
@@ -415,7 +435,7 @@ class SaverChain:
         if isinstance(call_again, int) and not isinstance(call_again, bool) and call_again > 0:
             self.call_again_after = call_again
 
-    async def _on_rejected(self, prefetch: "_Prefetch") -> None:
+    async def _on_rejected(self, prefetch: "_Prefetch", reason: str = "") -> None:
         """A §6.1 rejection: back off, mark, memo the span, maybe pause (R-4/S-6).
 
         - the same 60 s back-off as a failure, so the next turn does not re-send;
@@ -423,14 +443,23 @@ class SaverChain:
           uploads never repeat (the 413/503/transport arm's rule);
         - the uploaded span's digest is remembered for the process and never
           uploaded again: the response is a pure function of the span;
-        - after :data:`PROCESS_REJECTION_LIMIT` consecutive rejections across the
-          process, Saver pauses for the process (the S3-7 encoding precedent).
+        - after :data:`PROCESS_REJECTION_LIMIT` consecutive FORBIDDEN-SHAPE
+          rejections across the process, Saver pauses for the process (the
+          S3-7 encoding precedent). A compatibility rejection counts separately
+          and never pauses: see :data:`COMPATIBILITY_REASONS`.
         """
         self._paused_until = time.monotonic() + REJECTED_BACKOFF_S
         _ProcessState.rejected_digests.add(prefetch.uploaded_digest)
-        _ProcessState.rejections += 1
-        if _ProcessState.rejections >= PROCESS_REJECTION_LIMIT:
-            _ProcessState.paused = True
+        if reason in COMPATIBILITY_REASONS:
+            # Counted apart from the security signal, and never a reason to
+            # pause the whole process: the session backs off, everyone else
+            # carries on. §12's watch list also stops filling with honest
+            # epochs this client could not yet derive.
+            _ProcessState.compat_rejections += 1
+        else:
+            _ProcessState.rejections += 1
+            if _ProcessState.rejections >= PROCESS_REJECTION_LIMIT:
+                _ProcessState.paused = True
         if prefetch.oversized_unit is not None and (
             prefetch.chain_generation == self.chain_generation
             and prefetch.frontier == self.frontier
