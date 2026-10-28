@@ -33,7 +33,37 @@ from local_operator.saver.gate import Availability
 from tests.unit.saver.fake_prepare import FakeServer
 
 PRIMARY = ModelSpec(provider="anthropic", model_id="claude-test")
+# `auto` no longer resolves ON (§9, `auto_unavailable`): Saver is reachable in
+# LO1 only by an explicit session choice, which LO2 wires. These tests cover the
+# CHAIN SEAM, so they inject that decision at the resolver (see the fixture
+# below) and leave the gate to `test_gate_modes.py`.
 ON = {"radient": {"saver": {"mode": "auto"}}, "retry": {"baseDelayMs": 1}}
+
+
+@pytest.fixture(autouse=True)
+def _the_session_asked_for_saver(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand in for LO2's session choice so the seam tests can enable Saver.
+
+    `auto` is refused at the resolver by design, and `_saver_splice` consults
+    it for every non-`off` mode, so without this the chain is unreachable and
+    the seam assertions have nothing to observe. The gate's own behaviour is
+    pinned in `test_gate_modes.py`.
+    """
+    from local_operator.saver import gate as gate_mod
+
+    real = gate_mod.resolve_saver
+
+    def resolve(settings, availability, **kwargs):
+        decision = real(settings, availability, **kwargs)
+        if decision.on:
+            return decision
+        # Only the step-5 arm `auto` used to supply: a signed-in account with
+        # credit. The usage gates above it (signed out, no credit) still decide.
+        if availability is not None and availability.signed_in and availability.positive_balance:
+            return gate_mod.SaverDecision(True, "session")
+        return decision
+
+    monkeypatch.setattr(gate_mod, "resolve_saver", resolve)
 
 
 def _history(blocks: int) -> list[Message]:

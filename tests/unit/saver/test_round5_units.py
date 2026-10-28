@@ -31,6 +31,13 @@ def _reject(rows: list[dict], record: str) -> None:
         check_provenance(HEADER + "\n" + record, rows)
 
 
+#: Span padding for the guard fixtures: an epoch has to be genuinely cheaper
+#: than its span for the token comparison to pass, so a fixture that asserts a
+#: STRUCTURAL refusal must give the span enough material that the comparison
+#: does not refuse it first.
+_PAD = " the deployment finished and the log line says everything is fine" * 6
+
+
 def test_the_content_line_budget_refuses_a_reemitted_span() -> None:
     """M1: a record may not reproduce its span line for line.
 
@@ -41,10 +48,15 @@ def test_the_content_line_budget_refuses_a_reemitted_span() -> None:
     `consumed` set refuse records 2 and 3 first, so the budget was never
     reached and deleting it left the suite green (round-5 review, S-20).
     """
+    # Long rows, short PREFIXES emitted: the epoch is far cheaper than its span
+    # in tokens, so only the strict line budget refuses it. (One-word rows made
+    # the ruler comparison refuse the epoch first, which left this guard green
+    # with the budget deleted — the round-5 defect again, one layer down.)
+    pad = " and then the rest of a long log line that the epoch does not keep" * 4
     rows = [
-        {"role": "user", "content": [{"type": "text", "text": "alpha"}]},
-        {"role": "user", "content": [{"type": "text", "text": "bravo"}]},
-        {"role": "user", "content": [{"type": "text", "text": "charlie"}]},
+        {"role": "user", "content": [{"type": "text", "text": "alpha" + pad}]},
+        {"role": "user", "content": [{"type": "text", "text": "bravo" + pad}]},
+        {"role": "user", "content": [{"type": "text", "text": "charlie" + pad}]},
     ]
     _reject(rows, "user: alpha\nuser: bravo\nuser: charlie")
 
@@ -69,14 +81,14 @@ def test_a_pool_token_must_be_a_span_identifier() -> None:
     from the span or only a FRAGMENT of an identifier it holds.
     """
     _reject(
-        _rows("the deployment finished\nsrc/app/views.py"),
+        _rows("the deployment finished " + _PAD + "\nsrc/app/views.py"),
         "user: [radient:ids mentioned in this part] invented_identifier",
     )
     # A FRAGMENT of a real identifier is refused too, and that is the round-5
     # blocker: prefix, suffix and slice admission let one unit of a count budget
     # buy up to 2,400 characters of a path it did not delete.
     _reject(
-        _rows("local_operator/mobile/daemon.py"),
+        _rows("local_operator/mobile/daemon.py " + _PAD),
         "user: [radient:ids mentioned in this part] /daemon.py",
     )
 

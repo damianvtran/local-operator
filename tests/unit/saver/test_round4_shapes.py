@@ -102,7 +102,7 @@ def test_r4_1_qa_fragmentation_spans_are_refused_or_cost_less_than_their_span(
 
 def test_a_normal_prefix_cut_is_still_accepted() -> None:
     """`MIN_CUT` must not reject honest output: a cut line is a prefix."""
-    source = "the quick brown fox jumps over the lazy dog and then keeps running"
+    source = "the quick brown fox jumps over the lazy dog and then keeps running " * 12
     check_provenance(HEADER + "\nuser: the quick brown fox jumps over the lazy dog", _span(source))
 
 

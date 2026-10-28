@@ -43,6 +43,7 @@ Source = Literal[
     "session",
     "agent",
     "parent",
+    "auto_unavailable",
     "default",
 ]
 
@@ -97,7 +98,19 @@ def resolve_saver(
        ``SessionSpec.radient_saver``) — LO2.
     3. Agent pin (team slot, then profile) — LO3.
     4. A child's parent value at spawn — LO3.
-    5. Default: ``auto`` ⇒ on, ``opt_in`` ⇒ off.
+    5. Default: ``auto`` ⇒ **OFF, always, in LO1** (``auto_unavailable``);
+       ``opt_in`` ⇒ off.
+
+    WHY ``auto`` IS UNREACHABLE. It turns Saver on for a user who never asked,
+    which is only safe once the verifier can PROVE an epoch cheaper than the
+    history it replaces. Check 6 is a provenance rule in rev7 and the
+    non-amplification clause lands with the token comparison (PR #3078), so an
+    accepted epoch could otherwise cost several times more than the unreduced
+    history while §5a still bills the user for "removed tokens". That is the
+    same shape as the signup-grant floor: an unattended default plus an
+    unenforced economic bound. ``opt_in`` and an explicit session choice are
+    unaffected — a user who asks is a different case from one who never did,
+    and LO2's session choice still wins at step 2.
     """
     mode = configured_mode(settings)
     if mode == "off":
@@ -112,7 +125,9 @@ def resolve_saver(
         return SaverDecision(agent_pin, "agent")
     if parent_value is not None:
         return SaverDecision(parent_value, "parent")
-    return SaverDecision(mode == "auto", "default")
+    if mode == "auto":
+        return SaverDecision(False, "auto_unavailable")
+    return SaverDecision(False, "default")
 
 
 #: The availability read's TOTAL deadline (S-4): a refresh, the request and the

@@ -117,6 +117,12 @@ def test_identifier_pool_is_not_a_second_word_membership_escape_hatch() -> None:
         )
 
 
+#: A realistic span body: the token comparison refuses an epoch that is not
+#: cheaper than its span, and these fixtures are about structure, not cost, so
+#: the span has to be material the reducer would actually freeze.
+PROSE = "the deployment finished and the log line says everything is fine " * 12
+
+
 def _pool_span(source: str, lines: int = 6) -> list[dict]:
     """One real source row plus filler, so an epoch can reduce something."""
     return [{"role": "user", "content": [{"type": "text", "text": source}]}] + [
@@ -172,7 +178,9 @@ def test_a_pool_token_may_not_be_spent_twice() -> None:
     """
     from local_operator.saver.validate import check_provenance
 
-    rows = _pool_span("the deployment finished and the log looks stable\nsrc/app/views.py")
+    rows = _pool_span(
+        "the deployment finished and the log looks stable\nsrc/app/views.py\n" + PROSE
+    )
     with pytest.raises(SaverRejected, match="provenance"):
         check_provenance(
             HEADER
@@ -184,6 +192,13 @@ def test_a_pool_token_may_not_be_spent_twice() -> None:
 
 def test_a_pool_line_may_not_buy_more_characters_than_the_span_deletes() -> None:
     """The pool is charged in CHARACTERS against what the epoch deleted.
+
+    NOT AN INDEPENDENT GUARD, and measured as such: deleting the character
+    budget leaves this test green, because a pool payload that costs more
+    characters than the epoch deleted costs more tokens too under any uniform
+    ruler — the token comparison (M15) refuses the same epochs. The rule is
+    retained as defence in depth, and this test pins its behaviour rather than
+    claiming a failure mode no other rule covers.
 
     Content keeps two of the three rows, so the epoch deletes only the third
     (~7 characters) while the pool discloses a 300-character identifier that is
@@ -248,6 +263,56 @@ def test_pool_records_may_not_repeat_one_long_identifier(rows_count: int) -> Non
         check_provenance(HEADER + "\n" + record, rows)
 
 
+def _ruler_ready() -> None:
+    """The comparison's guard needs the ruler; say so instead of skipping.
+
+    "No tokenizer ⇒ Saver unavailable" means an acceptance test cannot run
+    without one, and a SKIP would hide that the guard never executed (round-5
+    review, S-20). CI installs `.[dev]`, which pulls `tokenizer`, so this fails
+    loudly only if the environment drifts.
+    """
+    from local_operator.compaction import tokens as estimator
+
+    assert estimator._get_encoding() is not None, (
+        "the token comparison needs the client estimator; install the tokenizer extra"
+    )
+
+
+def test_an_epoch_that_costs_more_than_its_span_is_refused() -> None:
+    """S-18: deleting two characters can COST tokens, so the mapping cannot bound.
+
+    Each emitted record is the 24-character interior of a 26-character row: a
+    real piece of a source line, one record per row, 39 of 40 lines emitted, so
+    the line budget and the mapping both pass and the epoch costs ~5x its span
+    under either bundled encoding. Only the ruler comparison refuses it.
+    """
+    from local_operator.saver.validate import check_provenance
+
+    _ruler_ready()
+    rows = [
+        {"role": "user", "content": [{"type": "text", "text": "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}]}
+    ] + [
+        {"role": "user", "content": [{"type": "text", "text": f"row {n}"}]} for n in range(39)
+    ]
+    record = "user: " + "\nuser: ".join(["BCDEFGHIJKLMNOPQRSTUVWX"] * 39)
+    with pytest.raises(SaverRejected, match="provenance"):
+        check_provenance(HEADER + "\n" + record, rows)
+
+
+def test_an_epoch_cheaper_than_its_span_is_accepted() -> None:
+    """The comparison must not refuse a real reduction: it is a gate, not a cap."""
+    from local_operator.saver.validate import check_provenance
+
+    _ruler_ready()
+    rows = [
+        {"role": "user", "content": [{"type": "text", "text": "the deployment finished " * 40}]},
+        {"role": "user", "content": [{"type": "text", "text": "src/app/views.py"}]},
+    ] + [{"role": "user", "content": [{"type": "text", "text": f"row {n}"}]} for n in range(9)]
+    check_provenance(
+        HEADER + "\nuser: the deployment finished " + "\nuser: src/app/views.py", rows
+    )
+
+
 def test_the_identifier_pool_is_a_disclosure_line_and_is_accepted() -> None:
     """The reducer's own compact pool: source-derived identifiers, used once.
 
@@ -259,7 +324,8 @@ def test_the_identifier_pool_is_a_disclosure_line_and_is_accepted() -> None:
     from local_operator.saver.validate import check_provenance
 
     rows = _pool_span(
-        "the parser choked\nsrc/app/views.py\nConnectionError\nsee https://example.com/a/b"
+        PROSE + "\nthe parser choked\nsrc/app/views.py\nConnectionError\n"
+        "see https://example.com/a/b"
     )
     check_provenance(
         HEADER
@@ -279,7 +345,9 @@ def test_a_pool_only_epoch_over_a_one_line_span_is_still_a_reduction() -> None:
     """
     from local_operator.saver.validate import check_provenance
 
-    rows = [{"role": "user", "content": [{"type": "text", "text": "src/app/views.py raised"}]}]
+    rows = [
+        {"role": "user", "content": [{"type": "text", "text": PROSE + "\nsrc/app/views.py raised"}]}
+    ]
     check_provenance(
         HEADER + "\nuser: [radient:ids mentioned in this part] src/app/views.py", rows
     )
@@ -298,7 +366,7 @@ def test_a_pool_payload_past_the_reducers_own_cap_is_refused() -> None:
         f"/Users/damian/local-operator/.worktrees/saver-lo1/pkg_{n:02d}/module_{n:02d}.py"
         for n in range(45)
     ]
-    rows = _pool_span("\n".join(paths))
+    rows = _pool_span("\n".join(paths) + "\n" + PROSE)
     payload = " ".join(paths)
     assert len(payload) > 2400
     with pytest.raises(SaverRejected, match="provenance"):
@@ -314,7 +382,9 @@ def test_a_harness_state_preview_must_be_the_preview_of_its_record() -> None:
     """
     from local_operator.saver.validate import check_provenance
 
-    rows = _pool_span("[session-state]\n## Knowledge and session state\nGuides are procedures.")
+    rows = _pool_span(
+        "[session-state]\n## Knowledge and session state\nGuides are procedures.\n" + PROSE
+    )
     honest = (
         "user: [radient:harness state omitted, 62 chars]"
         " [session-state] ## Knowledge and session state"
@@ -338,7 +408,10 @@ def test_two_text_blocks_have_distinct_source_occurrences() -> None:
     rows = [
         {
             "role": "user",
-            "content": [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}],
+            "content": [
+                {"type": "text", "text": "first " + PROSE},
+                {"type": "text", "text": "second " + PROSE},
+            ],
         },
         *[
             {"role": "user", "content": [{"type": "text", "text": f"filler line {n}"}]}
@@ -354,7 +427,7 @@ def test_a_named_source_record_carries_its_sanitized_prefix() -> None:
     check_records(
         HEADER + "\nuser: (alice) actual words",
         [
-            {"role": "user", "name": "alice", "content": "actual words"},
+            {"role": "user", "name": "alice", "content": "actual words " + PROSE},
             *[
                 {"role": "user", "content": [{"type": "text", "text": f"filler line {n}"}]}
                 for n in range(6)

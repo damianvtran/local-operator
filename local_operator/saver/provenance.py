@@ -32,15 +32,22 @@ WHAT THAT BUYS, BY CONSTRUCTION RATHER THAN BY MORE CAPS.
   epoch's deletions. (Round 5's security review measured the earlier looser
   rules: one count-budget unit bought up to 2,400 characters, and repeating one
   long identifier in pool records was accepted at 3.00x-7.43x the span.)
-- NOT established: the TOKEN cost of an emitted CONTENT fragment. The mapping
-  bounds which characters and how many lines, never what a substring costs, and
-  BPE is not monotone under substring — dropping characters can raise the count
-  by destroying a merge boundary (`ABCDEFGHIJKLMNOPQRSTUVWXYZ` 1 token, its
-  24-character interior 8). Security measured 5.42x-5.49x accepted through this
-  gate on fragments of that shape, so the claim that token boundedness follows
-  "by construction" is withdrawn rather than restated: bounding that needs a
-  real token comparison, which is an open finding (S-18) and not a byte or a
-  substring rule. A later round must not build on the withdrawn claim.
+- NON-AMPLIFICATION, MEASURED: `tokens_R(epoch text) < tokens_R(span rendered
+  text)`, both sides measured by the client's own estimator (`cl100k_base` via
+  :mod:`local_operator.compaction.tokens`, the ruler the provider path already
+  uses) on each side's own text — never on the canonical JSON. An epoch that is
+  not cheaper is refused, and an estimator that has degraded to `chars // 4`
+  refuses every epoch rather than approximating. This is the rule that bounds
+  cost, and it has to be a comparison: no property of the mapping can supply
+  it, because BPE is not
+  monotone under substring — deleting two characters from
+  `ABCDEFGHIJKLMNOPQRSTUVWXYZ` (1 token) leaves a 24-character interior worth
+  8 — so every rule of the form "the epoch's characters are a subsequence of
+  the span's" admits an 8x amplification, and the only sound tokenizer-free
+  bound (chars(epoch) <= chars(span) / 128, the longest token in either bundled
+  encoding) accepts nothing the reducer produces. The architecture decision is
+  on PR #3078; S-18 is the finding, and a later round must not restate the
+  withdrawn "by construction" theorem.
 - Total lines strictly fewer: the epoch's total line count must be STRICTLY less
   than the span's, and disclosure lines (markers, the reducer's own notes) count.
   Each marker and note is therefore paid for by real deletions elsewhere in the
@@ -973,6 +980,29 @@ emitted line, so a line cannot be shredded into pieces of itself.
     return True
 
 
+def _ruler_tokens(text: str) -> int:
+    """``tokens_R(text)`` — the client's own estimator, never a proxy.
+
+    `compaction.tokens` is the estimator the provider path already calls on
+    every request (`estimate_messages_tokens`, after the splice point), so the
+    epoch and the span are measured with the same ruler as the request they
+    replace: cl100k_base, the encoding the `tokenizer` extra ships.
+
+    Where the estimator degrades to `chars // 4` — the extra is not installed,
+    or a load has not published yet — the answer is UNAVAILABLE, not
+    approximate. A byte ratio is exactly the bypass rounds 3 and 5 measured, so
+    an epoch this client cannot count is an epoch it does not accept; the chain
+    then sends unreduced history, which is what "Saver unavailable" means in
+    practice.
+    """
+    from local_operator.compaction import tokens as estimator
+    from local_operator.saver.validate import SaverRejected
+
+    if estimator._get_encoding() is None:
+        raise SaverRejected("provenance")
+    return estimator.count_text_tokens(text)
+
+
 def _check_line_budget(emitted: int, span_lines: int) -> None:
     """The invariant's reduction half, at the granularity the contract states.
 
@@ -1090,6 +1120,15 @@ def check_records(
         content_chars += sum(len(piece) for piece in pieces)
         units.append((label, elements, pieces, pools, previews))
     _check_line_budget(emitted, span_lines)
+    # NON-AMPLIFICATION: the comparison the invariant actually needs, and the
+    # only one that can bound cost. Both sides are RENDERED TEXT — the epoch's
+    # own bytes against the span's own text as the reducer reads it — never the
+    # canonical JSON, whose ~80 bytes of structure per row made a 199-of-200
+    # verbatim epoch look like a 0.42x saving while being larger than the text
+    # it replaced (S-18's second half).
+    span_text = "\n".join(parts)
+    if _ruler_tokens(text) >= _ruler_tokens(span_text):
+        raise SaverRejected("provenance")
     # THE DISCLOSURE CHANNEL, charged on BOTH sides and only once the epoch's
     # content is known: every pooled token must be an exact source identifier
     # spent once, and the pool's characters are charged against what the epoch
