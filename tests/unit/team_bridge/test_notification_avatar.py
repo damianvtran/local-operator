@@ -11,6 +11,7 @@ import io
 import struct
 import threading
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from PIL import Image
@@ -27,7 +28,21 @@ def _jpeg(colour=(200, 40, 40), size=(256, 256)) -> bytes:
     return out.getvalue()
 
 
-def _render(kind="person", theme="light", size=256, initials="BT", photo=None) -> Image.Image:
+def _rgb(image: Image.Image, xy: tuple[int, int]) -> tuple[int, ...]:
+    """RGB of one RGBA pixel; narrows Pillow's ``float | tuple | None`` result."""
+
+    pixel = image.getpixel(xy)
+    assert isinstance(pixel, tuple)
+    return pixel[:3]
+
+
+def _render(
+    kind: na.Kind = "person",
+    theme: na.Theme = "light",
+    size: int = 256,
+    initials: str = "BT",
+    photo: bytes | None = None,
+) -> Image.Image:
     data = na.compose(
         na.Variant(kind, theme, size, initials), origin=ORIGIN, account_id="acc_ben", photo=photo
     )
@@ -51,7 +66,7 @@ def test_precropped_with_transparent_corners_and_badge_inside(size, kind, theme)
     # The LO badge is opaque INSIDE the canvas at the bottom-right.
     badge_centre = int(size * (1 - na.BADGE_RATIO / 2))
     assert alpha.getpixel((badge_centre, badge_centre)) == 255
-    assert image.getpixel((badge_centre, badge_centre))[:3] != (200, 40, 40)
+    assert _rgb(image, (badge_centre, badge_centre)) != (200, 40, 40)
 
 
 def test_source_kind_rule_agent_marker_only_for_person_agent():
@@ -60,8 +75,8 @@ def test_source_kind_rule_agent_marker_only_for_person_agent():
     agent = _render(kind="person_agent", photo=photo)
     marker = (int(256 * (1 - na.AGENT_MARKER_RATIO / 2)), int(256 * na.AGENT_MARKER_RATIO / 2))
     # Without a marker that point is the red photo; with one it is not.
-    assert person.getpixel(marker)[:3] == pytest.approx((200, 40, 40), abs=12)
-    assert agent.getpixel(marker)[:3] != pytest.approx((200, 40, 40), abs=40)
+    assert _rgb(person, marker) == pytest.approx((200, 40, 40), abs=12)
+    assert _rgb(agent, marker) != pytest.approx((200, 40, 40), abs=40)
     # The rest of the picture is the same photo.
     centre = (100, 100)
     assert person.getpixel(centre) == agent.getpixel(centre)
@@ -365,3 +380,108 @@ def test_every_palette_fill_holds_white_initials_at_normal_text_contrast(palette
     assert all(_contrast(fill) >= 4.5 for fill in palette), [
         (f"#{r:02x}{g:02x}{b:02x}", round(_contrast((r, g, b)), 2)) for r, g, b in palette
     ]
+
+
+def test_worker_post_decode_owner_check_refuses_on_its_own():
+    """The worker's check AFTER ``compose`` is a fence by itself (review R2-2).
+
+    The client brackets ``render`` with its own checks, which overlap the
+    worker's, so only a direct call proves this one: the owner is still current
+    when the decode starts and gone when it finishes, and the bytes are refused.
+    """
+
+    calls = []
+
+    def check_owner() -> None:
+        calls.append(1)
+        if len(calls) == 2:
+            raise PermissionError("login changed during the decode")
+
+    with pytest.raises(PermissionError):
+        asyncio.run(
+            na.render(
+                na.Variant("person", "light", 64, "BT"),
+                origin=ORIGIN,
+                account_id="acc_ben",
+                photo=None,
+                check_owner=check_owner,
+            )
+        )
+    assert len(calls) == 2
+
+
+def _semaphore_free(semaphore: threading.BoundedSemaphore, capacity: int) -> bool:
+    """True when all ``capacity`` permits are free; leaves them free again."""
+
+    taken = 0
+    while taken < capacity and semaphore.acquire(blocking=False):
+        taken += 1
+    for _ in range(taken):
+        semaphore.release()
+    return taken == capacity
+
+
+def test_render_concurrency_bounds_and_cancel_release(monkeypatch):
+    """2 renders at once, 8 pending, a 9th refused busy; cancelling frees both.
+
+    Pins the reviewer's round-2 probe (R2-3) against the REAL module semaphores:
+    the memory bound is the slot count, the closure-retention bound is the
+    pending count, and a cancelled HTTP caller must not leak either permit
+    (``asyncio.shield`` + the worker's ``finally``).
+    """
+
+    gate = threading.Event()
+    guard = threading.Lock()
+    active = [0]
+    peak = [0]
+    real = na.compose
+
+    def held(*args, **kwargs):
+        with guard:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        try:
+            # Bounded so a regression fails the test instead of hanging the suite.
+            assert gate.wait(timeout=10)
+            return real(*args, **kwargs)
+        finally:
+            with guard:
+                active[0] -= 1
+
+    monkeypatch.setattr(na, "compose", held)
+    variant = na.Variant("person", "light", 64, "BT")
+
+    def call():
+        return na.render(variant, origin=ORIGIN, account_id="acc_ben", photo=None)
+
+    async def scenario():
+        # Three executor workers, one more than the slots: a third render could
+        # still enter (so a widened slot count shows as peak 3), while callers
+        # 4-8 sit QUEUED in the executor, which is the only place an unshielded
+        # cancel can drop a worker before its ``finally`` releases ``_PENDING``.
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=3))
+        tasks = [asyncio.ensure_future(call()) for _ in range(8)]
+        for _ in range(200):
+            if active[0] == 2:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)  # give a third worker the chance to (wrongly) enter
+        assert peak[0] == 2
+        with pytest.raises(na.RendererBusy):
+            await call()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        assert all(task.cancelled() for task in tasks)
+        gate.set()
+        for _ in range(500):
+            if _semaphore_free(na._PENDING, 8):
+                break
+            await asyncio.sleep(0.01)
+
+    asyncio.run(scenario())
+    assert peak[0] == 2
+    assert _semaphore_free(na._PENDING, 8)
+    assert _semaphore_free(na._RENDER_SLOTS, 2)
+    monkeypatch.setattr(na, "compose", real)
+    assert asyncio.run(call()).startswith(b"\x89PNG")

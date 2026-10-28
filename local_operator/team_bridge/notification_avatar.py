@@ -97,10 +97,10 @@ _MARK_PATH = Path(__file__).resolve().parent.parent / "mobile" / "static" / "mar
 # Initials palettes: fixed, mid-saturation tones that hold white text at
 # >= 4.5:1 in BOTH themes. That is the normal-text bar: at the intended 32/48
 # px appearance, 64 px initials scale to ~10-16 px, which is not large text
-# (design review D2). The dark set is the light-theme hues, a step brighter so
-# they stay distinct on a dark shell; each was darkened in HLS lightness only
-# (hue/saturation kept, so the order and per-owner mapping are unchanged)
-# until white reached >= 4.6:1. The
+# (design review D2). The dark set is nearly the light hues, each shifted in
+# HLS lightness only (hue/saturation kept, so the order and per-owner mapping
+# are unchanged) just enough for white to hold >= 4.6:1; a person keeps
+# recognisably the same colour across themes (design review D3). The
 # colour is chosen by a digest of (hub origin, account id) -- never the display
 # name -- so renaming someone never recolours them.
 _PALETTE_LIGHT = (
@@ -135,14 +135,45 @@ _AGENT_STYLE = {
 
 #: At most two decodes/renders at once across the process: a burst of
 #: notifications must not fan out into N simultaneous bitmap allocations.
+#:
+#: The slot count is a MEMORY bound, not a latency target. One decode may
+#: allocate up to ``MAX_SOURCE_PIXELS`` x 4 bytes (~4 MiB) plus the 4x
+#: supersampled canvas (1024 x 1024 RGBA, another ~4 MiB) and its masks, so
+#: two slots cap the transient peak at a few tens of MiB regardless of how many
+#: notifications arrive. Widening it would trade that ceiling for burst latency.
+#:
+#: MEASURED BURST BEHAVIOUR (QA round 2, Q3, M-series Mac, loopback hub): a
+#: 10-way simultaneous burst of 256 px photo requests served 8 (2 refused
+#: ``renderer_busy``, see ``_PENDING``) at 200-324 ms end to end, 5 of the 8
+#: over 250 ms, because the two slots serialise the work; 64 px initials bursts
+#: stayed at 91-145 ms; a single request is far inside budget. That is by
+#: design: the 250 ms figure is a PER-REQUEST budget, and the desktop posts
+#: with initials at 250 ms whatever happens here, so a burst costs some
+#: notifications their photo, never their delivery. The desktop also warms its
+#: display cache on directory load, so a burst of genuine misses is rare. (A
+#: cheaper burst would come from the desktop asking for 64 px only, the size an
+#: OS notification thumbnail actually shows; the size contract is unchanged
+#: here.)
 _RENDER_SLOTS = threading.BoundedSemaphore(2)
 # Bound queued work as well as active decodes; a flood must not retain arbitrary
-# image bytes in executor closures. Overload is a normal app-icon fallback.
+# image bytes in executor closures. Overload raises ``RendererBusy`` (a
+# transient 503 ``renderer_busy`` at the route), and the desktop shows initials.
 _PENDING = threading.BoundedSemaphore(8)
 
 
 class AvatarImageRejected(ValueError):
     """The authorized bytes are not an image this renderer will decode."""
+
+
+class RendererBusy(RuntimeError):
+    """Every pending slot is taken: transient overload, NOT a bad image.
+
+    Deliberately not an :class:`AvatarImageRejected` subclass, so a handler for
+    bad bytes cannot swallow it: the desktop must be able to tell "this image is
+    bad" from "try another time" (QA round 2, Q2). It does not retry either way
+    (the bounded wait has already posted with initials), and it must never
+    negative-cache a busy answer as if the sender had no usable picture.
+    """
 
 
 @dataclass(frozen=True)
@@ -432,6 +463,7 @@ async def render(
 ) -> bytes:
     """Concurrency-bounded :func:`compose` off the event loop. Stores nothing.
 
+    Raises :class:`RendererBusy` without queueing when ``_PENDING`` is full.
     ``check_owner`` runs before and after the decode inside the worker, so a
     queued render whose login ended in the meantime refuses instead of
     returning pixels. With no cache, a caller that is cancelled mid-render
@@ -439,7 +471,7 @@ async def render(
     """
 
     if not _PENDING.acquire(blocking=False):
-        raise AvatarImageRejected("renderer busy")
+        raise RendererBusy("renderer busy")
 
     def work() -> bytes:
         try:

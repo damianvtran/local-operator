@@ -49,7 +49,9 @@ def test_photo_composite_reads_only_the_closed_avatar_route(proxy):
     client, calls, state = proxy
     state.update(serve_type="image/jpeg", serve=_jpeg())
     image = _png(client.get(f"{URL}?{PHOTO_Q}"))
-    assert image.getpixel((20, 20))[:3] == pytest.approx((200, 40, 40), abs=16)
+    pixel = image.getpixel((20, 20))
+    assert isinstance(pixel, tuple)
+    assert pixel[:3] == pytest.approx((200, 40, 40), abs=16)
     assert [c[1] for c in calls] == ["/v1/accounts/acc_2/avatar?v=0123456789abcdef&size=64"]
 
 
@@ -113,13 +115,20 @@ def test_desktop_bearer_required(proxy):
 
 
 @pytest.mark.parametrize(
-    "mime,body",
-    [("image/png", b"\x89PNG\r\n\x1a\n" + b"\0" * 30), ("image/svg+xml", b"<svg/>")],
+    "mime,body,code",
+    [
+        ("image/png", b"\x89PNG\r\n\x1a\n" + b"\0" * 30, "malformed_page"),
+        ("image/svg+xml", b"<svg/>", "bridge_invalid_response"),
+    ],
 )
-def test_bad_upstream_bytes_are_refused(proxy, mime, body):
+def test_bad_upstream_bytes_are_refused(proxy, mime, body, code):
     client, _, state = proxy
     state.update(serve_type=mime, serve=body)
-    assert client.get(f"{URL}?{PHOTO_Q}").status_code == 502
+    response = client.get(f"{URL}?{PHOTO_Q}")
+    assert response.status_code == 502
+    # A bad image keeps its own code (the relay refuses an SVG before any
+    # decode); overload is the separate ``renderer_busy`` (below).
+    assert response.json()["detail"]["code"] == code
 
 
 def test_upstream_failure_is_a_refusal_not_a_stale_image(proxy):
@@ -157,3 +166,23 @@ def test_capability_is_advertised():
     from local_operator.server.features import static_feature_flags
 
     assert static_feature_flags()["team_bridge_notification_avatar"] == 1
+
+
+def test_overload_is_a_transient_503_not_a_bad_image(proxy, monkeypatch):
+    """A full pending queue is ``503 renderer_busy``, distinct from ``502
+    malformed_page`` (QA round 2, Q2), and carries no ``Retry-After``: the
+    desktop shows initials now and never retries or negative-caches it."""
+
+    import threading
+
+    from local_operator.team_bridge import notification_avatar as na
+
+    client, calls, _ = proxy
+    exhausted = threading.BoundedSemaphore(1)
+    exhausted.acquire()
+    monkeypatch.setattr(na, "_PENDING", exhausted)
+    response = client.get(f"{URL}?{BASE_Q}")
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "renderer_busy"
+    assert "retry-after" not in response.headers
+    assert not calls

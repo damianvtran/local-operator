@@ -522,6 +522,13 @@ _READ_REFUSALS: dict[str, tuple[int, str]] = {
         502,
         "the agent-messages hub answered in a shape this build cannot read",
     ),
+    # Transient local overload of the notification-avatar renderer, kept apart
+    # from ``malformed_page`` (a bad image) so the desktop never confuses the
+    # two (QA round 2, Q2). No ``Retry-After``: the desktop does not retry it.
+    "renderer_busy": (
+        503,
+        "the notification image renderer is busy; showing initials for now",
+    ),
     "wrong_tenant": (
         409,
         "the answer carried a message from another organization's namespace",
@@ -2620,6 +2627,14 @@ async def get_notification_avatar(
     desktop main process owns display retention (A0: in memory, <= 15 minutes,
     cleared on auth transitions); an HTTP/disk cache here could not apply its
     login fence.
+
+    Refusals specific to this route: ``502 malformed_page`` when the hub's
+    bytes are not a bounded PNG/JPEG, and ``503 renderer_busy`` when the
+    renderer's pending queue is full (a burst beyond 8 in flight). The second
+    is transient and carries no ``Retry-After``: the desktop shows initials
+    NOW, does not retry in the post path (the bounded wait has already spent
+    its budget, Team Bridge T2), and never negative-caches it as "no picture",
+    so the next notification from that sender asks again.
     """
 
     from local_operator.team_bridge import notification_avatar as na
@@ -2660,6 +2675,8 @@ async def get_notification_avatar(
                 expected_account_id=query["expected_account_id"],
             )
         )
+    except na.RendererBusy:
+        _raise_read("renderer_busy")
     except na.AvatarImageRejected:
         # The hub's bytes were not a bounded PNG/JPEG: same class as an
         # avatar body this relay refuses to serve.
