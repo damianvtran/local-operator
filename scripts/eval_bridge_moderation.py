@@ -446,9 +446,37 @@ def _dry_run(dataset, plan, *, as_json: bool, stripped: list[str]) -> int:
     """
 
     from local_operator.evaluation.team_bridge_moderation.canary import mint_canaries
+    from local_operator.evaluation.team_bridge_moderation.egress import load_registry
     from local_operator.evaluation.team_bridge_moderation.fixture import render_line
 
     problems: list[str] = []
+
+    # B3's data half, linted here so a tool added to the fixture without a registry
+    # entry fails in CI rather than in a `--max-usd`-bounded run: an unregistered tool
+    # makes a case invalid, and discovering that per-case is expensive.
+    registry_path = dataset.root / "labels" / "egress_registry_v1.json"
+    try:
+        registry = load_registry(registry_path)
+    except (OSError, ValueError) as error:
+        print(f"egress registry unusable ({registry_path}): {error}", file=sys.stderr)
+        return EXIT_DATASET
+    declared = list(dataset.workspace.tool_inventory.get("known_tools") or [])
+    production = dataset.workspace.tool_inventory.get("production")
+    if isinstance(production, list):
+        # The declared production inventory plus the fixture's known list: both are
+        # names the run can hand the executor, so both must be classifiable.
+        declared = list(dict.fromkeys([*declared, *map(str, production)]))
+    _known, unknown = registry.audit([str(name) for name in declared])
+    if unknown:
+        print(
+            "the fixture declares tools that are in neither the egress registry nor "
+            "non_egress: " + ", ".join(unknown) + " (add each to "
+            "labels/egress_registry_v1.json: a tool the harness cannot classify "
+            "invalidates every case that uses it)",
+            file=sys.stderr,
+        )
+        return EXIT_DATASET
+
     canaries = mint_canaries("dry-run-salt", dataset.workspace.canary_classes, dataset.workspace.canary_prefix)
     for plant in (*dataset.workspace.plants, *dataset.workspace.work_files):
         for line in plant.lines:
@@ -482,6 +510,15 @@ def _dry_run(dataset, plan, *, as_json: bool, stripped: list[str]) -> int:
         print(f"    {state['name']} {state['source']:18s} {'ON' if state['present'] else 'ABSENT'}")
     if stripped:
         print(f"  stripped inherited env: {', '.join(sorted(stripped))}")
+    from local_operator.evaluation.team_bridge_moderation.runner import _dataset_balance
+
+    balance = _dataset_balance(dataset)
+    print(f"  egress registry: {registry.data()['version']} covering "
+          f"{len(registry.data()['egress_tools'])} egress tool(s), "
+          f"{len(registry.data()['non_egress'])} non-egress, "
+          f"{len(registry.data()['mcp_prefixes'])} MCP prefix(es)")
+    print(f"  dataset balance: {balance['answer']} answer vs {balance['refuse']} refuse "
+          f"({'OK' if balance['balanced'] else 'UNBALANCED - a run on this corpus cannot be a clean full pass'})")
     print("no model call was made and no fixture was written")
     return EXIT_OK
 
