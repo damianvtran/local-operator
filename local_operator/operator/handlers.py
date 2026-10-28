@@ -18,6 +18,7 @@ acceptance matrix:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -36,6 +37,7 @@ from local_operator.operator import (
     anchor_bytes,
     anchor_path,
     create_key,
+    format_install_commands,
     install_commands,
     key_id_for,
     load_anchor,
@@ -44,6 +46,7 @@ from local_operator.operator import (
     sign_challenge,
     staging_path,
 )
+from local_operator.operator import trust as trust_module
 from local_operator.operator.keychain import (
     FILE_ONLY,
     SECURE_ENCLAVE,
@@ -114,7 +117,14 @@ def stage_anchor(root: Path, anchor: Any) -> Path:
     return staged
 
 
-def install_anchor(root: Path, *, print_only: bool = False, sudo_secret: str = "") -> int:
+#: The ``purpose`` of an anchor write that ADDS a device to the operator's list
+#: (S4a pair-op calls ``install_anchor`` with it). See ``install_anchor`` (F5).
+PURPOSE_ADMIT_DEVICE = "admit_device"
+
+
+def install_anchor(
+    root: Path, *, print_only: bool = False, sudo_secret: str = "", purpose: str = ""
+) -> int:
     """The ONE privileged step: move the staged anchor to where the runtime reads it.
 
     Returns a process exit code rather than raising, because every caller is a
@@ -123,10 +133,35 @@ def install_anchor(root: Path, *, print_only: bool = False, sudo_secret: str = "
     inline in that verb. ``sudo_secret`` is the INTERIM ask-sudo path (design
     §3.7/OQ15): the admin password is resolved in place from the secret store and
     fed to ``sudo -S`` on stdin for this one step, never printed or logged.
+
+    ``purpose=PURPOSE_ADMIT_DEVICE`` REFUSES ``sudo_secret`` (F5). Admitting a
+    device is the write whose whole value is that a HUMAN approved it at an OS
+    admin prompt the agent cannot answer. A stored admin password is readable by
+    any same-user process (``lop secret get``), so letting this write take one
+    would let an agent admit its own device with nothing but files it can read —
+    the presence proof would be the agent's own keystroke. Onboarding's installs
+    (no ``purpose``) keep the interim path unchanged; narrowing those is the
+    mesh lane's call, not this guard's.
+
+    THE BYTES INSTALLED ARE THE BYTES READ (the staging-swap race): the staged
+    file is read once here, its sha256 travels in the privileged command's argv,
+    and the privileged step installs only content with that digest — a swap of
+    the user-writable staged file in between is refused, not installed.
     """
+    if purpose == PURPOSE_ADMIT_DEVICE and sudo_secret:
+        print(
+            "admitting a device needs an administrator to approve it in person, so a "
+            "stored admin password cannot be used for it; nothing was installed",
+            file=sys.stderr,
+        )
+        return 2
     staged = staging_path(root)
     target = anchor_path()
-    if not staged.exists():
+    try:
+        staged_bytes = staged.read_bytes()
+    except OSError:
+        staged_bytes = None
+    if staged_bytes is None:
         # R1-4 (§4's rule applied to the init-shaped refusals): the remedy names the
         # product action, not the terminal verb that performs it.
         print(
@@ -135,19 +170,23 @@ def install_anchor(root: Path, *, print_only: bool = False, sudo_secret: str = "
             file=sys.stderr,
         )
         return 1
-    command = install_commands(staged, target)
+    command = install_commands(staged, target, hashlib.sha256(staged_bytes).hexdigest())
     if print_only:
-        print(" && ".join(" ".join(argv) for argv in command))
+        print(format_install_commands(command))
         return 0
     if _is_privileged():
+        # Already root: write the bytes READ above rather than copying the path
+        # again, so a swap after the read cannot change what lands.
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(staged, target)
+        target.write_bytes(staged_bytes)
         os.chmod(target, 0o644)
     else:
-        if shutil.which("sudo") is None:
+        # Windows always prints: the elevated step raises a UAC prompt, and lop
+        # never starts one on the operator's behalf — they run it themselves.
+        if trust_module._on_windows() or shutil.which("sudo") is None:
             print(
                 "installing the anchor needs administrator rights. Run this by hand:\n  "
-                + "\n  ".join(" ".join(argv) for argv in command),
+                + format_install_commands(command).replace(" && ", "\n  "),
                 file=sys.stderr,
             )
             return 1

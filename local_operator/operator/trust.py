@@ -9,7 +9,8 @@ a ROOT/ADMIN-OWNED FILE with public data only:
 
 * macOS  — ``/Library/Application Support/local-operator/operators/<uid>.json``
 * Linux  — ``/etc/local-operator/operators/<uid>.json``
-* Windows — ``%PROGRAMDATA%\\local-operator\\operators\\<sid>.json``
+* Windows — ``<ProgramData known folder>\\local-operator\\operators\\<account>.json``
+  (the folder is asked of the shell's Known Folder API, never of ``%PROGRAMDATA%``)
 
 MEASURED, IN A THROWAWAY KEYCHAIN (macOS 26.6.2, uid 501, SIP on), and the reason
 this is a file and not a keychain item:
@@ -40,6 +41,8 @@ TWO FURTHER CONSEQUENCES, STATED RATHER THAN GLOSSED:
 
 from __future__ import annotations
 
+import ctypes
+import functools
 import hashlib
 import json
 import os
@@ -66,11 +69,88 @@ _ANCHOR_ROOTS = {
     "linux": Path("/etc/local-operator/operators"),
 }
 
-#: Overridable ONLY in-process, for tests. Nothing reads an environment variable
-#: for this: an env-redirectable anchor path is the substitution attack this
-#: module exists to prevent, so the seam is a module global a test patches rather
-#: than a lookup the runtime performs (see ``test_the_anchor_path_cannot_be_redirected``).
+#: TEST-ONLY seam: overridable ONLY in-process, by a test. Nothing reads an
+#: environment variable for this: an env-redirectable anchor path is the
+#: substitution attack this module exists to prevent, so the seam is a module
+#: global a test patches rather than a lookup the runtime performs (see
+#: ``test_the_anchor_path_cannot_be_redirected``). Production code never assigns
+#: it; the Windows ACL verifier still runs against an overridden root, which is
+#: what lets the windows-latest job exercise the real verifier in a temp dir.
 _ANCHOR_ROOT_OVERRIDE: Path | None = None
+
+#: Where the anchor reads from when the Windows root cannot be resolved. A path
+#: that never exists, so an unresolvable root reports "no anchor" (fail closed)
+#: rather than falling back to anything the user's environment names.
+_UNRESOLVED_ROOT = Path("/nonexistent-local-operator-anchor")
+
+#: ``FOLDERID_ProgramData`` — {62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}.
+_FOLDERID_PROGRAMDATA = (
+    0x62AB5D82,
+    0xFDC1,
+    0x4DC3,
+    (0xA9, 0xDD, 0x07, 0x0D, 0x1D, 0x49, 0x5D, 0x97),
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _windows_program_data() -> Path | None:  # pragma: no cover — Windows only
+    """``C:\\ProgramData`` as the SHELL knows it, never as the environment says.
+
+    WHY THE KNOWN FOLDER API AND NOT A CONSTANT OR ``%PROGRAMDATA%`` (F4):
+    ``%PROGRAMDATA%`` is a value the gated subject writes for its own tool
+    subprocesses, so reading it let a same-user process point the runtime at a
+    directory it owns. A hard-coded ``C:\\ProgramData`` would be env-proof but
+    wrong on hosts whose system drive is not ``C:``. ``SHGetKnownFolderPath``
+    answers from the machine's registry (``HKLM``, administrator-writable), which
+    is the same trust level as the anchor file itself and moves with the drive.
+
+    Cached for the process: the folder does not move under a running process,
+    and ``anchor_dir`` is read on every anchor refresh. Any failure answers
+    ``None`` and the caller reads :data:`_UNRESOLVED_ROOT` — never a fallback.
+    """
+
+    class _Guid(ctypes.Structure):
+        _fields_ = [
+            ("data1", ctypes.c_ulong),
+            ("data2", ctypes.c_ushort),
+            ("data3", ctypes.c_ushort),
+            ("data4", ctypes.c_ubyte * 8),
+        ]
+
+    d1, d2, d3, d4 = _FOLDERID_PROGRAMDATA
+    folder_id = _Guid(d1, d2, d3, (ctypes.c_ubyte * 8)(*d4))
+    out = ctypes.c_wchar_p()
+    try:
+        shell32 = getattr(ctypes, "WinDLL")("shell32", use_last_error=True)
+        ole32 = getattr(ctypes, "WinDLL")("ole32", use_last_error=True)
+        hresult = shell32.SHGetKnownFolderPath(ctypes.byref(folder_id), 0, None, ctypes.byref(out))
+    except (OSError, AttributeError):
+        return None
+    try:
+        if hresult != 0 or not out.value:
+            return None
+        return Path(out.value)
+    finally:
+        ole32.CoTaskMemFree(out)
+
+
+def _windows_account_name() -> str | None:  # pragma: no cover — Windows only
+    """The account name from the process TOKEN (``GetUserNameW``), not ``%USERNAME%``.
+
+    Same reason as the root (F4): ``%USERNAME%`` is writable by the subject, and
+    naming another account's file would make this runtime read a different
+    human's anchor. ``GetUserNameW`` answers the same string ``%USERNAME%``
+    normally holds, so an anchor installed under the old spelling keeps its name.
+    """
+    size = ctypes.c_ulong(257)
+    buffer = ctypes.create_unicode_buffer(size.value)
+    try:
+        advapi32 = getattr(ctypes, "WinDLL")("advapi32", use_last_error=True)
+        if not advapi32.GetUserNameW(buffer, ctypes.byref(size)):
+            return None
+    except (OSError, AttributeError):
+        return None
+    return buffer.value or None
 
 
 def _owner_key() -> str:
@@ -90,17 +170,33 @@ def _owner_key() -> str:
     getuid = getattr(os, "getuid", None)
     if getuid is not None:
         return str(getuid())
-    account = os.environ.get("USERNAME") or os.environ.get("USER") or "default"
+    # No environment fallback (F4): an unreadable token names a file that is
+    # never installed, so the load reports "no anchor" rather than reading
+    # whichever account the environment claims.
+    account = _windows_account_name() or "unresolved-account"
     return re.sub(r"[^A-Za-z0-9._-]", "_", account)[:64]
+
+
+def _on_windows() -> bool:
+    """Whether the Windows rules apply — ONE seam a POSIX test can flip.
+
+    Patching ``os.name`` itself would turn every ``Path`` in the test process
+    into a ``WindowsPath``; a function the Windows branches all read lets the
+    Ubuntu suite drive the Windows root, verifier and install command while the
+    rest of the process stays POSIX.
+    """
+    return os.name == "nt"
 
 
 def anchor_dir() -> Path:
     """The directory the anchor is read from."""
     if _ANCHOR_ROOT_OVERRIDE is not None:
         return _ANCHOR_ROOT_OVERRIDE
-    if os.name == "nt":  # pragma: no cover — Windows only; CI runs POSIX
-        program_data = os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
-        return Path(program_data) / "local-operator" / "operators"
+    if _on_windows():
+        program_data = _windows_program_data()
+        if program_data is None:  # pragma: no cover — the shell API failed
+            return _UNRESOLVED_ROOT
+        return program_data / "local-operator" / "operators"
     root = _ANCHOR_ROOTS.get(sys.platform)
     if root is None:  # pragma: no cover — an unknown POSIX platform
         # Deliberately NOT a home-relative fallback: a fallback directory under
@@ -108,7 +204,7 @@ def anchor_dir() -> Path:
         # meant to be out of reach of, and silently reading an anchor from there
         # would report a boundary that does not exist. An unknown platform
         # reports "no anchor" instead.
-        return Path("/nonexistent-local-operator-anchor")
+        return _UNRESOLVED_ROOT
     return root
 
 
@@ -286,6 +382,214 @@ def _open_no_follow(path: Path) -> tuple[int, os.stat_result] | None:
         return None
 
 
+#: SIDs allowed to own, and to hold write-class rights over, the anchor and the
+#: two directories lop creates for it: LocalSystem and BUILTIN\\Administrators.
+#: The same two principals an elevated install leaves in the DACL; TrustedInstaller
+#: and every other principal are deliberately absent, so a widened ACL refuses.
+_WINDOWS_TRUSTED_SIDS = frozenset({"S-1-5-18", "S-1-5-32-544"})
+
+#: Access-mask bits that let a principal change what the anchor SAYS or WHO may
+#: change it: write/append data (add file / add subdirectory on a directory),
+#: write EA and attributes, delete and delete-child (replace by rename), WRITE_DAC,
+#: WRITE_OWNER, and the generic/maximum bits that map onto them.
+_WINDOWS_WRITE_MASK = (
+    0x0000_0002  # FILE_WRITE_DATA / FILE_ADD_FILE
+    | 0x0000_0004  # FILE_APPEND_DATA / FILE_ADD_SUBDIRECTORY
+    | 0x0000_0010  # FILE_WRITE_EA
+    | 0x0000_0040  # FILE_DELETE_CHILD
+    | 0x0000_0100  # FILE_WRITE_ATTRIBUTES
+    | 0x0001_0000  # DELETE
+    | 0x0004_0000  # WRITE_DAC
+    | 0x0008_0000  # WRITE_OWNER
+    | 0x0200_0000  # MAXIMUM_ALLOWED
+    | 0x1000_0000  # GENERIC_ALL
+    | 0x4000_0000  # GENERIC_WRITE
+)
+
+#: ACE types that only DENY. Every other type in a DACL is read as granting
+#: (fail closed: an ACE layout this module does not know is refused below).
+_WINDOWS_DENY_ACE_TYPES = frozenset({1, 6, 10, 12})
+#: The allow/deny types whose layout is header + mask + SID, the only ones a
+#: file-system DACL carries. Object ACEs (5/6/11/12) never appear on files.
+_WINDOWS_SIMPLE_ACE_TYPES = frozenset({0, 1, 9, 10})
+_INHERIT_ONLY_ACE = 0x08
+
+
+@dataclass(frozen=True)
+class WindowsAce:
+    """One DACL entry as the verifier needs it: type, flags, mask and trustee SID."""
+
+    ace_type: int
+    flags: int
+    mask: int
+    sid: str
+
+
+@dataclass(frozen=True)
+class WindowsSecurity:
+    """Owner and DACL of one object. ``aces is None`` is a NULL DACL (everyone: full)."""
+
+    owner: str
+    aces: tuple[WindowsAce, ...] | None
+
+
+def windows_acl_refusal(what: str, security: WindowsSecurity) -> str | None:
+    """Why this owner+DACL may not hold the anchor, or ``None`` when it may.
+
+    THE WINDOWS COUNTERPART OF ``st_uid == 0 and not mode & 0o022`` (F4). Before
+    this, ``load_anchor`` skipped every ownership check on Windows, and the
+    default ``C:\\ProgramData`` ACL (``BUILTIN\\Users:(CI)(WD,AD)`` plus
+    ``CREATOR OWNER:(OI)(CI)(IO)(F)``) lets a standard user create
+    ``ProgramData\\local-operator`` and own it outright — so a same-user agent
+    could plant its own key. Pure over a value, so the Ubuntu suite drives it
+    with fake descriptors and the windows-latest job drives it with real ones.
+
+    Inherit-only ACEs are skipped: they grant nothing on THIS object (the
+    ``CREATOR OWNER`` template is exactly that), and the children they would
+    reach are checked in their own right.
+    """
+    if security.owner not in _WINDOWS_TRUSTED_SIDS:
+        return f"the {what} is owned by {security.owner}, not SYSTEM or Administrators"
+    if security.aces is None:
+        return f"the {what} has no access list, so everyone may write it"
+    for ace in security.aces:
+        if ace.flags & _INHERIT_ONLY_ACE:
+            continue
+        if ace.ace_type not in _WINDOWS_SIMPLE_ACE_TYPES:
+            return f"the {what} carries an access entry of a kind the runtime does not read"
+        if ace.ace_type in _WINDOWS_DENY_ACE_TYPES:
+            continue
+        if ace.sid not in _WINDOWS_TRUSTED_SIDS and ace.mask & _WINDOWS_WRITE_MASK:
+            return f"the {what} is writable by {ace.sid} (access mask {ace.mask:#x})"
+    return None
+
+
+def _windows_security(  # pragma: no cover — Windows only; the windows-latest job runs it
+    target: Path | int,
+) -> WindowsSecurity | None:
+    """Owner SID and DACL of a path, or of an OPEN descriptor, via advapi32.
+
+    ctypes rather than pywin32: pywin32 reaches this project only through the
+    optional ``mcp`` extra, and the root of trust must not depend on an extra.
+    A descriptor is read with ``GetSecurityInfo`` on its OS handle, so the file
+    that is checked is the file that is then read — the Windows half of the
+    POSIX ``fstat``-from-the-descriptor rule. ``None`` on any failure; the caller
+    refuses it.
+    """
+    from ctypes import wintypes
+
+    advapi32 = getattr(ctypes, "WinDLL")("advapi32", use_last_error=True)
+    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+    owner = ctypes.c_void_p()
+    dacl = ctypes.c_void_p()
+    descriptor = ctypes.c_void_p()
+    se_file_object, owner_and_dacl = 1, 0x1 | 0x4
+    if isinstance(target, int):
+        import msvcrt
+
+        handle = getattr(msvcrt, "get_osfhandle")(target)
+        rc = advapi32.GetSecurityInfo(
+            wintypes.HANDLE(handle),
+            se_file_object,
+            owner_and_dacl,
+            ctypes.byref(owner),
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(descriptor),
+        )
+    else:
+        rc = advapi32.GetNamedSecurityInfoW(
+            wintypes.LPCWSTR(str(target)),
+            se_file_object,
+            owner_and_dacl,
+            ctypes.byref(owner),
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(descriptor),
+        )
+    if rc != 0:
+        return None
+    try:
+
+        def sid_string(sid: Any) -> str | None:
+            text = wintypes.LPWSTR()
+            if not advapi32.ConvertSidToStringSidW(sid, ctypes.byref(text)):
+                return None
+            try:
+                return text.value
+            finally:
+                kernel32.LocalFree(text)
+
+        owner_sid = sid_string(owner)
+        if owner_sid is None:
+            return None
+        if not dacl.value:
+            return WindowsSecurity(owner=owner_sid, aces=None)
+
+        class _AclSize(ctypes.Structure):
+            _fields_ = [
+                ("count", wintypes.DWORD),
+                ("in_use", wintypes.DWORD),
+                ("free", wintypes.DWORD),
+            ]
+
+        class _Ace(ctypes.Structure):
+            # ACE_HEADER + Mask; the SID starts at ``sid_start``.
+            _fields_ = [
+                ("ace_type", ctypes.c_ubyte),
+                ("flags", ctypes.c_ubyte),
+                ("size", wintypes.WORD),
+                ("mask", wintypes.DWORD),
+                ("sid_start", wintypes.DWORD),
+            ]
+
+        size = _AclSize()
+        if not advapi32.GetAclInformation(dacl, ctypes.byref(size), ctypes.sizeof(size), 2):
+            return None
+        aces: list[WindowsAce] = []
+        for index in range(size.count):
+            pointer = ctypes.c_void_p()
+            if not advapi32.GetAce(dacl, index, ctypes.byref(pointer)):
+                return None
+            ace = ctypes.cast(pointer, ctypes.POINTER(_Ace)).contents
+            sid = ""
+            if ace.ace_type in _WINDOWS_SIMPLE_ACE_TYPES:
+                address = (pointer.value or 0) + _Ace.sid_start.offset
+                sid = sid_string(ctypes.c_void_p(address)) or ""
+            aces.append(WindowsAce(ace.ace_type, ace.flags, ace.mask, sid))
+        return WindowsSecurity(owner=owner_sid, aces=tuple(aces))
+    finally:
+        kernel32.LocalFree(descriptor)
+
+
+def _windows_anchor_refusal(path: Path, descriptor: int) -> str | None:
+    """Run :func:`windows_acl_refusal` over the anchor and the directories lop owns.
+
+    WHICH DIRECTORIES, and why it stops there: the file, ``operators`` and
+    ``local-operator`` are what the elevated install creates and hardens, and a
+    principal that can write, delete or re-ACL any of them can replace the anchor.
+    The ProgramData root above them is the system's: its default ACL lets Users
+    add entries but not delete or rename an existing child (no DELETE_CHILD), so
+    a hardened ``local-operator`` cannot be swapped from there — and checking the
+    root would refuse every stock install for an ACE that cannot reach the file.
+    """
+    targets: list[tuple[str, Path | int]] = [
+        ("anchor", descriptor),
+        ("anchor directory", path.parent),
+        ("anchor's parent directory", path.parent.parent),
+    ]
+    for what, target in targets:
+        security = _windows_security(target)
+        if security is None:
+            return f"the {what}'s owner and access list could not be read"
+        refusal = windows_acl_refusal(what, security)
+        if refusal is not None:
+            return refusal
+    return None
+
+
 def load_anchor(uid: int | str | None = None) -> AnchorLoad:
     """Read and validate the pinned anchor. Never raises, never follows a link.
 
@@ -325,8 +629,21 @@ def load_anchor(uid: int | str | None = None) -> AnchorLoad:
             reason="no anchor is installed, so the runtime trusts no key yet",
         )
     descriptor, info = opened
+    # Whether an administrator, not the gated user, controls the file. POSIX reads
+    # it from ``st_uid``; on Windows ``st_uid`` is always 0 and means nothing, so
+    # it is True only once the DACL verifier below has accepted the file.
+    owner_ok = info.st_uid == 0
     try:
-        if os.name != "nt":  # pragma: no branch — the POSIX check is the measured one
+        if _on_windows():
+            # ``st_uid`` is always 0 on Windows, so the POSIX checks below would
+            # pass ANY file there; the DACL verifier is the Windows check (F4).
+            refusal = _windows_anchor_refusal(path, descriptor)
+            if refusal is not None:
+                return AnchorLoad(
+                    anchor=None, path=path, root_owned=False, reason=refusal, exists=True
+                )
+            owner_ok = True
+        else:
             if info.st_uid != 0:
                 return AnchorLoad(
                     anchor=None,
@@ -356,7 +673,7 @@ def load_anchor(uid: int | str | None = None) -> AnchorLoad:
         return AnchorLoad(
             anchor=None,
             path=path,
-            root_owned=info.st_uid == 0,
+            root_owned=owner_ok,
             reason="the anchor is not readable JSON",
             exists=True,
         )
@@ -365,7 +682,7 @@ def load_anchor(uid: int | str | None = None) -> AnchorLoad:
         return AnchorLoad(
             anchor=None,
             path=path,
-            root_owned=info.st_uid == 0,
+            root_owned=owner_ok,
             # ``refusal`` carries the ONE specific sentence ``_parse`` gives (the
             # declared-vs-derived key id — F5 slice B); every other refusal keeps
             # the corpus's generic sentence, because none of them names a
@@ -373,9 +690,7 @@ def load_anchor(uid: int | str | None = None) -> AnchorLoad:
             reason=refusal or "the anchor does not describe an ES256 operator key",
             exists=True,
         )
-    return AnchorLoad(
-        anchor=anchor, path=path, root_owned=info.st_uid == 0, reason="ok", exists=True
-    )
+    return AnchorLoad(anchor=anchor, path=path, root_owned=owner_ok, reason="ok", exists=True)
 
 
 def anchor_bytes(anchor: OperatorAnchor) -> bytes:
@@ -487,7 +802,80 @@ def load_local_anchor(config_root: Path | None = None) -> OperatorAnchor | None:
     return load_staged_anchor(config_root if config_root is not None else config_dir())
 
 
-def install_commands(staging: Path, target: Path) -> list[list[str]]:
+#: The privileged half of a POSIX install, run as ``sh -c <this> lop-anchor-install
+#: <staged> <target> <sha256-hex> <group>``. Every value arrives as a POSITIONAL
+#: argument, never interpolated into the script, so no path or digest is ever
+#: re-parsed as shell. WHY IT COPIES, HASHES, THEN RENAMES (the staging-swap
+#: race): the staged file is user-writable, so a same-user process could replace
+#: it between the moment lop read and showed it and the moment root installs it.
+#: Root first copies it into the ROOT-OWNED target directory (where the user can
+#: no longer touch the copy), hashes THAT copy, refuses unless it is the exact
+#: digest lop computed from the bytes it read, and only then renames it into
+#: place — so what lands is byte-for-byte what was validated, atomically.
+_POSIX_INSTALL_SCRIPT = (
+    "set -eu; "
+    'staged="$1"; target="$2"; expected="$3"; group="$4"; '
+    'tmp="$(dirname "$target")/.anchor-install.$$"; '
+    "trap 'rm -f \"$tmp\"' EXIT; "
+    'install -m 0600 -o root -g "$group" "$staged" "$tmp"; '
+    'actual="$({hash} "$tmp" | cut -d " " -f 1)"; '
+    'if [ "$actual" != "$expected" ]; then '
+    "echo 'the staged anchor changed after it was read; nothing was installed' >&2; "
+    "exit 3; fi; "
+    'chmod 0644 "$tmp"; mv -f "$tmp" "$target"; trap - EXIT'
+)
+
+#: Well-known SIDs, spelled as SIDs so the Windows command is locale-independent
+#: (``Administrators`` is ``Administratoren`` on a German install).
+_SID_SYSTEM, _SID_ADMINS, _SID_USERS = "S-1-5-18", "S-1-5-32-544", "S-1-5-32-545"
+
+
+def _ps_quote(value: str) -> str:
+    """A PowerShell single-quoted literal: no expansion, ``'`` doubled."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _windows_install_script(staging: Path, target: Path, digest_hex: str) -> str:
+    """The script the ELEVATED PowerShell runs (F4, problem 3).
+
+    The old step was a non-elevated ``Copy-Item`` into ``%PROGRAMDATA%`` that set
+    no ACL, so the file inherited ``CREATOR OWNER: F`` and stayed writable by the
+    very user it gates. This one, as an administrator: creates both directories,
+    strips inheritance and grants Full to SYSTEM and Administrators and read to
+    Users, makes Administrators the owner, reads the staged bytes ONCE, refuses
+    unless they hash to the digest lop read (the staging-swap race), writes those
+    bytes to a hardened temp file inside the hardened directory and renames it
+    into place. The result is what :func:`windows_acl_refusal` accepts.
+    """
+    tmp = target.parent / ".anchor-install.tmp"
+    lines = [
+        "$ErrorActionPreference = 'Stop'",
+        f"$root = {_ps_quote(str(target.parent.parent))}",
+        f"$dir = {_ps_quote(str(target.parent))}",
+        f"$tmp = {_ps_quote(str(tmp))}",
+        "function Harden($p, $inherit) {",
+        f'  icacls $p /inheritance:r /grant:r "*{_SID_SYSTEM}:$($inherit)F" '
+        f'"*{_SID_ADMINS}:$($inherit)F" "*{_SID_USERS}:$($inherit)R" | Out-Null',
+        '  if ($LASTEXITCODE -ne 0) { throw "icacls could not restrict $p" }',
+        f'  icacls $p /setowner "*{_SID_ADMINS}" | Out-Null',
+        '  if ($LASTEXITCODE -ne 0) { throw "icacls could not take ownership of $p" }',
+        "}",
+        "New-Item -ItemType Directory -Force -Path $dir | Out-Null",
+        "Harden $root '(OI)(CI)'",
+        "Harden $dir '(OI)(CI)'",
+        f"$bytes = [IO.File]::ReadAllBytes({_ps_quote(str(staging))})",
+        "$sha = [Security.Cryptography.SHA256]::Create()",
+        "$actual = -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })",
+        f"if ($actual -ne {_ps_quote(digest_hex)}) {{ throw 'the staged anchor changed "
+        "after it was read; nothing was installed' }",
+        "[IO.File]::WriteAllBytes($tmp, $bytes)",
+        "Harden $tmp ''",
+        f"Move-Item -Force -LiteralPath $tmp -Destination {_ps_quote(str(target))}",
+    ]
+    return "\n".join(lines)
+
+
+def install_commands(staging: Path, target: Path, digest_hex: str) -> list[list[str]]:
     """The privileged commands onboarding needs, spelled in ONE place.
 
     A list of argv lists rather than one joined string, so the caller runs them
@@ -497,22 +885,68 @@ def install_commands(staging: Path, target: Path) -> list[list[str]]:
     explicitly rather than left to ``install``'s defaults, which inherit the
     invoking user's umask and group.
 
-    Windows takes one command because ``%PROGRAMDATA%`` is already
-    admin-writable and has no POSIX ownership to set.
+    ``digest_hex`` is the sha256 of the staged bytes AS THE CALLER READ THEM; the
+    privileged step installs only content with that digest (see
+    :data:`_POSIX_INSTALL_SCRIPT` for the race it closes).
+
+    Windows takes one command, which the operator runs and approves at the UAC
+    prompt — lop never runs it itself. The elevated script travels as
+    ``-EncodedCommand`` (UTF-16LE base64) inside the argv rather than as a script
+    file, because a script file would have to live somewhere the user can write,
+    which reopens the same swap race for the script itself.
     """
-    if os.name == "nt":  # pragma: no cover — Windows only
+    if _on_windows():
+        import base64
+
+        script = _windows_install_script(staging, target, digest_hex)
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
         return [
             [
                 "powershell",
+                "-NoProfile",
                 "-Command",
-                f"Copy-Item -Force '{staging}' '{target}'",
+                # ``-PassThru`` + ``exit``: ``Start-Process -Wait`` alone drops the
+                # elevated child's exit code, so a refused digest would print as
+                # success.
+                "$p = Start-Process -FilePath powershell -Verb RunAs -Wait -PassThru "
+                f"-ArgumentList '-NoProfile -NonInteractive -EncodedCommand {encoded}'; "
+                "exit $p.ExitCode",
             ]
         ]
     group = "wheel" if sys.platform == "darwin" else "root"
+    hasher = "shasum -a 256" if sys.platform == "darwin" else "sha256sum"
+    script = _POSIX_INSTALL_SCRIPT.replace("{hash}", hasher)
     return [
         ["sudo", "install", "-d", "-m", "0755", "-o", "root", "-g", group, str(target.parent)],
-        ["sudo", "install", "-m", "0644", "-o", "root", "-g", group, str(staging), str(target)],
+        [
+            "sudo",
+            "sh",
+            "-c",
+            script,
+            "lop-anchor-install",
+            str(staging),
+            str(target),
+            digest_hex,
+            group,
+        ],
     ]
+
+
+def format_install_commands(command: list[list[str]]) -> str:
+    """The commands as ONE line an operator (or ``sh -c``) can run as printed.
+
+    Quoted per argument, because the macOS target contains a space
+    (``Application Support``) and the install step now carries a script; the
+    remote-onboarding runner executes this exact line under ``sh -c``.
+    Windows prints its single PowerShell command with Windows quoting.
+    """
+    if _on_windows():
+        import subprocess
+
+        return " && ".join(subprocess.list2cmdline(argv) for argv in command)
+    import shlex
+
+    return " && ".join(shlex.join(argv) for argv in command)
 
 
 def device_is_revoked(anchor: OperatorAnchor, device_id: str) -> bool:
