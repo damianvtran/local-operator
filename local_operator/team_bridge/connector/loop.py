@@ -138,14 +138,17 @@ HOLD_STALE_CLAIM = "stale_claim"
 #: retires it on a terminal outcome by this code. In ``screening.HOLD_CODES``.
 STALE_CLAIM_REDRIVE_CODE = "stale_claim_retry"
 
-#: Re-drive outcomes after which nothing is owed for the row: the message was
-#: handed off (``delivered``), refused for good (``bounce``/``rejected``), is
-#: gone from its conversation (``skipped``), or the conversation reservation
-#: witness proves a card was already admitted for it (``duplicate``; its
-#: residual — a crash between the reservation and the card — is the claiming
-#: slice's, see ``conversation.py``). ``retry_due_holds`` deletes the row on
-#: each of these (PR #3063 review B1/M2).
-_TERMINAL_REDRIVE_ACTIONS = frozenset({"delivered", "bounce", "rejected", "skipped", "duplicate"})
+#: Re-drive outcomes after which nothing is owed for the row — the actions the
+#: spines actually return (review n3): handed off (``delivered``, and the
+#: conversation recovery card's ``delivered_unadmitted``), refused for good
+#: with the hub told (``bounce`` only after a confirmed ``blocked`` ACK,
+#: review m7; ``rejected``), or a replay of an admission whose card already
+#: went out (``duplicate``: a reservation exists and the card-owed marker was
+#: cleared, review m6). ``retry_due_holds`` deletes the row on each of these
+#: (PR #3063 review B1/M2).
+_TERMINAL_REDRIVE_ACTIONS = frozenset(
+    {"delivered", "delivered_unadmitted", "bounce", "rejected", "duplicate"}
+)
 
 #: Slack past the lease expiry before the parked message comes due, so the
 #: re-drive's claim lands strictly after ``expires_at`` (``claim`` refuses a
@@ -349,14 +352,14 @@ async def retry_due_holds(
     spine (``handle_message_available``), whose fetch performs the single
     documented message-bytes re-read per due item. Outcomes:
 
-    * terminal (``_TERMINAL_REDRIVE_ACTIONS``: delivered, bounce, rejected,
-      skipped, duplicate) — the pass deletes the row by its own key (a cache
-      hit commits no receipt to do it); the attempt counter resets;
+    * terminal (``_TERMINAL_REDRIVE_ACTIONS``: delivered, delivered_unadmitted,
+      bounce, rejected, duplicate) — the pass deletes the row by its own key (a
+      cache hit commits no receipt to do it); the attempt counter resets;
     * held AGAIN — ``retry_at`` advances by a bounded doubling gap (60 s →
       3600 s cap; counter capped at RETRY_MAX_ATTEMPTS);
-    * any other outcome (``badge_only``, ``claimed_elsewhere``) — the row and
-      its code stay, and ``retry_at`` advances on the same bounded doubling
-      gap as a hold, so no row is ever due on every pass;
+    * any other outcome (``badge_only``, ``claimed_elsewhere``) — the row
+      stays, re-coded to that outcome, and ``retry_at`` advances on the same
+      bounded doubling gap as a hold, so no row is ever due on every pass;
     * a ``stale_claim`` park — re-driven only when its connector claim is
       held past expiry (the holder died); ``wait`` re-arms it at the current
       expiry, ``retire`` deletes it (see ``HOLD_STALE_CLAIM``);
@@ -494,11 +497,17 @@ async def retry_due_holds(
             # or anything a spine adds later): the reason is real but outside
             # this row, so it waits on the SAME bounded doubling backoff a hold
             # gets. Leaving ``retry_at`` alone kept the row due on every pass
-            # (PR #3063 review M2: 141 re-drives in 200 s). The code is kept.
+            # (PR #3063 review M2: 141 re-drives in 200 s). The code becomes
+            # the outcome (review n4): the owner sees the REASON it waits, not
+            # the mechanism (``stale_claim_retry``) that re-drove it. Still
+            # conditional on the row existing, like the hold arm below.
             attempts = _RETRY_ATTEMPTS.get(message_id, 0)
             gap = min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S)
+            reason = str(action or "")[:64]
             try:
-                store.advance_hold_retry(owner, message_id, retry_at=_time.time() + gap)
+                advanced = store.advance_hold_retry(owner, message_id, retry_at=_time.time() + gap)
+                if advanced and reason and reason != row["hold_code"]:
+                    store.persist_hold(owner, message_id, reason, retry_at=_time.time() + gap)
             except StoreRefused:
                 pass  # fenced owner: the next live pass owns the row
             _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)

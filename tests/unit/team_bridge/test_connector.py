@@ -1310,6 +1310,8 @@ def test_a_non_terminal_redrive_outcome_backs_off(tmp_path, monkeypatch, action)
     assert 1 <= len(calls) <= 3
     hold = store.screening_hold(owner, "bmsg_1")
     assert hold is not None and hold["retry_at"] > clock.now
+    # Review n4: the owner sees WHY it waits, not the re-drive mechanism.
+    assert hold["hold_code"] == action
 
 
 def test_a_stop_during_the_read_ack_post_is_flushed_and_delivered_once(
@@ -1377,6 +1379,155 @@ def test_a_stop_during_the_read_ack_post_is_flushed_and_delivered_once(
     assert intent is not None and intent["state"] == "confirmed"
     assert store.screening_hold(owner, "bmsg_1") is None
     assert store.drain_feed_refs(owner, 3) == []
+
+
+def _stop_during_the_read_ack_post(monkeypatch, tmp_path) -> tuple[Any, ...]:
+    """A connector stopped DURING the read-ACK POST, the m4 shape: the intent
+    is durable and pending, the hub never answered, the ref is still due."""
+
+    from local_operator.team_bridge import screening as screening_mod
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    record, body = _wire_spine(monkeypatch, tmp_path)
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    wire, access = _real_ack_access(monkeypatch, owner)
+    screens: list[str] = []
+    model = {"name": "qa-default"}
+
+    async def screen(owner_, item, *, config_dir, auth_store, settings=None):
+        # screening.py step 5 (a pending read intent is never admitted), then
+        # a fresh allow under whatever model is CURRENT — the stand-in for a
+        # cache miss after a model/template change.
+        if Store(config_dir).find_pending_intent(owner_, "bmsg_1", "read") is not None:
+            return screening_mod.ScreenResult("hold", hold_code="ack_recovery")
+        screens.append(model["name"])
+        receipt = ScreeningReceipt(
+            verdict="allow",
+            model=model["name"],
+            prompt_version="bridge-screen-v1",
+            template_sha256="ab" * 32,
+            body_sha256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            categories=(),
+        ).validated()
+        return ScreenResult(disposition="deliver", receipt=receipt)
+
+    monkeypatch.setattr(wake_mod, "screen_item", screen)
+    real_wire_ack = wire.ack
+
+    async def stopped_mid_post(message_id: str, **kwargs: Any) -> dict[str, Any]:
+        wire.refs.append(str(kwargs["client_ref"]))
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(wire, "ack", stopped_mid_post)
+    _one_pending_ref(store, owner)
+    with pytest.raises(asyncio.CancelledError):
+        _iterate(owner, tmp_path, access)
+    pending = store.find_pending_intent(owner, "bmsg_1", "read")
+    assert pending is not None
+    wire.refs.clear()
+    monkeypatch.setattr(wire, "ack", real_wire_ack)
+    return clock, store, owner, record, wire, access, screens, model, pending
+
+
+def test_a_changed_screening_tuple_after_the_replay_delivers_on_the_stored_verdict(
+    tmp_path, monkeypatch
+) -> None:
+    """PR #3063 review M3: after the m4 replay CONFIRMS the stored intent, a
+    re-screen under a CHANGED tuple (a ``lop`` update shipping a new model or
+    template between the stop and the restart) re-recorded the allow under the
+    stored ref; the write-once ledger raised ``intent_conflict`` out of the
+    spine — hub read, nobody woken, no hold, and the connector stuck on its
+    failure backoff. The hub's confirmed verdict IS the screening decision:
+    the handoff must carry it, with no re-screen."""
+
+    clock, store, owner, record, wire, access, screens, model, pending = (
+        _stop_during_the_read_ack_post(monkeypatch, tmp_path)
+    )
+    screens.clear()
+    model["name"] = "qa-default-v2"  # the update landed while the device was off
+    for _ in range(4):
+        _iterate(owner, tmp_path, access)
+        clock.now += loop_mod.RETRY_MAX_S
+    assert len(record["delivered"]) == 1
+    assert screens == []  # delivered on the stored verdict, never re-screened
+    assert wire.refs == [pending["client_ref"]]
+    assert store.screening_hold(owner, "bmsg_1") is None
+    assert store.drain_feed_refs(owner, 3) == []
+
+
+def test_an_ack_ledger_refusal_is_a_visible_hold_never_an_escape(tmp_path, monkeypatch) -> None:
+    """M3 defence in depth: any ``StoreRefused`` out of ``ack_read`` (the
+    write-once ledger, a fenced owner) is a typed hold on the bounded backoff,
+    never an exception that leaves the message with no hold row."""
+
+    store, owner = _enroll(tmp_path)
+    record, _ = _wire_spine(monkeypatch, tmp_path)
+
+    async def refusing_ack(*args: Any, **kwargs: Any) -> Any:
+        raise StoreRefused("intent_conflict", "write-once intent tuple differs")
+
+    monkeypatch.setattr(wake_mod, "ack_read", refusing_ack)
+    out = asyncio.run(
+        wake_mod.handle_message_available(
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=_access(owner)
+        )
+    )
+    assert out == {"action": "hold", "message_id": "bmsg_1", "code": "ack_refused:intent_conflict"}
+    assert record["delivered"] == []
+
+
+def test_a_bounce_whose_blocked_ack_did_not_confirm_is_a_hold(tmp_path, monkeypatch) -> None:
+    """PR #3063 review m7: ``bounce`` was terminal whatever the blocked-ACK
+    outcome, so a 503 left a pending ``blocked`` intent nothing ever flushed
+    and the re-drive row was retired. Only a CONFIRMED blocked ACK ends it."""
+
+    store, owner = _enroll(tmp_path)
+    record, _ = _wire_spine(monkeypatch, tmp_path, disposition="bounce")
+
+    async def pending_ack(owner_, message_id, target, receipt, *, config_dir, access):
+        record["acks"].append(target)
+        return SimpleNamespace(state="pending", intent_id="i-1")
+
+    monkeypatch.setattr(wake_mod, "ack_read", pending_ack)
+    out = asyncio.run(
+        wake_mod.handle_message_available(
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=_access(owner)
+        )
+    )
+    assert out == {"action": "hold", "message_id": "bmsg_1", "code": "ack_not_confirmed:pending"}
+    assert record["acks"] == ["blocked"] and record["delivered"] == []
+
+
+def test_the_recovery_ack_runs_behind_the_producer_fence(tmp_path, monkeypatch) -> None:
+    """PR #3063 review m8: the m4 replay sends an ACK after two network
+    round trips; a bridge turned off during them must stop it, exactly as
+    FENCE #2 stops the ordinary ACK."""
+
+    clock, store, owner, record, wire, access, screens, model, pending = (
+        _stop_during_the_read_ack_post(monkeypatch, tmp_path)
+    )
+    real_fetch = wake_mod.fetch_item
+
+    async def fetch_then_off(*args: Any, **kwargs: Any) -> Any:
+        item = await real_fetch(*args, **kwargs)
+        (tmp_path / "config.yml").write_text(
+            json.dumps({"values": {"team_bridge": {"enabled": False}}}), encoding="utf-8"
+        )
+        return item
+
+    monkeypatch.setattr(wake_mod, "fetch_item", fetch_then_off)
+    out = asyncio.run(
+        wake_mod.handle_message_available(
+            owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=access
+        )
+    )
+    assert out["action"] == "hold" and out["code"] == "bridge_off"
+    assert wire.refs == [] and record["delivered"] == []
+    intent = store.ack_intent(owner, pending["intent_id"])
+    assert intent is not None and intent["state"] == "pending"
 
 
 def test_a_session_claim_is_never_parked_for_redelivery(tmp_path, monkeypatch) -> None:

@@ -518,8 +518,12 @@ async def ack_read(
 
 async def recover_pending_read(
     owner: Any, message_id: str, item: Any, *, config_dir: Path, access: Any
-) -> str | None:
-    """Replay a PENDING read-ACK intent before screening; ``None`` to proceed.
+) -> tuple[str | None, Mapping[str, Any] | None]:
+    """Replay a PENDING read-ACK intent before screening.
+
+    Returns ``(hold_code, None)`` to hold, ``(None, receipt)`` when the hub
+    confirmed the stored intent (its receipt is the decision the spine
+    carries, review M3), or ``(None, None)`` when there was nothing to replay.
 
     WHY (PR #3063 review m4; the operator's "unacked messages must catch up
     after the device was off"): a stop or crash DURING the read-ACK POST
@@ -538,34 +542,60 @@ async def recover_pending_read(
     acknowledged for different bytes.
 
     BOUNDED: one replay per re-drive, and a re-drive that cannot confirm
-    returns a hold, which the loop schedules on its ordinary backoff. Returns
-    the hold code when the intent is still not confirmed.
+    returns a hold, which the loop schedules on its ordinary backoff. The
+    caller runs ``_producer_fence`` immediately before this (review m8).
     """
 
     from local_operator.team_bridge import pull as _pull
-    from local_operator.team_bridge.store import Store
+    from local_operator.team_bridge.store import Store, StoreRefused
 
     pending = Store(config_dir).find_pending_intent(owner, message_id, "read")
     if pending is None:
-        return None
-    if pending.get("receipt") is None:
+        return None, None
+    stored = pending.get("receipt")
+    if stored is None:
         # No tuple to replay (a pre-screening row): screening's own
         # ``ack_recovery`` hold stays the honest answer.
-        return "ack_recovery"
+        return "ack_recovery", None
     text = _body_text(item)
     fetched = hashlib.sha256(text.encode("utf-8")).hexdigest() if text is not None else None
-    if fetched is None or pending["receipt"].get("body_sha256") != fetched:
-        return None
+    if fetched is None or stored.get("body_sha256") != fetched:
+        return None, None
     try:
         outcome = await _pull.recover_ack(
             owner, message_id, "read", config_dir=config_dir, access=access
         )
-    except _pull.PullRefused as refusal:
-        return f"ack_recovery:{refusal.code}"[:64]
+    except (_pull.PullRefused, StoreRefused) as refusal:
+        return f"ack_recovery:{refusal.code}"[:64], None
     state = str(getattr(outcome, "state", "") or "")
     if state != _pull.ACK_CONFIRMED:
-        return f"ack_not_confirmed:{state or 'unknown'}"
-    return None
+        return f"ack_not_confirmed:{state or 'unknown'}", None
+    return None, stored
+
+
+def _confirmed_screen_result(stored: Mapping[str, Any]) -> Any:
+    """The screening result a CONFIRMED stored read intent stands for.
+
+    A ``read`` intent is only ever recorded for an ``allow`` receipt (a
+    reject is acked ``blocked``, which this recovery never replays), so this
+    is a ``deliver`` carrying the stored tuple verbatim — the S-12 checks
+    downstream then compare that tuple against the very intent it came from.
+    """
+
+    from local_operator.team_bridge.screening import ScreenResult
+    from local_operator.team_bridge.types import ScreeningReceipt
+
+    receipt = ScreeningReceipt(
+        verdict=str(stored["verdict"]),
+        model=str(stored["model"]),
+        prompt_version=str(stored["prompt_version"]),
+        template_sha256=str(stored["template_sha256"]),
+        body_sha256=str(stored["body_sha256"]),
+        categories=tuple(str(c) for c in stored.get("categories") or ()),
+    ).validated()
+    if receipt.verdict != "allow":
+        return ScreenResult("hold", hold_code="ack_recovery")
+    return ScreenResult(disposition="deliver", receipt=receipt)
 
 
 async def deliver_wake(
@@ -721,14 +751,28 @@ async def handle_message_available(
         item = await fetch_item(
             owner, message_id, config_dir=config_dir, access=access, auth_store=auth_store
         )
-        recovery_code = await recover_pending_read(
+        # FENCE before the recovery ACK I/O (review m8): the replay below is
+        # an ACK like FENCE #2's, sent after two network round trips, and a
+        # bridge switched off during them must stop it the same way.
+        fence_code = _producer_fence(store, owner, access, settings)
+        if fence_code:
+            return {"action": "hold", "message_id": message_id, "code": fence_code}
+        recovery_code, recovered = await recover_pending_read(
             owner, message_id, item, config_dir=config_dir, access=access
         )
         if recovery_code:
             return {"action": "hold", "message_id": message_id, "code": recovery_code}
-        result = await screen_item(
-            owner, item, config_dir=config_dir, auth_store=auth_store, settings=settings
-        )
+        if recovered is not None:
+            # The hub CONFIRMED the stored verdict: that IS the screening
+            # decision for this message, so it is carried to the handoff as
+            # is. Re-screening would gain nothing (the hub already reads the
+            # message as read) and, under a changed model/template/revision,
+            # minted a second tuple the write-once ledger refuses (review M3).
+            result = _confirmed_screen_result(recovered)
+        else:
+            result = await screen_item(
+                owner, item, config_dir=config_dir, auth_store=auth_store, settings=settings
+            )
         if result is None:
             return {"action": "hold", "message_id": message_id, "code": "screening_unavailable"}
         disposition = getattr(result, "disposition", None)
@@ -750,9 +794,30 @@ async def handle_message_available(
                     "message_id": message_id,
                     "code": "bounce_receipt_missing",
                 }
-            await ack_read(
-                owner, message_id, "blocked", receipt, config_dir=config_dir, access=access
-            )
+            try:
+                blocked = await ack_read(
+                    owner, message_id, "blocked", receipt, config_dir=config_dir, access=access
+                )
+            except StoreRefused as failure:
+                return {
+                    "action": "hold",
+                    "message_id": message_id,
+                    "code": f"ack_refused:{failure.code}"[:64],
+                }
+            # A bounce is TERMINAL only once the hub has the blocked state
+            # (review m7): the loop retires the row on ``bounce``, and a
+            # pending blocked intent left behind is never flushed again, so
+            # the sender would never learn. ``conflict`` is the hub's own
+            # final answer (the first verdict stands) and ends it too.
+            from local_operator.team_bridge.pull import ACK_CONFIRMED, ACK_CONFLICT
+
+            blocked_state = str(getattr(blocked, "state", "") or "")
+            if blocked_state not in (ACK_CONFIRMED, ACK_CONFLICT):
+                return {
+                    "action": "hold",
+                    "message_id": message_id,
+                    "code": f"ack_not_confirmed:{blocked_state or 'unknown'}",
+                }
             return {"action": "bounce", "message_id": message_id}
         if disposition != "deliver" or receipt is None:
             return {"action": "hold", "message_id": message_id, "code": "screening_unknown"}
@@ -848,9 +913,22 @@ async def handle_message_available(
         fence_code = _producer_fence(store, owner, access, settings)
         if fence_code:
             return {"action": "hold", "message_id": message_id, "code": fence_code}
-        ack = await ack_read(
-            owner, message_id, "read", receipt, config_dir=config_dir, access=access
-        )
+        try:
+            ack = await ack_read(
+                owner, message_id, "read", receipt, config_dir=config_dir, access=access
+            )
+        except StoreRefused as failure:
+            # Defence in depth (review M3): the write-once ledger refuses a
+            # second tuple under one ref (``intent_conflict``), and a fenced
+            # owner refuses outright. Either escaped the spine before — no
+            # hold row, the ref re-raising every pass and pinning the whole
+            # connector on its failure backoff. A typed hold is visible to
+            # the owner and paced by the loop's bounded retry.
+            return {
+                "action": "hold",
+                "message_id": message_id,
+                "code": f"ack_refused:{failure.code}"[:64],
+            }
         from local_operator.team_bridge.pull import ACK_CONFIRMED
 
         # S-12: an ORDINARY return from ack is not a confirmed read — the

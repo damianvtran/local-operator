@@ -575,6 +575,48 @@ def test_a_replayed_admit_does_not_post_a_second_card(tmp_path, monkeypatch) -> 
     assert len(_reservation_rows(config_dir)) == 1
 
 
+def test_a_stop_between_the_reservation_and_the_card_still_posts_the_card(
+    tmp_path, monkeypatch
+) -> None:
+    """PR #3063 review m6: the reservation proves an admission, not a card. A
+    stop that cancelled the card hand-off left the replay answering
+    ``duplicate`` (terminal), so the card was never posted and nothing woke
+    the session. The card-owed marker survives the stop, and the replay must
+    post the card exactly once; a later replay is then a true duplicate."""
+
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    store = _enroll(config_dir, a, "sess_a")
+
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+    real_deliver = conversation_mod.deliver_wake
+
+    async def stopped_at_the_card(*args: Any, **kwargs: Any) -> str:
+        raise asyncio.CancelledError  # the clean stop's cancellation lands here
+
+    monkeypatch.setattr(conversation_mod, "deliver_wake", stopped_at_the_card)
+    with pytest.raises(asyncio.CancelledError):
+        _run(a, config_dir)
+    assert transcripts["sess_a"] == []
+    assert [row["state"] for row in _reservation_rows(config_dir)] == ["pending"]
+    _cursor, refs, _resync = project_events_batch(server.events_answer("bep_a"))
+    ref = plan_feed_refs(refs).conversation_deliveries[0]
+    owed = store.screening_hold(a, ref.encode())
+    assert owed is not None and owed["hold_code"] == conversation_mod.HOLD_CARD_PENDING
+
+    monkeypatch.setattr(conversation_mod, "deliver_wake", real_deliver)
+    restarted = _run(a, config_dir)
+    assert restarted["handled"][0]["action"] == "delivered"
+    assert len(transcripts["sess_a"]) == 1
+    assert store.screening_hold(a, ref.encode()) is None
+    replayed = _run(a, config_dir)
+    assert replayed["handled"][0]["action"] == "duplicate"
+    assert len(transcripts["sess_a"]) == 1, "the card is owed once, never twice"
+    assert len(_reservation_rows(config_dir)) == 1
+
+
 def test_a_missing_receipt_holds_without_a_card_or_a_row(tmp_path, monkeypatch) -> None:
     """M3: ``receipt_unavailable`` is exercised, not merely defined."""
 

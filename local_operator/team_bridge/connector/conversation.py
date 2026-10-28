@@ -61,6 +61,13 @@ from .wake import (
 
 logger = logging.getLogger(__name__)
 
+#: The conversation lane's card-owed marker (see ``handle_conversation_available``,
+#: PR #3063 review m6): a hold row under the message's own ref key, written
+#: before the body reservation and cleared once the card is handed off. Due
+#: one claim lease later, so a live spine always finishes (and clears it)
+#: before the retry pass could re-drive it. In ``screening.HOLD_CODES``.
+HOLD_CARD_PENDING = "card_pending"
+
 #: The served guidance version the card names. Triage rules (inform /
 #: course-correct / ask, no new work, scope) live in that served text; the card
 #: deliberately does not duplicate them. Bump WITH the served version (§11.3).
@@ -666,8 +673,9 @@ async def handle_conversation_available(
 
     Returns metadata only. ``action`` is one of ``delivered`` (admitted body),
     ``rejected`` (a confirmed moderation refusal: terminal, and it posts NO card
-    and wakes nobody), ``hold``, ``badge_only``, ``claimed_elsewhere`` or
-    ``skipped`` (the message is no longer in the conversation's history).
+    and wakes nobody), ``delivered_unadmitted`` (the recovery card), ``hold``,
+    ``badge_only``, ``claimed_elsewhere`` or ``duplicate`` (an admission whose
+    card already went out).
     """
 
     from ..store import CONNECTOR_CLAIM_TOKEN_PREFIX, Store, StoreRefused
@@ -938,6 +946,26 @@ async def handle_conversation_available(
             template_sha256=SCREENING_TEMPLATE_V3_SHA256 if admitted_hash else None,
             access=access,
         )
+        # THE CARD-OWED MARKER (PR #3063 review m6), written BEFORE the
+        # reservation: the reservation proves an admission, not a card. A
+        # stop or crash between the reservation and the card left the replay
+        # answering ``duplicate`` with no card ever posted and nothing waking
+        # the session. This durable retry row (the conversation lane's own
+        # hold key) is cleared only once the card is handed off (``terminal``
+        # below), so a replay that finds a reservation AND this row still owes
+        # the card; one that finds no row already posted it. It also re-drives
+        # the message after a crash, on the ordinary backoff. Pre-upgrade
+        # reservations have no row and keep the old (consume) behaviour.
+        # The read comes FIRST: a re-drive of a message held for any reason
+        # (screening, admission) also has a row under this key, and a replay
+        # only owes the card when a reservation exists AND a row survived.
+        card_owed = store.screening_hold(owner, ref.encode()) is not None
+        try:
+            store.persist_hold(
+                owner, ref.encode(), HOLD_CARD_PENDING, retry_at=time.time() + CLAIM_TTL_S
+            )
+        except StoreRefused as failure:
+            return {"action": "hold", "message_id": message_id, "code": failure.code}
         # THE ADMISSION POINT (seam design, Revision 5): the hub has accepted
         # this message for this endpoint/member/consent tuple, so one
         # designated session now owes it a body. Recorded BEFORE the card —
@@ -950,21 +978,20 @@ async def handle_conversation_available(
             body_hash=body_hash,
             designation=designation,
         )
-        if recorded == RESERVATION_ALREADY_RECORDED:
-            # A replay (crash-after-record, or a hub re-delivery) must not post
-            # a SECOND card: the row is the dedupe witness, and a duplicate
+        if recorded == RESERVATION_ALREADY_RECORDED and not card_owed:
+            # A replay (a hub re-delivery after a posted card) must not post a
+            # SECOND card: the reservation is the admission witness and the
+            # absent card-owed marker proves the card went out, and a duplicate
             # wake costs the agent a turn for a message it already answered.
-            # RESIDUAL, stated rather than hidden: a crash in the window
-            # between recording and the card leaves a pending row with no
-            # wake; the row survives and stays claimable, and closing that
-            # window needs a card-delivery marker the claiming slice owns.
+            # RESIDUAL: a crash after the card but before the marker clears
+            # posts the card once more (at-least-once, never a loss).
             return {
                 "action": "duplicate",
                 "message_id": message_id,
                 "conversation_id": ref.conversation_id,
                 "reservation": "already_recorded",
             }
-        if recorded != RESERVATION_RECORDED:
+        if recorded not in (RESERVATION_RECORDED, RESERVATION_ALREADY_RECORDED):
             return {"action": "hold", "message_id": message_id, "code": recorded}
         detail = await _deliver_card(
             owner,
