@@ -437,6 +437,43 @@ async def test_the_first_frame_spends_only_what_is_left_of_its_budget(
 
 
 @pytest.mark.asyncio
+async def test_a_warm_reopen_does_not_wait_on_its_own_paused_scan(tmp_path: Path) -> None:
+    """The re-open of a conversation whose cold scan is still running.
+
+    That scan pauses while this open's paint hold is live (transcript_index "ITS
+    OWN OPEN TOO"), so it cannot land inside the snapshot budget and awaiting it
+    spends the whole budget idle for the same ``building`` answer -- measured
+    112-119 ms of a 120 ms budget on a real ``lop serve``. Mutant: drop the
+    ``refresh_paused_for_paint`` guard -> the read waits out the 1 s deadline.
+    """
+    async with _Harness(tmp_path) as harness:
+        session_dir = harness.root / "sessions" / harness.session_id
+        rows = _conversation(turns=2)
+        rows.append(
+            _entry(
+                "big",
+                1e6,
+                "message",
+                {"kind": "message", "role": "assistant", "content": [{"text": "x" * (6 << 20)}]},
+            )
+        )
+        _write(session_dir, rows)
+        task, started = ti.start_refresh(harness.root, harness.session_id)
+        assert started
+        release = ti.hold_paint(harness.root, harness.session_id)
+        try:
+            async with harness.pool.session(harness.session_id, read=True) as bridge:
+                began = time.monotonic()
+                index = await bridge._frame_index(time.monotonic() + 1.0)
+                elapsed = time.monotonic() - began
+        finally:
+            release()
+        assert index is None
+        assert elapsed < 0.5, f"waited {elapsed:.2f}s on a scan paused for this very open"
+        assert await asyncio.wait_for(task, 30) is not None
+
+
+@pytest.mark.asyncio
 async def test_the_event_stream_states_attaching_only_to_a_negotiating_client(
     tmp_path: Path,
 ) -> None:

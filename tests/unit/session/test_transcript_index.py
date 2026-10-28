@@ -2489,10 +2489,37 @@ async def test_an_unpayable_background_refresh_pauses_while_another_open_is_held
     assert _derived(built) == _derived(rebuilt), "yielding changed what the scan derived"
 
 
+# Its OWN open pauses an unpayable scan too (own-open-yield, 2026-10-28). #3026
+# exempted the scan's own session ("an open that waits on its own refresh would
+# otherwise wait on itself"), but the only own-refresh waiter is
+# ``checkpoints_view``'s 0.2 s wait, and that wait is only ever spent on a
+# PAYABLE scan -- which ``may_yield`` already never pauses. The exemption bought
+# nothing and cost the warm re-open of a conversation still being indexed its
+# GIL share (desktop legacy warm-after-miss 12 ms on v0.90.19 -> ~500 ms). The
+# two tests below pin both halves: unpayable pauses for its own open, payable
+# never does.
+
+
 @pytest.mark.asyncio
-async def test_the_pause_ignores_its_own_hold(tmp_path, monkeypatch):
-    """Mutant: the pause honours its own hold -> it sleeps out the 1 s budget."""
+async def test_the_pause_honours_its_own_hold_when_unpayable(tmp_path, monkeypatch):
+    """Mutant: the own-session exemption (#3026) -> the pause returns at once."""
     _big_journal(tmp_path)
+    monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 0.3)
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        pause = ti._yield_to_other_opens(ti._key(tmp_path, SID), tmp_path, SID)
+        started = time.monotonic()
+        await asyncio.to_thread(pause)
+        assert time.monotonic() - started >= 0.25, "the scan kept the GIL during its own open"
+    finally:
+        release()
+
+
+@pytest.mark.asyncio
+async def test_a_payable_pause_ignores_its_own_hold(tmp_path, monkeypatch):
+    """Mutant: ``may_yield`` dropped -> the payable pause sleeps out the 1 s budget,
+    which is the 0.2 s ``checkpoints_view`` wait stalling on its own open."""
+    _three_turns(tmp_path)
     monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 1.0)
     release = ti.hold_paint(tmp_path, SID)
     try:
@@ -2502,6 +2529,69 @@ async def test_the_pause_ignores_its_own_hold(tmp_path, monkeypatch):
         assert time.monotonic() - started < 0.5
     finally:
         release()
+
+
+@pytest.mark.asyncio
+async def test_a_running_unpayable_refresh_pauses_while_its_own_open_is_held(tmp_path):
+    """The warm re-open: the scan is already running (no deferral), then the same
+    conversation is opened again. Mutant: own-session exemption -> done under the hold."""
+    _big_journal(tmp_path)
+    task, started = ti.start_refresh(tmp_path, SID)
+    # Same loop tick: the task has not run yet, so the hold is live before the
+    # worker's first row, and taken AFTER start_refresh, so it never defers.
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        assert started and not ti.refresh_deferred(tmp_path, SID)
+        await asyncio.sleep(0.3)
+        assert not task.done(), "the scan kept the GIL while its own warm open was held"
+    finally:
+        release()
+    assert await asyncio.wait_for(task, 30) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_running_unpayable_refresh_reads_as_paused_for_its_own_open(tmp_path):
+    """The open frame's question once the scan pauses for its own open: awaiting
+    it from inside that open can only idle out the snapshot budget. Mutant:
+    ``refresh_paused_for_paint`` answers only ``refresh_deferred`` -> False here."""
+    _big_journal(tmp_path)
+    task, _ = ti.start_refresh(tmp_path, SID)
+    assert not ti.refresh_paused_for_paint(tmp_path, SID), "no hold: nothing to pause for"
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        assert not ti.refresh_deferred(tmp_path, SID), "already running: not deferred"
+        assert ti.refresh_paused_for_paint(tmp_path, SID)
+    finally:
+        release()
+    assert not ti.refresh_paused_for_paint(tmp_path, SID)
+    assert await asyncio.wait_for(task, 30) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_running_payable_refresh_is_never_paused_for_paint(tmp_path):
+    """A payable scan never pauses (``may_yield``), so waiting on it may pay."""
+    _three_turns(tmp_path)
+    task, _ = ti.start_refresh(tmp_path, SID)
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        assert not ti.refresh_paused_for_paint(tmp_path, SID)
+    finally:
+        release()
+    assert await asyncio.wait_for(task, 30) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_cold_payable_view_is_ready_while_its_own_open_is_held(tmp_path):
+    """No self-wait: the view's 0.2 s wait on a payable refresh, under its own
+    open's hold, still answers ``ready``. Mutant: ``may_yield`` dropped -> ``building``."""
+    _three_turns(tmp_path)
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        view = await asyncio.wait_for(ti.checkpoints_view(tmp_path, SID), 5)
+    finally:
+        release()
+    assert view["index"]["state"] == "ready"
+    assert [c["id"] for c in view["checkpoints"]] == ["u1", "a1", "u2", "a2", "u3", "a3"]
 
 
 @pytest.mark.asyncio

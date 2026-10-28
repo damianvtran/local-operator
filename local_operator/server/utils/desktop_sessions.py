@@ -4341,8 +4341,9 @@ class DesktopSessionBridge:
         The refresh task is REGISTERED either way, which makes that follow-up
         read cheap. During a desktop events open the index module's paint hold
         postpones a cold full scan that cannot fit its existing first-paint
-        budget until the snapshot has been written; a deferred task is not
-        awaited here (it cannot finish while this request owns the hold). With
+        budget until the snapshot has been written; a deferred task -- or a
+        running one paused for that same hold -- is not awaited here (it cannot
+        finish while this request owns the hold). With
         no hold -- standalone history, TUI or mobile -- scheduling is unchanged.
         """
         from local_operator.session import transcript_index as index_module
@@ -4358,11 +4359,13 @@ class DesktopSessionBridge:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return None
-        if index_module.refresh_deferred(self.root, self.session_id):
+        if index_module.refresh_paused_for_paint(self.root, self.session_id):
             # A cold, unpayable scan waiting on the paint hold this very open
-            # owns (``transcript_index``'s "The paint hold"): it cannot start
-            # until the snapshot is written, so waiting here would spend the
-            # budget idle for the same ``building`` answer.
+            # owns (``transcript_index``'s "The paint hold"), or one already
+            # running that pauses for that hold ("ITS OWN OPEN TOO" -- the warm
+            # re-open of a conversation still being indexed): either way it
+            # cannot land before the snapshot is written, so waiting here would
+            # spend the budget idle for the same ``building`` answer.
             return None
         done, _pending = await asyncio.wait({task}, timeout=remaining)
         if task not in done:
