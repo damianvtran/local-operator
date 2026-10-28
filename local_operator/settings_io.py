@@ -3642,10 +3642,12 @@ SETTINGS: tuple[Setting, ...] = (
         gated_by="classification.auto",
     ),
     # Radient Saver's gate (contract §1, §9). OFF by default: nothing uploads
-    # until the operator chooses ``opt_in`` or ``auto``. The default here and in
-    # ``config.DEFAULT_CONFIG`` is the "later flip" the contract describes — one
-    # value, pinned to ``saver.gate.DEFAULT_MODE`` by a test so the three cannot
-    # drift. ``LOP_RADIENT_SAVER`` overrides it per process (the ``LOP_ASK_GATE``
+    # until the operator chooses ``opt_in`` or ``auto``. The default here is the
+    # "later flip" the contract describes, pinned to ``saver.gate.DEFAULT_MODE``
+    # by a test; it is deliberately NOT in ``config.DEFAULT_CONFIG`` (R-6), so an
+    # unrelated settings write never persists it. Operator-only: the model's
+    # ``setting`` tool refuses it (``settings_control.OPERATOR_ONLY``, S-5).
+    # ``LOP_RADIENT_SAVER`` overrides it per process (the ``LOP_ASK_GATE``
     # precedent), which the help names.
     Setting(
         key="radient.saver.mode",

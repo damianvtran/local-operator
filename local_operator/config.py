@@ -987,16 +987,14 @@ DEFAULT_CONFIG = Config(
                 "inherit": [],
                 "exclude": [],
             },
-            # Radient Saver (beta): ``off`` (the default — nothing is uploaded),
-            # ``opt_in`` or ``auto``. ``LOP_RADIENT_SAVER`` overrides it per
-            # process. The one reader is ``saver.gate.configured_mode``; the
-            # contract's "later flip" to ``auto`` is this value and the registry
-            # row's default together, and a test pins the two.
-            "radient": {
-                "saver": {
-                    "mode": "off",
-                },
-            },
+            # Radient Saver's ``radient.saver.mode`` deliberately has NO entry
+            # here (agent review R-6): ``ConfigManager`` writes missing top-level
+            # defaults to disk on any unrelated settings save, which would store
+            # an explicit ``off`` no one chose and make the contract's later
+            # flip to ``auto`` (§9, "explicit settings are untouched") unable to
+            # tell a real opt-out from the shipped default. The resolver
+            # (``saver.gate.configured_mode``) supplies ``DEFAULT_MODE`` when
+            # the key is absent.
         },
     }
 )

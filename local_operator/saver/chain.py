@@ -13,11 +13,13 @@ THE PROTOCOL, in the order ``apply`` runs it:
    first mismatch (compaction, prune, fork, ``/clear``, resume) truncate from
    that epoch on and bump ``chain_generation``.
 2. **Adopt** — a prefetch result finished since the last turn is adopted only
-   when its 4-tuple ``(session_id, chain_generation, frontier,
-   uploaded_digest)`` still matches the chain AND the uploaded rows are still
-   the source's rows at the frontier; then every §6.1 check runs against that
-   source (S-30). A due prefetch still in flight is waited on for at most
-   250 ms, then the turn goes without it.
+   when ``(chain_generation, frontier)`` still match the chain AND the span the
+   response claims is byte-identical in the current source (its digest is
+   compared against the upload's, the ``uploaded_digest`` member). There is no
+   separate ``session_id`` member: a chain IS one session's, so it could never
+   differ (agent review R-11). Then every §6.1 check runs against that source
+   (S-30), on a worker thread under a deadline (S-1). A due prefetch still in
+   flight is waited on for at most 250 ms, then the turn goes without it.
 3. **Splice** — ``[epoch messages …] + source[frontier:]``; check 9(b) runs
    over the whole spliced list before any wire repair can mask it.
 4. **Prefetch** — when ``len(source) − frontier ≥ call_again_after`` start the
@@ -35,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
@@ -77,6 +80,19 @@ ADOPTION_WAIT_S = 0.25
 BUSY_BACKOFF_S = 60.0
 #: Transport failures (timeout, refused connection, blackhole) back off like a 503.
 TRANSPORT_BACKOFF_S = 60.0
+#: A §6.1 rejection backs off like a failure (R-4/S-6): the response is a pure
+#: function of (span, prior), so the same upload would fail the same way.
+REJECTED_BACKOFF_S = 60.0
+#: S-6: this many consecutive rejections IN THIS PROCESS pause Saver for the
+#: process, as an encoding rejection does: a server that fails validation
+#: deterministically fails it for every session, and each rejected 200 was
+#: already charged (§5a settles before the response).
+PROCESS_REJECTION_LIMIT = 3
+#: S-1: the overall budget for validating one response off the loop. Past it the
+#: response is refused as ``busy`` (fail open). Honest responses validate in
+#: tens of milliseconds (see the PR's oracle evidence); this is the ceiling a
+#: hostile one can cost, and it never blocks the loop.
+VALIDATION_DEADLINE_S = 2.0
 #: The §0.4 boundary step: a boundary is ≥ this many rows past the previous one.
 BOUNDARY_STEP = 12
 #: The server's live window (§3 gap 6): the last 6 rows, extended back to
@@ -120,6 +136,11 @@ class _ProcessState:
     """
 
     paused = False
+    #: Consecutive §6.1 rejections across every chain in the process (S-6).
+    rejections = 0
+    #: Digests of uploaded spans whose response was rejected in this process.
+    #: Never re-uploaded (manager disposition 3): the same bytes answer the same.
+    rejected_digests: set[str] = set()
     #: r6 S3-7 (b), kept apart from ``paused`` so the pause carries its notice:
     #: the notice is "one per session", so a session that never uploaded still
     #: hears once, on its next due prefetch, why it is sending full history.
@@ -132,9 +153,9 @@ class _ProcessState:
 class _Prefetch:
     """One in-flight prepare and the turn binding it must still match (§3.2)."""
 
-    session_id: str
     chain_generation: int
     frontier: int
+    #: Digest of the uploaded span's canonical bytes: the rejected-span memo's key.
     uploaded_digest: str
     rows: list[dict[str, Any]]
     encoded: list[bytes]
@@ -144,6 +165,8 @@ class _Prefetch:
     oversized_unit: int | None = None
     #: The upload stopped before a marked ``oversize`` unit (S3-6).
     ended_at_barrier: bool = False
+    #: B: the upload's canonical size, which bounds its charge (§5a, S-8).
+    body_bytes: int = 0
 
 
 @dataclass
@@ -211,15 +234,22 @@ class SaverChain:
         """
         try:
             return await self._apply(request)
-        except Exception:  # noqa: BLE001 — fail open is the contract (§6)
-            logger.debug("saver: apply failed; sending unreduced", exc_info=True)
+        except Exception as exc:  # noqa: BLE001 — fail open is the contract (§6)
+            # The exception TYPE only, never ``exc_info`` or its args (S-9): a
+            # future raise could carry conversation text, and DEBUG logging is a
+            # documented operator setting (the ``harness/loop.py`` one-turn-
+            # secret rule: exception args are deliberately absent from logs).
+            logger.debug("saver: apply failed (%s); sending unreduced", type(exc).__name__)
             self._reset()
             await self._fail_open(NOTICE_REJECTED)
             return request
 
     async def _apply(self, request: "ChatRequest") -> "ChatRequest":
         source = list(request.messages)
-        rows, encoded = self._cache.project(source, self.redaction)
+        # Off the loop (R-7): a cold projection of a resumed long session with
+        # registered values measured 3.25 s. ``to_thread`` is safe because the
+        # cache is only ever touched by this chain's one in-flight ``apply``.
+        rows, encoded = await asyncio.to_thread(self._cache.project, source, self.redaction)
         self._verify(encoded)
         await self._adopt(rows, encoded)
         spliced = request
@@ -302,40 +332,63 @@ class SaverChain:
                 return
             await self._on_failure(exc)
             return
-        # Turn binding (§6.1 check 7): the 4-tuple must still match the chain.
-        # A result computed for a chain that has since been truncated (/clear,
-        # compaction, fork, prune) is discarded without a notice — it is not a
-        # failure, the conversation simply moved on.
-        if (
-            prefetch.session_id != self.session_id
-            or prefetch.chain_generation != self.chain_generation
-            or prefetch.frontier != self.frontier
-        ):
+        # R-5: every 2xx carrying a ``cost`` object was CHARGED (§5a settles
+        # before the response), whether or not it is adopted below. Record it
+        # first, so the ``saver`` spend line equals the server's charges.
+        self._record_spend(result.payload, prefetch.body_bytes)
+        # Turn binding (§6.1 check 7). A result computed for a chain that has
+        # since been truncated (/clear, compaction, fork, prune) is discarded
+        # without a notice — it is not a failure, the conversation moved on.
+        if prefetch.chain_generation != self.chain_generation or prefetch.frontier != self.frontier:
             return
-        # The 4th member, ``uploaded_digest``, binds the bytes. Every row the
-        # server froze must still be byte-identical in the THEN-CURRENT source
-        # (S-30): the upload's trailing rows may legitimately differ (the live
-        # turn — a user message the next turn has since answered — is rebuilt
-        # every turn), so the digest compared is that of the span the response
-        # claims, re-taken from the current source. A rewrite inside it (a prune,
-        # an edit) changes those bytes and the result is dropped; §6.1 check 2
-        # then re-verifies each epoch digest against these same current bytes.
+        # ``uploaded_digest`` binds the bytes. Every row the server froze must
+        # still be byte-identical in the THEN-CURRENT source (S-30): the
+        # upload's trailing rows may legitimately differ (the live turn is
+        # rebuilt every turn), so what is compared is the span the response
+        # CLAIMS, re-taken from the current source, against the same span of
+        # the upload. When the response claims the whole upload, that is the
+        # stored ``uploaded_digest`` itself. A rewrite inside the span changes
+        # those bytes and the result is dropped; §6.1 check 2 then re-verifies
+        # each epoch digest against these same current bytes.
         claimed = _claimed_span(result.payload, len(prefetch.encoded))
         current_rows = encoded[self.frontier : self.frontier + claimed]
-        if len(current_rows) != claimed or list(current_rows) != prefetch.encoded[:claimed]:
+        if len(current_rows) != claimed:
+            return
+        uploaded_claimed = (
+            prefetch.uploaded_digest
+            if claimed == len(prefetch.encoded)
+            else digest_bytes(span_bytes(prefetch.encoded[:claimed]))
+        )
+        if digest_bytes(span_bytes(current_rows)) != uploaded_claimed:
             return
         try:
-            epochs, advanced = validate_response(
-                result.payload,
-                uploaded_rows=rows[self.frontier : self.frontier + len(prefetch.rows)],
-                uploaded_bytes=encoded[self.frontier : self.frontier + len(prefetch.encoded)],
-                verbatim=verbatim_wire,
-                id_prefix=f"saver:{self.chain_generation}:{self.frontier}",
+            # S-1: off the loop, under an overall deadline. The worker thread
+            # also checks the deadline between epochs, so a hostile response
+            # cannot keep a thread busy past it; ``wait_for`` bounds the await.
+            deadline = time.monotonic() + VALIDATION_DEADLINE_S
+            epochs, advanced = await asyncio.wait_for(
+                asyncio.to_thread(
+                    validate_response,
+                    result.payload,
+                    uploaded_rows=rows[self.frontier : self.frontier + len(prefetch.rows)],
+                    uploaded_bytes=encoded[self.frontier : self.frontier + len(prefetch.encoded)],
+                    verbatim=verbatim_wire,
+                    id_prefix=f"saver:{self.chain_generation}:{self.frontier}",
+                    first=not self.epochs,
+                    deadline=deadline,
+                ),
+                VALIDATION_DEADLINE_S + 0.5,
             )
-        except SaverRejected as exc:
-            logger.debug("saver: response rejected (%s)", exc.reason)
-            await self._fail_open(NOTICE_REJECTED)
+        except (SaverRejected, asyncio.TimeoutError) as exc:
+            reason = exc.reason if isinstance(exc, SaverRejected) else "busy"
+            logger.debug("saver: response rejected (%s)", reason)
+            await self._on_rejected(prefetch)
             return
+        if epochs:
+            # Only a response that FROZE something proves the server validates;
+            # an empty one (nothing to freeze yet) passes every check vacuously
+            # and must not reset the consecutive-rejection count.
+            _ProcessState.rejections = 0
         self._refreshed_after_401 = False
         self.failing_open = False
         if prefetch.ended_at_barrier:
@@ -361,7 +414,30 @@ class SaverChain:
         call_again = result.payload.get("call_again_after")
         if isinstance(call_again, int) and not isinstance(call_again, bool) and call_again > 0:
             self.call_again_after = call_again
-        self._record_spend(result.payload)
+
+    async def _on_rejected(self, prefetch: "_Prefetch") -> None:
+        """A §6.1 rejection: back off, mark, memo the span, maybe pause (R-4/S-6).
+
+        - the same 60 s back-off as a failure, so the next turn does not re-send;
+        - a rejected OVERSIZED-head upload sets the S3-6 mark, so multi-MiB
+          uploads never repeat (the 413/503/transport arm's rule);
+        - the uploaded span's digest is remembered for the process and never
+          uploaded again: the response is a pure function of the span;
+        - after :data:`PROCESS_REJECTION_LIMIT` consecutive rejections across the
+          process, Saver pauses for the process (the S3-7 encoding precedent).
+        """
+        self._paused_until = time.monotonic() + REJECTED_BACKOFF_S
+        _ProcessState.rejected_digests.add(prefetch.uploaded_digest)
+        _ProcessState.rejections += 1
+        if _ProcessState.rejections >= PROCESS_REJECTION_LIMIT:
+            _ProcessState.paused = True
+        if prefetch.oversized_unit is not None and (
+            prefetch.chain_generation == self.chain_generation
+            and prefetch.frontier == self.frontier
+        ):
+            self._mark_oversize(prefetch.rows, prefetch.encoded, prefetch.oversized_unit)
+            await self._flush_oversize_notice()
+        await self._fail_open(NOTICE_REJECTED)
 
     # -- §3.2 step 3 (prefetch half) ---------------------------------------
 
@@ -421,6 +497,13 @@ class SaverChain:
             "messages": upload_rows,
         }
         uploaded_digest = digest_bytes(span_bytes(upload_bytes))
+        if uploaded_digest in _ProcessState.rejected_digests:
+            # Manager disposition 3: a span whose response was rejected in this
+            # process is never uploaded again; the answer is a pure function of
+            # it. The conversation growing changes the span, and that uploads.
+            return
+        # B, the upload's size, bounds what this prepare may charge (§5a).
+        body_bytes = sum(len(row) for row in upload_bytes) + len(upload_bytes) + 2
         task = asyncio.create_task(
             self.client.prepare(
                 body,
@@ -431,7 +514,7 @@ class SaverChain:
             )
         )
         self._prefetch = _Prefetch(
-            session_id=self.session_id,
+            body_bytes=body_bytes,
             chain_generation=self.chain_generation,
             frontier=self.frontier,
             uploaded_digest=uploaded_digest,
@@ -561,6 +644,9 @@ class SaverChain:
                 _ProcessState.transport_paused = True
                 await self._fail_open(NOTICE_TRANSPORT)
                 return
+            # Size or JSON refused before validation: a 200 that may have been
+            # charged and will be refused the same way again (R-4/S-6).
+            self._paused_until = time.monotonic() + REJECTED_BACKOFF_S
             await self._fail_open(NOTICE_REJECTED)
             return
         if isinstance(exc, (httpx.HTTPError, OSError, asyncio.TimeoutError, CanonicalError)):
@@ -582,33 +668,41 @@ class SaverChain:
         self._noticed.add(reason)
         try:
             await self.notice(notice_message(reason))
-        except Exception:  # noqa: BLE001 — a notice must never fail the turn
-            logger.debug("saver: notice delivery failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001 — a notice must never fail the turn
+            logger.debug("saver: notice delivery failed (%s)", type(exc).__name__)
 
     # -- spend ----------------------------------------------------------------
 
-    def _record_spend(self, payload: Any) -> None:
+    def _record_spend(self, payload: Any, body_bytes: int) -> None:
         if self.spend is None:
             return
         try:
-            record = spend_record(payload, session_id=self.session_id)
-        except Exception:  # noqa: BLE001 — accounting must never fail the turn
-            logger.debug("saver: spend record failed", exc_info=True)
+            record = spend_record(payload, session_id=self.session_id, body_bytes=body_bytes)
+        except Exception as exc:  # noqa: BLE001 — accounting must never fail the turn
+            logger.debug("saver: spend record failed (%s)", type(exc).__name__)
             return
         if record is not None:
             try:
                 self.spend(record)
-            except Exception:  # noqa: BLE001 — same
-                logger.debug("saver: spend sink failed", exc_info=True)
+            except Exception as exc:  # noqa: BLE001 — same
+                logger.debug("saver: spend sink failed (%s)", type(exc).__name__)
 
     async def aclose(self) -> None:
         prefetch, self._prefetch = self._prefetch, None
-        if prefetch is not None and not prefetch.task.done():
+        if prefetch is None:
+            return
+        if not prefetch.task.done():
             prefetch.task.cancel()
             try:
                 await prefetch.task
             except BaseException:  # noqa: BLE001 — teardown
                 pass
+            return
+        # R-5: the session's FINAL prefetch completed but was never adopted.
+        # It was charged all the same, so its cost is recorded here; the server's
+        # ``usage_record_id`` keeps a replay of it from counting twice.
+        if not prefetch.task.cancelled() and prefetch.task.exception() is None:
+            self._record_spend(prefetch.task.result().payload, prefetch.body_bytes)
 
 
 def _claimed_span(payload: Any, uploaded: int) -> int:
@@ -827,6 +921,25 @@ def predicted_boundaries(rows: Sequence[dict[str, Any]]) -> list[int]:
 _SHARED: dict[str, SaverClient] = {}
 
 
+def upload_redaction(redaction: Redaction | None) -> Redaction:
+    """The redaction every Saver upload applies: the session's passes, or the
+    credential-shape floor, plus the stored provider secrets (S-3 body half).
+
+    The secrets are read through the same reader as the bearer's forbidden set,
+    against the same config root, on each projection: a key saved mid-session
+    is scrubbed from the next upload, and the cache re-projects because it
+    joins the value set.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.saver.client import stored_provider_secrets
+    from local_operator.saver.projection import with_provider_secrets
+
+    root = config_dir()
+    return with_provider_secrets(
+        redaction or shape_only_redaction(), lambda: stored_provider_secrets(root)
+    )
+
+
 def shared_client() -> SaverClient:
     """The process-wide Saver client for the configured Radient base URL.
 
@@ -874,7 +987,30 @@ def notice_message(reason: str) -> "Msg":
     }.get(reason, _rs.notice_unavailable)()
 
 
-def spend_record(payload: Any, *, session_id: str) -> Any:
+#: §5a: the standard tier's published price, $0.01 per million removed tokens,
+#: i.e. one micro-USD per this many tokens. Integer, so the bound is exact.
+_TOKENS_PER_MICRO_USD = 100
+#: §5a's K, the epochs-per-response cap in the reservation bound.
+_RESERVATION_K = 64
+#: ``usage_record_id`` is a server id: keep the printable, id-shaped part only.
+_RECORD_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+
+
+def charge_ceiling_micro(body_bytes: int) -> int:
+    """The most a prepare of ``body_bytes`` can charge, in micro-USD (§5a).
+
+    The contract's proof bounds every charge by the reservation
+    ``(ceil(B/4) + K) × standard / 1e6`` with B the request body's size and
+    K = 64; at B = 8 MiB that is $0.02097216. Rounded UP to whole micro-USD so
+    an honest charge at the bound is never refused. B here is the canonical
+    upload, the body's dominant part; the ceiling stays the contract's own
+    figure computed from the client's side of the exchange.
+    """
+    tokens = -(-max(0, body_bytes) // 4) + _RESERVATION_K
+    return -(-tokens // _TOKENS_PER_MICRO_USD)
+
+
+def spend_record(payload: Any, *, session_id: str, body_bytes: int = 0) -> Any:
     """The ``saver`` channel record for one charged prepare, or ``None``.
 
     From the response's ``cost`` object (§5a "Echo"): a prepare that charged 0
@@ -882,7 +1018,18 @@ def spend_record(payload: Any, *, session_id: str) -> Any:
     and no record is made. The record id is the server's ``usage_record_id`` when
     present — the join key that reconciles this line with ``GET /v1/usage`` —
     so a replayed response can never count twice.
+
+    The server's figures are UNTRUSTED (S-8). An amount that is negative, or
+    over :func:`charge_ceiling_micro` for this upload, is not a figure the
+    contract allows, so the row records an UNKNOWN amount rather than the
+    server's number: the spend panel can never be falsified downward or
+    inflated past the bound. ``provider``/``model`` are set client-side (the
+    contract fixes them as ``radient``/``reduce-v2``), never copied from the
+    response, so no server string (an ANSI escape, 5,000 characters) reaches
+    the channel ledger or the analytics mirror.
     """
+    from dataclasses import replace
+
     from local_operator.clients.radient_cost import (
         channel_record_from_cost,
         cost_from_payload,
@@ -892,12 +1039,35 @@ def spend_record(payload: Any, *, session_id: str) -> Any:
     cost = cost_from_payload(payload)
     if cost is None or cost.amount_micro is None:
         return None
+    amount = cost.amount_micro
+    ceiling = charge_ceiling_micro(body_bytes) if body_bytes > 0 else None
+    if amount < 0 or (ceiling is not None and amount > ceiling):
+        amount = None
+    usage_id = cost.usage_record_id if _RECORD_ID_RE.fullmatch(cost.usage_record_id) else ""
+    units = cost.units
+    if units is not None and (units != units or units < 0 or units > 1e12):
+        units = None
+    cost = replace(
+        cost,
+        amount_micro=amount,
+        provider="radient",
+        model=METHOD,
+        unit="tokens",
+        units=units,
+        usage_record_id=usage_id,
+        price_version=_printable(cost.price_version, 64),
+    )
     return channel_record_from_cost(
         cost,
         channel="saver",
-        record_id=new_record_id("saver", cost.usage_record_id),
+        record_id=new_record_id("saver", usage_id),
         session_id=session_id,
         unit="tokens",
         provider="radient",
         ts_ms=int(time.time() * 1000),
     )
+
+
+def _printable(value: str, limit: int) -> str:
+    """``value`` without control characters, capped: a server string for a ledger."""
+    return "".join(ch for ch in value if ch.isprintable())[:limit]

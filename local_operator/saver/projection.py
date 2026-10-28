@@ -74,6 +74,59 @@ class Redaction:
     values: Callable[[], Iterable[str]] = lambda: ()
 
 
+#: How long a provider-secret snapshot is reused before the stores are re-read.
+_PROVIDER_SECRET_TTL_S = 30.0
+
+
+def with_provider_secrets(redaction: Redaction, secrets: Callable[[], Iterable[str]]) -> Redaction:
+    """``redaction`` plus an exact-value pass over the stored provider secrets (S-3).
+
+    The S-32 sentence promises Saver never sends the user's AI-provider
+    credentials to Radient. The bearer half is the forbidden-set check; this is
+    the BODY half: a provider key printed bare in a tool result (``cat``,
+    ``env``, a config dump) has no credential shape the shape table knows, and
+    the session's store never registered it, so without this it was uploaded
+    (security round 1, p21). The values come from the same
+    :func:`~local_operator.saver.client.stored_provider_secrets` reader, are
+    scrubbed in every spelling by the shared ``scrub_values`` loop, and join
+    ``values`` so the projection cache re-projects when one is added.
+
+    They are deliberately NOT registered into the session's ``VariableStore``:
+    that store also drives the model-visible redaction, whose behaviour this
+    feature must not change for a user who never turns Saver on.
+    """
+    import time
+
+    from local_operator.redaction_shapes import scrub_values
+
+    # A SNAPSHOT, refreshed when the cache asks for ``values`` (once before and
+    # once after each projection) and at most every ``_PROVIDER_SECRET_TTL_S``:
+    # the reader opens the auth store and the encrypted store, which is far too
+    # costly per text block, and ``redact`` is called per block.
+    snapshot: list[str] = []
+    read_at = [float("-inf")]
+
+    def _refresh() -> list[str]:
+        if time.monotonic() - read_at[0] >= _PROVIDER_SECRET_TTL_S:
+            try:
+                snapshot[:] = sorted({value for value in secrets() if value})
+            except Exception:  # noqa: BLE001 — a failing reader keeps the last snapshot
+                pass
+            read_at[0] = time.monotonic()
+        return snapshot
+
+    def _wrap(inner: Redactor) -> Redactor:
+        def _redact(text: str) -> str:
+            return inner(scrub_values(text, snapshot)) if snapshot else inner(text)
+
+        return _redact
+
+    def _values() -> list[str]:
+        return [*redaction.values(), *_refresh()]
+
+    return Redaction(_wrap(redaction.redact), _wrap(redaction.redact_arguments), _values)
+
+
 def shape_only_redaction() -> Redaction:
     """The shape-table floor for a stream no session has bound yet.
 
@@ -257,9 +310,7 @@ def _content_key(message: Message) -> tuple[Any, ...]:
 
 
 def _raw_strings(message: Message) -> tuple[str, ...]:
-    texts = [block.text for block in message.content if isinstance(block, TextContent)]
-    texts.extend(call.raw_arguments or json.dumps(call.arguments) for call in message.tool_calls)
-    return tuple(texts)
+    return tuple(block.text for block in message.content if isinstance(block, TextContent))
 
 
 @dataclass
@@ -267,17 +318,24 @@ class _Entry:
     projected: dict[str, Any]
     canonical: bytes
     raw: tuple[str, ...]
+    #: The row carries tool calls, whose arguments are JSON: a registered value
+    #: holding ``"``, ``\\`` or non-ASCII is spelled ESCAPED there, so a
+    #: substring test on the raw text cannot see it (S-11).
+    has_calls: bool = False
 
 
 @dataclass
 class ProjectionCache:
     """Per-chain memo of projected rows and their canonical bytes.
 
-    Invalidation follows the redactor: a newly registered value evicts only the
-    rows whose raw text contains it (the shape pass is a pure function of the
-    text, so only the exact-value pass can change an old row's projection); a
-    REMOVED value evicts everything, because the redacted copy no longer shows
-    where it was.
+    Invalidation follows the redactor: a newly registered value evicts the text
+    rows whose raw text contains it, and EVERY row that carries tool calls (the
+    shape pass is a pure function of the text, so only the exact-value pass can
+    change an old row's projection); a REMOVED value evicts everything, because
+    the redacted copy no longer shows where it was. Tool-call rows are evicted
+    wholesale because their arguments are JSON, where a value's escaped
+    spelling defeats a substring test (S-11); text rows carry most of the bytes,
+    so the cache stays warm where it pays.
     """
 
     limit: int = 20_000
@@ -300,7 +358,7 @@ class ProjectionCache:
             stale = [
                 key
                 for key, entry in self._entries.items()
-                if any(value in text for value in added for text in entry.raw)
+                if entry.has_calls or any(value in text for value in added for text in entry.raw)
             ]
             for key in stale:
                 del self._entries[key]
@@ -318,7 +376,12 @@ class ProjectionCache:
             entry = self._entries.get(key)
             if entry is None:
                 row = project_message(message, redaction)
-                entry = _Entry(row, canonical_bytes(row), _raw_strings(message))
+                entry = _Entry(
+                    row,
+                    canonical_bytes(row),
+                    _raw_strings(message),
+                    has_calls=bool(message.tool_calls),
+                )
                 if len(self._entries) >= self.limit:
                     self._entries.clear()
                 self._entries[key] = entry

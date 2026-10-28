@@ -32,6 +32,7 @@ module (S-31: the server's text is never interpolated anywhere).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable, Iterable
@@ -45,6 +46,10 @@ from local_operator.saver.validate import MAX_RESPONSE_BYTES, SaverRejected, rea
 
 #: §6 latency budget: hard timeout 3 s, connect 0.5 s.
 TIMEOUT = httpx.Timeout(3.0, connect=0.5)
+#: The §6 "hard" 3 s as a TOTAL deadline over send, headers and body (S-7).
+#: httpx's timeouts are per operation, so a body dripped 4 bytes every 0.4 s
+#: completed after 8.1 s; ``asyncio.timeout`` bounds the whole exchange.
+TOTAL_DEADLINE_S = 3.0
 PREPARE_PATH = "/saver/prepare"
 HEADER_SESSION = "X-Radient-Client-Session-Id"
 HEADER_TIER = "X-Radient-Saver-Model"
@@ -81,8 +86,15 @@ class PreparedResponse:
 
 
 def prepare_url(base_url: str) -> str:
-    """``<base>/saver/prepare``; ``base_url`` already carries the ``/v1`` segment."""
-    return base_url.rstrip("/") + PREPARE_PATH
+    """``<base>/saver/prepare``, with the ``/v1`` segment a bare host lacks (S-10).
+
+    ``canonical_radient_destination`` accepts a bare ``https://api.radienthq.com``
+    (the empty-path allowance), which would otherwise join to ``/saver/prepare``
+    and 404 into a silent process pause. The shared normaliser completes it.
+    """
+    from local_operator.env import normalize_radient_api_base_url
+
+    return normalize_radient_api_base_url(base_url) + PREPARE_PATH
 
 
 def destination_allowed(base_url: str) -> bool:
@@ -94,37 +106,79 @@ def destination_allowed(base_url: str) -> bool:
     return org_oauth_destination_allowed(base_url)
 
 
+#: Provider ids whose credential IS the Radient bearer; never forbidden.
+_RADIENT_PROVIDERS = ("radient", "radient-key")
+
+
 def stored_provider_secrets(config_dir: Path | None) -> set[str]:
     """Every NON-Radient provider credential value, for the S-32 comparison.
 
-    Both places the inference cascade reads a provider key from: the auth
-    store's rows (API keys and OAuth access/refresh tokens) and each registered
-    provider's environment variables. Read in-process and compared in-process;
-    nothing here is logged or returned beyond the comparison. Best effort per
-    source: a store that cannot be read contributes nothing, and the allowlisted
-    header builder still guarantees no provider header is ever attached.
+    Every place the inference cascade reads a provider key from:
+
+    - the auth store's rows (API keys and OAuth access/refresh tokens), and a
+      row's ``access_secret_ref`` sealed in the encrypted store (the meta-muse
+      ``read_key`` rule);
+    - the encrypted provider namespace (``LOP_PROVIDER_<ENV_KEY>`` rows written
+      by ``store_provider_key``), which the cascade reads STORE FIRST at tier 5
+      (S-3: a key saved there was invisible to this check and was sent as the
+      Saver bearer when pasted into the Radient slot);
+    - each registered provider's environment variables.
+
+    Read in-process and compared in-process; nothing here is logged or returned
+    beyond the comparison. Best effort per source: a store that cannot be read
+    contributes nothing, and the allowlisted header builder still guarantees no
+    provider header is ever attached. The provider-store reads are guarded by
+    ``provider_secret_value``'s existence check, so a host with no store gains
+    no directory and no broker from this.
     """
     from contextlib import closing
 
     from local_operator.providers.auth_store import AuthStore
-    from local_operator.providers.registry import PROVIDER_REGISTRY, resolve_env_key
+    from local_operator.providers.registry import (
+        PROVIDER_REGISTRY,
+        env_key_names,
+        provider_secret_value,
+        resolve_env_key,
+        stored_provider_env_keys,
+    )
 
-    radient = ("radient", "radient-key")
     values: set[str] = set()
     try:
         db_path = (config_dir / "auth.db") if config_dir is not None else None
         with closing(AuthStore(db_path) if db_path is not None else AuthStore()) as store:
             for row in store.list_credentials(include_disabled=True):
-                if row.provider in radient:
+                if row.provider in _RADIENT_PROVIDERS:
                     continue
                 for key in ("key", "access", "refresh", "api_key", "token"):
                     value = row.data.get(key)
                     if isinstance(value, str) and value:
                         values.add(value)
+                try:
+                    from local_operator.providers.meta_muse_credentials import read_key
+
+                    sealed = read_key(dict(row.data), config_dir)
+                except Exception:  # noqa: BLE001 — best effort, see the docstring
+                    sealed = None
+                if sealed:
+                    values.add(sealed)
     except Exception:  # noqa: BLE001 — best effort, see the docstring
         pass
+    try:
+        stored_names = stored_provider_env_keys(config_dir)
+    except Exception:  # noqa: BLE001 — best effort, see the docstring
+        stored_names = set()
+    # The Radient key's own store row (``RADIENT_API_KEY``) is the bearer, not a
+    # provider credential; every other provider-class row is forbidden.
+    radient_names = {name for pid in _RADIENT_PROVIDERS for name in env_key_names(pid)}
+    for name in sorted(stored_names - radient_names):
+        try:
+            value = provider_secret_value(name, base=config_dir)
+        except Exception:  # noqa: BLE001 — best effort, see the docstring
+            continue
+        if value:
+            values.add(value)
     for definition in PROVIDER_REGISTRY:
-        if definition.id in radient:
+        if definition.id in _RADIENT_PROVIDERS:
             continue
         try:
             value = resolve_env_key(definition.id)
@@ -295,19 +349,24 @@ class SaverClient:
         request = self._http.build_request(
             "POST", prepare_url(self.base_url), content=content, headers=headers
         )
-        response = await self._http.send(request, stream=True)
-        try:
-            if response.status_code != 200:
-                # The body is NEVER read: a 3xx Location, an error sentence and a
-                # proxy page are all equally untrusted (S-31).
-                raise SaverHTTPError(response.status_code, _retry_after(response))
-            raw = await _read_capped(response, max_response_bytes)
-        finally:
-            await response.aclose()
-        return PreparedResponse(
-            read_body(raw, max_bytes=max_response_bytes),
-            (time.perf_counter() - started) * 1000,
-        )
+        # TOTAL deadline (S-7): a timeout here is an ``asyncio.TimeoutError``,
+        # which the chain classifies as a transport failure (back-off, and the
+        # oversize mark on an oversized-head upload, S3-9).
+        async with asyncio.timeout(TOTAL_DEADLINE_S):
+            response = await self._http.send(request, stream=True)
+            try:
+                if response.status_code != 200:
+                    # The body is NEVER read: a 3xx Location, an error sentence
+                    # and a proxy page are all equally untrusted (S-31).
+                    raise SaverHTTPError(response.status_code, _retry_after(response))
+                raw = await _read_capped(response, max_response_bytes)
+            finally:
+                await response.aclose()
+        # Strict JSON over up to R ≈ 8.25 MiB is CPU, not I/O: 39 ms per MiB
+        # measured, so it runs on a worker thread like the rest of validation
+        # (S-1: the loop is never blocked by a response's size).
+        payload = await asyncio.to_thread(read_body, raw, max_bytes=max_response_bytes)
+        return PreparedResponse(payload, (time.perf_counter() - started) * 1000)
 
 
 def radient_bearer_source(config_dir: Path | None, base_url: str) -> BearerSource:

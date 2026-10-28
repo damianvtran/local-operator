@@ -29,8 +29,11 @@ SETTING_KEY = "radient.saver.mode"
 #: The env override, the ``LOP_ASK_GATE`` precedent (``asks/policy.py``).
 ENV_OVERRIDE = "LOP_RADIENT_SAVER"
 MODES = ("off", "opt_in", "auto")
-#: The shipped default. The "later flip" (§9) is this one value, here and in
-#: ``config.DEFAULT_CONFIG``; explicit settings are untouched by it.
+#: The shipped default, supplied by :func:`configured_mode` when the key is
+#: ABSENT. The "later flip" (§9) is this one value (and the registry row's
+#: display default, pinned to it by a test). It is never in
+#: ``config.DEFAULT_CONFIG``: that would persist an explicit ``off`` on any
+#: unrelated settings write, and explicit settings are untouched by the flip.
 DEFAULT_MODE = "off"
 
 Source = Literal[
@@ -112,29 +115,133 @@ def resolve_saver(
     return SaverDecision(mode == "auto", "default")
 
 
-async def read_availability() -> Availability:
+#: The availability read's TOTAL deadline (S-4): a refresh, the request and the
+#: body together. httpx's own ``timeout=30`` is per read, so a 4 B/s drip held a
+#: turn 9.2 s and one byte every 29 s could hold it indefinitely.
+AVAILABILITY_DEADLINE_S = 5.0
+#: After a read that could not answer (timeout, transport, non-200), the next
+#: one is started no sooner than this: the prepare path's transport back-off.
+AVAILABILITY_RETRY_S = 60.0
+#: A billing quote is a few hundred bytes; anything past this is not one.
+MAX_BILLING_BYTES = 16 * 1024
+
+
+async def read_availability() -> Availability | None:
     """Signed in, and a positive balance from a FRESH owner-pinned billing read.
 
-    Reuses the tunnel plane's owner-pinned client and its ``_positive_balance``
-    predicate (missing, boolean or non-finite amounts are unavailable). Any
-    failure — no login, several logins and none selected, a network error, a
-    non-200 — answers "not available"; it never raises.
+    Reuses the tunnel plane's credential selection and its ``_positive_balance``
+    predicate (missing, boolean or non-finite amounts are unavailable). Answers
+    ``None`` when the read could not complete (timeout, transport, non-200,
+    oversized or encoded body), which the caller retries after a back-off;
+    never raises.
+
+    The request follows the prepare path's transport rules, not
+    ``RadientTunnels.request``'s, because this read happens on every
+    Saver-enabled session (S-4):
+
+    - ``Accept-Encoding: identity`` and a ``Content-Encoding`` answer refused
+      unread: no decoder is built, so a 61 KB gzip can no longer inflate to
+      187 MiB (the S3-7 surface ``/saver/prepare`` already closed);
+    - the raw body capped at :data:`MAX_BILLING_BYTES` while it streams;
+    - the host is the configured Radient API base (``RADIENT_API_BASE_URL``,
+      the same base the prepare path uses), under the same exact-host rule, so
+      a staging setup no longer sends the read to production (QA, other
+      observations);
+    - ``trust_env=False`` and ``follow_redirects=False``.
+
+    The total deadline is applied by :func:`start_availability_read`.
     """
+    import json
+
     import httpx
 
-    from local_operator.tunnels.api import RadientTunnels, credential_id
+    from local_operator.env import get_env_config, normalize_radient_api_base_url
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.saver.client import _read_capped, destination_allowed
+    from local_operator.tunnels.api import credential_id
     from local_operator.tunnels.cli import _positive_balance
 
     try:
         selected = credential_id(None)
     except Exception:  # noqa: BLE001 — no single Radient login: signed out
         return Availability(signed_in=False, positive_balance=False)
-    try:
-        async with httpx.AsyncClient(trust_env=False) as client:
-            quote = await RadientTunnels(selected, client).request("GET", "/billing")
-    except Exception:  # noqa: BLE001 — unknown counts as no (S-31)
+    base = normalize_radient_api_base_url(get_env_config().radient_api_base_url)
+    if not destination_allowed(base):
         return Availability(signed_in=True, positive_balance=False)
+    try:
+        from contextlib import closing
+
+        with closing(AuthStore()) as store:
+            credentials = await store.ensure_oauth_fresh_or_raise(selected)
+        token = credentials.get("access") if credentials else None
+        if not isinstance(token, str) or not token:
+            return Availability(signed_in=False, positive_balance=False)
+        async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
+            request = client.build_request(
+                "GET",
+                base + "/tunnels/billing",
+                headers={"Authorization": f"Bearer {token}", "Accept-Encoding": "identity"},
+            )
+            response = await client.send(request, stream=True)
+            try:
+                if response.status_code != 200:
+                    return None
+                raw = await _read_capped(response, MAX_BILLING_BYTES)
+            finally:
+                await response.aclose()
+        envelope = json.loads(raw)
+    except Exception:  # noqa: BLE001 — could not answer: retried after the back-off
+        return None
+    quote = envelope.get("result") if isinstance(envelope, dict) else None
     return Availability(
         signed_in=True,
         positive_balance=isinstance(quote, dict) and _positive_balance(quote),
     )
+
+
+class AvailabilityRead:
+    """One background availability read, never awaited by a turn (R-1/S-4/Q1).
+
+    ``result()`` is ``None`` ("not known yet", which the resolver treats as
+    off) until the read answers. A read that could not answer, or ran past
+    :data:`AVAILABILITY_DEADLINE_S`, ``expired()`` after
+    :data:`AVAILABILITY_RETRY_S`, and the caller starts a new one then.
+    """
+
+    def __init__(self) -> None:
+        import asyncio
+
+        self._started = _monotonic()
+        self._task = asyncio.get_running_loop().create_task(self._run())
+
+    async def _run(self) -> Availability | None:
+        import asyncio
+
+        try:
+            async with asyncio.timeout(AVAILABILITY_DEADLINE_S):
+                return await read_availability()
+        except Exception:  # noqa: BLE001 — a deadline is "could not answer"
+            return None
+
+    def result(self) -> Availability | None:
+        if not self._task.done() or self._task.cancelled():
+            return None
+        return self._task.result()
+
+    def expired(self) -> bool:
+        if not self._task.done():
+            return False
+        if self._task.cancelled() or self._task.result() is None:
+            return _monotonic() - self._started >= AVAILABILITY_RETRY_S
+        return False
+
+
+def start_availability_read() -> AvailabilityRead:
+    """Start the gate's account half in the background (must be on a running loop)."""
+    return AvailabilityRead()
+
+
+def _monotonic() -> float:
+    import time
+
+    return time.monotonic()

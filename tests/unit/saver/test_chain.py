@@ -36,6 +36,7 @@ from tests.unit.saver.fake_prepare import (
     FakeServer,
     ThrottledUplink,
     gzip_bomb,
+    prepare,
     spy_decoders,
 )
 
@@ -47,6 +48,8 @@ def _isolate(monkeypatch: pytest.MonkeyPatch) -> None:
     # The process-wide 404/403 and S3-7 pauses are class attributes: reset per test.
     monkeypatch.setattr(chain_mod._ProcessState, "paused", False)
     monkeypatch.setattr(chain_mod._ProcessState, "transport_paused", False)
+    monkeypatch.setattr(chain_mod._ProcessState, "rejections", 0)
+    monkeypatch.setattr(chain_mod._ProcessState, "rejected_digests", set())
     monkeypatch.setattr("local_operator.saver.client.destination_allowed", lambda base: True)
 
 
@@ -261,7 +264,10 @@ async def test_a_rejected_response_is_discarded_whole() -> None:
     assert rig.chain.epochs == [] and rig.chain.frontier == 0
     assert out.frozen_prefix_messages is None
     assert rig.notices == ["rejected"]
-    assert rig.spend == []  # nothing adopted, nothing recorded
+    # R-5: every charged 200 is recorded, the rejected one included (§5a
+    # settles first), though nothing was adopted: one row per charge.
+    charged = [body for body in server.bodies if prepare(body)["epochs"]]
+    assert len(rig.spend) == len(charged) >= 1
 
 
 @pytest.mark.asyncio

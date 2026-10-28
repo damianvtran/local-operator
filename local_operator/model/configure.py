@@ -4052,12 +4052,14 @@ class SessionStreamFn:
         self._context_tracker = ContextTokenTracker()
         # Radient Saver (contract §7, §9): this conversation's chain, built on the
         # first turn the gate allows and never shared — a fork starts its own.
-        # ``_saver_availability`` is the gate's account half, read at enable and
-        # after a 402 only, never per turn (§8). The redaction and the spend sink
-        # are bound by the owning Session (:meth:`bind_saver`); until then the
-        # projection uses the credential-shape floor and records no spend.
+        # ``_saver_availability_read`` is the gate's account half: a background
+        # read started at enable and after a 402 (§8), re-tried after its own
+        # back-off when it timed out, and never awaited on a turn (R-1). The
+        # redaction and the spend sink are bound by the owning Session
+        # (:meth:`bind_saver`); until then the projection uses the
+        # credential-shape floor and records no spend.
         self._saver_chain: Any | None = None
-        self._saver_availability: Any | None = None
+        self._saver_availability_read: Any | None = None
         self._saver_redaction: Any | None = None
         self._saver_spend: Callable[[Any], None] | None = None
         self._notice_handler: Callable[[str, str], Awaitable[None] | None] | None = None
@@ -5267,7 +5269,9 @@ class SessionStreamFn:
         chain = self._saver_chain
         if chain is not None:
             if redaction is not None:
-                chain.redaction = redaction
+                from local_operator.saver.chain import upload_redaction
+
+                chain.redaction = upload_redaction(redaction)
             chain.spend = spend
 
     def _saver_bypassed(self, request: ChatRequest) -> bool:
@@ -5286,37 +5290,68 @@ class SessionStreamFn:
         Never raises and never fails the turn (§6): every failure path returns
         the request as given. With the gate off this reads one setting and
         returns, so no Saver client, task or socket ever exists.
+
+        Whenever this returns the request UNSPLICED, the chain's frozen set is
+        cleared (R-2): the session's prune sweep restricts itself to the
+        frontier only while Saver is actually reducing the request, so a flip to
+        off, a silent bypass (a Radient-served model) or a 402 gives back
+        main's prune exactly.
         """
-        if self._saver_bypassed(request):
-            return request
+        spliced = request
         try:
-            from local_operator.saver.gate import configured_mode, resolve_saver
+            if not self._saver_bypassed(request):
+                spliced = await self._saver_splice(request)
+        except Exception as exc:  # noqa: BLE001 — an optimisation must never fail a turn
+            # The type only (S-9): never ``exc_info`` or args, which could carry
+            # conversation text into a DEBUG log.
+            logger.debug("saver: apply failed (%s); sending unreduced", type(exc).__name__)
+            spliced = request
+        chain = self._saver_chain
+        if chain is not None and spliced.frozen_prefix_messages is None:
+            chain.frozen_ids = frozenset()
+        return spliced
 
-            if configured_mode(self._settings) == "off":
-                return request
-            if self._saver_availability is None:
-                from local_operator.saver.gate import read_availability
+    async def _saver_splice(self, request: ChatRequest) -> ChatRequest:
+        from local_operator.saver.gate import (
+            configured_mode,
+            resolve_saver,
+            start_availability_read,
+        )
 
-                self._saver_availability = await read_availability()
-            decision = resolve_saver(self._settings, self._saver_availability)
-            if not decision.on:
-                return request
-            chain = self._ensure_saver_chain()
-            spliced = await chain.apply(request)
-            if chain.needs_availability_refresh:
-                # A 402 is the one runtime event that re-reads the balance (§8).
-                self._saver_availability = None
-                chain.needs_availability_refresh = False
-            return spliced
-        except Exception:  # noqa: BLE001 — an optimisation must never fail a turn
-            logger.debug("saver: apply failed; sending the request unreduced", exc_info=True)
+        mode = configured_mode(self._settings)
+        # ``opt_in`` cannot resolve ON in LO1 (no session choice is wired, §9
+        # step 2 is LO2), so neither it nor ``off`` ever reads the balance: no
+        # Radient call with the user's bearer for a session that cannot use it
+        # (R-1).
+        if mode != "auto":
             return request
+        # The availability read is NEVER awaited on the turn (R-1/S-4/Q1): it
+        # runs in the background under its own total deadline, and until it
+        # answers "signed in with credit" this turn goes unreduced.
+        availability = self._saver_availability_read
+        if availability is None or availability.expired():
+            availability = start_availability_read()
+            self._saver_availability_read = availability
+        decision = resolve_saver(self._settings, availability.result())
+        if not decision.on:
+            return request
+        chain = self._ensure_saver_chain()
+        spliced = await chain.apply(request)
+        if chain.needs_availability_refresh:
+            # A 402 is the one runtime event that re-reads the balance (§8).
+            self._saver_availability_read = None
+            chain.needs_availability_refresh = False
+        return spliced
 
     def _ensure_saver_chain(self) -> Any:
         chain = self._saver_chain
         if chain is not None:
             return chain
-        from local_operator.saver.chain import SaverChain, shared_client
+        from local_operator.saver.chain import (
+            SaverChain,
+            shared_client,
+            upload_redaction,
+        )
         from local_operator.saver.projection import shape_only_redaction
 
         # A stream with no session id still gets its own chain; the id is only
@@ -5324,7 +5359,7 @@ class SessionStreamFn:
         chain = SaverChain(
             session_id=self._session_id or f"stream-{id(self):x}",
             client=shared_client(),
-            redaction=self._saver_redaction or shape_only_redaction(),
+            redaction=upload_redaction(self._saver_redaction or shape_only_redaction()),
             notice=self._saver_notice,
             spend=self._saver_spend,
         )

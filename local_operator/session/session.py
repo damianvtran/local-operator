@@ -23749,6 +23749,17 @@ class Session:
             # Before the render below, so the bound reads the flushed history.
             await self._flush_stale_if_due(compaction_api, settings)
             rendered = self._render_history(messages)
+            # RADIENT SAVER (contract §7, agent review R-8): the contract says the
+            # trigger "reads provider usage (now reduced), so compaction fires
+            # later". It does not, here, ON PURPOSE: the gate takes
+            # ``max(provider_reported, current_bound)`` and this bound is over
+            # the UNREDUCED render, so with Saver on compaction still fires at
+            # the unreduced size. That is the conservative side for LO1: the
+            # session never depends on a reduction that a fail-open (a 402, an
+            # outage, a rejection) can withdraw on the very next turn, which
+            # would put an unreduced request over the window with no compaction
+            # behind it. Recorded under "Where the contract did not fit" in the
+            # PR; firing later is an LO2 decision once the badge can show it.
             current_bound = compaction_api.messages_tokens_upper_bound(rendered)
             if not _should_compact(
                 compaction_api,
@@ -24310,15 +24321,33 @@ class Session:
         now_ms = int(time.time() * 1000)
         last_ms = self._last_provider_request_ms
         frames = _history_captured_browser_views(llm_history)
+        # RADIENT SAVER (contract §7): while Saver is reducing the request, both
+        # sweeps act only on messages at or after the chain's frontier. Rows
+        # before it are already frozen into epochs: blanking one saves nothing on
+        # the wire (the epoch replaces it) and costs a chain truncation and a
+        # re-upload. Both sweeps mutate the messages they are given in place, so
+        # handing them the tail restricts them without copying.
+        #
+        # The batch-flush ceiling is judged over THAT SAME TAIL (R-3): judged
+        # over the whole history, stale rows in the frozen prefix (which the
+        # sweep may not touch) kept the flush due at every tool boundary, and
+        # each due flush lifted the sent-prefix guard on the tail: one cache
+        # break per boundary instead of one per batch. Frame victims are
+        # computed over the tail too, so their indices are already the tail's.
+        # ``0`` (Saver off, bypassed, or not reducing) is main's behaviour
+        # exactly: the chain clears its frozen set whenever a request goes out
+        # unspliced (R-2).
+        frontier = self._saver_frontier(llm_history)
+        swept = llm_history[frontier:] if frontier else llm_history
         flush = False
         stale: Any = None
         compute: Any = getattr(compaction_api, "stale_set", None)
         due: Any = getattr(compaction_api, "stale_flush_due", None)
         if callable(compute) and callable(due):
-            stale = compute(llm_history, frames=frames)
+            stale = compute(swept, frames=frames)
             flush = bool(
                 due(
-                    llm_history,
+                    swept,
                     context_window=self.effective_model.context_window,
                     wire_bytes_trigger=self._wire_trigger_bytes(compaction_api, settings) or 0,
                     stale=stale,
@@ -24327,15 +24356,6 @@ class Session:
         if only_if_due and not flush:
             return False
         pruned_before = _pruned_ids(llm_history)
-        # RADIENT SAVER (contract §7): while Saver is on, both sweeps act only on
-        # messages at or after the chain's frontier. Rows before it are already
-        # frozen into epochs: blanking one saves nothing on the wire (the epoch
-        # replaces it) and costs a chain truncation and a re-upload. Both sweeps
-        # mutate the messages they are given in place, so handing them the tail
-        # restricts them without copying; a frame victim index from ``stale`` is
-        # re-based onto that tail. ``0`` (Saver off) is today's behaviour.
-        frontier = self._saver_frontier(llm_history)
-        swept = llm_history[frontier:] if frontier else llm_history
         # ``flush`` and ``victims`` are passed only when set, so a duck-typed
         # hook that predates the parameters (the suite has several) keeps its
         # old signature.
@@ -24347,9 +24367,7 @@ class Session:
         if frames:
             frame_extra = dict(extra)
             if stale is not None:
-                frame_extra["victims"] = [
-                    index - frontier for index in stale.frames if index >= frontier
-                ]
+                frame_extra["victims"] = stale.frames
             try:
                 compaction_api.prune_stale_frames_in_place(
                     swept, now_ms=now_ms, last_activity_ms=last_ms, **frame_extra

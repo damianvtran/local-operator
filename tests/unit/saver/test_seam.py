@@ -170,7 +170,8 @@ async def test_the_default_config_is_off(rig) -> None:
 
     row = next(s for s in SETTINGS if s.key == "radient.saver.mode")
     assert row.default == DEFAULT_MODE == "off"
-    assert DEFAULT_CONFIG.values["radient"]["saver"]["mode"] == "off"
+    # R-6: no DEFAULT_CONFIG entry, so no settings write ever persists it.
+    assert "radient" not in DEFAULT_CONFIG.values
 
 
 @pytest.mark.asyncio
