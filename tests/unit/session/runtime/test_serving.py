@@ -291,7 +291,9 @@ class FakeSession:
         )
 
 
-def make_handle(auto_approve: bool = False) -> tuple[ServingSessionHandle, FakeSession]:
+def make_handle(
+    auto_approve: bool = False, directory: Path | None = None
+) -> tuple[ServingSessionHandle, FakeSession]:
     # The handle records whichever loop it is built on; inside an async test
     # that is the running loop, and the sync construction test never awaits so
     # a fresh loop is fine. get_event_loop_policy().get_event_loop() avoids the
@@ -301,6 +303,12 @@ def make_handle(auto_approve: bool = False) -> tuple[ServingSessionHandle, FakeS
     except RuntimeError:
         loop = asyncio.new_event_loop()
     session = FakeSession()
+    if directory is not None:
+        # A session with somewhere to write, which is what the steer door now
+        # needs: an accepted steer is spooled for a successor before it is
+        # acknowledged (``ServingSessionHandle.steer``), and a double with no
+        # transcript directory can only take the refusal.
+        session.transcript = SimpleNamespace(directory=directory)
     handle = ServingSessionHandle(session, loop, cwd="/tmp", auto_approve=auto_approve)
     return handle, session
 
@@ -390,8 +398,8 @@ async def test_ask_mode_parks_a_card_then_resolves() -> None:
 
 
 @pytest.mark.asyncio
-async def test_same_id_concurrent_steers_are_admitted_once() -> None:
-    handle, session = make_handle()
+async def test_same_id_concurrent_steers_are_admitted_once(tmp_path: Path) -> None:
+    handle, session = make_handle(directory=tmp_path / "sess")
     command_id = "same-steer"
 
     receipts = await asyncio.gather(
@@ -405,8 +413,8 @@ async def test_same_id_concurrent_steers_are_admitted_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_steer_rejection_releases_owned_slot_and_same_id() -> None:
-    handle, session = make_handle()
+async def test_async_steer_rejection_releases_owned_slot_and_same_id(tmp_path: Path) -> None:
+    handle, session = make_handle(directory=tmp_path / "sess")
     notified = 0
 
     def notify() -> None:
@@ -432,8 +440,8 @@ async def test_async_steer_rejection_releases_owned_slot_and_same_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_steer_ack_loss_retry_remains_admitted() -> None:
-    handle, session = make_handle()
+async def test_steer_ack_loss_retry_remains_admitted(tmp_path: Path) -> None:
+    handle, session = make_handle(directory=tmp_path / "sess")
 
     assert await handle.steer("once", command_id="lost-ack") == "steering queued"
     assert await handle.steer("once", command_id="lost-ack") == "already admitted"
@@ -441,8 +449,10 @@ async def test_steer_ack_loss_retry_remains_admitted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stalled_owned_steers_apply_backpressure_and_drain_frees_capacity() -> None:
-    handle, session = make_handle()
+async def test_stalled_owned_steers_apply_backpressure_and_drain_frees_capacity(
+    tmp_path: Path,
+) -> None:
+    handle, session = make_handle(directory=tmp_path / "sess")
 
     for index in range(32):
         assert await handle.steer(f"steer {index}", command_id=f"id-{index}") == "steering queued"
@@ -458,8 +468,8 @@ async def test_stalled_owned_steers_apply_backpressure_and_drain_frees_capacity(
 
 
 @pytest.mark.asyncio
-async def test_terminal_steer_rejection_releases_identity() -> None:
-    handle, session = make_handle()
+async def test_terminal_steer_rejection_releases_identity(tmp_path: Path) -> None:
+    handle, session = make_handle(directory=tmp_path / "sess")
     original = session.steer
     attempts = 0
 
@@ -478,8 +488,8 @@ async def test_terminal_steer_rejection_releases_identity() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prompt_streaming_rejection_transfers_identity_to_steer() -> None:
-    handle, session = make_handle()
+async def test_prompt_streaming_rejection_transfers_identity_to_steer(tmp_path: Path) -> None:
+    handle, session = make_handle(directory=tmp_path / "sess")
 
     async def reject_prompt(  # noqa: ANN202
         text, images=None, *, message_id=None, admitted=None  # noqa: ANN001
@@ -532,8 +542,8 @@ async def test_a_refused_prompt_retried_as_a_prompt_is_really_admitted() -> None
 
 
 @pytest.mark.asyncio
-async def test_distinct_concurrent_steers_keep_fifo_order() -> None:
-    handle, session = make_handle()
+async def test_distinct_concurrent_steers_keep_fifo_order(tmp_path: Path) -> None:
+    handle, session = make_handle(directory=tmp_path / "sess")
 
     receipts = await asyncio.gather(
         *(
@@ -695,8 +705,8 @@ async def test_a_signal_between_two_questions_does_not_park_the_second() -> None
 
 
 @pytest.mark.asyncio
-async def test_concurrent_explicit_steers_preserve_dispatch_order() -> None:
-    handle, session = make_handle()
+async def test_concurrent_explicit_steers_preserve_dispatch_order(tmp_path: Path) -> None:
+    handle, session = make_handle(directory=tmp_path / "sess")
     receipts = await asyncio.gather(
         handle.steer("mobile steer"),
         handle.steer("attach steer one"),
