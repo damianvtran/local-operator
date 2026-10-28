@@ -23,6 +23,7 @@ is documented on :meth:`_ContextBuilder.build`.
 
 from __future__ import annotations
 
+import ast
 import base64
 import difflib
 import json
@@ -44,8 +45,10 @@ from local_operator.evaluation.action_surface import (
 from local_operator.evaluation.adapters.supervisor import verify_artifact
 from local_operator.evaluation.evidence.models import RouteIdentity
 from local_operator.evaluation.protocol import (
+    MAX_BATCH_SIZE,
     ActionBatch,
     FinishAction,
+    KeyAction,
     Observation,
     canonical_key,
 )
@@ -715,7 +718,16 @@ _ENTRY_LOCATION = re.compile(
     re.MULTILINE,
 )
 _VALUE_ERROR_RULE = re.compile(r"Value error, (.+?) \[type=")
-_UNKNOWN_KEY_NAME = re.compile(r"unknown key: '(.*?)' \[type=")
+#: An unknown-key ENTRY: the action's index from its location line and the
+#: refused name as the validator's own ``repr``. Read whole-line and decoded
+#: with ``ast.literal_eval`` because ``repr`` switches to double quotes for a
+#: name holding ``'`` -- the old single-quote pattern skipped ``"<<'SCM'"``
+#: and quoted the NEXT bad action's key instead (round 1, Q2).
+_UNKNOWN_KEY_ENTRY = re.compile(
+    r"^actions\.(?P<index>\d+)\.[A-Za-z0-9_-]+\.keys\n"
+    r"Value error, unknown key: (?P<name>.+) \[type=value_error[,\]]",
+    re.MULTILINE,
+)
 _QUOTED_TAG = re.compile(r"Input tag '(.*?)' found using 'kind'")
 _MAX_RULE_CHARS = 200
 
@@ -1065,6 +1077,14 @@ def _action_kind_of(model: Any) -> str:
     return str(model.model_fields["kind"].default)
 
 
+def _action_index(path: tuple[str, ...]) -> str:
+    """`` (action index N)`` for an ``actions.N.<kind>`` path, else empty."""
+
+    if len(path) >= 2 and path[1].isdigit():
+        return f" (action index {path[1]})"
+    return ""
+
+
 def _field_shape(field: Any, *, name: str) -> str:
     """The accepted shape of one action field, read from its own constraints.
 
@@ -1143,14 +1163,22 @@ def _field_invalid_hint(
             # (main16 evidence: two such refusals re-sent the same shape).
             rule_text = f" The rule it broke: {quoted_rule}." if quoted_rule else ""
             return (
-                f'"{name}" in a "{kind}" action was refused: it takes '
+                f'"{name}" in a "{kind}" action was refused{_action_index(path)}: it takes '
                 f"{_field_shape(field, name=name)}.{rule_text} "
                 f"The kind's full shape is {_action_line(surface, kind, shape)}."
             )
         rule_text = f" The rule it broke: {quoted_rule}." if quoted_rule else ""
         return (
-            f'a "{kind}" action was refused.{rule_text} '
+            f'a "{kind}" action was refused{_action_index(path)}.{rule_text} '
             f"Its accepted shape is {_action_line(surface, kind, shape)}."
+        )
+    if path == ("actions",) and "[type=too_long]" in reason:
+        # The batch bound, stated: following one repair per refused action can
+        # grow a batch past it, and the shape example alone never says so
+        # (round 1, Q3).
+        return (
+            f"the batch has more than {MAX_BATCH_SIZE} actions and was refused before "
+            f"anything was executed: send at most {MAX_BATCH_SIZE}, and the rest next turn"
         )
     if quoted_rule:
         # A batch-level rule from one of the protocol's own model validators.
@@ -1362,12 +1390,14 @@ def _unknown_key_hint(reason: str, surface: ActionSurface) -> str:
     own alphabet.
     """
 
-    match = _UNKNOWN_KEY_NAME.search(reason)
-    sent = match.group(1) if match is not None else ""
+    sent, index = _unknown_key_entry(reason)
     named = {key.upper() for key in surface.named_keys}
     parts = []
+    # The index says WHICH action to fix: a long key-by-key batch otherwise
+    # reads as "some key somewhere" (round 1, Q2: 54 key actions).
+    where = f" (action index {index})" if index is not None else ""
     if sent and is_quotable_key(sent):
-        parts.append(f"{sent!r} is not an accepted key name")
+        parts.append(f"{sent!r} is not an accepted key name{where}")
         meanings = [key for key in _AMBIGUOUS_KEY_NAMES.get(sent.casefold(), ()) if key in named]
         chord = _joined_chord(sent)
         if chord is not None:
@@ -1397,7 +1427,7 @@ def _unknown_key_hint(reason: str, surface: ActionSurface) -> str:
                     f'{{"kind": "type", "text": {json.dumps(sent)}}}'
                 )
     else:
-        parts.append("The reply used an unknown key name")
+        parts.append(f"The reply used an unknown key name{where}")
     parts.append(
         f"the key-chord field takes {_keys_shape(surface)} written directly, "
         f"e.g. {json.dumps(_keys_example(surface))}; named keys are "
@@ -1406,16 +1436,56 @@ def _unknown_key_hint(reason: str, surface: ActionSurface) -> str:
     return ". ".join(parts)
 
 
-def _joined_chord(sent: str) -> list[str] | None:
-    """The chord a ``+``-joined key string spells, when every part is a key.
+def _unknown_key_entry(reason: str) -> tuple[str, int | None]:
+    """The first refused key name and its action index, or ``("", None)``.
 
-    Validated through ``protocol.canonical_key`` -- the one normalisation the
-    validator uses -- so the suggestion can never name a key that would be
-    refused. Parts are echoed in the model's own spelling (already accepted).
+    ``literal_eval`` decodes only the validator's ``repr`` of a string and
+    nothing else; anything that does not decode to one is treated as absent.
     """
 
-    parts = sent.split("+")
-    if len(parts) < 2 or any(not part or canonical_key(part) is None for part in parts):
+    match = _UNKNOWN_KEY_ENTRY.search(reason)
+    if match is None:
+        return "", None
+    try:
+        name = ast.literal_eval(match.group("name"))
+    except (ValueError, SyntaxError):
+        return "", int(match.group("index"))
+    return (name if isinstance(name, str) else ""), int(match.group("index"))
+
+
+def _joined_chord(sent: str) -> list[str] | None:
+    """The chord a ``+``-joined key string spells, when that chord would be accepted.
+
+    ``+`` is both the separator and a key, so a ``+`` where a part should start
+    IS the key: ``"ctrl++"`` is Ctrl and ``+``, not Ctrl and two empty parts
+    (round 1, M1). A trailing or doubled separator anywhere else spells nothing.
+
+    The WHOLE chord is validated with ``KeyAction`` -- the validator itself --
+    so the suggestion can never be refused in turn: every part is a key AND the
+    chord passes the duplicate and typed-text rules (round 1, M2). Parts are
+    echoed in the model's own spelling, lower-cased when they are names.
+    """
+
+    parts: list[str] = []
+    index, length = 0, len(sent)
+    while index < length:
+        if sent[index] == "+":
+            parts.append("+")
+            index += 1
+        else:
+            end = sent.find("+", index)
+            end = length if end == -1 else end
+            parts.append(sent[index:end])
+            index = end
+        if index < length:
+            index += 1  # the separator
+            if index == length:
+                return None
+    if len(parts) < 2 or any(canonical_key(part) is None for part in parts):
+        return None
+    try:
+        KeyAction(observation_id="suggestion", keys=tuple(parts))
+    except ValidationError:
         return None
     return [part.lower() if len(part) > 1 else part for part in parts]
 

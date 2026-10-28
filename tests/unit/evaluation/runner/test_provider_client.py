@@ -3119,7 +3119,11 @@ def _defective_reply(case: str, current: Observation) -> str:
         return json.dumps(
             {
                 "actions": [
-                    {"kind": "key", "observation_id": observation_id, "keys": ["e", "c", "h", "o"]}
+                    {
+                        "kind": "key",
+                        "observation_id": observation_id,
+                        "keys": ["e", "c", "h", "o", "space", "A"],
+                    }
                 ]
             }
         )
@@ -3231,7 +3235,7 @@ _REJECTION_HINT_CASES = [
     (
         "chord-spells-text",
         "field-invalid",
-        ["pressed together as one chord", '{"kind": "type", "text": "echo"}'],
+        ["pressed together as one chord", '{"kind": "type", "text": "echo A"}'],
     ),
     ("word-as-a-key", "unknown-key", ['{"kind": "type", "text": "cat"}']),
     ("plus-joined-chord", "unknown-key", ['send "keys": ["ctrl", "t"]']),

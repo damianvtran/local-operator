@@ -1158,6 +1158,18 @@ def test_type_accepts_whitespace_keystrokes(text: str) -> None:
     assert ActionBatch.from_canonical_json(batch.to_canonical_json()) == batch
 
 
+@pytest.mark.parametrize("text", ["\x0b", "\x0c", " \x0c", "\u00a0", "\u2003"])
+def test_whitespace_only_text_must_press_a_key(text: str) -> None:
+    """``\\x0b``/``\\x0c`` and Unicode spaces have no X11 key: refused, not no-op."""
+
+    with pytest.raises(ValidationError, match="space, tab, carriage return and newline"):
+        TypeAction(observation_id="observation-7", text=text)
+
+
+def test_mixed_text_with_other_whitespace_is_unchanged() -> None:
+    assert TypeAction(observation_id="observation-7", text="a\x0bb").text == "a\x0bb"
+
+
 def test_type_still_refuses_the_empty_string() -> None:
     """Empty types nothing; it stays a refusal rather than a silent no-op."""
 
@@ -1174,12 +1186,15 @@ def test_a_literal_space_key_is_the_space_bar() -> None:
 @pytest.mark.parametrize(
     ("keys", "text"),
     [
-        (("e", "c", "h", "o", " ", "A"), "echo A"),
+        # Each is a chord that, pressed, would NOT type the text: an upper-case
+        # letter compiles lower-cased, a repeat cannot be pressed twice in one
+        # chord, and a literal " " was refused outright on base.
+        (("e", "c", "h", "o", " ", "a"), "echo a"),
         (("e", "c", "h", "o", "space", "A"), "echo A"),
+        (("E", "N", "-", "M", "O", "D"), "EN-MOD"),
         (("c", "a", "t", "space", ">", "space", "c", "o"), "cat > co"),
         # A repeated letter is a typing attempt first, a duplicate second.
         (("m", "p", ".", "s", "c", "m", "space", "<"), "mp.scm <"),
-        (("l", "s"), "ls"),
     ],
 )
 def test_a_chord_that_spells_text_is_refused_with_the_type_action(
@@ -1204,6 +1219,12 @@ def test_a_chord_that_spells_text_is_refused_with_the_type_action(
         ("up", "left"),
         ("space",),
         ("1",),
+        ("shift", "A"),
+        # Lower-case, duplicate-free spellings ran as typed on base (QA round 1,
+        # Q1: ["t","e","r","m"] after Super launched Terminal) and stay accepted.
+        ("t", "e", "r", "m"),
+        ("l", "s"),
+        ("e", "c", "h", "o", "space", "a"),
     ],
 )
 def test_real_chords_are_not_read_as_typing(keys: tuple[str, ...]) -> None:

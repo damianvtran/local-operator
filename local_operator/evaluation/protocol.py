@@ -443,6 +443,19 @@ class TypeAction(_Action):
     # nothing, and the measured case was a model misfiring the kind it meant.
     text: str = Field(min_length=1, max_length=MAX_TEXT_LENGTH)
 
+    @field_validator("text")
+    @classmethod
+    def _whitespace_presses_a_key(cls, text: str) -> str:
+        # Whitespace-only text must press something: space, tab, CR and LF are
+        # keys, but ``\x0b``/``\x0c`` (and Unicode spaces) have no key on the X11
+        # compiler -- pyautogui drops them silently, so the action would report
+        # success and type nothing. Mixed text keeps base behaviour unchanged.
+        if not text.strip() and not set(text) <= _TYPEABLE_WHITESPACE:
+            raise ValueError(
+                "whitespace-only text may contain only space, tab, carriage return " "and newline"
+            )
+        return text
+
 
 #: The named keys ``KeyAction`` accepts, case-insensitively. Public because
 #: the episode system prompt must state this vocabulary rather than imply it:
@@ -476,6 +489,8 @@ NAMED_KEYS = frozenset(
     }
 )
 _PRINTABLE_KEYS = frozenset(string.ascii_letters + string.digits + string.punctuation)
+#: The whitespace a ``type`` action may consist of alone: each one is a key.
+_TYPEABLE_WHITESPACE = frozenset(" \t\r\n")
 
 #: Standard key spellings normalised, at parse time, to the ONE canonical key
 #: they name. Keyed by the upper-cased spelling (named keys are matched
@@ -575,24 +590,36 @@ def canonical_key(key: str) -> str | None:
     return None
 
 
-def _chord_as_typed_text(keys: Sequence[str]) -> str | None:
-    """The text a chord spells when it is really an attempt to TYPE, else ``None``.
+def _chord_as_typed_text(raw: Sequence[str], keys: Sequence[str]) -> str | None:
+    """The text a chord spells when pressing it would NOT type that text, else ``None``.
 
-    WHY REFUSE IT. ``keys`` is ONE chord: every key goes down together. Two or
-    more plain characters with no modifier are not a shortcut any desktop binds
-    -- the 2026-10-28 session-arm evidence is a model spelling ``echo A`` and a
-    whole heredoc letter by letter, eight keys per chord. That "works" only by
-    accident (X11 emits each key-down in order), and lossily: the compiler
-    presses single characters lower-cased, so ``A`` arrived as ``a``, and a
-    repeated letter is refused as a duplicate key. A ``type`` action carries the
-    same text exactly, so the refusal names that action, built from these keys.
+    ``raw`` is the model's spelling and ``keys`` the canonical form of it.
+
+    WHY REFUSE IT. ``keys`` is ONE chord: every key goes down together. A model
+    spelling a word letter by letter (2026-10-28 session-arm evidence: ``echo
+    A``, a heredoc eight keys at a time) gets that word only because X11 emits
+    the key-downs in order -- and ONLY when the chord carries nothing a chord
+    cannot type. So the refusal fires solely where pressing the chord would
+    lose what the model evidently meant, or where the chord was refused anyway:
+
+    * an upper-case letter: a chord applies no shift, and the compiler presses
+      single characters lower-cased (``["E","N","-","M","O","D"]`` compiled
+      to ``hotkey('e','n','-','m','o','d')``);
+    * a repeated key: refused as a duplicate before, and a chord cannot press
+      one key twice;
+    * a literal ``" "``: refused as an unknown key before.
+
+    A lower-case, duplicate-free spelling that already ran as typed -- the
+    measured ``["t","e","r","m"]`` after Super, which the model saw launch
+    Terminal -- stays accepted with identical compiled output. QA replayed all
+    714 accepted evidence batches to hold this line (PR #3091, round 1, Q1).
 
     NOT auto-converted: "press these together" and "type these" are different
-    actions, and the model has to say which. Scoped to the unambiguous shape --
-    no modifier, and every key a single printable character or the space bar --
-    so ``["shift", "a"]``, ``["ctrl", "alt", "t"]`` and named-key chords such as
-    ``["up", "left"]`` are untouched. The text is at most 8 printable ASCII
-    characters (the chord bound), so quoting it in the rule is bounded.
+    actions, and the model has to say which. Only chords with no modifier and
+    nothing but single printable characters or the space bar qualify, so
+    ``["shift", "A"]``, ``["ctrl", "alt", "t"]`` and ``["up", "left"]`` are
+    untouched. The text is at most 8 printable ASCII characters (the chord
+    bound), so quoting it in the rule is bounded.
     """
 
     if len(keys) < 2 or any(key in _MODIFIER_KEYS for key in keys):
@@ -600,6 +627,13 @@ def _chord_as_typed_text(keys: Sequence[str]) -> str | None:
     if not all(key == "SPACE" or key in _PRINTABLE_KEYS for key in keys):
         return None
     if all(key == "SPACE" for key in keys):
+        return None
+    lossy = (
+        any(key in string.ascii_uppercase for key in keys)
+        or len(set(keys)) != len(keys)
+        or " " in raw
+    )
+    if not lossy:
         return None
     return "".join(" " if key == "SPACE" else key for key in keys)
 
@@ -624,7 +658,7 @@ class _KeyChordAction(_Action):
         # Checked BEFORE duplicates: a spelled-out word with a repeated letter
         # (``["m", "p", ".", "s", "c", "m"]``) is a typing attempt, and naming
         # the duplicate would send the model to fix the wrong thing.
-        typed = _chord_as_typed_text(normalized)
+        typed = _chord_as_typed_text(keys, normalized)
         if typed is not None:
             raise ValueError(
                 "keys in one action are pressed together as one chord, not typed in "

@@ -1373,6 +1373,28 @@ _PLACEMENT_REPAIRS = [
         ['a chord lists each key separately: send "keys": ["ctrl", "t"]'],
     ),
     (
+        "ctrl-plus-plus",
+        {"actions": [{"kind": "key", "keys": ["ctrl++"]}]},
+        ['send "keys": ["ctrl", "+"]'],
+    ),
+    (
+        "names-the-failing-action",
+        {
+            "actions": [
+                *[{"kind": "wait", "duration_ms": 5}] * 6,
+                {"kind": "key", "keys": ["<<'SCM'"]},
+                {"kind": "wait", "duration_ms": 5},
+                {"kind": "key", "keys": ["(define"]},
+            ]
+        },
+        ["(action index 6)", '{"kind": "type", "text": "<<\'SCM\'"}'],
+    ),
+    (
+        "batch-over-the-bound",
+        {"actions": [{"kind": "wait", "duration_ms": 5}] * 65},
+        ["more than 64 actions", "send at most 64"],
+    ),
+    (
         "zero-scroll",
         {"actions": [{"kind": "scroll", "frame_id": "screen", "x": 1, "y": 1, "delta_y": 0}]},
         ["scroll requires a non-zero delta", "delta_y > 0 scrolls up and < 0 scrolls down"],
@@ -1457,3 +1479,29 @@ def test_the_description_states_the_chord_and_scroll_sign() -> None:
     assert "ONE chord pressed together" in ACTION_TOOL_DESCRIPTION
     assert "delta_y > 0 is up, < 0 is down" in ACTION_TOOL_DESCRIPTION
     assert len(ACTION_TOOL_DESCRIPTION) < 300
+
+
+@pytest.mark.parametrize(
+    ("sent", "chord"),
+    [
+        ("ctrl+t", ["ctrl", "t"]),
+        ("ctrl++", ["ctrl", "+"]),
+        ("ctrl+alt+t", ["ctrl", "alt", "t"]),
+        ("a+b", ["a", "b"]),
+        # A suggestion the validator would refuse in turn is never offered.
+        ("A+B", None),
+        ("a+a", None),
+        ("ctrl+", None),
+        ("ctrl+++", None),
+        ("+", None),
+    ],
+)
+def test_a_plus_joined_suggestion_is_always_an_accepted_chord(
+    sent: str, chord: list[str] | None
+) -> None:
+    from local_operator.evaluation.protocol import KeyAction
+    from local_operator.evaluation.runner.provider_client import _joined_chord
+
+    assert _joined_chord(sent) == chord
+    if chord is not None:
+        KeyAction(observation_id="o", keys=tuple(chord))
