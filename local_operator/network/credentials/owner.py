@@ -669,6 +669,18 @@ class MeshCredentialBroker:
                     f"on {self.self_device_name or self.self_device}; nothing was lent",
                 )
 
+        # 2d. THE BORROWER'S RESTING ROWS (``PlacementState.cool_down``): rows the
+        #     requester saw answer a usage limit, hidden from THIS resolve exactly as
+        #     the derived-holder exclusion above hides rows — nothing on the owner is
+        #     blocked, demoted or repointed (§2.1, F3), so a peer's word still cannot
+        #     take a login out of the owner's own rotation. It only narrows what this
+        #     one peer is offered, which is the same thing a local row's block does
+        #     for a local session. Peer ids are validated like every peer number;
+        #     an id the owner does not have hides nothing.
+        peer_excluded = _peer_excluded_ids(frame.get("exclude_credential_ids"))
+        if peer_excluded:
+            excluded_ids = tuple(sorted(set(excluded_ids) | set(peer_excluded)))
+
         # 3-5. Coalesce, resolve, audit. All on the owner's ONE loop.
         try:
             outcome = self._loop.submit(
@@ -2317,6 +2329,22 @@ def _already_expired(expiry: float | None, *, now: float | None = None) -> bool:
     if expiry is None:
         return False
     return float(expiry) <= (now if now is not None else time.time())
+
+
+#: The most row ids a peer's grant ask may hide; see ``credentials._peer_ids``.
+MAX_PEER_EXCLUDED_IDS = 32
+
+
+def _peer_excluded_ids(value: Any) -> tuple[int, ...]:
+    """A peer's ``exclude_credential_ids``, bounded: positive ints, de-duplicated.
+
+    Re-validated here although leg 1 already did it, because leg 2 is a PEER frame
+    and this device trusts none of its fields on another device's say-so.
+    """
+    if not isinstance(value, list):
+        return ()
+    ids = {peer_int(item) for item in value[:MAX_PEER_EXCLUDED_IDS]}
+    return tuple(sorted(item for item in ids if item > 0))
 
 
 def remote_block_scope(claimed: str, model_id: str) -> str:

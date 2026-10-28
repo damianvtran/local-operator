@@ -35,6 +35,7 @@ WHAT THIS MODULE GUARANTEES, and the mechanism for each:
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from contextlib import suppress
@@ -61,6 +62,8 @@ from local_operator.network.credentials.types import (
     credential_key_for_mcp,
     credential_key_for_provider,
 )
+
+logger = logging.getLogger("local_operator.network.credentials.client")
 
 #: The borrower's whole budget for one borrow, in seconds. Below the local secret
 #: broker's 10 s (see this module's docstring) and far below the owner-side
@@ -627,6 +630,12 @@ class MeshCredentialClient:
             refusal = self.cached_refusal(key)
             if refusal is not None and refusal.code == "quota_blocked":
                 return self._render(refusal, key, label)
+        # THE ROWS THIS DEVICE SAW ANSWER A USAGE LIMIT, hidden from this ask only
+        # (see ``PlacementState.cool_down``). An explicit refresh still carries
+        # them: a forced refresh is a repair of the bearer, not a request to be
+        # served by a row the provider said is spent.
+        resting = self.state.cooldowns(key, model_id)
+        excluded = sorted({int(row["credential_id"]) for row in resting})
         try:
             from local_operator.network import store
             from local_operator.network.relay import control_request
@@ -634,6 +643,11 @@ class MeshCredentialClient:
             record = store.find_own_relay(self.root)
             if record is None:
                 return self._offline(key, label)
+            extra: dict[str, Any] = {}
+            if excluded:
+                # Only when there is something to hide, so the frame an older relay
+                # or owner reads is byte-identical to the one it always read.
+                extra["exclude_credential_ids"] = excluded
             reply = control_request(
                 record,
                 "credential_grant",
@@ -647,6 +661,7 @@ class MeshCredentialClient:
                 session_id=session_id,
                 model_id=model_id,
                 force_refresh=bool(force_refresh),
+                **extra,
             )
         except Exception as exc:  # noqa: BLE001 — a broker bug must not fail a turn
             return BrokerError(
@@ -656,7 +671,44 @@ class MeshCredentialClient:
                 owner_device_name=self.owner_label(key),
                 message=exc.__class__.__name__,
             )
-        return self._from_reply(reply, key, label, session_id)
+        outcome = self._from_reply(reply, key, label, session_id)
+        if isinstance(outcome, BrokerError) and resting and outcome.code == "no_local_credential":
+            # EVERY ROW THE OWNER COULD LEND IS ONE THIS DEVICE SAW RATE-LIMITED: the
+            # owner, with them hidden, has nothing left. That is a quota rest, not
+            # "nothing is signed in" — the latter is cached for 300 s with a re-login
+            # remedy, which is wrong for a limit that heals on its own. Answer the
+            # real reason, with the earliest end and the resting accounts' labels.
+            return self._resting_refusal(key, label, resting)
+        return outcome
+
+    def _resting_refusal(self, key: str, label: str, resting: list[dict[str, Any]]) -> BrokerError:
+        """``quota_blocked`` built from this device's own cooldowns. Not cached.
+
+        Not cached in the refusal file on purpose: the cooldowns already ARE the
+        record, and a cached refusal would outlive a cooldown the operator clears
+        (or one that ends) by its own TTL rather than by the fact.
+        """
+        now = time.time()
+        remaining_ms = max(0, int((min(float(r["until"]) for r in resting) - now) * 1000))
+        accounts = tuple(
+            dict.fromkeys(str(r.get("label") or "") for r in resting if r.get("label"))
+        )
+        error = BrokerError(
+            code="quota_blocked",
+            key=key,
+            owner_device=self.owner_of(key),
+            owner_device_name=self.owner_label(key),
+            retry_after_ms=remaining_ms,
+        )
+        error.message = render_broker_error(
+            error,
+            key=key,
+            provider=label,
+            owner_name=self.owner_label(key),
+            last_seen_s=self.owner_last_seen_s(error.owner_device),
+            accounts=accounts,
+        )
+        return error
 
     # -- leg 2: the relay asks the owner ------------------------------------
 
@@ -668,6 +720,7 @@ class MeshCredentialClient:
         session_id: str = "",
         model_id: str = "",
         force_refresh: bool = False,
+        exclude_credential_ids: list[int] | None = None,
     ) -> dict[str, Any]:
         """Answer a leg-1 ``credential_grant``. Returns a ``detail`` object.
 
@@ -710,6 +763,12 @@ class MeshCredentialClient:
             "model_id": model_id,
             "force_refresh": bool(force_refresh),
         }
+        if exclude_credential_ids:
+            # The borrower's resting rows (``PlacementState.cool_down``). Present only
+            # when non-empty, so the frame an older owner reads is unchanged — and an
+            # older owner simply ignores it, which costs one more 429, never a wrong
+            # account (it is a narrowing, never a widening).
+            frame["exclude_credential_ids"] = list(exclude_credential_ids)
         direct = self._ask_owner_directly(owner, frame)
         if direct is not None:
             return self._detail_from_owner(direct, key, label)
@@ -808,6 +867,15 @@ class MeshCredentialClient:
         if not self.should_borrow(key):
             return
         credential_id = self._reported_credential_id(key, session_id)
+        if kind == "quota":
+            self._cool_lent_row(
+                key,
+                session_id=session_id,
+                credential_id=credential_id,
+                model_id=model_id,
+                retry_after_ms=retry_after_ms,
+                block_scope=block_scope,
+            )
         self.grants.drop(key)
         try:
             from local_operator.network import store
@@ -830,6 +898,56 @@ class MeshCredentialClient:
             )
         except Exception:  # noqa: BLE001 — a failed report must not raise into a turn
             return
+
+    def _cool_lent_row(
+        self,
+        key: str,
+        *,
+        session_id: str,
+        credential_id: int,
+        model_id: str,
+        retry_after_ms: int,
+        block_scope: str,
+    ) -> None:
+        """Rest the LENT row for the window a local row would rest. Best effort.
+
+        The borrower-side half of the local rule (``AuthStore.rotate_sibling``):
+        same window, same family scoping, read from
+        ``auth_store.failure_block_window``. Read BEFORE the grant cache is dropped,
+        like the report's ``credential_id``, because the lent row's id and label
+        are only known from that grant. Without an id there is nothing to hide —
+        the owner's own first-row pick then stands, exactly as before.
+        """
+        if credential_id <= 0:
+            return
+        from local_operator.providers.auth_store import failure_block_window
+        from local_operator.session.credential_binding import identity_label_for
+
+        scope, window_ms = failure_block_window(
+            retry_after_ms, usage_limited=True, model_id=model_id
+        )
+        if block_scope:
+            # The scope the caller actually observed (``configure``'s Fable-only
+            # cap) wins over the one derived from the model, as on the owner.
+            scope = block_scope
+        label = ""
+        for sid in dict.fromkeys((session_id, "")):
+            grant = self.grants.peek(key, sid)
+            if isinstance(grant, Grant):
+                label = identity_label_for(grant.identity)
+                break
+        try:
+            self.state.cool_down(
+                key,
+                owner_device=self.owner_of(key),
+                credential_id=credential_id,
+                block_scope=scope,
+                until=time.time() + window_ms / 1000.0,
+                label=label,
+            )
+            self._save_state()
+        except Exception:  # noqa: BLE001 — a bookkeeping failure must not raise into a turn
+            logger.debug("could not record a borrowed row's cooldown", exc_info=True)
 
     def _reported_credential_id(self, key: str, session_id: str) -> int:
         """The owner's row id from the grant this device was last lent for ``key``.

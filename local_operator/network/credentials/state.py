@@ -85,6 +85,8 @@ class PlacementState:
         self.network_id = network_id
         self.root = _config_root(root)
         self._observations: dict[str, dict[str, Any]] = {}
+        #: ``(key, owner_device, credential_id) -> row`` — see :meth:`cool_down`.
+        self._cooldowns: dict[tuple[str, str, int], dict[str, Any]] = {}
 
     # -- reads --------------------------------------------------------------
 
@@ -207,6 +209,74 @@ class PlacementState:
         for key in mine:
             del self._observations[key]
 
+    # -- borrower-side cooldowns --------------------------------------------
+
+    def cool_down(
+        self,
+        key: str,
+        *,
+        owner_device: str,
+        credential_id: int,
+        block_scope: str,
+        until: float,
+        label: str = "",
+    ) -> None:
+        """Remember that the owner's row ``credential_id`` answered a usage limit.
+
+        WHY THE BORROWER KEEPS THIS AND THE OWNER DOES NOT: a local row that
+        answers ``429 … retry in 24h`` is blocked for that window by
+        ``AuthStore.rotate_sibling`` and the cascade moves to a sibling. A
+        BORROWED row's verdict is reported to the owner instead, and the owner
+        deliberately writes at most a 60 s, family-scoped block on a peer's word
+        (``owner.REMOTE_QUOTA_BLOCK_MAX_MS``, F3: one report must never lock the
+        owner out of its own login) — and nothing at all for a report it cannot
+        scope. So the next grant re-served the same spent row and the turn ended
+        on the same 429. This row is the borrower's OWN routing preference: it
+        travels on the grant frame as ``exclude_credential_ids`` (hide these rows
+        from THIS resolve only) and never touches the owner's row, so F3 holds.
+
+        The window comes from ``auth_store.failure_block_window`` — the rule a
+        local row follows — so the two cannot drift. ``label`` is the account's
+        non-secret identity label (email or account id), kept so the refusal can
+        name WHICH account is resting; it is never a token.
+        """
+        if credential_id <= 0 or until <= time.time():
+            return
+        self._cooldowns[(key, owner_device, int(credential_id))] = {
+            "key": key,
+            "owner_device": owner_device,
+            "credential_id": int(credential_id),
+            "block_scope": block_scope,
+            "until": float(until),
+            "label": label,
+        }
+
+    def cooldowns(
+        self, key: str, model_id: str = "", *, now: float | None = None
+    ) -> list[dict[str, Any]]:
+        """The live cooldowns that gate ``model_id`` for ``key``, earliest-ending first.
+
+        The scope test is ``auth_store.block_scope_gates`` — the predicate the
+        local store's ``is_blocked_for_model`` applies — so an account-wide
+        cooldown gates every model and a ``model:<family>`` one only that family.
+        """
+        from local_operator.providers.auth_store import block_scope_gates
+
+        stamp = time.time() if now is None else now
+        live = [
+            dict(row)
+            for (row_key, _owner, _id), row in self._cooldowns.items()
+            if row_key == key
+            and float(row.get("until") or 0.0) > stamp
+            and block_scope_gates(str(row.get("block_scope") or ""), model_id)
+        ]
+        return sorted(live, key=lambda row: float(row["until"]))
+
+    def _prune_cooldowns(self, now: float | None = None) -> None:
+        stamp = time.time() if now is None else now
+        for slot in [s for s, row in self._cooldowns.items() if float(row["until"]) <= stamp]:
+            del self._cooldowns[slot]
+
     # -- persistence --------------------------------------------------------
 
     def to_json(self) -> dict[str, Any]:
@@ -215,6 +285,11 @@ class PlacementState:
             "network_id": self.network_id,
             "observations": [row for _, row in sorted(self._observations.items())],
         }
+        # Omitted when empty, so a device that never cooled a borrowed row writes
+        # the file it always wrote; expired rows are dropped rather than carried.
+        self._prune_cooldowns()
+        if self._cooldowns:
+            payload["cooldowns"] = [row for _, row in sorted(self._cooldowns.items())]
         # The same guard the placement document uses, and for the same reason: the
         # cheapest way to prove this file cannot hold a bearer is to refuse one at
         # the writer. See this module's docstring.
@@ -251,6 +326,20 @@ class PlacementState:
         for row in payload.get("observations") or []:
             if isinstance(row, dict) and row.get("key"):
                 state._observations[str(row["key"])] = dict(row)
+        for row in payload.get("cooldowns") or []:
+            # A malformed row is skipped, never guessed at: the failure mode of a
+            # bad cooldown must be one more ask of the owner, not a hidden login.
+            try:
+                state.cool_down(
+                    str(row["key"]),
+                    owner_device=str(row.get("owner_device") or ""),
+                    credential_id=int(row["credential_id"]),
+                    block_scope=str(row.get("block_scope") or ""),
+                    until=float(row["until"]),
+                    label=str(row.get("label") or ""),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
         return state
 
     @classmethod

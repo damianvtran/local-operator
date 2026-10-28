@@ -152,6 +152,27 @@ async def borrowed_provider_key(
                 logger.debug("credentials: closing the borrow store failed", exc_info=True)
 
 
+#: The most row ids one grant ask may hide. A device has a handful of logins per
+#: provider; the cap only bounds what a garbled frame can make the owner iterate.
+MAX_EXCLUDED_CREDENTIAL_IDS = 32
+
+
+def _peer_ids(value: Any) -> list[int]:
+    """``exclude_credential_ids`` from a frame, validated at the boundary.
+
+    The ids a borrower saw answer a usage limit (``PlacementState.cool_down``).
+    Positive integers only, de-duplicated, capped; anything else is dropped rather
+    than guessed at — a dropped id costs one more 429, never a wrong account,
+    because the list can only NARROW what the owner offers.
+    """
+    from local_operator.network.credentials.types import peer_int
+
+    if not isinstance(value, list):
+        return []
+    ids = [peer_int(item) for item in value[:MAX_EXCLUDED_CREDENTIAL_IDS]]
+    return sorted({item for item in ids if item > 0})
+
+
 class _LocalOps:
     """LEG 1: the control-socket ops a runtime uses to ask its own relay.
 
@@ -187,6 +208,7 @@ class _LocalOps:
             session_id=str(frame.get("session_id") or ""),
             model_id=str(frame.get("model_id") or ""),
             force_refresh=bool(frame.get("force_refresh")),
+            exclude_credential_ids=_peer_ids(frame.get("exclude_credential_ids")),
         )
 
     def report(self, frame: dict[str, Any]) -> dict[str, Any]:

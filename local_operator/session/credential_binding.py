@@ -125,6 +125,17 @@ def _as_float(value: Any) -> float:
         return 0.0
 
 
+def identity_label_for(identity: Mapping[str, str] | None) -> str:
+    """The public spelling of :func:`_identity_label`, for callers outside this module.
+
+    The mesh client names a resting borrowed account by this label
+    (``MeshCredentialClient._cool_lent_row``), and it must be the SAME label the
+    binding row records, so an operator reading the incident and the binding
+    notice sees one name for one account.
+    """
+    return _identity_label(identity)
+
+
 def _identity_label(identity: Mapping[str, str] | None) -> str:
     """The operator-facing account string from a grant's identity dict.
 

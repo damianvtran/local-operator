@@ -105,8 +105,15 @@ def render_broker_error(
     owner_name: str = "the owner device",
     last_seen_s: float | None = None,
     provider: str = "",
+    accounts: tuple[str, ...] = (),
 ) -> str:
     """The sentence for ``error``, with the remedy its code implies.
+
+    ``accounts`` names WHICH of the owner's logins a ``quota_blocked`` is about,
+    by their non-secret identity labels (email or account id) — only when this
+    device itself saw those accounts rate-limited (``client._resting_refusal``).
+    An owner with several logins for one provider otherwise reads as "the
+    provider is rate-limited" when one account is resting and another may not be.
 
     ``key`` is the placement key the borrow was for; ``provider`` is the provider
     the operator would type at ``lop login``. They differ for MCP, where the key
@@ -269,6 +276,12 @@ def render_broker_error(
         # time for exactly this refusal. Absent (an older owner, or a value the
         # boundary dropped) keeps the old wording.
         left = render_retry_after(error.retry_after_ms)
+        if accounts and left:
+            return (
+                f"'{label}' on {owner} is rate-limited for another {left} "
+                f"({', '.join(accounts)}), so nothing was borrowed. The usual failover "
+                "to another of your own logins is already running."
+            )
         if left:
             return (
                 f"'{label}' on {owner} is rate-limited for another {left}, so nothing "
