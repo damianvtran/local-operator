@@ -4,8 +4,8 @@
  * SOURCES, at the desktop sourceHash `parity-sources.json` pins
  * (`47757620d75085ce…`), line ranges of THAT source (measured, round 2 - the round-1
  * ranges ended at the next function's start, not at its own end):
- * - `components/trace/tool-row-model.ts` — `isPartialDelivery` 553-573,
- *   `isFailedResult` 618-741, `displayName` 803-833.
+ * - `components/trace/tool-row-model.ts` — `isPartialDelivery` 554-574,
+ *   `isFailedResult` 619-742, `displayName` 804-834.
  * - `components/trace/receipt-row-model.ts` — `receiptFamilyOf` 194-213,
  *   `isInternalReceipt` 214-252, the `PeerSender` type 318-331,
  *   `EMPTY_SENDER` 332-352, `peerName` 353-388, `peerIdentity` 389-409.
