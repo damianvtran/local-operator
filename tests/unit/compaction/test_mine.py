@@ -271,8 +271,8 @@ def test_chained_archives_keep_their_middle_unwrapped_and_mine_whole_asks():
     dump. Threading ``previous_text``/``previous_carry`` as ``Session`` does must
     not reintroduce 175-column fragments from the second pass onward."""
     from local_operator.compaction.snapcompact import (
-        _middle_pages,
         _paginate,
+        _policy_pages,
         compact_to_archive,
         resolve_shape,
     )
@@ -299,11 +299,12 @@ def test_chained_archives_keep_their_middle_unwrapped_and_mine_whole_asks():
             context_window=400_000,
             previous_carry=previous_carry,
         )
-        # The replay gate re-derives EXACTLY the pages its frames were rendered
-        # from, even though the stored middle is now the unwrapped source.
+        # Gate-level assertion: a partial wrapped line at the kept-page boundary
+        # must not shift re-pagination and force all-image replay (review r5 M1).
         shape = resolve_shape("anthropic", "claude-opus-4-8")
         if archive.frames:
-            assert _middle_pages(archive) == _paginate(
+            assert _policy_pages(archive) is not None
+            assert _policy_pages(archive) == _paginate(
                 archive.text[len(archive.text_head) : len(archive.text) - len(archive.text_tail)],
                 shape,
             )
@@ -314,19 +315,58 @@ def test_chained_archives_keep_their_middle_unwrapped_and_mine_whole_asks():
             middle = archive.text[
                 len(archive.text_head) : len(archive.text) - len(archive.text_tail)
             ]
-            # No hard-wrapped storage: a long source line stays intact across passes.
-            assert any(len(line) > shape.chars_per_line for line in middle.splitlines())
+            # The middle may begin mid-line exactly where the first kept page did;
+            # no extra wrapped segments are carried back into it.
+            assert _policy_pages(archive) == _paginate(middle, shape)
         previous_text, previous_carry = archive.text, archive.carry
 
 
-def test_carry_truncation_does_not_create_a_new_ask_on_the_next_pass():
-    """A carry item must not be clipped in place: its clipped tail otherwise
-    looks like a new operator ask when the archive's source is mined again."""
-    ask = ("please " + "verify the release gate " * 40).strip()
-    first = mine_carry(f"[User]\n{ask}")
-    assert first.asks == [ask]
-    second = mine_carry(render_carry(first))
-    assert second.asks == []
+def test_one_long_paste_cannot_evict_the_whole_carry():
+    """Review round 5 M2: per-item bounds protect all other carry tiers; clipping
+    is at a word boundary and tagged carry rows are never re-mined as asks."""
+    previous = Carry(
+        asks=[f"please preserve operator ask {n}" for n in range(40)],
+        decisions=[f"we decided to preserve decision {n}" for n in range(20)],
+        identifiers=["src/billing/release.py"],
+    )
+    paste = '{"release_gate": "' + "x" * 38_000 + '"}'
+    fresh = mine_carry(f"[User]\n{paste}")
+    assert len(fresh.asks[0]) <= ASK_ITEM_CHARS
+    assert fresh.asks[0].endswith("…")
+    merged = merge_carry(previous, fresh)
+    assert len(merged.asks) == 41
+    assert len(merged.decisions) == 20
+    assert mine_carry(render_carry(merged)).asks == []
+
+
+def test_a_giant_source_line_keeps_the_policy_replay_gate():
+    """The first kept page can begin inside a giant line; the stored suffix starts
+    at that segment rather than carrying the whole line forward (review r5 M1)."""
+    from local_operator.compaction.snapcompact import (
+        _policy_pages,
+        compact_to_archive,
+        estimate_archive_tokens,
+    )
+    from local_operator.harness.types import Message
+
+    archive = None
+    previous_text = None
+    for _ in range(2):
+        archive = compact_to_archive(
+            [Message.user("x" * 480_000)],
+            "anthropic",
+            "claude-opus-4-8",
+            previous_text,
+            max_frames=8,
+            context_window=400_000,
+        )
+        previous_text = archive.text
+    assert archive is not None
+    assert _policy_pages(archive) is not None
+    assert len(archive.frames) == 8
+    middle = archive.text[len(archive.text_head) : len(archive.text) - len(archive.text_tail)]
+    assert len(middle) < 160_000
+    assert estimate_archive_tokens(archive) > 0
 
 
 def test_a_long_operator_ask_on_a_dropped_page_is_mined_whole():

@@ -116,11 +116,9 @@ CARRY_IDENTIFIER_ITEMS = 64
 CARRY_ASK_ITEMS = 60
 CARRY_DECISION_ITEMS = 40
 
-#: Deprecated per-item caps. Do NOT truncate an item before writing it to the
-#: carry: the carry survives as an ordinary source line, so its truncated tail is
-#: mined as a NEW mid-word ask on a later pass. Item and whole-carry budgets
-#: bound retention by dropping oldest items instead of splitting surviving ones.
-#: Kept for compatibility with callers/tests that import the names.
+#: Per-item truncation: an ask is carried as its own substance, not the whole
+#: pasted blob that followed it. Without this bound one long paste evicts every
+#: other item from the carry under CARRY_CHAR_BUDGET (review round 5, M2).
 ASK_ITEM_CHARS = 240
 DECISION_ITEM_CHARS = 220
 
@@ -259,6 +257,21 @@ def _dedupe(values: list[str]) -> list[str]:
     return out
 
 
+def _clip_item(text: str, limit: int) -> str:
+    """Bound a carry item at a word boundary, marking the omitted tail.
+
+    Tagged digest rows are skipped when re-mined, so this clip cannot create a
+    continuation ask; the ellipsis distinguishes a shortened item from a
+    page-wrap fragment without weakening the per-item bound.
+    """
+    if len(text) <= limit:
+        return text
+    end = text.rfind(" ", 0, limit - 1)
+    if end < limit // 2:
+        end = limit - 1
+    return text[:end].rstrip() + "…"
+
+
 def mine_carry(text: str) -> Carry:
     """Extract the tiered candidate material from one serialized block.
 
@@ -345,9 +358,9 @@ def mine_carry(text: str) -> Carry:
         if role == "user":
             collapsed = " ".join(line.split())
             if collapsed:
-                asks.append(collapsed)
+                asks.append(_clip_item(collapsed, ASK_ITEM_CHARS))
         elif role == "assistant" and _DECISION_CUE.search(line):
-            decisions.append(" ".join(line.split()))
+            decisions.append(_clip_item(" ".join(line.split()), DECISION_ITEM_CHARS))
 
     # Identifiers in FIRST-SEEN order, not by frequency: merge keeps the newest
     # rows of every tier uniformly (see ``merge_carry``), and a frequency ranking

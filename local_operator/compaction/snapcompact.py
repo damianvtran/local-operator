@@ -771,9 +771,11 @@ def _unwrapped_suffix(text: str, pages: list[str], cols: int) -> str:
     """The source lines of ``text`` that the trailing ``pages`` were wrapped from.
 
     The page run must be the END of ``_paginate(text, …)`` (the kept middle).
-    Wrap boundaries can split a source line; counting wrapped segments back from
-    the end keeps that line whole. The previous pass's edges are not included:
-    their caller already stores those separately.
+    The suffix starts EXACTLY at the first kept wrapped segment, including a
+    partial source line. Re-including that line's earlier segments shifts every
+    re-pagination boundary, so the page-digest replay gate degrades to all-image
+    (review round 5, M1: 36% of random cases, 58k vs 31k replay tokens). The
+    dropped-prefix miner has already seen the full line, so this cut loses no ask.
     """
     wrapped = sum(page.count("\n") + 1 for page in pages)
     if not wrapped:
@@ -784,7 +786,10 @@ def _unwrapped_suffix(text: str, pages: list[str], cols: int) -> str:
             break
         out.append(line)
         wrapped -= max(1, -(-len(line) // cols))
-    return "\n".join(reversed(out))
+    out.reverse()
+    if wrapped < 0:
+        out[0] = out[0][-wrapped * cols :]
+    return "\n".join(out)
 
 
 def _paginate(text: str, shape: Shape) -> list[str]:
