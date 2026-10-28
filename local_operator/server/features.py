@@ -410,6 +410,20 @@ def static_feature_flags() -> dict[str, Any]:
         # in this runtime: feature branches must adopt the same guard before
         # advertising their mutations alongside this capability.
         "team_bridge_conversation_owner_guard": 1,
+        # The OWNER AUDIT ("{chief of staff}'s messages"): the read-only
+        # `/v1/desktop/team-bridge/owner-audit/...` family over agent-server
+        # #221, where the signed-in owner reads every conversation their own
+        # agent is or was in, with full bodies and per-message
+        # `agent_delivery_status`. Its own key by the `radient_org` rule: a
+        # renderer that does not see it hides the section rather than mounting
+        # one whose every call 404s. 1 is the shape version
+        # (`server/models/desktop_team_bridge_owner_audit.py`). The renderer
+        # keys the section's AVAILABILITY on this capability, never on a 404:
+        # `conversation_not_found` is also what a non-owner or an out-of-window
+        # conversation answers, so treating a 404 as "no audit here" would hide
+        # the section over one conversation (#3022 R1-N2). A hub that predates
+        # #221 is detected on the LIST route only (its 404 there).
+        "team_bridge_owner_audit": 1,
         # The owner's agent-invitation surface over agent-server #227: the
         # `GET /v1/desktop/team-bridge/agents/owned/invitations` read (metadata
         # only, receipt required, `private, no-store`) and `decision=withdraw`

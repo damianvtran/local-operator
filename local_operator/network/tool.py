@@ -303,6 +303,16 @@ class NetworkParams(BaseModel):
     )
 
 
+def _withheld_env() -> dict[str, str]:
+    """This process's environment minus the harness's own plane credentials."""
+
+    from local_operator.agent_shell import without_daemon_bearer
+
+    env = dict(os.environ)
+    without_daemon_bearer(env)
+    return env
+
+
 def _cli_argv() -> list[str]:
     """The argv prefix that runs THIS build's CLI.
 
@@ -637,7 +647,9 @@ async def _run_cli(argv: list[str], timeout: float) -> tuple[int, str, str]:
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=os.environ.copy(),
+        # A child of a model tool call: never hand it the desktop plane bearer
+        # (#3022 r2 M2 sweep). `lop network` reaches the mesh, not the desktop plane.
+        env=_withheld_env(),
     )
     try:
         out, err = await asyncio.wait_for(process.communicate(), timeout)
@@ -811,7 +823,9 @@ async def _start_parked_join(argv: list[str]) -> tuple[int, str, str]:
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=os.environ.copy(),
+        # A child of a model tool call: never hand it the desktop plane bearer
+        # (#3022 r2 M2 sweep). `lop network` reaches the mesh, not the desktop plane.
+        env=_withheld_env(),
         # Its own session, so a session restart or a killed tool call does not take the
         # ceremony with it mid-handshake.
         start_new_session=True,

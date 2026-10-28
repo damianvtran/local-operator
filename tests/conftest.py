@@ -1165,6 +1165,24 @@ def reset_store_maintenance() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def reset_desktop_launch_capture() -> Iterator[None]:
+    """Give every test a process whose desktop bearer has not been adopted.
+
+    ``desktop.adopt_spawn_bearer`` latches the spawner's bearer in
+    ``_SPAWN_BEARER`` once per process, and ``tests/unit/test_cli_serve.py`` and
+    friends reach it in-process through ``cli.main()``, so without this reset a
+    later test's ``monkeypatch.setenv`` of the token would be answered from an
+    earlier test's latched value (or its absence).
+    """
+
+    from local_operator.server import desktop
+
+    desktop._SPAWN_BEARER = None
+    yield
+    desktop._SPAWN_BEARER = None
+
+
+@pytest.fixture(autouse=True)
 def reset_page_cache_between_tests() -> Iterator[None]:
     """Give every test a worker that has served no transcript page yet.
 

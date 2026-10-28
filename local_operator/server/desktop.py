@@ -377,11 +377,13 @@ def _relaunchable_argv() -> list[str] | None:
 
     WHY A PREDICATE AT ALL: ``cli.main()`` is also called IN-PROCESS -- by the test suite and
     by rigs -- and an unguarded ``execve`` there replaces pytest itself (the failure
-    ``procname.is_own_launch`` documents). So this re-execs only a process whose OWN launch
-    line is a launch of this product: ``procname.is_own_launch`` (the ``lop`` script or
-    ``-m local_operator.*``), or the desktop app's ``-c`` program, which ``is_own_launch``
-    refuses on purpose (branding would change ``sys.executable``; this re-exec does not --
-    it execs ``sys.executable`` itself, so the app's identity probe still matches).
+    ``procname.is_own_launch`` documents). So this re-execs only a process that really is a
+    launch of this product: ``procname.is_own_launch`` answers that from what is RUNNING (the
+    console script, or a ``-m`` of a module inside this package), so no interpreter flag can
+    move the answer. The desktop app's ``-c`` program is the exception, handled here instead:
+    ``is_own_launch`` refuses ``-c`` on purpose (branding would change ``sys.executable``;
+    this re-exec does not -- it execs ``sys.executable`` itself, so the app's identity probe
+    still matches).
 
     POSIX only: ``os.execve`` on Windows starts a NEW process and exits the old one, which
     would orphan the app's ``ChildProcess`` handle, and the ``ps -E`` exposure it closes is

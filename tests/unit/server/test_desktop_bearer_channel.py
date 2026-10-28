@@ -11,7 +11,10 @@ tool child. These tests pin the in-process half of the contract:
 * an app that still passes the environment variable gets a daemon that re-execs itself
   onto a pipe -- same interpreter, same argv, the value gone from the new environment;
 * only a real launch of this product re-execs (never pytest, never an embedder);
-* the serve reload hands the bearer on by pipe, never by environment.
+* the serve reload hands the bearer on by pipe, never by environment;
+* an OPTIMIZED launch (``python -O -m local_operator.cli serve``) reaches the same
+  exec-time guarantee as a plain one -- the launch predicate is what decides that,
+  so ``-O``/``-OO`` are launch flags, not an unknown option.
 
 The exec-time half (``ps -E`` on a real daemon, a runtime and a tool child) cannot be
 asserted from inside the test process; the PR carries that probe as evidence.
@@ -21,6 +24,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -268,3 +272,136 @@ def test_the_reload_hands_the_bearer_on_by_pipe(monkeypatch: pytest.MonkeyPatch)
 
 def test_no_bearer_means_no_handoff() -> None:
     assert desktop.spawn_bearer_handoff() == ({}, None)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the exec-time environment is a POSIX read")
+@pytest.mark.parametrize(
+    ("label", "leading", "as_script"),
+    [
+        # The shapes an argv-based "is this our launch" question got wrong, each
+        # of which left the bearer in the daemon's exec-time block (#3022 code
+        # review rounds 5 and 6). The decision is now made from what is running,
+        # so none of these can move it.
+        #
+        # ``-S`` and ``-IO`` are deliberately absent HERE and live in
+        # ``test_procname`` as predicate facts: neither can be measured against a
+        # running daemon. ``-S`` skips site-packages, so the app cannot import its
+        # dependencies at all (a real ``lop -S`` is equally dead), and ``-I`` both
+        # ignores ``PYTHONPATH`` and stops ``-m`` from putting the working directory
+        # on the path, so a local run would exercise whatever the environment has
+        # installed rather than this tree.
+        ("-O", ["-O"], False),
+        ("-OO", ["-OO"], False),
+        ("-Ou", ["-Ou"], False),
+        ("-q", ["-q"], False),
+        ("-b", ["-b"], False),
+        ("-Es", ["-Es"], False),
+        ("-sP", ["-sP"], False),
+        ("-uO", ["-uO"], False),
+        ("-R", ["-R"], False),
+        ("-mlocal_operator.cli", [], False),  # attached -m, substituted below
+        ("-sP console script", ["-sP"], True),
+        ("console script", [], True),
+    ],
+)
+def test_a_recognised_launch_leaves_no_bearer_in_the_exec_time_environment(
+    tmp_path: Path, label: str, leading: list[str], as_script: bool
+) -> None:
+    """Each real launch shape, measured on a REAL daemon the way a model child could.
+
+    ``procname.is_own_launch`` decides whether ``adopt_spawn_bearer`` re-execs, and
+    the answer comes from ``__main__`` now -- the module for a ``-m`` launch, the
+    script for a console one -- so interpreter flags cannot defeat it. This starts
+    the launch an operator would and reads it with ``ps eww``.
+    """
+
+    import socket
+    import subprocess
+    import time
+    import urllib.error
+    import urllib.request
+
+    port_probe = socket.socket()
+    port_probe.bind(("127.0.0.1", 0))
+    port = port_probe.getsockname()[1]
+    port_probe.close()
+
+    root = Path(__file__).resolve().parents[3]
+    home = tmp_path / "home"
+    config = tmp_path / "config"
+    home.mkdir()
+    config.mkdir()
+    token = "[redacted]" + "q" * 16
+
+    if as_script:
+        # The console-script shape without depending on an installed entry point:
+        # ``__main__`` is a script FILE named ``lop``, which is exactly what
+        # ``bin/lop`` is to the interpreter.
+        entry = tmp_path / "lop"
+        entry.write_text("import sys\n\nfrom local_operator.cli import main\n\nsys.exit(main())\n")
+        target = [str(entry)]
+    elif leading == [] and label.startswith("-m"):
+        target = ["-mlocal_operator.cli"]
+    else:
+        target = [*leading, "-m", "local_operator.cli"]
+
+    env = {
+        "HOME": str(home),
+        "LOCAL_OPERATOR_CONFIG_DIR": str(config),
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "PYTHONPATH": str(root),
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        desktop.TOKEN_ENV: token,
+    }
+    log = tmp_path / "serve.log"
+    with log.open("wb") as sink:
+        process = subprocess.Popen(
+            [sys.executable, *target, "serve", "--host", "127.0.0.1", "--port", str(port)],
+            env=env,
+            stdout=sink,
+            stderr=subprocess.STDOUT,
+            # ``-Es`` ignores every PYTHON* variable, so the package has to resolve
+            # from the working directory for that shape: ``-m`` prepends it.
+            cwd=str(root),
+        )
+    started = process.pid
+    try:
+        deadline = time.monotonic() + 90
+        healthy = False
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                break
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2):
+                    healthy = True
+                    break
+            except (urllib.error.URLError, OSError):
+                time.sleep(0.5)
+        assert healthy, f"[{label}] " + log.read_text()[-4000:]
+
+        listing = subprocess.run(
+            ["ps", "eww", "-p", str(started)], capture_output=True, text=True, timeout=30
+        ).stdout
+        assert token not in listing, f"[{label}] the bearer is in the exec-time environment"
+        assert process.poll() is None, f"[{label}] the re-exec must keep the pid"
+
+        def status(headers: dict[str, str]) -> int:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/v1/desktop/team-bridge/status", headers=headers
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=10) as answer:
+                    return answer.status
+            except urllib.error.HTTPError as refusal:
+                return refusal.code
+
+        assert status({"Authorization": f"Bearer {token}"}) == 200
+        assert status({}) == 401
+    finally:
+        assert process.pid == started, "an exec must not hand the pid to another process"
+        process.terminate()
+        try:
+            process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)

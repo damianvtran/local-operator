@@ -61,6 +61,8 @@ shared settings writer, watcher or timer. See docs/design/team-bridge-identity-m
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import enum
 import hashlib
 import json
@@ -628,6 +630,102 @@ ATTACHMENT_MAX_COUNT = 4
 #: Content-Type outside it is refused here — the bytes are never trusted to
 #: name their own type downstream.
 ATTACHMENT_MIME_TYPES = ("image/png", "image/jpeg")
+#: The owner-audit byte route's served types: the two images plus the ONE type
+#: the hub serves every generic (non-image) file as (agent-server
+#: ``models.BridgeFileServedMime``, with the fixed name ``attachment.bin``). The
+#: audit serves files because the auditor is a human reading under the human
+#: predicate (contract v2 m2); the agent's own fetch stays images-only.
+OWNER_AUDIT_FILE_MIME = "application/octet-stream"
+OWNER_AUDIT_ATTACHMENT_MIME_TYPES = (*ATTACHMENT_MIME_TYPES, OWNER_AUDIT_FILE_MIME)
+#: The hub's owner-audit route family (agent-server #221). ONE spelling, used
+#: by the four ``owner_audit_*`` methods and by the gate below and nowhere else.
+_OWNER_AUDIT_HUB_PATH = "/messaging/agents/owned/conversations"
+PATH_METACHAR_SENTENCE = (  # i18n: ignore local guard; a code path, never shown to a person
+    "A hub path may not contain a separator or parameter character."
+)
+DOT_SEGMENT_SENTENCE = (
+    "A hub path may not contain a dot segment."  # i18n: ignore local guard, no copy
+)
+OWNER_AUDIT_SCOPE_SENTENCE = (  # i18n: ignore local guard; a code path, never shown to a person
+    "The owner audit is readable only through the desktop owner-audit routes."
+)
+#: Set ONLY while an ``owner_audit_*`` method is dispatching (see
+#: :func:`_owner_audit_scope`). The audit serves bodies the agent's screening
+#: rejected, so a request on that path from ANY other caller — a new method on
+#: this class, ``_send`` with a hand-built or concatenated path, a ``getattr``
+#: with a computed name reaching something else — is refused before a byte
+#: moves (#3022 R1-1). A static scan cannot see a built string; this can.
+_OWNER_AUDIT_SCOPE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "team_bridge_owner_audit_scope", default=False
+)
+
+
+@contextlib.contextmanager
+def _owner_audit_scope() -> Any:
+    token = _OWNER_AUDIT_SCOPE.set(True)
+    try:
+        yield
+    finally:
+        _OWNER_AUDIT_SCOPE.reset(token)
+
+
+def _refuse_unscoped_owner_audit(path: str) -> None:
+    """Refuse a hub request on the owner-audit family outside its four methods.
+
+    Matched after percent-decoding and collapsing slashes and case, so
+    ``//messaging/Agents/%6Fwned`` is the same path to this check as it is to
+    the hub's router. A ``.`` or ``..`` segment is refused outright, before the
+    match: httpx resolves dot segments when it builds the URL, so
+    ``conversations/../agents/x/../owned`` would leave this check as a member
+    path and reach the wire as the audit route (#3022 r3 m1). Normalising here
+    would mean tracking httpx's resolver; refusing is exact, and no hub path
+    this client builds has a dot segment (every id is grammar-checked first).
+    """
+
+    # Percent-decoded first (repeatedly, so ``%256F`` is not a second spelling):
+    # the hub routes on the DECODED path, so ``agents/%6Fwned`` is the audit
+    # family there and must be here too (#3022 r2 N2).
+    decoded, previous = path, None
+    while decoded != previous:
+        previous, decoded = decoded, urllib.parse.unquote(decoded)
+    if any(segment in (".", "..") for segment in decoded.split("/")):
+        raise BridgeRefusal(
+            "invalid_request",
+            DOT_SEGMENT_SENTENCE,
+            http_status=400,
+        )
+    # ``;`` and ``\`` are refused for the same reason as a dot segment (#3022 r8 m1):
+    # a spelling THIS check reads as a member path must not reach the hub as the
+    # audit family. ``owned;x/conversations`` and ``owned\conversations`` both did
+    # before the family match was narrowed to the conversations constant, and no
+    # hub path this client builds contains either: ids are grammar-checked and
+    # every separator it writes is ``/``.
+    if ";" in decoded or "\\" in decoded:
+        raise BridgeRefusal(
+            "invalid_request",
+            PATH_METACHAR_SENTENCE,
+            http_status=400,
+        )
+    normalized = re.sub(r"/+", "/", decoded).lower()
+    # The CONVERSATIONS family, not every ``/agents/owned`` path: the owner's
+    # agent-invitations read (``…/agents/owned/invitations``, #3045) shares the
+    # prefix and is an ordinary metadata read, so a prefix-wide check turned it
+    # into this refusal the moment both branches met.
+    if _OWNER_AUDIT_HUB_PATH in normalized and not _OWNER_AUDIT_SCOPE.get():
+        raise BridgeRefusal(
+            "owner_audit_not_in_scope",
+            OWNER_AUDIT_SCOPE_SENTENCE,
+            http_status=403,
+        )
+
+
+#: The hub's largest generic-file class cap (agent-server
+#: ``BridgeFileContainerMaxBytes``/``BridgeFileOtherMaxBytes``, 25 MiB). The
+#: audit read is STREAMED with this bound, so an oversized answer is refused
+#: once it passes the cap rather than read to the end; a legitimate file is
+#: then held in daemon memory (up to this size, never on disk) and handed to the
+#: route as one body (#3022 R1-3).
+OWNER_AUDIT_FILE_MAX_BYTES = 25 * 1024 * 1024
 #: The two attachment fetch purposes (manager decision D1). ``screen`` is the
 #: pre-admission classification read whose bytes go ONLY to the isolated
 #: screening call; ``context`` is the post-``allow`` read whose bytes may enter
@@ -1229,7 +1327,12 @@ class TeamBridgeClient:
         identity_response_only: bool = False,
         if_none_match: str | None = None,
         timeout: float = REQUEST_TIMEOUT_S,
+        accept: str | None = None,
     ) -> httpx.Response:
+        # Every hub request in this class ends here, so the owner-audit path
+        # gate lives here: no caller can reach `/agents/owned` by spelling the
+        # path itself (#3022 R1-1).
+        _refuse_unscoped_owner_audit(path)
         # ONE AsyncClient per request is H1's bounded-CRUD shape: every op is a
         # single small JSON round trip and nothing here runs on a loop. The
         # connector (H4) needs a PERSISTENT client with an owned ``aclose()``
@@ -1249,7 +1352,10 @@ class TeamBridgeClient:
                 # ``max_response_bytes + chunk`` bytes instead of being
                 # buffered whole. The capped body is rebuilt into an ordinary
                 # Response so refusal mapping stays the one shared path.
-                headers["Accept"] = "image/png, image/jpeg, application/json"
+                # ``accept`` names the bounded read's own success types: the
+                # owner-audit byte read also accepts the hub's generic-file type,
+                # which a negotiating hop would otherwise answer 406 (#3022 R1-2).
+                headers["Accept"] = accept or "image/png, image/jpeg, application/json"
                 # identity (review R1-03): ``aiter_bytes`` yields DECODED bytes,
                 # and the rebuilt Response below would decode a gzip
                 # Content-Encoding a second time (a DecodingError surfacing as
@@ -1367,6 +1473,7 @@ class TeamBridgeClient:
         content: bytes | None = None,
         max_response_bytes: int | None = None,
         expected_account_id: str | None = None,
+        accept: str | None = None,
     ) -> httpx.Response:
         """Resolve, send, refresh-once-on-401: the response, refusals UNMAPPED.
 
@@ -1392,6 +1499,7 @@ class TeamBridgeClient:
                 body=body,
                 content=content,
                 max_response_bytes=max_response_bytes,
+                accept=accept,
             )
         except httpx.HTTPError as failure:
             raise BridgeUnreachable() from failure
@@ -1406,6 +1514,7 @@ class TeamBridgeClient:
                     body=body,
                     content=content,
                     max_response_bytes=max_response_bytes,
+                    accept=accept,
                 )
             except httpx.HTTPError as failure:
                 raise BridgeUnreachable() from failure
@@ -3007,6 +3116,179 @@ class TeamBridgeClient:
             params=params or None,
             access=access,
         )
+
+    # -- owner audit (HUMAN-ONLY) --------------------------------------------
+    #
+    # The agent OWNER's read-only audit of every conversation its own agent is
+    # or was in (agent-server #221, docs/TEAM-BRIDGE-CONVERSATIONS.md §16). These
+    # four reads return FULL bodies, including messages the agent REJECTED or
+    # never screened: screening protects the agent's context from injection, it
+    # is not a confidentiality boundary against the agent's owner.
+    #
+    # THAT IS WHY THEY ARE HUMAN-ONLY. A body served here has NOT passed the
+    # agent's screening, so it must never reach a model: the `team_bridge` tool,
+    # read_context, model_boundary, the connector and every other agent-context
+    # path must not call these methods. The only caller is the desktop route
+    # family `/v1/desktop/team-bridge/owner-audit/...`, which hands the bytes to
+    # the renderer and keeps nothing. `tests/unit/team_bridge/
+    # test_owner_audit_isolation.py` pins that statically (no module but this one
+    # and the desktop route names `owner_audit_`) and behaviourally (every tool
+    # op runs without one audit request leaving the process). A new caller must
+    # come through that test, not around it.
+    #
+    # NO ENDPOINT PARAMETER, by contract (v2 M1): the server derives the audited
+    # agent rows from the caller + tenant, so a non-owner cannot even express the
+    # request, and the hub refuses `endpoint_id`/`purpose`/`scope` here. Nothing
+    # is persisted: no store write, no body cache (store.py's no-body-cache rule),
+    # and the hub answers `Cache-Control: private, no-store`.
+    #
+    # Every read REQUIRES the captured-owner receipt (`expected_account_id`):
+    # an audit page fetched for account A must never be served while the machine
+    # is signed in as B, and an optional guard regresses the first time a caller
+    # forgets it (the attachment routes' #2772 B1 rule).
+
+    async def owner_audit_conversations(
+        self,
+        *,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """One page of the conversations the caller's OWN agent is or was in.
+
+        ``{conversations: [...], next_cursor?, has_more}``, activity-descending,
+        each row carrying ``agent`` (the audited member and its window bounds)
+        and no read state. HUMAN-ONLY: see the section comment above.
+        """
+
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if cursor:
+            params["cursor"] = cursor
+        with _owner_audit_scope():
+            return await self._send(
+                "GET",
+                _OWNER_AUDIT_HUB_PATH,
+                params=params or None,
+                expected_account_id=expected_account_id,
+            )
+
+    async def owner_audit_messages(
+        self,
+        conversation_id: str,
+        *,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        before_seq: int | None = None,
+        after_seq: int | None = None,
+    ) -> dict[str, Any]:
+        """One audited timeline page, newest-first, with FULL bodies.
+
+        Each message may carry ``agent_delivery_status`` (``admitted`` |
+        ``rejected`` | ``not_screened``; omitted on the agent's own messages)
+        and ``agent_verdict_at``. Only the audit window is served; a
+        conversation without one is the hub's uniform 404. HUMAN-ONLY.
+        """
+
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if before_seq is not None:
+            params["before_seq"] = int(before_seq)
+        if after_seq is not None:
+            params["after_seq"] = int(after_seq)
+        with _owner_audit_scope():
+            return await self._send(
+                "GET",
+                f"{_OWNER_AUDIT_HUB_PATH}/{conversation_id}/messages",
+                params=params or None,
+                expected_account_id=expected_account_id,
+            )
+
+    async def owner_audit_replies(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        after_seq: int | None = None,
+    ) -> dict[str, Any]:
+        """One audited thread: ``{root, replies (oldest-first), has_more, next_after_seq?}``.
+
+        Same window as the timeline (the root must be inside it). HUMAN-ONLY.
+        """
+
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if after_seq is not None:
+            params["after_seq"] = int(after_seq)
+        with _owner_audit_scope():
+            return await self._send(
+                "GET",
+                f"{_OWNER_AUDIT_HUB_PATH}/{conversation_id}/messages/{message_id}/replies",
+                params=params or None,
+                expected_account_id=expected_account_id,
+            )
+
+    async def owner_audit_attachment(
+        self,
+        conversation_id: str,
+        message_id: str,
+        attachment_id: str,
+        *,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+    ) -> tuple[bytes, str]:
+        """One audited attachment's bytes and served type: ``(data, mime)``.
+
+        Unlike :meth:`fetch_attachment` the audit branch serves GENERIC files as
+        well as images (the auditor is a human, and the human predicate serves
+        them), so the accepted types are :data:`OWNER_AUDIT_ATTACHMENT_MIME_TYPES`
+        and the bounded read uses the hub's largest file class cap. An image is
+        still held to :data:`ATTACHMENT_MAX_BYTES`. Anything else — another
+        type, an empty body, a missing header — is refused rather than handed
+        downstream under a type nobody can name. HUMAN-ONLY.
+        """
+
+        _require_attachment_id(attachment_id)
+        params = {"tenant_id": tenant_id} if tenant_id else None
+        with _owner_audit_scope():
+            response = await self._authorized(
+                "GET",
+                f"{_OWNER_AUDIT_HUB_PATH}/{conversation_id}/messages/{message_id}"
+                f"/attachments/{attachment_id}",
+                params=params,
+                max_response_bytes=OWNER_AUDIT_FILE_MAX_BYTES,
+                expected_account_id=expected_account_id,
+                accept=f"image/png, image/jpeg, {OWNER_AUDIT_FILE_MIME}, application/json",
+            )
+        if response.status_code >= 400:
+            raise _refusal(response)
+        mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if (
+            response.status_code != 200
+            or mime not in OWNER_AUDIT_ATTACHMENT_MIME_TYPES
+            or not response.content
+            or (mime in ATTACHMENT_MIME_TYPES and len(response.content) > ATTACHMENT_MAX_BYTES)
+        ):
+            raise BridgeRefusal(
+                "bridge_invalid_response",
+                "Radient returned an invalid response.",  # i18n: ignore, no code
+                http_status=502,
+            )
+        return response.content, mime
 
     async def conversation_body(
         self,
