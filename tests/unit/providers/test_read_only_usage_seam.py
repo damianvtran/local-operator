@@ -284,13 +284,14 @@ async def test_auth_table_missing_required_column_is_unavailable(tmp_path) -> No
 
 
 async def test_wal_deleted_account_is_returned_flagged_not_current(tmp_path) -> None:
-    """A committed DELETE in ``-wal`` is flagged, not silently served as current.
+    """A committed DELETE in an ORPHANED ``-wal`` is flagged, not served as current.
 
-    ``immutable=1`` cannot see the WAL, so the reader still sees the removed row
-    (an ordinary connection sees count=0). The seam DISCLOSES staleness and
-    returns the snapshot flagged, so the surface can label it or exclude the
-    removed account — it must not be presented as current, and it must not be
-    withheld (a blank phone /usage on a busy desktop is the worse failure).
+    With no ``-shm`` beside it (a crashed writer) the WAL cannot be read
+    without creating a file, so the seam keeps the ``immutable=1`` snapshot,
+    which still sees the removed row (an ordinary connection sees count=0). The
+    seam DISCLOSES staleness and returns the snapshot flagged, so the surface
+    can label it or exclude the removed account — it must not be presented as
+    current, and it must not be withheld.
     """
     import sqlite3
 
@@ -314,10 +315,18 @@ async def test_wal_deleted_account_is_returned_flagged_not_current(tmp_path) -> 
     writer.execute("PRAGMA journal_mode=WAL")
     writer.execute("DELETE FROM auth_credentials")
     writer.commit()  # lives in -wal, uncheckpointed
+    frozen = {path: path.read_bytes() for path in (auth_db, tmp_path / "auth.db-wal")}
+    writer.close()  # checkpoints and removes both sidecars...
+    for path, data in frozen.items():
+        path.write_bytes(data)  # ...so restore the crash image: no -shm
     assert (tmp_path / "auth.db-wal").stat().st_size > 0
-    assert sqlite3.connect(str(auth_db)).execute(
-        "SELECT count(*) FROM auth_credentials"
-    ).fetchone() == (0,)
+    assert not (tmp_path / "auth.db-shm").exists()
+    names_before = sorted(p.name for p in tmp_path.iterdir())
+    control = sqlite3.connect(f"file:{auth_db}?mode=ro&immutable=1", uri=True)
+    try:
+        assert control.execute("SELECT count(*) FROM auth_credentials").fetchone() == (1,)
+    finally:
+        control.close()
 
     controller = ProviderController.read_only_for_persisted_usage(auth_db, cache_db)
     snap = controller.cached_persisted_usage_reports_read_only(None)
@@ -329,14 +338,55 @@ async def test_wal_deleted_account_is_returned_flagged_not_current(tmp_path) -> 
     explicit = controller.cached_persisted_usage_reports_read_only("openai")
     assert explicit.may_be_stale is True
     assert [r.provider for r in explicit.reports] == ["openai"]
-    writer.close()
+    assert sorted(p.name for p in tmp_path.iterdir()) == names_before, "a sidecar was created"
 
 
-async def test_wal_present_with_live_account_returns_value_flagged(tmp_path) -> None:
+async def test_live_writer_deleted_account_is_read_current_not_flagged(tmp_path) -> None:
+    """A committed DELETE in a LIVE writer's WAL is read, so it is gone and not stale.
+
+    Both sidecars exist, so the seam reads the committed WAL without creating
+    a file: the deleted account is absent from the inventory and the auth side
+    raises no staleness flag (a busy desktop is the normal state, not a stale one).
+    """
+    auth_db = tmp_path / "auth.db"
+    cache_db = tmp_path / "usage.db"
+    seeder = AuthStore(auth_db)
+    seeder.upsert_credential(
+        "openai", {"access": "a", "refresh": "r", "expires": 10**15, "account_id": "acct"}
+    )
+    seeder.close()
+    cache = UsageCacheStore(cache_db)
+    cache.set(
+        provider_cache_key("openai", fingerprint_accounts(["acct"])),
+        "openai",
+        [UsageReport(provider="openai", identity="acct")],
+        expires_at_ms=int(time.time() * 1000) + 60_000,
+    )
+    cache.close()
+
+    writer = sqlite3.connect(str(auth_db))
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("DELETE FROM auth_credentials")
+    writer.commit()  # lives in -wal, uncheckpointed, writer still open
+    assert (tmp_path / "auth.db-wal").stat().st_size > 0
+    names_before = sorted(p.name for p in tmp_path.iterdir())
+    try:
+        controller = ProviderController.read_only_for_persisted_usage(auth_db, cache_db)
+        snap = controller.cached_persisted_usage_reports_read_only(None)
+        assert snap.unavailable is False
+        assert snap.may_be_stale is False
+        assert snap.reports == [], "a deleted account was served from a stale snapshot"
+        assert sorted(p.name for p in tmp_path.iterdir()) == names_before
+    finally:
+        writer.close()
+
+
+async def test_wal_present_with_live_account_returns_value_current(tmp_path) -> None:
     """A non-empty WAL beside a LIVE account must not blank the inventory.
 
     The common busy-desktop case: the account still exists, there is just an
-    uncheckpointed WAL. The inventory must come back with its value, flagged.
+    uncheckpointed WAL held by a live writer. The seam reads that WAL, so the
+    inventory comes back with its value and is current, not flagged.
     """
     import sqlite3
 
@@ -366,7 +416,7 @@ async def test_wal_present_with_live_account_returns_value_flagged(tmp_path) -> 
 
     controller = ProviderController.read_only_for_persisted_usage(auth_db, cache_db)
     snap = controller.cached_persisted_usage_reports_read_only(None)
-    assert snap.may_be_stale is True
+    assert snap.may_be_stale is False
     assert snap.unavailable is False
     assert [r.provider for r in snap.reports] == ["openai"], "inventory was blanked"
     writer.close()
