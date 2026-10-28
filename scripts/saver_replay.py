@@ -131,6 +131,8 @@ def main() -> int:
     accepted = rejected = 0
     shown = 0
     span_tokens = epoch_tokens = 0
+    worst_ratio = 0.0
+    worst_case = ""
     for path in files:
         body = json.loads(path.read_text())
         rows = saver_projection(messages_from_blocks(body))
@@ -181,13 +183,22 @@ def main() -> int:
             if args.list:
                 print(f"ACCEPT {digest}")
             if args.tokens:
-                span_tokens += token_count_text(_all_text(window_rows))
-                epoch_tokens += token_count_text(text)
+                window_tokens = token_count_text(_all_text(window_rows))
+                packed_tokens = token_count_text(text)
+                span_tokens += window_tokens
+                epoch_tokens += packed_tokens
+                # The manager's gate is about EVERY accepted epoch, so the
+                # worst per-epoch ratio is the number that matters; a mean can
+                # hide one inflating epoch among many shrinking ones.
+                ratio = packed_tokens / window_tokens if window_tokens else 0.0
+                if ratio > worst_ratio:
+                    worst_ratio, worst_case = ratio, path.name
     total = accepted + rejected
     print(f"distinct epochs {total}: accepted {accepted}, rejected {rejected}")
     if args.tokens and accepted:
         ratio = epoch_tokens / span_tokens if span_tokens else 0.0
         print(f"tokens o200k: span {span_tokens} -> packed {epoch_tokens} ({ratio:.3f}x)")
+        print(f"worst accepted epoch: {worst_ratio:.3f}x ({worst_case})")
     return 0 if rejected == 0 else 1
 
 
