@@ -174,6 +174,16 @@ Capture cannot block compaction;
 its terminal hint arrives at the next ordinary provider boundary and never
 wakes a session. A crash between commit and capture is retried idempotently.
 
+Capture is bounded per session: its candidates share a 16k-token budget inside the
+50k session quota, and a pass that exceeds it forgets the session's oldest untouched
+captured candidates, never stated facts. Goal, progress and next-step are each one
+row revised in place. Unreviewed `captured` candidates expire 14 days after their
+last revision (a re-capture refreshes the deadline); any edit, promotion or move by
+an agent or person makes the fact `stated` and clears it. Expired text can be
+captured again; a deliberate forget stays final. Only the host that holds the
+session directory or wrote the capture expires it. Deleting a session forgets its
+captured facts and keeps its stated ones (`lop memory list --session ID`).
+
 `memory-session.jsonl` carries session memories on export/move, with a derived
 SQLite index after import. All four scopes also use incremental `net_memory`
 when enabled. Only existing paired peers with the receiver-side **admin** grant
@@ -217,8 +227,16 @@ state are unchanged; superseded revisions become unreadable (`show --version` re
 "Revision unavailable"). A peer that is behind still catches up: it receives the
 retained operation as the state, skips the dropped revisions, and new operations keep
 sequence numbers ABOVE the highest ever used (the counter survives the pass), so no
-peer can be handed a new operation under an identity it already holds. Run it
-explicitly when the store nears its byte cap; it is not on a timer.
+peer can be handed a new operation under an identity it already holds.
+
+Maintenance also runs unattended, at most once per 6 h: the wake supervisor checks
+hourly, and each session runtime offers one pass off-thread when it starts; one-shot
+commands (`lop exec`, `lop memory status`) never run it. A pass expires stale
+captures (at most 500; the rest wait), then compacts with the same plan only if
+reclaimable operations reach 5,000, pages reach 50% of the byte cap, or the freelist
+reaches 25% of pages. VACUUM is skipped when free disk is under max(1 GiB, 2× the
+store). An interrupted pass backs off 1 h. `lop memory status --json` shows the last
+one under `maintenance`; `lop memory compact` stays the manual path to run it now.
 
 Design inspiration: [Hindsight](https://github.com/vectorize-io/hindsight)'s
 structured retain/recall lifecycle, source/time filtering and bounded retrieval.
