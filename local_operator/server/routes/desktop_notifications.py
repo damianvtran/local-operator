@@ -360,10 +360,30 @@ class NotificationsPatch(_NotificationTargets):
         return self
 
 
-class DesktopNotificationsPatch(_NotificationTargets):
-    """Additive desktop-only receipt contract, leaving relay validation intact."""
+#: The largest ``through_seq`` SQLite can bind. ``seq`` is an INTEGER column, so
+#: a larger watermark cannot name any row; on the receipt path it would reach
+#: ``bulk.apply``'s ``seq<=?`` bind and raise ``OverflowError`` (a 500). Only the
+#: receipt path is bounded here: the legacy path clamps an oversized watermark to
+#: ``high_water`` and the relay shares its validator, so its answer stays as it was.
+_MAX_SEQ = 2**63 - 1
 
-    op: Literal["read", "unread", "dismiss", "undismiss", "undo"]
+
+class DesktopNotificationsPatch(_NotificationTargets):
+    """Additive desktop-only receipt contract, leaving relay validation intact.
+
+    ``op: "preview"`` is the BODY form of the selection recount: it never
+    mutates, never mints a receipt and never extends the handle's expiry. It
+    exists because the GET form carries ``excluded_ids`` in the URL, and 500
+    ask-shaped ids (~50 KB) exceed uvicorn/h11's 16 KiB incomplete-request-head
+    limit whenever the kernel delivers the head in more than one read, so the
+    request was refused with a 400 before the route ran (QA Q1 on #3103).
+    Raising that limit is a server-wide hardening knob shared by every route,
+    and lowering the cap would cut the 500-row page the UI needs; a body is not
+    subject to that limit. PATCH is used because it is the one body-carrying
+    method this path already serves, with the same token and exclusion fields.
+    """
+
+    op: Literal["read", "unread", "dismiss", "undismiss", "undo", "preview"]
     selection_token: Annotated[str | None, Field(pattern=r"^[A-Za-z0-9_-]{43}$")] = None
     operation_token: Annotated[str | None, Field(pattern=r"^[A-Za-z0-9_-]{43}$")] = None
     receipt: bool = False
@@ -393,8 +413,12 @@ class DesktopNotificationsPatch(_NotificationTargets):
             return self
         if self.op == "undo":
             raise ValueError("undo requires operation_token")
+        if self.op == "preview":
+            raise ValueError("preview requires selection_token")
         if self.receipt and (self.ids is None or self.through_seq is None):
             raise ValueError("receipt requires ids and through_seq")
+        if self.receipt and self.through_seq is not None and self.through_seq > _MAX_SEQ:
+            raise ValueError("through_seq is out of range")
         self._legacy_target()
         return self
 
@@ -407,6 +431,18 @@ async def patch_notifications(body: DesktopNotificationsPatch, request: Request)
         if body.selection_token is not None or body.operation_token is not None or body.receipt:
             store = NotificationStore(root)
             try:
+                if body.op == "preview":
+                    # The validator guarantees a selection_token and no other
+                    # target. Same answer shape as the GET recount.
+                    selection = await asyncio.to_thread(
+                        bulk.refresh,
+                        store,
+                        str(body.selection_token),
+                        scope=_bulk_scope(request),
+                        excluded_ids=body.excluded_ids or (),
+                    )
+                    counts = await asyncio.to_thread(inbox.counts, root)
+                    return reply({"selection": selection, **counts})
                 if body.operation_token is not None:
                     result = await asyncio.to_thread(
                         bulk.undo, store, body.operation_token, scope=_bulk_scope(request)

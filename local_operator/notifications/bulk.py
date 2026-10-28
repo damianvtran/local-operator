@@ -314,8 +314,11 @@ def undo(
 ) -> dict[str, Any]:
     """Restore only untouched post-images, atomically and at most once.
 
-    A later write of *any* kind advances seq, including a state ABA cycle or a
-    delivery claim. Conservatively skipping it is safer than overwriting it.
+    A later content or state write advances seq, including a state ABA cycle,
+    and conservatively skipping it is safer than overwriting it. A delivery
+    claim deliberately does not advance seq (``store.claim_delivery``); that is
+    safe only because Undo restores ``_STATE`` (read/dismiss) columns alone and
+    never touches the delivery fields a claim writes.
     """
     stamp = now_ms() if now is None else now
 

@@ -2608,9 +2608,11 @@ wrapper, not a new envelope:
 
 Preview does not change notification or ask state. It stores only bounded
 selection metadata. Its update count and server watermark are captured in one
-SQLite transaction. **Every row write advances `seq`**, including read-state
-changes and delivery claims, so a later arrival, content revision or state ABA
-cycle cannot enter the selected set at commit. A bearer-hash binding plus the
+SQLite transaction. **Every content or state write advances `seq`**, including
+read-state changes, so a later arrival, content revision or state ABA cycle
+cannot enter the selected set at commit. Delivery claims deliberately do not
+advance `seq`; that is safe because no bulk path, Undo included, reads or
+writes the delivery fields. A bearer-hash binding plus the
 store-local token namespace prevents reuse after auth rotation or in another
 config/account store. Neither bearer nor notification bodies are stored in the
 selection metadata.
@@ -2654,13 +2656,27 @@ Replay returns the saved receipt with `replayed:true` and fresh global badges:
 **do not apply its deltas a second time**. The same selection token with a
 different op or exclusion set returns 409 `selection_operation_conflict`.
 
-An optional recount never broadens a frozen selection or extends its expiry:
+An optional recount never broadens a frozen selection or extends its expiry.
+Send exclusions in a body, with the read-only `preview` op on the same PATCH
+route:
+
+```json
+{"op":"preview","selection_token":"<token>","excluded_ids":["n_aaaaaaaaaaaaaaaa"]}
+```
+
+`excluded_ids` is optional, at most 500, validated exactly as on a mutation.
+`op:"preview"` changes no item, mints no receipt and is not a replay: the token
+can still be applied afterwards. Its result is the same `{selection, ...counts}`
+shape preview returns, with identical counts to the GET form below. The GET
+recount remains for no or a few exclusions:
 
 ```http
 GET /v1/desktop/notifications?preview=true&selection_token=<token>&excluded_ids=n_aaaaaaaaaaaaaaaa&excluded_ids=n_bbbbbbbbbbbbbbbb
 ```
 
-`excluded_ids` is repeated, at most 500. No new filters are accepted with an
+**Clients must use the body form for exclusions.** 500 ids in a URL is 16-50 KB,
+and uvicorn/h11 refuse a request head over 16 KiB with `400` whenever it arrives
+in more than one read, before the route runs. No new filters are accepted with an
 existing token. Counts reflect the still-eligible subset; the token, watermark,
 expiry and original informational ask count remain unchanged. Recount after
 commit returns 409 `selection_already_committed`.

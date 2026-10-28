@@ -27,6 +27,15 @@ from local_operator.supplements.contract import (
     SUPPLEMENTS_FEATURE_VERSION,
 )
 
+#: Keys this map holds that ONLY the desktop routes serve. The phone relay
+#: (``mobile/daemon.py``) republishes this map as its own capabilities, but it
+#: validates notifications with the legacy ``NotificationsQuery`` (unknown keys
+#: ignored) and ``NotificationsPatch``: a relay ``preview=true`` answers a plain
+#: first page with no ``selection``, the silent first-page fallback the
+#: ``notification_bulk_selection`` key exists to rule out. The relay drops these
+#: keys rather than reshaping its validators, so its behaviour stays as it was.
+DESKTOP_ONLY_FEATURES = frozenset({"notification_bulk_selection"})
+
 
 def feature_flags() -> dict[str, Any]:
     """The versioned feature map, resolved per call.

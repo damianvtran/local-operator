@@ -430,3 +430,111 @@ def test_preview_ask_scope_and_maximum_count_payload(client, tmp_path):
     assert len(selected["session_counts"]) == 50
     assert len(json.dumps(selected)) < 5000
     assert client.get(URL, params={"preview": True, "bulk_priorty": "high"}).status_code == 422
+
+
+def recount(client, token, excluded_ids=None, **headers):
+    body = {"op": "preview", "selection_token": token}
+    if excluded_ids is not None:
+        body["excluded_ids"] = excluded_ids
+    return client.patch(URL, json=body, headers=headers or None)
+
+
+def test_body_recount_matches_get_and_never_mutates_or_extends(client, tmp_path, monkeypatch):
+    """QA Q1: PATCH ``op:"preview"`` is the body form of the GET recount."""
+    ids = seed(tmp_path, 4)
+    selection = preview(client)
+    seed(tmp_path, 2)
+    before = NotificationStore(tmp_path).counts()
+    by_body = recount(client, selection["token"], [ids[0], ids[1]])
+    assert by_body.status_code == 200, by_body.text
+    by_query = client.get(
+        URL,
+        params={
+            "preview": True,
+            "selection_token": selection["token"],
+            "excluded_ids": [ids[0], ids[1]],
+        },
+    )
+    assert by_body.json()["result"] == by_query.json()["result"]
+    refreshed = by_body.json()["result"]["selection"]
+    assert refreshed["eligible_count"] == 2
+    for key in ("token", "through_seq", "expires_at"):
+        assert refreshed[key] == selection[key]
+    assert NotificationStore(tmp_path).counts() == before
+    with sqlite3.connect(NotificationStore(tmp_path).path) as conn:
+        assert conn.execute("SELECT count(*) FROM bulk_rows").fetchone()[0] == 0
+        assert conn.execute("SELECT op FROM bulk_tokens").fetchone()[0] is None
+    # Not a replay and not a commit: the same token still applies afterwards.
+    applied = patch(client, op="dismiss", selection_token=selection["token"])
+    assert applied["changed_count"] == 4 and applied["replayed"] is False
+    assert recount(client, selection["token"]).json()["detail"] == {
+        "code": "selection_already_committed"
+    }
+
+
+#: A rotated desktop bearer: valid auth, different receipt scope.
+ROTATED = "-".join(("rotated", "synthetic", "bearer"))
+
+
+def test_body_recount_keeps_auth_scope_and_expiry(client, tmp_path, monkeypatch):
+    seed(tmp_path)
+    selection = preview(client)
+    assert recount(client, selection["token"], Authorization="Bearer wrong").status_code == 401
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", ROTATED)
+    foreign = recount(client, selection["token"], Authorization="Bearer " + ROTATED)
+    assert foreign.status_code == 409
+    assert foreign.json()["detail"] == {"code": "selection_unavailable"}
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", SYNTHETIC_TOKEN)
+    assert recount(client, "A" * 43).json()["detail"] == {"code": "selection_unavailable"}
+    monkeypatch.setattr(bulk, "now_ms", lambda: selection["expires_at"])
+    expired = recount(client, selection["token"])
+    assert expired.status_code == 409
+    assert expired.json()["detail"] == {"code": "selection_unavailable"}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"op": "preview"},
+        {"op": "preview", "operation_token": "x" * 43},
+        {"op": "preview", "selection_token": "x" * 43, "all": True},
+        {"op": "preview", "selection_token": "x" * 43, "receipt": True},
+        {"op": "preview", "selection_token": "x" * 43, "excluded_ids": ["bad"]},
+        {"op": "preview", "selection_token": "x" * 43, "excluded_ids": ["n_" + "a" * 16] * 501},
+        {"op": "preview", "ids": [{"id": "n_" + "a" * 16, "revision": 1}]},
+    ],
+)
+def test_body_recount_refuses_mixed_or_missing_targets(client, body):
+    assert client.patch(URL, json=body).status_code == 422
+
+
+def test_relay_validator_refuses_preview_op():
+    from pydantic import ValidationError
+
+    from local_operator.server.routes.desktop_notifications import NotificationsPatch
+
+    with pytest.raises(ValidationError):
+        NotificationsPatch.model_validate({"op": "preview", "selection_token": "x" * 43})
+
+
+def test_unbindable_receipt_watermark_is_422_not_500(client, tmp_path):
+    """Review F3: SQLite cannot bind ``seq<=10**20``; refuse it at the edge."""
+    (item,) = seed(tmp_path)
+    body = {"op": "read", "ids": [{"id": item, "revision": 1}], "receipt": True}
+    assert client.patch(URL, json={**body, "through_seq": 10**20}).status_code == 422
+    assert client.patch(URL, json={**body, "through_seq": 2**63 - 1}).status_code == 200
+    # The legacy path (shared with the relay) keeps clamping, unchanged.
+    legacy = {"op": "read", "ids": [{"id": item, "revision": 1}], "through_seq": 10**20}
+    assert client.patch(URL, json=legacy).status_code == 200
+
+
+def test_relay_does_not_advertise_desktop_only_selection(monkeypatch):
+    """Review F1: the relay answers ``preview`` with a legacy first page."""
+    from local_operator.mobile import daemon as daemon_module
+    from local_operator.server.features import static_feature_flags
+
+    monkeypatch.setattr(daemon_module, "_FEATURE_FLAGS_MEMO", None)
+    assert static_feature_flags()["notification_bulk_selection"] == 1
+    flags = daemon_module._feature_flags()
+    assert "notification_bulk_selection" not in flags
+    assert flags["notification_contract"] == 1
