@@ -25102,7 +25102,12 @@ async def _browser_upload(
     session_id = str(getattr(context, "session_id", "") or "")
     resolved: list[Path] = []
     for raw in params.paths:
-        path, reason = files.check_upload(raw, cwd=_safe_cwd(context), policy=limits)
+        # `session_id` is what lets the gate recognise THIS session's own scratchpad as
+        # the agent's working area rather than as the credential store beside it (see
+        # `browser_files.own_scratchpad_root`); an empty id grants nothing.
+        path, reason = files.check_upload(
+            raw, cwd=_safe_cwd(context), policy=limits, session_id=session_id
+        )
         if path is None:
             # Refused as a whole call: attaching the rest would send a set the
             # caller did not name, and the refusal names the one rule that fired.

@@ -513,7 +513,9 @@ upload selector=e7 paths=["/Users/me/Deck.pptx", "/Users/me/notes.pdf"]
 ```
 
 - `paths` takes one or more **local** files. Relative paths resolve against the
-  session's working directory; a file inside the harness's own config directory,
+  session's working directory; a file inside the harness's own config directory
+  (EXCEPT this session's own `scratchpad://` folder, which is where you put files
+  you made — it attaches fine, and a hidden `display:none` file input works too),
   a credential file (`~/.ssh/id_rsa`, `*.pem`, `.env`, `secrets/…`), a symlink to
   one, a directory, or anything over 256 MB is refused, and a refusal attaches
   **nothing at all**. Say which rule fired to the user rather than retrying.
@@ -740,7 +742,11 @@ Every failure is one actionable string; act on it rather than retrying blindly:
   then ON in `chrome://extensions` (pairing is preserved).
 - **"refused: nothing was attached — …"** — the upload gate fired. The sentence
   names the rule (config directory, credential deny-list, not a regular file, over
-  the size cap). Report it to the user rather than retrying with the same path.
+  the size cap) or the cause (`does not exist: <full path>`, or `could not be
+  opened: <path> (<reason>)`). A `does not exist` for a file a call in the SAME
+  turn is still creating (a `cp`, a screenshot) is a race, not a bug: calls in one
+  turn run at the same time, so issue the upload in the next turn. Otherwise
+  report it to the user rather than retrying with the same path.
 - **"The extensions gallery cannot be scripted"** — Chrome forbids the debugger
   API on the Chrome Web Store domains (`chrome.google.com/webstore`,
   `chromewebstore.google.com`) as a platform security rule, and once the

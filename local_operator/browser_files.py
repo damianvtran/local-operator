@@ -58,6 +58,13 @@ from urllib.parse import urlsplit
 
 from local_operator.paths import config_dir
 
+# The layout names are IMPORTED, not re-spelled: the allow below must point at exactly the
+# directory the session writes its scratchpad to, and a second copy of either name is how the
+# two would drift apart. Both modules are stdlib-only (retention) or retention-only (scratchpad),
+# so this keeps the module free of the bridge and of anything heavy.
+from local_operator.scratchpad import SCRATCHPAD_DIRNAME
+from local_operator.session.retention import SESSIONS_DIRNAME
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -907,7 +914,127 @@ def _credential_refusal(path: Path) -> str:
     return ""
 
 
-def check_upload(raw: str, *, cwd: str, policy: Policy = DEFAULT) -> tuple[Path | None, str]:
+#: A session id is used as ONE path component under ``<config>/sessions/``, so it must be
+#: exactly that: letters, digits, ``_`` and ``-``. Real ids are 12 hex characters; the
+#: bound is generous rather than tight because the point of the pattern is to make a
+#: separator, a ``..``, a NUL, whitespace or an empty string UNREPRESENTABLE, not to
+#: re-validate the id format. ``re.fullmatch`` rather than ``match`` + ``$``: ``$`` also
+#: matches before a trailing newline.
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+#: The longest a user-supplied path is echoed back in a refusal. A path is long by nature,
+#: so this is wider than ``MAX_NAME_BYTES``; the cap exists so a model that passes a
+#: megabyte string cannot grow the tool result by it.
+_MAX_ECHOED_PATH_BYTES = 400
+
+
+def own_scratchpad_root(session_id: str) -> Path | None:
+    """The REAL, canonical ``<config>/sessions/<id>/scratchpad`` of this session, or ``None``.
+
+    This is the one place the upload gate learns that a file under the config directory is
+    not a secret: the scratchpad is where the system prompt tells an agent to write its own
+    files (an icon it rendered, a CSV it built), so refusing it as "credentials" made
+    ``upload`` unusable for exactly the files agents produce. The allow is DERIVED from the
+    session id the tool context carries and nothing else, and it fails closed to ``None``
+    (no allow) on every doubt:
+
+    * the id must be a single safe path component (:data:`_SESSION_ID_RE`) — ``../x``,
+      ``a/b``, ``""`` and anything with a NUL or whitespace give no allow, so a malformed id
+      can never be steered at ``<config>`` itself, ``<config>/sessions`` or a neighbour;
+    * the result is the path AFTER resolving the config root, and it is returned only when
+      resolving the scratchpad itself lands on the very same location. A ``scratchpad`` (or
+      ``sessions/<id>``) that is a symlink pointing at another session's pad, at
+      ``config.yml``'s directory, or anywhere else would otherwise turn "the allowed root"
+      into "wherever the link points", so a link anywhere along the way means no allow;
+    * both sides are compared resolved (the caller resolves the candidate, this resolves the
+      root), and by path COMPONENTS via :func:`is_within` — never a string prefix, so session
+      ``abc`` does not admit ``abcdef`` or ``abc-evil``.
+
+    Only the scratchpad is allowed, not the whole session directory: ``transcript.jsonl``,
+    ``memory-session.jsonl`` and the rest of ``sessions/<id>/`` are conversation content, not
+    the agent's working files. Two other session-shaped places inside the config directory
+    are deliberately NOT allowed: the browser's own ``browser/downloads/<stamp>-<session8>/``
+    (the directory name carries only the first 8 characters of the id, so it cannot be tied
+    to one session exactly; copy a downloaded file into the scratchpad to re-upload it) and
+    ``attachments/`` / ``uploads/`` (content-addressed or shared across sessions, not
+    session-scoped). Widening this set is a security decision, not a convenience.
+    """
+    if not isinstance(session_id, str) or _SESSION_ID_RE.fullmatch(session_id) is None:
+        return None
+    try:
+        config_root = config_dir().resolve()
+    except (OSError, RuntimeError):
+        return None
+    expected = config_root / SESSIONS_DIRNAME / session_id / SCRATCHPAD_DIRNAME
+    try:
+        # Non-strict: the pad may not exist yet, in which case no candidate can be inside it
+        # and the comparison below is simply a no-op.
+        actual = expected.resolve()
+    except (OSError, RuntimeError):
+        return None
+    if actual != expected:
+        # A symlink somewhere in sessions/<id>/scratchpad: the allowed root would be wherever
+        # it points. No allow.
+        return None
+    return expected
+
+
+def _echo_path(path: str) -> str:
+    """A caller-supplied path, safe to print back (controls and bidi stripped, clipped).
+
+    Sanitised with the same door as every other string from outside (:func:`_outside_text`)
+    but NOT reduced to a basename: the old refusal showed only ``safe_name`` of the argument,
+    which hid which folder was actually looked in — the reason a model that had passed a
+    perfectly good absolute path concluded the tool "loses the folder part".
+    """
+    return _clip_text(_outside_text(path), _MAX_ECHOED_PATH_BYTES)
+
+
+def _nearest_existing_folder(path: Path) -> Path | None:
+    """The closest ancestor of ``path`` that exists as a directory, or ``None``."""
+    for parent in path.parents:
+        try:
+            if parent.is_dir():
+                return parent
+        except OSError:
+            continue
+    return None
+
+
+def _unopenable_reason(raw_path: Path, exc: BaseException) -> str:
+    """The honest sentence for a path that could not be resolved.
+
+    ``ENOENT`` is the only case that may be called "does not exist". Everything else
+    (permission, a symlink loop, a path component that is a regular file, a name too long)
+    previously collapsed into the same sentence, which sent a model hunting for a file that
+    was in fact present and merely unreadable.
+    """
+    shown = _echo_path(str(raw_path))
+    if isinstance(exc, FileNotFoundError):
+        parent = _nearest_existing_folder(raw_path)
+        where = (
+            f" (nearest existing folder: {_echo_path(str(parent))})" if parent is not None else ""
+        )
+        # The hint is about the one cause the tool cannot see for itself: calls issued in the
+        # same turn run at the same time, so a file that a sibling call is still creating
+        # (a `cp`, a screenshot) is genuinely absent when this gate looks.
+        return (
+            f"refused: does not exist: {shown}{where}. If a call in the same turn is still "
+            "creating it, issue this call in the next turn: calls in one turn run at the same time"
+        )
+    if isinstance(exc, RuntimeError):
+        # Python < 3.13 reports a symlink loop as RuntimeError rather than OSError(ELOOP).
+        detail = "too many levels of symbolic links"
+    elif isinstance(exc, OSError):
+        detail = exc.strerror or exc.__class__.__name__
+    else:  # pragma: no cover - defensive; resolve() raises only the two above
+        detail = exc.__class__.__name__
+    return f"refused: could not be opened: {shown} ({_echo_path(detail)})"
+
+
+def check_upload(
+    raw: str, *, cwd: str, policy: Policy = DEFAULT, session_id: str = ""
+) -> tuple[Path | None, str]:
     """``(resolved_path, "")`` or ``(None, reason)`` — one call site, one seam.
 
     Unconditional: it consults no approval policy and no tier, because the
@@ -915,6 +1042,13 @@ def check_upload(raw: str, *, cwd: str, policy: Policy = DEFAULT) -> tuple[Path 
     auto-approved (§9.1, §7.3). Everything is judged on the RESOLVED path, so a
     symlink is judged by its target — which is what closes the "a symlink named
     `handout.pdf` pointing at `~/.ssh/id_rsa`" case.
+
+    ``session_id`` lifts ONE refusal for ONE subtree: the blanket "inside the config
+    directory" rule does not apply to the calling session's own scratchpad (see
+    :func:`own_scratchpad_root` for the derivation and why it is not a bypass). The empty
+    default means no allow, so every caller that does not name a session keeps the strict
+    behaviour. Nothing else is relaxed: the credential name/component deny-list, the
+    regular-file, size and empty checks all still run on the resolved path.
     """
     if not (raw or "").strip():
         return None, "refused: no path given"
@@ -925,16 +1059,18 @@ def check_upload(raw: str, *, cwd: str, policy: Policy = DEFAULT) -> tuple[Path 
         # strict: the file must exist, and resolving first is the rule the whole
         # check list is applied to (design §9.2's step 2).
         resolved = raw_path.resolve(strict=True)
-    except OSError:
-        return None, f"refused: '{safe_name(str(raw))}' does not exist"
+    except (OSError, RuntimeError) as exc:
+        return None, _unopenable_reason(raw_path, exc)
     config_root = config_dir().resolve()
     if is_within(resolved, config_root):
-        # Unconditional and first: this is where the encrypted secret store and
-        # config.yml live (§9.2's step 1, "the cheapest high-value rule").
-        return None, (
-            "refused: that file is inside Local Operator's own config directory, which holds "
-            "credentials"
-        )
+        own_pad = own_scratchpad_root(session_id) if session_id else None
+        if own_pad is None or not is_within(resolved, own_pad):
+            # Unconditional and first: this is where the encrypted secret store and
+            # config.yml live (§9.2's step 1, "the cheapest high-value rule").
+            return None, (
+                "refused: that file is inside Local Operator's own config directory, which holds "
+                "credentials"
+            )
     try:
         mode = resolved.stat().st_mode
     except OSError:

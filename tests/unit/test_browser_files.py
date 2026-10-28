@@ -943,3 +943,308 @@ def test_the_origin_predicate_names_only_the_schemes_the_extension_agrees_on(
     assert bf._origin_of("ws://h:80/a") == "ws://h"
     for url in ("blob:https://example.test/uuid", "data:text/plain,x", "/relative", "ftp://h/p"):
         assert bf._origin_of(url) == "", f"{url} has no origin the extension agrees on"
+
+
+# --- upload: the session's OWN scratchpad, and the honest refusals -----------
+#
+# The reported incident: a session wrote an icon to its scratchpad (where the
+# system prompt tells it to write files) and `upload` refused it as "inside Local
+# Operator's own config directory". The allow is derived from the session id and
+# lifts the blanket config-root refusal for that ONE subtree; every test below
+# either pins the allow or pins a way of abusing it that must stay refused.
+
+SESSION = "abc123def456"
+
+
+def _png(path: Path, fill: bytes = b"0") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + fill * 64)
+    return path
+
+
+def _pad(config: Path, session_id: str = SESSION) -> Path:
+    return config / "sessions" / session_id / "scratchpad"
+
+
+def test_check_upload_allows_the_sessions_own_scratchpad(isolated_config: Path) -> None:
+    icon = _png(_pad(isolated_config) / "grafana-icon" / "slack-icon-1024.png")
+    resolved, reason = bf.check_upload(str(icon), cwd="/", session_id=SESSION)
+    assert reason == ""
+    assert resolved == icon.resolve()
+
+
+def test_check_upload_without_a_session_id_keeps_the_blanket_refusal(
+    isolated_config: Path,
+) -> None:
+    """Empty id = no allow: every existing caller keeps the strict behaviour."""
+    icon = _png(_pad(isolated_config) / "x.png")
+    resolved, reason = bf.check_upload(str(icon), cwd="/")
+    assert resolved is None
+    assert "config directory" in reason
+
+
+def test_check_upload_refuses_a_scratchpad_symlink_escaping_to_config_yml(
+    isolated_config: Path,
+) -> None:
+    config_yml = isolated_config / "config.yml"
+    config_yml.parent.mkdir(parents=True, exist_ok=True)
+    config_yml.write_text("api_key: nope\n")
+    pad = _pad(isolated_config)
+    pad.mkdir(parents=True)
+    (pad / "icon.png").symlink_to(config_yml)
+    resolved, reason = bf.check_upload(str(pad / "icon.png"), cwd="/", session_id=SESSION)
+    assert resolved is None
+    assert "config directory" in reason
+
+
+def test_check_upload_refuses_a_scratchpad_symlink_to_the_secrets_store(
+    isolated_config: Path,
+) -> None:
+    store = isolated_config / "secrets" / "store.db"
+    store.parent.mkdir(parents=True)
+    store.write_bytes(b"SQLite format 3\x00" + b"0" * 64)
+    pad = _pad(isolated_config)
+    pad.mkdir(parents=True)
+    (pad / "notes.png").symlink_to(store)
+    resolved, reason = bf.check_upload(str(pad / "notes.png"), cwd="/", session_id=SESSION)
+    assert resolved is None
+    assert "config directory" in reason
+
+
+def test_check_upload_refuses_dotdot_traversal_out_of_the_scratchpad(
+    isolated_config: Path,
+) -> None:
+    pad = _pad(isolated_config)
+    pad.mkdir(parents=True)
+    (isolated_config / "config.yml").write_text("k: v\n")
+    sibling = _png(isolated_config / "sessions" / SESSION / "transcript.png")
+    for escape in (
+        pad / ".." / ".." / ".." / "config.yml",
+        pad / ".." / "transcript.png",
+    ):
+        resolved, reason = bf.check_upload(str(escape), cwd="/", session_id=SESSION)
+        assert resolved is None, escape
+        assert "config directory" in reason
+    assert sibling.exists()
+
+
+@pytest.mark.parametrize(
+    ("own", "neighbour"),
+    [("abc", "abcdef"), ("abc", "abc-evil"), ("abc", "abc.evil"), ("abc", "ab")],
+)
+def test_check_upload_refuses_a_sibling_whose_name_shares_the_id_prefix(
+    isolated_config: Path, own: str, neighbour: str
+) -> None:
+    """Containment is on path components, never on a string prefix."""
+    _png(_pad(isolated_config, own) / "own.png")
+    theirs = _png(_pad(isolated_config, neighbour) / "theirs.png")
+    resolved, reason = bf.check_upload(str(theirs), cwd="/", session_id=own)
+    assert resolved is None
+    assert "config directory" in reason
+
+
+def test_check_upload_refuses_another_sessions_scratchpad(isolated_config: Path) -> None:
+    _png(_pad(isolated_config) / "mine.png")
+    theirs = _png(_pad(isolated_config, "zzz999zzz999") / "theirs.png")
+    resolved, reason = bf.check_upload(str(theirs), cwd="/", session_id=SESSION)
+    assert resolved is None
+    assert "config directory" in reason
+
+
+def test_check_upload_refuses_the_sessions_own_directory_outside_the_scratchpad(
+    isolated_config: Path,
+) -> None:
+    """Only `<session>/scratchpad` is the agent's; the transcript beside it is not."""
+    transcript = _png(isolated_config / "sessions" / SESSION / "transcript.png")
+    resolved, reason = bf.check_upload(str(transcript), cwd="/", session_id=SESSION)
+    assert resolved is None
+    assert "config directory" in reason
+
+
+def test_check_upload_refuses_when_the_scratchpad_itself_is_a_symlink_elsewhere(
+    isolated_config: Path,
+) -> None:
+    """A planted `scratchpad -> <other session>` must not widen the allow."""
+    theirs = _png(_pad(isolated_config, "zzz999zzz999") / "theirs.png")
+    own_dir = isolated_config / "sessions" / SESSION
+    own_dir.mkdir(parents=True)
+    (own_dir / "scratchpad").symlink_to(_pad(isolated_config, "zzz999zzz999"))
+    resolved, reason = bf.check_upload(
+        str(own_dir / "scratchpad" / "theirs.png"), cwd="/", session_id=SESSION
+    )
+    assert resolved is None
+    assert theirs.exists()
+    assert "config directory" in reason
+
+
+@pytest.mark.parametrize("bad_id", ["../x", "a/b", "", "..", ".", "a\\b", "abc\x00", " abc", "a b"])
+def test_check_upload_grants_nothing_for_a_malformed_session_id(
+    isolated_config: Path, bad_id: str
+) -> None:
+    # Planted at the places a malformed id could be coerced to point at.
+    _png(isolated_config / "x" / "scratchpad" / "x.png")
+    _png(isolated_config / "sessions" / "x" / "scratchpad" / "x.png")
+    _png(isolated_config / "sessions" / "scratchpad" / "x.png")
+    for candidate in (
+        isolated_config / "x" / "scratchpad" / "x.png",
+        isolated_config / "sessions" / "x" / "scratchpad" / "x.png",
+        isolated_config / "sessions" / "scratchpad" / "x.png",
+    ):
+        resolved, reason = bf.check_upload(str(candidate), cwd="/", session_id=bad_id)
+        assert resolved is None, (bad_id, candidate)
+        assert "config directory" in reason
+    assert bf.own_scratchpad_root(bad_id) is None
+
+
+# One test per credential CLASS, each with a valid session id supplied: the allow
+# must be invisible to every one of them.
+
+
+def test_check_upload_still_refuses_the_secrets_store_with_a_session_id(
+    isolated_config: Path,
+) -> None:
+    store = isolated_config / "secrets" / "store.db"
+    store.parent.mkdir(parents=True)
+    store.write_bytes(b"SQLite format 3\x00" + b"0" * 64)
+    resolved, reason = bf.check_upload(str(store), cwd="/", session_id=SESSION)
+    assert resolved is None
+    assert "config directory" in reason
+
+
+def test_check_upload_still_refuses_config_yml_with_a_session_id(isolated_config: Path) -> None:
+    isolated_config.mkdir(parents=True, exist_ok=True)
+    (isolated_config / "config.yml").write_text("k: v\n")
+    resolved, reason = bf.check_upload(
+        str(isolated_config / "config.yml"), cwd="/", session_id=SESSION
+    )
+    assert resolved is None
+    assert "config directory" in reason
+
+
+@pytest.mark.parametrize("name", ["auth.db", "credentials.env", "mcp.json"])
+def test_check_upload_still_refuses_the_auth_and_token_stores_with_a_session_id(
+    isolated_config: Path, name: str
+) -> None:
+    isolated_config.mkdir(parents=True, exist_ok=True)
+    (isolated_config / name).write_bytes(b"token")
+    resolved, reason = bf.check_upload(str(isolated_config / name), cwd="/", session_id=SESSION)
+    assert resolved is None
+    assert "config directory" in reason
+
+
+def test_check_upload_still_refuses_a_keychain_with_a_session_id(
+    isolated_config: Path, tmp_path: Path
+) -> None:
+    """Outside the config root the name/component deny-list is what stops it..."""
+    outside = tmp_path / "Library" / "Keychains" / "login.keychain-db"
+    outside.parent.mkdir(parents=True)
+    outside.write_bytes(b"kych" + b"0" * 64)
+    resolved, reason = bf.check_upload(str(outside), cwd="/", session_id=SESSION)
+    assert resolved is None
+    assert "credential deny-list" in reason or "holds credentials" in reason
+
+    # ...and INSIDE the allowed scratchpad too: the allow lifts the blanket
+    # config-root refusal and nothing else, so a keychain copied into the pad is
+    # still a keychain.
+    pad = _pad(isolated_config)
+    for planted in (pad / "login.keychain-db", pad / "keychains" / "innocent.png"):
+        planted.parent.mkdir(parents=True, exist_ok=True)
+        planted.write_bytes(b"kych" + b"0" * 64)
+        resolved, reason = bf.check_upload(str(planted), cwd="/", session_id=SESSION)
+        assert resolved is None, planted
+        assert "credential deny-list" in reason or "holds credentials" in reason
+
+
+def test_check_upload_still_applies_the_name_and_shape_checks_inside_the_scratchpad(
+    isolated_config: Path,
+) -> None:
+    pad = _pad(isolated_config)
+    pad.mkdir(parents=True)
+    (pad / ".env").write_text("SECRET=1\n")
+    (pad / "empty.png").write_bytes(b"")
+    (pad / "folder").mkdir()
+    for name, needle in (
+        (".env", "credential deny-list"),
+        ("empty.png", "empty"),
+        ("folder", "regular"),
+    ):
+        resolved, reason = bf.check_upload(str(pad / name), cwd="/", session_id=SESSION)
+        assert resolved is None, name
+        assert needle in reason, (name, reason)
+
+
+def test_check_upload_still_refuses_another_sessions_directory_with_a_session_id(
+    isolated_config: Path,
+) -> None:
+    transcript = _png(isolated_config / "sessions" / "zzz999zzz999" / "transcript.png")
+    resolved, reason = bf.check_upload(str(transcript), cwd="/", session_id=SESSION)
+    assert resolved is None
+    assert "config directory" in reason
+
+
+# --- honest refusals: the cause is named, never collapsed to "does not exist" --
+
+
+def test_check_upload_a_missing_file_names_the_full_path_and_the_nearest_parent(
+    tmp_path: Path,
+) -> None:
+    existing = tmp_path / "workspace"
+    existing.mkdir()
+    missing = existing / "grafana-slack-icon" / "slack-icon-1024.png"
+    resolved, reason = bf.check_upload(str(missing), cwd=str(tmp_path))
+    assert resolved is None
+    assert reason.startswith("refused: ")
+    assert "does not exist" in reason
+    # The FULL path, not just the basename: the old text hid which folder was looked in.
+    assert str(missing) in reason
+    assert f"nearest existing folder: {existing}" in reason
+
+
+def test_check_upload_shows_what_a_relative_path_was_resolved_against(tmp_path: Path) -> None:
+    resolved, reason = bf.check_upload("sub/nope.png", cwd=str(tmp_path))
+    assert resolved is None
+    assert str(tmp_path / "sub" / "nope.png") in reason
+
+
+def test_check_upload_sanitises_the_path_it_echoes(tmp_path: Path) -> None:
+    hostile = str(tmp_path / "ev\x1b[31mil\u202e.png\nINJECTED")
+    resolved, reason = bf.check_upload(hostile, cwd=str(tmp_path))
+    assert resolved is None
+    assert "\x1b" not in reason and "\u202e" not in reason and "\n" not in reason
+
+
+def test_check_upload_a_path_through_a_regular_file_is_not_called_missing(
+    tmp_path: Path,
+) -> None:
+    afile = tmp_path / "afile"
+    afile.write_text("x")
+    resolved, reason = bf.check_upload(str(afile / "x.png"), cwd=str(tmp_path))
+    assert resolved is None
+    assert "could not be opened" in reason
+    assert "does not exist" not in reason
+
+
+def test_check_upload_a_symlink_loop_is_reported_not_raised(tmp_path: Path) -> None:
+    """Python 3.12 raises RuntimeError (not OSError) for a loop; it escaped the tool."""
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+    resolved, reason = bf.check_upload(str(tmp_path / "a"), cwd=str(tmp_path))
+    assert resolved is None
+    assert "could not be opened" in reason
+    assert "does not exist" not in reason
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_check_upload_a_permission_error_is_not_called_missing(tmp_path: Path) -> None:
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    target = _png(locked / "x.png")
+    locked.chmod(0)
+    try:
+        resolved, reason = bf.check_upload(str(target), cwd=str(tmp_path))
+    finally:
+        locked.chmod(0o700)
+    assert resolved is None
+    assert "could not be opened" in reason
+    assert "Permission denied" in reason
+    assert "does not exist" not in reason
