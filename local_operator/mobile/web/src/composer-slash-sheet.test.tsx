@@ -83,9 +83,11 @@ function projection(): SessionProjection {
 function renderComposer(): HTMLTextAreaElement {
 	render(
 		<Composer
+			ended={false}
 			pid="p1"
 			projection={projection()}
 			onOpenModels={() => {}}
+			onReturnToModels={() => {}}
 			onOpenEffort={() => {}}
 			effortOpen={false}
 			onCloseEffort={() => {}}

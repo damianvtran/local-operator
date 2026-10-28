@@ -2143,8 +2143,37 @@ class Store:
                 ).fetchone()
             )
 
+    def conversation_of_reserved_message(self, owner: OwnerSnapshot, message_id: str) -> str | None:
+        """The ``bcv_`` id an ADMITTED conversation message belongs to, or None.
+
+        WHY: no hub route maps a ``bcmsg_`` id to its conversation (every
+        conversation route needs the id in its path), so this reservation row is
+        the only local answer. The bridge tool's ``reply`` refusal uses it to
+        name the exact ``channel_post`` call. Read-only and generation-fenced
+        like :meth:`body_reservation`; an absent store stays absent.
+        """
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            row = conn.execute(
+                "SELECT conversation_id FROM body_reservations WHERE owner_key = ? "
+                "AND message_id = ? LIMIT 1",
+                (_owner_key(owner), message_id),
+            ).fetchone()
+            return str(row["conversation_id"]) if row is not None else None
+
     def pending_body_reservation_for(
-        self, owner: OwnerSnapshot, designated_session: str, *, now: float | None = None
+        self,
+        owner: OwnerSnapshot,
+        designated_session: str,
+        *,
+        now: float | None = None,
+        selected: tuple[str, str] | None = None,
+        exclude: frozenset[tuple[str, str]] = frozenset(),
+        admitted_before: float | None = None,
     ) -> dict[str, Any] | None:
         """The OLDEST pending reservation this session is designated to serve.
 
@@ -2167,9 +2196,32 @@ class Store:
         its message forever, and the CAS's reclaim arm could never be reached
         through this reader. A live claim belongs to another turn and is
         excluded; a completed or retired row owes nothing.
+
+        Follow-up passes may exclude already-attempted identities and freeze an
+        admission horizon, without rewriting a failed row's FIFO timestamp or
+        losing its retry reason. Hydration names the selected identity through
+        this SAME query so an explicit selection cannot bypass owner, session,
+        generation or live-claim fencing.
         """
 
         moment = time.time() if now is None else float(now)
+        filters: list[str] = []
+        bindings: list[Any] = [
+            _owner_key(owner),
+            owner.credential_id,
+            owner.enrollment_generation,
+            designated_session,
+            moment,
+        ]
+        if selected is not None:
+            filters.append("AND conversation_id = ? AND message_id = ? ")
+            bindings.extend(selected)
+        for conversation_id, message_id in sorted(exclude):
+            filters.append("AND NOT (conversation_id = ? AND message_id = ?) ")
+            bindings.extend((conversation_id, message_id))
+        if admitted_before is not None:
+            filters.append("AND created_at <= ? ")
+            bindings.append(float(admitted_before))
 
         with self._connect_readonly() as conn:
             if conn is None:
@@ -2183,14 +2235,9 @@ class Store:
                     "AND designated_session = ? AND (state = 'pending' OR "
                     "(state = 'claimed' AND claim_expires_at IS NOT NULL "
                     "AND claim_expires_at < ?)) "
-                    "ORDER BY created_at ASC, rowid ASC LIMIT 1",
-                    (
-                        _owner_key(owner),
-                        owner.credential_id,
-                        owner.enrollment_generation,
-                        designated_session,
-                        moment,
-                    ),
+                    + "".join(filters)
+                    + "ORDER BY created_at ASC, rowid ASC LIMIT 1",
+                    bindings,
                 ).fetchone()
             )
 
@@ -2606,12 +2653,24 @@ class Store:
         receipt: OwnerReceipt,
         *,
         cos_session_id: str | None = None,
+        require_no_owner: bool = False,
     ) -> None:
         """Atomically commit authority: exact owner + server consent receipt.
 
         This is H2's SEAM. H4 calls it only after the real captured-owner
         consent flow succeeded; a generic ``{enabled, session}`` preference
         has no path here, and a failed consent flow cannot produce a receipt.
+
+        ``require_no_owner`` is the one-owner rule the settings commit needs,
+        enforced INSIDE this transaction rather than by a caller that counts
+        first and inserts afterwards. That caller-side shape was atomic only
+        while both steps ran on the event loop; once the commit moved to a
+        worker thread, two enables on a fresh store could both see zero owners
+        and both insert — a two-row store answers ``active_owner() is None``
+        forever, which is a dark bridge that never heals (review R2-2, measured
+        3/40). Under ``BEGIN IMMEDIATE`` the count and the insert cannot
+        interleave, and it closes the cross-process case too (a second `lop`
+        process), which no in-process lock could have.
         """
 
         owner.validated()
@@ -2620,6 +2679,23 @@ class Store:
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
+            if require_no_owner:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM enrollments WHERE state = 'committed'"
+                ).fetchone()
+                if row is not None and int(row["n"]) != 0:
+                    # The message names the rule, not the caller: a different
+                    # owner needs an explicit re-enrolment, and an AMBIGUOUS
+                    # store must never receive a third row.
+                    # NOT ``already_owned``: that is #3027's CLIENT outcome
+                    # meaning "this machine holds THIS endpoint", and reusing
+                    # the name at the store invites forwarding this refusal as
+                    # that code, which would report another owner's row as ours
+                    # (review R3 M1).
+                    raise StoreRefused(
+                        "owner_present",
+                        "this machine already holds a committed owner",
+                    )
             existing = conn.execute(
                 "SELECT enrollment_generation, state FROM enrollments WHERE owner_key = ?",
                 (_owner_key(owner),),
@@ -4973,6 +5049,29 @@ class Store:
                         ref.request_ref,
                     ),
                 )
+
+    def reply_target(self, owner: OwnerSnapshot, message_id: str) -> dict[str, Any] | None:
+        """Thread and sender ids of one delivery THIS owner received, or None.
+
+        WHY: ``reply`` answers a received message, so its destination comes
+        from the row :meth:`merge_page`/:meth:`merge_refs` wrote after the
+        recipient binding check, never from the model's say-so. Owner-keyed,
+        tenant-matched and generation-fenced, so a drifted runtime or another
+        owner's row resolves nothing. Ids only: no label or body is stored or
+        returned. Read-only: an absent store stays absent.
+        """
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            row = conn.execute(
+                "SELECT thread_id, sender_account_id, sender_endpoint_id FROM deliveries "
+                "WHERE owner_key = ? AND message_id = ? AND tenant_id = ?",
+                (_owner_key(owner), message_id, owner.tenant_id),
+            ).fetchone()
+            return dict(row) if row is not None else None
 
     def list_metadata(self, owner: OwnerSnapshot) -> list[dict[str, Any]]:
         """Whitelisted metadata rows for the egress-free consumers (H4 later).

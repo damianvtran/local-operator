@@ -278,7 +278,14 @@ MEASURED_TOKENS: dict[str, int] = {
     # retry, with update/reset/sync naming no retry), the collision clause and
     # the host-dependent default. The same printed table measured it; the
     # 8 KiB soft cap still holds.
-    "agent": 1365,
+    # RE-MEASURED (F0, #3054): 1365 -> 1364. The ``scope`` field now states the
+    # host-dependent default ("this conversation if it has a store, else the
+    # account") instead of naming 'session' as THE default, which was false in a
+    # configuration run (unscoped registries, so an omitted scope writes the
+    # account). Worded to cost no more than the old text: the child-kind
+    # context budget had 2 billed tokens of headroom. The ``team`` entry moves by
+    # the same -1 for its twin field; the same printed table measured both.
+    "agent": 1364,
     "ask": 1079,
     "ask_withdraw": 452,
     "bash": 295,
@@ -318,7 +325,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # the field's own description to the doc — the deliberate cost of the value
     # never appearing in the transcript (incident: a literal password in `type`
     # reached a subagent's transcript, where no shape pass could see it).
-    "browser": 1380,
+    "browser": 1655,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
@@ -402,8 +409,15 @@ MEASURED_TOKENS: dict[str, int] = {
     # 788 -> 812 (review round 1, M1): one sentence names the BYOK voiceover
     # meter (per character; the estimate is per 1,000 characters).
     "generate_voiceover": 812,
-    "glob": 87,
-    "grep": 333,
+    # 87 -> 215 / 333 -> 445 (scout grep/glob fixes, 2026-10-26): the ``glob``
+    # ``path`` parameter and its off-wire note (absolute-pattern split, ``..``
+    # refusal, approval), and ``grep``'s ``max_filesize_mb`` parameter plus the
+    # clipped-line and skipped-file notes. Re-measured through this test's own
+    # printed table; no other entry moved. Round-1 remediation: 215 -> 224 /
+    # 445 -> 472 — the wire descriptions were cut to fit the start-context
+    # ratchet and their detail moved here, to the on-demand doc.
+    "glob": 224,
+    "grep": 472,
     # NEW (LOH-14 agent slice): the ``harness_import`` doc advertises the six
     # actions plus the preview-first/confirm/selection contract. Measured with
     # this test's canonical isolated renderer; no existing entry moved. Round-1
@@ -427,12 +441,19 @@ MEASURED_TOKENS: dict[str, int] = {
     # NEW (Library): the six-op catalog tool's reference — filters, tag and
     # provenance rules, and the read-tier rationale. Measured through this
     # file's own renderer; no other entry moved.
-    "library": 683,
+    # RE-MEASURED (Librarian provenance): 683 -> 713. The `actor` bullet now
+    # states the DERIVATION (the Librarian's own session records `librarian`,
+    # every other session `agent`) and the reservation, replacing a sentence
+    # that was simply wrong — it claimed a `librarian` default no caller ever
+    # used. The `update` bullet gains the clause that a non-empty tag set
+    # organizes too. Re-measured through this file's own printed table; no
+    # other entry moved.
+    "library": 713,
     "lsp": 272,
     # 116 -> 127 (memory move, round 1): the description now names
     # ``edit new_text={"move":"scope"}``, which makes the verb discoverable
     # without a guide lookup. Re-measured deliberately via this test's print.
-    "memory": 127,
+    "memory": 109,
     "monitor": 353,
     "network": 870,
     # NEW (quiet-turn S0a, docs/design/quiet-turns.md §4): the ``no_reply``
@@ -440,6 +461,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # it" notes. Re-measured via this test's own print, and it is the ONLY
     # entry that moved: every other count above is byte-identical.
     "no_reply": 109,
+    # NEW (notifications inbox, docs/design/notifications-inbox.md §3.1): the
+    # ``notify`` doc — its description plus the five-field schema rendered by
+    # this file's own renderer. Re-measured via this test's print; it is the
+    # ONLY entry that moved, every other count is byte-identical.
+    "notify": 242,
     "patience": 330,
     # RE-MEASURED 2026-10-20 (evidence-attachment discoverability): ``project``
     # 1098 -> 1143 is the ONLY entry that moved — the ``attach`` description now
@@ -503,7 +529,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # RE-MEASURED (LOH-9 S5): 1109 -> 1400 — the promote row, the promote and
     # member-copy step, the corrected refusal copy and the collision clause;
     # the same printed table.
-    "team": 1400,
+    # RE-MEASURED (F0, #3054): 1400 -> 1399 -- the ``scope`` default wording,
+    # the same -1 as the agent twin.
+    "team": 1399,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -511,9 +539,14 @@ MEASURED_TOKENS: dict[str, int] = {
     "video_status": 202,
     "wait": 268,
     "wake": 308,
-    "web_fetch": 348,
+    # RE-MEASURED (web-research-speed): 348 -> 363 — the new optional
+    # ``query`` parameter (passage previews for oversized pages) in the
+    # rendered schema, net of the description trimmed to pay for it.
+    "web_fetch": 363,
     "web_read": 221,
-    "web_search": 189,
+    # RE-MEASURED (web-research-speed): 189 -> 193 — "with `query`" steers the
+    # follow-up fetch of a result toward a passage preview.
+    "web_search": 193,
     "write": 137,
 }
 
@@ -539,7 +572,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: promotion fields are on ``agent``/``team``, not on the launch tool.
 #: RE-MEASURED (LOH-9 S5): agent 1148 -> 1394, the same +246 the canonical arm
 #: takes because both arms render the completed notes; ``task`` stays 764.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1394, "task": 764}
+#: RE-MEASURED (F0, #3054): agent 1394 -> 1393, the same -1 ``scope``-default
+#: wording as the canonical arm; ``task`` stays 764.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1393, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:

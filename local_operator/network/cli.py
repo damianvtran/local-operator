@@ -1078,8 +1078,11 @@ def main(args: argparse.Namespace) -> int:
                 block = getattr(exc, "join_block", None)
                 if isinstance(block, dict):
                     body["join"] = block
+                commands = getattr(exc, "commands", None)
+                if isinstance(commands, list):
+                    body["commands"] = commands
                 print(json.dumps(body))
-            print(f"\033[1;31m{exc.sentence}\033[0m", file=sys.stderr)
+            _print_refusal(exc)
             # 3 IS ITS OWN EXIT CODE (the design's "a human decision is required"), and
             # it is checked BEFORE the generic 1 so a caller can tell "nobody answered
             # in time" from "the network said no" without matching on English.
@@ -1346,6 +1349,45 @@ def _cmd_init(args: argparse.Namespace) -> int:
     settings = imported.NetworkSettings.from_config()
     listen_address = args.listen_address or settings.listen_address
     port = args.port or settings.port
+    if args.port and args.port != settings.port:
+        # THE PORT THE RECORD ADVERTISES MUST BE THE PORT THE RELAY BINDS. The
+        # record's listen block and our member row (below) publish ``port`` to
+        # every joiner, but ``serve``/autostart read ``network.port`` from the
+        # config — so a port given only here was advertised and never bound:
+        # measured, init advertised :47811 and the relay tried the default :4097
+        # ("address in use") until ``network.port`` was set by hand. Persisted
+        # through the registry writer (range-validated, watcher-notified) BEFORE
+        # the record exists, so a refused value creates no network either.
+        from local_operator import settings_io
+        from local_operator.config import ConfigManager
+        from local_operator.network.types import MeshRefusal
+        from local_operator.paths import config_dir
+
+        setting = settings_io.BY_KEY.get("network.port")
+        if setting is None:  # pragma: no cover - registry guarantee
+            raise RuntimeError("network.port is not registered in settings_io")
+        # A refused value is the CLI's normal refusal (a sentence, and a JSON body
+        # for --json), not a traceback (review round 1, m3; QA round 1, Q1).
+        problem = settings_io.validate(setting, port)
+        if problem is not None:
+            raise MeshRefusal("bad_request", f"--port {port}: {problem}")
+        # ONE RELAY, ONE PORT, PER DEVICE (review round 1, m2). ``network.port`` is
+        # device-wide; every existing network's record and member row still
+        # publish the old port, so moving it here would strand their peers on a
+        # closed port after the next relay restart. Refusing is the safe choice:
+        # nothing changes, and the operator can still move the port deliberately
+        # (`lop config` / settings), which is where a device-wide change belongs.
+        existing = [record.name for record in store.list_networks()]
+        if existing:
+            raise MeshRefusal(
+                "bad_request",
+                f"--port {port} would move this device's relay off port {settings.port}, "
+                f"which network {', '.join(repr(name) for name in existing)} already "
+                "advertises to its members; create the network without --port, or move "
+                f"the relay deliberately with 'lop config edit network.port {port}' — which "
+                "also changes the port the existing networks' peers dial",
+            )
+        settings_io.write_setting(ConfigManager(config_dir=Path(config_dir())), setting, port)
     identity = load_or_mint()
 
     # ONE ANSWER TO "WHERE CAN PEERS REACH US", used for BOTH the record's listen
@@ -1898,12 +1940,20 @@ def _shareable_servers(self_device: str) -> list[dict[str, Any]]:
 
     Every user-scope HTTP/SSE server declared in this device's ``mcp.json`` (stdio
     servers have no login to share and are excluded), joined with (a) whether a login
-    row exists HERE — the same read the share verb's refusal makes, reused so the
-    ledger and the refusal cannot disagree — and (b) any placement entry this device
+    the runtime would USE is held here (``readiness.mcp_server_login_here``) and
+    (b) any placement entry this device
     holds for ``mcp:<url>``, so an already-shared login says where. READ-ONLY: no
     declare, no placement write, no broker semantics change; ``remedy`` is the
     command the operator would run next, with ``<device>`` standing where a target
     device goes (the ledger cannot know which one).
+
+    THE SHARE VERB'S READ IS WIDER BY ONE SHAPE, ON PURPOSE (review round 2, m1). Its
+    ``credential_here`` counts any ISSUED grant, so a TOMBSTONED login still shares:
+    the holder's borrow then says "sign in again on <this device>", the one remedy
+    that works. The ledger cannot call that row "login held" (nothing would serve)
+    nor "sign in here first" (one exists); it marks ``login_dead`` and prints
+    ``readiness.MCP_DEAD_LOGIN_REMEDY`` — the sentence the readiness viewer row and
+    the share receipt print too, so the three surfaces say one thing.
     """
     from local_operator.network import readiness as readiness_mod
     from local_operator.network.credentials import placement as placement_mod
@@ -1918,9 +1968,19 @@ def _shareable_servers(self_device: str) -> list[dict[str, Any]]:
             # No URL, no login to hold and nothing to share: a row here would render
             # a remedy naming an empty command.
             continue
-        login_here = server.get("has_row")  # True | False | None (store unreadable)
+        # True | False | None (store unreadable). A registration-only or tombstoned
+        # row is NOT a login here: the runtime would borrow, so offering
+        # "login held — share" would promise a share this device cannot serve.
+        login_here = readiness_mod.mcp_server_login_here(server)
         shared_with: list[dict[str, str]] = []
         found = placement_mod.placement_entries_for(mcp_url=url, root=_config_dir())
+        if readiness_mod.mcp_header_ref_server(
+            server, shared=found is not None or bool(server.get("auth_evidence"))
+        ):
+            # Not a login: its credential is a ``${REF}`` secret, shared through
+            # the secret placement, so "sign in here first" was a dead end even
+            # with the secret set (QA round 1, Q2). Same rule readiness uses.
+            continue
         if found is not None:
             network_id, entry = found
             record = _record_for(network_id)
@@ -1937,14 +1997,19 @@ def _shareable_servers(self_device: str) -> list[dict[str, Any]]:
                     }
                 )
         key = f"mcp:{url}"
+        dead = login_here is False and readiness_mod.mcp_login_dead(server)
         if login_here is True:
             remedy = f"lop network credential share {key} --with <device>"
+        elif dead:
+            remedy = readiness_mod.MCP_DEAD_LOGIN_REMEDY
         elif login_here is False:
             remedy = readiness_mod.mcp_login_remedy(url)
         else:
             remedy = ""
         rows.append(
             {
+                # Only on a tombstoned row, so every other row's shape is unchanged.
+                **({"login_dead": True} if dead else {}),
                 "server": str(server.get("name") or ""),
                 "url": url,
                 "transport": str(server.get("transport") or ""),
@@ -2289,6 +2354,7 @@ def _cmd_credential_inherit(args: argparse.Namespace) -> int:
                 *inheritance.details(requested),
                 "Request only; nothing is permitted yet.",
                 f"Approve: lop network approvals approve {requested['approval_id']}",
+                *inheritance.next_lines(requested),
             ],
         )
     result = inheritance.apply(
@@ -2519,6 +2585,32 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         f"borrowers now: {', '.join(holders) or 'none'}",
         f"broker_credential on {name}: {capability or 'unchanged'}",
     ]
+    from local_operator.network.credentials.types import is_mcp_key
+
+    if verb == "share" and is_mcp_key(key):
+        from local_operator.mcp.auth import server_has_stored_grant
+        from local_operator.network.credentials.offers import close_quietly, open_store
+        from local_operator.network.credentials.types import mcp_url_from_key
+
+        # A TOMBSTONED login shares on purpose (``holds_grant``), so the receipt says
+        # what the holder will see instead of implying a working borrow (review round
+        # 2, m1). Same sentence as the ledger and the readiness viewer row.
+        auth_store = open_store(_config_dir())
+        try:
+            usable = auth_store is not None and server_has_stored_grant(
+                mcp_url_from_key(key), auth_store
+            )
+        finally:
+            if auth_store is not None:
+                close_quietly(auth_store)
+        if not usable:
+            from local_operator.network import readiness as readiness_mod
+
+            payload["login_dead"] = True
+            lines.append(
+                "note: this device's login is no longer valid — "
+                f"{readiness_mod.MCP_DEAD_LOGIN_REMEDY}"
+            )
     if verb == "share" and github_mod.is_github_key(key):
         # The disclosure names the ARM that will serve (§3.4): only the App is
         # narrowed server-side, and the share receipt must not promise narrowing
@@ -3006,6 +3098,80 @@ def _member_name(record: Any, device_id: str) -> str:
     return str(member.name) if member is not None else ""
 
 
+def _member_rm_already_revoked(args: argparse.Namespace, record: Any) -> int | None:
+    """``member rm`` on an EXACT id that is already removed: say so, and repair.
+
+    WHY. ``lop network show`` lists a removed member (``active:false``) with its id,
+    so an operator cleaning up copies that id into ``member rm`` — and used to be
+    told ``unknown_member``, while credential metadata still named the device as a
+    holder and nothing would ever prune it. The removal already happened; what is
+    left is its idempotent local repair (``relay.repair_removed_member``: no epoch
+    rotation, tombstone and burned id kept, nothing remote claimed erased).
+
+    THE RECOGNITION LIVES HERE, NOT IN ``_resolve_device``. That resolver is shared
+    with ``credential share --with`` and ``member grant|revoke``, which must stay
+    ACTIVE-ONLY — a share or a grant resolving to a removed device would be a write
+    about a device that can no longer authenticate. Removal is the one operation
+    for which "already removed" is a meaningful answer, so only this verb asks.
+
+    EXACT ID ONLY: names are cosmetic and may be reused by an active member, and a
+    tail is a convenience for live devices — the burned id is the identity. Returns
+    ``None`` when the argument is not an already-removed id, so the caller's
+    ``unknown_member`` refusal stands unchanged.
+    """
+    from local_operator.network.credentials import messages as messages_mod
+
+    wanted = str(args.device or "").strip()
+    tombstone = next((row for row in record.members if str(row.device_id) == wanted), None)
+    if not wanted or not (record.is_burned(wanted) or (tombstone and not tombstone.active)):
+        return None
+    imported = _import_relay()
+    outcome = imported.repair_removed_member(record, device_id=wanted, by=record.self_device_id)
+    pruned = outcome.repaired
+    # R3: with the tombstone row gone only the burned id is left, and "<id> (<id[:8]>)"
+    # would print one identity twice. The short id alone is the readable spelling.
+    who = (
+        f"{tombstone.name} ({wanted[:8]})"
+        if tombstone is not None and tombstone.name
+        else wanted[:8]
+    )
+    repaired = (
+        f"removed {len(pruned)} stale credential reference(s) to it: {', '.join(pruned)}"
+        if pruned
+        else "no credential references to it remained on this device"
+    )
+    # R1: a row another device owns is that owner's to revise, so it is named, not
+    # rewritten — and not counted as repaired.
+    foreign = [
+        f"{key} is still listed by {owner_name or owner[:8]}, which owns it; "
+        "that device must revoke it (this device does not rewrite another owner's share)"
+        for key, owner, owner_name in outcome.owner_must_revoke
+    ]
+    return _emit(
+        args,
+        {
+            "ok": True,
+            "code": "already_revoked",
+            "network_id": record.network_id,
+            "removed": wanted,
+            "epoch": record.epoch,
+            "rotated": False,
+            "repaired": pruned,
+            "owner_must_revoke": [
+                {"key": key, "owner_device": owner, "owner_name": owner_name}
+                for key, owner, owner_name in outcome.owner_must_revoke
+            ],
+        },
+        [
+            f"{who} was already removed from {record.name}; "
+            f"the epoch was not rotated again (it is {record.epoch})",
+            repaired,
+            *foreign,
+            *messages_mod.COPY_CEILING_LINES,
+        ],
+    )
+
+
 def _cmd_member_rm(args: argparse.Namespace) -> int:
     """Revoke a member: tombstone, rotate, bump the epoch, fan out (R5)."""
     # THE ARGUMENT IS A DEVICE, AND EVERY OTHER SURFACE PRINTS ITS NAME — the same rule
@@ -3028,6 +3194,9 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
         # that could inform them — it is the one that matches what the write needs.)
         # Safe here because ``require_secrets`` only reads.
         store.require_secrets(record.network_id)
+        already = _member_rm_already_revoked(args, record)
+        if already is not None:
+            return already
         raise MeshRefusal(
             "unknown_member",
             f"{args.device!r} is not a device in {record.name}; run 'lop network show' "
@@ -8308,6 +8477,14 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
                         source=readiness_mod.SOURCE_UNKNOWN,
                     )
                 )
+    if not wanted:
+        # THIS DEVICE'S SERVE DAEMON NEEDS NO RELAY (2026-10-28): it is read from
+        # this root's own records, so the fallback reports it exactly as the
+        # relay's composer does — a node whose relay is down still says that its
+        # `lop serve` is stale or held only by a login session.
+        from local_operator.paths import config_dir
+
+        checks.extend(readiness_mod.local_serve_daemon_rows(config_dir()))
     return {
         "checks": checks,
         "identity_present": identity_file.exists(),
@@ -8386,6 +8563,23 @@ def _cmd_update(args: argparse.Namespace) -> int:
     if state == "done":
         lines.append(f"{label} updated to {version}" + (f" (via {method})" if method else ""))
         lines.append("the device installs it in its own tree and switches over atomically")
+        left_busy = [item for item in payload.get("left_busy") or [] if isinstance(item, dict)]
+        if left_busy:
+            # The operator who ASKED must see what the update did not wait for
+            # (QA round 1 on #3028, Q2/Q3): a generation-layout member moves on
+            # while a busy or approval-parked session keeps its old build, and
+            # the member's own sentence was not printed on this path at all.
+            named = "; ".join(
+                f"{item.get('name') or 'unnamed session'} ({item.get('session_id', '')}"
+                + (f", waiting for {item['pending']}" if item.get("pending") else "")
+                + ")"
+                for item in left_busy[:3]
+            )
+            more = f" and {len(left_busy) - 3} more" if len(left_busy) > 3 else ""
+            lines.append(
+                f"{len(left_busy)} busy session(s) there stay on their old build until "
+                f"they settle: {named}{more}"
+            )
     elif state == "already_on_target":
         lines.append(f"{label} is already on {version or 'the target build'}; nothing to do")
     elif state == "ahead_of_target":
@@ -8764,6 +8958,9 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
         return [
             *finite_share.details(dict(record)),
             f"Approval {record.get('approval_id', '')}: {record.get('state', '')}",
+            # The reason and the next step for THIS state (UX U1, U5): a failed card says
+            # why it stopped and what to do; an approved one says how to apply it.
+            *finite_share.next_lines(dict(record)),
             "This operation restores only the signed finite share; nothing is installed or joined.",
         ]
     from local_operator.network.credentials import inheritance
@@ -8778,9 +8975,14 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
             described = [
                 "A credential-permission request this build cannot describe; do not approve it."
             ]
+        try:
+            following = inheritance.next_lines(dict(record))
+        except MeshRefusal:
+            following = []
         return [
             *described,
             f"Approval {record.get('approval_id', '')}: {record.get('state', '')}",
+            *following,
             "This records a credential permission only; nothing is installed, joined or "
             "connected.",
         ]
@@ -8914,6 +9116,137 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+def _approved_credential_lines(record: Mapping[str, Any]) -> list[str]:
+    """After a CLI approve of a credential card: its state and how to apply it (UX U5)."""
+    from local_operator.network.credentials import finite_share, inheritance
+
+    approval_id = record.get("approval_id", "")
+    lines = [f"Approval {approval_id}: {record.get('state', '')}"]
+    if finite_share.intent(dict(record)) is not None:
+        return lines + finite_share.next_lines(dict(record))
+    return lines + inheritance.next_lines(dict(record))
+
+
+def _print_file_only_notice() -> None:
+    """Before a credential card is signed here with a FILE-ONLY key, say so (UX U3).
+
+    COPY, NOT A GATE: the approval proceeds exactly as before (operator a-4ba6 keeps the
+    terminal path allowed; a-b492 attached "with the warning" to file-only approval). The
+    words are the desktop sheet's own (:data:`approval_copy.FILE_ONLY_DISCLOSURE`), so the
+    two surfaces warn about the same key the same way. Read failures print nothing: an
+    unreadable level is not evidence of a file-only key, and the signer decides anyway.
+    """
+    from local_operator.network.credentials import approval_copy, desktop_approval
+
+    try:
+        level, _ = desktop_approval.assurance()
+    except Exception:  # noqa: BLE001 - a notice must never block or break the approval
+        return
+    if level == desktop_approval.ASSURANCE_FILE_ONLY:
+        _print_wrapped(["Note: " + approval_copy.FILE_ONLY_DISCLOSURE], sys.stderr)
+
+
+def _emit_wrapped(args: argparse.Namespace, payload: dict[str, Any], lines: list[str]) -> int:
+    """:func:`_emit` for the credential-approval card verbs, word-wrapped (design D3).
+
+    SCOPED to `approvals show/list/approve`: those are the cards whose long disclosure
+    lines the terminal used to cut mid-word. Every other `lop network` printer keeps its
+    exact bytes (their tests pin single-line receipts, and a wrap there is a separate
+    design decision, not this PR's).
+    """
+    if _json_mode(args):
+        return _emit(args, payload, lines)
+    return _emit(args, payload, _wrap_lines(lines, stream=sys.stdout))
+
+
+def _print_refusal(exc: Any) -> None:
+    """A refusal on stderr: its sentence, then any commands it carries, one per line.
+
+    The finite apply refusal carries its recipe as ``.commands`` (design #3002 r2, D9; UX
+    U8a) rather than inside the sentence, so each command prints whole on its own line and
+    the sentence wraps to the terminal like the card does. Colour honours ``NO_COLOR``
+    (design N4); every other refusal keeps its exact bytes.
+    """
+    import os
+
+    red = not os.environ.get("NO_COLOR")
+    commands = getattr(exc, "commands", None)
+    sentence = [exc.sentence]
+    if isinstance(commands, list):
+        sentence = _wrap_lines(sentence, stream=sys.stderr)
+    for line in sentence:
+        print(f"\033[1;31m{line}\033[0m" if red else line, file=sys.stderr)
+    if isinstance(commands, list) and commands:
+        for line in _wrap_lines([str(getattr(exc, "commands_label", ""))], stream=sys.stderr):
+            print(line, file=sys.stderr)
+        for command in commands:
+            print(command, file=sys.stderr)
+
+
+def _is_command(line: str) -> bool:
+    """Whether a printed line IS a runnable command, which is never wrapped.
+
+    The line must START with ``lop `` (after an optional ``Label: `` prefix such as
+    ``Approve: ``), never merely contain it (design #3002 r3, D10; UX U13): a recipient named
+    "Studio develop Mac" put ``lop `` inside a prose line and switched its wrapping off.
+    """
+    import re
+
+    return re.match(r"\s*(?:[A-Z][\w ]{0,40}: )?lop ", line) is not None
+
+
+def _wrap_lines(lines: list[str], width: int | None = None, *, stream: Any = None) -> list[str]:
+    """Wrap logical lines to the terminal on WORDS, with a hanging indent (design D3).
+
+    A long line used to be left to the terminal, which cuts mid-word (``Th|at``,
+    ``ma|chine``) and drops the continuation to column 0, where it reads as a new fact.
+    ``Label: value`` lines keep the label on the first row and indent the value under it;
+    a single token longer than the row (a fingerprint, a JSON tuple) gets its own indented
+    row and is never broken, so it can still be selected and compared whole.
+
+    TWO THINGS ARE NEVER WRAPPED (design #3002 r2, D6; UX U7; QA Q6/Q7):
+
+    * a line that carries a COMMAND. A hard break inside one turned a pasted command into
+      several broken ones (``argument --with: expected one argument``, then ``command not
+      found`` per row). The renderers print each command on its own line, so the terminal
+      soft-wraps it and copies it back as one line.
+    * anything not written to a TTY. A pipe or a log gets the logical lines, so ``grep``
+      finds a whole command and a script reads what the card says. ``stream`` names the
+      stream the lines go to; without one (a caller that measures the wrap) the width rules.
+    """
+    import shutil
+    import textwrap
+
+    if stream is not None and width is None:
+        isatty = getattr(stream, "isatty", None)
+        if not (callable(isatty) and isatty()):
+            return list(lines)
+    width = width or shutil.get_terminal_size((100, 24)).columns
+    width = max(40, width)
+    out: list[str] = []
+    for line in lines:
+        if len(line) <= width or _is_command(line):
+            out.append(line)
+            continue
+        lead = len(line) - len(line.lstrip(" "))
+        indent = " " * (lead + 2)
+        wrapped = textwrap.wrap(
+            line,
+            width=width,
+            initial_indent="",
+            subsequent_indent=indent,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        out.extend(wrapped or [line])
+    return out
+
+
+def _print_wrapped(lines: list[str], stream: Any) -> None:
+    for line in _wrap_lines(lines, stream=stream):
+        print(line, file=stream)
+
+
 def _approval_signature_payload(record: Mapping[str, Any]) -> dict[str, Any]:
     """The frozen ``{key_id}`` half of the approve/deny payload (§3.5)."""
     signature = record.get("signature") or {}
@@ -9001,10 +9334,9 @@ def _cmd_approvals_approve(args: argparse.Namespace) -> int:
     from local_operator.network.credentials import finite_share
 
     finite_summary = finite_share.summary(record)
+    disclosed: list[str] = []
     if finite_summary is not None:
-        # Presign intent is stderr; JSON stdout remains one complete object.
-        for disclosure_line in finite_share.details(record):
-            print(disclosure_line, file=sys.stderr)
+        disclosed = finite_share.details(record)
     from local_operator.network.credentials import inheritance
 
     # A credential PERMISSION is described from its own signed record, in full, BEFORE the
@@ -9012,8 +9344,11 @@ def _cmd_approvals_approve(args: argparse.Namespace) -> int:
     # be disclosed is never signed; the generic "onboard/anchor install" card text is not
     # what a person is approving here.
     if inheritance.intent(record) is not None:
-        for disclosure_line in inheritance.details(record):
-            print(disclosure_line, file=sys.stderr)
+        disclosed = inheritance.details(record)
+    if disclosed:
+        # Presign intent is stderr; JSON stdout remains one complete object.
+        _print_wrapped(disclosed, sys.stderr)
+        _print_file_only_notice()
     decided_at = time.time()
     # ONE signing implementation for every surface: the store's ``sign_decision``
     # (the `lop operator sign` path), so "who may approve" cannot drift between
@@ -9033,6 +9368,10 @@ def _cmd_approvals_approve(args: argparse.Namespace) -> int:
         "state": decided["state"],
         "signature": _approval_signature_payload(decided),
     }
+    if disclosed:
+        # The disclosure was printed ONCE, above, before signing (UX U5). After it: the state
+        # and the next step only -- printing the whole block again doubled the output.
+        return _emit_wrapped(args, payload, _approved_credential_lines(decided))
     return _emit(args, payload, _approval_lines(decided))
 
 
@@ -9119,15 +9458,20 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
             if lines:
                 lines.append("")
             # A credential permission is one summary line here; its full disclosure is `show`.
-            lines.extend(
-                inheritance.list_lines(row)
-                if inheritance.intent(row) is not None
-                else _approval_lines(row)
-            )
-        return _emit(args, payload, lines or ["no approvals on this device"])
+            from local_operator.network.credentials import finite_share
+
+            if inheritance.intent(row) is not None:
+                lines.extend(inheritance.list_lines(row))
+            elif finite_share.intent(row) is not None:
+                # The same compact card as inheritance (UX U6, design D4), not the full
+                # disclosure: `show` keeps every fact.
+                lines.extend(finite_share.list_lines(row))
+            else:
+                lines.extend(_approval_lines(row))
+        return _emit_wrapped(args, payload, lines or ["no approvals on this device"])
     if verb == "show":
         record = approval_store.load_record(args.approval)
-        return _emit(args, {"ok": True, "approval": record}, _approval_lines(record))
+        return _emit_wrapped(args, {"ok": True, "approval": record}, _approval_lines(record))
     if verb == "request":
         return _cmd_approvals_request(args)
     if verb == "approve":

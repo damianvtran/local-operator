@@ -51,6 +51,25 @@ afterEach(() => {
 	document.documentElement.dir = "ltr";
 });
 
+/** The keys the redesigned list ACTUALLY renders (sentence case, O1). The
+    superseded `relay.session.*` values above stay frozen and unused — the
+    catalogue freeze forbids editing an existing English value, so a changed
+    string is a new `relay.chrome.*` key and both are asserted. */
+const CHROME = {
+	"relay.chrome.list.no_matches": "No matching conversations",
+	"relay.chrome.list.new": "New",
+	"relay.chrome.list.new_label": "New session",
+	"relay.chrome.list.starting": "Starting…",
+} as const;
+
+describe("relay.chrome list copy the redesign renders", () => {
+	it("paints the sentence-case English the list surfaces use", () => {
+		for (const [key, text] of Object.entries(CHROME)) {
+			expect(messageRuntime.t(key as keyof typeof CHROME)).toBe(text);
+		}
+	});
+});
+
 describe("relay.session extraction", () => {
 	it("renders byte-identical English for every owned session key", () => {
 		for (const [key, text] of Object.entries(BEFORE)) {

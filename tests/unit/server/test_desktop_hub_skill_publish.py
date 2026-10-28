@@ -534,6 +534,9 @@ def test_hub_skills_advertises_the_whole_adapter_and_every_promised_route_exists
     }
     assert ("/v1/desktop/hub/skills/pull", "POST") in routes
     assert ("/v1/desktop/hub/skills/publish", "POST") in routes
+    # The republish half of "publish": the UI's `hub.push` arm. It 404ed for lack of
+    # this route while `hub_skills` was already advertised.
+    assert ("/v1/desktop/hub/updates/push", "POST") in routes
     assert ("/v1/desktop/hub/links", "GET") in routes
 
     # The DISPATCHER, not the declared literal: a literal left behind after its

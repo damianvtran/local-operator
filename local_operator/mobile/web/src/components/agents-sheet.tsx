@@ -60,7 +60,7 @@ function Group({
 }) {
 	if (agents.length === 0) return null;
 	return (
-		<section className="border-t border-hairline px-3 py-2 first:border-t-0">
+		<section className="px-3 py-2 first:border-t-0">
 			<h3 className="mb-1 text-meta font-medium text-ink-dim">{label}</h3>
 			{agents.map((agent) => (
 				<AgentRow

@@ -1,0 +1,90 @@
+{
+  "schema": 1,
+  "audit_id": "nt25a2",
+  "audit_kind": "independent_current_byte_namespace_delta_audit",
+  "locale": "ru",
+  "namespace": "wire.slash.notifications_page",
+  "audit_date": "2026-10-25",
+  "audited_revision": "329b5c581784df1082dbd0630c0f814c7a3c0c8f",
+  "audited_revision_note": "One-key remediation remains uncommitted; input hashes bind exact working-tree bytes.",
+  "source_audit_revision": "3c16a9e77c63dce7082af6137e151421b6cbf2be",
+  "key_count": {
+    "en": 1,
+    "target": 1
+  },
+  "verdict": "passed",
+  "verdict_reason": "R5 fixed exactly as proposed; literal read, idiomatic terminology/action wording, core parser/render and maxCells pass.",
+  "auditor": {
+    "agent": "translation-auditor",
+    "session": "ffd16b7ff158",
+    "instance": "ffd16b7ff158",
+    "model": "openai/gpt-6-astra",
+    "actual_model_source": "Resumed session-state environment header: Model openai/gpt-6-astra.",
+    "date": "2026-10-25",
+    "independence": "Same independent auditor session as nt25a1; authored none of the translations or remediation; no catalogue/ledger/git edits."
+  },
+  "translator": {
+    "agent": "L1-core-notify coder",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-10-25"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.json",
+      "sha256": "9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594"
+    },
+    "en_context_sidecar": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.context.json",
+      "sha256": "2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ru/wire.slash.notifications_page.json",
+      "sha256": "60d8b0637b2c1a2793e60157cf16b5626f42f427c55ad66fa7e3fd528029f367"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "artifacts": [
+    "report.md",
+    "audit.log",
+    "receipt.json"
+  ],
+  "audit_log": {
+    "path": "audit.log",
+    "state": "present",
+    "command": "env -i HOME=\"$LOCAL_OPERATOR_SCRATCHPAD/ru-a2-home\" LOCAL_OPERATOR_CONFIG_DIR=\"$LOCAL_OPERATOR_SCRATCHPAD/ru-a2-home/config\" PATH=\"$PATH\" PYTHONPATH=\"$PWD\" PYTHONDONTWRITEBYTECODE=1 TERM=xterm-256color .venv/bin/python \"$LOCAL_OPERATOR_SCRATCHPAD/audit-ru-round2.py\"",
+    "exit_code": 0
+  },
+  "findings": [],
+  "resolved_findings": [
+    {
+      "id": "R5",
+      "previous_record": "i18n/audits/evidence/ru/wire.slash.notifications_page/nt25a1/record.json",
+      "status": "fixed",
+      "key": "wire.slash.notifications_page.help",
+      "repair": "Запросы, обновления; read помечает всё прочитанным",
+      "target_sha256": "60d8b0637b2c1a2793e60157cf16b5626f42f427c55ad66fa7e3fd528029f367"
+    }
+  ],
+  "retained_scope": {
+    "evidence": "audit.log SHA-256 equality checks",
+    "namespaces": [
+      "wire.errors.notifications",
+      "ui.notifications"
+    ],
+    "prior_minor_findings_retained": true
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0,
+    "rejected": 0,
+    "findings_total": 0
+  },
+  "limitations": [
+    "Delta-only semantic audit of one help key.",
+    "No native-speaker or rendered-fit evidence."
+  ]
+}

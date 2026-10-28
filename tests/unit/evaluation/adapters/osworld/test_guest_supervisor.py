@@ -386,6 +386,9 @@ async def test_allocation_installs_once_before_task_setup(
         monkeypatch.setattr(provider, "_wait_ready", lambda *args: "127.0.0.1")
         monkeypatch.setattr(provider, "_prepare_guest_disk", lambda *args: order.append("disk"))
         monkeypatch.setattr(provider, "_start_desktop_env", lambda *args: order.append("task"))
+        # The X-display leak fix runs between disk preparation and the
+        # supervisor install (``guest_xcursor``); it is pinned in that slot here.
+        monkeypatch.setattr(provider, "_patch_guest_xcursor", lambda: order.append("xcursor"))
 
         def install(*args: Any, **kwargs: Any) -> guest_disk.CommandResult:
             order.append("supervisor")
@@ -396,7 +399,7 @@ async def test_allocation_installs_once_before_task_setup(
         monkeypatch.setattr(provider, "_run_guest_command", install)
         await provider.allocate(_plan(), _task(), cache_root=provider._cache_root)
         provider._install_guest_supervisor(_plan())
-        assert order == ["disk", "supervisor", "task"]
+        assert order == ["disk", "xcursor", "supervisor", "task"]
         report = json.loads((provider._cache_root / "guest-supervisor-setup.json").read_text())
         assert report["installed"] is True
         assert report["status"] == "supervised"
@@ -609,18 +612,31 @@ _BUSY_TERMINAL_DELAY_S = 1.5
 
 
 def _start_action_server(
-    *, terminal_delay_s: float
+    *,
+    terminal_delay_s: float,
+    platform_delay_s: float | None = None,
+    get_paths: list[str] | None = None,
+    release: threading.Event | None = None,
 ) -> tuple[ThreadingHTTPServer, list[dict[str, Any]], threading.Thread]:
-    """A real loopback action server: delayed ``/terminal``, recording ``/execute``.
+    """A real loopback action server: delayed GETs, recording ``/execute``.
 
     Real sockets rather than a stubbed client, because the defect lives in the
     interaction between the probe's deadline and a server that is slow to
     answer; a stub cannot reproduce a read timeout. The receipt command is
     answered with a healthy baseline, so a probe that succeeds proceeds to a
     normal ``verified_none`` rather than a restart.
+
+    ``/terminal`` and ``/platform`` are delayed separately because upstream's
+    costs differ: ``/terminal`` walks the AT-SPI desktop tree, ``/platform``
+    returns ``platform.system()``. ``platform_delay_s`` defaults to the
+    terminal delay -- a server that is busy as a whole. ``get_paths``, when
+    given, records every GET path in arrival order. ``release``, when given,
+    cuts every pending delay short once set, so a test can stop a server whose
+    handler is still blocked without paying (or leaking) the rest of it.
     """
 
     action_posts: list[dict[str, Any]] = []
+    platform_delay = terminal_delay_s if platform_delay_s is None else platform_delay_s
     baseline = {
         "schema_version": 1,
         "records": [],
@@ -645,9 +661,15 @@ def _start_action_server(
             self.wfile.write(body)
 
         def do_GET(self) -> None:
-            # Accepted immediately, answered only after the simulated screenshot
-            # or page load: exactly the shape a short probe calls ambiguous.
-            time.sleep(terminal_delay_s)
+            # Accepted immediately, answered only after the simulated desktop
+            # work: exactly the shape a short probe calls ambiguous.
+            if get_paths is not None:
+                get_paths.append(self.path)
+            delay = platform_delay if self.path == "/platform" else terminal_delay_s
+            if release is not None:
+                release.wait(delay)
+            else:
+                time.sleep(delay)
             self._respond(b"")
 
         def do_POST(self) -> None:
@@ -754,6 +776,82 @@ async def test_a_busy_server_is_not_mistaken_for_a_dead_one(
             assert len(action_posts) == 1, "the patient probe must attempt and deliver"
     finally:
         _stop_action_server(server, thread)
+
+
+#: How long the loopback server holds ``/terminal`` in the AT-SPI test below:
+#: past the 5 s probe timeout, inside the 4-31 s a focused terminal measured on
+#: a real v2.1 guest (see ``providers.aws._LIVENESS_PATH``).
+_ATSPI_TERMINAL_DELAY_S = 8.0
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_heavy_desktop_does_not_refuse_a_live_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The main16 wedge: ``/terminal`` blocks on AT-SPI while the server lives.
+
+    Upstream's ``/terminal`` serialises the whole AT-SPI desktop whenever a
+    terminal is active, so with a terminal open it answered past the 5 s probe
+    timeout on a real guest while ``/platform`` answered in ~0.1 s. Probing
+    ``/terminal`` mid-episode therefore read a live server as ReadTimeout
+    (ambiguous), exhausted the budget and refused the action unsent -- 7 of
+    the 10 wedged main16 episodes. The REAL probe timeout is used throughout.
+    The provider's clock is a stub that only sleeps advance, so a real
+    ReadTimeout costs no budget; the negative control pins the cadence to one
+    5 s wait so it makes exactly ONE probe instead of paying five real ones.
+
+    Negative control: the old endpoint against this server sends nothing.
+    Positive: the liveness endpoint delivers exactly one action, and never
+    asks ``/terminal`` at all.
+    """
+
+    get_paths: list[str] = []
+    release = threading.Event()
+    server, action_posts, thread = _start_action_server(
+        terminal_delay_s=_ATSPI_TERMINAL_DELAY_S,
+        platform_delay_s=0.0,
+        get_paths=get_paths,
+        release=release,
+    )
+    try:
+        monkeypatch.setattr(aws_mod, "GUEST_PORT", server.server_address[1])
+        assert aws_mod._RECOVERY_PROBE_TIMEOUT_S == 5.0
+        with _Stubs() as stubs:
+            provider = _provider_with_real_transport(stubs, tmp_path)
+            assert provider._cache_root is not None
+
+            with monkeypatch.context() as old:
+                old.setattr(aws_mod, "_LIVENESS_PATH", aws_mod._ALLOCATION_READY_PATH)
+                old.setattr(aws_mod, "_PRE_ACTION_RECOVERY_BUDGET_S", 5.0)
+                old.setattr(aws_mod, "_RECOVERY_PROBE_DELAYS_S", (5.0,))
+                with pytest.raises(aws_mod.GuestExecutionError, match="not attempted"):
+                    await provider.execute(["old_probe()"], settle=False)
+            assert action_posts == [], "the /terminal probe must refuse without sending input"
+            assert get_paths == ["/terminal"]
+            evidence = json.loads(
+                (provider._cache_root / "guest-supervisor-recovery.json").read_text()
+            )
+            assert {entry["error_class"] for entry in evidence["probe_outcomes"]} == {"ReadTimeout"}
+            assert evidence["path_unreachable"] is False
+
+            get_paths.clear()
+            await provider.execute(["new_probe()"], settle=False)
+            assert len(action_posts) == 1, "the liveness probe must attempt and deliver once"
+            encoded = action_posts[0]["command"][-1]
+            assert base64.b64decode(encoded).decode() == "new_probe()"
+            assert get_paths and set(get_paths) == {"/platform"}
+    finally:
+        # The abandoned /terminal handler is still blocked; release it so the
+        # server joins its threads instead of leaking or waiting them out.
+        release.set()
+        _stop_action_server(server, thread)
+
+
+def test_only_allocation_readiness_asks_terminal() -> None:
+    """The two probe purposes stay distinct, and only admission costs AT-SPI."""
+
+    assert aws_mod._ALLOCATION_READY_PATH == "/terminal"
+    assert aws_mod._LIVENESS_PATH == "/platform"
 
 
 @pytest.mark.asyncio
@@ -5013,9 +5111,80 @@ async def test_a_changed_watchdog_summary_is_written_without_a_recovery(
         evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
         assert evidence["observed"] == "verified_none"
         assert evidence["watchdog"]["attempts"] == 5
+        # Read in this very call: the block is a current observation.
+        assert evidence["watchdog_source"] == "fresh_receipt"
+        assert evidence["watchdog_observed_at"] is not None
+        assert evidence["watchdog_age_s"] == 0.0
         # The next action sees the same summary and writes nothing new.
         assert provider._recover_guest_supervisor().state == "verified_none"
         assert writes == ["guest-supervisor-recovery.json"]
+
+
+def test_an_exhausted_recovery_marks_its_watchdog_block_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-emitted ``serving`` must say it is the LAST read, not this one.
+
+    The exhaustion record cannot read the receipt (the probes never got an
+    answer), so its watchdog block is whatever the last successful read left.
+    It once read as a fresh ``status: serving`` and an investigation spent two
+    days on a server it believed healthy. The record now names the source, the
+    wall-clock time of that read and its age on the provider's clock.
+    """
+
+    with _Stubs() as stubs:
+        provider = _provider_over(stubs, tmp_path)
+        assert provider._cache_root is not None
+        provider._supervisor_unit = "action-server.service"
+        clock = {"now": 100.0}
+        provider._monotonic = lambda: clock["now"]
+        provider._sleep = lambda seconds: clock.__setitem__("now", clock["now"] + seconds)
+
+        # No read yet: an exhaustion has nothing to re-emit, and says so.
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (False, {"answered": False, "error_class": "ReadTimeout"}),
+        )
+        assert provider._recover_guest_supervisor(budget_s=1.0).recovery_exhausted
+        evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
+        assert evidence["watchdog_source"] == "absent"
+        assert evidence["watchdog_observed_at"] is None
+        assert evidence["watchdog_age_s"] is None
+        assert evidence["watchdog"]["status"] == "absent"
+
+        # A successful read caches the summary...
+        envelope = _envelope([])
+        envelope["watchdog"] = _watchdog_payload(attempts=1)
+        monkeypatch.setattr(
+            provider,
+            "_run_guest_command",
+            lambda *args, **kwargs: guest_disk.CommandResult(0, json.dumps(envelope), ""),
+        )
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (True, {"answered": True}),
+        )
+        assert provider._recover_guest_supervisor().state == "verified_none"
+        cached = provider._supervisor_watchdog
+        observed_at = provider._supervisor_watchdog_observed_at
+        assert cached is not None and observed_at is not None
+
+        # ...which a later exhaustion re-emits, marked cached and aged.
+        clock["now"] += 42.0
+        monkeypatch.setattr(
+            provider,
+            "_probe_control_server_outcome",
+            lambda timeout: (False, {"answered": False, "error_class": "ReadTimeout"}),
+        )
+        assert provider._recover_guest_supervisor(budget_s=1.0).recovery_exhausted
+        evidence = json.loads((provider._cache_root / "guest-supervisor-recovery.json").read_text())
+        assert evidence["watchdog"] == cached
+        assert evidence["watchdog_source"] == "cached_last_receipt"
+        assert evidence["watchdog_observed_at"] == observed_at
+        # 42 s of injected clock plus the 1 s budget the exhaustion waited.
+        assert evidence["watchdog_age_s"] == 43.0
 
 
 @pytest.mark.asyncio

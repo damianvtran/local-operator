@@ -189,6 +189,95 @@ def test_swap_free_is_a_pressure_floor_never_spendable_budget(
     assert pressured.available_mb == 7109  # reported arm unchanged
 
 
+def _fake_meminfo(
+    monkeypatch: pytest.MonkeyPatch, *, available_mb: int, swap_total_mb: int, swap_free_mb: int
+) -> None:
+    """Serve a synthetic ``/proc/meminfo`` to the Linux probe arms.
+
+    The Linux arms read the file directly (no runner seam), so the module-global
+    ``open`` is shadowed for that ONE path; every other path falls through to the
+    real builtin. ``_platform`` is pinned to linux so the parse runs on macOS too.
+    """
+    import builtins
+
+    text = (
+        "MemTotal:       16081288 kB\n"
+        f"MemAvailable:   {available_mb * 1024} kB\n"
+        f"SwapTotal:      {swap_total_mb * 1024} kB\n"
+        f"SwapFree:       {swap_free_mb * 1024} kB\n"
+    )
+    real_open = builtins.open
+
+    def fake_open(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if path == "/proc/meminfo":
+            import io
+
+            return io.StringIO(text)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(mg, "_platform", lambda: "linux")
+    monkeypatch.setattr(mg, "open", fake_open, raising=False)
+
+
+def test_a_swapless_linux_host_is_not_swap_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``SwapTotal: 0`` is "no swap", not "swap ran out" (lop-remote-node-2).
+
+    Measured 2026-10-28 on a 16 GB node with 13.5 GB MemAvailable and no swap:
+    the probe read ``SwapFree: 0`` as exhaustion, the pressure floor cut the
+    effective available to 256 MB, and every bash command was capped at the 64 MB
+    floor, which killed ``lop network credentials`` (~92 MB peak). Only the
+    physical arms may bind on such a host.
+    """
+    _fake_meminfo(monkeypatch, available_mb=13493, swap_total_mb=0, swap_free_mb=0)
+    monkeypatch.setattr(mg, "_total_memory_mb", lambda: 15704)
+    assert mg._free_swap_mb(_fake_runner()) is None
+    budget = mg.compute_budget()
+    assert budget.available_mb == 13493
+    assert "swap-pressure floor" not in budget.reason
+    # 0.25 x 15704 MB physical cap binds, not the 64 MB command floor.
+    assert budget.ceiling_mb == 3926
+
+
+def test_a_linux_host_whose_swap_ran_dry_is_still_floored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The protected case survives: swap exists (total > 0) and is ~exhausted."""
+    _fake_meminfo(monkeypatch, available_mb=13493, swap_total_mb=4096, swap_free_mb=0)
+    monkeypatch.setattr(mg, "_total_memory_mb", lambda: 15704)
+    assert mg._free_swap_mb(_fake_runner()) == 0
+    budget = mg.compute_budget()
+    assert "swap-pressure floor (free swap 0 MB)" in budget.reason
+    assert budget.ceiling_mb == mg._MIN_CEILING_MB
+
+
+def test_the_darwin_swap_arm_reads_no_swap_file_as_no_swap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """macOS before ``dynamic_pager`` creates a swap file reports ``total = 0``;
+    that is no pool, not an exhausted one. A real pool still reports its free."""
+    monkeypatch.setattr(mg, "_platform", lambda: "darwin")
+    no_file = "total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)"
+    assert mg._free_swap_mb(_fake_runner(swapusage=no_file)) is None
+    dry = "total = 5120.00M  used = 5108.00M  free = 12.00M  (encrypted)"
+    assert mg._free_swap_mb(_fake_runner(swapusage=dry)) == 12
+    gib = "total = 2.00G  used = 1.50G  free = 0.50G  (encrypted)"
+    assert mg._free_swap_mb(_fake_runner(swapusage=gib)) == 512
+
+
+def test_admission_on_a_swapless_host_reports_no_swap_rather_than_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Admission shares the probe: a swapless host says "no measurable swap"
+    instead of "0 MB of free swap", and its headroom is MemAvailable alone."""
+    _fake_meminfo(monkeypatch, available_mb=200, swap_total_mb=0, swap_free_mb=0)
+    decision = mg.admission_check("a session runtime", floor_mb=384)
+    assert not decision.admitted
+    assert decision.swap_free_mb is None
+    assert "no measurable swap" in decision.reason
+
+
 def test_small_device_floor_keeps_ordinary_commands_alive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

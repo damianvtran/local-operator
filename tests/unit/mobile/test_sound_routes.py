@@ -52,13 +52,28 @@ def _client() -> TestClient:
     return client
 
 
+def _append(directory: Any, write: Any) -> None:
+    """Run ONE append on a fresh ``Transcript`` and release its writer lock.
+
+    A ``Transcript`` holds the session's writer lock until ``close()``, which
+    otherwise runs only at finalisation, so a test that later compresses the
+    journal is refused as "session in use" whenever the GC has not yet run
+    ``__del__``. ``write`` receives the transcript and returns the awaitable.
+    """
+    transcript = Transcript(directory)
+    try:
+        asyncio.run(write(transcript))
+    finally:
+        transcript.close()
+
+
 def _session_dir(session_id: str) -> Any:
     """A durable user conversation's directory (a transcript, no origin marker)."""
     from local_operator.harness.types import Message
 
     directory = config_dir() / "sessions" / session_id
     directory.mkdir(parents=True)
-    asyncio.run(Transcript(directory).append_message(Message.assistant("a finished answer")))
+    _append(directory, lambda t: t.append_message(Message.assistant("a finished answer")))
     return directory
 
 
@@ -72,8 +87,9 @@ def _reference_sounds(directory: Any, *digests: str) -> None:
         {"attachment": digest, "mime": "audio/mpeg", "title": "clip", "duration_s": 1.5}
         for digest in digests
     ]
-    asyncio.run(
-        Transcript(directory).append_custom(
+    _append(
+        directory,
+        lambda t: t.append_custom(
             "supplement_v1",
             {
                 "anchor": "b" * 32,
@@ -84,14 +100,15 @@ def _reference_sounds(directory: Any, *digests: str) -> None:
                 "components": [],
                 "sounds": sounds,
             },
-        )
+        ),
     )
 
 
 def _reference_component(directory: Any, digest: str) -> None:
     """A supplement row whose only attachment reference is a COMPONENT (not a sound)."""
-    asyncio.run(
-        Transcript(directory).append_custom(
+    _append(
+        directory,
+        lambda t: t.append_custom(
             "supplement_v1",
             {
                 "anchor": "c" * 32,
@@ -102,7 +119,7 @@ def _reference_component(directory: Any, digest: str) -> None:
                 "components": [{"attachment": digest, "title": "card", "source": "x"}],
                 "sounds": [],
             },
-        )
+        ),
     )
 
 

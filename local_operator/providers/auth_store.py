@@ -380,6 +380,53 @@ CREATE TABLE IF NOT EXISTS auth_credential_refresh_leases (
 """
 
 
+def failure_block_window(
+    retry_after_ms: int | None,
+    *,
+    usage_limited: bool,
+    model_id: str = "",
+    floor_ms: int = DEFAULT_BLOCK_MS,
+) -> tuple[str, int]:
+    """``(block_scope, block_ms)`` for a credential that just failed: the ONE rule.
+
+    WHY THIS IS A FUNCTION: the window a failing credential sits out used to be
+    spelled inline in :meth:`AuthStore.rotate_sibling`, so the only credential
+    that obeyed it was a LOCAL row. A row borrowed over the mesh answered the same
+    ``429 … retry in 24h`` and was asked again on the very next request, because
+    nothing on the borrower remembered it (``MeshCredentialClient.report_sync``
+    now calls this too). Both sides read the same rule here so they cannot drift.
+
+    The rule itself is unchanged: the provider's advertised wait, floored at
+    ``floor_ms`` and capped at :data:`MAX_CREDENTIAL_BLOCK_MS` — the ceiling
+    :meth:`AuthStore.block_credential` already applied to every local block, so
+    a ``retry in 24h`` rests a row for an hour and is then re-probed once rather
+    than stranded for a day on one reading. A usage-limit verdict on a model
+    with a parsable family is scoped to that family (see ``rotate_sibling`` for
+    why the family is the under-block side that heals); anything else is
+    account-wide.
+    """
+    from local_operator.model.registry import model_family
+
+    family = model_family(model_id) if model_id else ""
+    scope = f"model:{family}" if (usage_limited and family) else ""
+    window = max(floor_ms, int(retry_after_ms or 0))
+    return scope, min(window, MAX_CREDENTIAL_BLOCK_MS)
+
+
+def block_scope_gates(scope: str, model_id: str) -> bool:
+    """Whether a block written with ``scope`` stops a request for ``model_id``.
+
+    The read half of :func:`failure_block_window`, shared for the same reason:
+    an account-wide block (``""``) gates every model, a ``model:<slug>`` block
+    gates exactly the models whose id contains the slug — the predicate
+    :meth:`AuthStore.is_blocked_for_model` applies to its stored rows.
+    """
+    if not scope:
+        return True
+    lowered = (model_id or "").lower()
+    return bool(lowered) and scope.removeprefix("model:") in lowered
+
+
 class AuthStoreError(Exception):
     """Credential resolution/refresh failure (never a bare sqlite error)."""
 
@@ -2487,7 +2534,7 @@ class AuthStore:
             (credential_id, provider_key),
         ).fetchall()
         now = self._now_ms()
-        return any(until > now and scope.removeprefix("model:") in lowered for scope, until in rows)
+        return any(until > now and block_scope_gates(scope, lowered) for scope, until in rows)
 
     def blocked_remaining_ms(self, credential_id: int, provider: str, model_id: str) -> int:
         """The ms until ``credential_id`` could serve ``model_id`` again, or ``0``.
@@ -4498,6 +4545,80 @@ class AuthStore:
             account_created_at=row.created_at if row is not None else 0,
         )
 
+    async def get_catalogue_access(self, provider: str) -> OAuthAccess | None:
+        """A credential for READING a provider catalogue, not routing inference.
+
+        Inference selection deliberately excludes quota-depleted accounts. Model
+        discovery must not inherit that decision: an exhausted account can still
+        have a valid OAuth grant and a provider-published model list. Hiding that
+        list made a signed-in provider look completely empty.
+
+        Keep the cascade's credential precedence (runtime/config override, OAuth,
+        login key, environment, other stored key), but do not read usage, rank or
+        repoint accounts, clear demotions, or block a credential on failure. A
+        transient refresh error degrades to the next eligible credential; a
+        provider-declared dead grant is never sent. Successful token rotation is
+        still persisted because discarding a single-use refresh token would break
+        the account, not protect it.
+        """
+        provider = self._storage_id(provider)
+        override = self._runtime_overrides.get(provider) or self._config_overrides.get(provider)
+        if override:
+            return OAuthAccess(access_token=override, credential_id=0, kind="api_key")
+
+        key_fn = self._oauth_key_fn(provider)
+        oauth_rows = [
+            row for row in self.list_credentials(provider) if row.credential_type == "oauth"
+        ]
+        for row in oauth_rows:
+            try:
+                creds = await self._ensure_oauth_fresh(row)
+            except AuthStoreError:
+                continue
+            key = key_fn(creds) if key_fn else creds.get("access")
+            if key:
+                current = self.get_credential(row.id) or row
+                data = current.data
+                return OAuthAccess(
+                    access_token=key,
+                    credential_id=current.id,
+                    account_id=data.get("account_id"),
+                    email=data.get("email"),
+                    org_id=data.get("org_id"),
+                    api_endpoint=data.get("api_endpoint"),
+                    kind="oauth",
+                    raw=data,
+                    account_created_at=current.created_at,
+                )
+
+        # Preserve the ordinary cascade's API-key tiers and environment fallback.
+        # Iterating stored rows directly is intentional: `_usable_key_rows` also
+        # applies inference blocks, which are unrelated to catalogue authorization.
+        for source in ("login", None):
+            for row in self.list_credentials(provider):
+                if row.credential_type != "api_key":
+                    continue
+                if (source == "login") != (row.data.get("source") == "login"):
+                    continue
+                key = row.data.get("key")
+                if key:
+                    return OAuthAccess(
+                        access_token=key,
+                        credential_id=row.id,
+                        kind="api_key",
+                        account_created_at=row.created_at,
+                    )
+            if source == "login":
+                env_key = self._env_api_key(provider)
+                if env_key:
+                    return OAuthAccess(access_token=env_key, credential_id=0, kind="api_key")
+
+        resolver = self._fallback_resolvers.get(provider)
+        fallback = resolver(provider) if resolver is not None else None
+        if fallback:
+            return OAuthAccess(access_token=fallback, credential_id=0, kind="api_key")
+        return None
+
     async def list_oauth_accesses(self, provider: str) -> list[OAuthAccess]:
         """EVERY logged-in OAuth account for ``provider``, each one refreshed.
 
@@ -5118,15 +5239,17 @@ class AuthStore:
                 # unusable", so it is never written from a family-named
                 # rotation. The family comes from the model the request ran,
                 # via the same parser the usage layer's tier rows key on.
-                from local_operator.model.registry import model_family
-
-                family = model_family(model_id) if model_id else ""
-                scope = f"model:{family}" if (usage_limited and family) else ""
+                scope, window_ms = failure_block_window(
+                    retry_after,
+                    usage_limited=usage_limited,
+                    model_id=model_id,
+                    floor_ms=block_ms,
+                )
                 self.block_credential(
                     failing.id,
                     provider,
                     block_scope=scope,
-                    block_ms=max(block_ms, retry_after or 0),
+                    block_ms=window_ms,
                 )
             if usage_limited:
                 # Sticky preserved: same account stays first after backoff.

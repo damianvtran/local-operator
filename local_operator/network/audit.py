@@ -189,6 +189,14 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # filed, and the permission recorded. Ids and the provider key only.
         "credential.inherit_requested",
         "credential.inherit_applied",
+        # A credential card signed, refused before signing, or applied FROM THE DESKTOP
+        # (credentials/desktop_approval.py). The signature row names its ASSURANCE --
+        # `presence` (an OS prompt proved a person) or `file_only` (the operator's 0600 key
+        # signed; no person is proven) -- so an incident review can tell the two apart.
+        "credential.desktop_signed",
+        "credential.desktop_sign_refused",
+        "credential.desktop_applied",
+        "credential.desktop_apply_refused",
         # A refusal: which device asked, for which key, and the machine code. The
         # person-facing sentence is rendered where the operator is, never stored here.
         "credential.grant_refused",
@@ -500,6 +508,14 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     ),
     "credential.inherit_requested": frozenset({"credential_key", "act", "sub", "approval_id"}),
     "credential.inherit_applied": frozenset({"credential_key", "act", "sub", "approval_id"}),
+    "credential.desktop_signed": frozenset(
+        {"surface", "assurance", "operation", "key_id", "disclosure_digest"}
+    ),
+    "credential.desktop_sign_refused": frozenset(
+        {"surface", "operation", "code", "authority_level"}
+    ),
+    "credential.desktop_applied": frozenset({"surface", "operation"}),
+    "credential.desktop_apply_refused": frozenset({"surface", "operation", "code"}),
     "credential.grant_refused": frozenset({"credential_key", "act", "sub", "code", "capability"}),
     "credential.refresh": frozenset({"credential_key", "act", "sub", "cause"}),
     "credential.report": frozenset({"credential_key", "act", "sub", "failure"}),
@@ -593,7 +609,13 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "update_rollout_started": frozenset(
         {"rollout", "authority", "policy", "via", "target", "from", "members"}
     ),
-    "update_member_state": frozenset({"rollout", "state", "code", "reason", "method", "version"}),
+    # ``left_busy`` (#3028, QA round 2 Q8): the ids a generation-layout member
+    # deliberately left on its old build — the receipt's sentence is capped, so
+    # the names it carries can be lost. A list of short ids, bounded by count at
+    # the emitter (``rollouts.LEFT_BUSY_CAP``) and here by ``_clean_value``.
+    "update_member_state": frozenset(
+        {"rollout", "state", "code", "reason", "method", "version", "left_busy"}
+    ),
     "update_rollout_done": frozenset({"rollout", "counts"}),
     # The suppression row (S3b): which front end moved (``via``), what the key
     # said (``policy``) and the per-run override when it was the flag that
@@ -681,6 +703,9 @@ DURABLE_EVENTS: frozenset[str] = frozenset(
         "onboard_approved",
         "onboard_denied",
         "onboard_connected",
+        # A desktop credential signature is the same authority decision as
+        # `onboard_approved`, plus the assurance it was made at.
+        "credential.desktop_signed",
         # The mesh update request and its by-rule refusals are AUTHORITY
         # decisions ("may this peer move my install"): a widened standing grant
         # whose request landed with no record would leave a device explaining an

@@ -71,6 +71,8 @@ from local_operator.evaluation.session_arm import (
     AMBIGUOUS_REBIND_BUDGET,
     BRIDGE_WEDGED_TERMINAL,
     EPISODE_TOOL_SURFACE,
+    NOT_APPLIED_REBIND_LIMIT,
+    RECOVERY_AFTER_NOT_APPLIED,
     RECOVERY_AFTER_READBACK_LOSS,
     ActionBridge,
     ObservationRenderer,
@@ -84,6 +86,7 @@ from local_operator.evaluation.session_arm import (
     declare_action_server,
     open_episode_session,
     prose_claims_completion,
+    render_prompt_header,
     run_session_episode,
     session_tool_names,
     split_prompt_content,
@@ -1750,7 +1753,8 @@ class TestFailedExecuteRecovery:
                 raise _observation_phase_error()
             return _result(input_observation=obs0, output_observation=obs1)
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             re_reads.append(1)
             return obs0
 
@@ -1792,7 +1796,8 @@ class TestFailedExecuteRecovery:
             del batch
             raise _observation_phase_error()
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             return obs1  # newer than the screen the model last saw
 
         bridge = _bridge(tmp_path, execute=execute, recover=recover)
@@ -1814,7 +1819,8 @@ class TestFailedExecuteRecovery:
             del batch
             raise _observation_phase_error()
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             re_reads.append(1)
             raise _observation_phase_error()  # the environment is still down
 
@@ -1839,7 +1845,8 @@ class TestFailedExecuteRecovery:
             del batch
             raise _deadline_error()
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             re_reads.append(1)
             return _observation()
 
@@ -1888,7 +1895,8 @@ class TestFailedExecuteRecovery:
             # refusal (the recorded sequence's final class).
             raise _invalid_state_error()
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             recovered_calls.append(1)
             return _observation(sequence=2, text="screen C")
 
@@ -1935,7 +1943,8 @@ class TestFailedExecuteRecovery:
             del batch
             raise _invalid_state_error()
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             re_reads.append(1)
             raise _observation_phase_error()
 
@@ -1964,7 +1973,8 @@ class TestFailedExecuteRecovery:
                 ),
             )
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             re_reads.append(1)
             return _observation()
 
@@ -1984,7 +1994,8 @@ class TestFailedExecuteRecovery:
             executed.append(batch)
             raise _observation_phase_error()
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             raise _observation_phase_error()
 
         bridge = _bridge(
@@ -2041,7 +2052,8 @@ class TestFailedExecuteRecovery:
             del batch
             raise _observation_phase_error()
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             return obs0
 
         bridge = _bridge(
@@ -2055,6 +2067,251 @@ class TestFailedExecuteRecovery:
         assert [kind for kind, _ in recorded] == ["output_epoch", "recovered"]
         assert recorded[1][1]["observation_id"] == obs0.observation_id
         assert recorded[1][1]["transport_error"].startswith("RpcRemoteError")
+
+
+def _not_applied_error() -> RpcRemoteError:
+    """The wire shape of an adapter-declared ``ActionNotAppliedError`` -- the
+    OSWorld main16 wedge ("guest action 1 was not attempted; no input was
+    sent"), now declared instead of crossing as ``phase == "unknown"``."""
+
+    return RpcRemoteError(
+        "adapter_error",
+        "adapter operation failed",
+        RpcErrorDetail(
+            exception_type="ActionNotAppliedError",
+            message=(
+                "guest action 1 was not attempted; no input was sent; supervisor "
+                "recovery budget exhausted"
+            ),
+            method="execute",
+            operation_id="exec-na",
+            phase="not_applied",
+        ),
+    )
+
+
+class TestNotAppliedRebind:
+    """A DECLARED not-applied batch re-binds once, tells the model the batch did
+    not run, and is bounded by ``NOT_APPLIED_REBIND_LIMIT`` consecutive
+    failures so a dead guest cannot spin the step budget."""
+
+    _WAIT = {"actions": [{"kind": "wait", "duration_ms": 50}]}
+
+    @pytest.mark.asyncio
+    async def test_re_binds_once_and_the_next_batch_runs(self, tmp_path: Path) -> None:
+        obs0 = _observation()
+        obs1 = _observation(sequence=1, text="screen B")
+        executed: list[Any] = []
+        re_reads: list[int] = []
+        recorded: list[tuple[str, dict[str, Any]]] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            executed.append(batch)
+            if len(executed) == 1:
+                raise _not_applied_error()
+            return _result(input_observation=obs1, output_observation=_observation(sequence=2))
+
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is True
+            re_reads.append(1)
+            return obs1
+
+        bridge = _bridge(
+            tmp_path,
+            observation=obs0,
+            execute=execute,
+            recover=recover,
+            record=lambda kind, payload: recorded.append((kind, payload)),
+        )
+        first = await bridge.call(self._WAIT)
+        assert first["is_error"] is True
+        assert first["details"]["recovered"] is True
+        assert first["details"]["not_applied"] is True
+        # Fresh screen follows the declaration; its FULL binding is journalled.
+        assert [block.text for block in first["content"]] == [RECOVERY_AFTER_NOT_APPLIED, "seen 1"]
+        assert recorded[1][1]["observation"] == obs1
+        assert bridge.end_requested is None
+        assert re_reads == [1]
+        assert [kind for kind, _ in recorded] == ["output_epoch", "not_applied_rebind"]
+        assert recorded[1][1]["consecutive"] == 1
+        assert recorded[1][1]["limit"] == NOT_APPLIED_REBIND_LIMIT
+
+        bridge.fold(TurnEndEvent())
+        after = await bridge.call(self._WAIT)
+        assert after["is_error"] is False
+        assert len(executed) == 2 and re_reads == [1]
+        assert executed[1].observation_id == obs1.observation_id
+        # The failed batch's epoch was charged at admission, the success's too.
+        assert bridge.steps == 2
+
+    @pytest.mark.asyncio
+    async def test_the_consecutive_cap_ends_the_episode_legibly(self, tmp_path: Path) -> None:
+        re_reads: list[int] = []
+        recorded: list[tuple[str, dict[str, Any]]] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise _not_applied_error()
+
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is True
+            re_reads.append(1)
+            return _observation()
+
+        bridge = _bridge(
+            tmp_path,
+            execute=execute,
+            recover=recover,
+            max_steps=50,
+            record=lambda kind, payload: recorded.append((kind, payload)),
+        )
+        for _ in range(NOT_APPLIED_REBIND_LIMIT):
+            reply = await bridge.call(self._WAIT)
+            assert reply["details"].get("not_applied") is True
+            assert bridge.end_requested is None
+            bridge.fold(TurnEndEvent())
+
+        final = await bridge.call(self._WAIT)
+        assert final["details"]["terminal"] == BRIDGE_WEDGED_TERMINAL
+        assert bridge.end_requested == BRIDGE_WEDGED_TERMINAL
+        # The cap costs no re-read: exactly one per re-bound failure.
+        assert len(re_reads) == NOT_APPLIED_REBIND_LIMIT
+        sentence = final["content"][-1].text
+        assert sentence == bridge.end_diagnostic
+        assert f"refused {NOT_APPLIED_REBIND_LIMIT + 1} consecutive batches" in sentence
+        assert "ambiguous" not in sentence
+        assert recorded[-1][0] == "bridge_wedged"
+        assert recorded[-1][1]["recovery_attempted"] is False
+
+    @pytest.mark.asyncio
+    async def test_a_successful_batch_resets_the_consecutive_count(self, tmp_path: Path) -> None:
+        obs0 = _observation()
+        obs1 = _observation(sequence=1, text="screen B")
+        # LIMIT failures, a success, then LIMIT failures again: never capped.
+        script = ["fail"] * NOT_APPLIED_REBIND_LIMIT + ["ok"] + ["fail"] * NOT_APPLIED_REBIND_LIMIT
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            if script.pop(0) == "fail":
+                raise _not_applied_error()
+            return _result(input_observation=obs0, output_observation=obs1)
+
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is True
+            return obs0
+
+        bridge = _bridge(tmp_path, observation=obs0, execute=execute, recover=recover, max_steps=50)
+        while script:
+            await bridge.call(self._WAIT)
+            assert bridge.end_requested is None
+            bridge.fold(TurnEndEvent())
+
+    @pytest.mark.asyncio
+    async def test_a_failed_re_read_still_wedges_accurately(self, tmp_path: Path) -> None:
+        re_reads: list[int] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise _not_applied_error()
+
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is True
+            re_reads.append(1)
+            raise _observation_phase_error()
+
+        bridge = _bridge(tmp_path, execute=execute, recover=recover)
+        reply = await bridge.call(self._WAIT)
+        assert reply["details"]["terminal"] == BRIDGE_WEDGED_TERMINAL
+        assert re_reads == [1]
+        assert "a re-read of the environment's current observation failed too" in (
+            bridge.end_diagnostic or ""
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_recover_seam_wedges_naming_the_declaration(self, tmp_path: Path) -> None:
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise _not_applied_error()
+
+        bridge = _bridge(tmp_path, execute=execute)
+        reply = await bridge.call(self._WAIT)
+        assert reply["details"]["terminal"] == BRIDGE_WEDGED_TERMINAL
+        diagnostic = bridge.end_diagnostic or ""
+        assert "declared not applied" in diagnostic
+        assert "ambiguous" not in diagnostic
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_phase_with_the_same_words_still_ends_the_episode(
+        self, tmp_path: Path
+    ) -> None:
+        """Negative control: only the DECLARED phase re-binds. The pre-1.7 wire
+        shape -- the same sentence at ``phase == "unknown"`` -- ends as before."""
+
+        re_reads: list[int] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise RpcRemoteError(
+                "adapter_error",
+                "adapter operation failed",
+                RpcErrorDetail(
+                    exception_type="GuestExecutionError",
+                    message="guest action 1 was not attempted; no input was sent",
+                    method="execute",
+                    operation_id="exec-na",
+                ),
+            )
+
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is True
+            re_reads.append(1)
+            return _observation()
+
+        bridge = _bridge(tmp_path, execute=execute, recover=recover)
+        reply = await bridge.call(self._WAIT)
+        assert reply["details"]["terminal"] == BRIDGE_WEDGED_TERMINAL
+        assert re_reads == []
+
+    @pytest.mark.asyncio
+    async def test_the_read_back_loop_never_resumes_a_not_applied_batch(
+        self, tmp_path: Path
+    ) -> None:
+        """``resume_observation`` means "committed, skip the re-apply"; a
+        not-applied batch must propagate after ONE execute, never be resumed."""
+
+        from local_operator.evaluation.protocol import ActionBatch, WaitAction
+        from local_operator.evaluation.runner.episode import EpisodeConfig
+        from local_operator.evaluation.session_arm import _make_execute
+
+        calls: list[str] = []
+
+        class Session:
+            async def execute(self, params: Any, *, timeout: float) -> Any:
+                calls.append("execute")
+                raise _not_applied_error()
+
+            async def resume_observation(self, params: Any, *, timeout: float) -> Any:
+                calls.append("resume_observation")
+                raise AssertionError("a not-applied batch must never be resumed")
+
+        config = EpisodeConfig(
+            evidence_root=tmp_path / "evidence",
+            artifact_root=tmp_path / "artifacts",
+            rescue_root=tmp_path / "rescue",
+            observation_retry_attempts=3,
+            observation_retry_delay=0.0,
+        )
+        execute = _make_execute(cast("Any", Session()), config, cast("Any", SimpleNamespace()))
+        batch = ActionBatch(
+            protocol_version="1.0",
+            task_id="task",
+            episode_id="episode",
+            observation_id="obs-0",
+            actions=(WaitAction(observation_id="obs-0", duration_ms=1),),
+        )
+        with pytest.raises(RpcRemoteError):
+            await execute(batch)
+        assert calls == ["execute"]
 
 
 class TestAmbiguousDeliveryRebind:
@@ -2096,7 +2353,8 @@ class TestAmbiguousDeliveryRebind:
                 raise AmbiguousRebindCleared(_ambiguous_delivery_error(), attempt=1, attempts=2)
             return _result(input_observation=obs0, output_observation=obs1)
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             re_reads.append(1)
             return obs0
 
@@ -2150,7 +2408,8 @@ class TestAmbiguousDeliveryRebind:
             del batch
             raise AmbiguousRebindCleared(_ambiguous_delivery_error(), attempt=1, attempts=2)
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             return obs0
 
         bridge = _bridge(tmp_path, observation=obs0, execute=execute, recover=recover)
@@ -2182,7 +2441,8 @@ class TestAmbiguousDeliveryRebind:
             del batch
             raise AmbiguousRebindCleared(_ambiguous_delivery_error(), attempt=1, attempts=2)
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             return obs0
 
         bridge = _bridge(
@@ -2222,7 +2482,8 @@ class TestAmbiguousDeliveryRebind:
             del batch
             raise _ambiguous_delivery_error()
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             re_reads.append(1)
             return _observation()
 
@@ -2252,7 +2513,8 @@ class TestAmbiguousDeliveryRebind:
             del batch
             raise AmbiguousRebindCleared(_ambiguous_delivery_error(), attempt=1, attempts=2)
 
-        async def recover() -> Observation:
+        async def recover(*, fresh: bool = False) -> Observation:
+            assert fresh is False
             re_reads.append(1)
             raise _observation_phase_error()
 
@@ -2305,6 +2567,11 @@ class _ScriptedSession:
         self._script = list(script)
         self._sinks: list[Any] = []
         self._tools = [SimpleNamespace(name="mcp__episode_actions_apply_actions")]
+        #: The concrete ``Session`` member the arm reads confinement from
+        #: (``EpisodeSession.confined``). ``None`` until a test presets it --
+        #: the session factory's construction-time ``world_root`` install --
+        #: or the arm calls ``set_tool_confinement``.
+        self._confinement_root: str | None = None
         self.mcp_startup = None
         self.mcp_manager = None
         self.replies: list[dict[str, Any]] = []
@@ -2348,7 +2615,9 @@ class _ScriptedSession:
         )
 
     def set_tool_confinement(self, root: Any) -> None:
-        del root
+        # Mirrors ``Session.set_tool_confinement``: installing a root is what
+        # makes the session confined, so the arm's reading follows it.
+        self._confinement_root = None if root is None else str(root)
 
     async def wait_for_tools(self, required: Any, *, timeout_s: float = 30.0) -> ToolReadiness:
         # The arm's first-request gate now calls the typed owning API
@@ -3104,6 +3373,7 @@ class TestAgentStopOutcome:
         terminal_end: AgentEndEvent | None = None,
         hold_s: float = 0.0,
         max_wall_s: float | None = None,
+        confinement_root: Path | None = None,
     ) -> tuple[Any, _ScriptedSession, Any]:
         home = scratch_root / "home"
         config_dir = home / ".local-operator"
@@ -3171,6 +3441,7 @@ class TestAgentStopOutcome:
                 rescue=rescue,
                 session_opener=opener,
                 max_wall_s=max_wall_s,
+                confinement_root=confinement_root,
             )
 
         return run, session, adapter
@@ -3247,6 +3518,160 @@ class TestAgentStopOutcome:
         # The abort went through the session's normal stop path; nothing ran.
         assert session.aborts == ["episode wall budget"]
         assert adapter.calls.count("execute") == 0
+
+    async def _first_prompt(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        short_scratch: Path,
+        *,
+        installed_at_open: Path | str | None = None,
+        confinement_root: Path | None = None,
+    ) -> str:
+        run, session, _adapter = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[[{"kind": "wait", "duration_ms": 10}]],
+            terminal_message=Message(role="assistant", content=[], stop_reason="stop"),
+            terminal_end=AgentEndEvent(),
+            confinement_root=confinement_root,
+        )
+        session._tools = [
+            SimpleNamespace(name=name)
+            for name in ("bash", "write", "task", "mcp__episode_actions_apply_actions")
+        ]
+        if installed_at_open is not None:
+            # What the session factory does for ``SessionSpec.world_root``:
+            # the root is installed at CONSTRUCTION, before the arm sees it.
+            session._confinement_root = str(installed_at_open)
+        await run()
+        return session.prompts[0][0]
+
+    @pytest.mark.asyncio
+    async def test_the_first_prompt_states_the_machine_topology(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        # The REAL arm path: the prompt the session receives is rendered from
+        # the live inventory the arm read, not from a constant. A session that
+        # holds local tools beside the action tool is told they are on a
+        # different machine with no shared path. This control has NO installed
+        # confinement, so it must not claim isolation.
+        first = await self._first_prompt(tmp_path, monkeypatch, short_scratch)
+        assert first.startswith("Act on the remote computer by calling")
+        assert "share no filesystem, clipboard or network path" in first
+        assert "Your other tools (`bash`, `write`) run in a local workspace" in first
+        assert "isolated" not in first
+        assert "cannot reach the remote computer" in first
+
+    @pytest.mark.asyncio
+    async def test_a_world_root_only_session_is_described_as_isolated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        # R1-1 (PR #2958): no ``confinement_root`` argument, but the session
+        # was confined at construction from ``world_root``. The note follows
+        # the INSTALLED root, so it says isolated.
+        first = await self._first_prompt(
+            tmp_path, monkeypatch, short_scratch, installed_at_open=tmp_path / "world"
+        )
+        assert "run in an isolated scratch workspace on a different machine" in first
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_confinement_root_is_described_as_isolated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        # The production caller's shape (``scripts/run_episode.py`` passes
+        # ``confinement_root=world``): installed by ``open_episode_session``.
+        first = await self._first_prompt(
+            tmp_path, monkeypatch, short_scratch, confinement_root=tmp_path / "world"
+        )
+        assert "run in an isolated scratch workspace on a different machine" in first
+
+    @pytest.mark.asyncio
+    async def test_an_empty_installed_root_is_not_described_as_isolated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        # ``ToolConfinement.from_context`` treats a falsy root as unconfined,
+        # so an (artificial) ``""`` must not earn the isolation claim either.
+        first = await self._first_prompt(tmp_path, monkeypatch, short_scratch, installed_at_open="")
+        assert "run in a local workspace on a different machine" in first
+        assert "isolated" not in first
+
+
+class TestRenderPromptHeader:
+    """The first prompt's topology note states only facts the arm holds.
+
+    Measured defect (task_001, 2026-10-25): the header said "this computer"
+    and nothing said the local tools run elsewhere, so the model ran a
+    locally-written script inside the remote terminal and then probed for a
+    shared channel for 54 calls. See ``REMOTE_TOPOLOGY_NOTE``.
+    """
+
+    TOOL = "mcp__episode_actions_apply_actions"
+
+    def _render(self, *, surface: ActionSurface, tools: tuple[str, ...], confined: bool) -> str:
+        return render_prompt_header(
+            tool_name=self.TOOL, surface=surface, tool_names=tools, confined=confined
+        )
+
+    def test_the_pinned_episode_surface_is_told_there_is_no_shared_path(self) -> None:
+        text = self._render(
+            surface=ActionSurface(paste_text=False), tools=EPISODE_TOOL_SURFACE, confined=True
+        )
+        assert "on a different machine, not on the remote computer" in text
+        assert "share no filesystem, clipboard or network path" in text
+        assert "does not exist on the remote computer" in text
+        assert "an isolated scratch workspace" in text
+        # Every filesystem-reach tool the pinned surface holds, in the note's order.
+        assert "(`bash`, `read`, `write`, `edit`, `glob`, `grep`)" in text
+        assert "Agents you delegate to run in that same workspace" in text
+
+    def test_paste_text_is_named_only_when_the_surface_offers_it(self) -> None:
+        without = self._render(
+            surface=ActionSurface(paste_text=False), tools=EPISODE_TOOL_SURFACE, confined=True
+        )
+        with_paste = self._render(
+            surface=ActionSurface(paste_text=True), tools=EPISODE_TOOL_SURFACE, confined=True
+        )
+        assert "paste_text" not in without
+        assert "(typing text)" in without
+        assert "(typing text, or `paste_text`)" in with_paste
+
+    def test_no_benchmark_or_task_vocabulary_reaches_the_model(self) -> None:
+        for paste in (False, True):
+            # The tool's own minted name carries the action server's name
+            # (``episode-actions``); that identifier predates this note and is
+            # not prose, so the check reads the text with it removed.
+            text = (
+                self._render(
+                    surface=ActionSurface(paste_text=paste),
+                    tools=EPISODE_TOOL_SURFACE,
+                    confined=True,
+                )
+                .replace(self.TOOL, "<tool>")
+                .lower()
+            )
+            for word in ("osworld", "benchmark", "episode", "task_", "vm", "guest", "score"):
+                assert word not in text, word
+
+    def test_unconfined_sessions_do_not_claim_isolation(self) -> None:
+        text = self._render(surface=ActionSurface(), tools=EPISODE_TOOL_SURFACE, confined=False)
+        assert "isolated" not in text
+        assert "run in a local workspace on a different machine" in text
+
+    def test_no_delegation_sentence_without_the_task_tool(self) -> None:
+        text = self._render(surface=ActionSurface(), tools=("bash", self.TOOL), confined=True)
+        assert "Your other tools (`bash`)" in text
+        assert "delegate" not in text
+
+    def test_a_session_with_no_local_tools_gets_the_bare_header(self) -> None:
+        text = self._render(surface=ActionSurface(), tools=(self.TOOL, "todo"), confined=True)
+        assert text == (
+            f"Act on the remote computer by calling `{self.TOOL}`: each call carries ONE "
+            "batch of actions for the screen you were just shown and returns the state "
+            "that results. Send exactly one call per turn. When the task is complete, "
+            f"call `{self.TOOL}` with a single finish action.\n"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -4094,3 +4519,48 @@ class TestTheStreamCompletedStopBoundary:
         assert outcome.attempted_groups == 1
         assert outcome.steps == 0
         assert text.count("tool_execution_end") == 2  # both paired
+
+
+def test_identical_read_only_pixels_are_neutral_and_do_not_escalate_action_streak(
+    tmp_path: Path,
+) -> None:
+    frames = (_frame(tmp_path, PNG),)
+    renderer = ObservationRenderer(tmp_path)
+    renderer.render(_observation(frames=frames))
+    capture = renderer.render_read_only(_observation(sequence=1, frames=frames))
+    sentence = "\n".join(block.text for block in capture if hasattr(block, "text"))
+    assert "read-only capture, not an action result" in sentence
+    assert "your last action" not in sentence and "Do not repeat" not in sentence
+    # The ordinary action-result path keeps its existing advice, with no
+    # artificial no-progress streak charged by the read-only capture.
+    normal = renderer.render(_observation(sequence=2, frames=frames))
+    text = "\n".join(block.text for block in normal if hasattr(block, "text"))
+    assert "your last action changed nothing visible" in text
+    assert renderer._builder._no_change_streak == 1
+
+
+@pytest.mark.asyncio
+async def test_recovery_seam_forwards_fresh_explicitly_and_preserves_default(
+    tmp_path: Path,
+) -> None:
+    from local_operator.evaluation.adapters.api import ObservationResult, ObserveParams
+    from local_operator.evaluation.runner.episode import EpisodeConfig
+    from local_operator.evaluation.session_arm import _make_recover
+
+    calls: list[ObserveParams] = []
+    live = _observation(sequence=1)
+
+    class Session:
+        async def observe(self, params: ObserveParams, *, timeout: float) -> ObservationResult:
+            calls.append(params)
+            return ObservationResult(observation=live)
+
+    config = EpisodeConfig(
+        evidence_root=tmp_path / "evidence",
+        artifact_root=tmp_path / "artifacts",
+        rescue_root=tmp_path / "rescue",
+    )
+    recover = _make_recover(cast(Any, Session()), config, live.episode_id)
+    assert await recover(fresh=True) == live
+    assert await recover() == live
+    assert [params.fresh for params in calls] == [True, False]

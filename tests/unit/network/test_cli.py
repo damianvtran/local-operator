@@ -177,6 +177,41 @@ def test_the_mcp_push_receipt_names_the_next_step_for_a_withheld_row(
     assert "— not sent;" in out and "push again" in out, out
 
 
+def test_network_update_names_the_sessions_a_peer_left_on_its_old_build(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Q2/Q3 (QA round 1 on #3028): both the human line and ``--json`` carry ``left_busy``.
+
+    A generation-layout member updates past a busy or approval-parked session;
+    the operator who asked must be told which sessions stayed on the old build,
+    and the plain-text ``done`` branch used to drop the member's sentence.
+    """
+    answer = {
+        "ok": True,
+        "code": "done",
+        "state": "done",
+        "message": "this device moved from 0.0.1 to 0.99.0; 1 busy session(s) stay on 0.0.1",
+        "method": "uv-tool-generation",
+        "version": "0.99.0",
+        "sessions": {"moved": 0, "kept": 1},
+        "left_busy": [{"session_id": "p4rk-cli-0001", "name": "Librarian", "pending": "approval"}],
+        "device_id": "d_a",
+        "name": "device-a",
+    }
+    monkeypatch.setattr(net_cli, "_relay_answer", lambda op, **fields: dict(answer))
+    assert net_cli.main(_parser().parse_args(["network", "update", "device-a"])) == 0
+    out = capsys.readouterr().out
+    assert "device-a updated to 0.99.0" in out, out
+    assert (
+        "1 busy session(s) there stay on their old build until they settle: "
+        "Librarian (p4rk-cli-0001, waiting for approval)"
+    ) in out, out
+
+    assert net_cli.main(_parser().parse_args(["network", "update", "device-a", "--json"])) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["left_busy"] == answer["left_busy"], payload
+
+
 def test_mcp_state_render_marks_a_row_that_will_not_travel(
     root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2537,7 +2572,14 @@ class _FakeCredentialStore:
 def _mcp_login_row(url: str) -> Any:
     from types import SimpleNamespace
 
-    return SimpleNamespace(id=1, identity_key=url, updated_at=0)
+    # A row carrying a token, as a real login does: the ledger counts only a grant
+    # the runtime would use (F-READY-1), so a data-less row reads as no login.
+    return SimpleNamespace(
+        id=1,
+        identity_key=url,
+        updated_at=0,
+        data={"tokens": {"access_token": "synthetic-access"}},
+    )
 
 
 def _radient_login_row(email: str = "owner@example.test") -> Any:
@@ -3192,3 +3234,26 @@ def test_set_name_reaches_its_handler_with_the_parsed_value(
     net_cli._guard_identity_subcommand(bare)  # noqa: SLF001
     capsys.readouterr()
     assert len(seen) == 1
+
+
+@pytest.mark.parametrize("no_color", [None, "1"])
+def test_a_refusal_is_red_unless_no_color_is_set(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], no_color: str | None
+) -> None:
+    """#3002 review r3 N1: ``_print_refusal`` honours ``NO_COLOR`` (design N4).
+
+    The sentence carries the ANSI wrapper only when ``NO_COLOR`` is absent; the commands
+    a finite refusal carries are never coloured either way.
+    """
+    if no_color is None:
+        monkeypatch.delenv("NO_COLOR", raising=False)
+    else:
+        monkeypatch.setenv("NO_COLOR", no_color)
+    refusal = types.MeshRefusal("busy", "Another change was in progress.")
+    refusal.commands_label = "Apply again:"  # type: ignore[attr-defined]
+    refusal.commands = ["lop network approvals apply ap_x"]  # type: ignore[attr-defined]
+    net_cli._print_refusal(refusal)  # noqa: SLF001
+    err = capsys.readouterr().err
+    assert "Another change was in progress." in err
+    assert ("\033[" in err) is (no_color is None)
+    assert "\nlop network approvals apply ap_x\n" in err

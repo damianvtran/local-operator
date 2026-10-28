@@ -44,6 +44,10 @@ class FakeUiClient:
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((method, params))
         if method == "open":
+            if self.recover_state == "allocated":
+                # The app keys a tab by the session's allocation scope, so `open`
+                # on a scope that already holds one hands back THAT tab.
+                return {"tab": "ui:114:capability", "url": params["url"]}
             return {"tab": "ui:100:aaaaaaaabbbbccccddddeeeeffff0000", "url": params["url"]}
         if method == "read":
             return {"url": "https://example.com/", "title": "Example Domain", "text": "body"}
@@ -57,6 +61,10 @@ class FakeUiClient:
                 # (local-operator-ui src/main/browser/ownership.ts): a SUCCESSFUL
                 # acknowledgement, which is what collapses the replay chain.
                 return {"ownership_version": 1, "state": "closed", "tab": ""}
+            if self.recover_state == "allocated":
+                # The app's real answer for a LIVE, held tab (local-operator-ui
+                # src/main/browser/ownership.ts): `allocated`, not `owned`.
+                return {"ownership_version": 1, "state": "allocated", "tab": "ui:114:capability"}
             return {"ownership_version": 1, "state": "owned", "tab": "ui:100:capability"}
         if method == "owner_retain":
             return {"state": "retained"}
@@ -2463,3 +2471,84 @@ async def test_a_refused_recover_surfaces_only_the_sanitized_diagnostic(
 
     legacy = await refused("legacy", {"refusal": "stale"})
     assert "session_match" not in legacy and "stale" in legacy, "older peers keep today's message"
+
+
+@pytest.mark.asyncio
+async def test_recover_on_a_live_allocated_ui_tab_says_the_tab_is_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ui_client: FakeUiClient
+) -> None:
+    """Repro of the stale-handle report: `recover` denied a tab `open` would reuse.
+
+    The app answers `owner_recover` with state `allocated` and a live `ui:` tab.
+    `_browser_ownership_text` only knew `owned`/`cleanup_pending`, so the answer
+    fell through to "no browser tab" while the record held the handle. `recover`
+    and `open` must agree on the same handle.
+    """
+    _ui_only(monkeypatch)
+    ui_client.recover_state = "allocated"
+    context, resource = _context(tmp_path)
+    assert context.browser is not None
+
+    recovered = await builtin.execute_browser("t", {"action": "recover"}, None, None, context)
+
+    assert recovered.is_error is False, recovered.text
+    assert "no browser tab" not in recovered.text
+    assert "Nothing to recover" not in recovered.text
+    assert "Browser tab available (allocated)" in recovered.text
+    held = context.browser.surface_id
+    assert held == "ui:114:capability"
+
+    # `open` on the same session reuses the very handle `recover` reported.
+    ui_client.calls.clear()
+    reopened = await builtin.execute_browser(
+        "t", {"action": "open", "url": "https://example.com"}, None, None, context
+    )
+    assert reopened.is_error is False, reopened.text
+    assert context.browser.surface_id == held
+    assert resource.record.get("surface_id") == held
+
+
+@pytest.mark.asyncio
+async def test_recover_with_no_surface_still_says_there_is_nothing_to_recover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ui_client: FakeUiClient
+) -> None:
+    """The default sentence stays reachable when there truly is no tab."""
+    _ui_only(monkeypatch)
+    ui_client.recover_state = "unresolved"
+    context, _resource = _context(tmp_path)
+    assert context.browser is not None
+
+    result = await builtin.execute_browser("t", {"action": "recover"}, None, None, context)
+
+    assert result.is_error is False, result.text
+    assert "Nothing to recover: this session has no browser tab" in result.text
+    assert context.browser.surface_id == ""
+
+
+@pytest.mark.parametrize(
+    "state, has_surface, expected",
+    [
+        # Live-tab states with a handle: usable.
+        ("allocated", True, "Browser tab available (allocated)"),
+        ("owned", True, "Browser ownership recovered (owned)"),
+        ("cleanup_pending", True, "Browser ownership recovered (cleanup_pending)"),
+        # `pending` keeps a handle after a failed close but the tab is NOT usable;
+        # unknown states must not be promised either. Both keep the prior text.
+        ("pending", True, "Nothing to recover"),
+        ("unresolved", True, "Nothing to recover"),
+        ("somefuturestate", True, "Nothing to recover"),
+        ("", True, "Nothing to recover"),
+        # No handle: never "available".
+        ("allocated", False, "Nothing to recover"),
+        ("owned", False, "Nothing to recover"),
+        ("pending", False, "Nothing to recover"),
+        ("unresolved", False, "Nothing to recover"),
+    ],
+)
+def test_ownership_text_only_calls_a_tab_available_for_explicit_live_states(
+    state: str, has_surface: bool, expected: str
+) -> None:
+    text = builtin._browser_ownership_text(state, has_surface)
+    assert expected in text
+    if expected == "Nothing to recover":
+        assert "available" not in text

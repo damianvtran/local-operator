@@ -9,6 +9,7 @@ or zero artifact.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from lop_osworld_v2_adapter import scoring
@@ -117,3 +118,61 @@ def test_detail_byte_limit_is_exact_not_truncation(tmp_path: Path) -> None:
     with pytest.raises(ScoringProtocolError):
         scoring.score_to_artifact(raw, artifact_root=tmp_path)
     assert len(list(tmp_path.iterdir())) == 1
+
+
+# ----------------------------------------------------------------------
+# Guest-environment disclosure (``guest_xcursor``): it rides the sealed detail
+# ----------------------------------------------------------------------
+
+_PATCH = {"xcursor_patch": {"schema": "lop-guest-xcursor-patch-v1", "applied": True}}
+
+
+def _detail(tmp_path: Path, artifact: Any) -> Any:
+    import json
+
+    return json.loads((tmp_path / artifact.details.sha256).read_bytes())
+
+
+def test_no_environment_keeps_the_detail_bytes_unchanged(tmp_path: Path) -> None:
+    """The fake provider and pre-change records stage exactly the old bytes."""
+
+    plain = scoring.score_to_artifact(0.5, artifact_root=tmp_path)
+    explicit = scoring.score_to_artifact(0.5, artifact_root=tmp_path, environment=None)
+    assert plain.details == explicit.details
+    assert _detail(tmp_path, plain) == 0.5
+
+
+def test_the_environment_disclosure_is_sealed_beside_the_score(tmp_path: Path) -> None:
+    artifact = scoring.score_to_artifact(1.0, artifact_root=tmp_path, environment=_PATCH)
+    detail = _detail(tmp_path, artifact)
+    assert detail[scoring.EVALUATOR_RESULT_KEY] == 1.0
+    assert detail[scoring.GUEST_ENVIRONMENT_KEY] == _PATCH
+    assert artifact.binary == 1  # the number is untouched
+
+
+def test_an_over_budget_diagnostics_block_never_drops_the_disclosure(tmp_path: Path) -> None:
+    huge = {"schema": "lop-evaluator-diagnostics-v1", "stdout": "x" * (2 * 1024 * 1024)}
+    artifact = scoring.score_to_artifact(
+        0.0, artifact_root=tmp_path, diagnostics=huge, environment=_PATCH
+    )
+    detail = _detail(tmp_path, artifact)
+    assert detail[scoring.EVALUATOR_DIAGNOSTICS_KEY] == scoring.DIAGNOSTICS_REFUSED
+    assert detail[scoring.GUEST_ENVIRONMENT_KEY] == _PATCH
+
+
+def test_a_result_too_large_for_the_disclosure_keeps_a_fixed_marker(tmp_path: Path) -> None:
+    """m1: the disclosure is refused with a marker, never silently dropped.
+
+    The result alone fits under the 1 MiB limit, but not with the disclosure
+    beside it. An absent key would read exactly like a stock/fake-provider
+    score, hiding a possibly-deviated guest.
+    """
+
+    big_env = {"xcursor_patch": {"applied": True, "pad": "p" * 4096}}
+    # Leave room for the wrapper and the ~40-byte marker, not the 4 KiB env.
+    raw = {"score": 0.0, "blob": "x" * (scoring.MAX_SCORE_DETAIL_BYTES - 2048)}
+    artifact = scoring.score_to_artifact(raw, artifact_root=tmp_path, environment=big_env)
+    detail = _detail(tmp_path, artifact)
+    assert detail[scoring.EVALUATOR_RESULT_KEY] == raw
+    assert detail[scoring.GUEST_ENVIRONMENT_KEY] == scoring.GUEST_ENVIRONMENT_REFUSED
+    assert artifact.binary == 0

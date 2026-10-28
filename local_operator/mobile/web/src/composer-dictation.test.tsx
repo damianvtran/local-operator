@@ -116,9 +116,11 @@ function projection(): SessionProjection {
 function renderComposer() {
 	return render(
 		<Composer
+			ended={false}
 			pid="p1"
 			projection={projection()}
 			onOpenModels={() => {}}
+			onReturnToModels={() => {}}
 			onOpenEffort={() => {}}
 			effortOpen={false}
 			onCloseEffort={() => {}}

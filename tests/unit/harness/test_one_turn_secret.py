@@ -1681,3 +1681,20 @@ async def test_secret_active_tool_progress_is_never_public(nested: bool) -> None
         )
     loop = AgentLoop()
     loop._clear_one_turn_secrets(context)
+
+
+def test_clone_guard_allows_the_cache_ttl_decoration_on_an_armed_request() -> None:
+    """``SessionStreamFn`` stamps ``cache_role`` and ``cache_after_long_call``
+    on every request, armed or not; both pick a marker TTL and never message
+    bytes, so the clone guard must let them through (review S-9) while still
+    refusing a content rewrite of the same armed request."""
+    request = _request("call-a")
+    request.arm_one_turn_secrets({"call-a": SecretStr(_canary("ttl"))})
+    stamped = request.model_copy(update={"cache_role": "subagent", "cache_after_long_call": True})
+    assert stamped.cache_after_long_call is True
+    assert stamped.has_one_turn_secrets
+    # Transport policy, never serialized.
+    field = ChatRequest.model_fields["cache_after_long_call"]
+    assert field.exclude is True and field.repr is False
+    with pytest.raises(OneTurnSecretScopeError):
+        stamped.model_copy(update={"messages": [Message.user("rewritten")]})

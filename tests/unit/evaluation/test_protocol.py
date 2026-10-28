@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import pickle
+import string
 import subprocess
 import sys
 from collections import UserDict
@@ -819,6 +820,123 @@ def test_named_key_case_is_not_meaningful_but_character_case_is() -> None:
     assert KeyAction(observation_id="observation-7", keys=("A",)).keys == ("A",)
     assert KeyAction(observation_id="observation-7", keys=("a",)).keys == ("a",)
     assert KeyAction(observation_id="observation-7", keys=("shift", "A")).keys == ("SHIFT", "A")
+
+
+@pytest.mark.parametrize(
+    ("spelling", "canonical"),
+    [
+        # The main16 OSWorld refusals, in the cases the model actually sent.
+        ("Return", "ENTER"),
+        ("RETURN", "ENTER"),
+        ("return", "ENTER"),
+        ("Escape", "ESC"),
+        ("ESCAPE", "ESC"),
+        ("escape", "ESC"),
+        ("Page_Down", "PAGEDOWN"),
+        ("Page_Up", "PAGEUP"),
+        ("Caps_Lock", "CAPSLOCK"),
+        ("super", "META"),
+        ("Super_L", "META"),
+        ("Control_L", "CTRL"),
+        ("Shift_L", "SHIFT"),
+        ("Alt_L", "ALT"),
+        ("pgdn", "PAGEDOWN"),
+        ("pgup", "PAGEUP"),
+        ("del", "DELETE"),
+        ("win", "META"),
+        ("minus", "-"),
+        ("plus", "+"),
+        ("equal", "="),
+        # X11 keysyms that are ALREADY canonical under case folding: no alias
+        # entry, and they must keep working without one.
+        ("BackSpace", "BACKSPACE"),
+        ("Tab", "TAB"),
+        ("Delete", "DELETE"),
+        ("Home", "HOME"),
+        ("End", "END"),
+        ("Insert", "INSERT"),
+        ("Left", "LEFT"),
+        ("Right", "RIGHT"),
+        ("Up", "UP"),
+        ("Down", "DOWN"),
+        ("pagedown", "PAGEDOWN"),
+        ("esc", "ESC"),
+    ],
+)
+def test_standard_key_spellings_normalise_to_the_canonical_key(
+    spelling: str, canonical: str
+) -> None:
+    """Each standard spelling parses AS the canonical key, not beside it.
+
+    The parsed action is what is bound, recorded and compiled, so asserting the
+    stored value (not merely that parsing succeeds) is what proves evidence and
+    replay never carry an alias.
+    """
+
+    assert KeyAction(observation_id="observation-7", keys=(spelling,)).keys == (canonical,)
+
+
+def test_alias_is_recorded_under_its_canonical_name() -> None:
+    """The canonical form is what survives the record/replay round trip."""
+
+    batch = _batch(KeyAction(observation_id="observation-7", keys=("Escape",)))
+    encoded = batch.to_canonical_json()
+    assert b'"keys":["ESC"]' in encoded
+    assert b"Escape" not in encoded
+    decoded = ActionBatch.from_canonical_json(encoded)
+    assert decoded == batch
+    # And the alias spelling parses to the byte-identical record a canonical
+    # spelling produces, so a replayed batch cannot tell the two apart.
+    canonical = _batch(KeyAction(observation_id="observation-7", keys=("esc",)))
+    assert canonical.to_canonical_json() == encoded
+
+
+def test_alias_and_its_canonical_key_in_one_chord_are_duplicates() -> None:
+    """Normalising first means ["Escape", "esc"] is one key pressed twice."""
+
+    with pytest.raises(ValidationError, match="duplicate keys"):
+        KeyAction(observation_id="observation-7", keys=("Escape", "esc"))
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        # Ambiguous: Ctrl on Linux/Windows shortcuts, Super if read literally.
+        "cmd",
+        "command",
+        # Alt on a Mac keyboard, but may mean AltGr.
+        "option",
+        # Not standard key names; refused so the hint can teach the vocabulary.
+        "control",
+        "click",
+        # X11 page keysyms whose spelling reads as a command, not a key.
+        "Next",
+        "Prior",
+        # Right-hand modifiers: pyautogui's ctrl/shift/alt press the LEFT key,
+        # so accepting these would press a different key than the one named.
+        "Control_R",
+        "Shift_R",
+        "Alt_R",
+        "Super_R",
+    ],
+)
+def test_ambiguous_or_non_standard_key_names_are_still_refused(spelling: str) -> None:
+    with pytest.raises(ValidationError, match="unknown key"):
+        KeyAction(observation_id="observation-7", keys=(spelling,))
+
+
+def test_every_alias_targets_a_key_the_vocabulary_accepts() -> None:
+    """An alias can only rename an existing key; it can never widen the set."""
+
+    from local_operator.evaluation.protocol import KEY_ALIASES, NAMED_KEYS
+
+    for alias, target in KEY_ALIASES.items():
+        assert alias == alias.upper() and len(alias) > 1, alias
+        assert alias not in NAMED_KEYS, alias
+        assert target in NAMED_KEYS or (len(target) == 1 and target in string.punctuation), (
+            alias,
+            target,
+        )
 
 
 def test_type_action_text_is_never_case_folded() -> None:

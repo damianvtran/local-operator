@@ -365,10 +365,10 @@ class EnvironmentProvider(Protocol):
 
         MUST NOT RAISE for unreachability: every way the server can fail to
         answer -- refused, timed out within ``timeout``, a non-200 status --
-        is ``False``. The implementation reuses the SAME bounded GET the
-        allocation loop's readiness check already trusts (``_READY_PATH``,
-        upstream's own ``ensure_ready`` probe), so "reachable" means here
-        exactly what it meant when the guest was first admitted.
+        is ``False``. The implementation reuses the SAME bounded liveness GET
+        as the pre-action receipt wait (``providers.aws._LIVENESS_PATH``), an
+        endpoint that does no desktop work, so a busy desktop is never read as
+        an unreachable server.
         """
         ...
 

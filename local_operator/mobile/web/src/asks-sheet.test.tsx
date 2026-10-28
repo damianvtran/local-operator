@@ -95,6 +95,39 @@ afterEach(() => {
 	vi.clearAllMocks();
 });
 
+/* THE DRAWER'S QUESTIONS DESTINATION IS MACHINE-WIDE (UX review round 1, U1).
+   It opened this sheet with `currentSessionId=""`, which the per-conversation
+   filter could not match against anything — so the success path painted
+   "nothing waiting" over three outstanding asks. These two cases pin the mode
+   and the empty state that must still exist when the queue is genuinely empty. */
+describe("the drawer's Questions destination", () => {
+	it("lists outstanding asks from every conversation, each named", async () => {
+		rows = [
+			summary({ session_id: "mine" }),
+			summary({ session_id: "other", conversation_name: "tax receipts" }),
+		];
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ ask_id: "a-other", session_id: "other" })],
+		});
+
+		render(<AsksSheet open onClose={() => {}} currentSessionId="" />);
+
+		await waitFor(() => expect(screen.getByText("ship the fix?")).toBeTruthy());
+		// WHICH conversation is asking, so an answer is never attributed wrongly.
+		expect(screen.getByText("tax receipts")).toBeTruthy();
+		// The success path must not also claim the queue is empty.
+		expect(screen.queryByTestId("ask-sheet-empty")).toBeNull();
+	});
+
+	it("still states an empty queue when nothing is waiting anywhere", async () => {
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [] });
+
+		render(<AsksSheet open onClose={() => {}} currentSessionId="" />);
+
+		await waitFor(() => expect(screen.getByTestId("ask-sheet-empty")).toBeTruthy());
+	});
+});
+
 describe("AsksSheet", () => {
 	it("renders nothing until it is opened, and reads the aggregate when it is", async () => {
 		const { container } = render(<AsksSheet open={false} onClose={() => {}} currentSessionId="mine" />);

@@ -617,6 +617,22 @@ def _loaded_no_restart(body: str, target: str, pid: int) -> bool | None:
             sections.append(1)
     if sections or fields.get("pid") != str(pid) or fields.get("state") != "running":
         return None
+    # ``job state`` is launchd's own lifecycle reading, not a restart setting.
+    # It is also not always present: sampling one live job's ``launchctl
+    # print`` every 0.2 s on Darwin 27.0.1 (2026-10-26) showed the line from
+    # t+0.4 s in one run and never across 16 s in the next. A real owner
+    # (scripts/run_episode.py) was refused with the exact "no-restart policy is
+    # unverified" sentence on an admission body whose only off-allowlist field
+    # was ``job state = running``, while a trivial probe owner that admitted
+    # inside the same window passed -- so treating the field as an unknown
+    # shape refused genuine production owners. Only the running state this
+    # body's pid/state proof already asserts is neutral here; any other value
+    # is a shape this parser does not understand and stays unknown. KeepAlive
+    # still has to be absent from ``properties`` and triggers from their own
+    # fields, below.
+    job_state = fields.get("job state")
+    if job_state is not None and job_state != "running":
+        return None
     properties = fields.get("properties")
     if properties is None:
         return None
@@ -669,6 +685,7 @@ def _loaded_no_restart(body: str, target: str, pid: int) -> bool | None:
         "jetsam memory limit (inactive)",
         "jetsamproperties category",
         "jetsam thread limit",
+        "job state",
         "cpumon",
         "sanitizer flags",
         "properties",

@@ -1,0 +1,495 @@
+{
+  "relay.chrome.drawer.open": {
+    "role": "app-bar menu button accessible name",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Accessible name of the ☰ button at the start of the conversation list's app bar; it opens the navigation drawer. Read by screen readers only; the glyph is not translated."
+  },
+  "relay.chrome.drawer.close": {
+    "role": "drawer close button accessible name",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Accessible name of the close control inside the navigation drawer. Escape and a tap outside also close it; this is the visible, labelled path for touch screen-reader users."
+  },
+  "relay.chrome.drawer.label": {
+    "role": "navigation landmark name",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). aria-label of the drawer's <nav> landmark. Screen readers announce it as 'Navigation, navigation' style landmark names, so a single noun."
+  },
+  "relay.chrome.drawer.conversations": {
+    "role": "drawer destination and list screen title",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). The current destination in the drawer AND the conversation list's app-bar title (one key, one meaning: the list of the operator's agent conversations). App-bar width at 360 px phones leaves ~24 cells beside two icon buttons."
+  },
+  "relay.chrome.drawer.questions": {
+    "role": "drawer destination",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Opens the questions the agents are waiting on, across every conversation. A trailing count may render beside it. 'Questions' is the same word the ask chip uses ('1 question waiting')."
+  },
+  "relay.chrome.drawer.past": {
+    "role": "drawer destination",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Opens the searchable, resumable history of finished sessions. Replaces a footer button that read 'past'."
+  },
+  "relay.chrome.drawer.projects": {
+    "role": "drawer destination",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Opens the projects sheet (multi-session workstreams with status and milestones)."
+  },
+  "relay.chrome.drawer.library": {
+    "role": "drawer destination",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Opens the asset library (files the agents produced). Hidden on a relay without the library capability, never shown disabled."
+  },
+  "relay.chrome.drawer.usage": {
+    "role": "drawer destination",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Opens the cached provider usage sheet (quota and spend as last reported). Read-only."
+  },
+  "relay.chrome.drawer.appearance": {
+    "role": "drawer destination and sheet title",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Opens the appearance sheet (colour theme, wide view, group by tag); also that sheet's title."
+  },
+  "relay.chrome.drawer.settings": {
+    "role": "drawer destination",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Opens this computer's account-routing settings."
+  },
+  "relay.chrome.drawer.status": {
+    "role": "drawer footer link state",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 32,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). The quiet line at the foot of the drawer saying whether this phone's link to the computer is up. {state} is a machine token, never shown: online = live; retrying = the link has been down for a while and the app keeps retrying; other = no first connection yet. Keep the middle dot (·) separator and the U+2026 ellipsis."
+  },
+  "relay.chrome.link.reconnecting": {
+    "role": "app-bar subtitle while the link is down",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 32,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Shown under the app-bar title when the phone has lost its live connection to the computer and is retrying. The rows on screen are still true as of the last update. Also the session subtitle when the moment the link dropped is unknown. The ellipsis is U+2026."
+  },
+  "relay.chrome.link.since_seconds": {
+    "role": "session app-bar subtitle while the link is down",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 44,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Shown under a conversation's title when the phone lost its live connection and is retrying; the conversation on screen is as it was {count} seconds ago (the # renders the number, updated every few seconds, always ≥ 1). The message field stays usable: sends wait and deliver on reconnect. Sits on one line under the title at 360 px, so keep it short. Every branch must keep the number."
+  },
+  "relay.chrome.link.since_minutes": {
+    "role": "session app-bar subtitle while the link is down",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 44,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). The same line as relay.chrome.link.since_seconds once the outage passes a minute; {count} (the #) is whole minutes, ≥ 1. Every branch must keep the number."
+  },
+  "relay.chrome.list.search_open": {
+    "role": "app-bar search button accessible name",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 16,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Accessible name of the ⌕ button; pressing it swaps the title for a search field."
+  },
+  "relay.chrome.list.search_close": {
+    "role": "search field close button accessible name",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 16,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Accessible name of the ✕ that closes the search field and clears the query."
+  },
+  "relay.chrome.list.search_label": {
+    "role": "search field accessible name",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 32,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). aria-label of the conversation search field (its visible placeholder ends in an ellipsis, which does not belong in an accessible name). Matches names, tags and folders."
+  },
+  "relay.chrome.list.filter_label": {
+    "role": "filter chip group accessible name",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 32,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). aria-label of the row of filter chips under the app bar."
+  },
+  "relay.chrome.list.filter.all": {
+    "role": "filter chip",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 10,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). The default filter chip: every conversation. A pill about 32 px tall; keep it one short word."
+  },
+  "relay.chrome.list.filter.needs_you": {
+    "role": "filter chip with a count",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 16,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Filter chip for conversations blocked on the operator: an approval to give or a question to answer. {count} is how many. The middle dot separates label and count; keep it. The chip row scrolls sideways, but keep it short."
+  },
+  "relay.chrome.list.filter.unread": {
+    "role": "filter chip with a count",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 16,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Filter chip for conversations with finished work the operator has not looked at yet. {count} is how many. Keep the middle dot separator."
+  },
+  "relay.chrome.list.filter_empty": {
+    "role": "filtered-list empty state",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 40,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Shown when a filter chip is selected and no conversation matches it."
+  },
+  "relay.chrome.list.mark_all": {
+    "role": "header action",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 20,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Ghost button above the unread conversations (shown while the Unread chip is selected). One press marks every unread conversation as seen."
+  },
+  "relay.chrome.list.marking": {
+    "role": "header action busy state",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 20,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Replaces 'Mark all read' while the request is in flight. The ellipsis is U+2026."
+  },
+  "relay.chrome.list.section.pinned": {
+    "role": "list section heading",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 20,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Heading of the section holding conversations the operator pinned to the top. Small, quiet heading."
+  },
+  "relay.chrome.list.section.active": {
+    "role": "list section heading",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 20,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Heading of the section holding conversations that are running now (open on the computer)."
+  },
+  "relay.chrome.list.section.previous": {
+    "role": "list section heading",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 20,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Heading of the section holding conversations that are no longer running but are still listed."
+  },
+  "relay.chrome.list.connecting": {
+    "role": "list loading state (screen-reader text)",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Announced while the list waits for its first update; sighted readers see placeholder rows instead. The ellipsis is U+2026."
+  },
+  "relay.chrome.list.empty": {
+    "role": "empty-list headline",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 32,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Headline of the empty conversation list once the phone is connected and there is nothing to show."
+  },
+  "relay.chrome.list.empty_hint": {
+    "role": "empty-list hint",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Under the empty-list headline. 'New' names the floating button labelled with relay.chrome.list.new; use exactly that button's translated word. 'Local Operator' is the product name; do not translate it. Wraps to two lines on a phone."
+  },
+  "relay.chrome.list.no_matches": {
+    "role": "search empty state",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 32,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Shown when the search query matches nothing."
+  },
+  "relay.chrome.list.clear_search": {
+    "role": "search empty state action",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 20,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Ghost button under 'No matching conversations' that empties the query."
+  },
+  "relay.chrome.list.new": {
+    "role": "floating action button label",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 10,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). The visible label of the floating '+ New' button that starts a new conversation. The button collapses to a bare '+' while scrolling, so this is short by design."
+  },
+  "relay.chrome.list.new_label": {
+    "role": "floating action button accessible name",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 20,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Accessible name of the floating start button, read in both its labelled and its collapsed '+' form. 'Session' is one running agent conversation."
+  },
+  "relay.chrome.list.starting": {
+    "role": "floating action button busy label",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 12,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Replaces 'New' while the computer is starting the session. The ellipsis is U+2026."
+  },
+  "relay.chrome.snackbar.dismiss": {
+    "role": "snackbar close button",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 12,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Accessible close control on the short-lived message that floats above the New button (a start failure, a mark-all receipt). It also disappears on its own and can be swiped away."
+  },
+  "relay.chrome.row.actions": {
+    "role": "row action button and sheet accessible name",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 40,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Names the per-conversation actions control and the sheet it opens. {name} is the conversation's own name, inserted verbatim."
+  },
+  "relay.chrome.row.pin": {
+    "role": "row action sheet item",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 28,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Pins the conversation to the top of the list (a Pinned section). Shared with the computer's own list."
+  },
+  "relay.chrome.row.unpin": {
+    "role": "row action sheet item and swipe action",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 10,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Removes the pin. Also the label of the swipe-revealed action on a pinned row, a 72 px wide tile."
+  },
+  "relay.chrome.row.saving": {
+    "role": "row action busy state",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 12,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Replaces the pin action while the computer has not confirmed the change. The ellipsis is U+2026."
+  },
+  "relay.chrome.row.tags": {
+    "role": "row action sheet item",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 20,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Opens the sheet that assigns tag categories to this conversation. A trailing value shows the primary tag or relay.chrome.row.tags_none."
+  },
+  "relay.chrome.row.tags_none": {
+    "role": "row action sheet trailing value",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 12,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Trailing value beside 'Tags' when the conversation has no tag."
+  },
+  "relay.chrome.row.mark_read": {
+    "role": "row action sheet item",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 28,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Marks one conversation's finished work as seen. Only offered while it is unread."
+  },
+  "relay.chrome.row.open": {
+    "role": "row action sheet item",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 20,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Opens the conversation (the same as tapping the row)."
+  },
+  "relay.chrome.row.swipe_pin": {
+    "role": "swipe action",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 10,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Label of the action revealed by swiping a row toward the start edge; it pins the conversation. A 72 px wide tile under an icon, so one short word."
+  },
+  "relay.chrome.row.more": {
+    "role": "swipe action",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 10,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Label of the second swipe-revealed action; it opens the row's action sheet. A 72 px wide tile under an icon."
+  },
+  "relay.chrome.appearance.theme": {
+    "role": "appearance sheet section heading",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Heading above the list of colour themes."
+  },
+  "relay.chrome.appearance.wide_view": {
+    "role": "appearance sheet toggle",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 28,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Toggle that lets the column use the full width of a large screen instead of a phone-width column. A trailing On/Off value shows the state."
+  },
+  "relay.chrome.appearance.group_by_tag": {
+    "role": "appearance sheet toggle",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 36,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Toggle that splits the conversation list into one section per tag category. Only offered when the computer supports tags."
+  },
+  "relay.chrome.appearance.on": {
+    "role": "toggle state value",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 6,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Trailing state value of an appearance toggle that is on."
+  },
+  "relay.chrome.appearance.off": {
+    "role": "toggle state value",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 6,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Trailing state value of an appearance toggle that is off."
+  },
+  "relay.chrome.session.back": {
+    "role": "back button accessible name and error action",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 28,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Accessible name of the ‹ button in the conversation's app bar, and the visible label of the button offered when a conversation cannot be loaded."
+  },
+  "relay.chrome.session.connecting": {
+    "role": "conversation loading state",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Centred in the empty conversation area while the phone is not yet connected. The ellipsis is U+2026."
+  },
+  "relay.chrome.session.loading": {
+    "role": "conversation loading state",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 28,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Centred in the empty conversation area while the phone is connected and waiting for the conversation's first update. The ellipsis is U+2026."
+  },
+  "relay.chrome.session.empty_title": {
+    "role": "empty conversation headline",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 28,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Shown in a conversation that has no messages."
+  },
+  "relay.chrome.session.empty_hint": {
+    "role": "empty conversation hint",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 40,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Under 'No messages yet'; the message field is directly below."
+  },
+  "relay.chrome.session.subtitle.working": {
+    "role": "app-bar subtitle",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 32,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Liveness line under the conversation title while the agent works. {elapsed} is an ALREADY-FORMATTED compact duration such as '1m36s'; do not reformat it. Keep the middle dot."
+  },
+  "relay.chrome.session.subtitle.working_plain": {
+    "role": "app-bar subtitle",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Liveness line while the agent works and its start time is unknown."
+  },
+  "relay.chrome.session.subtitle.waiting": {
+    "role": "app-bar subtitle",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Liveness line while the agent is stopped on an approval the operator must give."
+  },
+  "relay.chrome.session.subtitle.idle": {
+    "role": "app-bar subtitle",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Liveness line while the agent is not working and nothing is pending."
+  },
+  "relay.chrome.session.subtitle.ended": {
+    "role": "app-bar subtitle",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Liveness line once the session has ended (its history is kept and it can be resumed)."
+  },
+  "relay.chrome.session.subtitle.not_answering": {
+    "role": "app-bar subtitle",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Liveness line while the computer's session process has stopped responding; messages will wait."
+  },
+  "relay.chrome.session.tray.label": {
+    "role": "status tray accessible name",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 28,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). aria-label of the row of status pills above the message field (approval, questions, tasks, agents)."
+  },
+  "relay.chrome.session.tray.approve": {
+    "role": "status tray pill",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 12,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). The most urgent pill: a run is held until the operator approves or denies it. Opens the approvals sheet. A short pill; one word."
+  },
+  "relay.chrome.session.tray.approve_label": {
+    "role": "status tray pill accessible name",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 48,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Accessible name of the 'Approve' pill. It must START with the same word as the visible pill (relay.chrome.session.tray.approve) so voice control users can say what they see."
+  },
+  "relay.chrome.session.tray.questions": {
+    "role": "status tray pill",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 16,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Pill for questions the agent is waiting on; opens the questions sheet. {count} is how many. Its accessible name is the longer existing 'N question(s) waiting'."
+  },
+  "relay.chrome.session.tray.tasks": {
+    "role": "status tray pill",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 16,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Pill for the session's task list; opens it. {done} of {total} tasks are finished. Keep the slash form; it is a compact fraction."
+  },
+  "relay.chrome.session.tray.agents": {
+    "role": "status tray pill",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 20,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Pill for the session's subagents (helper agents it started); opens their list. {running} of {total} are running now."
+  },
+  "relay.chrome.session.tray.agents_failed": {
+    "role": "status tray pill with failures",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 28,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). The agents pill when some subagents failed. {running} of {total} are running; {failed} (the #) failed. Every branch must keep the running/total fraction and the failed count."
+  },
+  "relay.chrome.session.tasks_title": {
+    "role": "sheet title",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Title of the sheet listing the session's tasks."
+  },
+  "relay.chrome.session.agents_title": {
+    "role": "sheet title",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Title of the sheet listing the session's subagents."
+  },
+  "relay.chrome.session.ended": {
+    "role": "banner above the message field",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 32,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Shown when the session has ended. Its history is kept and can be resumed; a Resume button sits at the end of the same banner."
+  },
+  "relay.chrome.session.ended_hint": {
+    "role": "banner hint",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Second line of the ended banner. 'Resume' names the button beside it (relay.chrome.session.resume); use that button's translated word. 'Home folder' is the operator's home directory on the computer: the session comes back there, not in its project folder."
+  },
+  "relay.chrome.session.resume": {
+    "role": "banner action",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 12,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Filled button that reopens an ended session."
+  },
+  "relay.chrome.session.resuming": {
+    "role": "banner action busy state",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 12,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Replaces 'Resume' while the computer reopens the session. The ellipsis is U+2026."
+  },
+  "relay.chrome.session.degraded": {
+    "role": "banner above the message field",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 36,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Warning banner while the computer's session process has stopped responding. Messages typed now are kept and delivered when it answers again. No action."
+  },
+  "relay.chrome.composer.label": {
+    "role": "message field accessible name",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 16,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). aria-label of the message field at the bottom of a conversation."
+  },
+  "relay.chrome.composer.folder_label": {
+    "role": "composer meta button accessible name",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 40,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Names the folder button in the message field's meta line. {name} is the last segment of the folder path, exactly as shown on the button; it must appear in the name. Opens the folder picker."
+  },
+  "relay.chrome.composer.model_label": {
+    "role": "composer meta button accessible name",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 40,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Names the model button in the message field's meta line. {label} is the button's visible text (model name and effort, e.g. 'Opus 5.5 · high'), inserted verbatim. Opens the model picker."
+  },
+  "relay.chrome.composer.spend_label": {
+    "role": "composer meta button accessible name",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 40,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Names the spend button in the message field's meta line. {label} is its visible text (context used and spend, e.g. '31% · $2.47'), inserted verbatim. Opens the breakdown."
+  },
+  "relay.chrome.spend.title": {
+    "role": "sheet title and menu item",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). Title of the sheet breaking down the session's spend and context-window use, and the session menu item that opens it."
+  },
+  "relay.chrome.model.effort": {
+    "role": "model sheet row label",
+    "tone": "Sentence case (the redesign's O1); no trailing period on a label.",
+    "maxCells": 24,
+    "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). A row at the top of the model picker that opens the reasoning-effort picker; the current effort level (an untranslated provider word such as 'high') renders beside it as a trailing value."
+  }
+}

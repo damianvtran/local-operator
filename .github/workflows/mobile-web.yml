@@ -97,5 +97,38 @@ jobs:
       - name: Build the phone bundle (typechecks)
         run: pnpm build
 
+      # THE CROSS-REPO DRIFT GATE. The relay keeps its own copy of the desktop's
+      # condensation model and its generated fixture; a copy pinned only to itself
+      # stayed byte-identical for NINE DAYS while the desktop's moved, because each
+      # repository compared its copy with a number stored beside it (agent review
+      # round 1, C1-M1; round 2 measured that nothing ran the comparison at all).
+      #
+      # The desktop repository is public, so the manifest and fixture come from
+      # `raw.githubusercontent.com` rather than a second checkout: one job, no
+      # cross-repo token, and the comparison is between the COMMITTED bytes on both
+      # sides.
+      #
+      # THE REF IS `main`, and it is a named variable because it moved once:
+      # `feat/relay-parity-fixtures` carried the generated fixture (local-operator-ui
+      # #1423) until that PR merged. It cannot stay a branch pin - the UI repository
+      # deletes a branch on merge (`delete_branch_on_merge`), so a branch-pinned fetch
+      # would 404 on every run afterwards. `--require-sibling` keeps a failed FETCH
+      # red rather than the advisory skip that hid this for a round.
+      - name: Check the desktop's condensation fixture has not drifted
+        env:
+          CONDENSE_PARITY_REPO: damianvtran/local-operator-ui
+          CONDENSE_PARITY_REF: main
+        run: |
+          set -euo pipefail
+          desktop="$RUNNER_TEMP/desktop-condense-fixture"
+          mkdir -p "$desktop/scripts/fixtures"
+          base="https://raw.githubusercontent.com/${CONDENSE_PARITY_REPO}/${CONDENSE_PARITY_REF}"
+          for file in condense.parity.json condense.parity.manifest.json; do
+            curl -fsS --retry 2 --retry-delay 1 \
+              "$base/scripts/fixtures/$file" -o "$desktop/scripts/fixtures/$file"
+          done
+          node scripts/check-condense-parity-latest.mjs \
+            --latest --require-sibling --sibling "$desktop"
+
       - name: Run mobile web tests
         run: pnpm test

@@ -510,8 +510,11 @@ def build_web_search_tool(context: ToolContext | None = None) -> AgentTool | Non
         label="Web Search",
         description=(
             "Search the public web with load balancing and automatic fallback. "
-            "Results include bounded snippets and source URLs; use `web_fetch` (or "
-            "`read <url>`) to read a result's full page. Use provider only for a "
+            # "with `query`" carries the web_fetch passage steer to the moment
+            # a search result is about to be opened; kept to three words
+            # because this string is billed on every turn.
+            "Results include bounded snippets and source URLs; use `web_fetch` with "
+            "`query` (or `read <url>`) to read a result's full page. Use provider only for a "
             "specific enabled source. Running several independent searches? Issue "
             "the calls in one turn — they run in parallel."
         ),

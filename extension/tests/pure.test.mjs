@@ -938,6 +938,18 @@ test("every wire method has a worker handler", async () => {
   const methods = [...union[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
   assert.ok(methods.length > 10, `parsed too few methods: ${methods}`);
 
+  // The desktop app's host serves a few methods this build deliberately cannot.
+  // They are subtracted from the parity check through the GENERATED
+  // `DesktopOnlyMethod` union (Python's `DESKTOP_ONLY_METHODS`), not through a
+  // hand-kept list here: the exemption and the vocabulary then come from one
+  // source, and a method added to `METHODS` still fails this test unless it has a
+  // handler or was declared desktop-only where the protocol is defined.
+  const desktopOnlyUnion = generated.match(/export type DesktopOnlyMethod = ([^;]+);/);
+  const desktopOnly = new Set(
+    desktopOnlyUnion ? [...desktopOnlyUnion[1].matchAll(/'([^']+)'/g)].map((m) => m[1]) : [],
+  );
+  const served = methods.filter((method) => !desktopOnly.has(method));
+
   const worker = await readFile(new URL("../src/worker.ts", import.meta.url), "utf8");
   const table = worker.match(/const HANDLERS[\s\S]*?=\s*\{([\s\S]*?)\n\};/);
   assert.ok(table, "worker.ts must declare the HANDLERS table");
@@ -958,7 +970,7 @@ test("every wire method has a worker handler", async () => {
       .flatMap((line) => [...line.matchAll(/^\s{2}([A-Za-z_][A-Za-z0-9_]*)\s*[,:]/g)].map((m) => m[1])),
   );
 
-  const missing = methods.filter((method) => !handlers.has(method));
+  const missing = served.filter((method) => !handlers.has(method));
   // No exceptions, and the removal of the old one is the point: the escape hatch
   // that used to sit here read Python's `EXTENSION_CANNOT_SERVE` because no
   // build could serve `download` at all (Chrome refuses a tab-scoped

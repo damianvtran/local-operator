@@ -1,0 +1,21 @@
+{
+  "relay.transcript.turn.condensed": {"role": "collapsed turn bar fallback label", "tone": "Quiet, concise chrome.", "note": "Used only when the model supplies no more specific segment label."},
+  "relay.transcript.turn.took": {"role": "collapsed turn duration clause", "tone": "Compact factual summary.", "note": "{duration} is already formatted, for example 31s or 2m14s. Never claim a duration when absent."},
+  "relay.transcript.turn.actions": {"role": "turn and tool-group action count", "tone": "Compact factual summary.", "note": "{label} is the formatted count, including a trailing + when the loaded history is partial. Translate the complete plural message; do not print {count} separately."},
+  "relay.transcript.turn.completed": {"role": "screen-reader completion state", "tone": "Short state word.", "note": "Appended to a completed condensed bar's accessible name."},
+  "relay.transcript.fold.unit": {"role": "tool-fold count unit", "tone": "Compact factual summary.", "note": "One complete unit per kind. shell, python and {name} are runtime/tool names and stay untranslated. The other arm formats a raw tool name; preserve placeholders and plural/select syntax exactly."},
+  "relay.transcript.fold.shell": {"role": "shell command count unit", "tone": "Compact factual summary.", "note": "shell is a runtime tool category and stays untranslated. Use the locale's number formatting and plural rules; the noun remains shell in every arm."},
+  "relay.transcript.fold.python": {"role": "Python evaluation count unit", "tone": "Compact factual summary.", "note": "python is a runtime tool category and stays untranslated. Use the locale's number formatting and plural rules; the noun remains python in every arm."},
+  "relay.transcript.fold.more": {"role": "tool-fold overflow unit", "tone": "Compact factual summary.", "note": "Follows at most five count units and counts actions hidden by that display cap, not additional tool types."},
+  "relay.transcript.fold.failed_label": {"role": "collapsed group accessible failure state", "tone": "Plain factual warning.", "note": "Screen-reader text accompanying the failure glyph; it does not claim a count."},
+  "relay.transcript.fold.partial_label": {"role": "head-cut count accessible explanation", "tone": "Plain factual limitation.", "note": "Explains that N+ is a minimum because earlier history has not loaded."},
+  "relay.transcript.older.failed": {"role": "history paging error", "tone": "Brief, non-blaming error.", "note": "Shown beside the existing Try again action at the top of the transcript."},
+  "relay.transcript.label.steered": {"role": "condensed segment label", "tone": "Compact past-tense state.", "note": "The segment followed a steering message."},
+  "relay.transcript.label.wake": {"role": "condensed segment label", "tone": "Compact noun.", "note": "The segment followed a scheduled wake."},
+  "relay.transcript.label.peer": {"role": "condensed segment label", "tone": "Compact noun phrase.", "note": "The segment followed a peer message."},
+  "relay.transcript.label.job": {"role": "condensed segment label", "tone": "Compact noun phrase.", "note": "The segment followed a background job result."},
+  "relay.transcript.label.ask": {"role": "condensed segment label", "tone": "Compact noun.", "note": "The segment contains a settled operator question."},
+  "relay.transcript.label.messages": {"role": "mixed quiet-group label", "tone": "Compact plural noun.", "note": "Used when receipts from multiple families form one quiet group."},
+  "relay.transcript.composer.queued": {"role": "composer queued prompt count", "tone": "Compact factual status.", "note": "Restores the pre-redesign queued-prompt count; {count} is the number of prompts waiting, not tool calls."},
+  "relay.transcript.session.unread_refused": {"role": "unread-state operation refusal", "tone": "Calm, explicit recovery guidance.", "note": "Explains that unread state could not be read and that no messages were marked read. Used by both bulk and row-level mark operations."}
+}

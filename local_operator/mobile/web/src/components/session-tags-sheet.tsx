@@ -239,7 +239,7 @@ export function SessionTagsSheet({
 						<button
 							type="button"
 							onClick={() => setReload((n) => n + 1)}
-							className="min-h-11 rounded-sm border border-control bg-surface px-3 text-body-sm text-ink active:bg-accent-wash"
+							className="min-h-11 rounded-sm bg-surface px-3 text-body-sm text-ink active:bg-accent-wash"
 						>
 							{messageRuntime.t("relay.session.tags.retry")}
 						</button>
@@ -376,7 +376,7 @@ export function SessionTagsSheet({
 									type="button"
 									onClick={clearAll}
 									disabled={pending !== null}
-									className="min-h-11 rounded-sm border border-control bg-surface px-3 text-body-sm text-danger active:bg-accent-wash disabled:opacity-50"
+									className="min-h-11 rounded-sm bg-surface px-3 text-body-sm text-danger active:bg-accent-wash disabled:opacity-50"
 								>
 									{messageRuntime.t("relay.session.tags.remove_all_confirm")}
 								</button>
@@ -402,7 +402,7 @@ export function SessionTagsSheet({
 					<button
 						type="button"
 						onClick={onClose}
-						className="ms-auto min-h-11 rounded-sm border border-control bg-surface px-4 text-body-sm text-ink active:bg-accent-wash"
+						className="ms-auto min-h-11 rounded-sm bg-surface px-4 text-body-sm text-ink active:bg-accent-wash"
 					>
 						{messageRuntime.t("relay.session.tags.done")}
 					</button>

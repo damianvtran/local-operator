@@ -176,6 +176,8 @@ class _LocalOps:
         return self._client
 
     def grant(self, frame: dict[str, Any]) -> dict[str, Any]:
+        from local_operator.network.credentials.types import peer_credential_ids
+
         key = str(frame.get("credential_key") or "")
         provider = str(frame.get("provider") or key)
         client = self._source()
@@ -187,6 +189,7 @@ class _LocalOps:
             session_id=str(frame.get("session_id") or ""),
             model_id=str(frame.get("model_id") or ""),
             force_refresh=bool(frame.get("force_refresh")),
+            exclude_credential_ids=list(peer_credential_ids(frame.get("exclude_credential_ids"))),
         )
 
     def report(self, frame: dict[str, Any]) -> dict[str, Any]:

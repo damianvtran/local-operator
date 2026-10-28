@@ -1,0 +1,587 @@
+COMMAND: python harness.py.txt   [ntt2 remediation re-audit] (pinned tree /Users/damian/.local-operator/sessions/ca5d33d6f6aa/scratchpad/tui-audit/tree-77b3c2cf)
+Namespace: tui.notifications | locale: ru | host: damians-MacBook-Pro
+en         sha256=b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68  local_operator/i18n/catalogues/en/tui.notifications.json
+en_context sha256=9d10eb5db735fc9cbfb5152f9106a296f39bc85a722ff67b38ee5233c4d645b6  local_operator/i18n/catalogues/en/tui.notifications.context.json
+target     sha256=eee1186170a1856f4e59528b4769b8b834c0c928ce7cad325ceedccc789058fc  local_operator/i18n/catalogues/ru/tui.notifications.json
+pin PASS tui.notifications.json
+pin PASS tui.notifications.context.json
+pin PASS tui.notifications.json
+keys en=72 ru=72 context=72
+parity PASS: identical key sets (72 ids)
+
+== CLDR categories: en=['one', 'other'] ru=['few', 'many', 'one', 'other']
+
+== repo checker check_catalogues() over the pinned tree
+problems (every locale/namespace) = 0
+
+== ICU argument contract per key (name, order, type)
+argument/category failures = 0 over 72 keys
+
+active locale = 'ru' (catalogue root /Users/damian/.local-operator/sessions/ca5d33d6f6aa/scratchpad/tui-audit/tree-77b3c2cf/local_operator/i18n/catalogues)
+
+== render of all 72 keys (counts/ages/times realistic)
+ago                    en='6m ago'                                     ru='6m назад'
+arg_read               en='Mark every unread notification read'        ru='Отметить все уведомления прочитанными'
+ask_answer_hint        en="Asks stay until they're answered — press a to answer." ru='Запросы остаются, пока на них не ответят — нажмите a для ответа.'
+ask_expires            en='expires in 38m'                             ru='истекает через 38m'
+ask_kind               en='ask'                                        ru='запрос'
+asks_stay              en="3 asks stay until they're answered."        ru='3 запроса останутся до ответа.'
+back                   en='← Notifications'                            ru='← Уведомления'
+banner_digest_body     en='Type /notifications to see them.'           ru='Введите /notifications, чтобы их увидеть.'
+banner_digest_title    en='3 more high-priority notifications'         ru='Ещё 3 уведомления с высоким приоритетом'
+chip_high              en='high'                                       ru='выс.'
+confirm_dismiss_session en='Dismiss 12 updates from Fix the relay? y/n' ru='Скрыть 12 обновлений из «Fix the relay»? y/n'
+confirm_mark_all       en='Mark 12 read? y/n'                          ru='Отметить все (12) прочитанными? y/n'
+dismissed              en='Dismissed 12 updates.'                      ru='Скрыто 12 обновлений.'
+empty_caught_up_body   en='Nothing is waiting on you across your conversations. Press f to show everything.' ru='Ни в одном разговоре ничего не ждёт вашего внимания. Нажмите f, чтобы показать всё.'
+empty_caught_up_title  en='All caught up'                              ru='Всё прочитано'
+empty_filtered_title   en='Nothing matches these filters'              ru='По этим фильтрам ничего не найдено'
+empty_none_body        en='When an agent asks you something or flags an update, it shows up here.' ru='Когда агент задаст вам вопрос или пометит для вас обновление, вы увидите это здесь.'
+empty_none_title       en='No notifications yet'                       ru='Уведомлений пока нет'
+error_load             en="Couldn't load notifications: disk full"     ru='Не удалось загрузить уведомления: disk full'
+filter_all             en='all'                                        ru='все'
+filter_unread          en='unread'                                     ru='новые'
+group_conversation     en='conversation'                               ru='разговор'
+group_older            en='Older'                                      ru='Раньше'
+group_time             en='time'                                       ru='время'
+group_today            en='Today'                                      ru='Сегодня'
+group_waiting          en='Waiting on you'                             ru='Ждут вашего ответа'
+group_week             en='Earlier this week'                          ru='Ранее на этой неделе'
+group_yesterday        en='Yesterday'                                  ru='Вчера'
+header_counts          en='12 unread · 3 waiting on you'               ru='12 непрочитанных · 3 ждут ответа'
+header_partial         en='first 12'                                   ru='первые 12'
+hint_answer            en='answer'                                     ru='ответить'
+hint_back              en='back'                                       ru='назад'
+hint_clear             en='clear'                                      ru='сбросить'
+hint_conversation      en='conversation'                               ru='к разговору'
+hint_dismiss           en='dismiss'                                    ru='скрыть'
+hint_dismiss_all       en='dismiss all'                                ru='скрыть все'
+hint_filter            en='filter'                                     ru='фильтр'
+hint_open              en='open'                                       ru='открыть'
+hint_read              en='read'                                       ru='прочтено'
+hint_select            en='select'                                     ru='выбрать'
+hint_undo              en='undo'                                       ru='отменить'
+hint_unread            en='unread'                                     ru='новое'
+just_now               en='just now'                                   ru='только что'
+kind_asks              en='asks'                                       ru='запросы'
+kind_updates           en='updates'                                    ru='обновл.'
+marked_read            en='Marked 12 read.'                            ru='Отмечено прочитанными: 12.'
+marked_unread          en='Marked 12 unread.'                          ru='Отмечено непрочитанными: 12.'
+no_body                en='No details were attached.'                  ru='Подробности не приложены.'
+nothing_to_dismiss     en='Nothing to dismiss from Fix the relay.'     ru='В «Fix the relay» нечего скрыть.'
+nothing_unread         en='Nothing unread.'                            ru='Непрочитанных нет.'
+pointer_unread         en='Completion receipts moved to /unread.'      ru='Завершённые сессии перенесены в /unread.'
+position               en='12 of 34'                                   ru='12 из 34'
+priority_high          en='high'                                       ru='высокий'
+priority_normal_up     en='normal+'                                    ru='обычный+'
+refused_argument       en='/notifications takes no argument except read.' ru='/notifications принимает только аргумент read.'
+restored               en='Restored 12.'                               ru='Восстановлено: 12.'
+row_now                en='now'                                        ru='<1m'
+section_history        en='Earlier updates'                            ru='Предыдущие обновления'
+section_links          en='Links'                                      ru='Ссылки'
+section_projects       en='Related projects'                           ru='Связанные проекты'
+section_waiting_here   en='Waiting on you in this conversation'        ru='Ждут вашего ответа в этом разговоре'
+seen_in_chat           en='seen in chat'                               ru='было в чате'
+seen_live              en='seen live'                                  ru='видели сразу'
+selected               en='12 selected'                                ru='Выбрано: 12'
+sidebar_note           en='notifications 12'                           ru='уведомлений: 12'
+stale_skipped          en='3 changed since you looked and were left.'  ru='3 уведомления изменились после просмотра — не тронуты.'
+title                  en='Notifications'                              ru='Уведомления'
+unread_mark_all        en='/unread read marks all 12 read'             ru='/unread read помечает все 12 прочитанными'
+unread_mark_these      en='/unread read marks these read'              ru='/unread read помечает эти прочитанными'
+update_kind            en='update'                                     ru='обновл.'
+updates_since          en='3 updates since 14:05'                      ru='3 обновления с 14:05'
+write_failed           en="Couldn't update notifications — nothing else changed: disk full" ru='Не удалось обновить уведомления — ничего не изменилось: disk full'
+
+== plural renders at [0, 1, 2, 3, 5, 11, 21, 22, 25, 101, 1234]
+plural keys = 7: ['asks_stay', 'banner_digest_title', 'confirm_dismiss_session', 'dismissed', 'header_counts', 'stale_skipped', 'updates_since']
+-- asks_stay [count]
+   n=0     [many] '0 запросов останутся до ответа.'
+      grammar OK: 'запросов останутся' present
+   n=1     [one ] '1 запрос останется до ответа.'
+      grammar OK: 'запрос останется' present
+   n=2     [few ] '2 запроса останутся до ответа.'
+      grammar OK: 'запроса останутся' present
+   n=3     [few ] '3 запроса останутся до ответа.'
+      grammar OK: 'запроса останутся' present
+   n=5     [many] '5 запросов останутся до ответа.'
+      grammar OK: 'запросов останутся' present
+   n=11    [many] '11 запросов останутся до ответа.'
+      grammar OK: 'запросов останутся' present
+   n=21    [one ] '21 запрос останется до ответа.'
+      grammar OK: 'запрос останется' present
+   n=22    [few ] '22 запроса останутся до ответа.'
+      grammar OK: 'запроса останутся' present
+   n=25    [many] '25 запросов останутся до ответа.'
+      grammar OK: 'запросов останутся' present
+   n=101   [one ] '101 запрос останется до ответа.'
+      grammar OK: 'запрос останется' present
+   n=1234  [few ] '1\xa0234 запроса останутся до ответа.'
+      grammar OK: 'запроса останутся' present
+-- banner_digest_title [count]
+   n=0     [many] 'Ещё 0 уведомлений с высоким приоритетом'
+      grammar OK: 'уведомлений с высоким' present
+   n=1     [one ] 'Ещё 1 уведомление с высоким приоритетом'
+      grammar OK: 'уведомление с высоким' present
+   n=2     [few ] 'Ещё 2 уведомления с высоким приоритетом'
+      grammar OK: 'уведомления с высоким' present
+   n=3     [few ] 'Ещё 3 уведомления с высоким приоритетом'
+      grammar OK: 'уведомления с высоким' present
+   n=5     [many] 'Ещё 5 уведомлений с высоким приоритетом'
+      grammar OK: 'уведомлений с высоким' present
+   n=11    [many] 'Ещё 11 уведомлений с высоким приоритетом'
+      grammar OK: 'уведомлений с высоким' present
+   n=21    [one ] 'Ещё 21 уведомление с высоким приоритетом'
+      grammar OK: 'уведомление с высоким' present
+   n=22    [few ] 'Ещё 22 уведомления с высоким приоритетом'
+      grammar OK: 'уведомления с высоким' present
+   n=25    [many] 'Ещё 25 уведомлений с высоким приоритетом'
+      grammar OK: 'уведомлений с высоким' present
+   n=101   [one ] 'Ещё 101 уведомление с высоким приоритетом'
+      grammar OK: 'уведомление с высоким' present
+   n=1234  [few ] 'Ещё 1\xa0234 уведомления с высоким приоритетом'
+      grammar OK: 'уведомления с высоким' present
+-- confirm_dismiss_session [count]
+   n=0     [many] 'Скрыть 0 обновлений из «Fix the relay»? y/n'
+      grammar OK: 'обновлений' present
+   n=1     [one ] 'Скрыть 1 обновление из «Fix the relay»? y/n'
+      grammar OK: 'обновление' present
+   n=2     [few ] 'Скрыть 2 обновления из «Fix the relay»? y/n'
+      grammar OK: 'обновления' present
+   n=3     [few ] 'Скрыть 3 обновления из «Fix the relay»? y/n'
+      grammar OK: 'обновления' present
+   n=5     [many] 'Скрыть 5 обновлений из «Fix the relay»? y/n'
+      grammar OK: 'обновлений' present
+   n=11    [many] 'Скрыть 11 обновлений из «Fix the relay»? y/n'
+      grammar OK: 'обновлений' present
+   n=21    [one ] 'Скрыть 21 обновление из «Fix the relay»? y/n'
+      grammar OK: 'обновление' present
+   n=22    [few ] 'Скрыть 22 обновления из «Fix the relay»? y/n'
+      grammar OK: 'обновления' present
+   n=25    [many] 'Скрыть 25 обновлений из «Fix the relay»? y/n'
+      grammar OK: 'обновлений' present
+   n=101   [one ] 'Скрыть 101 обновление из «Fix the relay»? y/n'
+      grammar OK: 'обновление' present
+   n=1234  [few ] 'Скрыть 1\xa0234 обновления из «Fix the relay»? y/n'
+      grammar OK: 'обновления' present
+-- dismissed [count]
+   n=0     [many] 'Скрыто 0 обновлений.'
+      grammar OK: 'обновлений' present
+   n=1     [one ] 'Скрыто 1 обновление.'
+      grammar OK: 'обновление' present
+   n=2     [few ] 'Скрыто 2 обновления.'
+      grammar OK: 'обновления' present
+   n=3     [few ] 'Скрыто 3 обновления.'
+      grammar OK: 'обновления' present
+   n=5     [many] 'Скрыто 5 обновлений.'
+      grammar OK: 'обновлений' present
+   n=11    [many] 'Скрыто 11 обновлений.'
+      grammar OK: 'обновлений' present
+   n=21    [one ] 'Скрыто 21 обновление.'
+      grammar OK: 'обновление' present
+   n=22    [few ] 'Скрыто 22 обновления.'
+      grammar OK: 'обновления' present
+   n=25    [many] 'Скрыто 25 обновлений.'
+      grammar OK: 'обновлений' present
+   n=101   [one ] 'Скрыто 101 обновление.'
+      grammar OK: 'обновление' present
+   n=1234  [few ] 'Скрыто 1\xa0234 обновления.'
+      grammar OK: 'обновления' present
+-- header_counts [unread]
+   n=0     [many] '0 непрочитанных · 3 ждут ответа'
+      grammar OK: 'непрочитанных' present
+   n=1     [one ] '1 непрочитанное · 3 ждут ответа'
+      grammar OK: 'непрочитанное' present
+   n=2     [few ] '2 непрочитанных · 3 ждут ответа'
+      grammar OK: 'непрочитанных' present
+   n=3     [few ] '3 непрочитанных · 3 ждут ответа'
+      grammar OK: 'непрочитанных' present
+   n=5     [many] '5 непрочитанных · 3 ждут ответа'
+      grammar OK: 'непрочитанных' present
+   n=11    [many] '11 непрочитанных · 3 ждут ответа'
+      grammar OK: 'непрочитанных' present
+   n=21    [one ] '21 непрочитанное · 3 ждут ответа'
+      grammar OK: 'непрочитанное' present
+   n=22    [few ] '22 непрочитанных · 3 ждут ответа'
+      grammar OK: 'непрочитанных' present
+   n=25    [many] '25 непрочитанных · 3 ждут ответа'
+      grammar OK: 'непрочитанных' present
+   n=101   [one ] '101 непрочитанное · 3 ждут ответа'
+      grammar OK: 'непрочитанное' present
+   n=1234  [few ] '1\xa0234 непрочитанных · 3 ждут ответа'
+      grammar OK: 'непрочитанных' present
+-- header_counts [waiting]
+   n=0     [many] '12 непрочитанных · 0 ждут ответа'
+      grammar OK: 'ждут ответа' present
+   n=1     [one ] '12 непрочитанных · 1 ждёт ответа'
+      grammar OK: 'ждёт ответа' present
+   n=2     [few ] '12 непрочитанных · 2 ждут ответа'
+      grammar OK: 'ждут ответа' present
+   n=3     [few ] '12 непрочитанных · 3 ждут ответа'
+      grammar OK: 'ждут ответа' present
+   n=5     [many] '12 непрочитанных · 5 ждут ответа'
+      grammar OK: 'ждут ответа' present
+   n=11    [many] '12 непрочитанных · 11 ждут ответа'
+      grammar OK: 'ждут ответа' present
+   n=21    [one ] '12 непрочитанных · 21 ждёт ответа'
+      grammar OK: 'ждёт ответа' present
+   n=22    [few ] '12 непрочитанных · 22 ждут ответа'
+      grammar OK: 'ждут ответа' present
+   n=25    [many] '12 непрочитанных · 25 ждут ответа'
+      grammar OK: 'ждут ответа' present
+   n=101   [one ] '12 непрочитанных · 101 ждёт ответа'
+      grammar OK: 'ждёт ответа' present
+   n=1234  [few ] '12 непрочитанных · 1\xa0234 ждут ответа'
+      grammar OK: 'ждут ответа' present
+-- stale_skipped [count]
+   n=0     [many] '0 уведомлений изменилось после просмотра — не тронуто.'
+      grammar OK: 'уведомлений изменилось' present
+   n=1     [one ] '1 уведомление изменилось после просмотра — не тронуто.'
+      grammar OK: 'уведомление изменилось' present
+   n=2     [few ] '2 уведомления изменились после просмотра — не тронуты.'
+      grammar OK: 'уведомления изменились' present
+   n=3     [few ] '3 уведомления изменились после просмотра — не тронуты.'
+      grammar OK: 'уведомления изменились' present
+   n=5     [many] '5 уведомлений изменилось после просмотра — не тронуто.'
+      grammar OK: 'уведомлений изменилось' present
+   n=11    [many] '11 уведомлений изменилось после просмотра — не тронуто.'
+      grammar OK: 'уведомлений изменилось' present
+   n=21    [one ] '21 уведомление изменилось после просмотра — не тронуто.'
+      grammar OK: 'уведомление изменилось' present
+   n=22    [few ] '22 уведомления изменились после просмотра — не тронуты.'
+      grammar OK: 'уведомления изменились' present
+   n=25    [many] '25 уведомлений изменилось после просмотра — не тронуто.'
+      grammar OK: 'уведомлений изменилось' present
+   n=101   [one ] '101 уведомление изменилось после просмотра — не тронуто.'
+      grammar OK: 'уведомление изменилось' present
+   n=1234  [few ] '1\xa0234 уведомления изменились после просмотра — не тронуты.'
+      grammar OK: 'уведомления изменились' present
+-- updates_since [count]
+   n=0     [many] '0 обновлений с 14:05'
+      grammar OK: 'обновлений с' present
+   n=1     [one ] '1 обновление с 14:05'
+      grammar OK: 'обновление с' present
+   n=2     [few ] '2 обновления с 14:05'
+      grammar OK: 'обновления с' present
+   n=3     [few ] '3 обновления с 14:05'
+      grammar OK: 'обновления с' present
+   n=5     [many] '5 обновлений с 14:05'
+      grammar OK: 'обновлений с' present
+   n=11    [many] '11 обновлений с 14:05'
+      grammar OK: 'обновлений с' present
+   n=21    [one ] '21 обновление с 14:05'
+      grammar OK: 'обновление с' present
+   n=22    [few ] '22 обновления с 14:05'
+      grammar OK: 'обновления с' present
+   n=25    [many] '25 обновлений с 14:05'
+      grammar OK: 'обновлений с' present
+   n=101   [one ] '101 обновление с 14:05'
+      grammar OK: 'обновление с' present
+   n=1234  [few ] '1\xa0234 обновления с 14:05'
+      grammar OK: 'обновления с' present
+
+== plural completeness per argument (_number_upgrade_problem rule)
+   PASS asks_stay[count]       all 4 ru categories, no empty branch, every branch renders the count
+   PASS banner_digest_title[count] all 4 ru categories, no empty branch, every branch renders the count
+   PASS confirm_dismiss_session[count] all 4 ru categories, no empty branch, every branch renders the count
+   PASS dismissed[count]       all 4 ru categories, no empty branch, every branch renders the count
+   PASS header_counts[unread]  all 4 ru categories, no empty branch, every branch renders the count
+   PASS header_counts[waiting] all 4 ru categories, no empty branch, every branch renders the count
+   PASS stale_skipped[count]   all 4 ru categories, no empty branch, every branch renders the count
+   PASS updates_since[count]   all 4 ru categories, no empty branch, every branch renders the count
+
+== literal tokens (typed commands/keys/answers must survive byte-exact)
+   PASS banner_digest_body     keeps '/notifications' present
+   PASS pointer_unread         keeps '/unread'        present
+   PASS refused_argument       keeps '/notifications' present
+   PASS refused_argument       keeps 'read'           present
+   PASS unread_mark_all        keeps '/unread read'   present
+   PASS unread_mark_these      keeps '/unread read'   present
+   PASS confirm_mark_all       keeps 'y/n'            present
+   PASS confirm_dismiss_session keeps 'y/n'            present
+   PASS ask_answer_hint        keeps 'a'              present
+   PASS empty_caught_up_body   keeps 'f'              present
+
+== Latin runs inside ru values (ages/commands; must stay Latin-undeclined)
+   ago                    ['age']
+   ask_answer_hint        ['a']
+   ask_expires            ['time']
+   asks_stay              ['count', 'few', 'many', 'one', 'other', 'plural']
+   banner_digest_body     ['notifications']
+   banner_digest_title    ['count', 'few', 'many', 'one', 'other', 'plural']
+   confirm_dismiss_session ['count', 'few', 'many', 'one', 'other', 'plural', 'source', 'y/n']
+   confirm_mark_all       ['count', 'y/n']
+   dismissed              ['count', 'few', 'many', 'one', 'other', 'plural']
+   empty_caught_up_body   ['f']
+   error_load             ['error']
+   header_counts          ['few', 'many', 'one', 'other', 'plural', 'unread', 'waiting']
+   header_partial         ['count']
+   marked_read            ['count']
+   marked_unread          ['count']
+   nothing_to_dismiss     ['source']
+   pointer_unread         ['unread']
+   position               ['index', 'total']
+   refused_argument       ['notifications', 'read']
+   restored               ['count']
+   row_now                ['m']
+   selected               ['count']
+   sidebar_note           ['count']
+   stale_skipped          ['count', 'few', 'many', 'one', 'other', 'plural']
+   unread_mark_all        ['count', 'read', 'unread']
+   unread_mark_these      ['read', 'unread']
+   updates_since          ['count', 'few', 'many', 'one', 'other', 'plural', 'time']
+   write_failed           ['error']
+
+== values with no Cyrillic letter at all (each judged in the report)
+   row_now                ru='<1m' en='now'
+
+== ru value identical to en (untranslated?)
+   identical keys: 0 []
+
+== typography, NFC and direction controls
+   NFC violations: 0 []
+   bidi/format controls: 0 []
+   punctuation problems (space before !?;:, !, mixed quotes): 0
+   double spaces: 0 []
+   leading/trailing whitespace: 0 []
+
+== width budget: rendered ru cell width vs the en sidecar maxCells
+   ago                    budget=12  en=6   ru=8   ok   ratio=1.33 worst='6m назад'
+   arg_read               budget=44  en=35  ru=37  ok   ratio=1.06 worst='Отметить все уведомления прочитанными'
+   ask_expires            budget=18  en=14  ru=18  ok   ratio=1.29 worst='истекает через 38m'
+   ask_kind               budget=8   en=3   ru=6   ok   ratio=2.00 worst='запрос'
+   back                   budget=24  en=15  ru=13  ok   ratio=0.87 worst='← Уведомления'
+   banner_digest_body     budget=60  en=32  ru=41  ok   ratio=1.28 worst='Введите /notifications, чтобы их увидеть.'
+   banner_digest_title    budget=60  en=38  ru=43  ok   ratio=1.13 worst='Ещё 1\xa0234 уведомления с высоким приоритетом'
+   chip_high              budget=6   en=4   ru=4   ok   ratio=1.00 worst='выс.'
+   empty_caught_up_title  budget=30  en=13  ru=13  ok   ratio=1.00 worst='Всё прочитано'
+   empty_filtered_title   budget=40  en=29  ru=34  ok   ratio=1.17 worst='По этим фильтрам ничего не найдено'
+   empty_none_title       budget=30  en=20  ru=20  ok   ratio=1.00 worst='Уведомлений пока нет'
+   filter_all             budget=8   en=3   ru=3   ok   ratio=1.00 worst='все'
+   filter_unread          budget=8   en=6   ru=5   ok   ratio=0.83 worst='новые'
+   group_conversation     budget=12  en=12  ru=8   ok   ratio=0.67 worst='разговор'
+   group_older            budget=30  en=5   ru=6   ok   ratio=1.20 worst='Раньше'
+   group_time             budget=12  en=4   ru=5   ok   ratio=1.25 worst='время'
+   group_today            budget=30  en=5   ru=7   ok   ratio=1.40 worst='Сегодня'
+   group_waiting          budget=30  en=14  ru=18  ok   ratio=1.29 worst='Ждут вашего ответа'
+   group_week             budget=30  en=17  ru=20  ok   ratio=1.18 worst='Ранее на этой неделе'
+   group_yesterday        budget=30  en=9   ru=5   ok   ratio=0.56 worst='Вчера'
+   header_counts          budget=40  en=35  ru=39  ok   ratio=1.11 worst='1\xa0234 непрочитанных · 1\xa0234 ждут ответа'
+   header_partial         budget=12  en=8   ru=9   ok   ratio=1.12 worst='первые 12'
+   hint_answer            budget=9   en=6   ru=8   ok   ratio=1.33 worst='ответить'
+   hint_back              budget=8   en=4   ru=5   ok   ratio=1.25 worst='назад'
+   hint_clear             budget=8   en=5   ru=8   ok   ratio=1.60 worst='сбросить'
+   hint_conversation      budget=14  en=12  ru=11  ok   ratio=0.92 worst='к разговору'
+   hint_dismiss           budget=10  en=7   ru=6   ok   ratio=0.86 worst='скрыть'
+   hint_dismiss_all       budget=14  en=11  ru=10  ok   ratio=0.91 worst='скрыть все'
+   hint_filter            budget=8   en=6   ru=6   ok   ratio=1.00 worst='фильтр'
+   hint_open              budget=10  en=4   ru=7   ok   ratio=1.75 worst='открыть'
+   hint_read              budget=8   en=4   ru=8   ok   ratio=2.00 worst='прочтено'
+   hint_select            budget=8   en=6   ru=7   ok   ratio=1.17 worst='выбрать'
+   hint_undo              budget=8   en=4   ru=8   ok   ratio=2.00 worst='отменить'
+   hint_unread            budget=8   en=6   ru=5   ok   ratio=0.83 worst='новое'
+   just_now               budget=12  en=8   ru=10  ok   ratio=1.25 worst='только что'
+   kind_asks              budget=8   en=4   ru=7   ok   ratio=1.75 worst='запросы'
+   kind_updates           budget=8   en=7   ru=7   ok   ratio=1.00 worst='обновл.'
+   no_body                budget=40  en=25  ru=25  ok   ratio=1.00 worst='Подробности не приложены.'
+   position               budget=12  en=8   ru=8   ok   ratio=1.00 worst='12 из 34'
+   priority_high          budget=8   en=4   ru=7   ok   ratio=1.75 worst='высокий'
+   priority_normal_up     budget=8   en=7   ru=8   ok   ratio=1.14 worst='обычный+'
+   row_now                budget=5   en=3   ru=3   ok   ratio=1.00 worst='<1m'
+   section_history        budget=30  en=15  ru=21  ok   ratio=1.40 worst='Предыдущие обновления'
+   section_links          budget=20  en=5   ru=6   ok   ratio=1.20 worst='Ссылки'
+   section_projects       budget=30  en=16  ru=17  ok   ratio=1.06 worst='Связанные проекты'
+   section_waiting_here   budget=40  en=35  ru=35  ok   ratio=1.00 worst='Ждут вашего ответа в этом разговоре'
+   seen_in_chat           budget=12  en=12  ru=11  ok   ratio=0.92 worst='было в чате'
+   seen_live              budget=12  en=9   ru=12  ok   ratio=1.33 worst='видели сразу'
+   selected               budget=16  en=11  ru=11  ok   ratio=1.00 worst='Выбрано: 12'
+   sidebar_note           budget=18  en=16  ru=15  ok   ratio=0.94 worst='уведомлений: 12'
+   title                  budget=20  en=13  ru=11  ok   ratio=0.85 worst='Уведомления'
+   update_kind            budget=8   en=6   ru=7   ok   ratio=1.17 worst='обновл.'
+   updates_since          budget=30  en=25  ru=24  ok   ratio=0.96 worst='1\xa0234 обновления с 14:05'
+
+== TUI render layer under ru (committed notifications_render functions)
+-- row_line: exact width (never overruns), ru copy and chips
+   w=40  high+repeat+unread   cells=40  ok       '  • ▁▃▅ Пров… выс. ×2 Fix the rel…    4m'
+   w=40  read ask seen live   cells=40  ok       '  · ?   Проверить ре… Fix the rel…    4m'
+   w=40  read notify in_view  cells=40  ok       '    ▁▃▅ Проверить ре… Fix the rel…    4m'
+   w=40  just-now single      cells=40  ok       '  • ▁▃▅ Провери… выс. Fix the rel…   <1m'
+   w=60  high+repeat+unread   cells=60  ok       '  • ▁▃▅ Проверить ретранслятор п… выс. ×2 Fix the rel…    4m'
+   w=60  read ask seen live   cells=60  ok       '  · ?   Проверить ретран… ×2 видели сразу Fix the rel…    4m'
+   w=60  read notify in_view  cells=60  ok       '    ▁▃▅ Проверить ретра… выс. было в чате Fix the rel…    4m'
+   w=60  just-now single      cells=60  ok       '  • ▁▃▅ Проверить ретранслятор посл… выс. Fix the rel…   <1m'
+   w=76  high+repeat+unread   cells=76  ok       '  • ▁▃▅ Проверить ретранслятор после раскатки     выс. ×2 Fix the rel…    4m'
+   w=76  read ask seen live   cells=76  ok       '  · ?   Проверить ретранслятор после рас… ×2 видели сразу Fix the rel…    4m'
+   w=76  read notify in_view  cells=76  ok       '    ▁▃▅ Проверить ретранслятор после ра… выс. было в чате Fix the rel…    4m'
+   w=76  just-now single      cells=76  ok       '  • ▁▃▅ Проверить ретранслятор после раскатки        выс. Fix the rel…   <1m'
+   w=80  high+repeat+unread   cells=80  ok       '  • ▁▃▅ Проверить ретранслятор после раскатки         выс. ×2 Fix the rel…    4m'
+   w=80  read ask seen live   cells=80  ok       '  · ?   Проверить ретранслятор после раскатки ×2 видели сразу Fix the rel…    4m'
+   w=80  read notify in_view  cells=80  ok       '    ▁▃▅ Проверить ретранслятор после раскат… выс. было в чате Fix the rel…    4m'
+   w=80  just-now single      cells=80  ok       '  • ▁▃▅ Проверить ретранслятор после раскатки            выс. Fix the rel…   <1m'
+   w=120 high+repeat+unread   cells=120 ok       '  • ▁▃▅ Проверить ретранслятор после раскатки                                                 выс. ×2 Fix the rel…    4m'
+   w=120 read ask seen live   cells=120 ok       '  · ?   Проверить ретранслятор после раскатки                                         ×2 видели сразу Fix the rel…    4m'
+   w=120 read notify in_view  cells=120 ok       '    ▁▃▅ Проверить ретранслятор после раскатки                                        выс. было в чате Fix the rel…    4m'
+   w=120 just-now single      cells=120 ok       '  • ▁▃▅ Проверить ретранслятор после раскатки                                                    выс. Fix the rel…   <1m'
+   w=140 high+repeat+unread   cells=140 ok       '  • ▁▃▅ Проверить ретранслятор после раскатки                                                                     выс. ×2 Fix the rel…    4m'
+   w=140 read ask seen live   cells=140 ok       '  · ?   Проверить ретранслятор после раскатки                                                             ×2 видели сразу Fix the rel…    4m'
+   w=140 read notify in_view  cells=140 ok       '    ▁▃▅ Проверить ретранслятор после раскатки                                                            выс. было в чате Fix the rel…    4m'
+   w=140 just-now single      cells=140 ok       '  • ▁▃▅ Проверить ретранслятор после раскатки                                                                        выс. Fix the rel…   <1m'
+-- header_line: title, counts, filter segments (dropped whole, never clipped)
+   w=80  cells=80  ' Уведомления · 15 непрочитанных · 3 ждут ответа · первые 12     новые │ обновл. '
+   w=60  cells=59  ' Уведомления · 15 непрочитанных · 3 ждут ответа · первые 12'
+   w=40  cells=59  ' Уведомления · 15 непрочитанных · 3 ждут ответа · первые 12'
+-- hint row: whole-hint-or-none at several widths (ru labels from the file)
+   w=140 kept=8  cells=95  ' z отменить  ↵ открыть  e скрыть  u прочтено  space выбрать  o к разговору  f фильтр  esc назад'
+   w=120 kept=8  cells=95  ' z отменить  ↵ открыть  e скрыть  u прочтено  space выбрать  o к разговору  f фильтр  esc назад'
+   w=100 kept=8  cells=95  ' z отменить  ↵ открыть  e скрыть  u прочтено  space выбрать  o к разговору  f фильтр  esc назад'
+   w=80  kept=6  cells=65  ' z отменить  ↵ открыть  e скрыть  u прочтено  f фильтр  esc назад'
+   w=60  kept=5  cells=53  ' ↵ открыть  e скрыть  u прочтено  f фильтр  esc назад'
+   w=50  kept=4  cells=41  ' ↵ открыть  e скрыть  f фильтр  esc назад'
+-- detail_text: top line, meta line, sections (ru)
+   ask[0] cells=80  ' ← Уведомления                                                 запрос · 1 из 12 '
+   ask[1] cells=23  ' Подтвердить перезапуск'
+   ask[2] cells=25  ' Fix the relay · 4m назад'
+   ask[3] cells=79  ' ──────────────────────────────────────────────────────────────────────────────'
+   upd[0] cells=80  ' ← Уведомления                                    ▁▃▅ выс. · обновл. · 12 из 34 '
+   upd[1] cells=38  ' Проверить ретранслятор после раскатки'
+   upd[2] cells=48  ' Fix the relay · 4m назад · 2 обновления с 15:13'
+   upd[3] cells=79  ' ──────────────────────────────────────────────────────────────────────────────'
+   upd[4] cells=26  ' Подробности не приложены.'
+   upd[5] cells=0   ''
+-- empty_text states (ru)
+   caught up   cells=14  ' Всё прочитано'
+   caught up   cells=84  ' Ни в одном разговоре ничего не ждёт вашего внимания. Нажмите f, чтобы показать всё.'
+   nothing yet cells=21  ' Уведомлений пока нет'
+   nothing yet cells=84  ' Когда агент задаст вам вопрос или пометит для вас обновление, вы увидите это здесь.'
+   filtered    cells=35  ' По этим фильтрам ничего не найдено'
+   error       cells=45  ' Не удалось загрузить уведомления: store busy'
+-- section headers / group labels (ru)
+   group today     'Сегодня'
+   group yesterday 'Вчера'
+   group week      'Ранее на этой неделе'
+   group older     'Раньше'
+   group waiting     'Ждут вашего ответа'
+   header w=40  cells=40  ' ── Ждут вашего ответа · 3 ─────────────'
+   header w=60  cells=60  ' ── Ждут вашего ответа · 3 ─────────────────────────────────'
+   header w=80  cells=80  ' ── Ждут вашего ответа · 3 ─────────────────────────────────────────────────────'
+
+== negative controls on scratch copies (every check must fail closed)
+   NC1 renamed {count} -> 1 problem(s); first=["ru/tui.notifications: tui.notifications.confirm_dismiss_session: arguments (('name', 'simple'), ('source', 'simple')) != en's (('count', 'plural'), ('source', 'simple')): argument 1 is 'name', en's is 'count' (renamed or reordered)"]
+   NC2 dropped `few` -> completeness rule says: "plural 'count' is missing locale categories ['few'] (has ['many', 'one', 'other'])"
+   NC3 empty branch -> completeness rule says: "plural 'count' branch 'one' is empty"
+   NC4 extra key -> 1 problem(s); first=["ru/tui.notifications: unknown key 'tui.notifications.not_a_key'"]
+   NC5 drifted /unread -> token check sees the literal missing: True
+   NC6 over-budget value -> cell_len=34 vs maxCells 12 -> over=True
+   NC7 space-before-punctuation detected: True
+   NC8 manual bidi control detected: True
+
+FAILURES=[]
+RESULT: PASS (0 failure(s))
+
+COMMAND: python delta.py.txt [ntt2 remediation delta] tree=/Users/damian/.local-operator/sessions/ca5d33d6f6aa/scratchpad/tui-audit/tree-77b3c2cf
+pin PASS en       b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68
+pin PASS context  9d10eb5db735fc9cbfb5152f9106a296f39bc85a722ff67b38ee5233c4d645b6
+pin PASS target   eee1186170a1856f4e59528b4769b8b834c0c928ce7cad325ceedccc789058fc
+keys en=72 ru=72 round1=72 ctx=72
+round1 target=03cdb4d6fc69764229a5dd15611a0d64e1856dca54107904bfdca223f8b947c1 context=0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907
+
+== delta vs round-1 audited bytes
+changed keys (3): ['chip_high', 'pointer_unread', 'stale_skipped']
+order==en: True sorted: True
++/- lines: 6
+  | --- round1
+  | +++ target
+  | @@ -11 +11 @@
+  | -  "tui.notifications.chip_high": "важно",
+  | +  "tui.notifications.chip_high": "выс.",
+  | @@ -52 +52 @@
+  | -  "tui.notifications.pointer_unread": "Отчёты о завершении сессий перенесены в /unread.",
+  | +  "tui.notifications.pointer_unread": "Завершённые сессии перенесены в /unread.",
+  | @@ -67 +67 @@
+  | -  "tui.notifications.stale_skipped": "{count, plural, one {# уведомление изменилось с момента просмотра — оставлено как есть.} few {# уведомления изменились с момента просмотра — оставлены как есть.} many {# уведомлений изменились с момента просмотра — оставлены как есть.} other {# уведомления изменились с момента просмотра — оставлены как есть.}}",
+  | +  "tui.notifications.stale_skipped": "{count, plural, one {# уведомление изменилось после просмотра — не тронуто.} few {# уведомления изменились после просмотра — не тронуты.} many {# уведомлений изменилось после просмотра — не тронуто.} other {# уведомления изменилось после просмотра — не тронуто.}}",
+bytes=7031 ends=b'\n}\n' cr=False tabs=False nfc=True
+
+== the three changed values
+-- chip_high
+   old: 'важно'
+   new: 'выс.'
+   args en=() ru=() same=True problem=None
+   NFC=True bidi=[] dblspace=False
+-- pointer_unread
+   old: 'Отчёты о завершении сессий перенесены в /unread.'
+   new: 'Завершённые сессии перенесены в /unread.'
+   args en=() ru=() same=True problem=None
+   NFC=True bidi=[] dblspace=False
+-- stale_skipped
+   old: '{count, plural, one {# уведомление изменилось с момента просмотра — оставлено как есть.} few {# уведомления изменились с момента просмотра — оставлены как есть.} many {# уведомлений изменились с момента просмотра — оставлены как есть.} other {# уведомления изменились с момента просмотра — оставлены как есть.}}'
+   new: '{count, plural, one {# уведомление изменилось после просмотра — не тронуто.} few {# уведомления изменились после просмотра — не тронуты.} many {# уведомлений изменилось после просмотра — не тронуто.} other {# уведомления изменилось после просмотра — не тронуто.}}'
+   args en=(('count', 'plural'),) ru=(('count', 'plural'),) same=True problem=None
+   plural completeness: None
+   NFC=True bidi=[] dblspace=False
+
+== agreed text, exactly
+chip_high == 'выс.' PASS
+pointer_unread == agreed sentence PASS (40 cells)
+stale arms found: ['one', 'few', 'many', 'other']
+   one   PASS '# уведомление изменилось после просмотра — не тронуто.'
+   few   PASS '# уведомления изменились после просмотра — не тронуты.'
+   many  PASS '# уведомлений изменилось после просмотра — не тронуто.'
+   other PASS '# уведомления изменилось после просмотра — не тронуто.'
+   wrapper prefix=True suffix+branches=True
+
+== stale_skipped CLDR renders (ru) and en at the same counts
+  n=0     ru=54 en=41  grammar-OK '0 уведомлений изменилось после просмотра — не тронуто.'
+  n=1     ru=54 en=40  grammar-OK '1 уведомление изменилось после просмотра — не тронуто.'
+  n=2     ru=54 en=41  grammar-OK '2 уведомления изменились после просмотра — не тронуты.'
+  n=3     ru=54 en=41  grammar-OK '3 уведомления изменились после просмотра — не тронуты.'
+  n=5     ru=54 en=41  grammar-OK '5 уведомлений изменилось после просмотра — не тронуто.'
+  n=11    ru=55 en=42  grammar-OK '11 уведомлений изменилось после просмотра — не тронуто.'
+  n=21    ru=55 en=42  grammar-OK '21 уведомление изменилось после просмотра — не тронуто.'
+  n=22    ru=55 en=42  grammar-OK '22 уведомления изменились после просмотра — не тронуты.'
+  n=25    ru=55 en=42  grammar-OK '25 уведомлений изменилось после просмотра — не тронуто.'
+  n=101   ru=56 en=43  grammar-OK '101 уведомление изменилось после просмотра — не тронуто.'
+  n=1234  ru=58 en=45  grammar-OK '1\xa0234 уведомления изменились после просмотра — не тронуты.'
+  chip_high      cells=4
+  pointer_unread cells=40
+
+== widths, worst realistic count
+  n=3     new=54  round1=66  en=41  (saved 12)
+  n=5     new=54  round1=66  en=41  (saved 12)
+  n=11    new=55  round1=67  en=42  (saved 12)
+  n=1234  new=58  round1=70  en=45  (saved 12)
+  budgets: {'chip_high': 6, 'pointer_unread': None, 'stale_skipped': None}
+  chip_high      cells=4   budget=6 ok
+  pointer_unread cells=40  budget=None no budget
+  stale_skipped  cells=54  budget=None no budget
+
+== pointer_unread: the /unread literal
+  index=32 segment='/unread' codepoints=['0x2f', '0x75', '0x6e', '0x72', '0x65', '0x61', '0x64']
+  byte-exact /unread PASS; sentence ends ' /unread.'
+
+== context budgets: branch vs round 1
+  moved budgets: 2
+    hint_answer                            8 -> 9
+    hint_dismiss_all                       12 -> 14
+  moved among the three audited keys: none
+  audited budget chip_high      = 6 (round1 6)
+  audited budget pointer_unread = None (round1 None)
+  audited budget stale_skipped  = None (round1 None)
+  ru hint_answer        cells=8   old_budget=8   new_budget=9   fits_both=True
+  ru hint_dismiss_all   cells=10  old_budget=12  new_budget=14  fits_both=True
+
+== row chips: first width at which the chip survives (real row_line)
+  active locale='ru'
+  chip 'выс.'         dropped through width 36, shown from 37
+  chip 'было в чате'  dropped through width 48, shown from 49
+  chip 'видели сразу' dropped through width 49, shown from 50
+
+== negative controls
+  NC1a few arm drops the # placeholder -> completeness="plural 'count' branch 'few' does not render the value (`#` or `{count, number}`)"
+  NC1b few arm wrong case -> probe would accept=False ('3 уведомлений изменились после просмотра — не тронуты.')
+  NC2 few arm removed -> completeness="plural 'count' is missing locale categories ['few'] (has ['many', 'one', 'other'])"
+  NC3 argument renamed -> problem="argument 1 is 'total', en's is 'count' (renamed or reordered)"
+  NC4 drifted command literal detected=True
+
+FAILURES=[]
+RESULT: PASS (0 failure(s))

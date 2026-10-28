@@ -1,0 +1,310 @@
+"""ntt2 delta re-audit (read-only). Run from the pinned tree export.
+
+  PYTHONPATH=<tree> AUDIT_TREE=<tree> PYTHONDONTWRITEBYTECODE=1 <venv>/bin/python delta.py.txt
+"""
+
+import difflib
+import hashlib
+import json
+import os
+import re
+import sys
+import unicodedata
+from pathlib import Path
+
+from rich.cells import cell_len
+
+from local_operator.i18n import runtime as rt
+from local_operator.tui import notifications_render as R
+from scripts.i18n.check import _arguments_problem, _number_upgrade_problem
+
+HERE = Path(__file__).resolve().parent
+TREE = Path(os.environ["AUDIT_TREE"]).resolve()
+CATS = TREE / "local_operator" / "i18n" / "catalogues"
+NS = "tui.notifications"
+SHORT = ["chip_high", "pointer_unread", "stale_skipped"]
+AUDITED = [NS + "." + s for s in SHORT]
+failures = []
+
+
+def say(m=""):
+    print(m)
+
+
+def fail(m):
+    failures.append(m)
+    say("FAIL: " + m)
+
+
+def sha(p):
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+
+
+say("COMMAND: python delta.py.txt [ntt2 remediation delta] tree=%s" % TREE)
+
+# pins
+pins = {
+    "en": (CATS / "en" / (NS + ".json"),
+           "b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68"),
+    "context": (CATS / "en" / (NS + ".context.json"),
+                "9d10eb5db735fc9cbfb5152f9106a296f39bc85a722ff67b38ee5233c4d645b6"),
+    "target": (CATS / "ru" / (NS + ".json"),
+               "eee1186170a1856f4e59528b4769b8b834c0c928ce7cad325ceedccc789058fc"),
+}
+for label, (path, want) in pins.items():
+    got = sha(path)
+    say("pin %s %-8s %s" % ("PASS" if got == want else "FAIL", label, got))
+    if got != want:
+        fail("pin %s: %s != %s" % (label, got, want))
+
+en = json.loads(pins["en"][0].read_text(encoding="utf-8"))
+ctx = json.loads(pins["context"][0].read_text(encoding="utf-8"))
+ru = json.loads(pins["target"][0].read_text(encoding="utf-8"))
+r1_path = HERE / "inputs" / "round1.ru.tui.notifications.json"
+r1_ctx_path = HERE / "inputs" / "round1.context.json"
+r1 = json.loads(r1_path.read_text(encoding="utf-8"))
+r1_ctx = json.loads(r1_ctx_path.read_text(encoding="utf-8"))
+plural = json.loads((Path(rt.__file__).with_name("data") / "plural_rules.json").read_text())
+say("keys en=%d ru=%d round1=%d ctx=%d" % (len(en), len(ru), len(r1), len(ctx)))
+say("round1 target=%s context=%s" % (sha(r1_path), sha(r1_ctx_path)))
+
+# 1. delta
+say("")
+say("== delta vs round-1 audited bytes")
+changed = [k for k in en if r1.get(k) != ru.get(k)]
+say("changed keys (%d): %s" % (len(changed), [k.split(".", 2)[-1] for k in changed]))
+if sorted(changed) != sorted(AUDITED):
+    fail("delta is not exactly the three audited keys")
+if set(ru) != set(r1) or set(ru) != set(en):
+    fail("key set changed")
+say("order==en: %s sorted: %s" % (list(ru) == list(en), list(ru) == sorted(ru)))
+old_l = r1_path.read_text(encoding="utf-8").splitlines(keepends=True)
+new_l = pins["target"][0].read_text(encoding="utf-8").splitlines(keepends=True)
+diff = list(difflib.unified_diff(old_l, new_l, "round1", "target", n=0))
+marks = [d for d in diff if d[:1] in "+-" and d[:3] not in ("+++", "---")]
+say("+/- lines: %d" % len(marks))
+for d in diff:
+    say("  | " + d.rstrip("\n"))
+if len(marks) != 6:
+    fail("byte diff is not three replaced lines (%d)" % len(marks))
+raw = pins["target"][0].read_bytes()
+say("bytes=%d ends=%r cr=%s tabs=%s nfc=%s" % (len(raw), raw[-3:], b"\r" in raw, b"\t" in raw,
+                                             unicodedata.normalize("NFC", raw.decode()) == raw.decode()))
+if b"\r" in raw or b"\t" in raw or not raw.endswith(b"}\n"):
+    fail("byte hygiene: CR/tab/missing final newline")
+for i, line in enumerate(raw.decode("utf-8").splitlines(), 1):
+    if line != line.rstrip():
+        fail("trailing whitespace line %d" % i)
+
+# 2. the three values
+say("")
+say("== the three changed values")
+for key in AUDITED:
+    say("-- %s" % key.split(".", 2)[-1])
+    say("   old: %r" % r1[key])
+    say("   new: %r" % ru[key])
+    ea = rt.message_arguments(en[key])
+    try:
+        ra = rt.message_arguments(ru[key])
+    except rt.MessageSyntaxError as exc:
+        fail("%s: parse error %s" % (key, exc))
+        continue
+    prob = _arguments_problem(ea, ra, translated_source=ru[key], locale="ru", plural=plural)
+    say("   args en=%r ru=%r same=%s problem=%r" % (ea, ra, ea == ra, prob))
+    if prob is not None or ea != ra:
+        fail("%s: argument contract %r" % (key, prob))
+    if rt.plural_selectors(ru[key]):
+        comp = _number_upgrade_problem(ru[key], "count", "ru", plural)
+        say("   plural completeness: %r" % (comp,))
+        if comp is not None:
+            fail("%s: %s" % (key, comp))
+    v = ru[key]
+    bad_ctrl = [c for c in "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f\u061c" if c in v]
+    say("   NFC=%s bidi=%s dblspace=%s" % (unicodedata.normalize("NFC", v) == v, bad_ctrl, "  " in v))
+    if unicodedata.normalize("NFC", v) != v or bad_ctrl or "  " in v:
+        fail("%s: encoding hygiene" % key)
+
+# exact agreed text, arm by arm (avoids one 263-char literal)
+say("")
+say("== agreed text, exactly")
+if ru[NS + ".chip_high"] != "выс.":
+    fail("chip_high is %r, not the agreed «выс.»" % ru[NS + ".chip_high"])
+else:
+    say("chip_high == 'выс.' PASS")
+want_pointer = "Завершённые сессии перенесены в /unread."
+if ru[NS + ".pointer_unread"] != want_pointer:
+    fail("pointer_unread differs: %r" % ru[NS + ".pointer_unread"])
+else:
+    say("pointer_unread == agreed sentence PASS (%d cells)" % cell_len(want_pointer))
+
+stale = ru[NS + ".stale_skipped"]
+arms = dict(re.findall(r"(one|few|many|other) \{([^{}]*)\}", stale))
+want_arms = {
+    "one": "# уведомление изменилось после просмотра — не тронуто.",
+    "few": "# уведомления изменились после просмотра — не тронуты.",
+    "many": "# уведомлений изменилось после просмотра — не тронуто.",
+    "other": "# уведомления изменилось после просмотра — не тронуто.",
+}
+say("stale arms found: %s" % list(arms))
+for name, want in want_arms.items():
+    got = arms.get(name)
+    ok = got == want
+    say("   %-5s %s %r" % (name, "PASS" if ok else "FAIL", got))
+    if not ok:
+        fail("stale_skipped %s arm is %r, agreed %r" % (name, got, want))
+prefix_ok = stale.startswith("{count, plural, ")
+suffix_ok = stale.endswith("}}") and len(arms) == 4
+say("   wrapper prefix=%s suffix+branches=%s" % (prefix_ok, suffix_ok))
+if not (prefix_ok and suffix_ok):
+    fail("stale_skipped wrapper is not {count, plural, <4 arms>}")
+
+# 3. CLDR renders at the required counts
+say("")
+say("== stale_skipped CLDR renders (ru) and en at the same counts")
+COUNTS = [0, 1, 2, 3, 5, 11, 21, 22, 25, 101, 1234]
+probe = {0: "уведомлений изменилось", 1: "уведомление изменилось",
+         2: "уведомления изменились", 3: "уведомления изменились",
+         5: "уведомлений изменилось", 11: "уведомлений изменилось",
+         21: "уведомление изменилось", 22: "уведомления изменились",
+         25: "уведомлений изменилось", 101: "уведомление изменилось",
+         1234: "уведомления изменились"}
+for n in COUNTS:
+    out = rt.render_message(stale, {"count": n}, "ru")
+    eno = rt.render_message(en[NS + ".stale_skipped"], {"count": n}, "en")
+    want = probe[n]
+    ok = want in out
+    say("  n=%-5d ru=%d en=%-3d %s %r" % (n, cell_len(out), cell_len(eno),
+                                          "grammar-OK" if ok else "GRAMMAR-FAIL", out))
+    if not ok:
+        fail("stale_skipped n=%d lacks %r" % (n, want))
+    if "#" in out:
+        fail("stale_skipped n=%d rendered a literal #" % n)
+for short in ("chip_high", "pointer_unread"):
+    say("  %-14s cells=%d" % (short, cell_len(ru[NS + "." + short])))
+
+# 4. widths: new vs round 1 vs en
+say("")
+say("== widths, worst realistic count")
+for n in (3, 5, 11, 1234):
+    new_w = cell_len(rt.render_message(stale, {"count": n}, "ru"))
+    old_w = cell_len(rt.render_message(r1[NS + ".stale_skipped"], {"count": n}, "ru"))
+    en_w = cell_len(rt.render_message(en[NS + ".stale_skipped"], {"count": n}, "en"))
+    say("  n=%-5d new=%-3d round1=%-3d en=%-3d (saved %d)" % (n, new_w, old_w, en_w, old_w - new_w))
+budget = {s: ctx[NS + "." + s].get("maxCells") for s in SHORT}
+say("  budgets: %s" % budget)
+for s in SHORT:
+    b = ctx[NS + "." + s].get("maxCells")
+    w = cell_len(ru[NS + "." + s]) if not rt.plural_selectors(ru[NS + "." + s]) else 54
+    say("  %-14s cells=%-3d budget=%s %s" % (s, w, b,
+                                             "no budget" if b is None else ("ok" if w <= b else "OVER")))
+    if b is not None and w > b:
+        fail("%s over budget %s (%d)" % (s, b, w))
+
+# 5. pointer_unread literal
+say("")
+say("== pointer_unread: the /unread literal")
+p = ru[NS + ".pointer_unread"]
+idx = p.find("/unread")
+say("  index=%d segment=%r codepoints=%s" % (idx, p[idx:idx + 7] if idx >= 0 else None,
+                                             [hex(ord(c)) for c in p[idx:idx + 7]] if idx >= 0 else []))
+if p[idx:idx + 7] != "/unread":
+    fail("pointer_unread literal not byte-exact")
+else:
+    say("  byte-exact /unread PASS; sentence ends %r" % p[-9:])
+if not ru[NS + ".pointer_unread"].endswith("/unread."):
+    fail("pointer_unread does not end with the literal + full stop")
+
+# 6. context budgets
+say("")
+say("== context budgets: branch vs round 1")
+moved = []
+for key in ctx:
+    a = (r1_ctx.get(key) or {}).get("maxCells")
+    b = ctx[key].get("maxCells")
+    if a != b:
+        moved.append((key, a, b))
+say("  moved budgets: %d" % len(moved))
+for key, a, b in moved:
+    say("    %-38s %s -> %s" % (key.split(".", 2)[-1], a, b))
+ru_relevant = [m for m in moved if m[0] in AUDITED]
+say("  moved among the three audited keys: %s" % ([m[0] for m in ru_relevant] or "none"))
+if ru_relevant:
+    fail("a ru-relevant budget moved")
+for s in SHORT:
+    say("  audited budget %-14s = %s (round1 %s)" % (s, ctx[NS + "." + s].get("maxCells"),
+                                                     r1_ctx[NS + "." + s].get("maxCells")))
+for s in ("hint_answer", "hint_dismiss_all"):
+    k = NS + "." + s
+    w = cell_len(rt.render_message(ru[k], {}, "ru"))
+    say("  ru %-18s cells=%-3d old_budget=%-3s new_budget=%-3s fits_both=%s"
+        % (s, w, r1_ctx[k]["maxCells"], ctx[k]["maxCells"], w <= r1_ctx[k]["maxCells"]))
+    if w > ctx[k]["maxCells"]:
+        fail("%s over its widened budget" % s)
+
+# 7. chip-drop threshold cited by the style guide
+say("")
+say("== row chips: first width at which the chip survives (real row_line)")
+from local_operator.i18n import text as i18n_text  # noqa: E402
+i18n_text.set_active_locale("ru")
+say("  active locale=%r" % i18n_text._locale.eligible_locale(i18n_text._active_locale))
+now_ms = 1_700_000_000_000
+
+
+def mkrow(**over):
+    base = {"id": "r1", "source": "notify", "priority": "high", "read": False,
+            "title": "Проверить ретранслятор после раскатки", "updated_at": now_ms - 4 * 60_000,
+            "repeat_count": 1, "session": {"id": "s1", "title": "Fix the relay"},
+            "revision": 3, "read_via": None}
+    base.update(over)
+    return base
+
+
+for chip, r in (("выс.", mkrow()),
+                ("было в чате", mkrow(read=True, read_via="in_view")),
+                ("видели сразу", mkrow(read=True, read_via="watching"))):
+    first = None
+    last_gone = None
+    for w in range(30, 95):
+        plain = R.row_line(r, w, cursor=False, selected=False, now_ms=now_ms).plain
+        if chip in plain and first is None:
+            first = w
+        if chip not in plain:
+            last_gone = w
+    say("  chip %-14r dropped through width %s, shown from %s" % (chip, last_gone, first))
+
+# 8. negative controls on the new bytes (checks must fail closed)
+say("")
+say("== negative controls")
+mut = stale.replace("few {# уведомления изменились", "few {уведомления изменились")
+nc1 = _number_upgrade_problem(mut, "count", "plural", plural)
+nc1 = _number_upgrade_problem(mut, "count", "ru", plural)
+say("  NC1a few arm drops the # placeholder -> completeness=%r" % (nc1,))
+# 1b: the unit-suffix grammar probe must reject a wrong case form
+mut_grammar = stale.replace("few {# уведомления изменились", "few {# уведомлений изменились")
+probe_out = rt.render_message(mut_grammar, {"count": 3}, "ru")
+nc1b = ("уведомления изменились" in probe_out)
+say("  NC1b few arm wrong case -> probe would accept=%s (%r)" % (nc1b, probe_out))
+dropped = re.sub(r"few \{[^{}]*\} ", "", stale)
+c2 = _number_upgrade_problem(dropped, "count", "ru", plural)
+say("  NC2 few arm removed -> completeness=%r" % (c2,))
+c3 = _arguments_problem(rt.message_arguments(en[NS + ".stale_skipped"]),
+                        rt.message_arguments(stale.replace("{count, plural", "{total, plural")),
+                        translated_source=stale, locale="ru", plural=plural)
+say("  NC3 argument renamed -> problem=%r" % (c3,))
+bad = "Завершённые сессии перенесены в /уведомления."
+say("  NC4 drifted command literal detected=%s" % ("/unread" not in bad))
+if not (nc1 and "render the value" in str(nc1)):
+    fail("NC1a did not fail closed")
+if nc1b:
+    fail("NC1b did not fail closed")
+if not c2:
+    fail("NC2 did not fail closed")
+if not c3:
+    fail("NC3 did not fail closed")
+if "/unread" in bad:
+    fail("NC4 control unexpectedly holds the literal")
+
+say("")
+say("FAILURES=%r" % (failures,))
+say("RESULT: %s (%d failure(s))" % ("PASS" if not failures else "FAIL", len(failures)))
+sys.exit(1 if failures else 0)

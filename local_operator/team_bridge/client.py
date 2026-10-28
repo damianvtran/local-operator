@@ -61,6 +61,8 @@ shared settings writer, watcher or timer. See docs/design/team-bridge-identity-m
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import enum
 import hashlib
 import json
@@ -90,6 +92,8 @@ from local_operator.team_bridge.settings import (
     DEFAULT_ENROLLMENT_DONE,
     DEFAULT_ON_CONSENT_VERSION,
     TeamBridgeSettings,
+    parse_pending_default_enrollment,
+    pending_default_enrollment,
     record_default_enrollment,
     record_local_enabled,
     record_local_enabled_if_unset,
@@ -626,6 +630,102 @@ ATTACHMENT_MAX_COUNT = 4
 #: Content-Type outside it is refused here — the bytes are never trusted to
 #: name their own type downstream.
 ATTACHMENT_MIME_TYPES = ("image/png", "image/jpeg")
+#: The owner-audit byte route's served types: the two images plus the ONE type
+#: the hub serves every generic (non-image) file as (agent-server
+#: ``models.BridgeFileServedMime``, with the fixed name ``attachment.bin``). The
+#: audit serves files because the auditor is a human reading under the human
+#: predicate (contract v2 m2); the agent's own fetch stays images-only.
+OWNER_AUDIT_FILE_MIME = "application/octet-stream"
+OWNER_AUDIT_ATTACHMENT_MIME_TYPES = (*ATTACHMENT_MIME_TYPES, OWNER_AUDIT_FILE_MIME)
+#: The hub's owner-audit route family (agent-server #221). ONE spelling, used
+#: by the four ``owner_audit_*`` methods and by the gate below and nowhere else.
+_OWNER_AUDIT_HUB_PATH = "/messaging/agents/owned/conversations"
+PATH_METACHAR_SENTENCE = (  # i18n: ignore local guard; a code path, never shown to a person
+    "A hub path may not contain a separator or parameter character."
+)
+DOT_SEGMENT_SENTENCE = (
+    "A hub path may not contain a dot segment."  # i18n: ignore local guard, no copy
+)
+OWNER_AUDIT_SCOPE_SENTENCE = (  # i18n: ignore local guard; a code path, never shown to a person
+    "The owner audit is readable only through the desktop owner-audit routes."
+)
+#: Set ONLY while an ``owner_audit_*`` method is dispatching (see
+#: :func:`_owner_audit_scope`). The audit serves bodies the agent's screening
+#: rejected, so a request on that path from ANY other caller — a new method on
+#: this class, ``_send`` with a hand-built or concatenated path, a ``getattr``
+#: with a computed name reaching something else — is refused before a byte
+#: moves (#3022 R1-1). A static scan cannot see a built string; this can.
+_OWNER_AUDIT_SCOPE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "team_bridge_owner_audit_scope", default=False
+)
+
+
+@contextlib.contextmanager
+def _owner_audit_scope() -> Any:
+    token = _OWNER_AUDIT_SCOPE.set(True)
+    try:
+        yield
+    finally:
+        _OWNER_AUDIT_SCOPE.reset(token)
+
+
+def _refuse_unscoped_owner_audit(path: str) -> None:
+    """Refuse a hub request on the owner-audit family outside its four methods.
+
+    Matched after percent-decoding and collapsing slashes and case, so
+    ``//messaging/Agents/%6Fwned`` is the same path to this check as it is to
+    the hub's router. A ``.`` or ``..`` segment is refused outright, before the
+    match: httpx resolves dot segments when it builds the URL, so
+    ``conversations/../agents/x/../owned`` would leave this check as a member
+    path and reach the wire as the audit route (#3022 r3 m1). Normalising here
+    would mean tracking httpx's resolver; refusing is exact, and no hub path
+    this client builds has a dot segment (every id is grammar-checked first).
+    """
+
+    # Percent-decoded first (repeatedly, so ``%256F`` is not a second spelling):
+    # the hub routes on the DECODED path, so ``agents/%6Fwned`` is the audit
+    # family there and must be here too (#3022 r2 N2).
+    decoded, previous = path, None
+    while decoded != previous:
+        previous, decoded = decoded, urllib.parse.unquote(decoded)
+    if any(segment in (".", "..") for segment in decoded.split("/")):
+        raise BridgeRefusal(
+            "invalid_request",
+            DOT_SEGMENT_SENTENCE,
+            http_status=400,
+        )
+    # ``;`` and ``\`` are refused for the same reason as a dot segment (#3022 r8 m1):
+    # a spelling THIS check reads as a member path must not reach the hub as the
+    # audit family. ``owned;x/conversations`` and ``owned\conversations`` both did
+    # before the family match was narrowed to the conversations constant, and no
+    # hub path this client builds contains either: ids are grammar-checked and
+    # every separator it writes is ``/``.
+    if ";" in decoded or "\\" in decoded:
+        raise BridgeRefusal(
+            "invalid_request",
+            PATH_METACHAR_SENTENCE,
+            http_status=400,
+        )
+    normalized = re.sub(r"/+", "/", decoded).lower()
+    # The CONVERSATIONS family, not every ``/agents/owned`` path: the owner's
+    # agent-invitations read (``…/agents/owned/invitations``, #3045) shares the
+    # prefix and is an ordinary metadata read, so a prefix-wide check turned it
+    # into this refusal the moment both branches met.
+    if _OWNER_AUDIT_HUB_PATH in normalized and not _OWNER_AUDIT_SCOPE.get():
+        raise BridgeRefusal(
+            "owner_audit_not_in_scope",
+            OWNER_AUDIT_SCOPE_SENTENCE,
+            http_status=403,
+        )
+
+
+#: The hub's largest generic-file class cap (agent-server
+#: ``BridgeFileContainerMaxBytes``/``BridgeFileOtherMaxBytes``, 25 MiB). The
+#: audit read is STREAMED with this bound, so an oversized answer is refused
+#: once it passes the cap rather than read to the end; a legitimate file is
+#: then held in daemon memory (up to this size, never on disk) and handed to the
+#: route as one body (#3022 R1-3).
+OWNER_AUDIT_FILE_MAX_BYTES = 25 * 1024 * 1024
 #: The two attachment fetch purposes (manager decision D1). ``screen`` is the
 #: pre-admission classification read whose bytes go ONLY to the isolated
 #: screening call; ``context`` is the post-``allow`` read whose bytes may enter
@@ -730,6 +830,68 @@ ALLOWLIST_MAX_ENTRIES = 200
 
 #: §6.1's wire bound for the allowlist body (largest legitimate body ~30 KiB).
 ALLOWLIST_BODY_MAX_BYTES = 64 * 1024
+
+#: The closed set of ``local_enrollment.code`` values (D1). Before this, a
+#: ``state=active`` 200 said nothing about the LOCAL owner, so a device whose
+#: commit was skipped or failed showed "on" and never polled. Exactly two codes
+#: mean this machine holds the owner for the answered endpoint
+#: (``committed: true``): ``committed`` (just now) and ``already_owned``. The
+#: others are why not — never content, so they are safe to log and to render.
+LOCAL_ENROLLMENT_CODES = (
+    "committed",
+    "already_owned",
+    "other_owner",
+    "no_consent_echo",
+    "no_account_guard",
+    "no_tenant",
+    "tenant_mismatch",
+    "endpoint_not_active",
+    "store_failed",
+    "vetoed",
+)
+_LOCAL_ENROLLMENT_COMMITTED = frozenset({"committed", "already_owned"})
+#: The outcomes after a default-on POST that a COMMIT-ONLY retry may still fix
+#: (a transient store failure, a lost race, the late veto when it was not an
+#: explicit OFF — the retry re-checks that). The rest cannot change without a
+#: new consent, so they never arm the pending marker.
+_RETRYABLE_COMMIT_CODES = frozenset({"store_failed", "vetoed", "other_owner"})
+
+
+def _local_enrollment(code: str) -> dict[str, Any]:
+    """The additive ``local_enrollment`` result block for one closed-set code."""
+
+    if code not in LOCAL_ENROLLMENT_CODES:
+        raise ValueError(f"unknown local_enrollment code: {code}")
+    return {"committed": code in _LOCAL_ENROLLMENT_COMMITTED, "code": code}
+
+
+def _answer_tenant(result: Any) -> str | None:
+    """The tenant a settings answer names (endpoint first, then settings), or None."""
+
+    if not isinstance(result, Mapping):
+        return None
+    for block in (result.get("endpoint"), result.get("settings")):
+        tenant = block.get("tenant_id") if isinstance(block, Mapping) else None
+        if isinstance(tenant, str) and tenant:
+            return tenant
+    return None
+
+
+def _consent_on_record(endpoint: Mapping[str, Any]) -> str | None:
+    """The version of the hub's CURRENT consent record on ``endpoint``, or None.
+
+    The hub answers the endpoint's stored consent (``version``, ``current``);
+    ``current`` is false once it no longer binds (the member was re-added, or
+    the version left the accepted set). Only a version this client knows is
+    returned, so a receipt never names text it could not have shown.
+    """
+
+    consent = endpoint.get("consent")
+    if not isinstance(consent, Mapping) or consent.get("current") is not True:
+        return None
+    version = consent.get("version")
+    return version if version in (CONSENT_VERSION_V1, CONSENT_VERSION_V2) else None
+
 
 VALID_STATES = ("active", "paused", "disabled")
 VALID_CONSENTED_VIA = ("dialog", "settings")
@@ -884,6 +1046,57 @@ def _refuses_field(refusal: BridgeRefusal, field: str) -> bool:
     return refusal.http_status == 400 and refusal.details.get("field") == field
 
 
+#: agent-server #227's owner-only read of the caller's agent invitations. ONE
+#: spelling, used by :meth:`TeamBridgeClient.owned_agent_invitations` only.
+OWNED_AGENT_INVITATIONS_HUB_PATH = "/messaging/agents/owned/invitations"
+#: The client-side code for "this hub predates the operation". Its own code,
+#: not the hub's 400/404, because those read as a client bug ("invalid
+#: request") or as a missing resource ("gone"), and the honest remedy for
+#: both is an update of the server, not a retry or a different input.
+OUTDATED_HUB = "outdated_hub"
+OUTDATED_HUB_SENTENCE = (  # i18n: ignore machine-coded refusal; the renderer owns the copy
+    "The agent-messages server does not support this yet; it needs an update."
+)
+
+
+def _consent_predates_withdraw(refusal: BridgeRefusal) -> bool:
+    """Whether a consent refusal is a pre-#227 hub not knowing `withdraw`.
+
+    CODED answers only (review R1-3). `bridge_error` is what :func:`_refusal`
+    assigns to any body without a `code` — a fronting proxy's plain-text 400, an
+    unrelated refusal, and the pre-#227 strict decoder's complaint about an
+    unknown body key all arrive that way — so treating it as "the server needs
+    an update" sent the operator to the wrong remedy. The one shape a pre-#227
+    hub answers `withdraw` with, and a #227 hub cannot, is the closed-set
+    refusal `invalid_request` naming `decision`/`unknown_value`. Everything else
+    (including an uncoded 400/422 for `endpoint_id`) surfaces as the hub's own
+    answer, which is honest: this build cannot tell why that hub refused.
+    """
+
+    return (
+        refusal.http_status == 400
+        and refusal.code == "invalid_request"
+        and refusal.details.get("field") == "decision"
+        and refusal.details.get("rule") == "unknown_value"
+    )
+
+
+def _outdated_hub(refusal: BridgeRefusal) -> BridgeRefusal:
+    """Re-code a pre-#227 refusal as :data:`OUTDATED_HUB`, keeping the hub's status.
+
+    409 because it is a condition of the deployment (the same class as
+    ``bridge_destination_refused``), not of the request; ``hub_status`` keeps
+    the original answer for diagnosis.
+    """
+
+    return BridgeRefusal(
+        OUTDATED_HUB,
+        OUTDATED_HUB_SENTENCE,
+        http_status=409,
+        details={"hub_status": refusal.http_status, "hub_code": refusal.code},
+    )
+
+
 def _local_settings_snapshot(config_dir: Path | None) -> TeamBridgeSettings | None:
     """The directory-scoped watcher's last-good local settings, or None.
 
@@ -949,13 +1162,22 @@ class TeamBridgeClient:
         as the OWNER account, which is an enrollment-time decision (H2), not a
         silent fallback. The explicit ``db_path`` spelling is what relocates the
         store with ``config_dir`` — ``config_dir`` alone does not.
+
+        SHARED, NOT PRIVATE. This used to build a fresh ``AuthStore`` per client
+        and never close it. The connector builds two clients per message, and a
+        failure keeps each alive through its traceback's reference cycle, so a
+        refusing connector leaked an ``auth.db`` + ``-wal`` descriptor pair per
+        client until launchd's 256-descriptor limit stopped it silently (live
+        outage, 2026-10-26: 122 pairs held). ``shared_auth_store`` is the same
+        PLAIN store (never mesh-aware), one connection per credential root for
+        the process, and this client must not close what it was handed.
         """
 
         if self._store is None:
-            from local_operator.providers.auth_store import AuthStore
+            from local_operator.providers.auth_store import shared_auth_store
 
             db_path = (self._config_dir / "auth.db") if self._config_dir is not None else None
-            self._store = AuthStore(db_path=db_path)
+            self._store = shared_auth_store(db_path=db_path, config_dir=self._config_dir)
         return self._store
 
     def _pinned_row(self) -> Any:
@@ -1102,8 +1324,15 @@ class TeamBridgeClient:
         body: Mapping[str, Any] | None,
         content: bytes | None = None,
         max_response_bytes: int | None = None,
+        identity_response_only: bool = False,
+        if_none_match: str | None = None,
         timeout: float = REQUEST_TIMEOUT_S,
+        accept: str | None = None,
     ) -> httpx.Response:
+        # Every hub request in this class ends here, so the owner-audit path
+        # gate lives here: no caller can reach `/agents/owned` by spelling the
+        # path itself (#3022 R1-1).
+        _refuse_unscoped_owner_audit(path)
         # ONE AsyncClient per request is H1's bounded-CRUD shape: every op is a
         # single small JSON round trip and nothing here runs on a loop. The
         # connector (H4) needs a PERSISTENT client with an owned ``aclose()``
@@ -1115,13 +1344,18 @@ class TeamBridgeClient:
             follow_redirects=False,
         ) as http:
             headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+            if if_none_match is not None:
+                headers["If-None-Match"] = if_none_match
             if max_response_bytes is not None:
                 # The attachment byte read: STREAM and stop at the bound, so an
                 # oversized (or endless) answer is refused after at most
                 # ``max_response_bytes + chunk`` bytes instead of being
                 # buffered whole. The capped body is rebuilt into an ordinary
                 # Response so refusal mapping stays the one shared path.
-                headers["Accept"] = "image/png, image/jpeg, application/json"
+                # ``accept`` names the bounded read's own success types: the
+                # owner-audit byte read also accepts the hub's generic-file type,
+                # which a negotiating hop would otherwise answer 406 (#3022 R1-2).
+                headers["Accept"] = accept or "image/png, image/jpeg, application/json"
                 # identity (review R1-03): ``aiter_bytes`` yields DECODED bytes,
                 # and the rebuilt Response below would decode a gzip
                 # Content-Encoding a second time (a DecodingError surfacing as
@@ -1131,6 +1365,19 @@ class TeamBridgeClient:
                 async with http.stream(
                     method, self._base_url + path, params=params, headers=headers
                 ) as streamed:
+                    # Avatar reads need a hard allocation bound as well as a
+                    # decoded-size bound. Refuse an ignored identity request
+                    # before httpx can inflate a compressed image-sized bomb.
+                    if (
+                        identity_response_only
+                        and streamed.headers.get("content-encoding", "identity").strip().lower()
+                        != "identity"
+                    ):
+                        raise BridgeRefusal(
+                            "bridge_invalid_response",
+                            "Radient returned an invalid response.",  # i18n: ignore, no code
+                            http_status=502,
+                        )
                     chunks: list[bytes] = []
                     size = 0
                     async for chunk in streamed.aiter_bytes():
@@ -1226,6 +1473,7 @@ class TeamBridgeClient:
         content: bytes | None = None,
         max_response_bytes: int | None = None,
         expected_account_id: str | None = None,
+        accept: str | None = None,
     ) -> httpx.Response:
         """Resolve, send, refresh-once-on-401: the response, refusals UNMAPPED.
 
@@ -1251,6 +1499,7 @@ class TeamBridgeClient:
                 body=body,
                 content=content,
                 max_response_bytes=max_response_bytes,
+                accept=accept,
             )
         except httpx.HTTPError as failure:
             raise BridgeUnreachable() from failure
@@ -1265,6 +1514,7 @@ class TeamBridgeClient:
                     body=body,
                     content=content,
                     max_response_bytes=max_response_bytes,
+                    accept=accept,
                 )
             except httpx.HTTPError as failure:
                 raise BridgeUnreachable() from failure
@@ -1575,6 +1825,19 @@ class TeamBridgeClient:
         forbids a status read writing one. The commit is skipped for every
         other answer (pause, disable, missing echo/tenant), so a settings edit
         never invents consent.
+
+        EVERY ``state=active`` ANSWER SAYS WHETHER THIS MACHINE IS ENROLLED (D1).
+        A 200/active from the hub only proves the HUB endpoint; before this the
+        local commit could be skipped or fail silently and the device showed
+        "on" while never polling. The answer now carries the additive
+        ``local_enrollment: {committed, code}`` (``code`` from
+        :data:`LOCAL_ENROLLMENT_CODES`), and a consented enable that could never
+        commit — no captured account, no tenant — is refused with ``ValueError``
+        BEFORE any I/O: a caller bug, not a silent 200. The guard is never
+        filled in from whoever is signed in now (that re-binds consent to
+        another account, the R6/Q1 replay), and the tenant is never taken from
+        the answer after the write (that skips the pre-enable head read and
+        replays a reused endpoint's feed, R2-1).
         """
 
         if state not in VALID_STATES:
@@ -1595,6 +1858,20 @@ class TeamBridgeClient:
                     "state=active from a fresh endpoint or from disabled requires "
                     "consent_version (RFC §5.2)"
                 )
+        if state == "active" and consent_version:
+            # D1 paths (a) and (b): a consented enable missing either of these
+            # can never commit a local owner, so it would answer 200/active for
+            # a device that never receives. Refused before the first byte.
+            if expected_account_id is None:
+                raise ValueError(
+                    "a consented state=active write requires expected_account_id (the "
+                    "captured-account guard): without it no local enrolment can be committed"
+                )
+            if not tenant_id:
+                raise ValueError(
+                    "a consented state=active write requires tenant_id: without it no "
+                    "local enrolment can be committed"
+                )
         body: dict[str, Any] = {"state": state}
         if tenant_id:
             body["tenant_id"] = tenant_id
@@ -1609,9 +1886,12 @@ class TeamBridgeClient:
         _require_body_within(body, SETTINGS_BODY_MAX_BYTES)
         access = await self._guarded_access(expected_account_id)
         # R2-1: the seed position is read BEFORE the write (see _pre_enable_head).
+        # Also for a guarded resume WITHOUT an echo (D1 path c): it may commit
+        # from the hub's consent record, and it then needs the same seed. The
+        # read is skipped (no I/O) whenever an owner is already committed.
         head = (
             await self._pre_enable_head(tenant_id=tenant_id, access=access)
-            if state == "active" and consent_version and tenant_id
+            if state == "active" and tenant_id and (consent_version or access is not None)
             else None
         )
         try:
@@ -1626,7 +1906,7 @@ class TeamBridgeClient:
                     refusal.details.get("rule"),
                 )
             raise
-        await self._commit_explicit_enable(
+        local_enrollment = await self._commit_explicit_enable(
             state=state,
             tenant_id=tenant_id,
             consent_version=consent_version,
@@ -1634,11 +1914,43 @@ class TeamBridgeClient:
             access=access,
             head=head,
         )
+        if local_enrollment is not None and isinstance(result, dict):
+            result = {**result, "local_enrollment": local_enrollment}
         if state == "disabled":
             # The one-click Turn off: the hub answered, so make the opt-out
             # sticky on this machine too (see _apply_local_opt_out).
             opted_account = getattr(access, "account_id", None) or expected_account_id
             self._apply_local_opt_out(opted_account)
+        if state == "disabled" and self._config_dir is not None:
+            # THE OFF EVENT, and the only reconcile this method owns. An
+            # ENABLE is covered by the commit hook (``_commit_explicit_enable``
+            # -> ``commit_settings_enrollment`` -> the connector sync), so
+            # reconciling again here was a second launchctl round trip for one
+            # click (code review R1-1 / QA Q-1 measured 5 subprocesses across
+            # the two).
+            #
+            # WHAT A RESUME THEREFORE RELIES ON (review R2-4). A PUT that
+            # resumes an existing endpoint commits no owner, so it makes no
+            # launchctl call of its own — and after a Turn off the unit was
+            # REMOVED, so nothing is in place at that instant. The install is
+            # the surface's follow-up ``team_bridge.enabled = true`` write,
+            # which every shipped enable path sends (the desktop UI's
+            # ``enable()`` and its consent dialog both do, and that route
+            # reconciles), with the app-start catch-up as the backstop for a
+            # machine whose surface never wrote the key. Adding a second sync
+            # here instead would restore the double round trip this comment
+            # exists to explain.
+            #
+            # OFF THE EVENT LOOP: this runs launchctl, whose budget is a 15 s
+            # subprocess timeout plus the shared reload's release and bootstrap
+            # deadlines. Inline it stalled every route, the SSE fan-out and
+            # agent turns — measured at 0.97 s on one disable — at the moment
+            # this surface was waiting for its 200.
+            from local_operator.team_bridge.connector.install import (
+                sync_connector_service,
+            )
+
+            await asyncio.to_thread(sync_connector_service, self._config_dir)
         return result
 
     async def enroll_default_on(
@@ -1694,13 +2006,18 @@ class TeamBridgeClient:
         result = await self._send("POST", "/messaging/enrollment", body=body, access=access)
         endpoint = result.get("endpoint") if isinstance(result, Mapping) else None
         consent = endpoint.get("consent") if isinstance(endpoint, Mapping) else None
-        if (
+        if not (
             isinstance(consent, Mapping)
             and consent.get("consented_via") == "default_on"
             and consent.get("version") == CONSENT_VERSION_V2
-            and (may_commit_local is None or may_commit_local())
         ):
-            await self._commit_explicit_enable(
+            # The hub's no-op: nothing was created here, so there is no local
+            # enrolment to report on either.
+            return result
+        if may_commit_local is not None and not may_commit_local():
+            local_enrollment: dict[str, Any] | None = _local_enrollment("vetoed")
+        else:
+            local_enrollment = await self._commit_explicit_enable(
                 state="active",
                 tenant_id=tenant_id,
                 consent_version=CONSENT_VERSION_V2,
@@ -1708,7 +2025,80 @@ class TeamBridgeClient:
                 access=access,
                 head=head,
             )
+        if local_enrollment is not None and local_enrollment["code"] in _RETRYABLE_COMMIT_CODES:
+            # D1/R3: the endpoint now exists, so the surface reads state C and
+            # default-on never runs again. Record what a commit-only retry needs:
+            # the endpoint THIS POST created and the PRE-POST head (R2-1).
+            endpoint_id = endpoint.get("id") if isinstance(endpoint, Mapping) else None
+            if self._config_dir is not None and isinstance(endpoint_id, str) and endpoint_id:
+                try:
+                    record_default_enrollment(
+                        self._config_dir,
+                        expected_account_id,
+                        pending_default_enrollment(endpoint_id, head),
+                    )
+                except Exception:  # noqa: BLE001 - bookkeeping; the outcome still says so
+                    logger.warning("team_bridge: could not record the pending local commit")
+        if local_enrollment is not None and isinstance(result, dict):
+            result = {**result, "local_enrollment": local_enrollment}
         return result
+
+    async def commit_pending_default_enrollment(
+        self,
+        *,
+        tenant_id: str,
+        endpoint_id: str,
+        head: int,
+        expected_account_id: str,
+        may_commit_local: Callable[[], bool],
+    ) -> dict[str, Any]:
+        """Commit-only recovery for a default-on POST whose local commit failed.
+
+        WHY. :meth:`enroll_default_on` created the hub endpoint but the owner
+        commit raised (or lost a race), so the device is "on" for teammates and
+        deaf here; the status discipline cannot re-enter default-on (state C).
+        This NEVER POSTs again: it reads the caller's settings (``GET``, the one
+        answer carrying the endpoint's consent record) and commits the owner
+        only when that record still proves this machine's default-on consent —
+        the SAME endpoint id the marker names, ``default_on`` + v2, current,
+        active. An endpoint consented elsewhere (dialog/settings) never matches,
+        so the consent hold is not widened into state C (R2-6).
+
+        ``head`` is the PRE-POST head the marker stored (0 for a brand-new
+        endpoint), never one read now: the endpoint has been live since the POST,
+        so every message sent meanwhile sits at or below today's head and a seed
+        there would skip it for good (R2-1). Returns the ``local_enrollment``
+        outcome; refusals and transport failures propagate to the caller.
+        """
+
+        access = await self._guarded_access(expected_account_id)
+        answer = await self._send(
+            "GET", "/messaging/settings", params={"tenant_id": tenant_id}, access=access
+        )
+        endpoint = answer.get("endpoint") if isinstance(answer, Mapping) else None
+        consent = endpoint.get("consent") if isinstance(endpoint, Mapping) else None
+        if not (
+            isinstance(endpoint, Mapping)
+            and endpoint.get("id") == endpoint_id
+            and isinstance(consent, Mapping)
+            and consent.get("consented_via") == "default_on"
+            and consent.get("version") == CONSENT_VERSION_V2
+            # Fail closed like ``_consent_on_record`` (review R1-3): a recovery
+            # that commits consent needs the hub to SAY the record still binds.
+            and consent.get("current") is True
+        ):
+            return _local_enrollment("no_consent_echo")
+        if not may_commit_local():
+            return _local_enrollment("vetoed")
+        outcome = await self._commit_explicit_enable(
+            state="active",
+            tenant_id=tenant_id,
+            consent_version=CONSENT_VERSION_V2,
+            result=answer,
+            access=access,
+            head=head,
+        )
+        return outcome if outcome is not None else _local_enrollment("endpoint_not_active")
 
     def _apply_local_opt_out(self, account_id: str | None) -> None:
         """The local half of the one-click Turn off, after the hub accepted it.
@@ -1752,7 +2142,7 @@ class TeamBridgeClient:
         result: Mapping[str, Any],
         access: OAuthAccess | None,
         head: int | None = None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         """Commit the native receipt for THIS user's explicit settings enable.
 
         The settings PUT is the user's action (the surface has just sent the
@@ -1761,55 +2151,183 @@ class TeamBridgeClient:
         reaches here (consent hold, #2712).
 
         NOTHING IS COMMITTED for a pause/disable, an answer that does not prove
-        active state, or a caller that omitted the consent echo or tenant: the
-        server's answer is the source, and a guess is worse than no local
-        authority. Best-effort after the server write: a store failure must not
-        report a failed enable, and a later explicit write retries.
+        active state, or a caller that omitted the tenant: the server's answer
+        is the source, and a guess is worse than no local authority. Best-effort
+        after the server write: a store failure must not report a failed enable,
+        and a later explicit write retries.
+
+        CONSENT ON RECORD (D1 path c). The shipped desktop resume of an existing
+        endpoint sends NO echo, because the hub reports ``consent_required:
+        false`` whenever the member's stored consent still binds. That record is
+        this member's consent (and the hub's answer names its version), so the
+        user's explicit ``state=active`` write commits under it: ``current`` must
+        be true and the version one this client knows. Anything less is reported
+        as ``no_consent_echo`` — never a silent 200.
+
+        THIS IS A CONSENT-MODEL CHANGE (review R1-2), stated so nobody reads
+        it as an accident: before D1 "a bare resume is not an opt-in" held
+        unconditionally. It now holds only when the hub holds no binding record.
+        Why that is sound: ``current`` is the hub's ``ConsentBindsTo`` over the
+        caller's OWN membership row, read from the answer to this very guarded
+        PUT (so neither a stale echo nor another member's consent), the version
+        is the one the member agreed to, and the write itself is the user's
+        explicit action — never a status read (the consent hold, #2712, stands).
+
+        Returns ``None`` for a non-active write (nothing to claim) and otherwise
+        the ``local_enrollment`` outcome: whether THIS machine now holds the
+        owner for this endpoint, and a closed-set code. Every non-committed code
+        is logged by code only (content-free: no ids, no exception prose).
         """
 
-        if (
-            state != "active"
-            or not consent_version
-            or not tenant_id
-            or access is None
-            or self._config_dir is None
-        ):
-            return
+        if state != "active":
+            return None
+        outcome = await self._local_commit_outcome(
+            tenant_id=tenant_id,
+            consent_version=consent_version,
+            result=result,
+            access=access,
+            head=head,
+        )
+        if not outcome["committed"]:
+            logger.warning("team_bridge: local enrolment not committed (%s)", outcome["code"])
+        elif outcome["committed"] and self._config_dir is not None:
+            # The owner exists now, but every receive/wake/authority fence reads
+            # ``team_bridge.enabled`` from DISK, and an absent key reads OFF
+            # (review R1-1 / QA Q1). A resume on a reinstalled or wiped machine
+            # (path c) had no other writer — the desktop resume button only
+            # sends the PUT — so the device committed an owner and still held
+            # every message ``bridge_off`` while status said it receives. Same
+            # rule as default-on: "if unset" only, so an explicit local OFF
+            # always wins. Best-effort: the commit already stands.
+            #
+            # BOTH committed outcomes, never the ``committed`` CODE alone (review
+            # R2-1): ``already_owned`` means this machine already holds THIS
+            # endpoint's owner, which a config reset or a restore that keeps the
+            # owner store reaches with the key absent. That is the very
+            # deaf-but-on state, just with an owner present, so gate on the
+            # boolean the marker and the retry path already use.
+            try:
+                record_local_enabled_if_unset(self._config_dir)
+            except Exception:  # noqa: BLE001 - the fences then still read OFF, loudly
+                logger.warning("team_bridge: could not persist the local switch")
+        return outcome
+
+    async def _local_commit_outcome(
+        self,
+        *,
+        tenant_id: str | None,
+        consent_version: str | None,
+        result: Mapping[str, Any],
+        access: OAuthAccess | None,
+        head: int | None,
+    ) -> dict[str, Any]:
+        """The commit itself, each early exit a coded outcome (see the caller).
+
+        ASYNC, and the reason is load-bearing (review R3-2): the commit runs in
+        a worker thread so a first connector install cannot freeze the event
+        loop (R1-1). That await breaks the atomicity the same-endpoint
+        read-only check above used to have against the commit itself, so a
+        double submit can now pass the check twice — see the re-read below.
+        """
+
         endpoint = result.get("endpoint") if isinstance(result, Mapping) else None
-        if not isinstance(endpoint, Mapping) or endpoint.get("state") != "active":
-            return
-        endpoint_id = endpoint.get("id")
+        endpoint_id = endpoint.get("id") if isinstance(endpoint, Mapping) else None
+        if (
+            not isinstance(endpoint, Mapping)
+            or endpoint.get("state") != "active"
+            or not isinstance(endpoint_id, str)
+            or not endpoint_id
+        ):
+            return _local_enrollment("endpoint_not_active")
+        if self._config_dir is None:
+            return _local_enrollment("store_failed")
         credential_id = getattr(access, "credential_id", None)
         account_id = getattr(access, "account_id", None)
         if (
-            not isinstance(endpoint_id, str)
-            or not endpoint_id
+            access is None
             or not isinstance(credential_id, int)
             or isinstance(credential_id, bool)
             or not isinstance(account_id, str)
             or not account_id
         ):
-            return
-        local = _local_settings_snapshot(self._config_dir)
+            # Never resolve an unguarded access here: that would bind the
+            # consent to whoever is signed in now (R6/Q1).
+            return _local_enrollment("no_account_guard")
+        if not tenant_id:
+            return _local_enrollment("no_tenant")
+        if _answer_tenant(result) not in (None, tenant_id):
+            return _local_enrollment("tenant_mismatch")
+        try:
+            from local_operator.team_bridge.store import Store
+
+            # Read-only: a refusal below must not create the store as a side
+            # effect. This machine already owning THIS endpoint is enrolled,
+            # whatever the write carried (a rename, a resume).
+            owner = Store(self._config_dir).active_owner_readonly()
+        except Exception:  # noqa: BLE001 - unreadable reads as "cannot tell"
+            return _local_enrollment("store_failed")
+        if owner is not None and (owner.account_id, owner.tenant_id, owner.endpoint_id) == (
+            account_id,
+            tenant_id,
+            endpoint_id,
+        ):
+            return _local_enrollment("already_owned")
+        version = consent_version or _consent_on_record(endpoint)
+        if not version:
+            return _local_enrollment("no_consent_echo")
         try:
             from local_operator.team_bridge.connector.enrollment import (
                 commit_settings_enrollment,
             )
 
-            committed = commit_settings_enrollment(
+            # IN A THREAD (review R1-1): the commit itself is a fast SQLite
+            # transaction, but it fires the D2a connector hook, which runs
+            # launchctl. Off the loop a first install costs one worker thread;
+            # on it, it would freeze every route for the length of a bootstrap.
+            local = _local_settings_snapshot(self._config_dir)
+            committed = await asyncio.to_thread(
+                commit_settings_enrollment,
                 config_dir=self._config_dir,
                 credential_id=credential_id,
                 account_id=account_id,
                 tenant_id=tenant_id,
                 endpoint_id=endpoint_id,
-                consent_version=consent_version,
+                consent_version=version,
                 canonical_base_url=self.base_url,
                 cos_session_id=(local.session or None) if local is not None else None,
             )
         except Exception:  # noqa: BLE001 - the server-side enable already succeeded
-            return
-        if committed and head is not None:
+            return _local_enrollment("store_failed")
+        if not committed:
+            # ``commit_settings_enrollment`` refuses while ANY owner (or an
+            # ambiguous store) is committed — an IN-TRANSACTION one-owner rule
+            # (review R2-2), so this is the loss of a race, not a caller bug.
+            #
+            # A DOUBLE SUBMIT FOR THE SAME ENDPOINT MUST NOT READ AS SOMEBODY
+            # ELSE'S OWNER (review R3-2). The check above is read-only and now
+            # sits across an await, so two concurrent explicit enables for this
+            # endpoint can both pass it; one commits and the loser lands here.
+            # Re-reading the owner answers the only question that matters —
+            # does THIS machine hold THIS endpoint — and that is ``already_owned``
+            # (a committed outcome), never ``other_owner``: the caller writes
+            # ``team_bridge.enabled`` only for a committed outcome, and
+            # ``other_owner`` on the default-on path arms a pointless retry.
+            try:
+                from local_operator.team_bridge.store import Store
+
+                held = Store(self._config_dir).active_owner_readonly()
+            except Exception:  # noqa: BLE001 - unreadable reads as "cannot tell"
+                return _local_enrollment("other_owner")
+            if held is not None and (held.account_id, held.tenant_id, held.endpoint_id) == (
+                account_id,
+                tenant_id,
+                endpoint_id,
+            ):
+                return _local_enrollment("already_owned")
+            return _local_enrollment("other_owner")
+        if head is not None:
             self._seed_feed_cursor(head)
+        return _local_enrollment("committed")
 
     async def _pre_enable_head(self, *, tenant_id: str, access: OAuthAccess | None) -> int | None:
         """The hub's feed head for this account, read BEFORE the enable write.
@@ -2159,9 +2677,16 @@ class TeamBridgeClient:
         before: str | None = None,
         cursor: str | None = None,
         scope: Literal["account"] | None = None,
+        status: Literal["open", "archived"] | None = None,
         access: OAuthAccess | None = None,
     ) -> dict[str, Any]:
         """One page of the caller's conversations, newest activity first.
+
+        ``status="archived"`` asks for the archived half (the server's own rule
+        decides what the caller may see there, including an organization
+        administrator's archived channels they are not a member of); omitted or
+        ``"open"`` is the live list. The default is NOT sent, so an older
+        server that has no ``status`` parameter keeps answering exactly as before.
 
         ``scope="account"`` asks for the merged page across every organization
         the signed-in account is an ACTIVE member of. The server derives that set
@@ -2184,6 +2709,8 @@ class TeamBridgeClient:
             params["cursor"] = cursor
         if scope:
             params["scope"] = scope
+        if status:
+            params["status"] = status
         return await self._send(
             "GET", "/messaging/conversations", params=params or None, access=access
         )
@@ -2245,13 +2772,47 @@ class TeamBridgeClient:
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
-        """Archive or unarchive. ``action`` is the closed set ``archive|unarchive``."""
+        """Archive or unarchive. ``action`` is the closed set ``archive|unarchive``.
+
+        Permitted to the conversation owner or, on a channel, an organization
+        owner/admin (the server decides; the desktop never infers authority).
+        """
 
         if action not in ("archive", "unarchive"):
             raise ValueError("action must be 'archive' or 'unarchive'")
         return await self._send(
             "POST",
             f"/messaging/conversations/{conversation_id}/{action}",
+            params={"tenant_id": tenant_id} if tenant_id else None,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
+    async def conversation_delete(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Permanently delete an ARCHIVED conversation. Irreversible.
+
+        The server owns every rule (owner or organization owner/admin, archived
+        only, never a built-in) and erases the history; this client only carries
+        the request. A partly finished deletion is DURABLE: a large conversation is
+        drained in bounded requests, and a request that runs out of its budget (or
+        whose response is lost) answers 503 / a transport failure while the erasure
+        carries on, so the caller RETRIES the same call to finish it. A repeat after
+        completion answers ``conversation_not_found``, which is "done" only for a
+        retry of a delete that already got a 503 or a transport failure: the same
+        opaque 404 also answers a caller who has lost authority, so a first attempt
+        that gets it has NOT deleted anything.
+        """
+
+        return await self._send(
+            "DELETE",
+            f"/messaging/conversations/{conversation_id}",
             params={"tenant_id": tenant_id} if tenant_id else None,
             access=access,
             expected_account_id=expected_account_id,
@@ -2341,28 +2902,100 @@ class TeamBridgeClient:
         account_id: str,
         *,
         decision: str,
-        consent_version: str,
+        consent_version: str | None = None,
+        endpoint_id: str | None = None,
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
-        """Accept or decline an AGENT invitation, as the agent's owner.
+        """Accept, decline or withdraw the owner's AGENT in a conversation.
 
         This is the only path that activates an agent member, and the version
         is the server-served ``bridge_agent_participation_v1`` — never the
-        agent-messages consent.
+        agent-messages consent. ``withdraw`` (agent-server #227) takes an ACTIVE
+        agent out and carries no version: leaving is not consenting. The hub
+        acts on one source state per decision and refuses every other with 409
+        ``invalid_transition`` (``details.rule`` ``not_invited``/``not_active``)
+        or, for two unpinned candidate rows, 400 ``rule=ambiguous``; those
+        travel unchanged, because the renderer's "already answered" copy keys
+        on exactly that rule.
+
+        ``consent_version`` and ``endpoint_id`` ride only when given, so an
+        accept/decline without a pin is the pre-#227 wire byte for byte.
         """
 
-        body: dict[str, Any] = {"decision": decision, "consent_version": consent_version}
+        body: dict[str, Any] = {"decision": decision}
+        if consent_version is not None:
+            body["consent_version"] = consent_version
+        if endpoint_id is not None:
+            body["endpoint_id"] = endpoint_id
         if tenant_id:
             body["tenant_id"] = tenant_id
-        return await self._send(
-            "POST",
-            f"/messaging/conversations/{conversation_id}/members/{account_id}/consent",
-            body=body,
-            access=access,
-            expected_account_id=expected_account_id,
-        )
+        try:
+            return await self._send(
+                "POST",
+                f"/messaging/conversations/{conversation_id}/members/{account_id}/consent",
+                body=body,
+                access=access,
+                expected_account_id=expected_account_id,
+            )
+        except BridgeRefusal as refusal:
+            # Only a WITHDRAW is judged, and only on the shape above: an
+            # accept/decline is the pre-#227 wire and its refusals are always
+            # about the caller's rows (R1-3).
+            if decision == "withdraw" and _consent_predates_withdraw(refusal):
+                raise _outdated_hub(refusal) from refusal
+            raise
+
+    async def owned_agent_invitations(
+        self,
+        *,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """One page of the conversations where the caller's OWN agent is ``invited``.
+
+        agent-server #227 ``GET /messaging/agents/owned/invitations``: the only
+        place an invitation into a private channel or group the owner is not in
+        is visible at all. METADATA ONLY — the hub serves no body, preview or
+        member list, and nothing here asks for one or keeps the page. The hub
+        derives the agent rows from the caller + tenant (no endpoint parameter);
+        ``cursor`` is the hub's opaque ``next_cursor``, forwarded verbatim.
+
+        The captured-owner receipt is REQUIRED (the owner-audit rule): a page
+        captured for account A must not be answered while signed in as B. A hub
+        that predates #227 answers its router's uncoded 404, which is surfaced
+        as ``outdated_hub`` — no conversation id is in this path, so a 404 here
+        cannot mean "not yours".
+        """
+
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if cursor:
+            params["cursor"] = cursor
+        try:
+            return await self._send(
+                "GET",
+                OWNED_AGENT_INVITATIONS_HUB_PATH,
+                params=params or None,
+                expected_account_id=expected_account_id,
+            )
+        except BridgeRefusal as refusal:
+            # An UNCODED 404 here is "this hub has no such route": the path
+            # carries no id, so a coded 404 is the hub speaking about the caller
+            # (no membership, unknown tenant) and passes through. Deliberately
+            # unlike the consent arm (R1-3): there an uncoded 400/422 is
+            # ambiguous, while a router's 404 on a fixed metadata path is the
+            # absent-route answer itself — a #227 hub has no way to code a route
+            # it does not serve.
+            if refusal.http_status == 404 and refusal.code == "bridge_error":
+                raise _outdated_hub(refusal) from refusal
+            raise
 
     async def conversation_messages(
         self,
@@ -2483,6 +3116,179 @@ class TeamBridgeClient:
             params=params or None,
             access=access,
         )
+
+    # -- owner audit (HUMAN-ONLY) --------------------------------------------
+    #
+    # The agent OWNER's read-only audit of every conversation its own agent is
+    # or was in (agent-server #221, docs/TEAM-BRIDGE-CONVERSATIONS.md §16). These
+    # four reads return FULL bodies, including messages the agent REJECTED or
+    # never screened: screening protects the agent's context from injection, it
+    # is not a confidentiality boundary against the agent's owner.
+    #
+    # THAT IS WHY THEY ARE HUMAN-ONLY. A body served here has NOT passed the
+    # agent's screening, so it must never reach a model: the `team_bridge` tool,
+    # read_context, model_boundary, the connector and every other agent-context
+    # path must not call these methods. The only caller is the desktop route
+    # family `/v1/desktop/team-bridge/owner-audit/...`, which hands the bytes to
+    # the renderer and keeps nothing. `tests/unit/team_bridge/
+    # test_owner_audit_isolation.py` pins that statically (no module but this one
+    # and the desktop route names `owner_audit_`) and behaviourally (every tool
+    # op runs without one audit request leaving the process). A new caller must
+    # come through that test, not around it.
+    #
+    # NO ENDPOINT PARAMETER, by contract (v2 M1): the server derives the audited
+    # agent rows from the caller + tenant, so a non-owner cannot even express the
+    # request, and the hub refuses `endpoint_id`/`purpose`/`scope` here. Nothing
+    # is persisted: no store write, no body cache (store.py's no-body-cache rule),
+    # and the hub answers `Cache-Control: private, no-store`.
+    #
+    # Every read REQUIRES the captured-owner receipt (`expected_account_id`):
+    # an audit page fetched for account A must never be served while the machine
+    # is signed in as B, and an optional guard regresses the first time a caller
+    # forgets it (the attachment routes' #2772 B1 rule).
+
+    async def owner_audit_conversations(
+        self,
+        *,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """One page of the conversations the caller's OWN agent is or was in.
+
+        ``{conversations: [...], next_cursor?, has_more}``, activity-descending,
+        each row carrying ``agent`` (the audited member and its window bounds)
+        and no read state. HUMAN-ONLY: see the section comment above.
+        """
+
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if cursor:
+            params["cursor"] = cursor
+        with _owner_audit_scope():
+            return await self._send(
+                "GET",
+                _OWNER_AUDIT_HUB_PATH,
+                params=params or None,
+                expected_account_id=expected_account_id,
+            )
+
+    async def owner_audit_messages(
+        self,
+        conversation_id: str,
+        *,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        before_seq: int | None = None,
+        after_seq: int | None = None,
+    ) -> dict[str, Any]:
+        """One audited timeline page, newest-first, with FULL bodies.
+
+        Each message may carry ``agent_delivery_status`` (``admitted`` |
+        ``rejected`` | ``not_screened``; omitted on the agent's own messages)
+        and ``agent_verdict_at``. Only the audit window is served; a
+        conversation without one is the hub's uniform 404. HUMAN-ONLY.
+        """
+
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if before_seq is not None:
+            params["before_seq"] = int(before_seq)
+        if after_seq is not None:
+            params["after_seq"] = int(after_seq)
+        with _owner_audit_scope():
+            return await self._send(
+                "GET",
+                f"{_OWNER_AUDIT_HUB_PATH}/{conversation_id}/messages",
+                params=params or None,
+                expected_account_id=expected_account_id,
+            )
+
+    async def owner_audit_replies(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        after_seq: int | None = None,
+    ) -> dict[str, Any]:
+        """One audited thread: ``{root, replies (oldest-first), has_more, next_after_seq?}``.
+
+        Same window as the timeline (the root must be inside it). HUMAN-ONLY.
+        """
+
+        params: dict[str, Any] = {}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if after_seq is not None:
+            params["after_seq"] = int(after_seq)
+        with _owner_audit_scope():
+            return await self._send(
+                "GET",
+                f"{_OWNER_AUDIT_HUB_PATH}/{conversation_id}/messages/{message_id}/replies",
+                params=params or None,
+                expected_account_id=expected_account_id,
+            )
+
+    async def owner_audit_attachment(
+        self,
+        conversation_id: str,
+        message_id: str,
+        attachment_id: str,
+        *,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+    ) -> tuple[bytes, str]:
+        """One audited attachment's bytes and served type: ``(data, mime)``.
+
+        Unlike :meth:`fetch_attachment` the audit branch serves GENERIC files as
+        well as images (the auditor is a human, and the human predicate serves
+        them), so the accepted types are :data:`OWNER_AUDIT_ATTACHMENT_MIME_TYPES`
+        and the bounded read uses the hub's largest file class cap. An image is
+        still held to :data:`ATTACHMENT_MAX_BYTES`. Anything else — another
+        type, an empty body, a missing header — is refused rather than handed
+        downstream under a type nobody can name. HUMAN-ONLY.
+        """
+
+        _require_attachment_id(attachment_id)
+        params = {"tenant_id": tenant_id} if tenant_id else None
+        with _owner_audit_scope():
+            response = await self._authorized(
+                "GET",
+                f"{_OWNER_AUDIT_HUB_PATH}/{conversation_id}/messages/{message_id}"
+                f"/attachments/{attachment_id}",
+                params=params,
+                max_response_bytes=OWNER_AUDIT_FILE_MAX_BYTES,
+                expected_account_id=expected_account_id,
+                accept=f"image/png, image/jpeg, {OWNER_AUDIT_FILE_MIME}, application/json",
+            )
+        if response.status_code >= 400:
+            raise _refusal(response)
+        mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if (
+            response.status_code != 200
+            or mime not in OWNER_AUDIT_ATTACHMENT_MIME_TYPES
+            or not response.content
+            or (mime in ATTACHMENT_MIME_TYPES and len(response.content) > ATTACHMENT_MAX_BYTES)
+        ):
+            raise BridgeRefusal(
+                "bridge_invalid_response",
+                "Radient returned an invalid response.",  # i18n: ignore, no code
+                http_status=502,
+            )
+        return response.content, mime
 
     async def conversation_body(
         self,
@@ -2620,6 +3426,113 @@ class TeamBridgeClient:
             raise _refusal(response)
         # 204 carries no envelope; a 200 {msg} acknowledgement is equally final.
         return {}
+
+    async def fetch_avatar(
+        self,
+        target_account_id: str,
+        *,
+        v: str,
+        size: int,
+        expected_account_id: str,
+    ) -> tuple[bytes, str]:
+        """Closed account image read, fenced by the durable login incarnation.
+
+        Account equality alone misses A→B→A. AuthStore's incarnation changes
+        on interactive login, not token refresh; capture it BEFORE awaiting
+        refresh, then check both sides of the bounded byte read. Cached entities
+        have zero freshness lifetime: every reuse requires upstream membership
+        authorization and a matching conditional 304 under that same login.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.team_bridge.avatar_cache import AVATAR_CACHE, Entity
+        from local_operator.team_bridge.types import is_account_id
+
+        if (
+            not is_account_id(target_account_id)
+            or not is_account_id(expected_account_id)
+            or re.fullmatch(r"[0-9a-f]{16}", v) is None
+            or type(size) is not int
+            or size not in (64, 256)
+        ):
+            raise ValueError("invalid avatar request")
+        self._require_destination()
+        store = self._auth_store()
+        scope = (str((self._config_dir or config_dir()).resolve()), self._base_url)
+        row = self._pinned_row()
+        if row is None:
+            AVATAR_CACHE.admit(scope, None)
+            raise BridgeSignInRequired(SIGN_IN_SENTENCE)
+        incarnation = store.native_login_incarnation(row.id)
+
+        def check_owner() -> None:
+            current = self._pinned_row()
+            if (
+                not incarnation
+                or current is None
+                or current.id != row.id
+                or current.data.get("account_id") != expected_account_id
+                or store.native_login_incarnation(row.id) != incarnation
+            ):
+                AVATAR_CACHE.admit(scope, None)
+                raise BridgeRefusal(
+                    ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409
+                )
+
+        check_owner()
+        authority = (row.id, expected_account_id, incarnation)
+        AVATAR_CACHE.admit(scope, authority)
+        key = (scope, authority, target_account_id, v, size)
+        try:
+            access = await self._guarded_access(expected_account_id)
+        except (BridgeRefusal, BridgeSignInRequired):
+            AVATAR_CACHE.admit(scope, None)
+            raise
+        check_owner()
+        if access is None or access.credential_id != row.id:
+            raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
+        cached = AVATAR_CACHE.get(key)
+        try:
+            response = await self._dispatch(
+                "GET",
+                f"/accounts/{target_account_id}/avatar",
+                access.access_token,
+                params={"v": v, "size": size},
+                body=None,
+                max_response_bytes=1024 * 1024,
+                identity_response_only=True,
+                if_none_match=cached.etag if cached else None,
+            )
+        except httpx.HTTPError as failure:
+            AVATAR_CACHE.discard(key)
+            raise BridgeUnreachable() from failure
+        except BridgeRefusal:
+            AVATAR_CACHE.discard(key)
+            raise
+        check_owner()
+        # Remove before interpreting the response: errors, malformed 304s and
+        # no-store must never leave an entity available for a later retry.
+        AVATAR_CACHE.discard(key)
+        if response.status_code >= 400:
+            raise _refusal(response)
+        etag = response.headers.get("etag")
+        storable = "no-store" not in response.headers.get("cache-control", "").lower()
+        if response.status_code == 304 and cached is not None:
+            if (etag is None or etag == cached.etag) and not response.content:
+                if storable:
+                    AVATAR_CACHE.put(key, cached)
+                return cached.body, cached.mime
+        mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if response.status_code != 200 or mime not in ATTACHMENT_MIME_TYPES or not response.content:
+            raise BridgeRefusal(
+                "bridge_invalid_response",
+                "Radient returned an invalid response.",  # i18n: ignore, no code
+                http_status=502,
+            )
+        # Only a bounded HTTP entity-tag can authorize conditional reuse. No
+        # synthetic validators: an upstream without ETag simply cold-fetches.
+        if storable and etag and re.fullmatch(r'(?:W/)?"[\x21\x23-\x7e]{0,254}"', etag):
+            AVATAR_CACHE.put(key, Entity(response.content, mime, etag))
+        return response.content, mime
 
     async def fetch_attachment(
         self,
@@ -3237,6 +4150,12 @@ class StatusDiscipline:
         #: which is safe because the hub's route is a no-op once any endpoint
         #: exists. Memory only: it is never authority for a write.
         self._default_enroll_attempted: set[tuple[str, str]] = set()
+        #: account id -> monotonic time of the last commit-only retry attempt
+        #: (:meth:`_retry_pending_commit`). The retry runs on CACHED answers too
+        #: (QA Q2: waiting for the next fresh read left a device deaf for up to
+        #: :data:`STATUS_CACHE_TTL_S`), so it needs its own pacing: one settings
+        #: GET per :data:`STATUS_ERROR_TTL_S`, never one per click. Memory only.
+        self._pending_retry_at: dict[str, float] = {}
 
     @property
     def base_url(self) -> str:
@@ -3267,6 +4186,25 @@ class StatusDiscipline:
         so a timeout must not blank a surface the user can still reach.
         """
 
+        # ``Boundary.parse`` FIRST, and it is not a formality: the desktop route
+        # takes ``boundary`` from the query string, so it arrives as
+        # ``"app_start"``, never as the enum member — an ``is`` test against the
+        # enum silently never fired for the one caller that matters (QA round 2,
+        # out-of-scope note; the lifespan task hid it). Parse is lenient by its
+        # own contract and preserves the boundary recorded later in ``_check``.
+        if Boundary.parse(boundary) is Boundary.APP_START:
+            # CATCH-UP for machines enrolled before D2a existed: an app-start
+            # boundary is an existing, event-driven moment with no new poller.
+            # A machine with no committed owner answers absent without creating
+            # the store; a committed owner with no LaunchAgent is installed.
+            # Off the event loop: this may run launchctl, which must never hold
+            # up the status read. ``sync_connector_service`` never raises.
+            if self._config_dir is not None:
+                from local_operator.team_bridge.connector.install import (
+                    sync_connector_service,
+                )
+
+                await asyncio.to_thread(sync_connector_service, self._config_dir)
         return self._observe(await self._check(boundary))
 
     async def reconcile_identity_mutation(self) -> StatusCheck:
@@ -3347,7 +4285,12 @@ class StatusDiscipline:
             and state.identity_revision >= identity_revision
             and now - state.last_attempt < self._ttl(state)
         ):
-            return self._cached(state, boundary)
+            cached = self._cached(state, boundary)
+            # A pending local commit must not wait out the status cache (QA Q2):
+            # the cached answer already proves state C for the marker's endpoint,
+            # and the retry paces itself. Local gates only, unless one is pending.
+            await self._retry_pending_commit(cached, access=access)
+            return cached
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             # Re-check under the lock: a sibling that arrived first already read.
@@ -3404,6 +4347,10 @@ class StatusDiscipline:
             )
             return check
         check = self._payload_check(payload, boundary=boundary, access=access, texts=texts)
+        # BEFORE default-on, on the answer as read: the boundary whose POST just
+        # failed to commit reads B here, so the commit-only retry starts at the
+        # NEXT boundary (plan R3), never inside the request that created it.
+        await self._retry_pending_commit(check, access=access)
         check = await self._default_enroll(check, boundary=boundary, access=access, texts=texts)
         check = self._sync_local_designation(check)
         await self._sync_agent_name(check, access)
@@ -3524,7 +4471,12 @@ class StatusDiscipline:
         local = _local_settings_snapshot(config_dir)
         if local is None or (local.enabled_is_set and not local.enabled):
             return check
-        if local.default_enrollment.get(access.account_id) == DEFAULT_ENROLLMENT_DONE:
+        marker = local.default_enrollment.get(access.account_id)
+        if marker == DEFAULT_ENROLLMENT_DONE:
+            return check
+        if parse_pending_default_enrollment(marker) is not None:
+            # This machine already POSTed: never a second enrolment request.
+            # The commit-only recovery runs from state C (_retry_pending_commit).
             return check
         try:
             from local_operator.team_bridge.store import Store
@@ -3577,10 +4529,26 @@ class StatusDiscipline:
             # The hub's no-op (an endpoint already existed): nothing was
             # created here, so nothing is recorded and the answer stands.
             return check
-        try:
-            record_default_enrollment(config_dir, access.account_id)
-        except Exception:  # noqa: BLE001 - the enrolment already succeeded
-            pass
+        local_enrollment = result.get("local_enrollment") if isinstance(result, Mapping) else None
+        if isinstance(local_enrollment, Mapping) and local_enrollment.get("committed") is True:
+            # ``done`` ONLY once the local owner exists (D1/R3). A failed or
+            # vetoed commit left ``pending:<endpoint>:<head>`` (written by
+            # ``enroll_default_on``) for the commit-only retry instead; a ``done``
+            # here would lock the account out of that retry for good.
+            try:
+                record_default_enrollment(config_dir, access.account_id)
+            except Exception:  # noqa: BLE001 - the enrolment already succeeded
+                pass
+        else:
+            now = _local_settings_snapshot(config_dir)
+            if now is not None and now.enabled_is_set and not now.enabled:
+                # An explicit OFF vetoed the commit: that is the member's answer,
+                # not a transient failure, so close the retry (plan: "any explicit
+                # OFF or Turn off clears it to done").
+                try:
+                    record_default_enrollment(config_dir, access.account_id)
+                except Exception:  # noqa: BLE001 - the retry re-checks the OFF anyway
+                    pass
         try:
             from local_operator.team_bridge.store import Store
 
@@ -3601,6 +4569,106 @@ class StatusDiscipline:
         if not isinstance(payload, dict):
             return check
         return self._payload_check(payload, boundary=boundary, access=access, texts=texts)
+
+    async def _retry_pending_commit(self, check: StatusCheck, *, access: OAuthAccess) -> None:
+        """Finish a default-on enrolment whose LOCAL commit failed (D1, R3/R2-1).
+
+        WHY. After :meth:`_default_enroll`'s POST the hub endpoint is active, so
+        the surface reads state C and default-on never runs again; a commit that
+        failed there left the device "on" for teammates and deaf here, with no
+        retry. ``enroll_default_on`` now leaves ``pending:<endpoint>:<head>``
+        instead of ``done``, and this retries ONLY the local commit
+        (:meth:`TeamBridgeClient.commit_pending_default_enrollment`: no POST).
+
+        NOT A WIDENING OF DEFAULT-ON INTO STATE C (R2-6). Every gate must hold:
+        a pending marker for THIS account (proof this machine's POST created the
+        endpoint), the selected endpoint's id equal to the marker's, the local
+        key not an explicit OFF, zero committed owners; the client then requires
+        the hub's record to still be ``default_on`` + v2 for that endpoint, and
+        the late veto re-reads the local key before the commit. An endpoint
+        consented anywhere else never carries this machine's marker.
+
+        Silent towards the status answer, like default-on itself; the outcome
+        is logged by code. ``done`` is written once committed, or once the hub
+        proves the record is no longer this default-on consent (no endless GET).
+
+        ONE-SIDED BY DESIGN (review R2-4): the status answer that TRIGGERED a
+        successful commit keeps reporting ``local.enrolled: false`` until the next
+        fresh read, up to the cache TTL. It self-heals, and it is the one window
+        here that understates instead of overstating.
+
+        WHEN (QA Q2). On every status check, cached or fresh, paced to one
+        attempt per :data:`STATUS_ERROR_TTL_S` per account, so a failed commit
+        is retried at the next check rather than after the 5-minute cache.
+        """
+
+        config_dir = self._config_dir
+        if config_dir is None or _surface_state(check) != "C" or not access.account_id:
+            return
+        if check.account_id != access.account_id:
+            return
+        local = _local_settings_snapshot(config_dir)
+        if local is None or (local.enabled_is_set and not local.enabled):
+            return
+        pending = parse_pending_default_enrollment(local.default_enrollment.get(access.account_id))
+        if pending is None:
+            return
+        endpoint_id, head = pending
+        selected = select_tenant(check.payload)
+        tenant_id = selected_tenant_id(check.payload)
+        endpoint = selected.get("endpoint") if isinstance(selected, Mapping) else None
+        if tenant_id is None or not isinstance(endpoint, Mapping):
+            return
+        if endpoint.get("id") != endpoint_id:
+            return
+        try:
+            from local_operator.team_bridge.store import Store
+
+            if Store(config_dir).committed_owner_count() != 0:
+                return
+        except Exception:  # noqa: BLE001 - unreadable store: cannot commit
+            return
+        account_id = access.account_id
+        marker = local.default_enrollment.get(account_id)
+        last = self._pending_retry_at.get(account_id)
+        if last is not None and time.monotonic() - last < STATUS_ERROR_TTL_S:
+            return
+        # Set BEFORE the await: concurrent checks on the cached path must not
+        # each issue the settings GET.
+        self._pending_retry_at[account_id] = time.monotonic()
+
+        def _still_pending() -> bool:
+            # Re-read right before the commit: a Turn off (``done``) or an
+            # explicit OFF may have landed during the awaited settings read.
+            now = _local_settings_snapshot(config_dir)
+            return (
+                now is not None
+                and not (now.enabled_is_set and not now.enabled)
+                and now.default_enrollment.get(account_id) == marker
+            )
+
+        try:
+            outcome = await self._client.commit_pending_default_enrollment(
+                tenant_id=tenant_id,
+                endpoint_id=endpoint_id,
+                head=head,
+                expected_account_id=account_id,
+                may_commit_local=_still_pending,
+            )
+        except (BridgeRefusal, BridgeSignInRequired, ValueError) as exc:
+            logger.warning("team_bridge: pending local enrolment deferred (%s)", type(exc).__name__)
+            return
+        code = outcome.get("code")
+        if outcome.get("committed") is True or code == "no_consent_echo":
+            try:
+                record_default_enrollment(config_dir, account_id)
+            except Exception:  # noqa: BLE001 - bookkeeping only
+                pass
+        if outcome.get("committed") is True:
+            try:
+                record_local_enabled_if_unset(config_dir)
+            except Exception:  # noqa: BLE001 - no local authority beats a loud failure
+                pass
 
     def _sync_designation(self, store: Any, owner: Any, session: str) -> None:
         """Apply the current ``team_bridge.session`` to the native record.

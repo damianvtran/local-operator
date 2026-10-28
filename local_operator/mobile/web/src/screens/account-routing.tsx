@@ -66,7 +66,7 @@ export function AccountRoutingScreen() {
 
 	return <main className="relative mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col bg-surface text-ink" data-testid="account-routing-screen">
 		<header className="flex shrink-0 items-center gap-3 border-b border-hairline px-3 pt-[max(env(safe-area-inset-top),0.75rem)] pb-3">
-			<Button variant="quiet" onClick={() => navigateUp("/")}>{copy("back")}</Button>
+			<Button variant="ghost" onClick={() => navigateUp("/")}>{copy("back")}</Button>
 			<h1 className="text-body font-medium">{copy("title")}</h1>
 		</header>
 		<div className="min-h-0 flex-1 overflow-y-auto p-4 space-y-4">

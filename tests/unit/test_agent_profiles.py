@@ -137,12 +137,17 @@ def test_a_read_only_role_changes_nothing_but_can_still_reach_the_web() -> None:
     network access in this session" and fell back to grepping the local disk
     for facts it had been asked to find on the web. Retrieval mutates no more
     than reading a file does, so it belongs in a surface that is defined by
-    making no local change — while ``bash``, ``eval``, ``browser``, ``write``
-    and ``edit`` stay out by name, tier check or not."""
+    making no local change — while ``eval``, ``browser``, ``write`` and
+    ``edit`` stay out by name, tier check or not. (``bash`` is in, but only
+    ever write-confined by the kernel sandbox — see the comment below.)"""
     names = {tool.name for tool in filter_tools(ALL_TOOLS, seed("scout"))}
-    assert names <= {"read", "glob", "grep", "web_search", "web_fetch"}
+    assert names <= {"read", "glob", "grep", "bash", "web_search", "web_fetch"}
     assert {"web_search", "web_fetch"} <= names
-    assert not names & {"bash", "eval", "browser", "write", "edit"}
+    # ``bash`` IS in the scout seed (1.3.0), and is safe there only because
+    # child construction write-confines it in a kernel sandbox or strips it
+    # (``harness.subagent._with_readonly_shell_floor``) -- pinned in
+    # ``tests/unit/session/test_launch_subagent.py``.
+    assert not names & {"eval", "browser", "write", "edit"}
 
 
 def test_every_allowlisted_seed_carries_the_read_only_network_tools() -> None:
@@ -154,7 +159,20 @@ def test_every_allowlisted_seed_carries_the_read_only_network_tools() -> None:
         profile = seed(name)
         if not profile.tools:
             continue  # no allowlist: the role already has the full inventory
+        if name in OFFLINE_BY_DESIGN:
+            assert not set(READ_ONLY_NETWORK_TOOLS) & set(profile.tools), name
+            continue
         assert set(READ_ONLY_NETWORK_TOOLS) <= set(profile.tools), name
+
+
+#: Seeds whose allowlist omits the network tools ON PURPOSE, each with its reason.
+#: ``librarian`` (1.1.0, #3028): an unattended local-metadata curator — she names,
+#: describes and tags the operator's own Library assets — has no web duty (her
+#: seed's pass never fetches or searches the web), and keeping her off the network
+#: shrinks what a pass nobody can answer can reach. The exemption is asserted
+#: both ways: such a seed must NOT carry the tools, so the reason cannot go stale
+#: silently.
+OFFLINE_BY_DESIGN = frozenset({"librarian"})
 
 
 def test_the_scout_fallback_allowlist_matches_the_read_only_surface() -> None:
@@ -632,7 +650,7 @@ def test_an_untouched_copy_updates_in_place_when_the_starter_moves(scratch_seeds
     assert verdict.verdict == "outdated-clean"
     assert verdict.applied is True
     # Stamped from the packaged reviewer at install, before the simulated move.
-    assert verdict.installed_version == "1.3.5"
+    assert verdict.installed_version == "1.3.6"
     assert verdict.packaged_version == "2.0.0"
     assert verdict.diverged_fields == ("instructions",)
     # The echo: recoverable by copy-paste, the same guarantee reset gives.
@@ -770,7 +788,7 @@ def test_an_unbumped_body_change_is_still_an_update(scratch_seeds, tmp_path) -> 
     assert verdict.verdict == "outdated-clean"
     assert verdict.applied is True
     # Both sides read the seed's version, untouched by the body-only move.
-    assert verdict.installed_version == verdict.packaged_version == "1.3.5"
+    assert verdict.installed_version == verdict.packaged_version == "1.3.6"
     assert verdict.replaced_instructions == before_prompt
     assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER, SAME VERSION, NEW TEXT"
 

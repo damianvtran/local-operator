@@ -83,7 +83,7 @@ def detail(root: Path, approval_id: str) -> dict[str, Any]:
         if observation.get("failure_kind") == "changed_facts":
             replacement = observation.get("replacement_id")
             next_action = "review_replacement" if replacement else "start_new_review"
-    return {
+    answer: dict[str, Any] = {
         "approval_id": record["approval_id"],
         "replacement_id": replacement,
         "state": state,
@@ -102,3 +102,17 @@ def detail(root: Path, approval_id: str) -> dict[str, Any]:
         "receipts": receipts,
         "next": next_action,
     }
+    what = record.get("what") or {}
+    if isinstance(what, dict) and any(
+        key in what for key in ("credential_inheritance", "credential_finite_share")
+    ):
+        from local_operator.network.credentials import approval_copy
+
+        # Key presence, not a parsed intent: a malformed card still answers its detail read,
+        # and the outcome is read from its receipts alone.
+        # THE SAME OUTCOME BLOCK THE LIST ROW CARRIES (QA #3002 r3, Q5; UX r2, U9): this
+        # is the read a cancelled prompt sends the operator to ("review the card"), so
+        # after a reload or a daemon restart it must still say whether a retry can work,
+        # never leave the UI to guess from ``receipts[].detail``. ``None`` unless failed.
+        answer["apply_outcome"] = approval_copy.last_failure(record)
+    return answer

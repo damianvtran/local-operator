@@ -80,6 +80,7 @@ from local_operator.model.catalogue import (
     SOFT_TTL_S,
     _schedule_revalidate,
     invalidate,
+    note_unavailable,
     peek_listing,
     read_listing,
 )
@@ -730,6 +731,10 @@ def price_catalogue_row(
         models_dev = _models_dev_providers(provider, model_id, timeout, ttl_s, cache_dir)
     except Exception as exc:  # noqa: BLE001 — a price is never worth a failed start
         logger.debug("models.dev catalogue unavailable for %s/%s: %s", provider, model_id, exc)
+        # Reported, not just logged: the row this leg returns is then missing
+        # prices and limits for a FAULT, and ``configure``'s day memo must not
+        # keep it (PR #2992 review round 2; see ``catalogue.collect_unavailable``).
+        note_unavailable("models.dev catalogue")
         models_dev = None
     # The single "is the primary's answer complete" decision lives HERE so the
     # document read and the read-OpenRouter skip share one rule. The final
@@ -752,6 +757,7 @@ def price_catalogue_row(
             )
         except Exception as exc:  # noqa: BLE001 — same rule as the primary
             logger.debug("openrouter catalogue unavailable for %s/%s: %s", provider, model_id, exc)
+            note_unavailable("openrouter catalogue")
     return price_row(provider, model_id, models_dev=models_dev, openrouter=openrouter)
 
 
@@ -805,6 +811,7 @@ def models_dev_providers(
         return providers
     except Exception as exc:  # noqa: BLE001 — a price is never worth a failed paint
         logger.debug("models.dev catalogue unreadable: %s", exc)
+        note_unavailable("models.dev catalogue")
         return None
 
 
@@ -896,6 +903,11 @@ def _models_dev_providers(
         )
         providers = _usable(listing.payload)
     if providers is None:
+        if listing.payload is not None:
+            # A document arrived but even the refetch could not be read in this
+            # capture: no answer, for a fault rather than for an absent row. (A
+            # failed fetch with no document is already reported by read_listing.)
+            note_unavailable("models.dev catalogue")
         if listing.failed:
             # COLD MISS THAT FAILED. The first resolution on a machine with no
             # document pays a 4.4 MB download inside a 3 s leg budget, and on a

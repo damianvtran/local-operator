@@ -198,8 +198,8 @@ describe("reaching the assignment sheet", () => {
 		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
 		render(<SessionListScreen />);
 		longPress(cardByName("Alpha"));
-		expect(await screen.findByRole("button", { name: "Pin to the top" })).toBeTruthy();
-		expect(screen.queryByRole("button", { name: "Tags…" })).toBeNull();
+		expect(await screen.findByRole("button", { name: "Pin to top" })).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "Tags" })).toBeNull();
 	});
 
 	it("offers none when the capability is present but FALSE", async () => {
@@ -207,8 +207,8 @@ describe("reaching the assignment sheet", () => {
 		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
 		render(<SessionListScreen />);
 		longPress(cardByName("Alpha"));
-		expect(await screen.findByRole("button", { name: "Pin to the top" })).toBeTruthy();
-		expect(screen.queryByRole("button", { name: "Tags…" })).toBeNull();
+		expect(await screen.findByRole("button", { name: "Pin to top" })).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "Tags" })).toBeNull();
 	});
 
 	it("closes the action sheet and opens the tag sheet when the capability is present", async () => {
@@ -223,10 +223,10 @@ describe("reaching the assignment sheet", () => {
 		];
 		render(<SessionListScreen />);
 		longPress(cardByName("Alpha"));
-		fireEvent.click(await screen.findByRole("button", { name: "Tags…" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Tags" }));
 
 		/* One panel at a time: the pin action sheet is gone. */
-		expect(screen.queryByRole("button", { name: "Pin to the top" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Pin to top" })).toBeNull();
 		const work = (await screen.findByRole("checkbox", {
 			name: "Work",
 		})) as HTMLInputElement;
@@ -239,8 +239,8 @@ describe("reaching the assignment sheet", () => {
 		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
 		render(<SessionListScreen />);
 		longPress(cardByName("Alpha"));
-		expect(await screen.findByRole("button", { name: "Pin to the top" })).toBeTruthy();
-		expect(await screen.findByRole("button", { name: "Tags…" })).toBeTruthy();
+		expect(await screen.findByRole("button", { name: "Pin to top" })).toBeTruthy();
+		expect(await screen.findByRole("button", { name: "Tags" })).toBeTruthy();
 	});
 });
 
@@ -254,21 +254,21 @@ describe("the action sheet without a pointer", () => {
 		expect(card.getAttribute("aria-keyshortcuts")).toBe("Shift+F10");
 
 		fireEvent.keyDown(card, { key: "F10", shiftKey: true });
-		expect(await screen.findByRole("button", { name: "Pin to the top" })).toBeTruthy();
+		expect(await screen.findByRole("button", { name: "Pin to top" })).toBeTruthy();
 	});
 
 	it("opens from the dedicated ContextMenu key", async () => {
 		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
 		render(<SessionListScreen />);
 		fireEvent.keyDown(cardByName("Alpha"), { key: "ContextMenu" });
-		expect(await screen.findByRole("button", { name: "Pin to the top" })).toBeTruthy();
+		expect(await screen.findByRole("button", { name: "Pin to top" })).toBeTruthy();
 	});
 
 	it("opens from the pointer's context menu", async () => {
 		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
 		render(<SessionListScreen />);
 		fireEvent.contextMenu(cardByName("Alpha"));
-		expect(await screen.findByRole("button", { name: "Pin to the top" })).toBeTruthy();
+		expect(await screen.findByRole("button", { name: "Pin to top" })).toBeTruthy();
 	});
 
 	it("leaves Enter and Space to the row's own navigation", () => {
@@ -277,7 +277,7 @@ describe("the action sheet without a pointer", () => {
 		const card = cardByName("Alpha");
 		fireEvent.keyDown(card, { key: "Enter" });
 		fireEvent.keyDown(card, { key: " " });
-		expect(screen.queryByRole("button", { name: "Pin to the top" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Pin to top" })).toBeNull();
 	});
 });
 
@@ -288,7 +288,7 @@ describe("the tag sheet's focus", () => {
 		render(<SessionListScreen />);
 		const card = cardByName("Alpha");
 		fireEvent.keyDown(card, { key: "F10", shiftKey: true });
-		fireEvent.click(await screen.findByRole("button", { name: "Tags…" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Tags" }));
 		await screen.findByRole("checkbox", { name: "Work" });
 
 		fireEvent.click(screen.getByRole("button", { name: "done" }));
@@ -299,28 +299,20 @@ describe("the tag sheet's focus", () => {
 	});
 });
 
-describe("the long-press caption", () => {
-	it("names both gestures when the relay serves tags", () => {
+describe("visible row action discoverability", () => {
+	it("exposes Tags through More when the relay serves tags", async () => {
 		capabilities = { session_tags: { available: true } };
-		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
+		sessionList = [summary({ tags: [{ id: "work", name: "Work" }] })];
 		render(<SessionListScreen />);
-		expect(
-			screen.getByText("touch and hold a row to pin or tag it"),
-		).toBeTruthy();
-		/* The older sentence remains in the DOM as the capability-FALSE branch;
-		   it must be hidden, not merely unused. */
-		expect(
-			screen.getByText("touch and hold a row to pin it").className,
-		).toContain("hidden");
+		fireEvent.click(screen.getByRole("button", { name: "More" }));
+		expect(await screen.findByRole("button", { name: "Tags" })).toBeTruthy();
 	});
-
-	it("keeps the pin-only sentence on a relay without the capability", () => {
-		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
+	it("keeps More and Pin, but no dead Tags action, without the capability", async () => {
+		capabilities = null;
+		sessionList = [summary({})];
 		render(<SessionListScreen />);
-		const old = screen.getByText("touch and hold a row to pin it");
-		expect(old.className).not.toContain("hidden");
-		expect(
-			screen.queryByText("touch and hold a row to pin or tag it"),
-		).toBeNull();
+		fireEvent.click(screen.getByRole("button", { name: "More" }));
+		expect(await screen.findByRole("button", { name: "Pin to top" })).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "Tags" })).toBeNull();
 	});
 });

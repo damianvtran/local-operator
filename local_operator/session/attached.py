@@ -88,6 +88,11 @@ from local_operator.mobile.types import (
 )
 from local_operator.providers.local import LOCAL_PROVIDER_IDS
 from local_operator.session.attachments import AttachmentStore, store_for_transcript_dir
+from local_operator.session.cold_metadata import (
+    read_cold_metadata,
+    safe_metadata_path,
+    witness_for,
+)
 from local_operator.session.cold_model import (
     resolve_context_metadata,
     synthesise_cold_state,
@@ -115,7 +120,10 @@ from local_operator.session.frontend_state import (
     effective_identity_for,
 )
 from local_operator.session.history_window import DisplayHistoryWindow
-from local_operator.session.model_selection import StoredModelSelection
+from local_operator.session.model_selection import (
+    SelectionReading,
+    StoredModelSelection,
+)
 from local_operator.session.naming import ConversationName
 
 #: The mesh's ONE injection point into this facade (§3.1). Imported from
@@ -133,6 +141,7 @@ from local_operator.session.replay_cache import (
     ColdReplay,
     ReplayKey,
     build_cold_replay,
+    build_cold_tail_metadata,
     cached_replay,
     load_cold_replay,
     replay_key,
@@ -1031,6 +1040,42 @@ def _accepts_updating(callback: Any) -> bool:
     return any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
 
 
+class _DeferredHistory:
+    """A cold facade that holds its first frame but has read NO message list.
+
+    THE EXPLICIT STATE, and the reason this is a class rather than an empty
+    ``_history``: "no rows yet" and "this conversation is empty" are different
+    facts and every reader here has to be able to tell them apart. An empty list
+    would answer ``history() == []`` for a 17,000-row conversation, which is the
+    one lie this whole module is built to avoid; this object instead makes every
+    accessor that needs messages RAISE until :meth:`AttachedSession.
+    hydrate_deferred_history` has run.
+
+    ``witness`` is the journal version the metadata record described when the
+    facade was built — the cut this deferral was decided at. It is evidence for
+    the open, not a fence around the read: hydration replays the journal at its
+    captured ``through_id`` (``None`` for a cold open, which is the same cut the
+    eager path uses), so a row appended while the facade sat idle arrives in
+    ``_history`` exactly as it would have had the read happened sooner. What the
+    witness is FOR is :mod:`local_operator.session.cold_metadata`: a hit may only
+    be used for the journal version it describes, and the residual a stat tuple
+    cannot detect is named there rather than assumed away.
+
+    ``task`` is the single-flight hydration, and it belongs to the FACADE rather
+    than to whichever request started it — a snapshot that gives up must not
+    cancel the read the bind behind it is waiting on.
+    """
+
+    __slots__ = ("witness", "task", "selection")
+
+    def __init__(self, witness: "ReplayKey", selection: "SelectionReading | None" = None) -> None:
+        self.witness = witness
+        self.task: "asyncio.Task[None] | None" = None
+        #: The record's model-selection reading for ``witness``'s version, or
+        #: ``None`` when the record carried none (see ``ColdMetadata.selection``).
+        self.selection = selection
+
+
 class AttachedSession:
     """A SessionProtocol facade backed by one owner's v5 attach socket.
 
@@ -1049,6 +1094,17 @@ class AttachedSession:
     #: attribute keeps a hand-built instance (``__new__`` in the protocol
     #: conformance test) a viewer without reciting it.
     attach_behind: bool = False
+
+    #: Non-``None`` on a facade built with ``cold(deferred_history=True)`` whose
+    #: journal was described by a valid metadata record: the first frontend state
+    #: is complete but NO message list has been read (see :class:`_DeferredHistory`).
+    #:
+    #: DECLARED ON THE CLASS, not only assigned in ``__init__``, because a facade
+    #: is not always built through the constructor — a test or a diagnostic that
+    #: allocates one directly must still get the answer "not deferred" rather than
+    #: an ``AttributeError`` raised from inside a reader. The state has to be
+    #: readable on EVERY construction path or it is a trap for the next reader.
+    _deferred_history: "_DeferredHistory | None" = None
 
     def __init__(
         self,
@@ -1841,6 +1897,7 @@ class AttachedSession:
         owner: "SessionOwner | None" = None,
         seed: "SessionSeed | None" = None,
         slash_consumers: Sequence[str] | None = ATTACHED_SLASH_CONSUMERS,
+        deferred_history: bool = False,
     ) -> "AttachedSession":
         """A viewer bound to NOTHING: durable history and a spool, no runtime.
 
@@ -1857,6 +1914,18 @@ class AttachedSession:
         exactly the same path it renders an attached one — the alternative, a
         second "cold" rendering mode, is how two vocabularies for one screen
         get built.
+
+        ``deferred_history`` IS AN INTERNAL OPT-IN, default False, passed by
+        exactly one caller: the desktop bridge's cold facade
+        (``DesktopSessionBridge._ensure_facade``), whose FIRST frame paints its
+        transcript from ``load_transcript_page`` rather than from this facade's
+        message list. On True, a valid durable metadata record written for this
+        journal version restores the same four durable state values and defers
+        the MESSAGE LIST — see :class:`_DeferredHistory`. Every other caller
+        (the TUI, peer viewers, mobile, resume, a new session, the saved
+        preview) keeps the eager read byte for byte, because each of them paints
+        or folds ``history()`` and none of them has a page reader to fall back
+        on.
         """
         self = cls(
             config_dir=config_dir,
@@ -1874,18 +1943,51 @@ class AttachedSession:
         self._can_go_cold = True
         self._birth_model = initial_model
         self._model_selection_override = model_selection_override
-        state = await self._synthesise_cold_state(cwd)
         # A session that has never run has no transcript to read; one being
         # reopened has its whole history here, off the loop as always.
         # ``has_transcript``: a compressed session has a history to paint, and
         # the plain name would open it as an empty conversation.
         from local_operator.session import compression as _compression
 
-        if _compression.has_transcript(config_dir / "sessions" / session_id):
+        has_transcript = _compression.has_transcript(config_dir / "sessions" / session_id)
+        # THE DEFERRED RECORD IS READ BEFORE THE SYNTHESIS, so a HIT can hand the
+        # model resolution the journal's selection the record already proved
+        # (``ColdMetadata.selection``) instead of re-scanning the journal for it —
+        # the largest CPU cost a warm deferred open had left. Safe to move: the
+        # synthesis reads config, the wakes/monitors indexes and the selection,
+        # none of which the record restore touches, and the record restore reads
+        # nothing the synthesis writes. The eager path (every other caller) keeps
+        # today's order and reads, byte for byte.
+        if has_transcript and deferred_history:
+            self._deferred_history = await self._deferred_cold_details()
+        deferred = self._deferred_history
+        state = await self._synthesise_cold_state(
+            cwd, selection=deferred.selection if deferred is not None else None
+        )
+        if has_transcript:
             # ``want_checkpoint`` extracts the durable status row during the
             # SAME threaded parse the history comes from, so the restore below
             # costs no second read of a file that is 103 MB at the top end.
-            await self._load_history(None, want_checkpoint=True)
+            #
+            # THE DEFERRED OPT-IN IS CHECKED FIRST, and it can only ever SKIP
+            # the read above: a valid metadata record changes nothing about the
+            # state restored below (the same four values, from the same
+            # function, computed by an earlier process), it just defers the one
+            # output that record deliberately does not carry — the message
+            # list. A record MISS may also prove those facts from a bounded
+            # tail read; if neither proof is available, the eager line below
+            # stays the exact fallback.
+            if self._deferred_history is None:
+                await self._load_history(None, want_checkpoint=True)
+            else:
+                # THE FLAG HAS TO AGREE WITH THE STATE. ``_history_hydrated`` is
+                # True from construction (a new facade's empty list is real), but
+                # on a deferral there IS no list, and code that reads the flag
+                # alone — ``materialize_history``'s early return, a future
+                # caller — must not be told a list exists. Every accessor gates
+                # on ``_deferred_history`` first; this keeps the two consistent
+                # so the next reader of the flag cannot be misled by it.
+                self._history_hydrated = False
             # Ordered before ``_install_frontend`` so the roster, todos and
             # title are present in the FIRST state the widgets ever see —
             # installing twice would paint an empty panel and then repaint it,
@@ -1894,6 +1996,13 @@ class AttachedSession:
         # Children can persist a roster before the parent's first transcript
         # row. Absence of that file must not hide independently durable spend.
         state = await self._restore_cold_details(state)
+        # THE ONE INSTALL THAT IS A RESTORE. Everything in ``state`` here was
+        # read out of the durable checkpoint, so the MCP round it carries is
+        # history: the row that renders it says "last session", and a later live
+        # round is worded and announced as news. This is provenance by
+        # construction — ``_install_frontend(restored=True)`` — because the
+        # connection state cannot tell the two apart (the owner's first live
+        # snapshot lands while the facade is still mid-bind).
         self._cold_checkpoint = None
         self._cold_seed_usage = None
         # NOT cleared, unlike its two neighbours: the spend details row is ~200
@@ -1901,7 +2010,7 @@ class AttachedSession:
         # ``restored_spend`` for the exact micro-USD figure long after the cold
         # open. Freeing it would trade nothing for a missing number.
         self._cold_selection = None
-        self._install_frontend(state)
+        self._install_frontend(state, restored=True)
         self._finish_sync()
         # Nothing is queued behind an owner that will never arrive: a cold
         # viewer is READY, and it is _ensure_bound that supplies the runtime
@@ -2090,6 +2199,20 @@ class AttachedSession:
                 # what the session was connected to, and the runtime's own
                 # state replaces it wholesale on first engage.
                 "mcp_servers": list(durable.mcp_servers),
+                # The startup OUTCOME is durable for the same reason, and it is
+                # the one thing that decides whether the transcript carries MCP
+                # FAILURE rows. Without it a cold frame cannot know about them:
+                # the first frame paints clean, and the runtime's first
+                # engagement reinjects the very same checkpoint and appends the
+                # rows under a reader who has already started reading, which is
+                # the tail shift this restore removes. Restored as HISTORY like
+                # ``mcp_servers``: the outcome the last runtime recorded, which
+                # the runtime's own state replaces wholesale on first engage.
+                # ``_apply_frontend_facades`` converts this Mapping into the
+                # ``McpStartupOutcome`` every in-process reader asks for (the
+                # notice projection, the toast, the band, ``/mcp``), so the cold
+                # frame and the attached frame render one outcome.
+                "mcp_startup": durable.mcp_startup,
                 # Wakes are deliberately NOT taken from the checkpoint. The
                 # synthesised state already read them from the wake index
                 # (``_synthesise_cold_state``), which is the live derived file
@@ -2343,13 +2466,13 @@ class AttachedSession:
             cost_summary,  # neutral, not the TUI package (Q7)
         )
         from local_operator.session.frontend_state import CostKnowledge
-        from local_operator.session.session import (
+        from local_operator.session.roster_sidecar import (
             SUBAGENT_ROSTER_SIDECAR,
-            _read_roster_sidecar,
+            read_roster_sidecar,
         )
 
         payload = (
-            _read_roster_sidecar(
+            read_roster_sidecar(
                 self._config_dir / "sessions" / self._session_id / SUBAGENT_ROSTER_SIDECAR
             )
             or {}
@@ -2406,15 +2529,15 @@ class AttachedSession:
         Best-effort: an unreadable or absent sidecar leaves the checkpoint's
         rows exactly as they were.
         """
-        from local_operator.session.session import (
+        from local_operator.session.roster_sidecar import (
             SUBAGENT_ROSTER_SIDECAR,
-            _read_roster_sidecar,
+            read_roster_sidecar,
         )
 
         rows: dict[str, Any] = {str(job.id): job for job in durable.jobs}
         try:
             if payload is None:
-                payload = _read_roster_sidecar(
+                payload = read_roster_sidecar(
                     self._config_dir / "sessions" / self._session_id / SUBAGENT_ROSTER_SIDECAR
                 )
             for raw in (payload or {}).get("jobs") or []:
@@ -2691,7 +2814,9 @@ class AttachedSession:
             logger.debug("cold state could not read the monitor index", exc_info=True)
         return monitors
 
-    async def _synthesise_cold_state(self, cwd: str) -> FrontendSessionState:
+    async def _synthesise_cold_state(
+        self, cwd: str, *, selection: "SelectionReading | None" = None
+    ) -> FrontendSessionState:
         """Canonical state for a session with no runtime to ask.
 
         A thin caller of :mod:`local_operator.session.cold_model`, which the
@@ -2713,6 +2838,9 @@ class AttachedSession:
             wakes=self._cold_wakes(),
             monitors=self._cold_monitors(),
             selection_sink=self._note_cold_selection,
+            # A deferred HIT's record-proved reading, or ``None`` to read the
+            # journal (see ``cold_model.resolve_conversation_model``).
+            selection=selection,
         )
         if state.selected_model is not None and state.selected_model.provider == "openai":
             # Resolve the account metadata the runtime would, so the band does
@@ -5482,6 +5610,15 @@ class AttachedSession:
 
     async def _load_frontend_history(self, frontend: FrontendSync) -> None:
         """Install the durable cut before live replay or command readiness."""
+        # A DEFERRED COLD FACADE IS HYDRATED BEFORE ITS FIRST BIND, and this is
+        # the one method every bind funnels through (``connect``, ``_bind_to``,
+        # ``_await_late_sync``, the degraded resync, ``_recover_runtime``). It
+        # is also the only place that can see what the owner wrote between the
+        # cold open and the bind (``_replay_cold_gap``), which it can only do
+        # with the ids the hydration installs — so hydrating here is what makes
+        # the cold-to-live transition identical to the eager one instead of a
+        # second code path with its own gaps.
+        await self.hydrate_deferred_history()
         window = frontend.display_history if self._display_window_requested else None
         self._display_window_supported = window is not None
         self._loaded_history_generation = (
@@ -6161,6 +6298,12 @@ class AttachedSession:
         an ordinary message submit. Audit rows are reached only by the reader's
         own backward scroll, one bounded page at a time.
         """
+        # A DEFERRED facade hydrates rather than refusing: this is the model
+        # consumer's explicit "I need the messages", which is exactly what the
+        # deferral withholds. Hydration is the cheaper answer to the same
+        # question (a replay of this journal at the captured cut) and leaves the
+        # facade on the ordinary hydrated path below.
+        await self.hydrate_deferred_history()
         if self._history_hydrated:
             return self.history()
         window = self._display_history
@@ -6368,7 +6511,146 @@ class AttachedSession:
             want_checkpoint=want_checkpoint,
             through_id=through_id,
             strict_cut=strict_cut,
+            # The durable record for the NEXT process's cold open, written behind
+            # this parse (``cold_metadata``). ``build_cold_replay`` ignores it for
+            # every request shape but the cold open's, so this is one argument
+            # and no branch: a caller that never wants a record still passes the
+            # path and gets today's read.
+            metadata_path=safe_metadata_path(self._config_dir, self._session_id),
         )
+
+    async def _deferred_cold_details(self) -> "_DeferredHistory | None":
+        """The durable record's four state values plus a deferral token, or ``None``.
+
+        A HIT restores the four values ``_read_transcript`` would install. On
+        a MISS, bounded tail evidence may prove those same values without a
+        message replay and file a fresh record for the next open. Neither path
+        treats a partial message list as hydrated history.
+
+        ``None`` means neither the record nor bounded tail evidence was safe:
+        the caller keeps today's exact eager read. Missing facts, a damaged
+        tail, an archive or a journal that moved while reading are not errors;
+        they are reasons to use the correct slow answer.
+
+        THREADED because a record is not always tiny: on real journals the
+        checkpoint dict measured 0.3-1.4 MB, so parsing one is real work and it
+        does not belong on the loop that is about to paint a frame.
+        """
+        directory = self._config_dir / "sessions" / self._session_id
+        # The witness must be the SAME request shape the eager cold open makes,
+        # or a record could never match a hit: same cut (``None``), same strict
+        # flag, same two wanted custom types.
+        witness = replay_key(
+            directory,
+            through_id=None,
+            strict_cut=False,
+            checkpoint_types=(FRONTEND_CHECKPOINT_CUSTOM_TYPE,),
+            opportunistic_types=(SESSION_SPEND_CUSTOM_TYPE,),
+        )
+        path = safe_metadata_path(self._config_dir, self._session_id)
+        if witness is None or path is None:
+            return None
+        record = await asyncio.to_thread(read_cold_metadata, path, witness_for(witness))
+        if record is None:
+            record = await asyncio.to_thread(build_cold_tail_metadata, witness, path)
+        if record is None:
+            return None
+        self._cold_checkpoint = record.checkpoint
+        self._cold_spend = record.checkpoints.get(SESSION_SPEND_CUSTOM_TYPE)
+        self._cold_order = dict(record.order)
+        self._cold_seed_usage = record.seed_usage
+        return _DeferredHistory(witness, record.selection)
+
+    async def hydrate_deferred_history(self) -> None:
+        """Load the message list a deferred cold open left unread. Idempotent.
+
+        THE ONE EXPLICIT ENTRY, and the reason the deferred state is safe: every
+        synchronous accessor that needs messages raises instead of answering
+        from a list nobody filled, so the only way to obtain one is to ask for
+        it here. A no-op on a facade that was never deferred and on one already
+        hydrated.
+
+        SINGLEFLIGHT PER FACADE. Two callers — a snapshot racing the bind behind
+        it — share ONE read: the task lives on the deferral and is shielded, so
+        neither caller's cancellation cancels the read the other is waiting on,
+        and the replay cache underneath shares the same read with any other
+        facade of this journal version.
+
+        Nothing may observe a partially populated history: ``_bind_history``
+        installs the list, the id set and the dedupe sets in one pass, and the
+        deferral is dropped only after it has, so a reader sees either the
+        deferred state (and raises) or a complete history.
+        """
+        deferred = self._deferred_history
+        if deferred is None:
+            return
+        if deferred.task is None:
+            deferred.task = asyncio.create_task(self._hydrate_deferred(deferred))
+        await asyncio.shield(deferred.task)
+
+    async def _hydrate_deferred(self, deferred: _DeferredHistory) -> None:
+        """The read behind :meth:`hydrate_deferred_history`, owned by the facade."""
+        # ``want_checkpoint=True`` so this is the SAME request shape the eager
+        # cold open makes: identical type tuples mean this read shares the replay
+        # cache and its in-flight singleflight with any concurrent eager read of
+        # this journal, instead of paying a second parse beside it.
+        #
+        # ``through_id=None`` IS the captured cut, not a missing one. The eager
+        # cold open reads with ``through_id=None`` too — "everything durable up
+        # to now" — so deferral moves the MOMENT of the read, never its cut: a
+        # row appended while the facade sat deferred is in this list, exactly as
+        # it would have been had the read happened at open time. That is safe on
+        # every reader, and both reasons are pinned by
+        # ``test_hydration_reads_the_journal_as_of_the_hydration_not_the_open``:
+        # the list equals what an EAGER facade reads at the same instant, and
+        # ``_cold_painted_ids`` below is derived from this list, so the
+        # cold-to-live gap replay measures against what was actually installed.
+        # The deferral's ``witness`` is cache-validation evidence for the record,
+        # never a fence on this read.
+        history = await self._read_transcript(want_checkpoint=True, through_id=None)
+        if self._deferred_history is not deferred:
+            # A seed, a close or a second open invalidated this hydration while
+            # it was reading. Installing now would write a message list over
+            # state that is no longer deferred — the half-hydrated session the
+            # deferral exists to make impossible.
+            return
+        self._bind_history(history, None, drop_history_duplicates=True)
+        # The pre-bind paint set, exactly as the eager ``cold`` sets it. It is
+        # what the first owner sync measures its own gap against
+        # (``_replay_cold_gap``), so establishing it here is what keeps the
+        # cold-to-live transition duplicate-free.
+        self._cold_painted_ids = set(self._history_ids)
+        self._history_hydrated = True
+        self._deferred_history = None
+        # Dropped for the reason ``cold`` drops it once the restore has consumed
+        # it: the checkpoint dict is ~1.3 MB on the largest real journals and
+        # nothing after the restore reads it.
+        self._cold_checkpoint = None
+
+    def _require_not_deferred(self) -> None:
+        """Refuse a history read while this facade's message list is DEFERRED.
+
+        THE ONLY REFUSAL THIS CHANGE ADDS, and it is scoped to the state the
+        change creates. ``_history_hydrated`` is a pre-existing axis with its own
+        meaning — a windowed follower paints ``display_history_window()`` while
+        the MODEL's full history is not materialized, and nothing but
+        :meth:`history` ever gated on it. Conflating the two made every windowed
+        read raise, so they stay separate: this one answers "was a list
+        deferred", that one answers "is the full context materialized".
+        """
+        if self._deferred_history is not None:
+            raise RuntimeError(
+                "durable history is deferred on this cold facade; "
+                "await hydrate_deferred_history()"
+            )
+
+    def _require_history(self) -> None:
+        """``history()``'s own gate: not deferred, and hydrated."""
+        self._require_not_deferred()
+        if not self._history_hydrated:
+            raise RuntimeError(
+                "display-window history is not hydrated; await materialize_history()"
+            )
 
     def _bind_history(
         self,
@@ -6911,7 +7193,13 @@ class AttachedSession:
         if state.history_generation != self._loaded_history_generation:
             self._invalidate_display_history()
 
-    def _install_frontend(self, state: FrontendSessionState, *, publish: bool = False) -> None:
+    def _install_frontend(
+        self,
+        state: FrontendSessionState,
+        *,
+        publish: bool = False,
+        restored: bool = False,
+    ) -> None:
         if state.session_id != self._session_id:
             raise ConnectionError("frontend state belongs to another session")
         if self._frontend_store is None or self._frontend_store.state.epoch != state.epoch:
@@ -6927,7 +7215,7 @@ class AttachedSession:
             self._frontend_store.replace_and_notify(state)
         else:
             self._frontend_store.replace(state)
-        self._apply_frontend_facades(state)
+        self._apply_frontend_facades(state, restored=restored)
         pending, self._pending_frontend_updates = self._pending_frontend_updates, None
         for update in pending or ():
             # A same-connection refresh can overtake queued deltas already
@@ -6938,7 +7226,11 @@ class AttachedSession:
             self._on_frontend_update(update.model_dump(mode="json"))
 
     def _apply_frontend_facades(
-        self, state: FrontendSessionState, *, changed_fields: set[str] | None = None
+        self,
+        state: FrontendSessionState,
+        *,
+        changed_fields: set[str] | None = None,
+        restored: bool = False,
     ) -> None:
         """Refresh changed facades; a full snapshot replaces every collection.
 
@@ -7009,9 +7301,18 @@ class AttachedSession:
             self.mcp_manager.replace(state.mcp_servers)
         startup = state.mcp_startup
         if isinstance(startup, Mapping):
-            from local_operator.session.mcp_status import McpStartupOutcome
+            from local_operator.session.mcp_status import (
+                McpStartupOutcome,
+                RestoredMcpStartupOutcome,
+            )
 
-            startup = McpStartupOutcome(
+            # ``restored`` says this state came out of the DURABLE checkpoint,
+            # and it is the provenance the TUI words its rows by: the same
+            # numbers from an owner's snapshot are news, from a checkpoint they
+            # are history. Connection state cannot answer this (it is cold for a
+            # while after a live snapshot lands — see the class docstring).
+            outcome_type = RestoredMcpStartupOutcome if restored else McpStartupOutcome
+            startup = outcome_type(
                 configured=tuple(startup.get("configured", ()) or ()),
                 connected=tuple(startup.get("connected", ()) or ()),
                 failures=dict(startup.get("failures", {}) or {}),
@@ -9376,14 +9677,20 @@ class AttachedSession:
             self._live_history[message.id] = message
 
     def history(self) -> list[Any]:
-        if not self._history_hydrated:
-            raise RuntimeError(
-                "display-window history is not hydrated; await materialize_history()"
-            )
+        self._require_history()
         return self.display_history_window()
 
     def display_history_window(self) -> list[Any]:
-        """Loaded durable rows plus canonical live rows, in display order."""
+        """Loaded durable rows plus canonical live rows, in display order.
+
+        RAISES only while the message list is DEFERRED (a desktop cold facade
+        before its first bind, see :class:`_DeferredHistory`): an empty list here
+        would be indistinguishable from an empty conversation, and every caller
+        of this either paints it or folds it into what the model sees. It does
+        NOT gate on ``_history_hydrated``, and never did: this is the accessor a
+        windowed follower paints from while the model's full history is unread.
+        """
+        self._require_not_deferred()
         durable_results = {
             m.tool_call_id for m in self._history if isinstance(m, Message) and m.role == "tool"
         }
@@ -9434,6 +9741,7 @@ class AttachedSession:
 
     @property
     def history_message_count(self) -> int:
+        self._require_not_deferred()
         durable = (
             self._display_history.total_message_count
             if self._display_history
@@ -9443,6 +9751,7 @@ class AttachedSession:
 
     @property
     def history_theme_turn_count(self) -> int:
+        self._require_not_deferred()
         if self._display_history is not None:
             return self._display_history.theme_turn_count + sum(
                 key not in self._history_ids and getattr(m, "role", "") in ("user", "assistant")
@@ -9454,11 +9763,13 @@ class AttachedSession:
 
     @property
     def history_opener_text(self) -> str:
+        self._require_not_deferred()
         if self._display_history is not None:
             return self._display_history.opener_text
         return next((m.text for m in self._history if getattr(m, "role", "") == "user"), "")
 
     def history_last_message(self) -> Any:
+        self._require_not_deferred()
         rows = self.display_history_window()
         return rows[-1] if rows else None
 
@@ -10007,6 +10318,18 @@ class AttachedSession:
         return await client.send_command(command, streaming=self._streaming)
 
     async def seed_history(self, messages: list[Message]) -> None:
+        # A SEED INVALIDATES A PENDING HYDRATION. Deferral says "no message list
+        # has been read yet"; a seed is a caller saying what the history IS, so
+        # the deferral is dropped rather than raced. The in-flight read (if any)
+        # is left to finish and DISCARD itself — ``_hydrate_deferred`` checks its
+        # own token before installing — because cancelling it would fail a
+        # snapshot that is legitimately awaiting the same read.
+        deferred, self._deferred_history = self._deferred_history, None
+        if deferred is not None:
+            # The seed IS this facade's history now, so the list installed below
+            # is hydrated by construction; leaving the flag down would make
+            # every accessor raise over a list that is present and correct.
+            self._history_hydrated = True
         if self.history_message_count:
             return
         self._history = list(messages)
@@ -10597,6 +10920,12 @@ class AttachedSession:
 
     async def dispose(self) -> None:
         self._disposed = True
+        # A pending hydration belongs to the facade and must not outlive it: the
+        # read is a worker-thread journal parse, and the token drop is what stops
+        # a late answer installing a message list into a disposed viewer.
+        deferred, self._deferred_history = self._deferred_history, None
+        if deferred is not None and deferred.task is not None and not deferred.task.done():
+            deferred.task.cancel()
         self._fail_prompt_completion_waiters("viewer disposed while awaiting turn completion")
         # A RETAINED dial's landing task must not outlive the facade it belongs
         # to: its whole job is to install state here, and the client it holds is

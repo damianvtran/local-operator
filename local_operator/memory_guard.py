@@ -230,12 +230,25 @@ def _available_memory_mb(runner: Runner) -> int | None:
 
 
 def _free_swap_mb(runner: Runner) -> int | None:
-    """Free swap in MB, or ``None`` when it cannot be measured.
+    """Free swap in MB, or ``None`` when it cannot be measured OR no swap exists.
 
     The INSTANTANEOUS term only. macOS swap ``used`` is cumulative (pages stay in
     the swap file until faulted back or reboot), so it reads "this host swapped
     since boot" rather than "this host is swapping now"; only ``free`` recovers,
     so only ``free`` is a pressure signal.
+
+    A host with NO swap configured (total 0) answers ``None``, never ``0``. Free
+    swap is a pressure signal only relative to a pool that exists: ``0 MB free``
+    out of ``0 MB`` is the steady state of every swapless cloud node, not a host
+    that paged itself into a corner. Reading it as exhaustion is what pinned
+    lop-remote-node-2 (16 GB, 13.5 GB MemAvailable, SwapTotal 0) to the 64 MB
+    command floor and killed ``lop network credentials`` (~92 MB peak). The
+    swapless answer is ``None`` rather than a separate flag so every consumer --
+    the budget's pressure floor and :func:`admission_check` -- gets it from ONE
+    probe; a host whose swap exists and has run dry (total > 0, free ~0) still
+    reports its free figure and stays protected. On macOS ``total = 0`` means no
+    swap file has been created yet (``dynamic_pager`` adds them on demand), which
+    is no more a sign of exhaustion than Linux's ``SwapTotal: 0``.
     """
     if _platform() == "darwin":
         code, out = runner(["sysctl", "-n", "vm.swapusage"])
@@ -243,23 +256,28 @@ def _free_swap_mb(runner: Runner) -> int | None:
             return None
 
         # `total = 5120.00M  used = 4011.25M  free = 1108.75M`
+        scale = {"M": 1, "G": 1024, "T": 1024 * 1024}
+        total = re.search(r"total\s*=\s*([\d.]+)([MGT])", out)
         match = re.search(r"free\s*=\s*([\d.]+)([MGT])", out)
-        if match is None:
+        if total is None or match is None:
             return None
-        value = float(match.group(1))
-        unit = match.group(2)
-        scale = {"M": 1, "G": 1024, "T": 1024 * 1024}[unit]
-        return int(value * scale)
+        if float(total.group(1)) * scale[total.group(2)] <= 0:
+            return None
+        return int(float(match.group(1)) * scale[match.group(2)])
 
     if _platform().startswith("linux"):
+        fields: dict[str, int] = {}
         try:
             with open("/proc/meminfo", encoding="utf-8") as handle:
                 for line in handle:
-                    if line.startswith("SwapFree:"):
-                        return int(line.split()[1]) // 1024
-        except (OSError, ValueError):
+                    key, _, rest = line.partition(":")
+                    if key in ("SwapTotal", "SwapFree"):
+                        fields[key] = int(rest.split()[0]) // 1024
+        except (OSError, ValueError, IndexError):
             return None
-        return None
+        if fields.get("SwapTotal", 0) <= 0:
+            return None
+        return fields.get("SwapFree")
 
     return None
 
@@ -414,7 +432,9 @@ def compute_budget(
 
     # Pressure floor: a host whose free swap has bottomed out has already paged
     # itself into a corner, so the ceiling must not stand on a figure that counts
-    # pages it can no longer keep resident. NOT summed into spendable budget.
+    # pages it can no longer keep resident. NOT summed into spendable budget. A
+    # swapless host reads ``None`` here (see ``_free_swap_mb``), so the floor
+    # binds only where a swap pool exists and has run dry.
     free_swap_mb = _free_swap_mb(base)
     floor_reason = ""
     effective_available = available_mb

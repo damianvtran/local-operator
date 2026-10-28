@@ -8,6 +8,7 @@ import copy
 import datetime
 import hashlib
 import json
+import logging
 import socket
 import sqlite3
 import time
@@ -3725,3 +3726,334 @@ def test_rearm_starts_the_windows_task_too(tmp_path, monkeypatch, connection) ->
     # exactly as on the others.
     monkeypatch.setattr(install.supervisors, "config_lives_in_real_home", lambda _base: False)
     assert install.rearm_if_parked(provider="radient", credential_id=7) == ""
+
+
+def _relay_stream_exchange(signing_key):
+    """The ASGI scope and ``receive`` for one authorized events request.
+
+    ``receive`` answers the empty request body once and then parks forever;
+    every caller here cancels the response instead of letting the request run
+    to completion, so the parked branch is unreachable by construction. It is
+    annotated rather than inferred because an inferred ``dict | None`` is not
+    Starlette's ``Receive``.
+    """
+    from starlette.types import Message
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/api/sessions/events",
+        "raw_path": b"/api/sessions/events",
+        "query_string": b"",
+        "headers": [
+            (b"host", HOST.encode()),
+            (
+                PROOF_HEADER.encode(),
+                proof(signing_key, target="/api/sessions/events").encode(),
+            ),
+        ],
+        "client": ("127.0.0.1", 1),
+        "server": ("127.0.0.1", 1),
+        "root_path": "",
+    }
+    body_read = False
+
+    async def receive() -> Message:
+        nonlocal body_read
+        if not body_read:
+            body_read = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await asyncio.Future()
+        raise AssertionError("the parked receive must never return")
+
+    return scope, receive
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_stream_closes_the_upstream_body(connection, signing_key):
+    """Cancellation must finalize the proxy generator, not only the ASGI task.
+
+    Starlette cancels a streaming response while its downstream send is blocked.
+    The generator's own finally is not guaranteed to run on that path, which
+    leaves the origin response open until garbage collection. Close it from the
+    response's finally as well; this is independent of the stream lease and
+    exercises the same response used by the real uvicorn/socket regression.
+    """
+    closed = asyncio.Event()
+
+    class Endless(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            while True:
+                await asyncio.sleep(0)
+                yield b"data: " + b"x" * 65536 + b"\n\n"
+
+        async def aclose(self):
+            closed.set()
+
+    def origin(request):
+        return httpx.Response(200, stream=Endless(), headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(origin)) as upstream:
+        gateway = Gateway(connection, upstream, mobile_password="pw")
+        scope, receive = _relay_stream_exchange(signing_key)
+
+        first = asyncio.Event()
+
+        async def send(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                first.set()
+                await asyncio.Future()
+
+        task = asyncio.create_task(gateway.app()(scope, receive, send))
+        await asyncio.wait_for(first.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert closed.is_set(), "cancelled streaming response left its upstream body open"
+
+
+@pytest.mark.asyncio
+async def test_a_cancellation_before_the_body_starts_still_releases_the_origin(
+    connection, signing_key
+):
+    """A cancel parked on the headers message must still release the origin.
+
+    ``aclose()`` on an async generator that never started does not run its
+    ``finally``, so a cancellation landing while ``http.response.start`` is
+    parked never reaches ``stream()``'s own close. The origin's close therefore
+    has to hang off the response itself, not off the body generator.
+    """
+    closed = asyncio.Event()
+
+    class Endless(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            while True:
+                await asyncio.sleep(0)
+                yield b"data: " + b"x" * 65536 + b"\n\n"
+
+        async def aclose(self):
+            closed.set()
+
+    def origin(request):
+        return httpx.Response(200, stream=Endless(), headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(origin)) as upstream:
+        gateway = Gateway(connection, upstream, mobile_password="pw")
+        scope, receive = _relay_stream_exchange(signing_key)
+        started = asyncio.Event()
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                started.set()
+                await asyncio.Future()
+
+        task = asyncio.create_task(gateway.app()(scope, receive, send))
+        await asyncio.wait_for(started.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert closed.is_set(), "a parked response start left the origin body open"
+
+
+@pytest.mark.asyncio
+async def test_a_failing_origin_close_does_not_mask_the_cancellation(
+    connection, signing_key, caplog
+):
+    """Cleanup failure is logged at WARNING, never substituted for the outcome.
+
+    The level is load-bearing (review round 4, R4-1): this helper also runs in
+    ``stream_response``'s ``finally`` on normal completion, where a failed
+    origin close has no in-flight exception to hide behind. ``caplog`` and not
+    live log output, because the suite's default ``-n auto`` drops worker
+    ``--log-cli-level`` records.
+    """
+    closed = asyncio.Event()
+
+    class Broken(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            while True:
+                await asyncio.sleep(0)
+                yield b"data: " + b"x" * 65536 + b"\n\n"
+
+        async def aclose(self):
+            closed.set()
+            raise RuntimeError("origin close failed")
+
+    def origin(request):
+        return httpx.Response(200, stream=Broken(), headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(origin)) as upstream:
+        gateway = Gateway(connection, upstream, mobile_password="pw")
+        scope, receive = _relay_stream_exchange(signing_key)
+        first = asyncio.Event()
+
+        async def send(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                first.set()
+                await asyncio.Future()
+
+        with caplog.at_level(logging.WARNING, logger="local_operator.tunnels.gateway"):
+            task = asyncio.create_task(gateway.app()(scope, receive, send))
+            await asyncio.wait_for(first.wait(), 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert closed.is_set()
+        assert [
+            (record.name, record.levelno, record.getMessage(), record.exc_info is not None)
+            for record in caplog.records
+        ] == [
+            (
+                "local_operator.tunnels.gateway",
+                logging.WARNING,
+                "stream cleanup failed",
+                True,
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_origin_close_does_not_replace_the_cancellation_while_reading(
+    connection, signing_key, caplog
+):
+    """The generator's own cleanup, which the response guard cannot reach.
+
+    A plain client disconnect cancels the read loop while it is awaiting the
+    next origin chunk, so ``stream()``'s ``finally`` closes the origin with the
+    CancelledError already in flight. Unguarded, that close's failure escaped
+    the generator and became the request's outcome — uvicorn logged "Exception
+    in ASGI application" and the reason the stream ended was lost (QA Q1-1,
+    measured identically at ``c8ba60e299`` and at ``d6a2c9dea45``).
+    """
+
+    class Broken(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"data: " + b"x" * 65536 + b"\n\n"
+            # Park the read loop: the disconnect must land inside ``anext``.
+            await asyncio.Future()
+
+        async def aclose(self):
+            raise RuntimeError("origin close failed")
+
+    def origin(request):
+        return httpx.Response(200, stream=Broken(), headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(origin)) as upstream:
+        gateway = Gateway(connection, upstream, mobile_password="pw")
+        scope, receive = _relay_stream_exchange(signing_key)
+        first = asyncio.Event()
+
+        async def send(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                first.set()
+
+        with caplog.at_level(logging.WARNING, logger="local_operator.tunnels.gateway"):
+            task = asyncio.create_task(gateway.app()(scope, receive, send))
+            await asyncio.wait_for(first.wait(), 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert [
+            (record.name, record.levelno, record.getMessage(), record.exc_info is not None)
+            for record in caplog.records
+        ] == [
+            (
+                "local_operator.tunnels.gateway",
+                logging.WARNING,
+                "stream cleanup failed",
+                True,
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_lease_ending_under_backpressure_still_completes_the_response(
+    connection, signing_key, monkeypatch
+):
+    """The 60 s stream lease must END a slow phone's stream, never truncate it.
+
+    The lease used to be an ``asyncio.timeout`` around the whole proxy loop, so
+    it also covered the time spent inside uvicorn's ``send`` waiting for a slow
+    reader to drain. A deadline firing THERE cancelled the response outside the
+    generator's ``except``: no terminating chunk, uvicorn's "ASGI callable
+    returned without completing response" (348 of them in the operator's
+    ``tunnel/service.log``), and a phone that saw a network error instead of the
+    clean end its rotation rule expects. The rig is the real path: the real
+    gateway under real uvicorn on a real socket whose reader stops reading until
+    the (shortened) lease has passed, then reads to the end.
+    """
+    import uvicorn
+
+    from local_operator.tunnels import gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "MAX_STREAM_SECONDS", 0.5)
+
+    class Endless(httpx.AsyncByteStream):
+        """An origin SSE body that never ends on its own, like the relay's."""
+
+        async def __aiter__(self):
+            while True:
+                await asyncio.sleep(0)
+                yield b"data: " + b"x" * 65536 + b"\n\n"
+
+    def origin(request):
+        return httpx.Response(200, stream=Endless(), headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(origin)) as upstream:
+        gateway = Gateway(connection, upstream, mobile_password="pw")
+        server = uvicorn.Server(
+            uvicorn.Config(gateway.app(), host="127.0.0.1", port=0, log_level="critical")
+        )
+        serving = asyncio.create_task(server.serve())
+        try:
+            async with asyncio.timeout(20):
+                while not server.started:
+                    await asyncio.sleep(0.01)
+                port = server.servers[0].sockets[0].getsockname()[1]
+                proof_value = proof(signing_key, target="/api/sessions/events")
+
+                def stalled_reader() -> bytes:
+                    with closing(socket.create_connection(("127.0.0.1", port))) as sock:
+                        # Linux with a 4 KiB SO_RCVBUF drains at about
+                        # 8 KiB per ~0.2 s (~41 KB/s). A multi-MB backlog then
+                        # needs ~80 s, so that arm cannot reach the 20 s bound
+                        # with no gateway involved (raw-socket control), while
+                        # the real uvicorn write-side high-water mark still
+                        # forces the lease path through its blocked-send case
+                        # at a buffer large enough to drain.
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
+                        sock.sendall(
+                            b"GET /api/sessions/events HTTP/1.1\r\nHost: "
+                            + HOST.encode()
+                            + b"\r\n"
+                            + PROOF_HEADER.encode()
+                            + b": "
+                            + proof_value.encode()
+                            + b"\r\n\r\n"
+                        )
+                        time.sleep(1.5)  # past the lease, with send() parked on drain
+                        sock.settimeout(5)
+                        received = b""
+                        while True:
+                            try:
+                                chunk = sock.recv(1 << 20)
+                            except TimeoutError:
+                                break
+                            if not chunk:
+                                break
+                            received += chunk
+                            if received.endswith(b"0\r\n\r\n"):
+                                break
+                        return received
+
+                received = await asyncio.to_thread(stalled_reader)
+        finally:
+            server.should_exit = True
+            await serving
+    assert received.startswith(b"HTTP/1.1 200")
+    # The chunked terminator is the clean end-of-stream: present only when the
+    # response COMPLETED rather than being abandoned mid-body.
+    assert received.endswith(b"0\r\n\r\n")

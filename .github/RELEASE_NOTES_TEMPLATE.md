@@ -19,6 +19,8 @@ version. Describe the benefit, not the development or release process.>
 
 Install or upgrade using your usual Local Operator installation method. Restart
 running sessions when you are ready to use the updated version.
+The PyPI wheels ship with code comments stripped (code and line numbers are
+identical); the full-source sdist is attached to this GitHub Release.
 
 **Full changelog**: https://github.com/damianvtran/local-operator/compare/<previous-tag>...<this-tag>
 

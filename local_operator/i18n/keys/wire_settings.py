@@ -1686,6 +1686,20 @@ def providers_anthropic_cache_ttl_1h_min_context_tokens_label() -> Msg:
     return Msg("wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label", {})
 
 
+def providers_anthropic_subagent_cache_ttl_1h_min_context_tokens_help() -> Msg:
+    return Msg(
+        "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.help",
+        {},
+    )
+
+
+def providers_anthropic_subagent_cache_ttl_1h_min_context_tokens_label() -> Msg:
+    return Msg(
+        "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.label",
+        {},
+    )
+
+
 def providers_openai_api_choice_chat_completions_description() -> Msg:
     return Msg("wire.settings.providers_openai_api.choice.chat_completions.description", {})
 

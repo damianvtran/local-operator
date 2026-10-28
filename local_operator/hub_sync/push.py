@@ -296,6 +296,11 @@ class PushOutcome:
     accepted: Mapping[str, Any] | None = None
     revision: str | None = None
     reason: str = ""
+    #: True when the hub produced NO DECISION (transport failure or 5xx). Carried on
+    #: the outcome itself so a caller classifies the retry class from the push that
+    #: just ran, not from a later read of outbox state a failed or fenced settle
+    #: would leave stale.
+    outage: bool = False
 
 
 def _canonical_equal(kind: Kind, a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
@@ -749,7 +754,7 @@ def _settle_refused(
         outage=outage,
         next_retry_at=next_at,
     )
-    return PushOutcome("refused", operation_id=operation_id, reason=code)
+    return PushOutcome("refused", operation_id=operation_id, reason=code, outage=outage)
 
 
 def _retry_at(generation: int, outbox: Outbox, operation_id: str) -> str:

@@ -155,5 +155,16 @@
     "note": "Row label within the settings page's 29-cell label budget (_LABEL_BUDGET). Boolean master switch: ON compresses transcripts older than the age row below.",
     "role": "settings row label",
     "tone": "plain"
+  },
+  "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.help": {
+    "note": "Explains the threshold for delegated (subagent) requests only. '5 minutes' and '1-hour' are Anthropic's two prompt-cache lifetimes; keep both durations. 0 is the default and means no SIZE rule only: the separate after-a-4-minute-call rule stays on unless the main 1-hour setting is 0. '4 minutes' is the fixed 240-second threshold; keep the number.",
+    "role": "settings help text",
+    "tone": "plain, precise"
+  },
+  "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.label": {
+    "note": "Row label within the settings page's 29-cell label budget; the value is a token count. 'Subagent' is a delegated child agent; '1h' is the one-hour prompt-cache lifetime. Sibling of 'Anthropic 1h cache above (tokens)'.",
+    "role": "numeric setting label",
+    "tone": "plain",
+    "maxCells": 29
   }
 }

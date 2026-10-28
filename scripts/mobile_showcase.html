@@ -1,0 +1,267 @@
+<!doctype html><html lang="en"><meta charset="utf-8">
+<title>Isolated relay showcase</title>
+<style>body{margin:0;padding:8px;background:#ddd;font:14px system-ui}header{display:flex;gap:12px;align-items:center;margin-bottom:8px}pre{position:absolute;inset-inline-start:420px;top:50px;max-width:700px;white-space:pre-wrap}iframe{display:block;border:0;width:390px;height:844px}label{display:flex;gap:4px}</style>
+<header><label>Phone <select id="phone"><option>390x844</option><option>360x780</option><option>320x568</option><option>844x390</option></select></label>
+<label>Theme <select id="theme"><option value="localOperatorDark">Dark</option><option value="localOperatorLight">Light</option></select></label>
+<button id="phone390" onclick="document.querySelector('#phone').value='390x844';setup()">390 phone</button>
+<button id="phone360" onclick="document.querySelector('#phone').value='360x780';setup()">360 phone</button>
+<button id="phone320" onclick="document.querySelector('#phone').value='320x568';setup()">320 phone</button>
+<button id="phonelandscape" onclick="document.querySelector('#phone').value='844x390';setup()">Landscape</button>
+<button id="dark" onclick="document.querySelector('#theme').value='localOperatorDark';setup()">Dark theme</button>
+<button id="light" onclick="document.querySelector('#theme').value='localOperatorLight';setup()">Light theme</button>
+<label><input id="rtl" type="checkbox">Force RTL</label><a href="/showcase">Reset</a>
+<label>State <input id="state" value="list-populated"></label><button id="audit">Audit</button><button id="sweep" title="Fixture-only: step the container 1 px at a time across the band a fit verdict can get wrong, and report at every step the rendered overflow, the form chosen and a second sample 300 ms later (identical form and no overflow at every width is the pass)">Sweep 310-330</button><button id="mincontent" title="Fixture-only: report the band table's RENDERED min-content width, the per-cell padding/border/font the engine uses, and the same totals the component's helpers would compute, so a fit verdict can be checked against the engine rather than against an estimate">Measure min-content</button><button id="bandcheck" title="Fixture-only: report the band table's min-content width at the cell font and at the inherited font, the form the component chose, and whether that form survives 3 s of width oscillation">Check table band</button><button id="reveal" title="Fixture-only: scroll the phone's conversation so its code block and table are on screen (the capture tool cannot scroll inside a frame)">Reveal code</button></header><pre id="result"></pre><pre id="framebox" aria-hidden="true"></pre>
+<iframe title="Phone relay" id="phone-relay" src="/"></iframe>
+<script src="/showcase/metrics.js"></script><script>
+const frame=document.querySelector('iframe');
+/* The phone's CSS box, published so a capture can crop exactly the phone instead
+   of guessing where it sits (a 390-tall landscape phone leaves the page shorter
+   than the window, so "crop from the image bottom" is the wrong anchor). */
+function publishFrameBox(){const r=frame.getBoundingClientRect();document.querySelector('#framebox').textContent=JSON.stringify([Math.round(r.left),Math.round(r.top+scrollY),Math.round(r.width),Math.round(r.height)]);}
+function setup(){const [w,h]=document.querySelector('#phone').value.split('x');frame.style.width=w+'px';frame.style.height=h+'px';const doc=frame.contentDocument;if(doc){doc.documentElement.dataset.theme=document.querySelector('#theme').value;doc.documentElement.dir=document.querySelector('#rtl').checked?'rtl':'ltr';}publishFrameBox();}
+document.querySelector('#audit').addEventListener('click',async()=>{const data=JSON.parse(window.measureRelay(frame.contentWindow));data.device_pixel_ratio=frame.contentWindow.devicePixelRatio;data.theme=frame.contentDocument.documentElement.dataset.theme;data.direction=frame.contentDocument.documentElement.dir;const result={state:document.querySelector('#state').value,metrics:data};document.querySelector('#result').textContent=JSON.stringify(result);await fetch('/showcase/metrics',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(result)});});
+/* THE FLIP-FLOP CHECK (code review round 3, C3-1). Fixture-only: nothing product
+   code reads.
+
+   It reports, as numbers: the band table's min-content total measured at the CELL
+   font (13 px) and at the wrapper's previously-inherited font (14 px), plus the
+   width the table is laid out in — so "this table is inside the band" is checkable
+   rather than asserted. Then, at a FIXED width where those two answers disagree, it
+   samples the rendered form and the wrapper rect every 250 ms for 3 s: one form
+   throughout is the pass (the old code re-decided on a height change the decision
+   itself caused, and could alternate). */
+/* THE 310–330 SWEEP (QA round 4, Q4-1). One pixel at a time across the band where
+   the under-measure showed: at every container width the wrapper must clip nothing
+   (`scrollWidth - clientWidth` 0), must have chosen one form, and must still have
+   that form 300 ms later — a width that fits then clips, or a form that alternates,
+   fails the step. Fixture-only: no product code reads it. */
+document.querySelector('#sweep').addEventListener('click',async()=>{
+  const doc=frame.contentDocument;
+  const find=()=>[...doc.querySelectorAll('[role="table"], table')]
+    .map(el=>el.closest('.lo-table-font')||el)
+    .find(el=>el.textContent.includes('counterreconciliation'));
+  const samples=[];
+  /* frame = container + 37 on this rig (measured), so 347..367 lands the container on 310..330 */
+  for(let frameWidth=347; frameWidth<=367; frameWidth++){
+    frame.style.width=frameWidth+'px';
+    /* settle first: a width change legitimately re-decides, and sampling inside
+       that transition would report the PREVIOUS form against the new container. */
+    await new Promise(r=>setTimeout(r,900));
+    const read=()=>{const node=find(); if(!node) return null; const r=node.getBoundingClientRect();
+      return {form:node.querySelector('table')?'table':'stacked',
+        container:node.clientWidth, content:node.scrollWidth,
+        overflow:Math.max(0,node.scrollWidth-node.clientWidth),
+        rect:[Math.round(r.width),Math.round(r.height)]};};
+    const first=read();
+    await new Promise(r=>setTimeout(r,350));
+    const second=read();
+    await new Promise(r=>setTimeout(r,350));
+    const third=read();
+    /* Three samples after the settle: the width change is allowed ONE transition,
+       and nothing may move after it. */
+    samples.push({frame:frameWidth, container:first&&first.container,
+      form:first&&first.form, overflow:first&&first.overflow,
+      stable:Boolean(first&&second&&third
+        &&first.form===second.form&&second.form===third.form
+        &&first.overflow===second.overflow&&second.overflow===third.overflow),
+      rect:first&&first.rect, secondForm:second&&second.form, thirdForm:third&&third.form});
+  }
+  frame.style.width='390px';
+  const bad=samples.filter(s=>!s.stable||s.overflow>0);
+  document.querySelector('#result').textContent=JSON.stringify({badCount:bad.length, samples});
+  try{
+    await fetch('/showcase/metrics',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({state:'sweep',metrics:{viewport:[0,0],theme:'sweep',sweep:samples}})});
+  }catch(error){ /* the on-page result is the record */ }
+});
+/* RENDERED MIN-CONTENT vs THE COMPONENT'S ESTIMATE (QA round 4, Q4-1). The fit
+   verdict is only honest if its number is at least the width the engine needs; this
+   reports both, plus every per-cell quantity that makes up the difference (padding,
+   border, font weight/size), so a fix can be argued from the engine's own numbers.
+   Fixture-only: no product code reads it. */
+document.querySelector('#mincontent').addEventListener('click',async()=>{
+  const doc=frame.contentDocument;
+  const wrapper=[...doc.querySelectorAll('[role="table"], table')]
+    .map(el=>el.closest('.lo-table-font')||el)
+    .find(el=>el.textContent.includes('counterreconciliation'));
+  if(!wrapper){document.querySelector('#result').textContent='{"mincontent":"table not found"}';return;}
+  const probe=doc.createElement('canvas').getContext('2d');
+  const row=wrapper.querySelector('[role="row"]')||wrapper.querySelector('tr');
+  const cells=row?[...row.children]:[];
+  const th=wrapper.querySelector('th')||cells[0];
+  const td=wrapper.querySelector('td')||cells[cells.length-1];
+  const pick=(el)=>{const st=frame.contentWindow.getComputedStyle(el);return {
+    font:st.font||`${st.fontSize} ${st.fontFamily}`, weight:st.fontWeight, size:st.fontSize,
+    padL:parseFloat(st.paddingLeft)||0, padR:parseFloat(st.paddingRight)||0,
+    borL:parseFloat(st.borderLeftWidth)||0, borR:parseFloat(st.borderRightWidth)||0};};
+  const thS=pick(th), tdS=pick(td);
+  const wrapS=frame.contentWindow.getComputedStyle(wrapper);
+  /* the ENGINE's answer: a detached clone told to be as narrow as its content */
+  const holder=doc.createElement('div');
+  holder.style.cssText='position:absolute;left:-9999px;top:0;width:min-content';
+  const clone=wrapper.cloneNode(true);
+  clone.style.maxWidth='none'; clone.style.width='auto';
+  holder.appendChild(clone); doc.body.appendChild(holder);
+  const tableEl=clone.querySelector('table');
+  if(tableEl){tableEl.style.width='min-content';}
+  const renderedMin = clone.getBoundingClientRect().width;
+  holder.remove();
+  /* the component's helpers: ceil(longest word) + per-column overhead */
+  const words=(el)=>[...el.children].flatMap(c=>c.textContent.replace(/:$/,'').split(/\s+/)).filter(Boolean);
+  const perColumn=(st, overhead)=>{probe.font=st.font;const widths=cells.map(c=>{
+    const own=[...c.textContent.replace(/:$/,'').split(/\s+/).filter(Boolean)];
+    const w=Math.max(0,...own.map(x=>probe.measureText(x).width));
+    return Math.ceil(w)+overhead;});return {widths,total:widths.reduce((a,b)=>a+b,0)+2};};
+  const out={
+    renderedMinContent:+renderedMin.toFixed(1),
+    columns:cells.length,
+    th:thS, td:tdS,
+    wrapper:{padL:parseFloat(wrapS.paddingLeft)||0, borL:parseFloat(wrapS.borderLeftWidth)||0, borR:parseFloat(wrapS.borderRightWidth)||0},
+    estimateAtThFont_16:perColumn(thS,16),
+    estimateAtTdFont_16:perColumn(tdS,16),
+    estimateAtThFont_cellBox:perColumn(thS, thS.padL+thS.padR+thS.borL+thS.borR),
+    /* the total the component SHOULD compare against `available`: its columns at the
+       cell box plus the wrapper's own inline border (border-box vs content-box). */
+    estimatePlusWrapperBorder:(()=>{const base=perColumn(thS, thS.padL+thS.padR+thS.borL+thS.borR);
+      return {total:base.total+((parseFloat(wrapS.borderLeftWidth)||0)+(parseFloat(wrapS.borderRightWidth)||0))*2};})(),
+  };
+  document.querySelector('#result').textContent=JSON.stringify(out);
+});
+document.querySelector('#bandcheck').addEventListener('click',async()=>{
+  const doc=frame.contentDocument, win=frame.contentWindow;
+  const findWrapper=()=>[...doc.querySelectorAll('[role="table"], table')]
+    .map(el=>el.closest('.lo-table-font')||el)
+    .find(el=>el.textContent.includes('counterreconciliation'));
+  const wrapper=findWrapper();
+  if(!wrapper){document.querySelector('#result').textContent='{"band":"table not found"}';return;}
+  const probe=doc.createElement('canvas').getContext('2d');
+  const cellsOf=(node)=>{
+    const row=node.querySelector('[role="row"]')||node.querySelector('tr');
+    return row?[...row.children]:[];
+  };
+  const total=(node,px)=>{
+    const cells=cellsOf(node);
+    if(!cells.length) return null;
+    const st=win.getComputedStyle(cells[0]);
+    probe.font=`${st.fontWeight} ${px}px ${st.fontFamily}`;
+    const widths=cells.map(c=>Math.ceil(Math.max(0,...c.textContent.replace(/:$/,'').split(/\s+/)
+      .filter(Boolean).map(w=>probe.measureText(w).width)))+16);
+    return {widths, total:widths.reduce((a,b)=>a+b,0)+2};
+  };
+  /* Freeze the width where the two candidate fonts disagree (295 px = a 320 phone's
+     wrapper), so a change of form cannot be a legitimate width re-decision. */
+  /* 372 px of iframe = a 337 px wrapper: between this table's 13 px total (326)
+     and its 14 px total (346), i.e. inside the band the wrong font decided. */
+  frame.style.width='372px';
+  await new Promise(r=>setTimeout(r,1200));
+  const node=findWrapper();
+  const at13=total(node,13), at14=total(node,14);
+  const samples=[];
+  for(let i=0;i<12;i++){
+    const current=findWrapper();
+    const r=current.getBoundingClientRect();
+    samples.push({t:i*250, form:current.querySelector('table')?'table':'stacked',
+      rect:[Math.round(r.width),Math.round(r.height)]});
+    await new Promise(res=>setTimeout(res,250));
+  }
+  const out={available:Math.round(findWrapper().getBoundingClientRect().width),
+    totalAt13px:at13&&at13.total, totalAt14px:at14&&at14.total,
+    widthsAt13px:at13&&at13.widths,
+    band:Boolean(at13&&at14&&at14.total>out_width&&at13.total<=out_width),
+    finalForm:findWrapper().querySelector('table')?'table':'stacked',
+    formsSeen:[...new Set(samples.map(x=>x.form))], sampleCount:samples.length, samples};
+  var out_width=Math.round(findWrapper().getBoundingClientRect().width);
+  out.band=Boolean(at13&&at14&&at14.total>out_width&&at13.total<=out_width);
+  document.querySelector('#result').textContent=JSON.stringify(out);
+  /* Stow the numbers with the page's own evidence, under the SAME shape the audit
+     uses, so a band check cannot need a second POST contract (a body without
+     `metrics` used to kill the fixture). */
+  try{
+    await fetch('/showcase/metrics',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({state:document.querySelector('#state').value+'band',metrics:{
+        viewport:[out.available,out.available],theme:'band',band:out}})});
+  }catch(error){ /* evidence is best-effort: the on-page result is the record */ }
+});
+document.querySelector('#reveal').addEventListener('click',()=>{const pre=frame.contentDocument.querySelector('pre');if(pre)pre.scrollIntoView({block:'start'});});
+frame.addEventListener('load',setup);document.querySelectorAll('#phone,#theme,#rtl').forEach(el=>el.addEventListener('change',setup));
+</script><script>
+/* THE MATCHED PAIR (fixture-only; header status dot PR). `?grid=1&route=/s/<id>
+   &phone=WxH&theme=dark|light[&kb=PX][&open=health][&retry=1][&state=label]` lays out the
+   SAME route twice — BEFORE (the frozen base bundle at /baseline, configured by
+   LOP_SHOWCASE_BASELINE_DIST) and AFTER (the bundle this checkout built) — so one
+   harness-browser screenshot is a matched pair. ONE THEME PER PAGE because each
+   phone holds two SSE streams open and a browser allows six HTTP/1.1
+   connections per host: four phones starved the fourth on "connecting…". Each iframe IS a WxH viewport; only its painting is scaled to fit
+   the browser tab (transform on a wrapper), so every layout number below is the
+   real WxH layout, never a CSS-scaled imitation.
+
+   `kb=PX` EMULATES AN OPEN KEYBOARD by making the iframe PX shorter. The
+   session view pins its column to `visualViewport.height` (session-view.tsx's
+   resize handler, `--lo-vvh`), and an iframe's visual viewport is its own box,
+   so the column receives exactly the height an iOS keyboard leaves it; the
+   260 px default the evidence uses is the keyboard `session-view.overflow
+   .test.tsx` reasons with at 390x844. What it does not emulate: the layout
+   viewport staying tall (it shrinks too here), which this column ignores.
+
+   The probe measures inside each iframe: the stacked items between the
+   transcript and the composer (gaps, edges, first-text inset), the header
+   dot's colour against the header's ground (WCAG contrast) and its control's
+   hit box. Results print to #grid-result and POST to /showcase/metrics. */
+(function(){
+const q=new URLSearchParams(location.search);
+if(q.get('grid')!=='1')return;
+document.querySelector('header').style.display='none';
+document.querySelectorAll('pre').forEach(el=>el.style.display='none');
+const solo=document.querySelector('#phone-relay');solo.setAttribute('src','about:blank');solo.style.display='none';
+const [W,H]=(q.get('phone')||'390x844').split('x').map(Number);const KB=Number(q.get('kb')||0);const h=H-KB;
+const route=q.get('route')||'/';const state=q.get('state')||'grid';
+/* `&retry=1` (QA round 1, Q2): seed a retained continuation envelope for the
+   routed session BEFORE either leg loads, so its composer mounts with the
+   retry alert open — the state where the card, the tray and the alert all
+   compete for a 440 px column. Same origin, so both legs read the one key;
+   the shape is `continuation-command.ts`'s stored v1 envelope. */
+if(q.get('retry')==='1'){const sid=decodeURIComponent(route.replace(/^\/s\//,''));localStorage.setItem(`lo-mobile-command:${sid}`,JSON.stringify({version:1,saved_at:Date.now(),envelope:{command_id:'0f2f1d5e-6c3a-4b7e-9f1a-2b3c4d5e6f70',op:'prompt',text:'hello from QA'}}));}
+const s=Math.min(1,(innerHeight-30)/h,(innerWidth/2-10)/W);
+const row=document.createElement('div');row.style.cssText='display:flex;gap:8px;align-items:flex-start';document.body.appendChild(row);
+const out=document.createElement('pre');out.id='grid-result';out.style.cssText='position:static;display:block;font-size:10px;max-width:none';document.body.appendChild(out);
+const results={};
+const theme=q.get('theme')==='light'?'localOperatorLight':'localOperatorDark';const legs=[['before','/baseline',theme],['after','/',theme]];
+const norm=(doc,c)=>{const x=doc.createElement('canvas').getContext('2d');x.fillStyle='#000';x.fillStyle=c;return x.fillStyle;};
+const rgb=(hex)=>{if(hex.startsWith('#')){const n=parseInt(hex.slice(1),16);return [n>>16&255,n>>8&255,n&255];}const m=hex.match(/[\d.]+/g).map(Number);return m.slice(0,3);};
+const lum=([r,g,b])=>{const f=v=>{v/=255;return v<=0.03928?v/12.92:Math.pow((v+0.055)/1.055,2.4);};return 0.2126*f(r)+0.7152*f(g)+0.0722*f(b);};
+const ratio=(a,b)=>{const [x,y]=[lum(a),lum(b)].sort((m,n)=>n-m);return Math.round((x+0.05)/(y+0.05)*100)/100;};
+const ground=(win,el)=>{for(let e=el;e;e=e.parentElement){const c=win.getComputedStyle(e).backgroundColor;if(c&&!/rgba\(.*,\s*0\)|transparent/.test(c))return c;}return win.getComputedStyle(win.document.body).backgroundColor;};
+const firstText=(doc,el)=>{const w=doc.createTreeWalker(el,NodeFilter.SHOW_TEXT);let n;while((n=w.nextNode())){if(n.textContent.trim()){const r=doc.createRange();r.selectNodeContents(n);const b=r.getBoundingClientRect();if(b.width>0)return Math.round(b.left*10)/10;}}return null;};
+const R=r=>({top:Math.round(r.top*10)/10,bottom:Math.round(r.bottom*10)/10,left:Math.round(r.left*10)/10,right:Math.round(r.right*10)/10,height:Math.round(r.height*10)/10});
+function probe(win){const doc=win.document;const comp=doc.querySelector('.lo-composer');const scroller=doc.querySelector('.lo-scroll.lo-fade-y');
+  const res={viewport:[win.innerWidth,win.innerHeight],dpr:win.devicePixelRatio,theme:doc.documentElement.dataset.theme};res.visual_viewport=win.visualViewport?[win.visualViewport.width,win.visualViewport.height]:null;res.short_column=!!doc.querySelector('[data-short]');
+  if(comp){/* FOOTER ROWS (QA round 3, O1): distinct tops among the composer row's children other than the field, i.e. how many 44 px lines the footer takes. */const row=comp.querySelector('textarea')?.closest('.flex-wrap');if(row){const tops=new Set([...row.children].filter(c=>!c.contains(comp.querySelector('textarea'))&&c.getBoundingClientRect().width>0&&c.getBoundingClientRect().height>0).map(c=>Math.round(c.getBoundingClientRect().top)));res.composer_footer_rows=tops.size;res.composer_footer=[...row.children].filter(c=>!c.contains(comp.querySelector('textarea'))).map(c=>{const b=c.getBoundingClientRect();return {top:Math.round(b.top),w:Math.round(b.width*10)/10,kids:[...c.children].map(k=>{const kb=k.getBoundingClientRect();return {w:Math.round(kb.width*10)/10,sw:k.scrollWidth,text:(k.textContent||'').trim().slice(0,28)};})};});res.composer_row_w=Math.round(row.getBoundingClientRect().width*10)/10;}res.foot_level=row.querySelector('[data-foot-level]')?.getAttribute('data-foot-level');res.facts_row_actual=(()=>{const x=row.querySelector('[data-foot-level]');return x?{w:x.getBoundingClientRect().width,client:x.clientWidth,scroll:x.scrollWidth}:null;})();res.facts_row_actual=(()=>{const x=row.querySelector('[data-foot-level]');return x?{w:x.getBoundingClientRect().width,client:x.clientWidth,scroll:x.scrollWidth}:null;})();res.foot_children=[...row.querySelectorAll('[data-foot]')].map(x=>({key:x.getAttribute('data-foot'),form:x.getAttribute('data-foot-form'),w:Math.round(x.getBoundingClientRect().width*10)/10}));const facts=row.querySelector('[data-foot=model]')?.parentElement;const actions=row.querySelector('.ms-auto');if(facts&&actions){const fr=facts.getBoundingClientRect(),ar=actions.getBoundingClientRect();res.facts_box=R(fr);res.actions_box=R(ar);res.facts_to_actions_gap=Math.round((ar.left-fr.right)*10)/10;res.facts_overflow=Math.round((fr.right-ar.left)*10)/10;res.reading_to_actions_gap=(()=>{const x=facts.querySelector("[data-foot=reading]");return x?Math.round((ar.left-x.getBoundingClientRect().right)*10)/10:null;})();}const discs=[...row.querySelectorAll('button')].filter(b=>b.getBoundingClientRect().width>=40);res.footer_button_boxes=discs.map(b=>({label:b.getAttribute('aria-label'),...R(b.getBoundingClientRect())}));const cr=comp.getBoundingClientRect();const ta=comp.querySelector('textarea');res.composer={...R(cr),text_left:ta?Math.round((ta.getBoundingClientRect().left+parseFloat(win.getComputedStyle(ta).paddingLeft))*10)/10:null};}
+  if(scroller&&comp){scroller.scrollTop=scroller.scrollHeight;const sr=scroller.getBoundingClientRect();const rows=[...scroller.children].filter(c=>c.getBoundingClientRect().height>0);const last=rows[rows.length-1];
+    res.transcript={bottom:Math.round(sr.bottom*10)/10,padding_bottom:parseFloat(win.getComputedStyle(scroller).paddingBottom),last_row_bottom:last?Math.round(last.getBoundingClientRect().bottom*10)/10:null};
+    const items=[];let el=scroller.nextElementSibling;while(el&&!el.contains(comp)){const kids=el.hasAttribute('data-above-composer')?[...el.children]:[el];for(const k of kids){const r=k.getBoundingClientRect();if(r.height>0)items.push({tag:k.tagName.toLowerCase(),label:(k.getAttribute('aria-label')||k.getAttribute('data-testid')||k.textContent.trim().slice(0,32)),...R(r),text_left:firstText(doc,k)});}
+      if(el.hasAttribute('data-above-composer')){res.stack_class=el.className;/* THE SLOT'S OWN BOX (QA round 1, Q2): item boxes inside a scrolling slot extend past what is painted, so overlap is measured on the slot, and `stack_overlap` > 0 means the slot paints over the composer. */const sb=el.getBoundingClientRect();res.stack={...R(sb),scroll_height:el.scrollHeight,client_height:el.clientHeight};res.stack_overlap=Math.round((sb.bottom-res.composer.top)*10)/10;}el=el.nextElementSibling;}
+    res.items=items;const gaps=[];for(let i=1;i<items.length;i++)gaps.push(Math.round((items[i].top-items[i-1].bottom)*10)/10);res.gaps_between=gaps;
+    res.gap_to_composer=Math.round(((res.composer.top)-(items.length?items[items.length-1].bottom:sr.bottom))*10)/10;
+    res.gap_transcript_to_first=items.length?Math.round((items[0].top-sr.bottom)*10)/10:null;
+    res.last_line_clearance=res.transcript.last_row_bottom!=null?Math.round(((items.length?items[0].top:res.composer.top)-res.transcript.last_row_bottom)*10)/10:null;}
+  const btn=doc.querySelector('button[data-health]');
+  if(btn){const dot=btn.querySelector('[data-health-dot]');const fill=rgb(norm(doc,win.getComputedStyle(dot).backgroundColor));const g=rgb(norm(doc,ground(win,doc.querySelector('header'))));
+    res.health={state:btn.dataset.health,title:btn.getAttribute('title'),name:btn.textContent.trim().replace(/\s+/g,' '),target:R(btn.getBoundingClientRect()),dot:R(dot.getBoundingClientRect()),dot_fill:fill,header_ground:g,dot_contrast:ratio(fill,g),expanded:btn.getAttribute('aria-expanded')};}
+  const dlg=doc.querySelector('[role=dialog]');if(dlg){res.sheet={name:dlg.getAttribute('aria-labelledby')?doc.getElementById(dlg.getAttribute('aria-labelledby'))?.textContent:null,text:dlg.textContent.trim().replace(/\s+/g,' ').slice(0,200)};}
+  return res;}
+legs.forEach(([which,base,theme],i)=>{const cell=document.createElement('div');const cap=document.createElement('div');cap.style.cssText='font:11px system-ui;height:16px';cap.textContent=`${which.toUpperCase()} · ${theme.replace('localOperator','').toLowerCase()} · ${W}x${H}${KB?` kb ${KB} (column ${h})`:''}`;
+  const wrap=document.createElement('div');wrap.style.cssText=`width:${Math.round(W*s)}px;height:${Math.round(h*s)}px;overflow:hidden;position:relative;outline:1px solid #999`;
+  const fr=document.createElement('iframe');fr.title=`${which} ${theme}`;fr.style.cssText=`position:absolute;left:0;top:0;border:0;width:${W}px;height:${h}px;transform:scale(${s});transform-origin:0 0`;
+  fr.addEventListener('load',async()=>{const win=fr.contentWindow;const doc=fr.contentDocument;doc.documentElement.dataset.theme=theme;
+    /* READY = the conversation painted, not the first-paint composer frame
+       (`ComposerFrame` is present while the session is still connecting). */
+    for(let t=0;t<150&&!doc.querySelector('.lo-scroll.lo-fade-y');t++)await new Promise(r=>setTimeout(r,100));
+    await new Promise(r=>setTimeout(r,700));
+    /* `&scroll=stack`: scroll the above-composer slot to its end first, to show its last item is reachable. */
+    if(q.get('scroll')==='stack'){const st=doc.querySelector('[data-above-composer]');if(st){st.scrollTop=st.scrollHeight;await new Promise(r=>setTimeout(r,300));}}
+    if(q.get('open')==='health'){const b=doc.querySelector('button[data-health]');if(b){b.click();await new Promise(r=>setTimeout(r,500));}}
+    const res=probe(win);results[`${which}-${theme}`]=res;out.textContent=JSON.stringify(results);
+    try{await fetch('/showcase/metrics',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:`${state}-${which}`,metrics:{...res,viewport:[W,h],theme}})});}catch(e){}});
+  fr.setAttribute('src',`${base}#${route}`);wrap.appendChild(fr);cell.appendChild(cap);cell.appendChild(wrap);row.appendChild(cell);});
+})();
+</script></html>

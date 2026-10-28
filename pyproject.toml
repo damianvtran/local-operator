@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.90.2"
+version = "0.91.1"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -379,6 +379,10 @@ local_operator = [
     "mobile/web/src/*.tsx",
     "mobile/web/src/components/*.tsx",
     "mobile/web/src/components/ui/*.tsx",
+    # The modal layer's own hook (`ui/use-modal-layer.ts`): drawer and sheet both
+    # import it, and an omitted `.ts` glob here is the same omission class as the
+    # library block below — the installed tree cannot compile without it.
+    "mobile/web/src/components/ui/*.ts",
     # The Library surface's own components: `screens/library.tsx` and
     # `screens/library-asset.tsx` import them, and the installed source tree
     # compiles every file under src, so an omitted glob breaks the documented
@@ -406,6 +410,11 @@ local_operator = [
     # later and only in the shipped tree's own suite. It still ships, because a
     # source snapshot that is missing files it references is not one.
     "mobile/web/src/lib/*.json",
+    # The chrome brand artwork, imported by components/ui/brand-mark.tsx and the
+    # chrome test. One directory, one extension: the `.png` glob is deliberate so
+    # a future non-image asset (or a stray editor file) still needs review rather
+    # than riding a `*` into the wheel.
+    "mobile/web/src/assets/*.png",
     # The login page's LO mark, served unauthenticated at /mark.png from
     # mobile/static/. Missing it shows a broken image on sign-in.
     "mobile/static/*",

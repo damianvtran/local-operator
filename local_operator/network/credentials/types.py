@@ -287,6 +287,36 @@ def peer_int(value: Any, *, default: int = 0, maximum: int | None = None) -> int
     return int(peer_number(value, default=default, maximum=maximum))
 
 
+#: The most row ids one grant ask may hide (``exclude_credential_ids``). ONE
+#: definition, read by both legs (``credentials._LocalOps.grant`` and the owner's
+#: broker): a device has a handful of logins per provider, so the cap only bounds
+#: what a garbled or hostile frame can make the owner iterate.
+MAX_EXCLUDED_CREDENTIAL_IDS = 32
+
+
+def peer_credential_ids(value: Any) -> tuple[int, ...]:
+    """A peer's ``exclude_credential_ids``: real positive ints, de-duplicated, capped.
+
+    STRICTER THAN :func:`peer_int` ON PURPOSE (QA round 1, Q4). A row id is an
+    identity, not a quantity: ``"1"`` or ``1.9`` is not a spelling of row 1 any
+    honest client produces (it sends ``sorted({int})``), so coercing it would only
+    let a garbled frame hide a row nobody named. ``bool`` is refused because it is
+    an ``int`` in Python. The cap applies AFTER filtering, so junk entries cannot
+    crowd real ids out of the first :data:`MAX_EXCLUDED_CREDENTIAL_IDS`. Anything
+    dropped costs at most one more 429 — the list only ever narrows what is lent.
+    """
+    if not isinstance(value, list):
+        return ()
+    ids = sorted(
+        {
+            item
+            for item in value
+            if type(item) is int and 0 < item <= PEER_NUMBER_CEILING  # noqa: E721 — exact int
+        }
+    )
+    return tuple(ids[:MAX_EXCLUDED_CREDENTIAL_IDS])
+
+
 def _bounded_narrowing(value: Any) -> dict[str, Any]:
     """A ``Grant.narrowing`` map a peer sent, bounded to shapes this build reads.
 

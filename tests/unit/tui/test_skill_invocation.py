@@ -7,7 +7,6 @@ the request) and what the TRANSCRIPT shows (the short line the user typed).
 
 from __future__ import annotations
 
-import os
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -144,7 +143,29 @@ async def test_invocation_sends_body_and_request(skill_root) -> None:
     sent = session.prompts[0]
     assert "Read primary sources." in sent
     assert "fix the login bug" in sent
-    assert "`research`" in sent
+    assert 'name="research"' in sent
+
+
+@pytest.mark.asyncio
+async def test_one_message_can_attach_more_than_one_skill(skill_root) -> None:
+    """Inline matching means a sentence can name several skills; all attach."""
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    text = "please $research this and $code-review the diff"
+    async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
+        await pilot.pause()
+        await _submit(app, pilot, text)
+        await _await_prompt(pilot, session)
+        await pilot.pause()
+        shown = _transcript_text(app)
+    assert len(session.prompts) == 1
+    sent = session.prompts[0]
+    assert "Read primary sources." in sent
+    assert "Check the diff." in sent
+    assert sent.startswith(text)
+    assert "$research this and $code-review the diff" in shown
+    assert "Check the diff." not in shown
 
 
 @pytest.mark.asyncio
@@ -483,14 +504,9 @@ class TestReviewRegressions:
         Driven through `_replay_history`, the real call site: the defect was
         that replay painted the persisted payload verbatim.
         """
-        from local_operator.skills.api import default_skill_roots
-        from local_operator.skills.discovery import discover_skills
-        from local_operator.skills.invoke import parse_invocation, render_invocation
+        from tests.unit.legacy_skill_payload import legacy_skill_payload
 
-        skills, _ = discover_skills(default_skill_roots(Path(os.getcwd())))
-        invocation = parse_invocation("$research fix the login bug", {s.name: s for s in skills})
-        assert invocation is not None
-        payload = render_invocation(invocation, "Read primary sources.")
+        payload = legacy_skill_payload("$research fix the login bug", body="Read primary sources.")
 
         session = FakeSession()
         # `history` is a read-only property backed by `_history` on the fake.
@@ -504,6 +520,32 @@ class TestReviewRegressions:
             shown = _transcript_text(app)
             assert "$research fix the login bug" in shown
             assert "Read primary sources." not in shown
+
+    @pytest.mark.asyncio
+    async def test_replay_of_the_NEW_shape_shows_the_verbatim_line(self, skill_root) -> None:
+        """A tail-block payload replays as the message the user typed.
+
+        The new shape keeps the user's text verbatim before the block, so replay
+        needs no `invocation=` recovery: `user_row_text` strips the block and
+        what is left IS the row. Driven through `_project_settled_rows`, the
+        real replay path.
+        """
+        from local_operator.skills.invoke import render_skill_block
+
+        typed = "we should use $research for this"
+        payload = typed + "\n\n" + render_skill_block([("research", "Read primary sources.")])
+
+        session = FakeSession()
+        session._history = [SimpleNamespace(role="user", text=payload, content=[])]
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
+            await pilot.pause()
+            app._project_settled_rows(list(session._history))
+            await pilot.pause()
+            shown = _transcript_text(app)
+        assert typed in shown
+        assert "Read primary sources." not in shown
 
     @pytest.mark.asyncio
     async def test_empty_skill_body_warns_instead_of_silently_sending_prose(
@@ -553,12 +595,11 @@ class TestReviewRegressions:
 
 
 class TestInlineInvocation:
-    """`$` reaches the picker anywhere `/` does, and reassembles like it.
+    """`$` reaches the picker anywhere `/` does, and fires where it stands.
 
-    The composer, not the submit parser, is where the position rule now lives:
-    `parse_invocation` stays anchored (see the last test in this class), and
-    accepting an inline row moves the token to the front so it still sees a
-    prefix.
+    The trigger is positional but not anchored: a boundary `$name` that names a
+    discovered skill fires anywhere in the message. The composer completes the
+    token IN PLACE, so the text around it is never rewritten.
     """
 
     async def _draft(self, app: OperatorApp, pilot, text: str) -> Editor:
@@ -653,13 +694,12 @@ class TestInlineInvocation:
                 assert editor.picker.mode is not PickerMode.SKILL, buffer
 
     @pytest.mark.asyncio
-    async def test_enter_reassembles_the_draft_and_stages_it(self, skill_root) -> None:
-        """Accepting an inline row stages `$research <draft> ` — and sends nothing.
+    async def test_enter_completes_in_place_and_stages_it(self, skill_root) -> None:
+        """Accepting an inline row completes the TOKEN — and sends nothing.
 
-        The whole inline contract in one keystroke: the token moves to the front
-        so the anchored submit parser can read it, the draft becomes the request
-        rather than being consumed as a name, and the buffer is STAGED for the
-        user to read and send themselves.
+        The whole inline contract in one keystroke: only the token's own span
+        changes, the prose before it survives byte-for-byte, and the buffer is
+        STAGED for the user to read and send themselves.
         """
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
@@ -670,13 +710,63 @@ class TestInlineInvocation:
             assert editor.picker.is_open()
             await pilot.press("enter")
             await pilot.pause()
-            assert editor.text == "$research fix the flaky login test "
+            assert editor.text == "fix the flaky login test $research "
             assert session.prompts == [], "a skill row must never submit"
-            # Caret at the end, where the request continues.
+            # Caret just past the terminating space, where the request continues.
             assert editor._caret_offset() == len(editor.text)
 
     @pytest.mark.asyncio
-    async def test_the_staged_line_then_sends_as_an_invocation(self, skill_root) -> None:
+    async def test_a_newline_terminated_accept_keeps_the_caret_on_the_line(self, skill_root):
+        """Q1: the caret must not jump to column 0 of the next line.
+
+        The text is right either way; the caret is where the request continues,
+        and for a token terminated by a newline that is the token's own line.
+        """
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
+            await pilot.pause()
+            editor = app.query_one(Editor)
+            editor.focus()
+            await pilot.pause()
+            editor.load_text("fix $res\nthe bug")
+            editor.move_cursor(editor._location_at_offset(len("fix $res")))
+            for _ in range(50):
+                await pilot.pause()
+                if editor.picker.is_open():
+                    break
+            assert editor.picker.is_open(), "premise: the token's list is up"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert editor.text == "fix $research\nthe bug"
+            assert editor._caret_offset() == len("fix $research")
+            assert editor.document.get_line(0) == "fix $research"
+
+    @pytest.mark.asyncio
+    async def test_a_second_pick_adds_a_second_token(self, skill_root) -> None:
+        """Two accepts in one draft: the first token is never disturbed."""
+        session = FakeSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await await_session_boot(app)
+            await pilot.pause()
+            editor = await self._draft(app, pilot, "$res")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert editor.text == "$research "
+
+            editor.insert("plus $code")
+            for _ in range(50):
+                await pilot.pause()
+                if editor.picker.is_open():
+                    break
+            assert editor.picker.is_open(), "the second token offered no list"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert editor.text == "$research plus $code-review "
+            assert session.prompts == []
+
         """Enter on the staged line fires the skill with the draft as its request.
 
         Drives the whole path — type inline, engage, send — because the point of
@@ -698,12 +788,12 @@ class TestInlineInvocation:
         assert "fix the flaky login test" in sent
 
     @pytest.mark.asyncio
-    async def test_a_mid_message_sigil_submitted_raw_is_still_prose(self, skill_root) -> None:
-        """`parse_invocation` stays ANCHORED; only the composer went inline.
+    async def test_a_mid_message_sigil_submitted_raw_fires(self, skill_root) -> None:
+        """The operator's settled rule: the trigger is not position-limited.
 
-        The property the anchoring buys, asserted at the submit path rather than
-        at the parser: a `$research` that was never engaged through the picker —
-        a pasted document, a sentence about a skill — must not fire one.
+        A `$research` typed mid-sentence fires without being engaged through the
+        picker. This is the deliberate consequence recorded in the design note
+        (D3), pinned at the submit path rather than at the parser.
         """
         session = FakeSession()
         app = OperatorApp(lambda: _factory(session))
@@ -713,7 +803,10 @@ class TestInlineInvocation:
             await pilot.pause()
             await _submit(app, pilot, text)
             await _await_prompt(pilot, session)
-        assert session.prompts == [text]
+        assert len(session.prompts) == 1
+        sent = session.prompts[0]
+        assert sent.startswith(text), sent[:120]
+        assert "Read primary sources." in sent
 
     @pytest.mark.asyncio
     async def test_a_bare_prefix_still_behaves_exactly_as_before(self, skill_root) -> None:
@@ -1162,47 +1255,48 @@ class TestSkillTokenParser:
         assert result is not None
         assert result[0] == "$research fix bug"
 
-    def test_inline_completion_reassembles_the_draft_to_the_front(self):
-        """The token moves to the front with the surviving draft as its request.
-
-        The `$` twin of `/team`'s inline engage, and the reason the submit-side
-        parser can stay anchored: by the time Enter is pressed the token IS the
-        prefix. Staged, not submitted — the caret lands at the end so the user
-        can keep writing.
-        """
+    def test_inline_completion_replaces_only_the_token(self):
+        """Mid-draft, the prose before the token survives byte-for-byte."""
         text = "fix this $res"
         result = completion_for(text, len(text), CompletionMode.SKILL, "research", ())
-        assert result == ("$research fix this ", len("$research fix this "))
+        assert result == ("fix this $research ", len("fix this $research "))
 
-    def test_inline_completion_across_lines_reassembles_too(self):
-        """A `$` opening line 2 collapses onto one staged line."""
+    def test_inline_completion_across_lines_never_joins_them(self):
+        """`fix $re⏎the bug` keeps its line break.
+
+        The old reassembly `lstrip`-ed the tail, welding the two lines into one
+        — a completion must never reformat prose the user typed.
+        """
         text = "fix this\n$res"
         result = completion_for(text, len(text), CompletionMode.SKILL, "research", ())
         assert result is not None
-        assert result[0] == "$research fix this "
+        assert result[0] == "fix this\n$research "
+        assert result[1] == len("fix this\n$research ")
 
-    def test_a_leading_token_is_not_reassembled(self):
-        """Already the prefix, so the request is preserved where it was typed.
+    def test_completion_leaves_existing_separator_alone(self):
+        """When the user already typed whitespace, no second space is added.
 
-        Reassembly is only for prose BEFORE the token — the shape an anchored
-        submit parser cannot read. Rebuilding a leading token's request would
-        churn a buffer that is already correct.
+        A NEWLINE terminates the token but is not a parking spot: the caret
+        stays on the token's line, right after the name (Q1, round 1), rather
+        than jumping to column 0 of the next line.
         """
+        text = "fix $re\nthe bug"
+        caret = text.index("\n")
+        result = completion_for(text, caret, CompletionMode.SKILL, "research", ())
+        assert result is not None
+        assert result[0] == "fix $research\nthe bug"
+        assert result[1] == len("fix $research")
+
+    def test_a_leading_token_completion_is_unchanged(self):
         text = "$res fix bug"
         result = completion_for(text, 4, CompletionMode.SKILL, "research", ())
         assert result == ("$research fix bug", len("$research") + 1)
 
-    def test_the_reassembled_ghost_is_withheld(self):
-        """A reordering is not an append, so no honest ghost describes it.
-
-        The consequence `completion_for` already documents for NAME_ARGUMENT,
-        asserted for SKILL: `ghost_for`'s `startswith` rule declines of its own
-        accord rather than painting characters Tab does not produce.
-        """
+    def test_the_ghost_previews_the_span_replacement(self):
+        """No reordering happens, so every completion IS an append at the caret."""
         text = "fix this $res"
         completion = completion_for(text, len(text), CompletionMode.SKILL, "research", ())
-        assert ghost_for(completion, text) == ""
-        # The bare-prefix case IS an append, and still previews.
+        assert ghost_for(completion, text) == "earch "
         bare = completion_for("$res", 4, CompletionMode.SKILL, "research", ())
         assert ghost_for(bare, "$res") == "earch "
 
@@ -1253,7 +1347,24 @@ class TestInvocationInsideACommandArgument:
         sent = session.prompts[0]
         assert "Read primary sources." in sent, sent
         assert "fix the login bug" in sent, sent
-        assert "`research`" in sent, sent
+        assert 'name="research"' in sent, sent
+
+    @pytest.mark.asyncio
+    async def test_an_UPPERCASE_token_at_the_argument_front_fires(self, skill_root) -> None:
+        """m4's submit half: the argument tail is its own string, so it leads.
+
+        The ink computes the same region, so `/team backend $RESEARCH` is one
+        decision on both surfaces rather than a missing ink over a live attach.
+        """
+        session = self._team_session()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await _boot(pilot, app)
+            await _submit_slash(pilot, app, "/team feature-release $RESEARCH fix it")
+            await _await_prompt(pilot, session)
+        sent = session.prompts[0]
+        assert "Read primary sources." in sent, sent
+        assert "$RESEARCH fix it" in sent, sent
 
     @pytest.mark.asyncio
     async def test_team_row_stays_the_typed_argument_not_the_body(self, skill_root) -> None:
@@ -1316,8 +1427,8 @@ class TestInvocationInsideACommandArgument:
         assert len(session.prompts) == 1, session.prompts
         sent = session.prompts[0]
         assert "Read primary sources." in sent, sent
-        # `render_invocation` invents no request, so nothing trails the close tag.
-        assert sent.rstrip().endswith("</skill>"), sent
+        # The block closes after the body; a bare `$name` invents no request.
+        assert sent.rstrip().endswith("</operator-skills>"), sent
 
     @pytest.mark.asyncio
     async def test_a_failed_team_attach_expands_nothing(self, skill_root) -> None:
@@ -1343,15 +1454,18 @@ class TestInvocationInsideACommandArgument:
         assert session.prompts == ["review $100 of spend"], session.prompts
 
     @pytest.mark.asyncio
-    async def test_a_non_leading_dollar_in_a_command_argument_is_prose(self, skill_root) -> None:
-        """Anchoring holds INSIDE the argument: offset 0 of it, not of the line."""
+    async def test_a_non_leading_dollar_in_a_command_argument_fires(self, skill_root) -> None:
+        """The trigger scans the ARGUMENT, and it is not position-limited."""
         session = self._team_session()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(120, 40)) as pilot:
             await _boot(pilot, app)
             await _submit_slash(pilot, app, "/team feature-release explain the MR $research")
             await _await_prompt(pilot, session)
-        assert session.prompts == ["explain the MR $research"], session.prompts
+        assert len(session.prompts) == 1
+        sent = session.prompts[0]
+        assert sent.startswith("explain the MR $research")
+        assert "Read primary sources." in sent
 
     @pytest.mark.asyncio
     async def test_an_empty_skill_body_warns_and_sends_the_argument_as_written(

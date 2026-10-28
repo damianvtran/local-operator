@@ -90,6 +90,14 @@ async def _allow_quiet() -> None:
     return None
 
 
+async def _allow_notify(**_kwargs: Any) -> str:
+    """An inbox door that accepts — the value a real top-level session binds.
+
+    ``build_notify_tool`` only checks PRESENCE; the body is never run.
+    """
+    return "Notified."
+
+
 def build_real_tool_context(cwd: str) -> ToolContext:
     """A ToolContext whose capabilities are all present.
 
@@ -148,6 +156,11 @@ def build_real_tool_context(cwd: str) -> ToolContext:
         # short of a real signed-in session's (``bridge``), the same defect
         # the project registry above records. Never called by a measurement.
         bridge_runtime=_UntypedStub(),
+        # The inbox door (docs/design/notifications-inbox.md §3.2): a bare
+        # callable a real top-level session binds, so leaving it unbound would
+        # measure a surface one tool short of every such session's
+        # (``notify``). The builder checks presence only; never awaited here.
+        notify_inbox=_allow_notify,
     )
 
 

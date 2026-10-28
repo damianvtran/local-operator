@@ -1923,6 +1923,20 @@ class NoticeBlock(TranscriptBlock):
     #: failures; design round 2, D2-1). Every other notice leaves it ``None``.
     mcp_failure_fit: tuple[str, str, int] | None = None
 
+    #: True while this row states a fact about the PREVIOUS runtime rather than
+    #: the live one: a failure projected out of the session's durable checkpoint
+    #: on a cold open, or out of an owner's last round on a viewer.
+    #:
+    #: It exists because the row outlives the moment it describes. The same
+    #: server can recover before the reader's next breath, and a present-tense
+    #: "MCP <x> failed" that nothing retracts is a standing contradiction of the
+    #: healthy toast beside it (QA round 1, Q2, measured on the real fixture: a
+    #: green "MCP ready: 12 servers" above nine red "failed" rows). Labelling it
+    #: as history makes it a true statement that no later state can contradict,
+    #: and it is what tells ``_report_mcp_startup`` to RESTATE this row in place
+    #: (never append beside it) once a live outcome confirms the same failure.
+    mcp_failure_history: bool = False
+
     #: Five tiers. ``info`` is `dim` — the quietest ink in the app, a step below a
     #: settled tool summary — which is right for a receipt nobody needs to read
     #: and wrong for one that answers a question the user is actively asking
@@ -7013,6 +7027,19 @@ class TranscriptView(ScrollableContainer):
         mount cannot re-acquire following for a reader who just left the tail.
         """
         self._on_user_scroll = hook
+
+    def on_show(self) -> None:
+        """Announce a SHOW to the same listener that hears about extents.
+
+        Showing a view changes what the app can measure about it, and Textual
+        owes no extent change when the new extent happens to match the last
+        laid-out one — so a listener keyed only on extents can miss the state
+        change itself. The deferred resume fill re-arms from this hook, and
+        standing that fill down while hidden is only safe if showing the view
+        resumes it (review round 1, M1).
+        """
+        if self._on_extent_changed is not None:
+            self._on_extent_changed()
 
     def set_on_extent_changed(self, hook: Callable[[], None] | None) -> None:
         """Install the hook fired whenever the scrollable extent changes.

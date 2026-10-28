@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "audit_id": "nt25a1",
+  "audit_kind": "independent_current_byte_namespace_audit",
+  "locale": "ru",
+  "namespace": "wire.errors.notifications",
+  "audit_date": "2026-10-25",
+  "audited_revision": "329b5c581784df1082dbd0630c0f814c7a3c0c8f",
+  "source_audit_revision": "3c16a9e77c63dce7082af6137e151421b6cbf2be",
+  "key_count": {
+    "en": 4,
+    "target": 4
+  },
+  "verdict": "passed",
+  "verdict_reason": "Complete side-by-side semantic audit; see findings and actual mechanical output.",
+  "auditor": {
+    "agent": "translation-auditor",
+    "instance": "ffd16b7ff158",
+    "session": "ffd16b7ff158",
+    "model": "openai/gpt-6.1-sol",
+    "independence": "Independent auditor; authored none of the target translations or implementation. No catalogue edits made.",
+    "actual_model_source": "Latest session model-switch message: openai/gpt-6.1-sol, temporary quota fallback after anthropic/claude-sonnet-5-5; original requested model anthropic/claude-opus-5-5."
+  },
+  "translator": {
+    "agent": "L1-core-notify coder",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-10-25"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.notifications.json",
+      "sha256": "f02bf1bc28f9c9e549a3ad8c34ead880315f4b39d25c36a869a1b3c5110f362c"
+    },
+    "en_context_sidecar": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.notifications.context.json",
+      "sha256": "07ad1e5da403a5fccde5648f04cd10bf1263cabc50f5e1804644630c7ce13106"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ru/wire.errors.notifications.json",
+      "sha256": "ccdf03166862d78b25c61b3c3651e92b0e24de2e85ed30f998db937b42739bdd"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "artifacts": [
+    "report.md",
+    "audit.log",
+    "receipt.json"
+  ],
+  "audit_log": {
+    "path": "audit.log",
+    "state": "present",
+    "command": "node /Users/damian/.local-operator/sessions/ffd16b7ff158/scratchpad/audit-ru.mjs wire.errors.notifications core",
+    "exit_code": 0
+  },
+  "findings": [
+    {
+      "id": "R4",
+      "key": "wire.errors.notifications.store_busy",
+      "severity": "minor",
+      "current": "Хранилище уведомлений сейчас занято, поэтому ничего не изменилось. Повторите попытку через минуту.",
+      "proposed": "Хранилище уведомлений сейчас занято, поэтому ничего не изменилось. Повторите попытку чуть позже.",
+      "reason": "The source says in a moment, not a fixed one-minute wait; avoid inventing retry timing."
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0,
+    "rejected": 0,
+    "findings_total": 1
+  },
+  "limitations": [
+    "LLM textual audit, not a native-speaker attestation.",
+    "No browser/rendered-fit validation; design/QA own rendered evidence.",
+    "Mechanical parser check uses the UI repository installed @formatjs/icu-messageformat-parser and intl-messageformat, without dependency installation. Unique typed-argument signatures are compared; plural category additions are intentional; exact =0/=1 and select false/other inspected in source and samples."
+  ]
+}

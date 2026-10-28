@@ -1057,6 +1057,18 @@ def remove_session_dir(
             ask_store.remove_entry(config_dir, target.name)
         except Exception:  # noqa: BLE001 — the sweep is the backstop
             logger.debug("session cleanup: could not drop the ask index entry", exc_info=True)
+        # The inbox's items for this conversation go with it
+        # (docs/design/notifications-inbox.md §1.4): an item whose conversation
+        # cannot be opened is a link to nowhere. Same site and same reason as
+        # the ask index above — this is the one place a directory is destroyed.
+        # Best-effort: an absent store is a no-op, and a contended one leaves
+        # rows the retention pass ages out.
+        try:
+            from local_operator.notifications.store import NotificationStore
+
+            NotificationStore(config_dir).delete_session(target.name)
+        except Exception:  # noqa: BLE001 — retention is the backstop
+            logger.debug("session cleanup: could not drop the inbox items", exc_info=True)
     return True
 
 
@@ -1851,7 +1863,7 @@ def _subagent_child_count(directory: Path) -> int:
     """How many subagent runs ``directory`` launched, best-effort, or 0.
 
     Read from the runtime's own roster sidecar through the same reader the
-    desktop's child routes use (``session.session._read_roster_sidecar``) rather
+    desktop's child routes use (``session.roster_sidecar.read_roster_sidecar``) rather
     than re-parsing the file, so "how many children does this conversation
     have" has one answer per conversation.
 
@@ -1862,12 +1874,12 @@ def _subagent_child_count(directory: Path) -> int:
     less informative.
     """
     try:
-        from local_operator.session.session import (
+        from local_operator.session.roster_sidecar import (
             SUBAGENT_ROSTER_SIDECAR,
-            _read_roster_sidecar,
+            read_roster_sidecar,
         )
 
-        payload = _read_roster_sidecar(directory / SUBAGENT_ROSTER_SIDECAR)
+        payload = read_roster_sidecar(directory / SUBAGENT_ROSTER_SIDECAR)
     except Exception:  # noqa: BLE001 — bookkeeping for a receipt, never a decision
         return 0
     if not payload:
@@ -2677,38 +2689,121 @@ def measure_session_dir(
     return contents
 
 
-def _bounded_dir_stats(directory: Path, max_entries: int = CONTENTS_MAX_ENTRIES) -> tuple[int, int]:
-    """``(bytes, entries)`` under ``directory``, counting at most ``max_entries``.
+class DirScanIncomplete(Exception):
+    """Part of a tree could not be inspected, and the caller asked to know.
 
-    Both figures are LOWER BOUNDS once capped. One walk serves both the size
-    estimate a notice records and the entry count a cleanup-log row carries, so
-    the two can never disagree about what was measured. Deliberately not
-    :func:`_dir_bytes` (an unbounded ``rglob`` that also follows into
-    ``node_modules``): this runs per removed item, so its cost is bounded.
-    Shared with ``delegated_retention`` — it lives HERE because the receipt
-    writer needs it and the content pass imports this module, not the other
-    way round.
+    Raised by :func:`bounded_dir_scan` in ``strict`` mode only. It carries the
+    offending path and the reason so the caller can name them to the operator:
+    "cannot be inspected" and "cannot be read" are different repair actions, and
+    a bare exception type tells nobody which happened where.
     """
+
+    def __init__(self, path: str, reason: str) -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(f"{path}: {reason}")
+
+
+def bounded_dir_scan(
+    directory: Path,
+    max_entries: int = CONTENTS_MAX_ENTRIES,
+    *,
+    recency_max_entries: int | None = None,
+    fresh_since_ns: int | None = None,
+    strict: bool = False,
+) -> tuple[int, int, int, bool]:
+    """``(bytes, entries, newest_mtime_ns, truncated)`` under ``directory``.
+
+    BYTES AND ENTRIES ARE BOUNDED AT ``max_entries`` and are LOWER BOUNDS once
+    capped. One walk serves the size estimate a notice records, the entry count
+    a cleanup-log row carries, and the newest mtime a caller may use as a safety
+    signal, so the three can never disagree about what was measured.
+    Deliberately not :func:`_dir_bytes` (an unbounded ``rglob`` that also
+    follows into ``node_modules``): this runs per removed item.
+
+    THE MTIME IS THE REASON THIS RETURNS FOUR VALUES. A caller about to delete a
+    directory it takes whole (the content layer's shape arm) has no other cheap
+    sight of a file written inside it. Its two questions have different costs
+    and different stakes, so they carry different bounds: ``regency`` —
+    ``recency_max_entries`` (default ``max_entries``) — may look further than
+    the byte figure, because a size is only ever quoted in a notice while a
+    recency answer decides whether work is destroyed. Every enumerated entry is
+    statted, directories included: their own mtime changes when a file is added
+    or removed beside them.
+
+    ``truncated`` IS A FAIL-CLOSED SIGNAL: true means the walk stopped at the
+    recency bound without finishing, so "no recent entry" is NOT established and
+    the caller must keep what it was about to delete. ``fresh_since_ns`` lets a
+    caller stop the moment a recent entry is seen (nothing later can make the
+    subtree safer), which truncates the byte figure — safe only because that
+    caller then keeps the whole item; ignore ``bytes`` in that case.
+
+    ``strict`` IS FOR CALLERS THAT WILL DELETE ON THE ANSWER, AND ONLY FOR THEM.
+    Non-strict mode swallows every ``OSError`` (an unstattable entry, a
+    classification that fails, a subtree that cannot be scanned) and simply
+    does not observe it — so ``newest_mtime_ns`` can come back blind to a fresh
+    file it could not stat, and a caller that deletes on "no recent entry" would
+    destroy exactly the work this walk exists to protect. Strict mode raises
+    :class:`DirScanIncomplete` instead, carrying the path and the reason; the
+    content layer turns that into a whole-pad abort. Non-strict is therefore
+    only for callers that will NOT delete on the answer — the removal receipt
+    and any size notice — which need a lower bound, not a verdict.
+
+    Shared with ``delegated_retention`` — it lives HERE because the receipt
+    writer needs the same walk and cannot import that module, not the other way
+    round.
+    """
+    recency_cap = max_entries if recency_max_entries is None else recency_max_entries
     total = 0
     seen = 0
+    newest = 0
     stack = [os.fspath(directory)]
     while stack:
         current = stack.pop()
         try:
             with os.scandir(current) as entries:
                 for entry in entries:
+                    if seen >= recency_cap:
+                        return total, min(seen, max_entries), newest, True
                     seen += 1
-                    if seen > max_entries:
-                        return total, max_entries
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError as exc:
+                        if strict:
+                            raise DirScanIncomplete(
+                                entry.path, f"cannot be inspected ({exc.strerror or exc})"
+                            ) from exc
+                        continue
+                    newest = max(newest, info.st_mtime_ns)
+                    if fresh_since_ns is not None and info.st_mtime_ns >= fresh_since_ns:
+                        # Recent activity found: the caller keeps the whole item,
+                        # so its byte figure is never shown and the walk can stop.
+                        return total, min(seen, max_entries), newest, False
                     try:
                         if entry.is_dir(follow_symlinks=False):
                             stack.append(entry.path)
-                        elif entry.is_file(follow_symlinks=False):
-                            total += entry.stat(follow_symlinks=False).st_size
-                    except OSError:
+                        elif entry.is_file(follow_symlinks=False) and seen <= max_entries:
+                            total += info.st_size
+                    except OSError as exc:
+                        if strict:
+                            raise DirScanIncomplete(
+                                entry.path, f"cannot be classified ({exc.strerror or exc})"
+                            ) from exc
                         continue
-        except OSError:
+        except OSError as exc:
+            if strict:
+                raise DirScanIncomplete(current, f"cannot be read ({exc.strerror or exc})") from exc
             continue
+    return total, seen, newest, False
+
+
+def _bounded_dir_stats(directory: Path, max_entries: int = CONTENTS_MAX_ENTRIES) -> tuple[int, int]:
+    """``(bytes, entries)``: :func:`bounded_dir_scan` without the mtime figure.
+
+    Kept as the name every existing caller uses, so adding the mtime observation
+    could not silently change their shape.
+    """
+    total, seen, _newest, _truncated = bounded_dir_scan(directory, max_entries)
     return total, seen
 
 
@@ -2742,6 +2837,28 @@ class _Entry:
     activity: float | None
     has_transcript: bool
     size: int
+
+
+#: The reason a pinned session is kept, by the parent class and the delegated pass.
+PINNED_REASON = "pinned by the operator"
+
+
+def pinned_session_ids(config_dir: Path) -> frozenset[str]:
+    """Session ids the operator pinned in the sidebar; raises :class:`GuardUnavailable`.
+
+    The standing rule is "never remove a pinned session", and no cleanup path
+    consulted pins before. Uses the strict reader (``load_pin_ids``), not
+    ``read_pins``: the latter turns an unreadable file into ``[]``, which here
+    would mean "remove everything the operator pinned". An ABSENT file is "nothing
+    pinned". Read once per pass by each caller. Lazy import: ``local_operator.tui``
+    is heavy and this module must stay light for the runtime child.
+    """
+    from local_operator.tui.sidebar_pins import load_pin_ids
+
+    try:
+        return frozenset(load_pin_ids(config_dir))
+    except (OSError, ValueError) as exc:
+        raise GuardUnavailable(f"sidebar-pins.json: {exc}") from exc
 
 
 class GuardUnavailable(Exception):
@@ -2837,6 +2954,16 @@ def _session_title(directory: Path) -> str:
         return ""
 
 
+def _observe(callback: Callable[..., None] | None, *args: Any) -> None:
+    """Call a display observer; its failure never changes a cleanup decision."""
+    if callback is None:
+        return
+    try:
+        callback(*args)
+    except Exception:  # noqa: BLE001 — display only
+        logger.debug("session cleanup: observer callback failed", exc_info=True)
+
+
 def run_cleanup(
     config_dir: Path,
     policy: CleanupPolicy,
@@ -2846,8 +2973,18 @@ def run_cleanup(
     dry_run: bool = False,
     force: bool = False,
     actor: str = "startup",
+    on_plan: Callable[[Candidate], None] | None = None,
+    on_kept: Callable[[str, str], None] | None = None,
 ) -> CleanupResult:
     """Apply ``policy`` to ``config_dir/sessions``.
+
+    ``on_plan(row)`` / ``on_kept(name, guard)`` are display observers for the
+    CLI's preview: called as each candidate is DECIDED (chosen by the first limit
+    that takes it, or kept by a guard), with the values ``result.chosen`` /
+    ``result.protected`` end up holding, so a streamed listing never differs from
+    the final one. They fire while the PLAN is decided (a real run applies it
+    later, in :func:`apply_cleanup`, which they do not observe) and a failing
+    observer never changes a decision.
 
     THE MASTER SWITCH GOVERNS EVERY CALLER. Round 1 let the CLI run with
     ``enabled: false`` on the theory that typing the command was consent;
@@ -2957,6 +3094,7 @@ def run_cleanup(
             result.scanned += 1
             if live_resolved is not None and child.resolve() == live_resolved:
                 result.protected.append((child.name, "the current session"))
+                _observe(on_kept, child.name, "the current session")
                 continue
             entries.append(
                 _Entry(child, session_activity(child), _has_transcript(child), _dir_bytes(child))
@@ -2997,6 +3135,16 @@ def run_cleanup(
         return result
     recent = set(picker[:RECENT_KEEP])
     visible = set(picker)
+    try:
+        # Pins only ever ADD protection and apply with --force too: a pinned
+        # conversation is never listed removable. An unreadable pin file refuses
+        # the run, like an unavailable picker, rather than reading as "none".
+        pinned = pinned_session_ids(config_dir)
+    except GuardUnavailable as exc:
+        logger.warning("session cleanup: REFUSING to run, %s", exc)
+        result.skipped = f"guard unavailable: {exc}"
+        result.errors += 1
+        return result
     chosen: dict[str, Candidate] = {}
 
     # A directory several limits would take is reported once, under the first
@@ -3008,11 +3156,15 @@ def run_cleanup(
         if name not in protected_seen:
             protected_seen.add(name)
             result.protected.append((name, guard))
+            _observe(on_kept, name, guard)
 
     def consider(entry: _Entry, policy_name: str, reason: str) -> bool:
         name = entry.path.name
         if name in chosen:
             return True
+        if name in pinned:
+            protect(name, PINNED_REASON)
+            return False
         if name in recent:
             protect(name, f"one of the {RECENT_KEEP} most recent")
             return False
@@ -3031,6 +3183,7 @@ def run_cleanup(
             origin=_origin_label(entry.path),
             active=entry.activity is not None,
         )
+        _observe(on_plan, chosen[name])
         return True
 
     if policy.remove_empty:
@@ -3123,9 +3276,21 @@ def apply_cleanup(
     result = CleanupResult(scanned=plan.scanned, protected=list(plan.protected))
     result.chosen = list(plan.chosen)
     result.skipped = plan.skipped
+    try:
+        # Re-read at APPLY time: a pin placed between the preview and the
+        # confirmation is exactly the operator changing their mind about a row.
+        pinned = pinned_session_ids(config_dir)
+    except GuardUnavailable as exc:
+        logger.warning("session cleanup: REFUSING to apply, %s", exc)
+        result.skipped = f"guard unavailable: {exc}"
+        result.errors += 1
+        return result
     for candidate in plan.chosen:
         target = sessions_dir / candidate.session
         if not target.is_dir():
+            continue
+        if candidate.session in pinned:
+            result.protected.append((candidate.session, f"{PINNED_REASON} (since the preview)"))
             continue
         guard = _guard(target, config_dir, moment)
         if guard is not None:

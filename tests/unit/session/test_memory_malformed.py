@@ -155,7 +155,9 @@ def test_parser_warning_never_echoes_raw_or_provider_controlled_tool_name(caplog
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scope", ["global", "session", "team", "agent"])
+# session|global are the tool's two scopes now; every OTHER scope stays a contract
+# error that is redacted from the journal and never reaches the store.
+@pytest.mark.parametrize("scope", ["team", "agent", "unknown"])
 async def test_real_session_legacy_scope_shape_is_redacted_without_promotion(tmp_path, scope):
     text = "Synthetic legacy personal locator must not be promoted"
     args = {"op": "store", "scope": scope, "text": text}
@@ -195,7 +197,7 @@ async def test_real_session_legacy_scope_shape_is_redacted_without_promotion(tmp
         retained = json.dumps([e.payload for e in transcript.entries()])
         published = json.dumps([e.model_dump(mode="json") for e in events], default=str)
         assert text not in retained + published and "memory_arguments_redacted" in retained
-        assert "Invalid memory contract" in retained and "No scope argument" in retained
+        assert "Invalid memory contract" in retained and "scope=session|global" in retained
         assert not (session._config_dir / "memory").exists()
     finally:
         await session.dispose()

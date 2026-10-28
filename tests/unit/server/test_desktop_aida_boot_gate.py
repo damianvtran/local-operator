@@ -182,3 +182,26 @@ def test_an_explicit_ensure_still_creates_her_on_a_cloud_install(
     her_id = asyncio.run(aida_pkg.ensure_session(root))
     assert her_id
     assert (root / "aida" / "state.json").exists()
+
+
+def test_the_boot_schedules_the_connector_catch_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D2a: a machine enrolled before the auto-install needs a repair at serve start.
+
+    The task is SCHEDULED (never awaited) for the same reason hers is: the
+    sync may run launchctl, and the daemon's readiness is worth more than a
+    service being placed a beat sooner. It stays best-effort — the boot is the
+    real work.
+    """
+
+    _boot(tmp_path, monkeypatch, token="tok", terminal=False)
+    with TestClient(app, headers={"Host": "127.0.0.1:1111"}) as client:
+        task = getattr(app.state, "bridge_connector_boot_task", None)
+        assert task is not None, "the lifespan must schedule the connector catch-up"
+        portal = client.portal
+        assert portal is not None
+        # Settling proves it swallows its own failure: this suite's scratch
+        # store is refused by the shared-label guard, so the sync answers
+        # ``isolated`` and the boot carries on.
+        portal.call(_settle, task)

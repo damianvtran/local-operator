@@ -234,7 +234,7 @@ async def test_a_timed_out_gate_says_nobody_was_there(tmp_path: Path, monkeypatc
     handle = _handle(monkeypatch, attached=0, hours=0)
     handle._session = type("S", (), {"transcript": _Transcript()})()
 
-    await handle._record_gate_timeout("bash", "rm -rf build/")
+    await handle._record_gate_timeout("bash", "rm -rf build/", waited_s=30.0)
 
     # A MESSAGE entry, not `append_custom`. Round 1 (D2/U2) found the row was
     # written where NOTHING could read it: `build_llm_history` ignores custom

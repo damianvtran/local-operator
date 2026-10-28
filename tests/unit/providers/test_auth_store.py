@@ -57,6 +57,37 @@ def _oauth(
     }
 
 
+async def test_catalogue_access_ignores_inference_quota(
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spent account cannot infer, but its signed-in catalogue still exists.
+
+    Regression for the empty direct-OpenAI picker: cached weekly quota removed
+    the only OAuth row from inference selection, and model discovery mistook
+    that routing decision for a missing sign-in. The catalogue lookup must not
+    consume, clear or otherwise alter inference routing state.
+    """
+    row = store.upsert_credential("openai", {**_oauth(), "type": "oauth", "account_id": "acct-42"})
+    monkeypatch.setattr(
+        store,
+        "_cached_usage_report",
+        lambda *_args: pytest.fail("catalogue access must not consult usage evidence"),
+    )
+    monkeypatch.setattr(
+        store,
+        "_selection_order",
+        lambda *_args, **_kwargs: pytest.fail("catalogue access must not rank inference accounts"),
+    )
+
+    access = await store.get_catalogue_access("openai")
+
+    assert access is not None
+    assert access.access_token == "access-1"
+    assert access.credential_id == row.id
+    assert access.kind == "oauth"
+    assert access.account_id == "acct-42"
+
+
 async def test_cascade_runtime_override_wins(
     store: AuthStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:

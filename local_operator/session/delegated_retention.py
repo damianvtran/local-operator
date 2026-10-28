@@ -53,9 +53,18 @@ A delegated session is kept when ANY of these holds:
 3. PARENT STILL ACTIVE. Parents reach children through ``hub peek/resume``, which
    read the child's directory as recorded in the PARENT's
    ``subagent-roster.v1.json`` (``records[].session_dir``); ``origin.json`` has no
-   parent link for legacy children. A delegated session is protected when ANY
-   session listing it in its roster is live OR has activity inside the window
-   (so a child outlives its newest parent by at most ``max_age_hours``). An idle
+   parent link for legacy children. The roster is the parent's LIFETIME LEDGER
+   (last 256 records), not a resumption set, so a record protects its child only
+   while it is IN FLIGHT or PAUSED (``settled_at`` absent/unreadable, or
+   ``paused`` truthy); a SETTLED, unpaused child is history: the parent keeps the
+   record and ``result_text``, the child's transcript is reaped like any other
+   once idle past the window, and a later ``hub resume`` gets the existing
+   "transcript is gone from disk" refusal. A delegated session is protected when
+   ANY session listing it with such a record in its roster is live OR has activity
+   inside the window (so a child outlives its newest parent by at most
+   ``max_age_hours``). A settled child that survives for another reason (pin,
+   hold, open project, …) still keeps ITS OWN in-flight children
+   (:func:`_protect_through_survivors`). An idle
    parent older than the window protects nothing. The set is built only from
    rosters of sessions that are live or recent — never all of them (the real store
    has ~800, some 6 MB) — and followed transitively through protected delegated
@@ -328,6 +337,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import subprocess
 import time
@@ -341,9 +351,12 @@ from local_operator.session.cleanup import (
     DEFAULT_DELEGATED_MAX_AGE_HOURS,
     MAX_DELEGATED_MAX_AGE_HOURS,
     MIN_DELEGATED_MAX_AGE_HOURS,
+    PAD_DIRNAME,
+    PINNED_REASON,
     Candidate,
     CleanupPolicy,
     CleanupResult,
+    GuardUnavailable,
     HoldsUnreadable,
     _append_cleanup_log,
     _claimed,
@@ -359,6 +372,7 @@ from local_operator.session.cleanup import (
     _lease_runtime_alive,
     _write_record,
     hold_for,
+    pinned_session_ids,
     policy_from_config,
     remove_scratchpad_entry,
     remove_session_dir,
@@ -456,6 +470,63 @@ STALE_OUTPUT_SUFFIXES: tuple[str, ...] = (
 STALE_OUTPUT_MIN_BYTES = 10 * 1024 * 1024
 STALE_OUTPUT_GRACE_S = 12 * 3600.0
 
+#: The whole-pad recency floor deliberately matches STALE_OUTPUT_GRACE_S: a
+#: file old enough for that arm is not evidence that the whole pad is idle, and
+#: different graces for shapes/copies would make one write safe in one arm and
+#: disposable in another. The floor uses the newest ENTRY mtime, not the pad
+#: directory's mtime (a nested write does not update it) and not the transcript
+#: clock (another process may write into the pad by absolute path).
+CONTENT_PAD_GRACE_S = 12 * 3600.0
+CONTENT_PAD_RECENT_REASON = "pad edited within 12h"
+
+#: How far the RECENCY walk may look inside an item taken whole, independently of
+#: the 2,000-entry figure the byte estimate is quoted under (``SIZE_MAX_ENTRIES``).
+#: The two questions are different: a notice can carry a lower-bound size, but a
+#: deletion decision must not be taken on a partial look. 50,000 is the
+#: scratchpad audit's order of magnitude for a pad worth reclaiming at all
+#: (``audit_scratchpads`` walks up to 50,000 entries per pad), so an ordinary
+#: ``node_modules`` is covered end to end. PAST IT THE PASS FAILS CLOSED: a shape
+#: or tree too large to prove idle keeps the pad with a named reason rather than
+#: deleting content it could not inspect.
+CONTENT_RECENCY_MAX_ENTRIES = 50_000
+
+#: WHAT THE FLOOR SEES INSIDE A SHAPE DIRECTORY: the content layer takes a
+#: shape (``node_modules``, ``build``, ``target``, …) whole on NAME, so the
+#: newest mtime comes from the same bounded walk that produces its byte figure
+#: (``cleanup.bounded_dir_scan``, ``SIZE_MAX_ENTRIES`` = 2,000 entries). A file
+#: written inside the shape is therefore visible to the floor up to that cap —
+#: the incident's ``build/nested/edit.txt`` case — and the depth does not matter
+#: because the walk is a full stack, not one level. THE REMAINING LIMIT IS THE
+#: CAP: past 2,000 entries the walk stops (as it always has for the byte figure,
+#: which is documented as a lower bound), so a write deeper than that inside a
+#: huge shape directory is not observed and the shape is reclaimed on name. No
+#: walk is added for this: the sizing walk was already bought, and its mtime is
+#: free.
+#:
+#: Everything else the incident turned on still stands — live claim, lease,
+#: armed wake/monitor, holds, pins, origin and the session's own activity clock.
+
+
+def _fresh_since_ns(now: float) -> int:
+    """The mtime at or above which an entry counts as recent (inclusive).
+
+    Passed into the scan so it can abandon a subtree the moment it finds such an
+    entry: nothing later in the walk can make that subtree safer, and the pad is
+    kept anyway.
+    """
+    return int((now - CONTENT_PAD_GRACE_S) * 1_000_000_000)
+
+
+def _pad_recent(now: float, newest_mtime_ns: int) -> bool:
+    """Whether the newest observed entry is inside the whole-pad grace.
+
+    INCLUSIVE at the boundary: at exactly 12 h the stale-output arm still
+    reclaims a file, so the floor keeps the pad too. Future mtimes are recent
+    (a skewed clock is not evidence that a pad is idle).
+    """
+    return newest_mtime_ns > 0 and now - newest_mtime_ns / 1_000_000_000 <= CONTENT_PAD_GRACE_S
+
+
 #: The four class phrases a content row's reason is built from, in the fixed
 #: order they are displayed and counted (see :func:`_PadPlan.classes`).
 CONTENT_CLASS_MERGED = "merged-clean clone"
@@ -524,6 +595,60 @@ CONTENT_MAX_UNIQUE_COMMITS = 20_000
 WINDOW_NAMES_CAP = 500
 
 ROSTER_NAME = "subagent-roster.v1.json"
+
+#: The scan reports a heartbeat every this many directory entries. A scan is
+#: ~2 ms per directory on a loaded store (9.7 s for 4,716), so this is a line
+#: roughly every half second: often enough that a person sees motion, rare
+#: enough that the callback is not the cost.
+SCAN_PROGRESS_EVERY = 256
+
+#: Content-phase heartbeat. The phase averages ~14 ms a pad but a single pad can
+#: cost seconds (a git probe, a 20,000-entry walk), so a coarse count hid 14 s
+#: behind one "32/1770" frame on the live store; every 4 pads keeps the counter
+#: moving between the slow ones. Only the CLI's one rewritten line consumes it.
+CONTENT_PROGRESS_EVERY = 4
+
+#: The record loop's heartbeat. Decisions cost ~1 ms each except a scratchpad git
+#: probe (up to GIT_TIMEOUT_S), so every 16 keeps the counter moving between the
+#: slow ones; only the CLI's one rewritten line consumes it.
+DECIDE_PROGRESS_EVERY = 16
+
+#: ``(phase, done, total_or_None, elapsed_s)``: a coarse heartbeat for a caller
+#: that wants to show motion during a pass (``lop sessions cleanup`` on a TTY).
+ProgressCallback = Callable[[str, int, "int | None", float], None]
+
+#: Every heartbeat is TIME-bounded as well as count-bounded: a phase reports again
+#: once this many seconds have passed since its last report even when fewer than
+#: its ``*_PROGRESS_EVERY`` items finished. The counts alone left real silences:
+#: 16 decisions that each ran a scratchpad git probe took ~7 s on a 4,000-session
+#: store, and a count cannot see that. What this bounds is silence from the LOOP
+#: (the clock is read at the top of every iteration). It does not pre-empt a single
+#: guard call, which cannot be interrupted from here: one candidate whose git probe
+#: or 20,000-entry walk exceeds this interval still leaves that long a gap.
+HEARTBEAT_MAX_SILENCE_S = 1.0
+
+
+class _Beat:
+    """Rate limiter for one phase's progress callback: every N items OR every interval."""
+
+    def __init__(
+        self, phase: str, every: int, on_progress: ProgressCallback | None, began: float
+    ) -> None:
+        self.phase = phase
+        self.every = every
+        self.on_progress = on_progress
+        self.began = began
+        self._last = float("-inf")
+
+    def tick(self, done: int, total: int | None) -> None:
+        if self.on_progress is None:
+            return
+        now = time.monotonic()
+        if done % self.every == 0 or now - self._last >= HEARTBEAT_MAX_SILENCE_S:
+            self._last = now
+            _notify(self.on_progress, self.phase, done, total, now - self.began)
+
+
 _PROJECT_CLOSED = frozenset({"done", "archived"})
 
 
@@ -950,6 +1075,107 @@ def _bounded_dir_stats(directory: Path, max_entries: int = SIZE_MAX_ENTRIES) -> 
     silently raise the per-pad cost tenfold.
     """
     return cleanup_module._bounded_dir_stats(directory, max_entries)
+
+
+def _bounded_dir_scan(
+    directory: Path,
+    max_entries: int = SIZE_MAX_ENTRIES,
+    *,
+    recency_max_entries: int | None = None,
+    fresh_since_ns: int | None = None,
+    strict: bool = False,
+) -> tuple[int, int, int, bool]:
+    """``(bytes, entries, newest_mtime_ns, truncated)``; the pass's own caps.
+
+    See :func:`cleanup.bounded_dir_scan`. The DEFAULT stays here for the same
+    reason :func:`_bounded_dir_stats` keeps it: this pass plans every pad, so
+    ``SIZE_MAX_ENTRIES`` is its measured cost bound. ``recency_max_entries``
+    lets a caller look further for recent activity than it counts bytes.
+    """
+    return cleanup_module.bounded_dir_scan(
+        directory,
+        max_entries,
+        recency_max_entries=recency_max_entries,
+        fresh_since_ns=fresh_since_ns,
+        strict=strict,
+    )
+
+
+def _scan_for_floor(directory: Path, *, now: float) -> tuple[int, int, int, bool]:
+    """The recency walk for an item the pass may DELETE: STRICT, always.
+
+    A walk that swallows an ``OSError`` returns "no recent entry" for a subtree
+    it could not see, and the caller then deletes it — the same fail-open shape
+    the copy arm had, one layer down. Strict mode raises
+    :class:`cleanup.DirScanIncomplete` and this turns it into the pad abort, so
+    the pad is kept whole, counted, and named in the dry run.
+    """
+    try:
+        return _bounded_dir_scan(
+            directory,
+            recency_max_entries=CONTENT_RECENCY_MAX_ENTRIES,
+            fresh_since_ns=_fresh_since_ns(now),
+            strict=True,
+        )
+    except cleanup_module.DirScanIncomplete as exc:
+        raise _PadAbort(f"scratchpad could not be looked at completely: {exc}") from exc
+
+
+def _record_pad_floor(session_dir: Path, *, now: float) -> tuple[str | None, bool]:
+    """``(keep_reason, unreadable)`` for removing a WHOLE session over its pad.
+
+    THE GAP THIS CLOSES (seen on the first live run of the 12 h floor): the floor
+    covered only the scratchpad CONTENT layer, while the record pass decides by
+    the transcript/mail clock and then ``remove_session_dir`` deletes the entire
+    directory, pad included. A session whose transcript was 50.6 h idle but whose
+    pad files had been edited 5.4-8.7 h earlier (a headless run's sqlite library
+    and pid files) was removed whole — transcript-idle is not pad-idle, which is
+    exactly the failure the floor exists to stop.
+
+    This is the SAME strict scan the planner and the copy report use
+    (:func:`_scan_for_floor`'s arguments, the shared constants, the shared
+    reason strings), seeded with the pad root's own stat for the same reason: a
+    rename in place updates the root and no child. Only the ``scratchpad/``
+    subtree is scanned — the transcript and sidecar clocks stay exactly as they
+    were, and a pad that is a symlink (never followed, as everywhere else) or
+    absent has nothing to protect.
+
+    Three outcomes, all KEEPS: recent (``CONTENT_PAD_RECENT_REASON``), too large
+    to prove idle, and not inspectable (``unreadable`` is True so the caller
+    counts the error — "could not look" is never a removal and never silent).
+    """
+    pad = session_dir / PAD_DIRNAME
+    try:
+        # The existence probe is INSIDE the guarded region on purpose:
+        # ``is_symlink``/``is_dir`` swallow only ENOENT-class errors, so a pad
+        # that turns unreadable between the scan and this decision raised
+        # straight out of ``run_delegated_pass`` and skipped the progress write
+        # for every session the pass had already removed. "Could not look" is a
+        # keep and a counted error, exactly like the strict scan below.
+        if pad.is_symlink() or not pad.is_dir():
+            return None, False
+        newest = pad.stat(follow_symlinks=False).st_mtime_ns
+        _bytes, _entries, walked, truncated = _bounded_dir_scan(
+            pad,
+            recency_max_entries=CONTENT_RECENCY_MAX_ENTRIES,
+            fresh_since_ns=_fresh_since_ns(now),
+            strict=True,
+        )
+    except cleanup_module.DirScanIncomplete as exc:
+        return f"scratchpad could not be looked at completely: {exc}", True
+    except OSError as exc:
+        # Name the entry that failed when the error carries it, like the
+        # ``DirScanIncomplete`` reason above; the pad itself is the fallback.
+        where = exc.filename if isinstance(exc.filename, str) else pad
+        return f"scratchpad could not be looked at completely: {where}: {exc.strerror or exc}", True
+    if _pad_recent(now, max(newest, walked)):
+        return CONTENT_PAD_RECENT_REASON, False
+    if truncated:
+        return (
+            f"scratchpad too large to prove idle (more than {CONTENT_RECENCY_MAX_ENTRIES} entries)",
+            False,
+        )
+    return None, False
 
 
 def bounded_dir_bytes(directory: Path, max_entries: int = SIZE_MAX_ENTRIES) -> int:
@@ -1499,6 +1725,30 @@ class _PadPlan:
     copy_candidates: int = 0
     copy_candidate_bytes: int = 0
     copy_deferred: int = 0
+    #: Newest mtime observed in this pad, including entries the arms take whole.
+    newest_mtime_ns: int = 0
+
+    def keep_whole(self, reason: str) -> None:
+        """Refuse the whole pad and name the one reason the operator needs.
+
+        The floor is a WHOLE-PAD decision in both directions: taking a stale
+        sibling while a nested write survives would still destroy active work,
+        and so would taking it while part of the pad could not be inspected.
+        Discarding rows that were already planned is the point of this method,
+        so a caller must reach it BEFORE the plan is executed.
+        """
+        self.removals.clear()
+        self.kept[:] = [reason]
+        self.copy_candidates = 0
+        self.copy_candidate_bytes = 0
+        self.copy_deferred = 0
+
+    def keep_for_recent_edit(self, now: float) -> bool:
+        """Discard every planned removal when the pad was edited recently."""
+        if not _pad_recent(now, self.newest_mtime_ns):
+            return False
+        self.keep_whole(CONTENT_PAD_RECENT_REASON)
+        return True
 
     def classes(self) -> tuple[str, ...]:
         """The distinct classes taken, in the fixed display order."""
@@ -1526,6 +1776,21 @@ def _has_evidence_segment(relative: str) -> bool:
     output, is unaffected.
     """
     return any(part.lower().startswith("evidence") for part in Path(relative).parts)
+
+
+def _observe_pad_mtime(path: Path, plan: _PadPlan, *, now: float) -> bool:
+    """Observe one pad's newest entry mtime; return whether it is recent.
+
+    The pad root is included because a write that renames an entry in place
+    updates the root even when the replaced entry's own mtime is old. A failure
+    to stat is a refusal, not an old-pad answer.
+    """
+    try:
+        info = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise _PadAbort(f"scratchpad root {path} cannot be inspected") from exc
+    plan.newest_mtime_ns = max(plan.newest_mtime_ns, info.st_mtime_ns)
+    return plan.keep_for_recent_edit(now)
 
 
 def _plan_pad_content(
@@ -1572,6 +1837,9 @@ def _plan_pad_content(
         # (only entries below it are), and deleting selected content under a
         # repository this pass may not judge would dirty it — keep it whole.
         plan.kept.append("the scratchpad root is itself a git tree")
+        # No recency walk: this pad plans no removal, so there is nothing the
+        # floor could keep, and walking it would double the pad's cost for a
+        # reason that can never change the decision.
         return plan
     if os.path.lexists(os.path.join(os.fspath(pad), ".git")):
         # The SESSION directory is a repository whose worktree includes the
@@ -1607,6 +1875,15 @@ def _plan_pad_content(
                 "(none configured, or no merged trunk to prove against)"
             )
             copy_arm = None
+    # ONE recency observation per pad: the root's own stat here, then every
+    # entry as the main walk reaches it (and a copy proof's files as the arm
+    # proves them). There is deliberately NO pre-walk: the copy-arm refusals
+    # above only clear ``copy_arm`` and fall through to this walk, and the two
+    # git-root refusals plan nothing at all, so either would have walked every
+    # ordinary pad a second time on a store whose content phase is measured in
+    # tens of seconds.
+    if _observe_pad_mtime(Path(root), plan, now=now):
+        return plan
     visited = 0
     repos = 0
     # ``(path, depth, copy_ancestor, copy_allowed)``: the last two carry the
@@ -1614,7 +1891,7 @@ def _plan_pad_content(
     # directory was already attempted (so a nested proof is not counted as a new
     # candidate), and ``copy_allowed`` is cleared below a nested repository.
     stack: list[tuple[str, int, bool, bool]] = [(root, 0, False, True)]
-    while stack:
+    while stack and not plan.keep_for_recent_edit(now):
         current, depth, copy_ancestor, copy_allowed = stack.pop()
         try:
             with os.scandir(current) as entries:
@@ -1627,6 +1904,13 @@ def _plan_pad_content(
         for entry in children:
             name = entry.name
             try:
+                # Stat EVERY entry before an arm takes it. A shape directory's
+                # own mtime is honoured even though its contents are not walked;
+                # symlinks are included but never followed.
+                info = entry.stat(follow_symlinks=False)
+                plan.newest_mtime_ns = max(plan.newest_mtime_ns, info.st_mtime_ns)
+                if plan.keep_for_recent_edit(now):
+                    return plan
                 if entry.is_symlink():
                     continue  # never followed, never shape-matched
                 if name == ".git":
@@ -1641,7 +1925,8 @@ def _plan_pad_content(
                                 "scratchpad holds more than "
                                 f"{CONTENT_MAX_REPOS} git repositories to inspect"
                             )
-                        _plan_tree(entry.path, root, plan)
+                        if _plan_tree(entry.path, root, plan, now=now):
+                            return plan
                         continue
                     refused_name = _is_refused_segment(name)
                     if refused_name:
@@ -1656,9 +1941,35 @@ def _plan_pad_content(
                                 f"{relative}: evidence path (never taken by the shape arm)"
                             )
                         else:
-                            stats = _bounded_dir_stats(Path(entry.path))
+                            # FOLD BEFORE PLANNING: the shape arm takes this
+                            # whole directory on NAME, and the file someone
+                            # wrote a minute ago can be nested INSIDE it — the
+                            # incident's exact failure mode. The sizing walk the
+                            # removal already pays for is the only cheap view
+                            # into that subtree, so fold its newest mtime into
+                            # the pad floor BEFORE planning: a fresh entry here
+                            # keeps the pad whole instead of being discovered
+                            # after the removal row already exists.
+                            measured, counted, newest, truncated = _scan_for_floor(
+                                Path(entry.path), now=now
+                            )
+                            plan.newest_mtime_ns = max(plan.newest_mtime_ns, newest)
+                            if plan.keep_for_recent_edit(now):
+                                return plan
+                            if truncated:
+                                # FAIL CLOSED: the walk stopped at the recency
+                                # bound without finding a recent entry, so this
+                                # subtree was NOT proved idle. Deleting it on a
+                                # partial look is the incident with a larger cap.
+                                plan.keep_whole(
+                                    f"{relative}: shape directory too large to prove idle "
+                                    f"(more than {CONTENT_RECENCY_MAX_ENTRIES} entries)"
+                                )
+                                return plan
                             plan.removals.append(
-                                _PlannedRemoval(Path(entry.path), CONTENT_CLASS_BUILD, *stats)
+                                _PlannedRemoval(
+                                    Path(entry.path), CONTENT_CLASS_BUILD, measured, counted
+                                )
                             )
                             continue
                     # The COPY arm owns plain directories at any depth, and
@@ -1677,6 +1988,10 @@ def _plan_pad_content(
                         verdict = _plan_copy(
                             entry.path, pad, plan, copy_arm, counted=not copy_ancestor
                         )
+                        # _prove_copy has walked the candidate's files; fold its
+                        # newest mtime into the floor before taking any of them.
+                        if plan.keep_for_recent_edit(now):
+                            return plan
                         if verdict == _COPY_BELOW:
                             # Not a candidate at THIS size, but its children may
                             # hold the copy (measured: the copy sits under a run
@@ -1724,14 +2039,31 @@ def _plan_pad_content(
     return plan
 
 
-def _plan_tree(path: str, root: str, plan: _PadPlan) -> None:
-    """Rule (c) for one git tree at ``path``: plan it, or record why it stays."""
+def _plan_tree(path: str, root: str, plan: _PadPlan, *, now: float) -> bool:
+    """Rule (c) for one git tree at ``path``: plan it, or record why it stays.
+
+    Returns whether the pad was kept for recent activity (the caller must stop
+    planning). The tree's own sizing walk is folded into the pad floor for the
+    same reason the shape arm's is: uncommitted or ignored work inside a
+    worktree this pass removes is still someone's work.
+    """
     relative = os.path.relpath(path, root)
     decision = _tree_reclaim_decision(Path(path))
     if not decision.reclaim:
         plan.kept.append(f"{relative}: {decision.keep}")
-        return
-    stats = _bounded_dir_stats(Path(path))
+        return False
+    measured, counted, newest, truncated = _scan_for_floor(Path(path), now=now)
+    plan.newest_mtime_ns = max(plan.newest_mtime_ns, newest)
+    if plan.keep_for_recent_edit(now):
+        return True
+    if truncated:
+        # Same fail-closed rule as the shape arm: an unproven-idle worktree this
+        # pass would ``worktree-remove`` is not a safe removal.
+        plan.keep_whole(
+            f"{relative}: tree too large to prove idle "
+            f"(more than {CONTENT_RECENCY_MAX_ENTRIES} entries)"
+        )
+        return True
     bundle_path: Path | None = None
     if decision.bundle_refs:
         bundle_path = _unique_rescue_bundle_path(root, relative, plan.bundle_names)
@@ -1739,13 +2071,15 @@ def _plan_tree(path: str, root: str, plan: _PadPlan) -> None:
         _PlannedRemoval(
             Path(path),
             CONTENT_CLASS_MERGED,
-            *stats,
+            measured,
+            counted,
             method="worktree-remove" if decision.worktree is not None else "remove",
             shared_repo=decision.worktree,
             bundle_path=bundle_path,
             bundle_refs=decision.bundle_refs,
         )
     )
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -2060,6 +2394,8 @@ class _CopyProof:
     #: Bytes actually hashed (the real pass's budget is charged this, not the
     #: candidate's total: a path present in no tree is never read).
     hashed_bytes: int = 0
+    #: Newest file mtime seen by the proof walk, for the pad recency floor.
+    newest_mtime_ns: int = 0
     #: Why the candidate is not reclaimed; empty means it is.
     reason: str = ""
     below_floor: bool = False
@@ -2145,6 +2481,10 @@ def _prove_copy(
                 proof.reason = f"more than {NON_GIT_COPY_MAX_ENTRIES} entries"
                 return proof
             try:
+                # Every entry contributes to the pad floor, including a
+                # directory whose own mtime changed without its files changing.
+                info = entry.stat(follow_symlinks=False)
+                proof.newest_mtime_ns = max(proof.newest_mtime_ns, info.st_mtime_ns)
                 if entry.is_symlink():
                     continue  # never followed: a link is not proof of a copy
                 if entry.name == ".git":
@@ -2163,9 +2503,9 @@ def _prove_copy(
                     proof.cap_exceeded = True
                     proof.reason = f"more than {NON_GIT_COPY_MAX_FILES} files"
                     return proof
-                info = entry.stat(follow_symlinks=False)
                 relative = os.path.relpath(entry.path, candidate).replace(os.sep, "/")
                 files.append((Path(entry.path), relative, info.st_size, info.st_mtime_ns))
+                proof.newest_mtime_ns = max(proof.newest_mtime_ns, info.st_mtime_ns)
                 proof.total_bytes += info.st_size
             except OSError:
                 proof.unreadable = True
@@ -2359,6 +2699,20 @@ def _plan_copy(path: str, pad: Path, plan: _PadPlan, arm: _CopyArm, *, counted: 
     # proof returns a deferred verdict, which this records and does not descend
     # past (the candidate is retried next pass).
     proof = _prove_copy(candidate, trees=arm.trees(pad), cache=arm.hash_cache, budget=arm.budget)
+    # The proof's file walk is the only inspection inside a copy candidate:
+    # retain its newest mtime for the pad-wide floor.
+    plan.newest_mtime_ns = max(plan.newest_mtime_ns, proof.newest_mtime_ns)
+    if proof.unreadable:
+        # FAIL CLOSED AT THE PAD, NOT AT THIS CANDIDATE (review round 5, R5-1).
+        # Keeping only the candidate leaves any EARLIER sibling's removal in the
+        # plan — a `build/` found before this one stays scheduled — so the real
+        # run deletes part of a pad the pass could not look at completely. The
+        # pad's own walk aborts for its unreadable entries; the copy arm must
+        # answer the same question the same way.
+        raise _PadAbort(
+            f"scratchpad could not be looked at completely: "
+            f"{os.path.relpath(candidate, os.fspath(pad))} cannot be read"
+        )
     arm.spend(proof.hashed_bytes)
     if proof.below_floor:
         return _COPY_BELOW
@@ -2600,6 +2954,45 @@ def scan_non_git_copies(
                 qualified = True
         trees = tuple(trees)
         cache = _HashCache()
+        # ONE PAD-WIDE VERDICT, FROM THE PLANNER'S OWN WALK (review round 7).
+        # The two surfaces used to disagree BY CONSTRUCTION: this outer walk
+        # skips refused-segment subtrees (`build/`, `node_modules/`), which is
+        # where the planner's recency floor looks hardest, so a pad whose only
+        # recent entry was `build/nested/edit.txt` was advertised as
+        # would-reclaim while the pass kept it whole. Rather than teach this
+        # walk a second set of arm rules, ask the SAME strict bounded scan the
+        # planner uses, ONCE per pad, and let its answer govern every row:
+        # recent, or not provable, means the whole pad is a keep with the
+        # planner's own reason string. Candidate proofs still contribute their
+        # own mtimes below — that can only reinforce this verdict.
+        verdict = ""
+        try:
+            # The pad ROOT's own mtime is part of the answer and the bounded scan
+            # observes only its ENTRIES: a rename in place updates the root and
+            # leaves every child's mtime untouched (review round 5, R5-2).
+            pad_newest_mtime_ns = pad.stat(follow_symlinks=False).st_mtime_ns
+        except OSError:
+            pad_newest_mtime_ns = 0
+        try:
+            _b, _e, walked_newest, truncated = cleanup_module.bounded_dir_scan(
+                pad,
+                recency_max_entries=CONTENT_RECENCY_MAX_ENTRIES,
+                fresh_since_ns=_fresh_since_ns(moment),
+                strict=True,
+            )
+        except cleanup_module.DirScanIncomplete as exc:
+            verdict = f"scratchpad could not be looked at completely: {exc}"
+            pad_newest_mtime_ns = 0
+        else:
+            pad_newest_mtime_ns = max(pad_newest_mtime_ns, walked_newest)
+            if _pad_recent(moment, pad_newest_mtime_ns):
+                verdict = CONTENT_PAD_RECENT_REASON
+            elif truncated:
+                verdict = (
+                    "scratchpad too large to prove idle "
+                    f"(more than {CONTENT_RECENCY_MAX_ENTRIES} entries)"
+                )
+        pad_rows: list[NonGitCopyCandidate] = []
         stack: list[tuple[str, int, bool, bool]] = [(os.fspath(pad), 0, False, True)]
         while stack:
             current, depth, ancestor, allowed = stack.pop()
@@ -2610,7 +3003,11 @@ def scan_non_git_copies(
                 continue  # unreadable dir: its parent already recorded the keep
             for entry in children:
                 try:
-                    if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    info = entry.stat(follow_symlinks=False)
+                    pad_newest_mtime_ns = max(pad_newest_mtime_ns, info.st_mtime_ns)
+                    if entry.is_symlink():
+                        continue
+                    if not entry.is_dir(follow_symlinks=False):
                         continue
                     if entry.name == ".git":
                         continue
@@ -2660,6 +3057,10 @@ def scan_non_git_copies(
                         )
                     )
                     continue
+                # The report's outer walk descends directories only; the
+                # candidate proof is what stats its files. Fold that newest
+                # mtime into the pad-wide recency decision.
+                pad_newest_mtime_ns = max(pad_newest_mtime_ns, proof.newest_mtime_ns)
                 if proof.below_floor:
                     stack.append((entry.path, depth + 1, ancestor, True))
                     continue
@@ -2681,7 +3082,13 @@ def scan_non_git_copies(
                         proof_ok and within_window and not root_guard and delegated and deletable
                     )
                     would = proof_ok and not within_window and deletable and not root_guard
-                    if root_guard:
+                    if _pad_recent(moment, pad_newest_mtime_ns):
+                        # The report is read-only, but must not advertise a
+                        # copy the pass would refuse for recent pad activity.
+                        reason = CONTENT_PAD_RECENT_REASON
+                        waiting = False
+                        would = False
+                    elif root_guard:
                         # The pass keeps the whole pad before any copy proof;
                         # the row is a keep, never a would-reclaim (review B1).
                         reason = root_guard
@@ -2697,7 +3104,7 @@ def scan_non_git_copies(
                         reason = f"proof ok, inside the {float(window_hours):g}h window"
                     else:
                         reason = ""
-                report.candidates.append(
+                pad_rows.append(
                     NonGitCopyCandidate(
                         session=session_dir.name,
                         path=os.path.relpath(entry.path, sessions_dir).replace(os.sep, "/"),
@@ -2721,6 +3128,21 @@ def scan_non_git_copies(
                     stack.append((entry.path, depth + 1, True, True))
                 elif outcome == _COPY_BLOCKED:
                     stack.append((entry.path, depth + 1, True, False))
+        # A recent sibling discovered after an earlier candidate was proved
+        # must still change that candidate's advertised state. This is why the
+        # pad's rows are held until the walk completes.
+        # A LATE-DISCOVERED FRESH SIBLING (a candidate proof's own file walk can
+        # see deeper than this loop) still has to change every row already
+        # emitted for the pad, which is why the rows are held until the walk
+        # completes.
+        if _pad_recent(moment, pad_newest_mtime_ns) and not verdict:
+            verdict = CONTENT_PAD_RECENT_REASON
+        if verdict:
+            for row in pad_rows:
+                row.waiting = False
+                row.would_reclaim = False
+                row.reason = verdict
+        report.candidates.extend(pad_rows)
     if not report.candidates and not pads:
         # THE STORE-LEVEL VACUOUS GUARD means "the scan could not SEE the
         # store" (review B3b), not "the store has no copies": zero scratchpad
@@ -2779,7 +3201,13 @@ class _ContentGuard:
 
 
 def _content_guard(
-    cand: _Cand, *, config_dir: Path, now: float, cutoff: float, live_resolved: Path | None
+    cand: _Cand,
+    *,
+    config_dir: Path,
+    now: float,
+    cutoff: float,
+    live_resolved: Path | None,
+    pinned: frozenset[str] = frozenset(),
 ) -> _ContentGuard:
     """The content phase's OWN guards: why this pad must not be touched at all.
 
@@ -2823,6 +3251,10 @@ def _content_guard(
         return _ContentGuard("operator holds unreadable", fresh)
     if held is not None:
         return _ContentGuard("held by the operator", fresh)
+    if cand.path.name in pinned:
+        # The same pin the record pass honours (``pinned`` is read once per pass):
+        # a pinned conversation keeps its pad too.
+        return _ContentGuard(PINNED_REASON, fresh)
     if fresh is not None and fresh >= now:
         return _ContentGuard("active since the scan", fresh)
     if live_resolved is not None:
@@ -2960,6 +3392,7 @@ def _reclaim_pad_content(
     actor: str,
     trigger: str,
     copy_arm: "_CopyArm | None" = None,
+    pinned: frozenset[str] = frozenset(),
 ) -> _ContentOutcome:
     """Evaluate — and in a real pass execute — the content reclaim for ONE pad.
 
@@ -2982,7 +3415,12 @@ def _reclaim_pad_content(
     """
     outcome = _ContentOutcome()
     guard = _content_guard(
-        cand, config_dir=config_dir, now=now, cutoff=cutoff, live_resolved=live_resolved
+        cand,
+        config_dir=config_dir,
+        now=now,
+        cutoff=cutoff,
+        live_resolved=live_resolved,
+        pinned=pinned,
     )
     if guard.reason is not None:
         outcome.kept.append(guard.reason)
@@ -2997,6 +3435,10 @@ def _reclaim_pad_content(
         raise _PadAbort(f"scratchpad cannot be inspected ({exc.__class__.__name__})") from exc
     if plan is None:
         return outcome
+    # The planner's final floor check is intentionally before this extension:
+    # it clears any early sibling's removals and replaces the keep reasons with
+    # the one reason the operator needs. Do not append a duplicate reason here.
+    plan.keep_for_recent_edit(now)
     outcome.kept.extend(plan.kept)
     # Rolled even when nothing was planned: a share-refused candidate is a keep
     # the CLI's report block must count, and its zero removals are the point.
@@ -3289,27 +3731,101 @@ def _cached_json(path: Path) -> Any:
     return payload
 
 
+def _record_in_flight(record: dict[str, Any]) -> bool:
+    """Whether a roster record describes a child its parent could still act on.
+
+    The roster is the parent's LIFETIME LEDGER (the last 256 records, each with
+    ``outcome``/``settled_at``/``paused``/``result_text``), not a resumption set:
+    measured on the operator's store, 19,468 of 19,756 records were settled and
+    unpaused, and a parent that lives for weeks therefore pinned its whole
+    historical subtree so the delegated window could only ever reclaim children
+    whose parent had itself aged out. A SETTLED child is history — its result
+    text already lives in the parent's roster — while two states stay actionable:
+
+    * IN FLIGHT: ``settled_at`` absent/None, the child has not finished.
+    * PAUSED: ``hub`` resumes a paused child, and ``paused`` is ORTHOGONAL to
+      ``settled_at`` (44 records on the same store carry both), so a paused
+      record is protected even though it is stamped settled.
+
+    Fails CLOSED on a field this cannot read: a ``settled_at`` that is not a
+    finite number (a string, a bool, NaN) is not proof of settlement, and any
+    truthy ``paused`` protects (``"false"`` included — a value this build did not
+    write is not evidence the child is idle).
+    """
+    if record.get("paused"):
+        return True
+    settled_at = record.get("settled_at")
+    if isinstance(settled_at, bool) or not isinstance(settled_at, (int, float)):
+        return True
+    try:
+        return not math.isfinite(settled_at)
+    except OverflowError:
+        # JSON allows an integer too large for a float ("1" and 400 zeros). It is
+        # not a timestamp anyone wrote, so it is no proof of settlement: protect,
+        # and do not let a hand-damaged roster crash the pass.
+        return True
+
+
 def roster_children(roster: Path) -> set[str]:
-    """Session ids a parent's roster records as its children.
+    """Session ids a parent's roster records as children it could still act on.
+
+    IN-FLIGHT OR PAUSED records only (:func:`_record_in_flight`); a settled child
+    is history and is not named. This is the ONE source of truth for both callers
+    — retention rule 3 (:func:`_protected_children`) and
+    :func:`active_parent_sessions` (compression keeps a child's transcript
+    uncompressed "while its parent could still resume it") — so they answer the
+    same question.
+
+    WHAT THIS DOES AND DOES NOT CLAIM. A settled child is still resumable by its
+    parent for as long as its transcript is on disk (``comms.py`` lists
+    completed/failed/cancelled/gone as resumable). What changes is that a parent's
+    roster no longer KEEPS that transcript past the delegated window: once a
+    settled child has been idle that long it is reaped like any other, the parent
+    keeps the record and its ``result_text``, and a later ``hub op='resume'`` gets
+    the existing, graceful "transcript … is gone from disk; launch a new one"
+    refusal (``test_comms.py::test_resume_refuses_when_the_transcript_is_gone_from_disk``;
+    the roster row reads ``gone``, ``resumable=False``).
+
+    A child named by SEVERAL records is protected if ANY of them is in flight.
+
+    FAILS CLOSED on a record that is not an object: it cannot say which child it
+    describes, so it could be hiding an in-flight one, and the roster is
+    reported unknowable (the pass is skipped) exactly as a non-list ``records``
+    already was. (All 19,756 records on the operator's store are objects.) A dict
+    record that names no usable ``session_dir`` names no child and protects none.
 
     Raises :class:`_Unknowable` for a roster that exists but cannot be read or is
     not an object — the caller must not treat that as "no children".
+    """
+    return _roster_ledger(roster)[0]
+
+
+def _roster_ledger(roster: Path) -> tuple[set[str], set[str]]:
+    """``(actionable, settled_only)`` child ids a roster names.
+
+    ``actionable`` is what :func:`roster_children` returns. ``settled_only`` is
+    every other child the ledger names: history, but its DIRECTORY may still
+    survive for another reason, and then its own roster still matters
+    (:func:`_protected_children`). Same fail-closed reads as the public wrapper.
     """
     payload = _cached_json(roster)
     if not isinstance(payload, dict):
         raise _Unknowable(f"{roster.parent.name}/{ROSTER_NAME}: not an object")
     records = payload.get("records")
     if records is None:
-        return set()
+        return set(), set()
     if not isinstance(records, list):
         raise _Unknowable(f"{roster.parent.name}/{ROSTER_NAME}: records is not a list")
-    names: set[str] = set()
+    actionable: set[str] = set()
+    settled: set[str] = set()
     for record in records:
-        if isinstance(record, dict):
-            directory = record.get("session_dir")
-            if isinstance(directory, str) and directory:
-                names.add(os.path.basename(directory.rstrip("/\\")))
-    return names
+        if not isinstance(record, dict):
+            raise _Unknowable(f"{roster.parent.name}/{ROSTER_NAME}: a record is not an object")
+        directory = record.get("session_dir")
+        if isinstance(directory, str) and directory:
+            name = os.path.basename(directory.rstrip("/\\"))
+            (actionable if _record_in_flight(record) else settled).add(name)
+    return actionable, settled - actionable
 
 
 def open_project_sessions(config_dir: Path) -> set[str]:
@@ -3394,6 +3910,7 @@ def _scan(
     now: float,
     should_stop: Callable[[], bool] | None,
     deadline: float | None = None,
+    on_progress: ProgressCallback | None = None,
 ) -> _Scan:
     """One pass over the store: no sizes, no rglob, a handful of syscalls per directory.
 
@@ -3405,6 +3922,7 @@ def _scan(
     only for an OLD directory that has a roster.
     """
     scan = _Scan()
+    scan_beat = _Beat("scan", SCAN_PROGRESS_EVERY, on_progress, time.monotonic())
     try:
         entries = [e for e in os.scandir(sessions_dir) if not e.name.startswith(".")]
     except OSError as exc:
@@ -3418,6 +3936,9 @@ def _scan(
         ):
             scan.stopped = True
             return scan
+        # Index 0 included (0 % N == 0): the FIRST frame already carries the total,
+        # so the operator sees "0/4700" at once instead of a bare "scanning…".
+        scan_beat.tick(index, len(entries))
         try:
             if not entry.is_dir(follow_symlinks=False):
                 continue
@@ -3500,30 +4021,87 @@ def _scan(
     return scan
 
 
-def _protected_children(scan: _Scan) -> set[str]:
-    """Rule 3: every session named in the roster of a live/recent session, transitively.
+def _protected_children(
+    scan: _Scan,
+    survives: Callable[[str, Path], bool] | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> set[str]:
+    """Rule 3: every IN-FLIGHT or PAUSED child named by a live/recent session, transitively.
 
-    Transitive through protected DELEGATED sessions: a kept child's own children
-    are reachable by resuming it, so they are kept too. Rosters are read only for
-    sources and for newly protected hidden sessions.
+    A settled child is not named (:func:`roster_children`): the roster is a
+    lifetime ledger, so it no longer keeps a finished child's transcript past the
+    window. Transitive through protected DELEGATED sessions: a kept child's own
+    children are reachable by resuming it, so they are kept too. Rosters are read
+    only for sources and for newly protected hidden sessions.
+
+    ``survives(name, path)`` closes the gap the narrowing would otherwise open: a
+    SETTLED child that this pass will nevertheless leave on disk (pinned, held, an
+    open project, a live claim, a git hazard, unread mail, …) is still a
+    directory whose own roster can name paused or in-flight children, and those
+    were protected before the narrowing because the settled child was. So a
+    settled child that survives is walked too — its in-flight children are
+    protected — WITHOUT being added to the result itself (its own reason, e.g.
+    "pinned by the operator", stays the one reported). Evaluated lazily, only for
+    a settled hidden child that has a roster, and iterated to a fixpoint because
+    a newly protected child can name further settled children. ``None`` (the
+    compression caller, which has no keep rules) skips it; compression is
+    reversible, retention is not.
+
+    ``on_progress("rosters", read, None, elapsed)`` fires after each roster is
+    read: on the operator's store this phase is ~4-9 s (hidden parents alone hold
+    ~220 MB of rosters), the one stretch of a dry run with no other heartbeat.
     """
+    roster_beat = _Beat("rosters", 1, on_progress, time.monotonic())
+    read = 0
     protected: set[str] = set()
     queue = list(scan.sources.items())
     seen = {name for name, _ in queue}
-    while queue:
-        name, path = queue.pop()
-        roster = path / ROSTER_NAME
-        if not os.path.exists(roster):
-            continue
-        for child in roster_children(roster):
-            protected.add(child)
-            if child in scan.hidden and child not in seen:
+    settled_named: dict[str, Path] = {}
+    #: Settled children already judged to go: that answer cannot change (the
+    #: callback judges them without ``parents``), and the judgement can include a
+    #: git walk, so it is asked once. It is keyed to the OPENING cutoff while the
+    #: batch loop may later WIDEN the window (``run_delegated_pass``): that is safe
+    #: because widening only ever protects MORE, and the removal loop re-runs
+    #: ``_evaluate`` per candidate against the then-current cutoff, so a child
+    #: cached as "going" here is still kept at removal time if the window grew.
+    going: set[str] = set()
+    while True:
+        while queue:
+            name, path = queue.pop()
+            roster = path / ROSTER_NAME
+            if not os.path.exists(roster):
+                continue
+            actionable, settled = _roster_ledger(roster)
+            read += 1
+            roster_beat.tick(read, None)
+            for child in actionable:
+                protected.add(child)
+                if child in scan.hidden and child not in seen:
+                    seen.add(child)
+                    queue.append((child, path.parent / child))
+            for child in settled:
+                if child in scan.hidden:
+                    settled_named.setdefault(child, path.parent / child)
+        if survives is None:
+            return protected
+        grew = False
+        for child, child_path in list(settled_named.items()):
+            if child in seen or child in protected or child in going:
+                continue
+            if not os.path.exists(child_path / ROSTER_NAME):
+                continue
+            if survives(child, child_path):
                 seen.add(child)
-                queue.append((child, path.parent / child))
-    return protected
+                queue.append((child, child_path))
+                grew = True
+            else:
+                going.add(child)
+        if not grew:
+            return protected
 
 
-#: Rule 3: every session named in the roster of a live/recent session, transitively.
+#: Rule 3: every in-flight/paused child named in the roster of a live/recent
+#: session, transitively (phase one only; see ``_protected_children``).
 #:
 #: Factored out of the delegated pass so a SECOND consumer can ask the same
 #: question without copying the answer: ``session.compression`` keeps a child's
@@ -3542,7 +4120,12 @@ def active_parent_sessions(
     *,
     window_hours: float = float(DEFAULT_DELEGATED_MAX_AGE_HOURS),
 ) -> set[str]:
-    """Session ids a live or recently active session still names in its roster."""
+    """Session ids a live or recently active session names as in-flight or paused.
+
+    Settled children are not named: their transcripts are no longer kept past the
+    window by a parent's roster, so compression treats them like any other old
+    transcript (reversible: a resume restores it before reading).
+    """
     scan = _scan(
         Path(config_dir) / SESSIONS_DIRNAME,
         now - float(window_hours) * 3600.0,
@@ -3563,6 +4146,17 @@ def active_parent_sessions(
 _WARNED_KEEP: set[tuple[str, str]] = set()
 
 
+def _pinned_sessions(config_dir: Path) -> frozenset[str]:
+    """The pinned set for this pass (:func:`cleanup.pinned_session_ids`) as ``_Unknowable``.
+
+    An unreadable pin file skips the whole pass, like an unreadable roster.
+    """
+    try:
+        return pinned_session_ids(config_dir)
+    except GuardUnavailable as exc:
+        raise _Unknowable(str(exc)) from exc
+
+
 def _evaluate(
     cand: _Cand,
     *,
@@ -3571,10 +4165,22 @@ def _evaluate(
     cutoff: float,
     parents: set[str],
     projects: set[str],
+    pinned: frozenset[str] = frozenset(),
     live_resolved: Path | None,
+    unreadable: list[str] | None = None,
 ) -> str | None:
-    """Why ``cand`` must be kept (a short phrase), or ``None`` if it may go."""
+    """Why ``cand`` must be kept (a short phrase), or ``None`` if it may go.
+
+    ``unreadable``, when given, receives the name of a candidate kept because its
+    pad could not be inspected, so the caller can count the error: a keep is the
+    right answer for "could not look", but it must not be silent telemetry.
+    """
     name = cand.path.name
+    if name in pinned:
+        # A pin is the operator's own statement that this conversation stays,
+        # and nothing else in the pass consulted it: asked FIRST so the reason
+        # names the real guard instead of whichever rule happens to match.
+        return PINNED_REASON
     if name in parents:
         return "parent session still active"
     if name in projects:
@@ -3602,7 +4208,44 @@ def _evaluate(
     fresh = session_activity_path(os.fspath(cand.path))
     if fresh is not None and fresh >= cutoff:
         return "active since the scan"
+    # LAST, because it is the only guard that walks: every cheaper reason (a pin,
+    # a parent, a claim, the activity clock) is allowed to name the keep first,
+    # and the ones the operator reads in the dry run keep their own wording.
+    pad_keep, pad_unreadable = _record_pad_floor(cand.path, now=now)
+    if pad_keep is not None:
+        if pad_unreadable and unreadable is not None:
+            unreadable.append(name)
+        return pad_keep
     return None
+
+
+def effective_window_hours(policy: CleanupPolicy) -> int:
+    """The delegated age window a pass will actually apply, always in range.
+
+    One definition for the pass (``result.hours``) and for a caller that must
+    state the window BEFORE the pass runs (the CLI prints its policy line first
+    so output starts at once): two spellings of this clamp would let the line
+    promise a window the pass then did not use.
+    """
+    return max(
+        MIN_DELEGATED_MAX_AGE_HOURS,
+        min(MAX_DELEGATED_MAX_AGE_HOURS, policy.delegated_max_age_hours),
+    )
+
+
+def _notify(callback: Callable[..., None] | None, *args: Any) -> None:
+    """Call an observer; an observer's failure never changes a retention decision.
+
+    The callbacks are display hooks (a broken pipe on a closed terminal is the
+    realistic failure). A pass that aborted half-way through a removal batch
+    because stdout went away would be a worse outcome than a lost progress line.
+    """
+    if callback is None:
+        return
+    try:
+        callback(*args)
+    except Exception:  # noqa: BLE001 — display only; never alters the decision
+        logger.debug("session cleanup: observer callback failed", exc_info=True)
 
 
 def run_delegated_pass(
@@ -3621,6 +4264,9 @@ def run_delegated_pass(
     should_stop: Callable[[], bool] | None = None,
     only: Iterable[str] | None = None,
     content_only: Iterable[str] | None = None,
+    on_progress: ProgressCallback | None = None,
+    on_plan: Callable[[Candidate], None] | None = None,
+    on_kept: Callable[[str, str], None] | None = None,
 ) -> DelegatedResult:
     """One scan-and-remove pass over the DELEGATED class.
 
@@ -3640,6 +4286,16 @@ def run_delegated_pass(
     pass, and shown then. ``None`` leaves the phase unconfined (startup passes,
     tests). ``actor`` and ``trigger`` are recorded on every reclaim (the log row
     and the pad's manifest), so a loss can be traced to what ran the pass.
+
+    ``on_progress``, ``on_plan`` and ``on_kept`` are OBSERVERS for a caller that
+    shows output while the pass runs (a dry run over thousands of directories
+    took minutes with nothing printed). ``on_plan(row)`` fires as each candidate
+    is decided removable and ``on_kept(name, reason)`` as each is decided kept,
+    in the same order and with the same values the final ``removed`` /
+    ``protected`` lists carry, so a caller that streamed needs no second print
+    and cannot print a row twice. ``on_progress(phase, done, total, elapsed_s)``
+    is a heartbeat from the scan and the content phase. None of them can change
+    a decision (:func:`_notify`).
     """
     # Resolved at CALL time so the module constants are the tuning surface (a
     # default bound at import would make them inert). ``budget_s=UNBOUNDED`` is
@@ -3656,10 +4312,7 @@ def run_delegated_pass(
     result = DelegatedResult(dry_run=dry_run)
     sessions_dir = config_dir / SESSIONS_DIRNAME
     policy = policy_provider()
-    result.hours = max(
-        MIN_DELEGATED_MAX_AGE_HOURS,
-        min(MAX_DELEGATED_MAX_AGE_HOURS, policy.delegated_max_age_hours),
-    )
+    result.hours = effective_window_hours(policy)
     if not policy.delegated_enabled and not force and not dry_run:
         result.skipped = "disabled"
         return result
@@ -3684,7 +4337,7 @@ def run_delegated_pass(
     # leave nothing recorded and no backlog to resume, i.e. a drain that never
     # continues; the scan is O(directories) in a handful of stats each (measured in
     # the PR), so the budget is spent where the cost is: removals.
-    scan = _scan(sessions_dir, cutoff, moment, should_stop, None)
+    scan = _scan(sessions_dir, cutoff, moment, should_stop, None, on_progress)
     result.scan_seconds = time.monotonic() - started
     result.scanned = scan.total
     result.window_names = scan.window_names
@@ -3697,8 +4350,39 @@ def run_delegated_pass(
         result.skipped = "stopped during the scan"
         return result
     try:
-        parents = _protected_children(scan)
         projects = open_project_sessions(config_dir)
+        # ONCE per pass, never per candidate: thousands of candidates must not
+        # each re-read the pin file. A pin file that exists and cannot be read
+        # skips the whole pass (like an unreadable roster) rather than reading
+        # as "nothing is pinned". Once is also safe for a REAL run's removal
+        # moment: pins only ever grow the protected set, a pin placed during the
+        # pass is honoured by the next one, and the CLI's apply pass re-reads the
+        # file at its own start, after the operator has confirmed the preview.
+        pinned = _pinned_sessions(config_dir)
+        by_name = {cand.path.name: cand for cand in scan.candidates}
+
+        def survives(name: str, path: Path) -> bool:
+            """Will the pass leave this settled child on disk? (:func:`_protected_children`)"""
+            cand = by_name.get(name)
+            if cand is None:
+                # In the window, no usable clock, or an origin retention never
+                # reaps: not a candidate, so it stays.
+                return True
+            return (
+                _evaluate(
+                    cand,
+                    config_dir=config_dir,
+                    now=moment,
+                    cutoff=cutoff,
+                    parents=set(),
+                    projects=projects,
+                    pinned=pinned,
+                    live_resolved=live_resolved,
+                )
+                is not None
+            )
+
+        parents = _protected_children(scan, survives, on_progress)
     except _Unknowable as exc:
         logger.warning("session cleanup: delegated pass skipped, cannot read %s", exc)
         result.skipped = f"skipped: cannot read {exc}"
@@ -3714,6 +4398,8 @@ def run_delegated_pass(
     recorded = 0
     in_batch = 0
     refused = 0
+    decide_beat = _Beat("decide", DECIDE_PROGRESS_EVERY, on_progress, started)
+    content_beat = _Beat("content", CONTENT_PROGRESS_EVERY, on_progress, started)
     while position < len(todo):
         if should_stop is not None and should_stop():
             break
@@ -3760,20 +4446,24 @@ def run_delegated_pass(
             if not live.delegated_enabled and not force:
                 result.skipped = "disabled during the pass"
                 break
-            hours = max(
-                MIN_DELEGATED_MAX_AGE_HOURS,
-                min(MAX_DELEGATED_MAX_AGE_HOURS, live.delegated_max_age_hours),
-            )
+            hours = effective_window_hours(live)
             if hours > result.hours:
                 # A WIDER window only ever protects more: tighten the cutoff.
                 result.hours = hours
                 cutoff = moment - hours * 3600.0
             in_batch = 0
         cand = todo[position]
+        # Read at the TOP of every iteration, so a candidate that was slow (a git
+        # probe) is reported the moment it finishes, and the longest silence from
+        # this loop is the slowest single candidate, not 16 of them. Keeps a
+        # terminal moving once the caller has stopped printing rows (the text cap).
+        decide_beat.tick(position, len(todo))
         position += 1
         if cand.clock >= cutoff:
             result.protected.append((cand.path.name, "inside the (widened) window"))
+            _notify(on_kept, cand.path.name, "inside the (widened) window")
             continue
+        unreadable_pads: list[str] = []
         keep = _evaluate(
             cand,
             config_dir=config_dir,
@@ -3781,10 +4471,15 @@ def run_delegated_pass(
             cutoff=cutoff,
             parents=parents,
             projects=projects,
+            pinned=pinned,
             live_resolved=live_resolved,
+            unreadable=unreadable_pads,
         )
         if keep is not None:
+            if unreadable_pads:
+                result.errors += 1
             result.protected.append((cand.path.name, keep))
+            _notify(on_kept, cand.path.name, keep)
             continue
         idle_hours = max(0.0, (moment - cand.clock) / 3600.0)
         # Sized here, for the rows about to be shown or removed only: a bounded
@@ -3803,6 +4498,28 @@ def run_delegated_pass(
         result.chosen.append(row)
         if dry_run:
             result.removed.append(row)
+            _notify(on_plan, row)
+            continue
+        # RE-ASKED AT THE REMOVAL MOMENT, like the pin: the sizing walk above and
+        # the earlier decision are a gap in which another process can write into
+        # the pad, and a write after the preview must still keep it. The pass's
+        # ``moment`` is the right clock, not a fresh ``time.time()``: a file
+        # written during a long drain has an mtime AFTER ``moment``, and a future
+        # mtime counts as recent (``_pad_recent``), so it is caught either way.
+        # Against a real clock this can only keep at least as much as a fresh
+        # read would WHILE ``moment`` <= real time (the normal case: ``moment``
+        # is taken at the start of the pass); a ``moment`` ahead of real time is
+        # a caller-supplied clock (tests, replays) and decides by that clock.
+        late_keep, late_unreadable = _record_pad_floor(cand.path, now=moment)
+        if late_keep is not None:
+            # Only ``chosen`` holds the row here: a real run appends to
+            # ``removed`` after the remover confirms, and a dry run never gets
+            # this far (it ``continue``s above).
+            result.chosen.pop()
+            if late_unreadable:
+                result.errors += 1
+            result.protected.append((cand.path.name, late_keep))
+            _notify(on_kept, cand.path.name, late_keep)
             continue
         try:
             done = remove_session_dir(
@@ -3950,6 +4667,7 @@ def run_delegated_pass(
             cand = content_pool[content_position]
             content_position += 1
             name = cand.path.name
+            content_beat.tick(content_position, len(content_pool))
             try:
                 outcome = _reclaim_pad_content(
                     cand,
@@ -3962,6 +4680,7 @@ def run_delegated_pass(
                     actor=actor,
                     trigger=trigger,
                     copy_arm=copy_arm,
+                    pinned=pinned,
                 )
             except _PadAbort as abort:
                 result.errors += 1
@@ -4025,14 +4744,18 @@ def run_delegated_pass(
         # window, and one with NO USABLE clock (no marker, or an implausible birth
         # stamp). Calling the second "active recently" would state something the
         # scan does not know.
-        result.protected.extend(
+        tail = [
             (name, f"inside the {result.hours}h window or no usable clock")
             for name in scan.window_names
-        )
-        # Same cap, same place: these were never in the age rule at all (their
-        # origin is not reapable) and they have no sidebar row, so the dry run is
-        # the only surface that can tell the operator WHICH ones the count means.
-        result.protected.extend((name, "origin not reapable") for name in scan.kept_by_origin_names)
+        ]
+        tail.extend((name, "origin not reapable") for name in scan.kept_by_origin_names)
+        result.protected.extend(tail)
+        for name, reason in tail:
+            _notify(on_kept, name, reason)
+        # (``origin not reapable`` rides in ``tail`` above.) Same cap, same
+        # place: these were never in the age rule at all (their origin is not
+        # reapable) and they have no sidebar row, so the dry run is the only
+        # surface that can tell the operator WHICH ones the count means.
     result.freed_bytes = freed
     if not dry_run and result.removed:
         logger.warning(

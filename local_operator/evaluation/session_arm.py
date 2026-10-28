@@ -82,7 +82,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
 if TYPE_CHECKING:
     from local_operator.owned_process import OwnerStatusChannel
@@ -142,6 +142,7 @@ from local_operator.evaluation.runner.episode import (
     EpisodeConfig,
     EpisodeSpec,
     UndeclaredDisclosedInfra,
+    _not_applied_failure,
     _observation_phase_failure,
     _rebindable_failure,
     _terminal_kind,
@@ -191,11 +192,100 @@ SESSION_APPROVALS = ApprovalPolicy.auto()
 #: as, and how the episode ends. Everything else the model needs is on the
 #: schema.
 PROMPT_HEADER = (
-    "Act on this computer by calling `{tool_name}`: each call carries ONE batch "
-    "of actions for the screen you were just shown and returns the state that "
-    "results. Send exactly one call per turn. When the task is complete, call "
-    "`{tool_name}` with a single finish action.\n"
+    "Act on the remote computer by calling `{tool_name}`: each call carries ONE "
+    "batch of actions for the screen you were just shown and returns the state "
+    "that results. Send exactly one call per turn. When the task is complete, "
+    "call `{tool_name}` with a single finish action.\n"
 )
+
+#: The local tools whose reach is a FILESYSTEM/shell (the ones a model could
+#: mistake for acting on the remote computer), in the order the topology note
+#: names them. Filtered by the session's LIVE inventory at render time, so the
+#: note never names a tool the session does not have.
+_LOCAL_REACH_TOOLS: tuple[str, ...] = ("bash", "read", "write", "edit", "glob", "grep")
+
+#: The machine topology of a session that drives a remote computer through
+#: one action tool while ALSO holding local tools. Stated as environment
+#: facts, never as task advice.
+#:
+#: WHY. The header used to say only "Act on this computer", and nothing said
+#: that the session's local tools run somewhere else. Measured on the session
+#: engagement (task_001, run 2026-10-25, deepseek-v4.1-flash): the model wrote
+#: a parser with the local ``write`` tool, then typed ``python3 /tmp/g3.py
+#: --create`` into the REMOTE terminal ("No such file or directory"). It then
+#: spent 54 calls probing for a shared channel (mounts, ``netstat``, ``nc -z``,
+#: ``/etc/hosts``, ``pbpaste``, writing host paths from inside the remote
+#: shell), left the remote state unchanged and still declared success. Across
+#: 180 recorded episodes those host-probing calls came to 48 / 72 / 61 on
+#: 2026-10-22 / 10-23 / 10-25.
+#:
+#: WHY HERE, AND ONLY HERE (the single source of truth). Not in
+#: ``ACTION_TOOL_DESCRIPTION``: that text is shared with the loop-driven runner,
+#: which has no local tools, so the contrast would be false there. It is also
+#: built in the action-server process, which cannot see the session's
+#: inventory or its confinement. The arm knows all three facts at the moment
+#: it writes the first prompt (``render_prompt_header``). Delegated children
+#: are covered by the same note, not by a second copy in ``harness/subagent``:
+#: a child never inherits the action tool (``ownTurnOnly``) and runs under the
+#: parent's confinement, so the fact a child's task depends on is whether its
+#: parent knows the child cannot reach the remote computer. The delegation
+#: sentence below tells the parent exactly that.
+#:
+#: WHAT IT DELIBERATELY DOES NOT DO. No task hints, no benchmark or
+#: environment names, and no change to tool availability: the local tools
+#: stay, because native tool use (computing, drafting and checking text
+#: locally) is the engagement being measured. It describes the topology and
+#: leaves strategy to the model.
+REMOTE_TOPOLOGY_NOTE = (
+    "Your other tools ({local_tools}) run in {workspace} on a different machine, "
+    "not on the remote computer. The two share no filesystem, clipboard or "
+    "network path: a file or program you create locally does not exist on the "
+    "remote computer. The only way to put data into the remote computer is a "
+    "`{tool_name}` action ({entry}); the only way to read from it is the state "
+    "`{tool_name}` returns. Local tools remain useful for computing, drafting "
+    "and checking text before you enter it.{delegation}\n"
+)
+
+
+def render_prompt_header(
+    *,
+    tool_name: str,
+    surface: ActionSurface,
+    tool_names: Sequence[str],
+    confined: bool,
+) -> str:
+    """The first prompt's protocol paragraph, plus the topology when it applies.
+
+    Every variable part is DERIVED from what the arm already holds, so the text
+    cannot claim a capability the episode does not have: ``paste_text`` is named
+    only when the negotiated ``surface`` offers it, the local tools are the
+    live inventory's own names, "isolated scratch workspace" appears only when
+    a confinement root is installed, and the delegation sentence appears only
+    when ``task`` is in the inventory. A session with no local tools gets the
+    bare header: with nothing to confuse the remote computer with, there is
+    no topology to state (see ``REMOTE_TOPOLOGY_NOTE`` for the why).
+    """
+
+    header = PROMPT_HEADER.format(tool_name=tool_name)
+    present = set(tool_names)
+    local = [name for name in _LOCAL_REACH_TOOLS if name in present]
+    if not local:
+        return header
+    entry = "typing text, or `paste_text`" if surface.paste_text else "typing text"
+    delegation = (
+        " Agents you delegate to run in that same workspace and cannot reach the "
+        "remote computer."
+        if "task" in present
+        else ""
+    )
+    return header + REMOTE_TOPOLOGY_NOTE.format(
+        local_tools=", ".join(f"`{name}`" for name in local),
+        workspace="an isolated scratch workspace" if confined else "a local workspace",
+        tool_name=tool_name,
+        entry=entry,
+        delegation=delegation,
+    )
+
 
 #: The sentence a terminal batch's tool result carries. Stated as the reason
 #: the episode is ending rather than as a refusal, because a ``finish`` batch
@@ -266,6 +356,34 @@ RECOVERY_AFTER_AMBIGUOUS_DELIVERY = (
 #: flapping guest spend an entire run; the third ambiguous delivery in one
 #: episode poisons and ends exactly as it did before the probe existed.
 AMBIGUOUS_REBIND_BUDGET = 2
+
+#: The sentence a DECLARED not-applied failure delivers after its re-bind
+#: (``ActionNotAppliedError`` -> ``phase == "not_applied"``). The adapter
+#: proved no input of the batch reached the environment, so -- unlike both
+#: siblings above -- this one may say the batch did NOT apply and that
+#: re-issuing it is safe. It still points at the current screen: the batch
+#: was decided against a screen that may since have moved on its own.
+RECOVERY_AFTER_NOT_APPLIED = (
+    "Not applied: the environment could not accept your last batch, and none of "
+    "its actions were applied. The episode continues. A fresh read-only capture "
+    "of the current screen follows. You may re-issue the batch; check that screen "
+    "first, since the environment may have changed on its own."
+)
+
+#: How many CONSECUTIVE declared not-applied failures one episode re-binds
+#: before ending, with no successful batch in between (a success resets the
+#: count). A harness RESILIENCE bound, like ``AMBIGUOUS_REBIND_BUDGET``: each
+#: re-bind happens instead of the episode's death on a batch the model already
+#: sent, adds no task and changes no step accounting (the batch's epoch was
+#: charged at admission either way). Three because the measured cause is a
+#: guest control server too slow to answer a pre-action health probe for
+#: ~15 s at a time (OSWorld main16: per-action wall 18-22 s once a terminal
+#: opened), which recovers between batches; a guest that refuses three
+#: batches running is not recovering, and without a bound it would spend the
+#: rest of the step budget on refusals plus one ``observe`` each. The fourth
+#: consecutive not-applied failure ends the episode with a sentence that names
+#: the bound.
+NOT_APPLIED_REBIND_LIMIT = 3
 
 #: The completion challenge's channel sentence -- the ONE part of the shared
 #: challenge text (``provider_client.build_completion_challenge``) that states
@@ -624,11 +742,15 @@ class ObservationRenderer:
         )
         self._turns: list[EpisodeTurn] = []
 
-    def render(self, observation: Observation) -> list[Any]:
+    def render_read_only(self, observation: Observation) -> list[Any]:
+        """Render a capture without attributing unchanged pixels to an action."""
+        return self.render(observation, read_only=True)
+
+    def render(self, observation: Observation, *, read_only: bool = False) -> list[Any]:
         """The observation's content blocks, in the builder's own rendering."""
 
         self._turns.append(EpisodeTurn(observation=observation))
-        self._builder.append_new_turns(self._turns)
+        self._builder.append_new_turns(self._turns, read_only=read_only)
         message = self._builder.messages[-1]
         return list(message.content)
 
@@ -674,6 +796,8 @@ def _bridge_wedge_sentence(
     committed: bool,
     recovery_attempted: bool,
     recover_error: BaseException | None,
+    not_applied: bool = False,
+    not_applied_limit: int | None = None,
 ) -> str:
     """The one sentence a wedge ends with -- model-facing, record and outcome.
 
@@ -685,13 +809,27 @@ def _bridge_wedge_sentence(
     outcome cannot drift into three different stories.
     """
 
-    if recover_error is not None:
+    if not_applied_limit is not None:
+        # Checked FIRST: the cap ends the episode without a re-read, and the
+        # sentence must say the environment kept refusing rather than imply
+        # the batch's state was ambiguous (it was declared not applied).
+        attempted = (
+            f"the environment refused {not_applied_limit + 1} consecutive batches "
+            "without applying any of them, so it is not recovering and the "
+            f"re-bind bound ({not_applied_limit} consecutive) is spent"
+        )
+    elif recover_error is not None:
         attempted = (
             "a re-read of the environment's current observation failed too "
             f"({_bounded_cause(recover_error)})"
         )
     elif recovery_attempted:
         attempted = "the re-read returned no observation"
+    elif not_applied:
+        attempted = (
+            "the batch was declared not applied, but no re-read path is wired "
+            "into this build, so the binding cannot be re-established"
+        )
     elif committed:
         attempted = (
             "no re-read path is wired into this build, so the binding cannot " "be re-established"
@@ -722,6 +860,7 @@ RecordBatch = Callable[[str, Mapping[str, Any]], None]
 #: ``ExecuteResult``.
 ExecuteBatch = Callable[[ActionBatch], Awaitable[Any]]
 
+
 #: The re-bind seam: one bounded attempt to fetch the observation the episode
 #: may continue from, called by the bridge after an execute failure that is
 #: RE-BINDABLE (``_rebindable_failure``: the committed read-back class, or a
@@ -729,7 +868,14 @@ ExecuteBatch = Callable[[ActionBatch], Awaitable[Any]]
 #: call; tests fill it with a fake.
 #: ``None`` means the bridge has no re-read path and a failed execute is
 #: terminal -- legibly (see ``ActionBridge._after_failed_execute``).
-RecoverObservation = Callable[[], Awaitable[Observation]]
+class RecoverObservation(Protocol):
+    """The re-bind seam explicitly distinguishes cached and live reads.
+
+    Only a declared not-applied batch requests ``fresh=True``. Other recovery
+    classes retain their cached binding and exact-equality validation.
+    """
+
+    def __call__(self, *, fresh: bool = False) -> Awaitable[Observation]: ...
 
 
 def _split_ask_delivery(delivery: Any) -> tuple[dict[str, Any] | None, str | None]:
@@ -819,6 +965,9 @@ class ActionBridge:
     #: owns WHEN; the driver owns the RPC. ``None`` degrades a failed execute
     #: to a legible end rather than a silent one.
     recover: RecoverObservation | None = None
+    #: The shared renderer's read-only variant, used only for a fresh recovery:
+    #: unchanged pixels describe a capture, not an action that never happened.
+    render_read_only: Callable[[Observation], list[Any]] | None = None
     #: The task as it was stated -- the reset observation's text -- restated by
     #: the completion challenge (the same source the runner's gate uses).
     instruction: str = ""
@@ -907,6 +1056,11 @@ class ActionBridge:
         #: replaces it, so it is the observation ``_last_shown`` was rendered
         #: from and the one a corrective reply binds to.
         self._last_observation: Observation | None = None
+        #: Declared not-applied failures re-bound since the last successful
+        #: batch; bounded by :data:`NOT_APPLIED_REBIND_LIMIT`. Reset by a
+        #: successful ``execute`` only -- a re-bind of any other class is not
+        #: evidence the environment accepts input again.
+        self._consecutive_not_applied = 0
 
     def arm(self, observation: Observation) -> None:
         """Arm the token with the episode's first observation.
@@ -1625,6 +1779,7 @@ class ActionBridge:
             # NOTE: the epoch was consumed at ADMISSION (above); the old
             # post-success increment that lived here is what made the
             # non-execute output forms uncharged. Do not reintroduce it.
+            self._consecutive_not_applied = 0
             token.record_in_flight(result.observation)
             if self.record is not None:
                 self.record("batch", {"batch": batch, "result": result})
@@ -1676,7 +1831,7 @@ class ActionBridge:
         ONE re-bind through the driver's ``recover`` seam (a read-only fetch of
         the environment's current observation).
 
-        WHICH FAILURES QUALIFY. Three, and the third arrives as the SESSION's
+        WHICH FAILURES QUALIFY. Four, and the last arrives as the SESSION's
         verdict rather than as an error class:
 
         * the adapter declared the batch committed and only the read-back was
@@ -1684,6 +1839,11 @@ class ActionBridge:
         * the worker refused before any adapter code ran
           (``_refused_before_dispatch`` -- ``invalid_state``, the task_077
           wedge): a refusal applied NOTHING, so a read-only re-read is safe;
+        * the adapter declared that NO part of the batch was applied
+          (``_not_applied_failure`` -- ``ActionNotAppliedError``, the OSWorld
+          main16 wedges): the model is told the batch did not run and may be
+          re-issued, bounded by ``NOT_APPLIED_REBIND_LIMIT`` consecutive
+          re-binds with no successful batch between them;
         * ``AmbiguousRebindCleared``: a ``delivery=ambiguous`` execute failure
           that the session's bounded probe of the environment's control server
           CLEARED -- the batch dropped mid-delivery, its effect is UNKNOWN, and
@@ -1733,6 +1893,23 @@ class ActionBridge:
         # ambiguous-delivery clearance. See ``_refused_before_dispatch`` for
         # the accuracy loss the refusal closes.
         committed = _observation_phase_failure(original)
+        not_applied = cleared_error is None and _not_applied_failure(original)
+        if not_applied:
+            # The consecutive bound (``NOT_APPLIED_REBIND_LIMIT``): a guest that
+            # keeps refusing input must not spend the step budget on refusals.
+            # Counted BEFORE the re-read so the cap costs no ``observe``; the
+            # session itself is still usable (the supervisor did not poison),
+            # so scoring the state reached still works after this ending.
+            self._consecutive_not_applied += 1
+            if self._consecutive_not_applied > NOT_APPLIED_REBIND_LIMIT:
+                return self._end_wedged(
+                    error=original,
+                    committed=False,
+                    recovery_attempted=False,
+                    recover_error=None,
+                    not_applied=True,
+                    not_applied_limit=NOT_APPLIED_REBIND_LIMIT,
+                )
         recovery_attempted = recover is not None and (
             cleared_error is not None or _rebindable_failure(original)
         )
@@ -1740,7 +1917,7 @@ class ActionBridge:
         recover_error: Exception | None = None
         if recovery_attempted and recover is not None:
             try:
-                recovered = await recover()
+                recovered = await recover(fresh=True) if not_applied else await recover()
             except Exception as failure:  # noqa: BLE001 - the wedge sentence names it
                 recover_error = failure
         if recovered is not None:
@@ -1751,13 +1928,80 @@ class ActionBridge:
                     attempt=cleared_error.attempt,
                     attempts=cleared_error.attempts,
                 )
+            if not_applied:
+                return self._deliver_not_applied_recovery(error=original, recovered=recovered)
             return self._deliver_recovery(error=original, recovered=recovered)
         return self._end_wedged(
             error=original,
             committed=committed,
             recovery_attempted=recovery_attempted,
             recover_error=recover_error,
+            not_applied=not_applied,
         )
+
+    def _deliver_not_applied_recovery(
+        self, *, error: Exception, recovered: Observation
+    ) -> dict[str, Any]:
+        """Re-arm the token after a DECLARED not-applied batch, and answer.
+
+        The re-arm discipline is ``_deliver_recovery``'s (held in flight,
+        armed by ``fold`` at the turn end, so one-batch-per-turn holds). Only
+        the claim differs, and it is the STRONGEST of the three recovery
+        sentences: the adapter proved nothing was applied, so the model is told
+        the batch did not run and may be re-issued (``RECOVERY_AFTER_NOT_APPLIED``).
+
+        The live capture has a new content-derived observation ID and next
+        sequence, even if the pixels did not move. The shared renderer's
+        read-only variant states identical pixels neutrally rather than
+        attributing them to an action that never ran.
+
+        Its own record kind, ``not_applied_rebind``, keeps these apart from the
+        committed-class ``recovered`` rows in a bundle, with the running
+        consecutive count and its bound.
+        """
+
+        token = self._token
+        if token is not None:
+            token.record_in_flight(recovered)
+        shown_before = self._last_observation
+        content: list[Any] = [
+            *self._pending_ask_delivery,
+            TextContent(text=RECOVERY_AFTER_NOT_APPLIED),
+        ]
+        if shown_before is None or shown_before.observation_id != recovered.observation_id:
+            rendered = (self.render_read_only or self.render)(recovered)
+            self._last_shown = (recovered.observation_id, rendered)
+            self._last_observation = recovered
+            content = [*content, *rendered]
+        if self.record is not None:
+            self.record(
+                "not_applied_rebind",
+                {
+                    "steps": self._steps,
+                    # Charged at admission like every attempted batch; the
+                    # environment refused it, the model still produced it.
+                    "attempted_epoch": True,
+                    "consecutive": self._consecutive_not_applied,
+                    "limit": NOT_APPLIED_REBIND_LIMIT,
+                    "transport_error": _bounded_cause(error, limit=500),
+                    "observation_id": recovered.observation_id,
+                    # This is a new observation binding with no execution
+                    # receipt; retain the full transition for offline audit.
+                    "observation": recovered,
+                },
+            )
+        details: dict[str, Any] = {
+            "recovered": True,
+            "not_applied": True,
+            "observation_id": recovered.observation_id,
+        }
+        if self._pending_ask_receipt is not None:
+            details["ask"] = self._pending_ask_receipt
+        return {
+            "content": content,
+            "is_error": True,
+            "details": details,
+        }
 
     def _deliver_recovery(self, *, error: Exception, recovered: Observation) -> dict[str, Any]:
         """Re-arm the token with the re-bound observation and answer the call.
@@ -1889,6 +2133,8 @@ class ActionBridge:
         committed: bool,
         recovery_attempted: bool,
         recover_error: Exception | None,
+        not_applied: bool = False,
+        not_applied_limit: int | None = None,
     ) -> dict[str, Any]:
         """End the episode: the observation binding cannot be re-established.
 
@@ -1909,6 +2155,8 @@ class ActionBridge:
             committed=committed,
             recovery_attempted=recovery_attempted,
             recover_error=recover_error,
+            not_applied=not_applied,
+            not_applied_limit=not_applied_limit,
         )
         self.end_requested = BRIDGE_WEDGED_TERMINAL
         self.end_diagnostic = sentence
@@ -2064,6 +2312,28 @@ class EpisodeSession:
         """
 
         return session_tool_names(self.session)
+
+    @property
+    def confined(self) -> bool:
+        """Whether the session's local tools actually run under a confinement.
+
+        Read off the SESSION's installed root, never off an argument the arm
+        was handed: confinement has two independent sources -- the session
+        factory installs ``SessionSpec.world_root`` at construction
+        (``session_factory``: ``session_kwargs["confinement_root"]``), and
+        ``open_episode_session`` may install an explicit root afterwards. A
+        valid episode always carries ``world_root``, so deriving this from the
+        optional ``confinement_root`` argument alone understated a world-root-
+        only session as unconfined (PR #2958 review, R1-1). ``getattr`` for the
+        same reason ``open_episode_session`` types the session ``Any``: the
+        root is a concrete ``Session`` member the protocol does not carry.
+        TRUTHINESS, not ``is not None``, to match the enforcement:
+        ``ToolConfinement.from_context`` treats a falsy root (``""``) as
+        unconfined, and the note must never claim an isolation the tools do
+        not enforce.
+        """
+
+        return bool(getattr(self.session, "_confinement_root", None))
 
     async def aclose(self) -> None:
         """Detach the sink, exit the SDK's open context, then the observer.
@@ -2631,6 +2901,7 @@ async def run_session_episode(
             endpoint=endpoint,
             surface=surface,
             render=renderer.render,
+            render_read_only=renderer.render_read_only,
             execute=_make_execute(adapter_session, config, record),
             # The re-bind seam: one read-only ``observe`` after a re-bindable
             # failed execute (see ``_make_recover``).
@@ -2824,7 +3095,18 @@ async def run_session_episode(
             # so rendering again here would append a duplicate turn to the
             # transcript the model is shown.
             text, images = split_prompt_content(bridge.initial_blocks)
-            prompt = PROMPT_HEADER.format(tool_name=declaration.tool_name) + "\n" + text
+            prompt = (
+                render_prompt_header(
+                    tool_name=declaration.tool_name,
+                    surface=surface,
+                    tool_names=tool_names,
+                    # The INSTALLED confinement (see ``EpisodeSession.confined``),
+                    # not this function's optional argument.
+                    confined=handle.confined,
+                )
+                + "\n"
+                + text
+            )
             wall_timer: asyncio.TimerHandle | None = None
 
             def _on_wall() -> None:
@@ -3631,9 +3913,12 @@ def _make_recover(
     a pre-dispatch refusal (``invalid_state``: nothing applied) -- and whose
     configured read-back retries have already run out, so this is NOT a retry
     of that read-back (raising those is a comparability-affecting change, see
-    INFRA.md) but a fresh state read through the read-only ``observe`` method
-    every adapter
-    already answers (``reset_start`` reads observation zero through it). It
+    INFRA.md) but a read through the read-only ``observe`` method every adapter
+    already answers (``reset_start`` reads observation zero through it). Its
+    default returns the last accepted snapshot, preserving existing committed
+    and refusal recovery. ONLY a declared not-applied recovery opts into
+    ``fresh=True``: a live capture whose exact-next sequence and content are
+    validated/adopted by the supervisor, without an action or receipt. It
     re-establishes what the bridge lost: a current observation the token can
     be re-armed with. When it cannot -- the environment is still unable to
     answer, or the read is refused -- the bridge ends the episode with the
@@ -3648,9 +3933,9 @@ def _make_recover(
     on a run that would otherwise have died anyway.
     """
 
-    async def recover() -> Observation:
+    async def recover(*, fresh: bool = False) -> Observation:
         result = await adapter_session.observe(
-            ObserveParams(episode_id=episode_id), timeout=config.step_timeout
+            ObserveParams(episode_id=episode_id, fresh=fresh), timeout=config.step_timeout
         )
         return result.observation
 

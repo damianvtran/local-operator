@@ -1,0 +1,88 @@
+{
+  "schema": 1,
+  "audit_id": "nt25a1",
+  "audit_id_assigned_by": "delegation brief, 2026-10-25",
+  "audit_kind": "independent_current_byte_namespace_audit",
+  "locale": "vi",
+  "namespace": "wire.slash.notifications_page",
+  "audit_date": "2026-10-25",
+  "audited_revision": "27763f663df0da7c849186f1e62e01eb98e3df96",
+  "audited_revision_note": "Working-tree bytes are authoritative and bound by input_hashes; English compared to delegation source hashes at pin 3c16a9e77c63dce7082af6137e151421b6cbf2be.",
+  "attestation_revision": null,
+  "key_count": {
+    "en": 1,
+    "target": 1
+  },
+  "verdict": "changes_requested",
+  "verdict_reason": "The source explicitly says read marks ALL read; dropping tất cả hides the command’s bulk scope. The repair restores that scope and matches Cập nhật terminology while preserving literal read; measured 47 cells within maxCells 50.",
+  "auditor": {
+    "agent": "translation-auditor (audit-vi, lopdev team)",
+    "instance": "cfdff5945838",
+    "session": "cfdff5945838",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host model-switch notice: openai/gpt-6.1-sol after anthropic/claude-opus-5-5 and anthropic/claude-sonnet-5-5 quota failures; substantive audit performed on this fallback.",
+    "date": "2026-10-25",
+    "independence": "Separate auditing agent/context from UI translator tr-vi and L1-core-notify coder; authored none of the translations; did not edit catalogues."
+  },
+  "translator": {
+    "agent": "L1-core-notify coder",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-10-25",
+    "source": "delegation brief"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.json",
+      "sha256": "9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594",
+      "matches_delegation_source_sha256": true
+    },
+    "en_context_sidecar": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.context.json",
+      "sha256": "2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/vi/wire.slash.notifications_page.json",
+      "sha256": "a84c7b4440b03da3cbd8fc81adeac1b400922e122c8b2f25b14570033518f9a2",
+      "matches_current_working_tree": true
+    }
+  },
+  "artifacts": [
+    "audit.log",
+    "report.md",
+    "audit-script.py.txt",
+    "receipt.json"
+  ],
+  "audit_log": {
+    "path": "audit.log",
+    "state": "present",
+    "provenance": "Actual successful command stdout captured by this independent auditor during this audit."
+  },
+  "findings": [
+    {
+      "id": "V3",
+      "key": "wire.slash.notifications_page.help",
+      "severity": "major",
+      "current_text": "Câu hỏi và tin tác nhân; read: đánh dấu đã đọc",
+      "proposed_text": "Câu hỏi, cập nhật; read: đánh dấu tất cả đã đọc",
+      "reason": "The source explicitly says read marks ALL read; dropping tất cả hides the command’s bulk scope. The repair restores that scope and matches Cập nhật terminology while preserving literal read; measured 47 cells within maxCells 50.",
+      "disposition": "unresolved — original coder must remediate"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 1,
+    "blocker": 0,
+    "major": 1,
+    "minor": 0,
+    "nit": 0,
+    "rejected": 0,
+    "findings_total": 1
+  },
+  "limitations": [
+    "LLM judgment; no human native-speaker or rendered-fit claim."
+  ],
+  "reference_hashes": {
+    "glossary": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd",
+    "style_guide": "0a99f5643a262a1c1994f08746fab2473ade5946573eedf20c95107b40b9fa97"
+  }
+}

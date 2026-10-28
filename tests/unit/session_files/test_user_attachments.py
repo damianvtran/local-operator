@@ -1,0 +1,554 @@
+"""The user-attachment inventory: scanner rules and the ``…/user-attachments`` route.
+
+Row shapes are copied from real journals (read 2026-10-27), not invented:
+
+* a durable PDF on a user row (session ``519d73620f7b``): ``{mime_type, filename, path,
+  stored_path, bytes, injection, type: "document", attachment}``;
+* a durable pasted screenshot: ``{attachment, mime_type}`` - NO ``type`` key, because the
+  encoder dumps with ``exclude_defaults``;
+* an inline screenshot row (written without a store): ``{data, mime_type}``;
+* the legacy document shape ``{filename, mime_type, attachment}`` with no ``type``.
+
+The route is driven through the REAL router, admission (``files_target``) and failure ladder,
+like ``test_route.py``.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+import pytest
+import pytest_asyncio
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+
+from local_operator.config import ConfigManager
+from local_operator.server import features
+from local_operator.server.routes import desktop_session_files, desktop_sessions
+from local_operator.server.utils.desktop_sessions import DesktopSessions
+from local_operator.session.attachments import store_for_transcript_dir
+from local_operator.session.user_attachments import list_user_attachments
+
+from ._fixtures import SESSION, png, write_journal
+
+TOKEN = "user-attachments-test-token"
+URL = f"/v1/desktop/sessions/{SESSION}/user-attachments"
+
+
+def _user(row_id: str, ts: float, blocks: list[Any], **payload: Any) -> dict[str, Any]:
+    return {
+        "id": row_id,
+        "ts": ts,
+        "type": "message",
+        "payload": {"kind": "message", "role": "user", "content": blocks, **payload},
+    }
+
+
+def _session(root: Path) -> Path:
+    directory = root / "sessions" / SESSION
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(root.parent)}))
+    return directory
+
+
+def _stored(directory: Path, raw: bytes, mime: str) -> tuple[str, Path]:
+    ref = store_for_transcript_dir(directory).put_bytes(raw, mime)
+    assert ref is not None
+    return ref.digest, store_for_transcript_dir(directory).path_for(ref.digest)
+
+
+def _seed(root: Path) -> tuple[Path, dict[str, Any]]:
+    """One journal holding every real shape plus the rows that must NOT be listed."""
+    directory = _session(root)
+    pdf_digest, pdf_store = _stored(directory, b"%PDF-1.7 hello", "application/pdf")
+    shot_digest, _ = _stored(directory, png(seed=3), "image/png")
+    inline_retained = png(seed=5)
+    retained_digest, _ = _stored(directory, inline_retained, "image/png")
+    origin = root.parent / "Downloads" / "IP Assignment.pdf"
+    rows = [
+        {"id": "c1", "ts": 1.0, "type": "custom", "payload": {"custom_type": "selected_model"}},
+        _user(
+            "u1",
+            10.0,
+            [
+                {"text": "see attached"},
+                {
+                    "mime_type": "application/pdf",
+                    "filename": "IP Assignment.pdf",
+                    "path": str(origin),
+                    "stored_path": str(pdf_store),
+                    "bytes": 14,
+                    "injection": "native",
+                    "type": "document",
+                    "attachment": pdf_digest,
+                },
+                {"attachment": shot_digest, "mime_type": "image/png"},
+                {
+                    "kind": "image",
+                    "attachment": shot_digest,
+                    "content_type": "image/png",
+                    "name": "pasted-kind.png",
+                },
+            ],
+            input_mode="typed",
+        ),
+        # An assistant's image and a tool's artifact are agent output, never user attachments.
+        {
+            "id": "a1",
+            "ts": 11.0,
+            "type": "message",
+            "payload": {"role": "assistant", "content": [{"attachment": shot_digest}]},
+        },
+        {
+            "id": "t1",
+            "ts": 12.0,
+            "type": "message",
+            "payload": {
+                "role": "tool",
+                "content": [{"kind": "image", "attachment": shot_digest, "content_type": "x"}],
+            },
+        },
+        # A harness-minted user row: never the person's attachment.
+        _user(
+            "h1",
+            13.0,
+            [{"attachment": shot_digest, "mime_type": "image/png"}],
+            provider_payload={"harness_injected": True},
+        ),
+        # Legacy document shape, store copy gone; inline screenshot whose bytes ARE retained;
+        # inline screenshot with a defaulted (absent) mime whose bytes are NOT retained.
+        _user(
+            "u2",
+            20.0,
+            [
+                {"filename": "old.txt", "mime_type": "text/plain", "attachment": "0" * 32},
+                {"data": base64.b64encode(inline_retained).decode(), "mime_type": "image/png"},
+                {"data": base64.b64encode(png(seed=9)).decode()},
+                "not-a-block",
+                {"type": "document"},  # malformed: no filename/mime
+            ],
+        ),
+    ]
+    write_journal(directory, rows)
+    with (directory / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write('{"role":"user", this is not json\n')
+    return directory, {"pdf": pdf_digest, "shot": shot_digest, "retained": retained_digest}
+
+
+@pytest.fixture
+def root(tmp_path: Path) -> Path:
+    cfg = tmp_path / "cfg"
+    cfg.mkdir(exist_ok=True)
+    return cfg
+
+
+def test_lists_user_documents_and_images_in_send_order(root: Path) -> None:
+    directory, digests = _seed(root)
+    listing = list_user_attachments(directory)
+    items = listing["items"]
+    assert listing["truncated"] is False
+    assert [(i["message_id"], i["index"], i["kind"]) for i in items] == [
+        ("u1", 1, "document"),
+        ("u1", 2, "image"),
+        ("u1", 3, "image"),
+        ("u2", 0, "document"),
+        ("u2", 1, "image"),
+        ("u2", 2, "image"),
+        ("u2", 4, "document"),
+    ]
+    pdf, shot, kind_image, legacy, inline_kept, inline_lost, malformed = items
+    assert pdf["attachment"] == digests["pdf"] and pdf["filename"] == "IP Assignment.pdf"
+    assert pdf["bytes"] == 14 and pdf["injection"] == "native" and pdf["stored"] is True
+    assert pdf["path"].endswith("IP Assignment.pdf") and pdf["ts"] == 10.0
+    # The origin was never created on disk: the retained copy is the only one left.
+    assert pdf["exists"] is False
+    assert shot["exists"] is None, "a pasted screenshot has no origin to be gone"
+    assert shot["attachment"] == digests["shot"] and shot["stored"] is True
+    assert shot["filename"] is None and shot["mime_type"] == "image/png"
+    assert kind_image["filename"] == "pasted-kind.png"
+    assert kind_image["attachment"] == digests["shot"] and kind_image["stored"] is True
+    # A durable image row records no size; the retained copy's length stands in for it.
+    assert shot["bytes"] == len(png(seed=3))
+    # Legacy: digest on the row, store copy missing -> stored False, path derived from digest.
+    assert legacy["filename"] == "old.txt" and legacy["stored"] is False
+    assert legacy["stored_path"].endswith("0" * 32 + ".bin")
+    # Inline bytes the store holds resolve to their digest (read-only lookup) ...
+    assert inline_kept["attachment"] == digests["retained"] and inline_kept["stored"] is True
+    # ... and inline bytes it does not hold are reported without a digest, never inlined.
+    assert inline_lost["attachment"] is None and inline_lost["stored"] is False
+    assert inline_lost["mime_type"] == "image/png" and inline_lost["bytes"] > 0
+    assert malformed["filename"] is None
+    assert all("data" not in item for item in items), "metadata only - no base64 on the wire"
+
+
+def test_read_path_never_writes_the_store(root: Path) -> None:
+    directory, _ = _seed(root)
+    store_dir = store_for_transcript_dir(directory).root
+    before = sorted(p.name for p in store_dir.iterdir())
+    list_user_attachments(directory)
+    assert sorted(p.name for p in store_dir.iterdir()) == before
+
+
+def test_store_path_from_another_device_does_not_hide_local_bytes(root: Path) -> None:
+    directory = _session(root)
+    digest, _ = _stored(directory, b"synced bytes", "text/plain")
+    write_journal(
+        directory,
+        [
+            _user(
+                "u1",
+                1.0,
+                [
+                    {
+                        "type": "document",
+                        "filename": "synced.txt",
+                        "attachment": digest,
+                        "stored_path": f"/Users/other/.local-operator/attachments/{digest}.bin",
+                    }
+                ],
+            )
+        ],
+    )
+    item = list_user_attachments(directory)["items"][0]
+    assert item["stored"] is True
+    assert item["stored_path"] == str(store_for_transcript_dir(directory).path_for(digest))
+
+
+def test_user_row_probe_accepts_json_whitespace(root: Path) -> None:
+    directory = _session(root)
+    row = _user(
+        "u1",
+        1.0,
+        [{"filename": "old.txt", "mime_type": "text/plain", "attachment": "0" * 32}],
+    )
+    row["payload"]["content"][0]["path"] = str(directory / "old.txt")
+    # Default json.dumps puts spaces after separators; the probe must accept arbitrary JSON
+    # whitespace around the role field, just as the session-files scanner does.
+    (directory / "transcript.jsonl").write_text(json.dumps(row) + "\n")
+    assert [item["filename"] for item in list_user_attachments(directory)["items"]] == ["old.txt"]
+
+
+def test_inventory_cache_invalidates_when_journal_changes(root: Path) -> None:
+    directory = _session(root)
+    row = _user(
+        "u1",
+        1.0,
+        [{"filename": "old.txt", "mime_type": "text/plain", "attachment": "0" * 32}],
+    )
+    write_journal(directory, [row])
+    assert len(list_user_attachments(directory)["items"]) == 1
+    write_journal(
+        directory,
+        [
+            row,
+            _user(
+                "u2",
+                2.0,
+                [{"filename": "new.txt", "attachment": "1" * 32}],
+            ),
+        ],
+    )
+    assert [item["filename"] for item in list_user_attachments(directory)["items"]] == [
+        "old.txt",
+        "new.txt",
+    ]
+
+
+def test_no_journal_is_an_empty_list(root: Path) -> None:
+    assert list_user_attachments(_session(root)) == {"items": [], "truncated": False}
+
+
+def test_cap_reports_truncation(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from local_operator.session import user_attachments
+
+    directory, _ = _seed(root)
+    monkeypatch.setattr(user_attachments, "MAX_ITEMS", 2)
+    listing = list_user_attachments(directory)
+    assert len(listing["items"]) == 2 and listing["truncated"] is True
+
+
+def test_capability_is_advertised() -> None:
+    assert features.static_feature_flags()["session_attachments"] == 1
+
+
+@pytest_asyncio.fixture
+async def api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    for name in list(os.environ):
+        if name.startswith(("CMUX_", "LOP_")):
+            monkeypatch.delenv(name)
+    cfg = tmp_path / "cfg"
+    cfg.mkdir(exist_ok=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(cfg)
+    app.state.desktop_sessions = DesktopSessions(cfg)
+    app.include_router(desktop_session_files.router)
+    app.include_router(desktop_sessions.router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    ) as client:
+        yield client, cfg
+    await app.state.desktop_sessions.close()
+
+
+@pytest.mark.asyncio
+async def test_route_lists_items_and_requires_the_bearer(api) -> None:
+    client, cfg = api
+    _, digests = _seed(cfg)
+    response = await client.get(URL)
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["state"] == "ready" and result["truncated"] is False
+    assert [i["attachment"] for i in result["items"][:2]] == [digests["pdf"], digests["shot"]]
+    assert "data" not in response.text
+    unauthorised = await client.get(URL, headers={"Authorization": "Bearer wrong"})
+    assert unauthorised.status_code in (401, 403)
+
+
+@pytest.mark.asyncio
+async def test_route_unknown_and_malformed_ids(api) -> None:
+    client, _ = api
+    assert (
+        await client.get("/v1/desktop/sessions/aaaaaaaaaaaa/user-attachments")
+    ).status_code == 404
+    assert (await client.get("/v1/desktop/sessions/NOT-AN-ID/user-attachments")).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_route_undecodable_archive_is_unavailable_not_empty(
+    api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.session import compression, user_attachments
+
+    client, cfg = api
+    _seed(cfg)
+
+    def boom(_directory: Path, **_kwargs: Any) -> dict[str, Any]:
+        raise compression.ArchiveUnavailable("zstd missing")
+
+    monkeypatch.setattr(user_attachments, "list_user_attachments", boom)
+    result = (await client.get(URL)).json()["result"]
+    assert result == {"state": "unavailable", "items": [], "truncated": False}
+
+
+@pytest.mark.asyncio
+async def test_materialise_copies_a_listed_attachment_and_refuses_others(
+    api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Defensive: the hardened copy needs dir_fd support. Lift the platform gate in this unit
+    # fixture exactly as test_route.py does, independent of the host interpreter's feature set.
+    monkeypatch.setattr(
+        os, "supports_dir_fd", os.supports_dir_fd | {os.open, os.mkdir, os.unlink, os.stat}
+    )
+    client, cfg = api
+    directory, digests = _seed(cfg)
+    (directory / "scratchpad").mkdir(exist_ok=True)
+    base = f"/v1/desktop/sessions/{SESSION}/user-attachments"
+    ok = await client.post(f"{base}/{digests['pdf']}/materialise")
+    assert ok.status_code == 200, ok.text
+    receipt = ok.json()["result"]
+    assert receipt["name"] == "IP Assignment.pdf"
+    assert Path(receipt["path"]).read_bytes() == b"%PDF-1.7 hello"
+    again = (await client.post(f"{base}/{digests['pdf']}/materialise")).json()["result"]
+    assert again["path"] == receipt["path"] and again["created"] is False
+    # Listed, but the store copy is gone -> 410.
+    gone = await client.post(f"{base}/{'0' * 32}/materialise")
+    assert gone.status_code == 410
+    # In the store, but never attached to this conversation -> 404 (the store is shared).
+    foreign, _ = _stored(directory, b"someone else's bytes", "text/plain")
+    assert (await client.post(f"{base}/{foreign}/materialise")).status_code == 404
+    assert (await client.post(f"{base}/not-a-digest/materialise")).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_listing_restats_origin_and_store_copy_without_a_journal_change(api) -> None:
+    """R2-1 (PR #3042 round 2): a moved/deleted file must SAY SO in a settled conversation.
+
+    The inventory cache is keyed on the journal's identity, and nothing is appended to the
+    journal when the person deletes the original or the store is pruned. So ``exists`` and
+    ``stored`` must be re-stat'd on every listing, never served from the cached scan.
+    """
+    client, cfg = api
+    directory = _session(cfg)
+    digest, store_copy = _stored(directory, b"quarterly numbers", "text/plain")
+    origin = cfg.parent / "Downloads" / "report.txt"
+    origin.parent.mkdir(parents=True, exist_ok=True)
+    origin.write_bytes(b"quarterly numbers")
+    write_journal(
+        directory,
+        [
+            _user(
+                "u1",
+                1.0,
+                [
+                    {
+                        "type": "document",
+                        "filename": "report.txt",
+                        "mime_type": "text/plain",
+                        "path": str(origin),
+                        "attachment": digest,
+                    }
+                ],
+            )
+        ],
+    )
+    journal = directory / "transcript.jsonl"
+    before = (await client.get(URL)).json()["result"]["items"][0]
+    assert (before["exists"], before["stored"]) == (True, True)
+    identity = journal.stat()
+    origin.unlink()
+    store_copy.unlink()
+    # Precondition of the regression: the journal is untouched, so the cache key still hits.
+    after_stat = journal.stat()
+    assert (after_stat.st_ino, after_stat.st_size, after_stat.st_mtime_ns) == (
+        identity.st_ino,
+        identity.st_size,
+        identity.st_mtime_ns,
+    )
+    after = (await client.get(URL)).json()["result"]["items"][0]
+    assert (after["exists"], after["stored"]) == (False, False)
+    # Each answer is freshly built: mutating one listing cannot leak into the next (R2-3).
+    first = list_user_attachments(directory)
+    first["items"][0]["filename"] = "mutated"
+    first["items"].clear()
+    assert list_user_attachments(directory)["items"][0]["filename"] == "report.txt"
+
+
+def _document(digest: str, filename: str, mime: str, path: Path | None) -> dict[str, Any]:
+    block: dict[str, Any] = {
+        "type": "document",
+        "filename": filename,
+        "mime_type": mime,
+        "attachment": digest,
+    }
+    if path is not None:
+        block["path"] = str(path)
+    return block
+
+
+def _generated(directory: Path) -> list[str]:
+    generated = directory / "scratchpad" / "generated"
+    return sorted(p.name for p in generated.iterdir()) if generated.is_dir() else []
+
+
+@pytest.mark.asyncio
+async def test_sensitive_attachments_are_listed_but_never_materialised(
+    api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q1 (PR #3042 QA round 3): a credential the person attached stays LISTED, never copied.
+
+    Before the fix the route listed ``~/.ssh/id_rsa`` and ``~/proj/.env`` and materialised
+    them as ``id_rsa.bin`` and ``env.txt`` - the second a name no denylist rule recognises,
+    so the copy laundered the secret into an innocuous scratchpad file.
+    """
+    monkeypatch.setattr(
+        os, "supports_dir_fd", os.supports_dir_fd | {os.open, os.mkdir, os.unlink, os.stat}
+    )
+    client, cfg = api
+    directory = _session(cfg)
+    home = cfg.parent / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / "proj").mkdir(parents=True)
+    key_path = home / ".ssh" / "id_rsa"
+    key_path.write_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----")
+    env_path = home / "proj" / ".env"
+    env_path.write_bytes(b"API_KEY=hunter2")
+    key, _ = _stored(directory, key_path.read_bytes(), "application/octet-stream")
+    env, _ = _stored(directory, env_path.read_bytes(), "text/plain")
+    pdf, _ = _stored(directory, b"%PDF-1.7 contract", "application/pdf")
+    # No origin path at all (a synced or pasted row): only the NAME can deny it, and the old
+    # sanitiser rewrote ``.npmrc`` to ``npmrc.txt``.
+    npmrc, _ = _stored(directory, b"//registry/:_authToken=x", "text/plain")
+    # A harmless name over a denied ORIGIN directory: only the path can deny it.
+    aws, _ = _stored(directory, b"[default]", "text/plain")
+    write_journal(
+        directory,
+        [
+            _user(
+                "u1",
+                1.0,
+                [
+                    _document(key, "id_rsa", "application/octet-stream", key_path),
+                    _document(env, ".env", "text/plain", env_path),
+                    _document(pdf, "Contract.pdf", "application/pdf", home / "Contract.pdf"),
+                    _document(npmrc, ".npmrc", "text/plain", None),
+                    _document(aws, "notes.txt", "text/plain", home / ".aws" / "notes.txt"),
+                ],
+            ),
+            # The SAME bytes as the .env, re-attached under an innocent name: a digest-addressed
+            # materialise must not be able to launder it through the second row.
+            _user("u2", 2.0, [_document(env, "notes.txt", "text/plain", None)]),
+        ],
+    )
+    items = (await client.get(URL)).json()["result"]["items"]
+    flags = [(i["filename"], i["materialisable"]) for i in items]
+    assert flags == [
+        ("id_rsa", False),
+        (".env", False),
+        ("Contract.pdf", True),
+        (".npmrc", False),
+        ("notes.txt", False),
+        ("notes.txt", False),
+    ]
+    # Listing semantics from round 2 are untouched: the origin is stat'd per call.
+    assert [i["exists"] for i in items[:2]] == [True, True]
+    assert all(i["stored"] for i in items)
+
+    base = f"/v1/desktop/sessions/{SESSION}/user-attachments"
+    for digest in (key, env, npmrc, aws):
+        refused = await client.post(f"{base}/{digest}/materialise")
+        assert refused.status_code == 404, refused.text
+        assert refused.json()["detail"]["code"] == "session_files_file_not_found"
+        assert _generated(directory) == [], "a refused attachment must write NOTHING"
+
+    # Control: an ordinary PDF still materialises.
+    receipt = await client.post(f"{base}/{pdf}/materialise")
+    assert receipt.status_code == 200, receipt.text
+    assert _generated(directory) == ["Contract.pdf"]
+
+
+@pytest.mark.asyncio
+async def test_sensitive_refusal_reads_no_bytes(api, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The deny gate runs BEFORE the store is read: a refusal never touches the bytes."""
+    from local_operator.session.attachments import AttachmentStore
+
+    client, cfg = api
+    directory = _session(cfg)
+    env, _ = _stored(directory, b"SECRET=1", "text/plain")
+    write_journal(directory, [_user("u1", 1.0, [_document(env, ".env", "text/plain", None)])])
+    reads: list[str] = []
+    original = AttachmentStore.get_bytes
+
+    def spy(self: AttachmentStore, digest: str):
+        reads.append(digest)
+        return original(self, digest)
+
+    monkeypatch.setattr(AttachmentStore, "get_bytes", spy)
+    refused = await client.post(
+        f"/v1/desktop/sessions/{SESSION}/user-attachments/{env}/materialise"
+    )
+    assert refused.status_code == 404
+    assert reads == []
+    assert _generated(directory) == []
+
+
+def test_sanitiser_cannot_launder_a_credential_name() -> None:
+    """The copy name of a credential-shaped original stays credential-shaped (Q1).
+
+    ``attachment_denied`` judges the ORIGINAL first, so this is defence in depth: even a
+    future caller that forgot the gate would write a name the denylist still recognises.
+    """
+    from local_operator.session_files import service
+    from local_operator.supplements import denylist
+
+    for name, mime in ((".env", "text/plain"), (".npmrc", "text/plain"), (".netrc", None)):
+        copy = service.sanitise_name(name, "d" * 32, mime)
+        assert denylist.is_sensitive("/" + copy), (name, copy)
+    # Ordinary dotfiles keep the established behaviour.
+    assert service.sanitise_name(".hidden.png", "d" * 32, "image/png") == "hidden.png"

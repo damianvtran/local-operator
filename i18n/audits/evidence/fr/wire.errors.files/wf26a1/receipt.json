@@ -1,0 +1,14 @@
+{
+ "schema": 1,
+ "audit_id": "wf26a1",
+ "locale": "fr",
+ "namespace": "wire.errors.files",
+ "record": "i18n/audits/evidence/fr/wire.errors.files/wf26a1/record.json",
+ "provenance": "Bundle written by the auditing session 2674212bee8a (agent i18n-auditor, model route radient/auto) on 2026-10-26. audit.log is the run's own command output; verify_wire_audit.py.txt is the read-only script that produced its mechanical section.",
+ "hashes": {
+  "record.json": "d3db063fb46f1a8ea513006fef3a5bc16a5517c20a571474c25ca1f7a2f68927",
+  "report.md": "291518e6e5adf0ab5ea51f546198327c33a7604ad3a8cfde9b28c6ac7c15d2d6",
+  "audit.log": "5ca115d610314b0a7789817a8a54a8bc379742d1899620c523cce258389cc6c9",
+  "verify_wire_audit.py.txt": "773456589de5bb9aa3616027fbb5448fe425933ce5c2d9bbfa03ae04c3006488"
+ }
+}

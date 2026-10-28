@@ -5,7 +5,7 @@
 // catalogue load/error paths. The pure partition itself is covered by
 // `lib/session-grouping.test.ts`; these tests prove the screen wires it to the
 // relay capability, the local preference and the live rows without writing.
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render as renderView, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionListScreen } from "./screens/session-list";
 import { SessionGroupToggle } from "./components/session-group-toggle";
@@ -79,12 +79,12 @@ function row(
 
 function headings(): string[] {
 	return screen
-		.getAllByRole("heading", { level: 2 })
+		.getAllByRole("heading", { level: 2, hidden: true })
 		.map((heading) => heading.textContent ?? "");
 }
 
 function section(name: string): HTMLElement {
-	const heading = screen.getByRole("heading", { name, level: 2 });
+	const heading = screen.getByRole("heading", { name, level: 2, hidden: true });
 	return heading.closest("section") as HTMLElement;
 }
 
@@ -93,12 +93,13 @@ function sectionRows(name: string): string[] {
 	   carries the ★ mark and the tag line, which are not what these assertions
 	   are about. */
 	return within(section(name))
-		.getAllByRole("button")
+		.getAllByRole("button", { hidden: true }).filter(button => button.hasAttribute("aria-haspopup"))
 		.map((button) => button.querySelector("span.flex-1")?.textContent ?? "");
 }
 
 function toggle(): HTMLElement {
-	return screen.getByRole("button", { name: "Group by tags" });
+	openAppearance();
+	return screen.getByRole("button", { name: "Group conversations by tag" });
 }
 
 async function flush(): Promise<void> {
@@ -125,7 +126,7 @@ describe("the capability gate", () => {
 		capabilities = null;
 		sessionList = [row("a", { primary: "work" })];
 		render(<SessionListScreen />);
-		expect(screen.queryByRole("button", { name: "Group by tags" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Group conversations by tag" })).toBeNull();
 		expect(headings()).not.toContain("Work");
 		expect(getTagsMock).not.toHaveBeenCalled();
 	});
@@ -134,7 +135,7 @@ describe("the capability gate", () => {
 		capabilities = { session_tags: { available: false } };
 		sessionList = [row("a", { primary: "work" })];
 		render(<SessionListScreen />);
-		expect(screen.queryByRole("button", { name: "Group by tags" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Group conversations by tag" })).toBeNull();
 		expect(headings()).not.toContain("Work");
 	});
 
@@ -143,7 +144,7 @@ describe("the capability gate", () => {
 		capabilities = null;
 		sessionList = [row("a", { primary: "work" })];
 		render(<SessionListScreen />);
-		expect(screen.queryByRole("button", { name: "Group by tags" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Group conversations by tag" })).toBeNull();
 		expect(headings()).not.toContain("Work");
 		expect(getTagsMock).not.toHaveBeenCalled();
 	});
@@ -159,15 +160,15 @@ describe("the preference", () => {
 		   1, D1/U1): the words no longer change, so the class pair is what a reader
 		   actually sees. */
 		expect(button.getAttribute("aria-pressed")).toBe("false");
-		expect(button.textContent).toBe("group by tags");
-		expect(button.className).toContain("border-control");
+		expect(button.textContent).toBe("Group conversations by tag");
+		expect(button.className).toContain("bg-surface");
 		expect(button.className).not.toContain("border-accent");
 
 		fireEvent.click(button);
 		expect(localStorage.getItem(KEY)).toBe("1");
 		expect(toggle().getAttribute("aria-pressed")).toBe("true");
-		expect(toggle().textContent).toBe("group by tags");
-		expect(toggle().className).toContain("border-accent");
+		expect(toggle().textContent).toBe("Group conversations by tag");
+		expect(toggle().className).not.toContain("border-accent");
 		expect(toggle().className).toContain("bg-accent-wash");
 		expect(toggle().className).toContain("text-accent");
 
@@ -182,7 +183,7 @@ describe("the preference", () => {
 		capabilities = { session_tags: { available: true } };
 		sessionList = [row("a", { primary: "work" })];
 		render(<SessionListScreen />);
-		expect(await screen.findByRole("heading", { name: "Work" })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Work", hidden: true })).toBeTruthy();
 		expect(toggle().getAttribute("aria-pressed")).toBe("true");
 	});
 });
@@ -201,7 +202,7 @@ describe("grouped rendering", () => {
 			row("home-a", { primary: "home" }),
 		];
 		render(<SessionListScreen />);
-		await screen.findByRole("heading", { name: "Research" });
+		await screen.findByRole("heading", { name: "Research", hidden: true });
 		expect(headings()).toEqual(["Research", "Home", "Work"]);
 		expect(sectionRows("Work")).toEqual(["work-b", "work-a"]);
 	});
@@ -213,7 +214,7 @@ describe("grouped rendering", () => {
 			row("none", { primary: null }),
 		];
 		render(<SessionListScreen />);
-		await screen.findByRole("heading", { name: "Work" });
+		await screen.findByRole("heading", { name: "Work", hidden: true });
 		expect(headings()).toEqual(["Work", "Untagged"]);
 		expect(sectionRows("Untagged")).toEqual(["gone", "none"]);
 	});
@@ -224,9 +225,9 @@ describe("grouped rendering", () => {
 			row("a", { primary: "research" }),
 		];
 		render(<SessionListScreen />);
-		await screen.findByRole("heading", { name: "Research" });
-		expect(headings()).toEqual(["★ Pinned", "Research"]);
-		expect(sectionRows("★ Pinned")).toEqual(["pin"]);
+		await screen.findByRole("heading", { name: "Research", hidden: true });
+		expect(headings()).toEqual(["Pinned", "Research"]);
+		expect(sectionRows("Pinned")).toEqual(["pin"]);
 		expect(sectionRows("Research")).toEqual(["a"]);
 	});
 
@@ -236,25 +237,27 @@ describe("grouped rendering", () => {
 			row("beta", { primary: "work", conversation_name: "Beta" }),
 		];
 		render(<SessionListScreen />);
-		await screen.findByRole("heading", { name: "Research" });
+		await screen.findByRole("heading", { name: "Research", hidden: true });
 		expect(screen.queryByText("grouping paused while searching")).toBeNull();
-		const input = screen.getByPlaceholderText("Search conversations…");
+		const input = openSearch();
 
 		fireEvent.change(input, { target: { value: "alpha" } });
-		expect(headings()).toEqual(["Active Sessions"]);
-		expect(screen.queryByRole("heading", { name: "Research" })).toBeNull();
+		expect(headings()).toEqual(["Active"]);
+		expect(screen.queryByRole("heading", { name: "Research", hidden: true })).toBeNull();
 		expect(screen.getByRole("button", { name: /Alpha/ })).toBeTruthy();
 		/* THE PREFERENCE SURVIVES THE SEARCH (round 1, U2/Q-2): a hint explains the
 		   flat list, and the toggle keeps saying it is on rather than flipping
 		   itself off behind the reader's back. It stays a working control. */
+		openAppearance();
 		expect(screen.getByText("grouping paused while searching").getAttribute("role")).toBe(
 			"status",
 		);
 		expect(toggle().getAttribute("aria-pressed")).toBe("true");
 		expect((toggle() as HTMLButtonElement).disabled).toBe(false);
 
+		fireEvent.click(screen.getByRole("button", { name: "close sheet" }));
 		fireEvent.change(input, { target: { value: "" } });
-		expect(await screen.findByRole("heading", { name: "Research" })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Research", hidden: true })).toBeTruthy();
 		expect(screen.queryByText("grouping paused while searching")).toBeNull();
 	});
 
@@ -266,19 +269,19 @@ describe("grouped rendering", () => {
 		render(<SessionListScreen />);
 		await waitFor(() => expect(getTagsMock).toHaveBeenCalled());
 		await flush();
-		expect(headings()).toEqual(["Active Sessions"]);
+		expect(headings()).toEqual(["Active"]);
 		expect(screen.queryByRole("heading", { name: "Untagged" })).toBeNull();
 	});
 
 	it("regroups live when a row's primary changes", async () => {
 		sessionList = [row("a", { primary: "research" })];
 		const view = render(<SessionListScreen />);
-		await screen.findByRole("heading", { name: "Research" });
+		await screen.findByRole("heading", { name: "Research", hidden: true });
 
 		sessionList = [row("a", { primary: "work" })];
 		view.rerender(<SessionListScreen />);
-		await screen.findByRole("heading", { name: "Work" });
-		expect(screen.queryByRole("heading", { name: "Research" })).toBeNull();
+		await screen.findByRole("heading", { name: "Work", hidden: true });
+		expect(screen.queryByRole("heading", { name: "Research", hidden: true })).toBeNull();
 		/* ONE catalogue read for the session, not one per list frame. */
 		expect(getTagsMock).toHaveBeenCalledTimes(1);
 	});
@@ -299,8 +302,8 @@ describe("the catalogue", () => {
 		);
 		sessionList = [row("a", { primary: "work" })];
 		render(<SessionListScreen />);
-		expect(headings()).toEqual(["Active Sessions"]);
-		expect(screen.queryByRole("heading", { name: "Work" })).toBeNull();
+		expect(headings()).toEqual(["Active"]);
+		expect(screen.queryByRole("heading", { name: "Work", hidden: true })).toBeNull();
 		/* THE FIRST READ IS VISIBLE WITHOUT BLOCKING (round 1, D3/Q-1): the list is
 		   the flat one it would be without the preference, plus one status line. */
 		expect(screen.getByText("loading tags…").getAttribute("role")).toBe("status");
@@ -308,7 +311,7 @@ describe("the catalogue", () => {
 		await act(async () => {
 			resolveTags({ tags: CATALOGUE });
 		});
-		expect(await screen.findByRole("heading", { name: "Work" })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Work", hidden: true })).toBeTruthy();
 		expect(screen.queryByText("loading tags…")).toBeNull();
 	});
 
@@ -318,7 +321,7 @@ describe("the catalogue", () => {
 		render(<SessionListScreen />);
 		const retry = await screen.findByRole("button", { name: "Retry tags" });
 		expect(retry.textContent).toBe("retry tags");
-		expect(headings()).toEqual(["Active Sessions"]);
+		expect(headings()).toEqual(["Active"]);
 		/* THE FAILURE IS STATED IN PLACE (round 1, D2/Q-2), beside the control that
 		   acts on it, and never as the `loading tags…` line that preceded it. */
 		expect(screen.getByText("could not load tags").getAttribute("role")).toBe("status");
@@ -336,12 +339,12 @@ describe("the catalogue", () => {
 		fireEvent.click(retry);
 		expect(screen.queryByText("could not load tags")).toBeNull();
 		expect(screen.getByText("loading tags…").getAttribute("role")).toBe("status");
-		expect(headings()).toEqual(["Active Sessions"]);
+		expect(headings()).toEqual(["Active"]);
 
 		await act(async () => {
 			resolveRetry({ tags: CATALOGUE });
 		});
-		expect(await screen.findByRole("heading", { name: "Work" })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Work", hidden: true })).toBeTruthy();
 		expect(screen.queryByRole("button", { name: "Retry tags" })).toBeNull();
 		/* Both states are gone: no failure text, and no status line at all. */
 		expect(screen.queryByText("could not load tags")).toBeNull();
@@ -355,7 +358,7 @@ describe("the catalogue", () => {
 		   cache's absence. */
 		sessionList = [row("a", { primary: "work" })];
 		render(<SessionListScreen />);
-		await screen.findByRole("heading", { name: "Work" });
+		await screen.findByRole("heading", { name: "Work", hidden: true });
 
 		vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
 		getTagsMock.mockRejectedValueOnce(new Error("500"));
@@ -364,7 +367,7 @@ describe("the catalogue", () => {
 		});
 		const retry = await screen.findByRole("button", { name: "Retry tags" });
 		expect(screen.getByText("could not load tags")).toBeTruthy();
-		expect(screen.queryByRole("heading", { name: "Work" })).toBeNull();
+		expect(screen.queryByRole("heading", { name: "Work", hidden: true })).toBeNull();
 
 		let resolveRetry: (value: { tags: TagCatalogueEntry[] }) => void = () => {};
 		getTagsMock.mockReturnValue(
@@ -376,13 +379,13 @@ describe("the catalogue", () => {
 		/* The stale groups are back, and the new read is named beside them. */
 		expect(screen.queryByText("could not load tags")).toBeNull();
 		expect(screen.getByText("loading tags…").getAttribute("role")).toBe("status");
-		expect(screen.getByRole("heading", { name: "Work" })).toBeTruthy();
+		expect(screen.getByRole("heading", { name: "Work", hidden: true })).toBeTruthy();
 
 		await act(async () => {
 			resolveRetry({ tags: CATALOGUE });
 		});
 		expect(screen.queryByText("loading tags…")).toBeNull();
-		expect(screen.getByRole("heading", { name: "Work" })).toBeTruthy();
+		expect(screen.getByRole("heading", { name: "Work", hidden: true })).toBeTruthy();
 	});
 
 	it("shows loading tags… while a refocus read runs, keeping the cached groups", async () => {
@@ -390,7 +393,7 @@ describe("the catalogue", () => {
 		   refresh is visible too, without replacing what is already painted. */
 		sessionList = [row("a", { primary: "work" })];
 		render(<SessionListScreen />);
-		await screen.findByRole("heading", { name: "Work" });
+		await screen.findByRole("heading", { name: "Work", hidden: true });
 
 		let resolveRefresh: (value: { tags: TagCatalogueEntry[] }) => void = () => {};
 		getTagsMock.mockReturnValueOnce(
@@ -402,14 +405,14 @@ describe("the catalogue", () => {
 		await act(async () => {
 			document.dispatchEvent(new Event("visibilitychange"));
 		});
-		expect(screen.getByRole("heading", { name: "Work" })).toBeTruthy();
+		expect(screen.getByRole("heading", { name: "Work", hidden: true })).toBeTruthy();
 		expect(screen.getByText("loading tags…").getAttribute("role")).toBe("status");
 
 		await act(async () => {
 			resolveRefresh({ tags: CATALOGUE });
 		});
 		expect(screen.queryByText("loading tags…")).toBeNull();
-		expect(screen.getByRole("heading", { name: "Work" })).toBeTruthy();
+		expect(screen.getByRole("heading", { name: "Work", hidden: true })).toBeTruthy();
 	});
 
 	it("refreshes the catalogue when the page becomes visible, not while hidden", async () => {
@@ -421,7 +424,7 @@ describe("the catalogue", () => {
 			.mockReturnValue("visible");
 		sessionList = [row("a", { primary: "work" })];
 		render(<SessionListScreen />);
-		await screen.findByRole("heading", { name: "Work" });
+		await screen.findByRole("heading", { name: "Work", hidden: true });
 		expect(getTagsMock).toHaveBeenCalledTimes(1);
 
 		visibility.mockReturnValue("hidden");
@@ -469,13 +472,38 @@ describe("no writes", () => {
 		capabilities = { session_tags: { available: true } };
 		sessionList = [row("alpha", { primary: "work", conversation_name: "Alpha" })];
 		render(<SessionListScreen />);
-		await screen.findByRole("heading", { name: "Work" });
+		await screen.findByRole("heading", { name: "Work", hidden: true });
 		fireEvent.click(toggle());
 		fireEvent.click(toggle());
-		fireEvent.change(screen.getByPlaceholderText("Search conversations…"), {
+		fireEvent.change(openSearch(), {
 			target: { value: "alp" },
 		});
 		expect(setSessionTagsMock).not.toHaveBeenCalled();
 		expect(setSessionPinMock).not.toHaveBeenCalled();
 	});
 });
+
+/** Search now expands in the app bar; exercise its real opening control. */
+function openSearch() {
+ const close = screen.queryByRole("button", { name: "close sheet" });
+ if (close) fireEvent.click(close);
+ const field = screen.queryByPlaceholderText("Search conversations…");
+ if (field) return field;
+ fireEvent.click(screen.getByRole("button", { name: "Search", hidden: true }));
+ return screen.getByPlaceholderText("Search conversations…");
+}
+
+/** The preference moved to Appearance; these tests retain their membership,
+ * persistence and read/refusal assertions while using that real two-tap path.
+ * Section assertions read rendered background membership while the modal is
+ * open; modal focus/inert behavior is covered by the primitive tests. */
+function openAppearance() {
+ if (screen.queryByRole("button", { name: "close sheet" })) return;
+ fireEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+ fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
+}
+function render(ui: React.ReactElement) {
+ const view = renderView(ui);
+ if (ui.type === SessionListScreen) openAppearance();
+ return view;
+}

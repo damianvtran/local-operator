@@ -1,0 +1,27 @@
+$ /Users/damian/workspace/repos/lo-notifications-l1/.venv/bin/python /Users/damian/.local-operator/sessions/766adb539e6a/scratchpad/fr-notifications-audit/core-parser-check.py /Users/damian/workspace/repos/lo-notifications-l1 wire.slash.notifications_page
+
+STDERR:
+Traceback (most recent call last):
+  File "/Users/damian/.local-operator/sessions/766adb539e6a/scratchpad/fr-notifications-audit/core-parser-check.py", line 12, in <module>
+    from wcwidth import wcswidth
+ModuleNotFoundError: No module named 'wcwidth'
+
+EXIT 1
+
+$ /Users/damian/workspace/repos/lo-notifications-l1/.venv/bin/python /Users/damian/.local-operator/sessions/766adb539e6a/scratchpad/fr-notifications-audit/core-parser-check.py /Users/damian/workspace/repos/lo-notifications-l1 wire.slash.notifications_page
+HEAD 329b5c581784df1082dbd0630c0f814c7a3c0c8f REQUESTED_PIN 3c16a9e77c63dce7082af6137e151421b6cbf2be
+INPUT en local_operator/i18n/catalogues/en/wire.slash.notifications_page.json 9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594 PIN_BYTE_MATCH PASS
+INPUT fr local_operator/i18n/catalogues/fr/wire.slash.notifications_page.json b7e183e9efbd5a40c1819556433bca46ed5c98029fefd152e6a1352dca4b3952 PIN_BYTE_MATCH PASS
+INPUT context local_operator/i18n/catalogues/en/wire.slash.notifications_page.context.json 2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0 PIN_BYTE_MATCH PASS
+PARSE_ARGS_PASS wire.slash.notifications_page.help ()
+FR_RENDER wire.slash.notifications_page.help Questions et infos des agents ; read : tout lu
+LITERAL_READ PASS CELL_WIDTH 46 MAX 50
+PROPOSED_MINOR_REPAIR Demandes et mises à jour d’agents ; read : tout lu CELL_WIDTH 50 MAX 50
+NEGATIVE_CONTROL malformed_ICU PASS
+NEGATIVE_CONTROL dropped_placeholder PASS
+SUMMARY wire.slash.notifications_page key_count 1 parsed_messages 2 rendered_fr 1 PASS
+LIMITATION source/parser proof only; no browser/native/rendered-fit claim
+
+STDERR:
+
+EXIT 0

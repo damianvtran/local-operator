@@ -1,0 +1,145 @@
+{
+ "schema": 1,
+ "audit_id": "wf26a1",
+ "audit_kind": "independent_current_byte_namespace_audit",
+ "locale": "fr",
+ "namespace": "wire.errors.files",
+ "audit_date": "2026-10-26",
+ "audited_revision": "1c23634501a5a65a610f4d428e27aadcd52e5e09",
+ "audited_revision_note": "The audit ran in the worktree i18n-fr-wire-errors-files at this revision. The target catalogue was an UNTRACKED working-tree file at audit time (git status: '?? local_operator/i18n/catalogues/fr/wire.errors.files.json'), so the audited target bytes are bound by the sha256 in input_hashes.target, not by a commit.",
+ "key_count": {
+  "en": 11,
+  "target": 11
+ },
+ "verdict": "passed",
+ "verdict_reason": "All 11 keys were read against the code that raises them (static.py route handlers and require_desktop) and against shipped fr wire.* terminology. Placeholders, ICU structure, markup, verbatim wire identifiers, JSON shape, key order, NFC and French typography are clean; meaning, polarity and register are preserved; no key is over a width budget (this namespace has no context sidecar, so no budget exists). One MINOR remains: sign_auth names the second credential with a bare borrowed noun ('un bearer'), which is clear to a developer who knows the Authorization scheme and opaque to one who does not. No BLOCKER or MAJOR, so the namespace passes.",
+ "auditor": {
+  "agent": "i18n-auditor (lopdev team)",
+  "session": "2674212bee8a",
+  "model": "radient/auto",
+  "actual_model_source": "this session's own harness header ('Model: radient/auto'); the concrete upstream model behind the auto route is not surfaced to the session, so this record names the route and claims no pinned model. No fallback was requested, configured or used by the auditor; if the router picked a fallback, it did so invisibly and is not claimed here.",
+  "date": "2026-10-26",
+  "independent_from_translator_session": true,
+  "independence": "Independent of the translator: this session did not translate the catalogue and could not edit it. Method independence is real (own reading, own mechanical re-derivation via the real parser/formatter, own comparison against the raising code). Model independence is NOT claimed: the translator's model is unrecorded and the auditor's concrete model is not surfaced."
+ },
+ "translator": {
+  "agent": "unrecorded (the catalogue arrived as untracked working-tree bytes)",
+  "model": "unrecorded",
+  "date": "unrecorded"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/wire.errors.files.json",
+   "sha256": "ccfeb1ea55e0fed62213846cb669f28075b20e91e361f380456772d433983f64"
+  },
+  "context": {
+   "path": null,
+   "sha256": null,
+   "note": "No en context sidecar exists for this namespace (en/wire.errors.files.context.json is absent at this revision), so there are no maxCells/maxChars budgets for these keys and none were applied."
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/fr/wire.errors.files.json",
+   "sha256": "9a2da0e48a75c746889a6ff0fec7d1e6530a68b6ccbc408c1062c6786b4ac6d4",
+   "matches_working_tree_at_audit": true
+  }
+ },
+ "artifacts": [
+  "report.md",
+  "audit.log",
+  "verify_wire_audit.py.txt",
+  "receipt.json"
+ ],
+ "evidence_manifest": {
+  "present": false,
+  "reason": "The fr evidence bundles carry no evidence-manifest.json (fr/relay.approvals/ap25a1 and ap25b1: record.json, report.md, receipt.json plus logs); this bundle mirrors that shape, and receipt.json carries the companion hashes that manifest would otherwise list."
+ },
+ "checks_run": {
+  "catalogue_validator": {
+   "command": "python3 scripts/i18n/check.py --catalogues-only",
+   "internally_ran_with": "python3 scripts/i18n/check.py",
+   "actual_output": "check.py: catalogue checks: 0 problem(s)",
+   "exit_code": 0,
+   "covers": [
+    "every message parses in the shipped ICU subset",
+    "per-namespace key set parity (no key added or dropped)",
+    "argument tuples (name AND kind) equal to en",
+    "plural categories valid for the locale and every branch defines other",
+    "context sidecar only describes existing keys"
+   ]
+  },
+  "full_repo_check": {
+   "command": "python3 scripts/i18n/check.py",
+   "actual_output": "check.py: ok — 184 file(s) scanned, 2258 literal(s) at or below the baseline, catalogues consistent; 37 advisory finding(s) (report-only until activated)",
+   "exit_code": 0,
+   "note": "Nothing failed anywhere, so no unrelated failure needs attributing. The 37 advisory lines are the AST ratchet reporting, outside enforced scope, and none implicates this namespace (advisory lines name .py files, never catalogues)."
+  },
+  "independent_recheck": {
+   "script": "verify_wire_audit.py.txt",
+   "what": "auditor's own re-derivation: argument tuples via runtime.message_arguments, plural_arguments, JSON shape/key-order/indent/trailing-newline, NFC, per-string typography codepoints, homoglyph/bidi scan, en+fr render with sample arguments, and the raising code sites",
+   "exit_code": 0
+  }
+ },
+ "mechanical": {
+  "key_parity": "11 en / 11 fr, no keys added or dropped, key ORDER identical to en",
+  "arguments": {
+   "{mime_type}": "audio_type, html_type, image_type, video_type — simple, name/order/kind identical",
+   "{error}": "heic_conversion, internal_error — simple, identical",
+   "{routes}": "sign_route — simple, identical",
+   "{maximum}": "sign_ttl — simple, identical (must stay bare: the caller passes str(TTL_MAX_S))",
+   "formatter_misuse": "none — no {x, number}/date formatting introduced in fr"
+  },
+  "plurals": "no plural or select in this namespace in either locale; fr one/many/other vacuously satisfied",
+  "markup": "no Rich tags and no backtick spans in en, none added in fr",
+  "verbatim_tokens": "HEIC/HEIF, HTML, UTF-8, path, route, ttl_s, token all preserved",
+  "typography": "U+202F before the colon in all six strings carrying one; no ASCII space and no U+00A0 before : ; ! ?; U+2019 for all three apostrophes, no straight '; sentence case; no BOM; file NFC",
+  "script_scan": "no bidi control characters, no non-Latin homoglyphs",
+  "json": "parses; 2-space indent; exactly one trailing LF"
+ },
+ "findings": [
+  {
+   "id": "F1",
+   "severity": "MINOR",
+   "key": "wire.errors.files.sign_auth",
+   "current": "Un token d’accès local ou un bearer de bureau est requis.",
+   "problem": "The second credential is named by a bare borrowed noun, 'un bearer'. The meaning is correct — the gate really does want 'Authorization: Bearer <posture token>' (desktop.py:244) or a valid X-Local-Token — and 'de bureau' follows shipped fr ('le bureau', 'application de bureau', 'Notifications de bureau'). But 'bearer' is absent from the fr guide's kept-English list and from every shipped fr catalogue, and the English source itself supplies no noun for it. In a 401 whose only job is to say what is missing, a reader who does not know the HTTP auth scheme has nothing to anchor the word to.",
+   "suggested": "Un token d’accès local ou un bearer token de bureau est requis.",
+   "alternative": "Keep the string and record 'bearer' in i18n/style-guides/fr.md's kept-English list — the current text is underspecified, not wrong.",
+   "rationale": "Comprehension polish in an auth refusal; no meaning, polarity, register or terminology conflict; does not block the namespace.",
+   "disposition": "open — reported to the requesting session; not applied by the auditor"
+  }
+ ],
+ "second_pass": {
+  "performed": true,
+  "why": "user-facing error copy is a high-visibility group; the task asked for a second independent pass",
+  "how": "every string was re-read in reverse (what does the French claim, and does the English claim anything more?) and re-checked against the raising condition; typography and argument parity were re-derived from a fresh parse rather than from the first pass's notes",
+  "outcome": "no verdict change, no additional finding, F1 confirmed as the only gap",
+  "independence_caveat": "same agent, same session — this is a second PASS, not an independent second reviewer; no inter-rater agreement is claimed"
+ },
+ "noted_outside_scope": [
+  "The desktop refusal strings that wire.errors.files.sign_auth wraps (local_operator/server/desktop.py:239 and :248) are hard-coded English carrying '# i18n: ignore pairing refusal; client classifies by status, never the body'. They are not this namespace's copy and were not audited; a French desktop user still sees them in logs.",
+  "sign_auth describes the sign endpoint's two accept paths. It reads naturally as 'supply one of these two credentials', which is exactly what the code accepts (X-Local-Token, or the desktop 'Authorization: Bearer' header). No divergence found — recorded because this was the one string where a divergence was plausible."
+ ],
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "blocker": 0,
+  "major": 0,
+  "minor": 1,
+  "nit": 0,
+  "rejected": 0,
+  "findings_total": 1,
+  "finding_ids": [
+   "F1"
+  ]
+ },
+ "ledger_note_suggestion": {
+  "applied": false,
+  "why_not_applied": "the audit task forbids editing i18n/ledger.json; the row is for the implementation session that owns the catalogue",
+  "suggested_note": "Independent fr audit passed: 11 keys, 0 blocker/major, 1 MINOR (sign_auth 'bearer' bare noun, propose 'bearer token'); evidence i18n/audits/evidence/fr/wire.errors.files/wf26a1/record.json"
+ },
+ "limitations": [
+  "LLM audit, not a native-speaker review; the record claims no native review.",
+  "No rendered capture: these strings are JSON error bodies and no surface renders them at a pinned width, so fit is judged from the strings plus the absence of a budget.",
+  "The auditor's concrete model is not surfaced (radient/auto), and the translator's is unrecorded, so model diversity between translator and auditor cannot be shown."
+ ]
+}

@@ -73,10 +73,12 @@ function TodoRow({ t }: { t: TodoItem }) {
 export function TodosPanel({
 	todos,
 	embedded = false,
+	sheet = false,
 	forceCollapsed = false,
 }: {
 	todos: TodoPhase[];
 	embedded?: boolean;
+	sheet?: boolean;
 	/** Held shut while something needs a decision — see the session view's
 	    panel-budget comment (D1). A task list does not outrank a question. */
 	forceCollapsed?: boolean;
@@ -89,6 +91,7 @@ export function TodosPanel({
 		todos.length === 1 && todos[0].name === IMPLICIT_TODO_PHASE;
 	return (
 		<Disclosure
+			bodyOnly={sheet}
 			/* Collapsed by default on the phone: the panel is above the
 			   transcript, and an auto-expanded list pushed the conversation off
 			   screen. The header's count is the at-a-glance signal; tap to work
@@ -156,7 +159,7 @@ export function TodosPanel({
 			   the keyboard is open, and a cap that does not tighten with the column
 			   is not a cap. */}
 			<div
-				style={columnCap(PANEL_FRACTION)}
+				style={sheet ? undefined : columnCap(PANEL_FRACTION)}
 				className="lo-scroll flex flex-col gap-1 overflow-y-auto pb-2"
 			>
 				{headerless

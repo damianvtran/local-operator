@@ -49,6 +49,9 @@ from collections.abc import Collection, Mapping
 #: sessions of EITHER kind; ``lsp`` and ``patience`` by roughly none. ``ask`` is
 #: deliberately NOT here: the ``<interactivity>`` bodies name it as the channel
 #: to the operator.
+# notify deliberately stays published: the completed live deferred pilot
+# repeatedly called todo and falsely claimed delivery with no durable row.
+# Correct reachability is worth its measured 573-billed-token publication cost.
 DEFERRED_TOOLS: frozenset[str] = frozenset(
     {
         "console",

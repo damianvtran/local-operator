@@ -42,6 +42,7 @@ import copy
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 # Release/dispatch must inspect the same event target the build consumes, not
@@ -503,3 +504,83 @@ def test_the_gate_check_would_catch_a_second_publisher_job() -> None:
         "steps": [{"uses": "softprops/action-gh-release@v3"}],
     }
     assert "brand-new-publisher" in _ungated_publishers(doc)
+
+
+# --- PyPI's 10 GB project cap: slim wheels, no sdist on PyPI ---------------------
+# v0.90.18/19 were refused with `400 Project size too large`. The fix is two edits to
+# this workflow that are each one silent deletion away from reopening the cap: the
+# slimming step and the wheels-only assertion before the upload.
+
+
+def _step_index(steps: list[dict[Any, Any]], needle: str) -> int:
+    """Index of the first step whose ``run:`` or ``uses:`` contains ``needle``."""
+    for index, step in enumerate(steps):
+        if needle in str(step.get("run", "")) or needle in str(step.get("uses", "")):
+            return index
+    raise AssertionError(f"no step contains {needle!r}")
+
+
+def test_release_build_slims_the_wheel_and_splits_the_sdist_before_upload() -> None:
+    steps = _workflow()["jobs"]["release-build"]["steps"]
+    slim = _step_index(steps, "scripts/slim_wheel.py")
+    assert "mv dist/*.tar.gz sdist/" in steps[slim]["run"]
+    assert "check_dist_size.py --wheels-only dist/" in steps[slim]["run"]
+    assert slim < _step_index(steps, "actions/upload-artifact")
+
+
+#: The publisher's shell guard (no checkout there, so no check_dist_size.py) and the
+#: upstream ``--wheels-only`` runs on the two artifacts the publisher downloads.
+_PUBLISHER_GUARD = "! -name '*.whl'"
+_UPSTREAM_GUARDS = {
+    "release-build": "check_dist_size.py --wheels-only dist/",
+    "keyagent-macos": 'check_dist_size.py --wheels-only "$RUNNER_TEMP/macos-dist"',
+}
+
+
+def _assert_wheels_only_guards(doc: dict[Any, Any]) -> None:
+    jobs = doc["jobs"]
+    steps = jobs["pypi-publish"]["steps"]
+    guard = _step_index(steps, _PUBLISHER_GUARD)
+    assert "-eq 2" in steps[guard]["run"], "the exactly-two-wheels count is gone"
+    assert guard < _step_index(steps, "pypa/gh-action-pypi-publish")
+    assert "if" not in steps[guard] and not steps[guard].get("continue-on-error")
+    for job, needle in _UPSTREAM_GUARDS.items():
+        upstream = jobs[job]["steps"]
+        index = _step_index(upstream, needle)
+        assert index < _step_index(upstream, "actions/upload-artifact")
+
+
+def test_both_upload_artifacts_and_the_publisher_are_wheels_only_guarded() -> None:
+    _assert_wheels_only_guards(_workflow())
+
+
+@pytest.mark.parametrize(
+    ("job", "needle"), [("pypi-publish", _PUBLISHER_GUARD), *_UPSTREAM_GUARDS.items()]
+)
+def test_deleting_any_wheels_only_guard_fails_the_check(job: str, needle: str) -> None:
+    """Negative control: each guard is load-bearing for the assertion above."""
+    doc = _workflow()
+    for step in doc["jobs"][job]["steps"]:
+        if needle in str(step.get("run", "")):
+            step["run"] = str(step["run"]).replace(needle, "")
+    with pytest.raises(AssertionError):
+        _assert_wheels_only_guards(doc)
+
+
+def test_the_pypi_publisher_runs_no_repository_code() -> None:
+    """The job holding ``id-token: write`` downloads and uploads, nothing else.
+
+    PyPA advises against a checkout in the trusted-publishing job
+    (pypa/gh-action-pypi-publish#237); the budget/wheels-only checks run upstream.
+    """
+    steps = _workflow()["jobs"]["pypi-publish"]["steps"]
+    assert not [s for s in steps if str(s.get("uses", "")).startswith("actions/checkout@")]
+    assert "scripts/" not in " ".join(str(s.get("run", "")) for s in steps)
+
+
+def test_the_sdist_is_attached_to_the_github_release() -> None:
+    doc = _workflow()
+    assert _publishing_jobs(doc).get("sdist-release") == "softprops/action-gh-release"
+    job = doc["jobs"]["sdist-release"]
+    assert job["permissions"] == {"contents": "write"}
+    assert "release-sdist" in str(job["steps"])

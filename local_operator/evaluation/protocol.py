@@ -21,6 +21,7 @@ import re
 import string
 from collections.abc import Iterator, Mapping
 from copy import deepcopy
+from types import MappingProxyType
 from typing import Annotated, Any, ClassVar, Literal, Self, TypeAlias
 
 from pydantic import (
@@ -469,6 +470,77 @@ NAMED_KEYS = frozenset(
 )
 _PRINTABLE_KEYS = frozenset(string.ascii_letters + string.digits + string.punctuation)
 
+#: Standard key spellings normalised, at parse time, to the ONE canonical key
+#: they name. Keyed by the upper-cased spelling (named keys are matched
+#: case-insensitively, so ``Return``/``RETURN``/``return`` are one entry).
+#:
+#: WHY. Case-insensitive matching was never the gap: ``Escape`` upper-cases to
+#: ``ESCAPE`` while the canonical name is ``ESC``, so it was refused however it
+#: was cased. Models trained on X11/xdotool/pyautogui reach for those names --
+#: in the OSWorld 2.1 main16 evidence, standard spellings such as ``Return``,
+#: ``Escape`` and ``Page_Down`` caused billed corrective turns despite naming
+#: an existing key unambiguously. Replaying all parser-refused action batches
+#: recovers 31 of 41; the other 10 still fail validation. This denominator is
+#: parser-refused batches, not refused key actions; OSWorld surface admission
+#: adds three non-ASCII type refusals (44 before, 13 after).
+#:
+#: THE BAR for an entry: the spelling is a standard name (an X11 keysym such as
+#: ``Return``/``Page_Down``/``Caps_Lock``, a pyautogui/xdotool spelling such as
+#: ``pgdn``/``del``/``win``, or the X11 keysym name of a printable symbol) AND
+#: it maps 1:1 onto a key this vocabulary already accepts, so normalising it
+#: changes the spelling and never the key pressed. Names that are already
+#: canonical under case folding (X11 ``BackSpace``, ``Tab``, ``Delete``,
+#: ``Home``, ``End``, ``Insert``, ``Left``/``Right``/``Up``/``Down``) need no
+#: entry. ``META`` is the Super/Windows logo key -- the only meaning any compiler
+#: gives it (the OSWorld adapter emits pyautogui ``win``) -- so ``super`` and
+#: ``win`` qualify.
+#:
+#: "1:1" is checked against the only X11 compiler there is: the OSWorld adapter
+#: emits pyautogui names, and pyautogui 0.9.54's X11 table resolves them to
+#: exactly these keysyms -- ``enter``->``Return``, ``esc``->``Escape``,
+#: ``pagedown``->``Page_Down``, ``capslock``->``Caps_Lock``, ``ctrl``->
+#: ``Control_L``, ``shift``->``Shift_L``, ``alt``->``Alt_L``, ``win``->
+#: ``Super_L``. That is why the LEFT modifier keysyms are aliases and the right
+#: ones (``Control_R``...) are not: accepting ``Control_R`` would press
+#: ``Control_L``, a different key than the one named.
+#:
+#: Deliberately ABSENT, because the spelling does not determine the key:
+#: ``cmd``/``command`` (a model sending ``["cmd", "a"]`` means the platform's
+#: shortcut modifier, which is Ctrl on a Linux guest, not the Super key META
+#: presses -- normalising it would press a different key than intended),
+#: ``option`` (Alt on a Mac keyboard, but a model may mean AltGr), ``control``
+#: and other synonyms nobody measured (the table stays evidence-sized), and the
+#: X11 ``Prior``/``Next`` page keysyms (``next`` reads as a command, not a key).
+#:
+#: Normalising in the validator keeps parsed actions, bound-batch artifacts,
+#: their digests and compiled guest statements canonical. Those artifacts match
+#: what the canonical spelling produces; existing canonical batches replay
+#: unchanged. Raw model-response evidence remains raw and can contain aliases.
+KEY_ALIASES: Mapping[str, str] = MappingProxyType(
+    {
+        # X11 keysym names
+        "RETURN": "ENTER",
+        "ESCAPE": "ESC",
+        "PAGE_DOWN": "PAGEDOWN",
+        "PAGE_UP": "PAGEUP",
+        "CAPS_LOCK": "CAPSLOCK",
+        "SUPER": "META",
+        "CONTROL_L": "CTRL",
+        "SHIFT_L": "SHIFT",
+        "ALT_L": "ALT",
+        "SUPER_L": "META",
+        # pyautogui / xdotool spellings
+        "PGDN": "PAGEDOWN",
+        "PGUP": "PAGEUP",
+        "DEL": "DELETE",
+        "WIN": "META",
+        # X11 keysym names of printable symbols: the character is the key
+        "MINUS": "-",
+        "PLUS": "+",
+        "EQUAL": "=",
+    }
+)
+
 
 class _KeyChordAction(_Action):
     keys: tuple[str, ...] = Field(min_length=1, max_length=8)
@@ -484,6 +556,7 @@ class _KeyChordAction(_Action):
         normalized: list[str] = []
         for key in keys:
             candidate = key.upper() if len(key) > 1 else key
+            candidate = KEY_ALIASES.get(candidate, candidate)
             if candidate not in NAMED_KEYS and candidate not in _PRINTABLE_KEYS:
                 raise ValueError(f"unknown key: {key!r}")
             normalized.append(candidate)

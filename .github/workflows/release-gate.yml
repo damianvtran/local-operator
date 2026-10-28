@@ -249,6 +249,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install build
           python -m build --wheel --outdir dist/release-gate
+          # The shape publish.yml ships: comments stripped (fails closed if any
+          # module cannot be verified AST- and line-identical), within the PR-side
+          # budget: 17.5 MiB, the release's 18 minus the release-only assets this
+          # wheel lacks (see scripts/check_dist_size.py).
+          python scripts/slim_wheel.py dist/release-gate/local_operator-*-py3-none-any.whl
+          python scripts/check_dist_size.py --budget-mib 17.5 dist/release-gate
 
       # The repository's own artifact check, unchanged: it installs the built
       # wheel into a throwaway venv, imports it from OUTSIDE the checkout so

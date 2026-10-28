@@ -65,7 +65,7 @@ export function PastSessionsScreen() {
 			const r = await resumeSession(id);
 			navigate(`/s/${encodeURIComponent(r.session_id)}`);
 		} catch (e) {
-			/* The same refusal voice the ended strip paints (design round 1, D5). */
+			/* The same refusal voice the health sheet's Resume paints (design round 1, D5). */
 			setResumeError(resumeRefusalText(e));
 			setResumingId("");
 		}
@@ -93,7 +93,7 @@ export function PastSessionsScreen() {
 					spellCheck={false}
 					autoCapitalize="off"
 					autoCorrect="off"
-					className="min-h-11 w-full rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
+					className="min-h-11 w-full rounded-sm bg-canvas px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
 			</div>
 
@@ -167,7 +167,7 @@ export function PastSessionsScreen() {
 								type="button"
 								onClick={() => void resume(s.id)}
 								disabled={resumingId !== ""}
-								className="min-h-11 shrink-0 rounded-sm border border-control bg-surface px-3 text-body-sm text-ink active:bg-accent-wash disabled:opacity-50"
+								className="min-h-11 shrink-0 rounded-sm bg-surface px-3 text-body-sm text-ink active:bg-accent-wash disabled:opacity-50"
 							>
 								{resumingId === s.id ? "opening…" : "resume"}
 							</button>

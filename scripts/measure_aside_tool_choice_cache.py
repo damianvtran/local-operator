@@ -234,8 +234,10 @@ class PreFixAnthropicClient(AnthropicClient):
     and 4 is the ``tool_choice`` value — which is the thing being measured.
     """
 
-    def _build_body(self, request: ChatRequest, *, oauth: bool = False) -> dict[str, Any]:
-        body = super()._build_body(request, oauth=oauth)
+    def _build_body(
+        self, request: ChatRequest, *, oauth: bool = False, account: str = ""
+    ) -> dict[str, Any]:
+        body = super()._build_body(request, oauth=oauth, account=account)
         if request.tools and request.tool_choice == "none":
             body["tool_choice"] = {"type": "none"}
         return body

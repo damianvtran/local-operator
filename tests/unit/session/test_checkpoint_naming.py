@@ -22,6 +22,7 @@ import pytest
 
 from local_operator.session import checkpoint_naming as cn
 from local_operator.session import transcript_index as ti
+from tests.unit.legacy_skill_payload import legacy_skill_payload
 
 pytestmark = pytest.mark.asyncio
 
@@ -292,20 +293,12 @@ async def test_digest_reads_a_skill_turn_as_the_line_that_was_typed(tmp_path: Pa
 
 
 def _skill_payload(typed: str) -> str:
-    """A ``$skill`` invocation in its PERSISTED form — the real renderer's output."""
-    from local_operator.skills.discovery import Skill
-    from local_operator.skills.invoke import parse_invocation, render_invocation
+    """A ``$skill`` invocation in the LEGACY persisted form.
 
-    skill = Skill(
-        name="research",
-        description="research things",
-        file_path=Path("/skills/research/SKILL.md"),
-        base_dir=Path("/skills/research"),
-        source="user",
-    )
-    invocation = parse_invocation(typed, {"research": skill})
-    assert invocation is not None
-    return render_invocation(invocation, "# Research\n\nSKILL_BODY_MARKER\n")
+    Old transcripts never migrate, so the reader stays and this pins its input;
+    ``legacy_skill_payload`` reproduces the deleted writer's escaping.
+    """
+    return legacy_skill_payload(typed)
 
 
 # ---------------------------------------------------------------------------

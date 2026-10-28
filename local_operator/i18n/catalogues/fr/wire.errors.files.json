@@ -1,0 +1,13 @@
+{
+  "wire.errors.files.audio_type": "Type de fichier audio non autorisé  : {mime_type}",
+  "wire.errors.files.heic_conversion": "Échec de la conversion du fichier HEIC/HEIF  : {error}",
+  "wire.errors.files.html_type": "Type de fichier HTML non autorisé  : {mime_type}",
+  "wire.errors.files.html_utf8": "Le fichier HTML n’est pas du texte UTF-8 valide.",
+  "wire.errors.files.image_type": "Type de fichier image non autorisé  : {mime_type}",
+  "wire.errors.files.internal_error": "Erreur interne du serveur  : {error}",
+  "wire.errors.files.sign_auth": "Un token d’accès local ou un bearer de bureau est requis.",
+  "wire.errors.files.sign_path": "path ne doit pas être vide.",
+  "wire.errors.files.sign_route": "route doit être l’une des valeurs suivantes  : {routes}",
+  "wire.errors.files.sign_ttl": "ttl_s doit être compris entre 1 et {maximum}.",
+  "wire.errors.files.video_type": "Type de fichier vidéo non autorisé  : {mime_type}"
+}

@@ -206,6 +206,32 @@ def _refused_before_dispatch(error: BaseException) -> bool:
     return isinstance(error, RpcRemoteError) and error.code == "invalid_state"
 
 
+def _declared_not_applied(error: BaseException) -> bool:
+    """Did the ADAPTER declare that no part of its batch reached the environment?
+
+    True only for an answered ``adapter_error`` whose worker-built detail
+    carries ``phase == "not_applied"`` -- the worker writes that value only for
+    an ``ActionNotAppliedError`` raised from ``execute`` (``worker._error_phase``).
+    Mirrors ``episode._not_applied_failure`` and must stay in lockstep with it,
+    for the reason ``_mutation_committed`` states: if the bridge re-bound a case
+    this module poisoned, the re-bind's ``observe`` would hit the poison gate.
+
+    SAME RESTRICTION AS ``_refused_before_dispatch``: a not-applied batch did
+    not commit, so this keeps the session usable for the bridge's read-only
+    ``observe`` re-bind and licenses NOTHING else -- never
+    ``resume_observation``, whose contract ("the batch committed, skip the
+    re-apply") would bind a never-applied batch to an observation. It is
+    consulted only in ``_mutating_call``, scoped to ``execute``.
+    """
+
+    return (
+        isinstance(error, RpcRemoteError)
+        and error.code == "adapter_error"
+        and error.detail is not None
+        and error.detail.phase == "not_applied"
+    )
+
+
 #: The token an adapter embeds in the execute failure's message when the
 #: DELIVERY of the batch is ambiguous -- "the request may have been written,
 #: and the guest may have acted on it" (the OSWorld adapter's ``guest_loss``).
@@ -955,8 +981,13 @@ class VerifiedAdapterSession:
             # bridge's re-bind is the only consumer, and widening every mutating
             # method would be scope drift (``_mutation_committed`` stays the
             # committed-class predicate). The refusal never licenses a resume.
+            # A DECLARED not-applied ``execute`` (``ActionNotAppliedError``)
+            # joins the refusal for the same reason: nothing reached the
+            # environment, so the bridge's read-only re-bind is safe. It is a
+            # structured phase, not a message match, so it needs no probe.
             stays_usable = _mutation_committed(error) or (
-                method == "execute" and _refused_before_dispatch(error)
+                method == "execute"
+                and (_refused_before_dispatch(error) or _declared_not_applied(error))
             )
             if stays_usable:
                 raise
@@ -1063,7 +1094,13 @@ class VerifiedAdapterSession:
         return initial
 
     async def observe(self, params: ObserveParams, *, timeout: float) -> ObservationResult:
-        """Read the current snapshot. Poisons on failure, deliberately.
+        """Read the accepted snapshot, or adopt an explicit live capture.
+
+        Default requests must equal the accepted snapshot. ``fresh=True`` is
+        the declared not-applied recovery's opt-in: it captures actual state
+        and must pass exact-next-sequence/content/artifact validation before
+        the verifier adopts the binding. Neither mode applies input or creates
+        an execution receipt, and failures in EITHER mode poison deliberately.
 
         ``observe`` is READ-ONLY, so a failure here is not an ambiguous
         mutation and the poison below is stricter than the mutating-call rule
@@ -1098,7 +1135,14 @@ class VerifiedAdapterSession:
                 "observe", params, ObservationResult, timeout=timeout
             )
             assert isinstance(result, ObservationResult)
-            self.verifier.verify_current_snapshot(result.observation)
+            if params.fresh:
+                # A read-only capture advances the OBSERVATION binding, not an
+                # applied-action count. Reuse exact-next/content/artifact checks:
+                # an unsupported adapter returning cache must fail closed, not
+                # silently label old pixels fresh. No execution receipt exists.
+                self.verifier.accept_output(result.observation)
+            else:
+                self.verifier.verify_current_snapshot(result.observation)
         except BaseException:
             await self._poison_after_ambiguous_mutation()
             raise

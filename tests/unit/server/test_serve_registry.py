@@ -109,6 +109,12 @@ def test_publish_is_atomic_and_0600_under_a_0700_directory(tmp_path: Path) -> No
         # reload. Handler presence alone cannot prove it, so the empty default is
         # "unknown", and a reader that could not find the key would have to guess.
         "rolling_reload_contract",
+        # The process birth (#3075 review round 1, R1-M1). Pinned because a
+        # reader compares it with the process now at ``pid`` to tell the daemon
+        # from a stranger that took a recycled pid; a missing key reads as
+        # "identity not known", which ``ready`` then cannot judge.
+        "birth_scheme",
+        "birth_token",
         # The Phase A local-surface credentials (file-serving RFC §4.1). Pinned
         # for the same reason as ``retiring_*``: a surface reads THIS file to
         # find what it presents (``access_token``) and what it compares against

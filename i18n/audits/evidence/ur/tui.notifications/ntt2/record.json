@@ -1,0 +1,315 @@
+{
+  "schema": 1,
+  "audit_id": "ntt2",
+  "audit_id_assigned_by": "Manager session, project notifications-inbox, PR #2943, round 2 for ur, 2026-10-25.",
+  "audit_kind": "independent_delta_reaudit_after_remediation",
+  "locale": "ur",
+  "namespace": "tui.notifications",
+  "audit_date": "2026-10-25",
+  "round": 2,
+  "previous_audit": {
+    "audit_id": "ntt1",
+    "record": "../ntt1/record.json",
+    "target_sha256": "a0cd78685b89231a7c282cf7f7b68020cbd4a8e29593e84c68e63105a9a96ea0",
+    "verdict": "changes_requested",
+    "findings": [
+      "NT-UR-1 major (back arrow)",
+      "NT-UR-2 minor (hint_undo)",
+      "NT-UR-3 nit (hint_clear)",
+      "NT-UR-4 nit (unread forms)",
+      "NT-UR-5 nit (missing terminal ۔)"
+    ]
+  },
+  "audited_revision": "8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a",
+  "audited_revision_note": "The audited catalogue bytes are untracked (`??` in git status) in /Users/damian/workspace/repos/lo-notifications-l1, whose HEAD is 8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a on feat/notifications-tui. The renderer under test was extracted from that commit with `git archive` into scratch, so the audited copy and the audited code are one generation. The honesty bindings are the hashes below.",
+  "code_under_test": {
+    "commit": "8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a",
+    "branch": "feat/notifications-tui",
+    "subject": "fix(notifications): isolate in-sentence commands and reserve the TUI's columns by cells",
+    "route": "notifications_render._t = display_tr('tui.notifications', technical_literals=model.SHELL_COMMANDS, technical_commands=model.SHELL_COMMAND_TEMPLATES)",
+    "previous_generation": {
+      "commit": "d25392f3553c38ce1740c98e53c9c66a700e9e64",
+      "route": "_t = tr('tui.notifications') (plain)"
+    }
+  },
+  "key_count": {
+    "en": 72,
+    "target": 72
+  },
+  "keys_read": {
+    "en": 72,
+    "target": 72,
+    "context": 72
+  },
+  "delta": {
+    "changed_keys": [
+      "tui.notifications.back",
+      "tui.notifications.hint_undo",
+      "tui.notifications.unread_mark_all",
+      "tui.notifications.unread_mark_these"
+    ],
+    "added_keys": [],
+    "removed_keys": [],
+    "changes": [
+      {
+        "key": "tui.notifications.back",
+        "from": "← اطلاعات",
+        "to": "→ اطلاعات",
+        "axes": "arrow direction (U+2190 -> U+2192) for RTL"
+      },
+      {
+        "key": "tui.notifications.hint_undo",
+        "from": "کالعدم",
+        "to": "بحال",
+        "axes": "terminology"
+      },
+      {
+        "key": "tui.notifications.unread_mark_all",
+        "from": "/unread read سے تمام {count} کو پڑھا ہوا نشان زد کریں",
+        "to": "/unread read سے تمام {count} کو پڑھا ہوا نشان زد کریں۔",
+        "axes": "terminal punctuation"
+      },
+      {
+        "key": "tui.notifications.unread_mark_these",
+        "from": "/unread read سے انہیں پڑھا ہوا نشان زد کریں",
+        "to": "/unread read سے انہیں پڑھا ہوا نشان زد کریں۔",
+        "axes": "terminal punctuation"
+      }
+    ],
+    "all_other_values_byte_identical": true,
+    "raw_diff_lines": 8,
+    "unexpected_bytes": []
+  },
+  "verdict": "passed",
+  "result": "clean",
+  "verdict_reason": "Delta re-audit of the four changed keys against the pinned English source, plus a byte-identity proof for the other 68. The round-1 major is fixed and measured end-to-end through the app's own display_tr route (back paints as RLI→ اطلاعاتPDI, whose FriBidi visual puts the arrow at the right end of the word pointing right, i.e. back in RTL); the round-1 minor is fixed (بحال, 4/8 cells, consistent with the namespace's own undo receipt); the missing terminal ۔ is applied to both /unread read lines. The render-layer defect I reported as code-side is fixed at 8976104b83: per-token LRI islands keep /notifications and /unread read contiguous and un-reversed (controls without the islands still migrate to 'notifications/'), and the projection is scoped to Urdu — en/es/fr/hi/ru/vi/zh-CN paint byte-equal to their catalogues with no control characters. No new finding on the delta.",
+  "ledger_gate_sentence": "The ur ledger row may ship at this hash: 07290844e42e8c147a1f342d359d1569446c8634660da62cabb5f479be63d52a",
+  "auditor": {
+    "agent": "translation-auditor (lopdev team, audit-tui-audit-ur)",
+    "instance": "6cd869512279",
+    "session": "6cd869512279",
+    "model": "radient/auto",
+    "actual_model": "radient/auto",
+    "actual_model_source": "Session header declared anthropic/claude-opus-5-5; provider-quota [model switch] notices in this session moved the serving model to anthropic/claude-sonnet-5-5, then openai/gpt-6.1-sol, then radient/auto. Both audit rounds ran across that sequence; radient/auto served the turns that produced round 2's measurements and this bundle. `sessions info` exposes no model field, so the runtime notices are the authoritative record.",
+    "primary_model": "anthropic/claude-opus-5-5",
+    "fallback_used": true,
+    "fallback_chain_note": "As recorded verbatim in ntt1/record.json: each notice named opus-5-5 as the model it replaced.",
+    "date": "2026-10-25",
+    "independence": "Independent agent/context: I authored none of the English or Urdu copy and took no part in the remediation. The implementer applied my round-1 proposals; this round verifies the applied bytes and the code fix by execution rather than by accepting the change description. I wrote, staged, stashed, moved and deleted nothing in the worktree; the audited bytes were copied out before any judgement and re-hashed at the end of the round."
+  },
+  "translator": {
+    "agent": "notifications-TUI coder / implementer (per delegation)",
+    "model": "not supplied to this auditor",
+    "date": "2026-10-25",
+    "note": "Applied the three accepted round-1 dispositions (back arrow, hint_undo, terminal ۔)."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.notifications.json",
+      "revision": "d25392f3553c38ce1740c98e53c9c66a700e9e64",
+      "sha256": "b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68",
+      "matches_round1_pin": true,
+      "note": "the en catalogue at the code commit 8976104b83 is byte-identical to this (measured)"
+    },
+    "en_context_sidecar": {
+      "path": "local_operator/i18n/catalogues/en/tui.notifications.context.json",
+      "revision": "d25392f3553c38ce1740c98e53c9c66a700e9e64",
+      "sha256": "0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ur/tui.notifications.json",
+      "sha256": "07290844e42e8c147a1f342d359d1569446c8634660da62cabb5f479be63d52a",
+      "matches_current_working_tree": true,
+      "tracking_state": "untracked (?? in git status)"
+    },
+    "previous_target": {
+      "path": "../ntt1/work/target.ur.json",
+      "sha256": "a0cd78685b89231a7c282cf7f7b68020cbd4a8e29593e84c68e63105a9a96ea0"
+    }
+  },
+  "reference_inputs": {
+    "ur_style_guide": "local_operator repo i18n/style-guide/… read at the pin (RTL & bidi, width and punctuation rules)",
+    "desktop_sibling": {
+      "path": "src/i18n/catalogues/ur/ui.notifications.json",
+      "sha256": "d5c4a7e21e450d9a21a06b85198bd8a2ed78cd2d5c007e0ab10c930d60fdae4d"
+    },
+    "core_siblings": [
+      "wire.errors.notifications",
+      "wire.slash.notifications_page",
+      "wire.slash"
+    ],
+    "note": "carried from round 1: نہ پڑھی گئی / منتخب: {count} / بحال ہو گیا / toast text identity; no new glossary question arises from the delta."
+  },
+  "artifacts": [
+    "report.md",
+    "audit.log",
+    "receipt.json"
+  ],
+  "audit_log": {
+    "path": "audit.log",
+    "state": "present",
+    "note": "verbatim captured stdout of the probes and diffs this round ran, including the before/after tables and the probe self-corrections."
+  },
+  "findings": [],
+  "round1_disposition": [
+    {
+      "id": "NT-UR-1",
+      "severity_was": "major",
+      "key": "tui.notifications.back",
+      "status": "fixed_verified",
+      "evidence": "audit.log §3 (paint through display_tr) and §5 (composed header, three states)"
+    },
+    {
+      "id": "NT-UR-2",
+      "severity_was": "minor",
+      "key": "tui.notifications.hint_undo",
+      "status": "fixed_verified",
+      "evidence": "بحال, 4 cells of 8; consistent with restored = 'بحال: {count}۔'"
+    },
+    {
+      "id": "NT-UR-5",
+      "severity_was": "nit",
+      "keys": [
+        "tui.notifications.unread_mark_all",
+        "tui.notifications.unread_mark_these"
+      ],
+      "status": "fixed_verified",
+      "evidence": "both lines now end with ۔"
+    },
+    {
+      "id": "NT-UR-3",
+      "severity_was": "nit",
+      "key": "tui.notifications.hint_clear",
+      "status": "answered_no_change",
+      "note": "صاف retained; صاف کریں would be exactly 8 cells (cap 8)"
+    },
+    {
+      "id": "NT-UR-4",
+      "severity_was": "nit",
+      "keys": [
+        "header_counts",
+        "filter_unread",
+        "hint_unread",
+        "marked_unread"
+      ],
+      "status": "answered_no_change",
+      "note": "grammar forms of one term; record the convention in the ur guide"
+    }
+  ],
+  "recorded_decisions": [
+    {
+      "topic": "TUI vs desktop wording for undo",
+      "detail": "TUI hint is بحال (4 cells), desktop button remains واپس کریں (9 cells, over the TUI hint budget; bare واپس would collide with hint_back). Budget-forced; the ur guide should record it.",
+      "gating": false
+    }
+  ],
+  "self_corrections": [
+    {
+      "topic": "round-1 'sequencing' caveat for the arrow",
+      "round1_claim": "→ must land with the isolating change, because under the LTR paint path the arrow renders leftmost.",
+      "measurement": "With the round-1 renderer the composed detail header is auto-detected RTL (the line begins with the Urdu label), so the arrow lands rightmost; → reads correctly there and ← did not. The caveat would only hold in a terminal forcing an LTR paragraph base, which was not measured.",
+      "disposition": "withdrawn in report.md; the finding and fix stand on the measured evidence."
+    },
+    {
+      "topic": "cell-padding probe",
+      "detail": "First version set row.source instead of row.session.title, so source_name() read nothing and both generations measured 78 cells — meaningless. Corrected probe: round-1 code paints 83 cells for a 78-cell row with a CJK conversation title in English, round-2 code paints exactly 78.",
+      "disposition": "disclosed in audit.log §8."
+    }
+  ],
+  "rtl_assessment": {
+    "renderer_route_confirmed": "both notifications modules declare display_tr with model.SHELL_COMMANDS / SHELL_COMMAND_TEMPLATES; the round-1 generation used plain tr",
+    "arrow_paint": {
+      "painted": "\\u2067→ اطلاعات\\u2069",
+      "visual": "<RLI>اطلاعات →<PDI>",
+      "cells": 9
+    },
+    "token_islands": {
+      "pointer_unread": "painted <RLI>… <LRI>/unread<PDI> …<PDI>; visual keeps '/unread' contiguous; control → 'unread/'",
+      "refused_argument": "'/notifications' intact; control → 'notifications/'",
+      "banner_digest_body": "'/notifications' intact; control → 'notifications/'",
+      "unread_mark_all": "'/unread read' as ONE island; control → 'unread read/'",
+      "unread_mark_these": "'/unread read' as ONE island; control → 'unread read/'"
+    },
+    "island_accounting": "one outer RLI/PDI per painted string; one inner LRI/PDI in each of the five command-bearing keys; none elsewhere in the spot-rendered set",
+    "composed_order": "segments stay LTR per the ur guide's stance; the isolating change stops the header being reordered as one RTL paragraph",
+    "ltr_locales_unaffected": [
+      "en",
+      "es",
+      "fr",
+      "hi",
+      "ru",
+      "vi",
+      "zh-CN"
+    ],
+    "manual_controls_in_file": "none"
+  },
+  "mechanical_checks": {
+    "repo_check_catalogues_problems": 0,
+    "argument_parity_all_keys": "PASS (72/72)",
+    "plural_arms_render_count": "PASS (7 plural keys at 0/1/2/5/21/1000)",
+    "nfc_file": true,
+    "manual_bidi_controls_in_file": "none",
+    "zwnj_zwj_nbsp": "none",
+    "non_ascii_digits": "none",
+    "doubled_danda": "none",
+    "widths": [
+      {
+        "key": "back",
+        "cells": 9,
+        "maxCells": 24
+      },
+      {
+        "key": "hint_undo",
+        "cells": 4,
+        "maxCells": 8
+      },
+      {
+        "key": "unread_mark_these",
+        "cells": 44,
+        "maxCells": null
+      },
+      {
+        "key": "unread_mark_all",
+        "cells": 52,
+        "maxCells": null
+      }
+    ],
+    "unchanged_keys_byte_identical_to_round1": true,
+    "diff_scope": "4 changed lines in the JSON, nothing else"
+  },
+  "code_claims_verified": [
+    {
+      "claim": "notifications surfaces paint through display_tr",
+      "evidence": "both modules declare display_tr with the SHELL_COMMANDS literals (§2 of audit.log)"
+    },
+    {
+      "claim": "literal /commands ride as per-token LRI/PDI islands",
+      "evidence": "audit.log §3"
+    },
+    {
+      "claim": "row_line pads by cells, not characters",
+      "evidence": "audit.log §8: round-1 83 cells vs round-2 78 at the same 78-cell width"
+    },
+    {
+      "claim": "detail header no longer prints the raw Latin priority token",
+      "evidence": "audit.log §5: round-1 '▁▃ normal' vs round-2 '▁▃'"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0,
+    "rejected": 0,
+    "findings_total": 0
+  },
+  "limitations": [
+    "LLM semantic judgement, not native-speaker attestation.",
+    "Bidi conclusions come from GNU FriBidi 1.0.16 over the app's own painted strings, not from a rendered terminal frame; no claim about glyph shaping, terminal fonts or a specific terminal's UAX#9 implementation.",
+    "Widths are rich.cells.cell_len on rendered strings.",
+    "The audited bytes are untracked working-tree content: this binds a hash, not a commit.",
+    "The audit ran across a provider fallback chain; radient/auto served the final judgement."
+  ]
+}

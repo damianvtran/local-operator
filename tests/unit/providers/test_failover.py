@@ -3088,12 +3088,70 @@ def test_an_image_rejection_is_recognised_in_both_the_raised_and_rendered_forms(
         "dimensions exceed max allowed size for many-image requests: 2000 pixels",
         "messages.5.content.1.image.source.base64.data: At least one of the image "
         "dimensions exceed max allowed size: 8000 pixels",
+        # The per-request image COUNT refusal, measured live on
+        # claude-haiku-4-5 with 101 images (PR #3004 QA round 1, C2c).
+        "Too much media: 0 document pages + 101 images > 100",
     ],
 )
 def test_the_wordings_providers_actually_use_are_all_recognised(message: str) -> None:
     """Sampled from the reports this degrade exists for, not invented:
     anthropics/claude-code#12009, #13594, #31142, #50708, #12351, #39185."""
     assert is_image_rejection(ProviderError(400, message))
+
+
+@pytest.mark.parametrize(
+    "status, message",
+    [
+        # OpenRouter, when no endpoint behind the id takes images.
+        (404, "No endpoints found that support image input"),
+        # DeepSeek direct: the wire schema has no image part at all.
+        (
+            422,
+            "Failed to deserialize the JSON body into the target type: messages[0]: "
+            "unknown variant `image_url`, expected `text` at line 1 column 120",
+        ),
+        (
+            400,
+            "Failed to deserialize the JSON body into the target type: messages[0]: "
+            "unknown variant `image_url`, expected `text`",
+        ),
+        # OpenAI-compatible gateways.
+        (400, "Invalid content type. image_url is only supported by certain models."),
+        (400, "image_url is not supported"),
+    ],
+)
+def test_a_text_only_model_refusing_images_is_an_image_rejection(status, message) -> None:
+    """The MODALITY refusals (PR #3071 M1/Q1): an undescribed model is sent
+    images, so a text-only endpoint behind one must be recognised in BOTH
+    forms, or the session re-sends the image and fails every turn."""
+    from local_operator.providers.failover import is_image_modality_rejection
+
+    raised = ProviderError(status, message)
+    assert is_image_rejection(raised)
+    assert is_image_rejection(str(raised))
+    assert is_image_modality_rejection(raised)
+    assert is_image_modality_rejection(str(raised))
+
+
+def test_a_block_refusal_is_not_a_modality_refusal_and_5xx_is_neither() -> None:
+    from local_operator.providers.failover import is_image_modality_rejection
+
+    assert not is_image_modality_rejection(ProviderError(400, "Could not process image"))
+    assert not is_image_modality_rejection(
+        ProviderError(503, "No endpoints found that support image input")
+    )
+    assert not is_image_rejection(ProviderError(503, "No endpoints found that support image input"))
+
+
+def test_only_the_count_refusal_is_provider_scoped() -> None:
+    """The count refusal names a per-request limit, not a bad block, so it is
+    the one image rejection the session may lift on a provider switch."""
+    from local_operator.providers.failover import is_image_count_rejection
+
+    count = "Too much media: 0 document pages + 101 images > 100"
+    assert is_image_count_rejection(ProviderError(400, count))
+    assert not is_image_count_rejection(ProviderError(400, "Could not process image"))
+    assert not is_image_count_rejection(ProviderError(500, count))
 
 
 def test_the_many_image_refusal_degrades_in_the_rendered_form_too() -> None:

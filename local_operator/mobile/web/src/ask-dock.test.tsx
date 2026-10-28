@@ -99,8 +99,8 @@ describe("AskDock", () => {
 		   read as a banner, which §5.0 names as the thing it must not be. */
 		render(<AskDock rows={[ask()]} onOpen={() => {}} />);
 		const dock = screen.getByTestId("ask-dock");
-		expect(dock.className).toMatch(/mx-2/);
-		expect(dock.className).toMatch(/rounded-md/);
-		expect(dock.className).toMatch(/border-accent/);
+		expect(dock.className).toMatch(/lo-hit/);
+		expect(dock.className).toMatch(/rounded-full/);
+		expect(dock.className).toMatch(/bg-accent-wash/);
 	});
 });

@@ -68,6 +68,7 @@ from typing import Final, Iterable, Sequence
 from local_operator.ansi import sanitize_prompt_line
 from local_operator.supplements import denylist
 from local_operator.supplements.evidence import Evidence, extract
+from local_operator.supplements.listing import directory_listing
 from local_operator.supplements.trigger import ToolCallItem, TurnItem
 
 #: Candidates offered to the decision (the recommend layer's ``maxCandidates`` scale).
@@ -253,6 +254,256 @@ _PY_VARIABLE_WRITE: Final = re.compile(
 SHELL_SCAN_MAX_CHARS: Final = 32_768
 _LEADING_HOME: Final = re.compile(r"^\$(?:\{HOME\}|HOME)(?=/|$)")
 
+# -- static shell variables -----------------------------------------------------------------
+# THE IDIOM. A turn that builds a deliverable names its destination once and reuses it:
+# ``D=~/Documents/Radient; N="Report-2026"; cp memo.pdf "$D/$N.pdf"``. Every ``$``-built
+# word used to be dropped, so that turn named no file and showed no Highlights at all.
+#
+# WHAT RESOLVES, AND WHY ONLY THAT. A ``$NAME``/``${NAME}`` is substituted only from a LITERAL
+# assignment made EARLIER IN THE SAME COMMAND, as its own statement (``NAME=value``, quoted or
+# not, optionally ``export``-ed), whose value is itself literal or built from names that
+# already resolved. That is the one case the text alone proves: the harness sees nothing of
+# the environment the command ran in, so an inherited variable (``$LOCAL_OPERATOR_SCRATCHPAD``,
+# ``$PWD``), a command substitution (``$(pwd)``, backticks), a loop or ``read`` variable, or an
+# assignment the shell may skip (after ``||``, inside ``then``/``do``, in a pipeline or a
+# background job) stays UNRESOLVED and its word is dropped exactly as before: a wrong guess is
+# a callout for some other file. ``$HOME`` is the one inherited name allowed, and only at the
+# start of a word, because ``~`` already stands for it in every path this module emits.
+#
+# QUOTING MATTERS AND ``shlex`` FORGETS IT, so a pre-pass (:func:`_mark_expansions`) tags each
+# ``$`` before lexing: a single-quoted or backslash-escaped ``$`` is a literal (never
+# expanded), an unquoted one word-splits (so a value with blanks or glob characters cannot be
+# substituted there), and a quoted ``~`` is a literal tilde (so ``D="~/x"`` is a directory
+# NAMED ``~``, unresolvable rather than home).
+_LITERAL_DOLLAR: Final = "\ue000"
+_UNQUOTED_DOLLAR: Final = "\ue001"
+_QUOTED_TILDE: Final = "\ue002"
+_VAR_REF: Final = re.compile(r"\{(?P<braced>[A-Za-z_]\w*)\}|(?P<bare>[A-Za-z_]\w*)")
+_ASSIGNMENT: Final = re.compile(r"^(?P<name>[A-Za-z_]\w*)=(?P<value>.*)$", re.DOTALL)
+#: Assignment-shaped words outside the supported literal grammar (``+=``, subscripts,
+#: arrays). They still mutate the name, so retaining an earlier value would name a wrong file.
+_OPAQUE_ASSIGNMENT: Final = re.compile(r"^(?P<name>[A-Za-z_]\w*)(?:\[[^]]*\]=|\+=|=\()")
+#: A literal path cannot need unbounded storage. Besides rejecting meaningless callouts, this
+#: stops ``D=$D$D`` from doubling memory at each assignment in an unbounded journal command.
+_SHELL_VALUE_MAX_CHARS: Final = 4096
+#: Tracking more distinct names cannot improve a path-sized answer; refuse further assignments
+#: so adversarial command text cannot turn this small static map into an unbounded allocation.
+_SHELL_MAX_VARIABLES: Final = 256
+#: Characters an UNQUOTED expansion splits or globs on: such a value cannot stand in one word.
+_SPLIT_OR_GLOB: Final = re.compile(r"[\s*?\[]")
+#: Leading words that make what follows conditional or repeated: an assignment there may not run.
+_CONDITIONAL_WORDS: Final = frozenset(
+    {"if", "then", "else", "elif", "while", "until", "do", "!", "{", "case", "for", "select"}
+)
+#: Compound-command brackets. Between an opener and its closer every assignment is treated as
+#: conditional, including one on its own line (``if c; then\n  D=~/x\nfi``), where the
+#: leading-keyword rule alone cannot see it. ``{ ...; }`` always runs, but is counted too:
+#: refusing a resolvable name costs a missed callout, never a wrong one.
+_COMPOUND_OPENERS: Final = frozenset({"if", "while", "until", "for", "select", "case", "{"})
+_COMPOUND_CLOSERS: Final = frozenset({"fi", "done", "esac", "}"})
+#: Builtins that set a variable the text does not spell as ``NAME=value`` (``read d``,
+#: ``for d in ...``, ``printf -v d``): every identifier operand becomes unresolvable.
+_SETTING_BUILTINS: Final = frozenset(
+    {"read", "for", "select", "mapfile", "readarray", "getopts", "unset", "printf",
+     "local", "declare", "typeset", "readonly", "let"}
+)  # fmt: skip
+#: Builtins that can set ANY variable: everything resolved so far is forgotten.
+_OPAQUE_BUILTINS: Final = frozenset({"eval", "source", "."})
+#: Separators after (or before) which an assignment is not the shell's own: a pipeline stage
+#: and a background job run in a subshell, and ``a || NAME=v`` runs only when ``a`` failed.
+_TRANSIENT_SEPARATORS: Final = frozenset({"|", "&"})
+
+#: A python ``-c``/stdin program writing to ``sys.argv[N]``: the Nth positional word after the
+#: program is then an output, which is how ``python -c '...outputfile=sys.argv[1])' "$D/x.docx"``
+#: names its file. Narrow on purpose: only a write SITE whose target is ``sys.argv[N]`` counts
+#: (an ``open(.., 'w')``, a writer method, ``Path(..).write_*``, or an output keyword argument);
+#: an argv merely READ (an input file) is never an output.
+_ARGV: Final = r"sys\.argv\[(?P<n{0}>[1-9])\]"
+_ARGV_WRITE: Final = re.compile(
+    r"\bopen\(\s*" + _ARGV.format(1) + r"""\s*,\s*['"][wax]"""
+    r"|\.(?:to_(?:csv|excel|json|parquet|markdown|html)|savefig|save|write_text|write_bytes)"
+    r"\(\s*" + _ARGV.format(2) + r"\s*[,)]"
+    r"|\bPath\(\s*" + _ARGV.format(3) + r"\s*\)(?:\.expanduser\(\))?\.write_(?:text|bytes)\("
+    r"|[(,]\s*(?:output_?file|out_?file|output_?path|out_?path|output|out)\s*=\s*"
+    + _ARGV.format(4)
+    + r"\s*[,)]"
+)
+
+
+def _mark_expansions(text: str) -> str:
+    """``text`` with each ``$`` and quoted ``~`` tagged by how the shell would treat it.
+
+    See the static-variables note above. Offsets are not preserved and need not be: this runs
+    on the heredoc-free text just before lexing, and every tag is resolved or turned back into
+    its original character by :func:`_expand_word`.
+    """
+    out: list[str] = []
+    quote = ""
+    escaped = False
+    for char in text:
+        if escaped:
+            out.append(_LITERAL_DOLLAR if char == "$" else char)
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = ""
+            elif char == "$":
+                char = _LITERAL_DOLLAR if quote == "'" else char
+            elif char == "~":
+                char = _QUOTED_TILDE
+        elif char in {"'", '"'}:
+            quote = char
+        elif char == "$":
+            char = _UNQUOTED_DOLLAR
+        out.append(char)
+    return "".join(out)
+
+
+def _expand_word(word: str, names: dict[str, str]) -> str:
+    """``word`` with every statically known ``$NAME`` substituted and every tag undone.
+
+    A reference that does not resolve keeps its ``$``, which is what makes :func:`bash_effects`
+    drop the word (the long-standing "a ``$`` names no single file" rule) -- so an unknown name
+    never yields a partly expanded path.
+    """
+    if _LITERAL_DOLLAR not in word and _UNQUOTED_DOLLAR not in word and "$" not in word:
+        return word.replace(_QUOTED_TILDE, "~")
+    out: list[str] = []
+    index = 0
+    while index < len(word):
+        char = word[index]
+        index += 1
+        if char == _QUOTED_TILDE:
+            out.append("~")
+        elif char == _LITERAL_DOLLAR:
+            out.append("$")
+        elif char in {"$", _UNQUOTED_DOLLAR}:
+            ref = _VAR_REF.match(word, index)
+            name = ref and (ref.group("braced") or ref.group("bare"))
+            value = names.get(name) if ref and name else None
+            if (
+                ref is None
+                or value is None
+                # An unquoted value with blanks or globs is several words, or a pattern.
+                or (char == _UNQUOTED_DOLLAR and _SPLIT_OR_GLOB.search(value))
+                # ``~`` means home only at the head of a word: ``x$D`` with D=~/a is ``x/Users/..``.
+                or (value.startswith("~") and (out or index > 1))
+            ):
+                out.append("$")
+                continue
+            out.append(value)
+            index = ref.end()
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def _join_continuations(text: str) -> str:
+    """Remove shell line continuations except where single quotes make them literal."""
+    out: list[str] = []
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if escaped:
+            if char == "\n" and quote != "'":
+                out.pop()  # remove the escape as well as the newline
+                escaped = False
+                index += 1
+                continue
+            out.append(char)
+            escaped = False
+        elif char == "\\" and quote != "'":
+            out.append(char)
+            escaped = True
+        else:
+            if char in {"'", '"'}:
+                quote = "" if quote == char else char if not quote else quote
+            out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _assigned_value(raw: str, names: dict[str, str]) -> str | None:
+    """The literal value of ``NAME=raw``, or ``None`` when the text cannot prove it."""
+    if "`" in raw or raw.startswith(_QUOTED_TILDE):
+        return None  # command substitution / a directory literally named ``~``
+    if raw.startswith("~") and raw != "~" and not raw.startswith("~/"):
+        return None  # ``~user`` is another account's home: not this pass's ``home``
+    # Assignment context neither word-splits nor globs, so an unquoted ``$`` is safe here.
+    value = _expand_word(raw.replace(_UNQUOTED_DOLLAR, "$"), names)
+    return None if "$" in value or len(value) > _SHELL_VALUE_MAX_CHARS else value
+
+
+def _python_without_comments(code: str) -> str:
+    """Blank Python comments without touching ``#`` inside a quoted string."""
+    out: list[str] = []
+    quote = ""
+    escaped = False
+    for char in code:
+        if escaped:
+            out.append(char)
+            escaped = False
+        elif char == "\\" and quote:
+            out.append(char)
+            escaped = True
+        elif quote and quote != "#":
+            out.append(char)
+            if char == quote:
+                quote = ""
+        elif char in {"'", '"'}:
+            out.append(char)
+            quote = char
+        elif char == "#":
+            quote = "#"
+            out.append(" ")
+        elif quote == "#":
+            out.append("\n" if char == "\n" else " ")
+            if char == "\n":
+                quote = ""
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def _argv_outputs(code: str, args: Sequence[str]) -> list[str]:
+    """The positional words a python program writes through ``sys.argv[N]``.
+
+    ``sys.argv[1]`` is the first word after ``-c``'s program (or after the interpreter's
+    stdin ``-``); flags belong to the interpreter and are not positional arguments.
+    """
+    found: list[str] = []
+    for match in _ARGV_WRITE.finditer(_python_without_comments(code)):
+        slot = int(next(group for group in match.groups() if group))
+        # An expansion, glob or brace earlier in argv can add or remove shell words, so
+        # counting past it could promote an input file to an output.
+        if any(
+            "$" in word or "{" in word or _SPLIT_OR_GLOB.search(word) for word in args[: slot - 1]
+        ):
+            continue
+        if slot <= len(args):
+            found.append(args[slot - 1])
+    return found
+
+
+def _positionals(words: Sequence[str]) -> list[str]:
+    """A command's leading positional words, up to its first redirect or heredoc marker."""
+    args: list[str] = []
+    for index, word in enumerate(words):
+        following = words[index + 1] if index + 1 < len(words) else ""
+        if (
+            word.startswith(("<", ">", "&>", "1>"))
+            or _HEREDOC_MARK_RE.match(word)
+            or (word.isdigit() and following.startswith((">", "<")))
+        ):
+            break
+        args.append(word)
+    return args
+
 
 @dataclass(frozen=True)
 class BashEffects:
@@ -391,14 +642,19 @@ def bash_effects(command: str) -> BashEffects:
     if len(command) > SHELL_SCAN_MAX_CHARS or "\x00" in command:
         return BashEffects()
     text, bodies = _lift_heredocs(command)
-    tokens = _shell_tokens(text)
+    tokens = _shell_tokens(_mark_expansions(_join_continuations(text)))
     if tokens is None:
         return BashEffects()
     outputs: list[str] = []
     sweep_dirs: list[str] = []
     cwd: str | None = ""
-    stack: list[str | None] = []
+    # ``HOME`` is the one inherited name: ``~`` already stands for it in every emitted path.
+    names: dict[str, str] = {"HOME": "~"}
+    functions: set[str] = set()
+    stack: list[tuple[str | None, dict[str, str]]] = []
     segment: list[str] = []
+    before = ""  # the separator that opened the current statement
+    depth = 0  # open compound commands (``if``/``for``/``while``/``case``/``{``)
 
     def emit(raw: str, found: list[str]) -> None:
         if raw and not raw.startswith(("-", "&", "/dev/")) and "$" not in raw and "*" not in raw:
@@ -406,9 +662,95 @@ def bash_effects(command: str) -> BashEffects:
             if joined:
                 found.append(joined)
 
-    def flush() -> None:
-        nonlocal cwd
-        words, segment[:] = list(segment), []
+    def flush(after: str = "") -> None:
+        nonlocal cwd, before, depth
+        marked, segment[:] = list(segment), []
+        prior, before = before, after
+        if not marked:
+            return
+        if marked[0] in _COMPOUND_OPENERS:
+            depth += 1
+        elif marked[0] in _COMPOUND_CLOSERS:
+            depth = max(0, depth - 1)
+        if "(" in marked:
+            # A function definition's body runs later; remember its name for call sites.
+            functions.add(marked[0])
+            names.clear()
+            return
+        if marked[0] not in _COMPOUND_OPENERS and marked[0] not in _COMPOUND_CLOSERS:
+            for index, word in enumerate(marked):
+                opaque = _OPAQUE_ASSIGNMENT.match(word)
+                if opaque:
+                    names.pop(opaque["name"], None)
+                if _ASSIGNMENT.match(word) and index + 1 < len(marked) and marked[index + 1] == "(":
+                    names.pop(word.split("=", 1)[0], None)
+                    return
+        # Skip environment prefixes before classifying a builtin: ``IFS= read D`` and
+        # ``command eval D=x`` are still opaque writes, not commands that leave D intact.
+        head = 0
+        if marked[:1] == ["export"]:
+            head = 1
+        elif not all(_ASSIGNMENT.match(word) for word in marked):
+            while head < len(marked) and _ASSIGNMENT.match(marked[head]):
+                head += 1
+        wrapped = False
+        while head < len(marked) and marked[head] in {"builtin", "command", "time"}:
+            wrapped = True
+            head += 1
+            while head < len(marked) and _ASSIGNMENT.match(marked[head]):
+                head += 1
+        if wrapped:
+            # A wrapper may change where and whether an assignment executes. Drop every
+            # assignment-shaped operand rather than interpreting only the forms we recognise.
+            for word in marked:
+                match = _ASSIGNMENT.match(word)
+                if match:
+                    names.pop(match["name"], None)
+            effective = marked[head] if head < len(marked) else ""
+            if effective in _OPAQUE_BUILTINS:
+                names.clear()
+            elif effective in _SETTING_BUILTINS:
+                for word in marked[head + 1 :]:
+                    names.pop(word, None)
+            return
+        assigned = [_ASSIGNMENT.match(word) for word in marked[head:]]
+        if len(marked) > head and all(assigned):
+            # A statement made only of assignments sets shell variables. One that may not run
+            # in THIS shell (after ``&&``/``||``, in a pipeline stage, a background job or a
+            # compound command) forgets them: a later separated statement still uses the name.
+            transient = (
+                depth > 0
+                or prior in {"&&", "||"}
+                or prior in _TRANSIENT_SEPARATORS
+                or after in _TRANSIENT_SEPARATORS
+            )
+            for match in assigned:
+                if match is None:
+                    continue
+                value = None if transient else _assigned_value(match["value"], names)
+                if value is None or (
+                    len(names) >= _SHELL_MAX_VARIABLES and match["name"] not in names
+                ):
+                    names.pop(match["name"], None)
+                else:
+                    names[match["name"]] = value
+            return
+        effective = marked[head] if head < len(marked) else ""
+        if effective in functions:
+            names.clear()
+        elif effective in _OPAQUE_BUILTINS:
+            names.clear()
+        elif effective in _SETTING_BUILTINS or effective in _CONDITIONAL_WORDS:
+            # ``then D=x`` may not run; ``read D`` / ``for D in`` set D from data: both unknown.
+            setting = effective in _SETTING_BUILTINS
+            for word in marked[head + 1 :]:
+                match = _ASSIGNMENT.match(word)
+                opaque = _OPAQUE_ASSIGNMENT.match(word)
+                setting = setting or word in _SETTING_BUILTINS
+                if match is not None or opaque is not None or setting:
+                    name = match["name"] if match else opaque["name"] if opaque else word
+                    names.pop(name, None)
+        words = [_expand_word(word, names) for word in marked]
         while words and "=" in words[0] and not words[0].startswith(("=", "-")):
             words.pop(0)  # ``FOO=bar cmd``
         if not words:
@@ -479,6 +821,10 @@ def bash_effects(command: str) -> BashEffects:
                     literals = _eval_outputs(words[index + 1])
                     for raw in literals:
                         emit(raw, found)
+                    # ``python -c '...outputfile=sys.argv[1])' "$D/x.docx"``: the program
+                    # names its output only through argv, so the positional word IS the name.
+                    for raw in _argv_outputs(words[index + 1], _positionals(words[index + 2 :])):
+                        emit(raw, found)
                     unnamed_write = unnamed_write or _variable_write(words[index + 1])
             for word in words:
                 mark = _HEREDOC_MARK_RE.match(word)
@@ -487,6 +833,21 @@ def bash_effects(command: str) -> BashEffects:
                     literals = _eval_outputs(body)
                     for raw in literals:
                         emit(raw, found)
+                    # ``python3 - "$out" <<PY ... open(sys.argv[1], 'w')``: argv after ``-``.
+                    interpreter = next(
+                        i for i, w in enumerate(words) if _PYTHON_WORD.match(os.path.basename(w))
+                    )
+                    args = _positionals(words[interpreter + 1 :])
+                    positional = 0
+                    while (
+                        positional < len(args)
+                        and args[positional].startswith("-")
+                        and args[positional] != "-"
+                    ):
+                        positional += 1
+                    if positional < len(args) and args[positional] == "-":
+                        for raw in _argv_outputs(body, args[positional + 1 :]):
+                            emit(raw, found)
                     unnamed_write = unnamed_write or _variable_write(body)
         outputs.extend(found)
         # ``cwd`` is "" before any ``cd``, a path after one, and ``None`` when a
@@ -504,14 +865,29 @@ def bash_effects(command: str) -> BashEffects:
 
     for token in tokens:
         if token in _SEPARATORS:
-            flush()
+            flush(token)
         elif token == "(":
-            flush()
-            stack.append(cwd)
+            if segment and segment[-1].endswith("="):
+                # ``A=(...)`` is an array assignment, not a subshell. Invalidate it before
+                # discarding the uninterpretable elements.
+                names.pop(segment[-1][:-1], None)
+                segment.clear()
+                stack.append((cwd, dict(names)))
+            else:
+                function_definition = len(segment) == 1
+                if function_definition:
+                    functions.add(segment[0])
+                flush(token)
+                # A subshell's ``cd`` and assignments end with it. A function definition
+                # flushes and returns at ``(``, so it never pushes an execution scope.
+                if not function_definition:
+                    stack.append((cwd, dict(names)))
         elif token == ")":
-            flush()
+            flush(token)
             if stack:
-                cwd = stack.pop()
+                cwd, restored = stack.pop()
+                names.clear()
+                names.update(restored)
         else:
             segment.append(token)
     flush()
@@ -830,6 +1206,18 @@ def prefilter(
         for match in _PROSE_PATH.finditer(answer_text):
             if kind_of(match.group("path")) in _DELIVERABLE_KINDS:
                 mentions.append(Mention(match.group("path"), TIER_PROSE, "answer", "", 10_000))
+        # Listed names are visible in the renderer just like links. Use the shared grammar so
+        # the candidate gate and Files ledger never disagree about what the answer displayed.
+        listed: set[str] = set()
+        for raw in directory_listing(answer_text):
+            if kind_of(raw) in _DELIVERABLE_KINDS:
+                expanded = _expand_home(raw, home)
+                listed.add(
+                    os.path.normpath(
+                        expanded if os.path.isabs(expanded) else os.path.join(cwd, expanded)
+                    )
+                )
+                mentions.append(Mention(raw, TIER_PROSE, "answer", "", 10_000))
         visible = _answer_spans(answer_text)
         for mention in mentions[: MAX_CONSIDERED * 4]:
             raw, tier, tool, intent, order = (
@@ -877,7 +1265,9 @@ def prefilter(
             # Linked in the answer: its path in a code span / link, in any spelling, or --
             # for the flag only -- its bare base name (``RUN-RECORD.md`` in backticks beside
             # ``in ~/workspace/x/``). The base-name form never DEDUPS: two files can share a name.
-            linked = not _spellings(raw.strip(), absolute, display, home).isdisjoint(visible)
+            linked = absolute in listed or not _spellings(
+                raw.strip(), absolute, display, home
+            ).isdisjoint(visible)
             linked_name = linked or os.path.basename(absolute) in visible
             if (captured is None or captured[0] != absolute) and linked:
                 # Dedup stays for what the turn only MENTIONED (tier 3) and for non-deliverable

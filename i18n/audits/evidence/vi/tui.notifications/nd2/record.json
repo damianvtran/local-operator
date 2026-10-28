@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "audit_id": "nd2",
+  "locale": "vi",
+  "namespace": "tui.notifications",
+  "verdict": "PASS",
+  "auditor": "independent i18n-auditor / reviewer (lopdev, session b4869f40ac63)",
+  "actual_model": "kimi/k3.1-pro (provider-quota fallback from anthropic/claude-opus-5-5 via anthropic/claude-sonnet-5-5 and openai/gpt-6-astra)",
+  "code_head": "897ffb54fef0f6a889bb135a22c80f7eebc3e0e5",
+  "requested_head": "0bffa9f447f2c697319defc25ddfd42c90a3f47d",
+  "source_sha256": "b405d23feb36ff29a4f75895513ec027cab13e4420a71ea05a83e515d8b20224",
+  "target_sha256": "50adc913c804bb51308642bbac0d7435dd2bf850995dea73df49211fad79f32f",
+  "findings": [],
+  "sampled_combinations": 72
+}

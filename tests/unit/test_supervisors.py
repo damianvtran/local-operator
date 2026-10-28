@@ -19,6 +19,7 @@ reported as unproven-on-Windows rather than implied.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -143,6 +144,74 @@ def test_the_windows_task_guard_refuses_off_windows() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_a_unit_finds_user_local_uv_under_the_managers_sparse_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """systemd's sparse default PATH must not hide a uv installed for the user.
+
+    The measured clean-node incident: the relay unit inherited
+    ``/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin`` and the update could
+    not find ``~/.local/bin/uv``. The fixture is a real executable under a
+    HOME with a space, so quoting and resolution are both exercised.
+    """
+    home = tmp_path / "home with spaces"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin")
+    uv = home / ".local" / "bin" / "uv"
+    uv.parent.mkdir(parents=True)
+    uv.write_text("#!/bin/sh\nprintf 'uv-fixture-ok\\n'\n", encoding="utf-8")
+    uv.chmod(0o755)
+
+    unit = supervisors.render_systemd_unit(description="x", exec_start="/bin/true")
+    path = supervisors.systemd_path().split(os.pathsep)
+
+    assert path == [
+        str(home / ".local" / "bin"),
+        "/usr/local/bin",
+        "/usr/local/sbin",
+        "/usr/bin",
+        "/usr/sbin",
+        "/bin",
+        "/sbin",
+    ]
+    path_assignment = next(line for line in unit.splitlines() if "PATH=" in line)
+    assert path_assignment == f'Environment="PATH={supervisors.systemd_path()}"'
+    assert " " in path_assignment
+    assert path_assignment.count('"') == 2
+    sparse_path = "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin"
+    assert shutil.which("uv", path=sparse_path) is None
+    discovered_uv = shutil.which("uv", path=supervisors.systemd_path())
+    assert discovered_uv is not None, "the unit PATH did not resolve the user-local uv"
+    assert discovered_uv == str(uv)
+    assert subprocess.run([discovered_uv], capture_output=True, text=True, check=True).stdout == (
+        "uv-fixture-ok\n"
+    )
+
+
+def test_the_unit_render_does_not_depend_on_the_callers_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Same build, same machine, same unit bytes — whoever renders it.
+
+    Review/QA round 1 (M1/Q1): installers compare the installed unit with a
+    fresh render by content, so a caller-dependent PATH is a rewrite loop and
+    freezes one caller's venv, scratchpad shim or relative entry into a
+    long-lived unit.
+    """
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+    def render(caller_path: str) -> str:
+        monkeypatch.setenv("PATH", caller_path)
+        return supervisors.render_systemd_unit(description="x", exec_start="/bin/true")
+
+    sparse = render("/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin")
+    session = render(f"{tmp_path / 'proj' / '.venv' / 'bin'}:.:bin:~/tools:/opt/company/bin")
+
+    assert sparse == session
+    for leaked in (".venv", "~/tools", "/opt/company/bin", ":.:", ":bin:"):
+        assert leaked not in sparse, leaked
+
+
 def test_a_unit_restarts_on_failure_and_not_always() -> None:
     """``on-failure`` is load-bearing: the wake supervisor exits 0 to retire."""
     unit = supervisors.render_systemd_unit(
@@ -155,13 +224,22 @@ def test_a_unit_restarts_on_failure_and_not_always() -> None:
     assert unit.endswith("\n")
 
 
-def test_the_browser_unit_is_byte_identical_to_the_one_it_replaced() -> None:
-    """The hoisted renderer must not perturb a unit real machines already run.
+def test_restart_prevent_exit_status_is_opt_in_and_paired_with_success() -> None:
+    """Only a unit that names the status gains the lines; it is also a clean exit."""
+    base = supervisors.render_systemd_unit(description="d", exec_start="/bin/true")
+    assert "RestartPreventExitStatus" not in base and "SuccessExitStatus" not in base
 
-    Byte-for-byte against the string ``render_systemd`` emitted before the
-    renderer was shared: a cosmetic diff here would rewrite every installed
-    browser unit on the next upgrade for no reason.
-    """
+    unit = supervisors.render_systemd_unit(
+        description="d", exec_start="/bin/true", restart="always", restart_prevent_exit_status=75
+    )
+    lines = unit.splitlines()
+    assert "Restart=always" in lines
+    assert lines.index("RestartPreventExitStatus=75") > lines.index("RestartSec=5")
+    assert "SuccessExitStatus=75" in lines
+
+
+def test_the_browser_unit_retains_its_hoisted_shape() -> None:
+    """The browser's explicit log redirects keep their established placement."""
     expected = (
         "[Unit]\n"
         "Description=Local Operator browser bridge\n"
@@ -170,6 +248,7 @@ def test_the_browser_unit_is_byte_identical_to_the_one_it_replaced() -> None:
         "ExecStart=/usr/bin/python3 -m local_operator.browser_bridge.daemon --port 4099\n"
         "Restart=on-failure\n"
         "RestartSec=5\n"
+        f'Environment="PATH={supervisors.systemd_path()}"\n'
         "StandardOutput=append:/tmp/bridge.log\n"
         "StandardError=append:/tmp/bridge.log\n"
         "\n"
@@ -195,7 +274,8 @@ def test_the_browser_unit_is_byte_identical_to_the_one_it_replaced() -> None:
             exec_start="/usr/bin/python3 -m x",
         )
         == "[Unit]\nDescription=Local Operator browser bridge\n\n[Service]\n"
-        "ExecStart=/usr/bin/python3 -m x\nRestart=on-failure\nRestartSec=5\n\n"
+        "ExecStart=/usr/bin/python3 -m x\nRestart=on-failure\nRestartSec=5\n"
+        f'Environment="PATH={supervisors.systemd_path()}"\n\n'
         "[Install]\nWantedBy=default.target\n"
     )
 

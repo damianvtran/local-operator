@@ -79,6 +79,7 @@ def _consumer_defaults() -> dict[str, object]:
     )
     from local_operator.model.configure import (
         ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
+        ANTHROPIC_SUBAGENT_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
         OPENAI_USE_MAX_CONTEXT_WINDOW,
         OPENROUTER_RETIRE_BELOW_TPS,
     )
@@ -324,6 +325,9 @@ def _consumer_defaults() -> dict[str, object]:
         # key); the config default is checked against the same constant below.
         "providers.anthropic.cache_ttl_1h_min_context_tokens": (
             ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+        ),
+        "providers.anthropic.subagent_cache_ttl_1h_min_context_tokens": (
+            ANTHROPIC_SUBAGENT_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
         ),
         # The openrouter routing rows are guarded against the shipped config
         # block itself: their consumer is the single-shot resolver

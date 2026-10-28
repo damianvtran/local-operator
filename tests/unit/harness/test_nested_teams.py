@@ -58,8 +58,15 @@ MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 #: RE-BASELINED again for the 2026-10-06 reporting-rule addition: the member
 #: preamble now carries "Derive it, or say where it came from." for custom
 #: roles that have no seed.
+#:
+#: RE-BASELINED for the final-message reporting rule: members pre-sent their
+#: report through hub and then settled with the same text (measured: 60% of
+#: child->parent hub notes duplicated by the settle within 120 s), so the
+#: preamble now says the final message IS the report and hub is mid-job only.
 FROZEN_ORG_TASK_BYTES = (
-    "[team: org]\n\nYou are task on this team. You report to manager, through hub.\n\n"
+    "[team: org]\n\nYou are task on this team. You report to manager: your final "
+    "message is the report and reaches them automatically; use hub only for a "
+    "blocker or question mid-job, never to pre-send it.\n\n"
     "Derive it, or say where it came from: a result you report is one you "
     "derived here or one whose source you name — when a first read looks "
     "surprising, go one step further before reporting it.\n\n"
