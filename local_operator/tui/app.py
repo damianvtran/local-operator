@@ -8253,12 +8253,20 @@ class OperatorApp(App[None]):
                 cwd=await self._preview_cwd(directory, session_id),
                 takeover_factory=no_takeover,
             )
-            if session_id not in self._last_known_states:
+            stored = self._last_known_states.get(session_id)
+            if stored is None:
                 stored = await asyncio.to_thread(
                     _read_stored_frontend_state, directory / "sessions" / session_id, session_id
                 )
                 if stored is not None:
                     self._last_known_states.setdefault(session_id, stored)
+            if stored is not None:
+                # ON THE FACADE, not only in the band: the dock's todo panel
+                # reads `session.frontend_state`, so a row painted into the band
+                # alone left the dock at its old height and the transcript
+                # viewport shrank at the bind (the residual half of D1 measured
+                # in the PR's evidence).
+                remote.install_saved_facts(stored)
         else:
             record, owner = await asyncio.to_thread(find_runtime_record, directory, session_id)
             if record is None or owner is None:
@@ -10947,17 +10955,17 @@ class OperatorApp(App[None]):
         carries them (`_read_stored_frontend_state`).
 
         So for exactly the ordinary connecting state — not a verdict (failed,
-        stopped, answer-the-question), which keeps its whole-row sentence —
-        the stored state is painted through the SAME `_apply_frontend_state`
-        the bound frame uses, so widths and truncation are the bound frame's
-        for the same data, and the band is put in its last-known mode (dim
-        values, the connecting word in the indicator slot). What is never
-        taken from the stored row: ``streaming`` — forced off — and every other
-        live authority, which `_apply_frontend_state` does not read from a
-        state here anyway (approval and ask cards come from the gate path, the
-        running-children count from the live roster). The bind's own snapshot
-        then replaces all of it; the mode clears in `_commit_sidebar_session`'s
-        bound branch through this same method (``connecting`` False).
+        stopped, answer-the-question), which keeps its whole-row sentence — the
+        band is put in its last-known mode: the ordinary ladder row, every value
+        in the dim ink, and the connecting word in the indicator slot. The
+        VALUES are the facade's own state, which
+        `AttachedSession.install_saved_facts` has already filled with the same
+        durable facts the bound frame will paint, so widths and truncation match
+        it by construction rather than by a second copy of the mapping. Live
+        authority never comes from that row: it is cleared on install
+        (``streaming``, the gate, the queues, the child roster, the attention
+        receipt). The bind's own snapshot then replaces all of it, and the mode
+        clears on the same call with ``connecting`` False.
 
         A conversation with no stored state (a legacy journal with no
         checkpoint, never bound here) keeps the whole-row connecting sentence:
@@ -10980,22 +10988,14 @@ class OperatorApp(App[None]):
         # the ask queue and the roster's running counts. The durable facts —
         # model, effort, cwd, context, cost, title, team/agent, MCP roster —
         # are what is left.
-        shown = stored.model_copy(
-            update={
-                "streaming": False,
-                "activity_started_at": None,
-                "attention": {},
-                "peer_cycle_display": None,
-                "asks": None,
-                "jobs": [],
-            }
-        )
-        # Painted with the display-only facade as the CURRENT session, so the
-        # memo write at the top of `_apply_frontend_state` is skipped (it
-        # records bound frames only) and the stored row cannot overwrite a
-        # newer bound one.
-        self._apply_frontend_state(shown)
         self._status.set_last_known(True)
+        # The dock panels (todo/subagent) read the session's own state, which
+        # `AttachedSession.install_saved_facts` has already given the durable
+        # facts — but the band sync runs from a revision gate, and the facade's
+        # revision for a stored row can equal the one already painted. Ask once
+        # explicitly so the dock is the bound frame's height at first paint and
+        # the transcript viewport never shrinks under it afterwards.
+        self._refresh_band()
 
     def _gate_card_is_answerable(self, source: SessionInteraction) -> bool:
         """Whether an ANSWERABLE card is on screen for ``source``'s live gate.

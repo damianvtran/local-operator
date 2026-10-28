@@ -1883,6 +1883,66 @@ class AttachedSession:
         self._runtime_ready.set()
         return self
 
+    def install_saved_facts(self, state: Any) -> None:
+        """Put a saved conversation's DURABLE facts on its preview facade.
+
+        A ``saved_preview`` facade installs an empty placeholder state on
+        purpose — config and auth resolution stay off the open path (see that
+        method's docstring) — so every surface reading ``session.frontend_state``
+        painted nothing until the owner bound, then reflowed at the bind. The
+        band (model, effort, cwd, context, cost, title) and the dock's todo
+        panel are both such surfaces, and the conversation-open finality audit
+        measured each moving after first paint for data that had not changed
+        (TUI-FINALITY-DESIGN D1/D2: a warm reopen filled a 39-row viewport where
+        the bound frame has 26, then trimmed the history it had painted).
+
+        So the caller hands over the newest state the journal — or this process's
+        last bound frame — already holds, and this installs its DISPLAY facts.
+        Everything that would assert LIVE AUTHORITY or a live side effect is
+        cleared here rather than trusted from a row a previous runtime wrote:
+        the turn is not running, nothing is queued for steering, no gate is
+        pending, no child is running and no attention receipt stands. ``epoch``
+        is re-stamped, so this is a display snapshot and never a claim to be the
+        runtime that wrote the row; the owner's own install replaces it wholesale
+        on the bind. A state naming a DIFFERENT session (a fork's inherited row)
+        keeps its durable facts and takes this session's identity, exactly as the
+        runtime's own restore does (``_inherited_identity_fixups``).
+
+        Never raises: a cosmetic install must not be able to fail an open.
+        """
+        from local_operator.session.frontend_state import _inherited_identity_fixups
+
+        try:
+            shown = state.model_copy(
+                update={
+                    "epoch": f"saved-facts-{self._session_id}",
+                    "sequence": 0,
+                    "streaming": False,
+                    "activity_started_at": None,
+                    "activity_phase": "",
+                    "activity_phase_started_at": None,
+                    "live_tool_started_at": {},
+                    "live_events": [],
+                    "queued_steering": [],
+                    "attention": {},
+                    "peer_cycle_display": None,
+                    "asks": None,
+                    "pending_gate": None,
+                    "jobs": [
+                        job
+                        for job in getattr(state, "jobs", [])
+                        # NEVER a child claiming LIVE execution: a stored row
+                        # cannot vouch that something is running now. Settled
+                        # rows (completed, failed) are durable display facts.
+                        if str(getattr(job, "status", "")) not in {"running", "queued"}
+                    ],
+                    **_inherited_identity_fixups(state, self._session_id),
+                }
+            )
+            self._install_frontend(shown)
+        except Exception:  # noqa: BLE001 — a cosmetic install never fails an open
+            logger.debug("saved facts not installed on the preview facade", exc_info=True)
+
     @classmethod
     async def cold(
         cls,
