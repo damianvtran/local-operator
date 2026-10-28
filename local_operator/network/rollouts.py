@@ -17,8 +17,8 @@ WHAT THIS FILE OWNS (RU §8.2 item 3, first half; the trigger note §4/§6):
   a codeless refusal retried on the cadence (the wire's "not now", never a
   claim of why — round 2, R2-2), a CODED ``no_grant`` member parked for
   the rollout with the remedy recorded, and a member whose channel does not
-  serve the target YET parked ``deferred (target_not_published)`` on the
-  backoff ladder until PyPI catches up or the window closes.
+  serve the target YET parked ``deferred (target_not_published)`` on its
+  own short publish-wait ladder until PyPI catches up or the window closes.
   Every state re-enters from the record; the record is the only state.
 - **The origin-side audit rows** — ``update_rollout_started`` (durable, written
   by S3b's hook through :func:`open_record`'s callers), ``update_member_state``
@@ -100,6 +100,19 @@ CADENCE_S = 300.0
 #: (RU §10). There is no give-up counter; the record's window is the bound.
 FAIL_BACKOFF_S: tuple[float, ...] = (300.0, 600.0, 1200.0, 2400.0, 7200.0)
 
+#: The not-yet-published wait's ladder (seconds), then its cap: 2, 5, 10 min,
+#: then every 15 min until the window closes. Deliberately NOT
+#: :data:`FAIL_BACKOFF_S`: that ladder guards against hammering a member whose
+#: install keeps breaking, where each attempt is expensive and a fast retry
+#: changes nothing. A publish wait is the opposite on both counts — PyPI lag
+#: after a tag is minutes (0.90.17: 21.5 min), and the ask that probes it is one
+#: small frame the member answers with a single index lookup. On the failure
+#: ladder an hour of lag pushed the next ask 2 h out, so on 2026-10-28 a member
+#: sat 98 min behind an already-published 0.91.1. The cap bounds the cost of a
+#: version that never appears (an upload PyPI refused) to four tiny asks an
+#: hour; the record's window is still the one bound that ends them.
+NOT_PUBLISHED_BACKOFF_S: tuple[float, ...] = (120.0, 300.0, 600.0, 900.0)
+
 #: The record's own window (seconds; RU §6.1) — the one bound that ends
 #: automatic retries.
 WINDOW_S = 86400.0
@@ -142,8 +155,8 @@ RULE_REFUSAL_CODES: tuple[str, ...] = ("target_not_published", "editable_install
 #: 404 nearly always means "not YET": 0.90.17's member was refused at 05:30:38Z
 #: and the wheel landed at 05:52:05Z, and 0.90.14 closed the same way, each
 #: rollout ending ``partial`` with nothing left to retry it. The member is
-#: parked ``deferred`` with this code on its own :data:`FAIL_BACKOFF_S` ladder
-#: (counted in ``waits``, so ``fails`` keeps meaning "the install broke") and is
+#: parked ``deferred`` with this code on its own :data:`NOT_PUBLISHED_BACKOFF_S`
+#: ladder (counted in ``waits``, so ``fails`` keeps meaning "the install broke") and is
 #: re-asked until it installs, the record's window lapses, or a newer rollout
 #: supersedes this one. Those two bounds are the ones every other retry already
 #: has; no new deadline exists. A 404 can also mean NEVER (an upload PyPI
@@ -555,9 +568,10 @@ def summary(record: Mapping[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _backoff_s(fails: int) -> float:
-    index = min(max(fails, 1), len(FAIL_BACKOFF_S)) - 1
-    return FAIL_BACKOFF_S[index]
+def _backoff_s(fails: int, ladder: tuple[float, ...] = FAIL_BACKOFF_S) -> float:
+    """The rung for the ``fails``-th consecutive miss on ``ladder``; its last rung is the cap."""
+    index = min(max(fails, 1), len(ladder)) - 1
+    return ladder[index]
 
 
 #: How many ``left_busy`` ids a member's answer may put into the durable record
@@ -624,8 +638,8 @@ def classify_answer(
             # The not-published wait's own rung counter. CARRIED, not reset, by
             # every other answer (agent review round 1 on #3028, m3): a busy or
             # dropped ask between two 404s says nothing about whether PyPI has
-            # the wheel yet, so restarting the ladder at 5 min would re-poll the
-            # channel faster for no new fact. Only that arm advances it, and a
+            # the wheel yet, so restarting the ladder at its first rung would
+            # re-poll the channel faster for no new fact. Only that arm advances it, and a
             # settled member (the done arm) or ``--resume`` clears it.
             "waits": waits,
         }
@@ -681,8 +695,9 @@ def classify_answer(
     if code == NOT_PUBLISHED_CODE and state == "refused":
         # THE MEMBER said its channel 404s this exact version. That is "not
         # YET" far more often than "never" (see :data:`NOT_PUBLISHED_CODE`):
-        # park it on the backoff ladder and ask again, bounded by the window
-        # and by supersede like every other retry. ``state == "refused"`` is
+        # park it on the publish-wait ladder (:data:`NOT_PUBLISHED_BACKOFF_S`,
+        # short and capped, never the failure ladder) and ask again, bounded by
+        # the window and by supersede like every other retry. ``state == "refused"`` is
         # what tells this apart from the ORIGIN's own pre-frame refusal (a
         # stamp that is not a version), which carries no state and stays a
         # terminal rule refusal below.
@@ -690,7 +705,7 @@ def classify_answer(
         return moved(
             "deferred",
             new_code=NOT_PUBLISHED_CODE,
-            floor=_backoff_s(next_waits),
+            floor=_backoff_s(next_waits, NOT_PUBLISHED_BACKOFF_S),
             cause="policy",
             outcome="refused",
         ) | {"waits": next_waits}

@@ -355,9 +355,14 @@ a per-network policy.**
   channel does not serve **yet** is waited for inside this rollout (amended
   2026-10-27): the origin installs at tag time while PyPI publication lags it —
   0.90.17's wheel landed 21.5 minutes after the member's first ask — so the
-  member is parked `deferred (target_not_published)` on the failure ladder
-  (5/10/20/40 min, then 2 h, counted separately from `failed`) and re-asked
-  until it installs, the window closes, or a newer rollout supersedes this one.
+  member is parked `deferred (target_not_published)` on its own short
+  publish-wait ladder (2/5/10 min, then every 15 min; counted separately from
+  `failed`) and re-asked until it installs, the window closes, or a newer
+  rollout supersedes this one. (Amended 2026-10-28: this wait first rode the
+  failure ladder's 5/10/20/40 min then 2 h, so an hour of lag put the next ask
+  2 h out and a member sat 98 min behind an already-published 0.91.1. Publish
+  lag is minutes and an ask is one small frame; the failure ladder stays for
+  real failures.)
   A window that closes on it says in plain words that the version never
   appeared on PyPI and may not have been published at all (a 404 also covers an
   upload PyPI refused, e.g. its project size quota), naming the members left on
