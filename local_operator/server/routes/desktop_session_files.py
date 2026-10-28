@@ -328,7 +328,11 @@ async def list_user_attachments(session_id: SessionID, request: Request):
     if directory is None:
         return reply(UserAttachmentsListing())
     try:
-        listing = await asyncio.to_thread(user_attachments.list_user_attachments, directory)
+        listing = await asyncio.to_thread(
+            user_attachments.list_user_attachments,
+            directory,
+            deny=service.make_deny(_config_dir(request)),
+        )
     except compression.ArchiveError:
         logger.info("user-attachments: undecodable archive for %s", session_id, exc_info=True)
         return reply(UserAttachmentsListing(state="unavailable"))
@@ -354,7 +358,8 @@ async def materialise_user_attachment(
 
     MEMBERSHIP: the digest must be one the person attached to THIS conversation
     (:func:`user_attachments.find_user_attachment`); the shared store means a bare digest
-    proves nothing. 404 otherwise (and for a draft or a peer, whose journal is not here); 410
+    proves nothing. 404 otherwise (and for a draft or a peer, whose journal is not here, and
+    for a listed attachment with ``materialisable: false`` - a sensitive path or name); 410
     when the store copy is gone; 409 for an unsafe destination. Capability:
     ``features.session_attachments``.
     """
@@ -365,13 +370,22 @@ async def materialise_user_attachment(
     )
     if kind_of_target != "local" or directory is None:
         raise not_found
+    deny = service.make_deny(_config_dir(request))
 
     def run() -> dict[str, Any]:
         from local_operator.scratchpad import scratchpad_root
         from local_operator.session.attachments import store_for_transcript_dir
 
-        item = user_attachments.find_user_attachment(directory, digest)
+        item = user_attachments.find_user_attachment(directory, digest, deny=deny)
         if item is None:
+            raise service.MaterialiseError("file_not_found")
+        # SENSITIVE-PATH GATE, before any byte is read (PR #3042 QA round 3, Q1). The file
+        # index never lists a denied path, so its own materialise answers 404
+        # ``session_files_file_not_found`` for one; this route LISTS a denied attachment (the
+        # person chose it) with ``materialisable: false`` and refuses it with that same
+        # envelope, so a client handles both routes' denials identically and nothing is
+        # written. Judged on the ORIGINAL path and name, never only the sanitised copy name.
+        if not item.get("materialisable", True):
             raise service.MaterialiseError("file_not_found")
         blob = store_for_transcript_dir(directory).get_bytes(digest)
         if blob is None:

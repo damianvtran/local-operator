@@ -2410,11 +2410,15 @@ memory when the canvas opens, and listing only the loaded rows would claim "noth
 The route scans the whole journal (`local_operator/session/user_attachments.py`).
 
 Each item: `{message_id, ts, index, kind: document|image, attachment, filename, mime_type,
-bytes, path, exists, stored_path, stored, injection}`. `index` is the block's position in its
+bytes, path, exists, stored_path, stored, injection, materialisable}`. `index` is the block's position in its
 message's `content`; `attachment` is the store digest (`null` when the row's inline bytes are
 not in the store); `path` is the ORIGIN path and `exists` whether it is still a file (`null` with no origin),
 `stored_path`/`stored` the retained
-store copy and whether it is on disk now. **Metadata only:** bytes stay on
+store copy and whether it is on disk now. `materialisable` is `false` when the sensitive-path
+denylist (the file index's `make_deny`) refuses the origin path, the original filename or the
+name a copy would get (`~/.ssh/id_rsa`, `.env`, `<config>/master.key`) — and for every row
+sharing a refused digest. Such a row is still listed (the person attached it), but no
+open/reveal/copy-path action may be offered for it. **Metadata only:** bytes stay on
 `…/attachments/{digest}`; there is no second transport. User rows only, and never a
 harness-injected row (`provider_payload.harness_injected`).
 
@@ -2428,7 +2432,9 @@ aggregates loaded rows and must not call the route.
 directories, sanitised name, MIME-derived extension, idempotent, never overwrites). The
 digest must be one the person attached to this conversation (the store is shared, so a bare
 digest proves nothing). Refusals reuse the file index's codes: `404
-session_files_file_not_found`, `410 session_files_artifact_missing`, `409
+session_files_file_not_found` (also for a `materialisable: false` row — the file index
+answers the same for a denied path, which it never lists — checked before any byte is read,
+so nothing is written), `410 session_files_artifact_missing`, `409
 session_files_unsafe_destination`.
 
 ### Verification

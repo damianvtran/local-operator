@@ -181,6 +181,11 @@ class UserAttachment(BaseModel):
     stored_path: str | None = None
     stored: bool = False
     injection: Literal["native", "extracted", "reference"] | None = None
+    #: ``False`` when the sensitive-path denylist refuses the origin path, the original
+    #: filename or the name a copy would get (``~/.ssh/id_rsa``, ``.env``): still listed, but
+    #: ``…/materialise`` answers 404 and a client must offer no open/reveal/copy-path action.
+    #: Absent from an older daemon, which a client treats as "governed by the capability bit".
+    materialisable: bool = True
 
 
 class UserAttachmentsListing(BaseModel):

@@ -55,7 +55,7 @@ import re
 import threading
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from local_operator.harness.rows import is_harness_injection
 from local_operator.session import compression
@@ -308,7 +308,9 @@ def _inventory(session_dir: Path) -> _Inventory:
     return result
 
 
-def list_user_attachments(session_dir: Path) -> dict[str, Any]:
+def list_user_attachments(
+    session_dir: Path, *, deny: Callable[[str], bool] | None = None
+) -> dict[str, Any]:
     """``{items, truncated}`` for the conversation in ``session_dir``, oldest first.
 
     Order is journal order (append order), which is send order; ``index`` is the block's
@@ -317,9 +319,47 @@ def list_user_attachments(session_dir: Path) -> dict[str, Any]:
     :class:`compression.ArchiveError` for an archive this build cannot decode - an honest
     failure the route maps to an error, never an empty "nothing attached". The answer is
     always freshly built (new dicts), with ``exists``/``stored`` stat'd on this call.
+
+    ``deny`` (``session_files.service.make_deny`` for this config dir) adds ``materialisable``
+    to every item: ``False`` when the sensitive-path gate refuses the row's origin path, its
+    original filename or the name a materialise would write (PR #3042 QA round 3, Q1). The
+    row is still LISTED - the person attached it and the transcript shows it - but no copy of
+    it may be written. Computed per call like ``exists``: the denylist reads the live config
+    dir and resolves symlinks, so it is not a journal fact the cache may hold.
     """
     records, truncated = _inventory(Path(session_dir))
-    return {"items": [_with_disk_state(record) for record in records], "truncated": truncated}
+    items = [_with_disk_state(record) for record in records]
+    if deny is not None:
+        # Materialise is addressed by DIGEST and the store is content-addressed, so the bytes
+        # of an attached ``.env`` re-attached as ``notes.txt`` are the same secret under an
+        # innocent name. A digest any row of which is denied is refused for EVERY row sharing
+        # it, which keeps this flag and the route's verdict (``find_user_attachment``) equal.
+        verdicts = [_record_denied(record, deny) for record in records]
+        refused = {r.get("attachment") for r, bad in zip(records, verdicts) if bad}
+        refused.discard(None)
+        for item, bad in zip(items, verdicts):
+            item["materialisable"] = not (bad or item.get("attachment") in refused)
+    return {"items": items, "truncated": truncated}
+
+
+def _materialised_name(record: dict[str, Any]) -> str:
+    """The name ``…/materialise`` would write, computed exactly as the route computes it."""
+    from local_operator.session_files.service import sanitise_name
+
+    return sanitise_name(
+        record.get("filename"), record.get("attachment") or "0" * 32, record.get("mime_type")
+    )
+
+
+def _record_denied(record: dict[str, Any], deny: Callable[[str], bool]) -> bool:
+    from local_operator.session_files.service import attachment_denied
+
+    return attachment_denied(
+        deny,
+        origin=record.get("path"),
+        filename=record.get("filename"),
+        materialised_name=_materialised_name(record),
+    )
 
 
 def _scan_user_attachments(session_dir: Path) -> _Inventory:
@@ -345,17 +385,28 @@ def _scan_user_attachments(session_dir: Path) -> _Inventory:
     return tuple(items), truncated
 
 
-def find_user_attachment(session_dir: Path, digest: str) -> dict[str, Any] | None:
+def find_user_attachment(
+    session_dir: Path, digest: str, *, deny: Callable[[str], bool] | None = None
+) -> dict[str, Any] | None:
     """The newest listed attachment carrying ``digest``, or ``None``.
 
     The materialise route's MEMBERSHIP check: the attachment store is shared across
     conversations, so a digest alone proves nothing about this session. Only a digest the
     person attached HERE may be copied into this session's scratchpad. Newest wins so a file
-    attached twice under two names materialises under the name used most recently.
+    attached twice under two names materialises under the name used most recently. With
+    ``deny``, ``materialisable`` is ``False`` when ANY row carrying the digest is denied.
     """
     found = None
+    matches: list[dict[str, Any]] = []
     # Membership needs only the cached records; stat just the one item that is returned.
     for record in _inventory(Path(session_dir))[0]:
         if record.get("attachment") == digest:
             found = record
-    return None if found is None else _with_disk_state(found)
+            matches.append(record)
+    if found is None:
+        return None
+    item = _with_disk_state(found)
+    if deny is not None:
+        # The same per-digest verdict the listing reports (see ``list_user_attachments``).
+        item["materialisable"] = not any(_record_denied(match, deny) for match in matches)
+    return item

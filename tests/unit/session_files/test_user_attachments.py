@@ -329,7 +329,7 @@ async def test_route_undecodable_archive_is_unavailable_not_empty(
     client, cfg = api
     _seed(cfg)
 
-    def boom(_directory: Path) -> dict[str, Any]:
+    def boom(_directory: Path, **_kwargs: Any) -> dict[str, Any]:
         raise compression.ArchiveUnavailable("zstd missing")
 
     monkeypatch.setattr(user_attachments, "list_user_attachments", boom)
@@ -418,3 +418,137 @@ async def test_listing_restats_origin_and_store_copy_without_a_journal_change(ap
     first["items"][0]["filename"] = "mutated"
     first["items"].clear()
     assert list_user_attachments(directory)["items"][0]["filename"] == "report.txt"
+
+
+def _document(digest: str, filename: str, mime: str, path: Path | None) -> dict[str, Any]:
+    block: dict[str, Any] = {
+        "type": "document",
+        "filename": filename,
+        "mime_type": mime,
+        "attachment": digest,
+    }
+    if path is not None:
+        block["path"] = str(path)
+    return block
+
+
+def _generated(directory: Path) -> list[str]:
+    generated = directory / "scratchpad" / "generated"
+    return sorted(p.name for p in generated.iterdir()) if generated.is_dir() else []
+
+
+@pytest.mark.asyncio
+async def test_sensitive_attachments_are_listed_but_never_materialised(
+    api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q1 (PR #3042 QA round 3): a credential the person attached stays LISTED, never copied.
+
+    Before the fix the route listed ``~/.ssh/id_rsa`` and ``~/proj/.env`` and materialised
+    them as ``id_rsa.bin`` and ``env.txt`` - the second a name no denylist rule recognises,
+    so the copy laundered the secret into an innocuous scratchpad file.
+    """
+    monkeypatch.setattr(
+        os, "supports_dir_fd", os.supports_dir_fd | {os.open, os.mkdir, os.unlink, os.stat}
+    )
+    client, cfg = api
+    directory = _session(cfg)
+    home = cfg.parent / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / "proj").mkdir(parents=True)
+    key_path = home / ".ssh" / "id_rsa"
+    key_path.write_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----")
+    env_path = home / "proj" / ".env"
+    env_path.write_bytes(b"API_KEY=hunter2")
+    key, _ = _stored(directory, key_path.read_bytes(), "application/octet-stream")
+    env, _ = _stored(directory, env_path.read_bytes(), "text/plain")
+    pdf, _ = _stored(directory, b"%PDF-1.7 contract", "application/pdf")
+    # No origin path at all (a synced or pasted row): only the NAME can deny it, and the old
+    # sanitiser rewrote ``.npmrc`` to ``npmrc.txt``.
+    npmrc, _ = _stored(directory, b"//registry/:_authToken=x", "text/plain")
+    # A harmless name over a denied ORIGIN directory: only the path can deny it.
+    aws, _ = _stored(directory, b"[default]", "text/plain")
+    write_journal(
+        directory,
+        [
+            _user(
+                "u1",
+                1.0,
+                [
+                    _document(key, "id_rsa", "application/octet-stream", key_path),
+                    _document(env, ".env", "text/plain", env_path),
+                    _document(pdf, "Contract.pdf", "application/pdf", home / "Contract.pdf"),
+                    _document(npmrc, ".npmrc", "text/plain", None),
+                    _document(aws, "notes.txt", "text/plain", home / ".aws" / "notes.txt"),
+                ],
+            ),
+            # The SAME bytes as the .env, re-attached under an innocent name: a digest-addressed
+            # materialise must not be able to launder it through the second row.
+            _user("u2", 2.0, [_document(env, "notes.txt", "text/plain", None)]),
+        ],
+    )
+    items = (await client.get(URL)).json()["result"]["items"]
+    flags = [(i["filename"], i["materialisable"]) for i in items]
+    assert flags == [
+        ("id_rsa", False),
+        (".env", False),
+        ("Contract.pdf", True),
+        (".npmrc", False),
+        ("notes.txt", False),
+        ("notes.txt", False),
+    ]
+    # Listing semantics from round 2 are untouched: the origin is stat'd per call.
+    assert [i["exists"] for i in items[:2]] == [True, True]
+    assert all(i["stored"] for i in items)
+
+    base = f"/v1/desktop/sessions/{SESSION}/user-attachments"
+    for digest in (key, env, npmrc, aws):
+        refused = await client.post(f"{base}/{digest}/materialise")
+        assert refused.status_code == 404, refused.text
+        assert refused.json()["detail"]["code"] == "session_files_file_not_found"
+        assert _generated(directory) == [], "a refused attachment must write NOTHING"
+
+    # Control: an ordinary PDF still materialises.
+    receipt = await client.post(f"{base}/{pdf}/materialise")
+    assert receipt.status_code == 200, receipt.text
+    assert _generated(directory) == ["Contract.pdf"]
+
+
+@pytest.mark.asyncio
+async def test_sensitive_refusal_reads_no_bytes(api, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The deny gate runs BEFORE the store is read: a refusal never touches the bytes."""
+    from local_operator.session.attachments import AttachmentStore
+
+    client, cfg = api
+    directory = _session(cfg)
+    env, _ = _stored(directory, b"SECRET=1", "text/plain")
+    write_journal(directory, [_user("u1", 1.0, [_document(env, ".env", "text/plain", None)])])
+    reads: list[str] = []
+    original = AttachmentStore.get_bytes
+
+    def spy(self: AttachmentStore, digest: str):
+        reads.append(digest)
+        return original(self, digest)
+
+    monkeypatch.setattr(AttachmentStore, "get_bytes", spy)
+    refused = await client.post(
+        f"/v1/desktop/sessions/{SESSION}/user-attachments/{env}/materialise"
+    )
+    assert refused.status_code == 404
+    assert reads == []
+    assert _generated(directory) == []
+
+
+def test_sanitiser_cannot_launder_a_credential_name() -> None:
+    """The copy name of a credential-shaped original stays credential-shaped (Q1).
+
+    ``attachment_denied`` judges the ORIGINAL first, so this is defence in depth: even a
+    future caller that forgot the gate would write a name the denylist still recognises.
+    """
+    from local_operator.session_files import service
+    from local_operator.supplements import denylist
+
+    for name, mime in ((".env", "text/plain"), (".npmrc", "text/plain"), (".netrc", None)):
+        copy = service.sanitise_name(name, "d" * 32, mime)
+        assert denylist.is_sensitive("/" + copy), (name, copy)
+    # Ordinary dotfiles keep the established behaviour.
+    assert service.sanitise_name(".hidden.png", "d" * 32, "image/png") == "hidden.png"
