@@ -24,7 +24,7 @@
   "cli.team_bridge.outcome.removed": "रिसीवर सेवा रोककर हटा दी गई है।",
   "cli.team_bridge.outcome.absent": "हटाने के लिए कोई रिसीवर सेवा नहीं है।",
   "cli.team_bridge.outcome.not_wanted": "इस मशीन पर एजेंट संदेशों का सेटअप नहीं हुआ है या वे बंद हैं, इसलिए कुछ इंस्टॉल नहीं हुआ।",
-  "cli.team_bridge.outcome.not_wanted_hint": "पहले एजेंट संदेशों का सेटअप करें: `lop login radient` से लॉगिन करें, `lop login-status` से क्रेडेंशियल पंक्ति की आईडी पाएँ, फिर `lop team-bridge setup --credential-id <id>` चलाएँ। उसका दिया गया सहमति विवरण पढ़ें और अपने चुने हुए सही खाते, संगठन, सहमति संस्करण और चीफ़ ऑफ़ स्टाफ़ सत्र के साथ कमांड दोबारा चलाएँ। फिर यह कमांड दोबारा चलाएँ।",
+  "cli.team_bridge.outcome.not_wanted_hint": "इस मशीन पर एजेंट संदेशों का सेटअप नहीं हुआ है या वे बंद हैं। सहमति और चीफ़ ऑफ़ स्टाफ़ Local Operator ऐप में चुने जाते हैं: इसे एक बार खोलें, खाता स्वामी के रूप में लॉगिन करें और एजेंट संदेश चालू करें। फिर यहाँ `lop team-bridge setup` चलाएँ ताकि रिसीवर की जाँच हो और वह अपनी जगह पर रखा जाए।",
   "cli.team_bridge.outcome.remove_hint": "एजेंट संदेश अब भी चालू हैं, इसलिए अगली बार Local Operator शुरू होने पर रिसीवर फिर से इंस्टॉल हो जाएगा। संदेश प्राप्त करना बंद करने के लिए एजेंट संदेश बंद करें: `lop config edit team_bridge.enabled false`।",
   "cli.team_bridge.outcome.no_supervisor": "इस मशीन पर उपयोगकर्ता सेवाओं का मैनेजर नहीं है, इसलिए रिसीवर इंस्टॉल नहीं किया जा सकता। {detail}",
   "cli.team_bridge.outcome.no_user_manager": "systemd में इस लॉगिन खाते के लिए उपयोगकर्ता सत्र नहीं है, इसलिए रिसीवर इंस्टॉल नहीं हो सका। {detail}",
@@ -36,10 +36,12 @@
   "cli.team_bridge.logs.none": "{path} पर अभी रिसीवर का कोई लॉग नहीं है।",
   "cli.team_bridge.logs.header": "{path} की आख़िरी पंक्तियाँ:",
   "cli.team_bridge.outcome.note": "नोट: {detail}",
-  "cli.team_bridge.help.setup": "डेस्कटॉप ऐप के बिना एजेंट संदेशों का सेटअप करें: दिया गया सहमति विवरण देखें या स्पष्ट रूप से स्वीकार करें",
-  "cli.team_bridge.setup.credential": "`lop login-status` में दिखाई गई Radient क्रेडेंशियल पंक्ति की आईडी (आवश्यक)",
-  "cli.team_bridge.setup.account": "लॉगिन किए गए खाते से मिलान के लिए बताई गई खाता आईडी (स्वीकार करने के लिए आवश्यक)",
-  "cli.team_bridge.setup.tenant": "पूर्वावलोकन में दी गई संगठन आईडी (स्वीकार करने के लिए आवश्यक)",
-  "cli.team_bridge.setup.consent": "पूर्वावलोकन में दिखाए गए सहमति विवरण का केवल सही संस्करण स्वीकार करें; --session आवश्यक है",
-  "cli.team_bridge.setup.session": "मौजूदा चीफ़ ऑफ़ स्टाफ़ सत्र की आईडी; सहमति स्वीकार करते समय इसे देना आवश्यक है"
+  "cli.team_bridge.help.setup": "जाँचें कि यह मशीन एजेंट संदेशों के लिए तैयार है, और रिसीवर रखें। सहमति Local Operator ऐप में दी जाती है",
+  "cli.team_bridge.setup.consent_ui_required": "Team Bridge की सहमति Local Operator ऐप में दी जाती है, टर्मिनल से नहीं। ऐप एक बार खोलें और एजेंट संदेश चालू करें।",
+  "cli.team_bridge.setup.consent_ui_next": "इस मशीन का सेटअप नहीं हुआ है, इसलिए अभी इंस्टॉल करने के लिए कुछ नहीं है। जब ऐप इस कॉन्फ़िगरेशन फ़ोल्डर के लिए एजेंट संदेश चालू कर दे, तब यह कमांड दोबारा चलाएँ।",
+  "cli.team_bridge.setup.enable_in_app_required": "{account_id} के लिए एजेंट संदेश सेटअप हो चुके हैं, लेकिन इस मशीन पर चालू नहीं हैं। Local Operator ऐप एक बार खोलें और एजेंट संदेश चालू करें, फिर यह कमांड दोबारा चलाएँ।",
+  "cli.team_bridge.setup.designation_missing": "{account_id} के लिए एजेंट संदेश सेटअप हो चुके हैं, लेकिन इसके लिए कोई चीफ़ ऑफ़ स्टाफ़ सत्र निर्धारित नहीं है। Local Operator ऐप खोलें और वह सत्र चुनें जो आपके एजेंट्स को जवाब दे।",
+  "cli.team_bridge.setup.ready": "एजेंट संदेश: तैयार। खाता {account_id}, चीफ़ ऑफ़ स्टाफ़ सत्र {session}, और रिसीवर अपनी जगह पर है।",
+  "cli.team_bridge.setup.not_ready": "एजेंट संदेश सेटअप हो चुके हैं, लेकिन रिसीवर नहीं रखा गया ({service})। {detail}",
+  "cli.team_bridge.setup.failed": "तैयारी की जाँच नहीं चल सकी। कुछ नहीं बदला गया।"
 }

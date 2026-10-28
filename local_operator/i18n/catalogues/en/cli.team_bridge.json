@@ -24,7 +24,7 @@
   "cli.team_bridge.outcome.removed": "The receiver service was stopped and removed.",
   "cli.team_bridge.outcome.absent": "There is no receiver service to remove.",
   "cli.team_bridge.outcome.not_wanted": "Agent messages are not set up or are turned off on this machine, so nothing was installed.",
-  "cli.team_bridge.outcome.not_wanted_hint": "Set up agent messages first: sign in with `lop login radient`, get the credential row id from `lop login-status`, then run `lop team-bridge setup --credential-id <id>`. Read its served consent and repeat with the exact account, tenant, consent version and chief-of-staff session you choose. Then run this again.",
+  "cli.team_bridge.outcome.not_wanted_hint": "Agent messages are not set up, or are turned off, for this machine. Consent and the chief of staff are chosen in the Local Operator app: open it once, sign in as the account owner and enable Agent messages. Then run `lop team-bridge setup` here to check and place the receiver.",
   "cli.team_bridge.outcome.remove_hint": "Agent messages are still on, so the receiver will be installed again the next time Local Operator starts. To stop receiving messages, turn agent messages off: `lop config edit team_bridge.enabled false`.",
   "cli.team_bridge.outcome.no_supervisor": "This machine has no user service manager, so the receiver cannot be installed. {detail}",
   "cli.team_bridge.outcome.no_user_manager": "systemd has no user session for this login, so the receiver could not be installed. {detail}",
@@ -36,10 +36,12 @@
   "cli.team_bridge.logs.none": "No receiver log yet at {path}.",
   "cli.team_bridge.logs.header": "Last lines of {path}:",
   "cli.team_bridge.outcome.note": "Note: {detail}",
-  "cli.team_bridge.help.setup": "Set up agent messages without the desktop app: preview or explicitly accept served consent",
-  "cli.team_bridge.setup.credential": "Radient credential row id shown by `lop login-status` (required)",
-  "cli.team_bridge.setup.account": "Account id asserted against the signed-in account (required to accept)",
-  "cli.team_bridge.setup.tenant": "Organization id from the preview (required to accept)",
-  "cli.team_bridge.setup.consent": "Accept only the exact consent version shown in the preview; requires --session",
-  "cli.team_bridge.setup.session": "Existing chief-of-staff session id; must accompany consent acceptance"
+  "cli.team_bridge.help.setup": "Check that this machine is ready for agent messages, and place the receiver. Consent is granted in the Local Operator app",
+  "cli.team_bridge.setup.consent_ui_required": "Team Bridge consent is granted in the Local Operator app, not from a terminal. Open the app once and enable Agent messages.",
+  "cli.team_bridge.setup.consent_ui_next": "This machine is not enrolled, so there is nothing to install yet. After the app has enabled Agent messages for this configuration folder, run this command again.",
+  "cli.team_bridge.setup.enable_in_app_required": "Agent messages are set up for {account_id} but are not switched on for this machine. Open the Local Operator app once and enable Agent messages, then run this command again.",
+  "cli.team_bridge.setup.designation_missing": "Agent messages are set up for {account_id}, but no chief-of-staff session is committed for it. Open the Local Operator app and choose the session that should answer your agents.",
+  "cli.team_bridge.setup.ready": "Agent messages: ready. Account {account_id}, chief-of-staff session {session}, and the receiver is in place.",
+  "cli.team_bridge.setup.not_ready": "Agent messages are set up, but the receiver was not placed ({service}). {detail}",
+  "cli.team_bridge.setup.failed": "The readiness check could not run. Nothing was changed."
 }

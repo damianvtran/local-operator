@@ -24,7 +24,10 @@ DEFAULT_LOG_LINES = 50
 def add_parser(subparsers: Any, parent_parser: argparse.ArgumentParser | None = None) -> None:
     """Register ``lop team-bridge setup`` and ``lop team-bridge receiver <verb>``.
 
-    Two children: ``setup`` (backend-only consent and chief-of-staff selection,
+    Consent is deliberately NOT part of this group: it is granted in the app
+    (#3022's bearer boundary). See :mod:`local_operator.team_bridge.setup_cli`.
+
+    Two children: ``setup`` (a read-only readiness check plus receiver placement,
     :mod:`local_operator.team_bridge.setup_cli`) and ``receiver`` (the service
     lifecycle, :mod:`local_operator.team_bridge.connector.cli`). The help text
     uses the product name ("agent messages") the rest of the product shows.
@@ -40,12 +43,13 @@ def add_parser(subparsers: Any, parent_parser: argparse.ArgumentParser | None = 
     parents = [parent_parser] if parent_parser is not None else []
     group = subparsers.add_parser("team-bridge", help=text(_k.help_group()), parents=parents)
     group_actions = group.add_subparsers(dest="team_bridge_command")
+    # NO FLAGS BUT --json, and that is the point: this verb cannot accept
+    # consent, name an account, pick a tenant or designate a session (see
+    # setup_cli's module docstring for why a terminal path to consent was
+    # removed rather than hardened). It reads what the app committed and places
+    # the receiver when that decision is already present.
     setup = group_actions.add_parser("setup", help=text(_k.help_setup()))
-    setup.add_argument("--credential-id", type=int, required=True, help=text(_k.setup_credential()))
-    setup.add_argument("--account-id", default=None, help=text(_k.setup_account()))
-    setup.add_argument("--tenant-id", default=None, help=text(_k.setup_tenant()))
-    setup.add_argument("--accept-consent-version", default=None, help=text(_k.setup_consent()))
-    setup.add_argument("--session", default=None, help=text(_k.setup_session()))
+    setup.add_argument("--json", action="store_true", help=text(_k.help_json()))
     receiver = group_actions.add_parser("receiver", help=text(_k.help_receiver()))
     verbs = receiver.add_subparsers(dest="receiver_command")
     for name, help_message in (

@@ -24,7 +24,7 @@
   "cli.team_bridge.outcome.removed": "وصول کنندہ کی سروس روک کر ہٹا دی گئی ہے۔",
   "cli.team_bridge.outcome.absent": "ہٹانے کے لیے وصول کنندہ کی کوئی سروس موجود نہیں ہے۔",
   "cli.team_bridge.outcome.not_wanted": "اس مشین پر ایجنٹ کے پیغامات کی ترتیب نہیں دی گئی یا وہ بند ہیں، اس لیے کچھ نصب نہیں کیا گیا۔",
-  "cli.team_bridge.outcome.not_wanted_hint": "پہلے ایجنٹ کے پیغامات کی ترتیب دیں: `lop login radient` سے لاگ اِن کریں، `lop login-status` سے کریڈینشل قطار کی شناخت حاصل کریں، پھر `lop team-bridge setup --credential-id <id>` چلائیں۔ اس کا پیش کردہ رضامندی بیان پڑھیں اور اپنے منتخب کردہ عین اکاؤنٹ، تنظیم، رضامندی کے ورژن اور چیف آف اسٹاف سیشن کے ساتھ وہی setup کمانڈ دوبارہ چلائیں۔ پھر یہ کمانڈ دوبارہ چلائیں۔",
+  "cli.team_bridge.outcome.not_wanted_hint": "اس مشین پر ایجنٹ کے پیغامات کی ترتیب نہیں دی گئی یا وہ بند ہیں۔ رضامندی اور چیف آف اسٹاف Local Operator ایپ میں منتخب کیے جاتے ہیں: اسے ایک بار کھولیں، اکاؤنٹ کے مالک کے طور پر لاگ اِن کریں اور ایجنٹ کے پیغامات فعال کریں۔ پھر یہاں `lop team-bridge setup` چلائیں تاکہ وصول کنندہ کی جانچ ہو اور وہ اپنی جگہ پر رکھا جائے۔",
   "cli.team_bridge.outcome.remove_hint": "ایجنٹ کے پیغامات اب بھی فعال ہیں، اس لیے Local Operator کے اگلی بار شروع ہونے پر وصول کنندہ دوبارہ نصب ہو جائے گا۔ پیغامات وصول کرنا بند کرنے کے لیے ایجنٹ کے پیغامات بند کریں: `lop config edit team_bridge.enabled false`۔",
   "cli.team_bridge.outcome.no_supervisor": "اس مشین پر صارف کی سروسز کا مینیجر نہیں ہے، اس لیے وصول کنندہ نصب نہیں کیا جا سکتا۔ {detail}",
   "cli.team_bridge.outcome.no_user_manager": "systemd میں اس لاگ اِن اکاؤنٹ کے لیے صارف سیشن نہیں ہے، اس لیے وصول کنندہ نصب نہیں کیا جا سکا۔ {detail}",
@@ -36,10 +36,12 @@
   "cli.team_bridge.logs.none": "{path} پر ابھی وصول کنندہ کا کوئی لاگ نہیں ہے۔",
   "cli.team_bridge.logs.header": "{path} کی آخری سطریں:",
   "cli.team_bridge.outcome.note": "نوٹ: {detail}",
-  "cli.team_bridge.help.setup": "ڈیسک ٹاپ ایپ کے بغیر ایجنٹ کے پیغامات کی ترتیب دیں: پیش کردہ رضامندی بیان کا پیش منظر دیکھیں یا اسے واضح طور پر قبول کریں",
-  "cli.team_bridge.setup.credential": "`lop login-status` میں دکھائی گئی Radient کریڈینشل قطار کی شناخت (لازمی)",
-  "cli.team_bridge.setup.account": "لاگ اِن کیے گئے اکاؤنٹ سے مطابقت کے لیے بیان کردہ اکاؤنٹ کی شناخت (قبول کرنے کے لیے لازمی)",
-  "cli.team_bridge.setup.tenant": "پیش منظر میں دی گئی تنظیم کی شناخت (قبول کرنے کے لیے لازمی)",
-  "cli.team_bridge.setup.consent": "جائزے میں دکھائے گئے رضامندی بیان کا صرف عین ورژن قبول کریں؛ --session درکار ہے",
-  "cli.team_bridge.setup.session": "موجودہ چیف آف اسٹاف سیشن کی شناخت؛ رضامندی قبول کرتے وقت اس کا ہونا لازمی ہے"
+  "cli.team_bridge.help.setup": "جانچیں کہ یہ مشین ایجنٹ کے پیغامات کے لیے تیار ہے، اور وصول کنندہ رکھیں۔ رضامندی Local Operator ایپ میں دی جاتی ہے",
+  "cli.team_bridge.setup.consent_ui_required": "Team Bridge کی رضامندی Local Operator ایپ میں دی جاتی ہے، کسی ٹرمینل سے نہیں۔ ایپ ایک بار کھولیں اور ایجنٹ کے پیغامات فعال کریں۔",
+  "cli.team_bridge.setup.consent_ui_next": "اس مشین کی ترتیب نہیں دی گئی، اس لیے ابھی نصب کرنے کے لیے کچھ نہیں ہے۔ جب ایپ اس کنفیگریشن فولڈر کے لیے ایجنٹ کے پیغامات فعال کر دے، تو یہ کمانڈ دوبارہ چلائیں۔",
+  "cli.team_bridge.setup.enable_in_app_required": "{account_id} کے لیے ایجنٹ کے پیغامات ترتیب دیے جا چکے ہیں، لیکن اس مشین پر فعال نہیں ہیں۔ Local Operator ایپ ایک بار کھولیں اور ایجنٹ کے پیغامات فعال کریں، پھر یہ کمانڈ دوبارہ چلائیں۔",
+  "cli.team_bridge.setup.designation_missing": "{account_id} کے لیے ایجنٹ کے پیغامات ترتیب دیے جا چکے ہیں، لیکن اس کے لیے کوئی چیف آف اسٹاف سیشن مقرر نہیں ہے۔ Local Operator ایپ کھولیں اور وہ سیشن منتخب کریں جو آپ کے ایجنٹس کا جواب دے۔",
+  "cli.team_bridge.setup.ready": "ایجنٹ کے پیغامات: تیار۔ اکاؤنٹ {account_id}، چیف آف اسٹاف سیشن {session}، اور وصول کنندہ اپنی جگہ پر ہے۔",
+  "cli.team_bridge.setup.not_ready": "ایجنٹ کے پیغامات ترتیب دیے جا چکے ہیں، لیکن وصول کنندہ نہیں رکھا گیا ({service})۔ {detail}",
+  "cli.team_bridge.setup.failed": "تیاری کی جانچ نہیں چل سکی۔ کوئی تبدیلی نہیں کی گئی۔"
 }

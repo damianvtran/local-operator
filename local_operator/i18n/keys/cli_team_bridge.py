@@ -121,24 +121,32 @@ def outcome_unknown() -> Msg:
     return Msg("cli.team_bridge.outcome.unknown", {})
 
 
-def setup_account() -> Msg:
-    return Msg("cli.team_bridge.setup.account", {})
+def setup_consent_ui_next() -> Msg:
+    return Msg("cli.team_bridge.setup.consent_ui_next", {})
 
 
-def setup_consent() -> Msg:
-    return Msg("cli.team_bridge.setup.consent", {})
+def setup_consent_ui_required() -> Msg:
+    return Msg("cli.team_bridge.setup.consent_ui_required", {})
 
 
-def setup_credential() -> Msg:
-    return Msg("cli.team_bridge.setup.credential", {})
+def setup_designation_missing(*, account_id: str) -> Msg:
+    return Msg("cli.team_bridge.setup.designation_missing", {"account_id": account_id})
 
 
-def setup_session() -> Msg:
-    return Msg("cli.team_bridge.setup.session", {})
+def setup_enable_in_app_required(*, account_id: str) -> Msg:
+    return Msg("cli.team_bridge.setup.enable_in_app_required", {"account_id": account_id})
 
 
-def setup_tenant() -> Msg:
-    return Msg("cli.team_bridge.setup.tenant", {})
+def setup_failed() -> Msg:
+    return Msg("cli.team_bridge.setup.failed", {})
+
+
+def setup_not_ready(*, service: str, detail: str) -> Msg:
+    return Msg("cli.team_bridge.setup.not_ready", {"service": service, "detail": detail})
+
+
+def setup_ready(*, account_id: str, session: str) -> Msg:
+    return Msg("cli.team_bridge.setup.ready", {"account_id": account_id, "session": session})
 
 
 def status_config_dir(*, path: str) -> Msg:

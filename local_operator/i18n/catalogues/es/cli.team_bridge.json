@@ -24,7 +24,7 @@
   "cli.team_bridge.outcome.removed": "El servicio del receptor se ha detenido y eliminado.",
   "cli.team_bridge.outcome.absent": "No hay ningún servicio receptor que eliminar.",
   "cli.team_bridge.outcome.not_wanted": "Los mensajes de agentes no están configurados o están desactivados en esta máquina, por lo que no se ha instalado nada.",
-  "cli.team_bridge.outcome.not_wanted_hint": "Primero configura los mensajes de agentes: inicia sesión con `lop login radient`, obtén el id de la fila de credenciales con `lop login-status` y después ejecuta `lop team-bridge setup --credential-id <id>`. Lee el consentimiento proporcionado y repite el comando con la cuenta, el tenant, la versión del consentimiento y la sesión de la jefa de gabinete exactos que hayas elegido. Después, vuelve a ejecutar este comando.",
+  "cli.team_bridge.outcome.not_wanted_hint": "Los mensajes de agentes no están configurados o están desactivados en esta máquina. El consentimiento y la jefa de gabinete se eligen en la aplicación Local Operator: ábrela una vez, inicia sesión como propietario de la cuenta y activa los mensajes de agentes. Después, ejecuta `lop team-bridge setup` aquí para comprobar y colocar el receptor.",
   "cli.team_bridge.outcome.remove_hint": "Los mensajes de agentes siguen activados, por lo que el receptor se volverá a instalar la próxima vez que se inicie Local Operator. Para dejar de recibir mensajes, desactiva los mensajes de agentes: `lop config edit team_bridge.enabled false`.",
   "cli.team_bridge.outcome.no_supervisor": "Esta máquina no tiene un gestor de servicios de usuario, por lo que no se puede instalar el receptor. {detail}",
   "cli.team_bridge.outcome.no_user_manager": "systemd no tiene una sesión de usuario para esta cuenta, por lo que no se ha podido instalar el receptor. {detail}",
@@ -36,10 +36,12 @@
   "cli.team_bridge.logs.none": "Aún no hay un registro del receptor en {path}.",
   "cli.team_bridge.logs.header": "Últimas líneas de {path}:",
   "cli.team_bridge.outcome.note": "Nota: {detail}",
-  "cli.team_bridge.help.setup": "Configurar los mensajes de agentes sin la aplicación de escritorio: previsualizar o aceptar explícitamente el consentimiento proporcionado",
-  "cli.team_bridge.setup.credential": "Id de la fila de credenciales de Radient mostrada por `lop login-status` (obligatorio)",
-  "cli.team_bridge.setup.account": "Id de la cuenta que se comparará con la cuenta que ha iniciado sesión (obligatorio para aceptar)",
-  "cli.team_bridge.setup.tenant": "Id de la organización de la previsualización (obligatorio para aceptar)",
-  "cli.team_bridge.setup.consent": "Aceptar únicamente la versión exacta del consentimiento mostrada en la previsualización; requiere --session",
-  "cli.team_bridge.setup.session": "Id de una sesión existente de la jefa de gabinete; debe acompañar la aceptación del consentimiento"
+  "cli.team_bridge.help.setup": "Comprobar que esta máquina está lista para los mensajes de agentes y colocar el receptor. El consentimiento se concede en la aplicación Local Operator",
+  "cli.team_bridge.setup.consent_ui_required": "El consentimiento de Team Bridge se concede en la aplicación Local Operator, no desde un terminal. Abre la aplicación una vez y activa los mensajes de agentes.",
+  "cli.team_bridge.setup.consent_ui_next": "Esta máquina no está configurada, así que todavía no hay nada que instalar. Cuando la aplicación haya activado los mensajes de agentes para esta carpeta de configuración, vuelve a ejecutar este comando.",
+  "cli.team_bridge.setup.enable_in_app_required": "Los mensajes de agentes están configurados para {account_id}, pero no están activados en esta máquina. Abre la aplicación Local Operator una vez y activa los mensajes de agentes, y luego vuelve a ejecutar este comando.",
+  "cli.team_bridge.setup.designation_missing": "Los mensajes de agentes están configurados para {account_id}, pero no hay ninguna sesión de jefa de gabinete asignada. Abre la aplicación Local Operator y elige la sesión que debe responder a tus agentes.",
+  "cli.team_bridge.setup.ready": "Mensajes de agentes: listos. Cuenta {account_id}, sesión de jefa de gabinete {session}, y el receptor está en su sitio.",
+  "cli.team_bridge.setup.not_ready": "Los mensajes de agentes están configurados, pero el receptor no se ha colocado ({service}). {detail}",
+  "cli.team_bridge.setup.failed": "No se ha podido ejecutar la comprobación de preparación. No se ha cambiado nada."
 }

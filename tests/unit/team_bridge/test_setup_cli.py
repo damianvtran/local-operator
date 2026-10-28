@@ -1,428 +1,224 @@
-"""Backend-only setup: observational preview, explicit consent, pinned identity.
+"""`lop team-bridge setup` is a readiness check — it can NEVER grant consent.
 
-The real production TeamBridgeClient and StatusDiscipline run over mocked HTTP;
-only connector placement is stubbed (no host service mutation). Negative cases
-must emit no settings/enrollment request and no native owner/config mutation.
+Operator decision, #3116 round 4: consent is granted in the Local Operator app
+only (#3022's bearer boundary). An earlier revision accepted it at a terminal
+behind a spoofable "human gate"; that path is removed rather than hardened, so
+these cells pin three things:
+
+* a machine with no enrolment is REFUSED, with the exact guidance copy a user
+  reads — consent is in the app, not a terminal;
+* nothing on any path writes consent, a designation or the enabled setting, and
+  the service is only asked to place a receiver once the app's own decision is
+  already committed;
+* the command has no option that could carry a consent, a session or a tenant
+  (the "can't happen" is enforced at the argument parser, not just in code).
 """
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import Any
-
-import httpx
 import pytest
+
+from pathlib import Path
 
 from local_operator import settings_io
 from local_operator.config import ConfigManager
-from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge import setup_cli
-from local_operator.team_bridge.client import StatusDiscipline
-from local_operator.team_bridge.store import Store
-from tests.unit.team_bridge.test_client import FakeRow, FakeStore, _ok
+from local_operator.team_bridge.connector import install
+from local_operator.team_bridge.store import OwnerReceipt, OwnerSnapshot, Store
 
-pytestmark = pytest.mark.asyncio
-
-HUB = "https://hub.example/v1"
-CONSENT = {"version": "bridge_consent_v2", "text": "Accept agent messages for this account."}
-
-
-@pytest.fixture(autouse=True)
-def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
-    monkeypatch.setattr(setup_cli, "TeamBridgeClient", _production_client)
-    monkeypatch.setattr(setup_cli, "StatusDiscipline", _production_discipline)
+OWNER = OwnerSnapshot(
+    credential_id=1,
+    account_id="acc_1",
+    tenant_id="tnt_1",
+    endpoint_id="bep_1",
+    canonical_base_url="https://hub.example/v1",
+    enrollment_generation=1,
+)
 
 
-def _production_client(config_dir: Path, **kwargs: Any):
-    client = tb_client.TeamBridgeClient(
-        config_dir,
-        base_url=HUB,
-        store=FakeStore(
-            [
-                FakeRow(17, data={"access": "token-17", "account_id": "acc_17"}),
-                FakeRow(42, data={"access": "token-42", "account_id": "acc_42"}),
-            ]
-        ),
-        transport=httpx.MockTransport(_handler),
-        **kwargs,
-    )
-    return client
+def _enrol(root: Path, *, designated: str | None = "session-42") -> None:
+    store = Store(root)
+    store.commit_enrollment(OWNER, OwnerReceipt("bridge_consent_v2", "bep_1"))
+    if designated is not None:
+        store.update_designated_session(OWNER, designated)
 
 
-def _production_discipline(config_dir: Path, **kwargs: Any):
-    # A separate pinned OAuth row proves the preview and write never select the
-    # sole/first credential when the machine has several Radient accounts.
-    return StatusDiscipline(
-        config_dir,
-        base_url=HUB,
-        store=FakeStore(
-            [
-                FakeRow(17, data={"access": "token-17", "account_id": "acc_17"}),
-                FakeRow(42, data={"access": "token-42", "account_id": "acc_42"}),
-            ]
-        ),
-        transport=httpx.MockTransport(_handler),
-        **kwargs,
-    )
-
-
-requests: list[httpx.Request] = []
-put_answers: list[dict[str, Any]] = []
-
-
-def _status() -> dict[str, Any]:
-    return {
-        "api_version": "1",
-        "available": True,
-        "consent": CONSENT,
-        "tenants": [
-            {
-                "tenant_id": "tnt_42",
-                "tenant_name": "Selected organization",
-                "eligible": True,
-                "endpoint": None,
-                "counts": {"unread": 0, "requests_pending": 0, "blocked": 0},
-            },
-            {
-                "tenant_id": "tnt_other",
-                "tenant_name": "Other organization",
-                "eligible": True,
-                "endpoint": None,
-                "counts": {"unread": 0, "requests_pending": 0, "blocked": 0},
-            },
-        ],
-    }
-
-
-def _handler(request: httpx.Request) -> httpx.Response:
-    requests.append(request)
-    if request.url.path.endswith("/messaging/status"):
-        return _ok(_status())
-    if request.url.path.endswith("/messaging/events"):
-        return _ok({"events": [], "cursor": 0})
-    if request.method == "PUT" and request.url.path.endswith("/messaging/settings"):
-        body = json.loads(request.content)
-        return _ok(
-            put_answers.pop(0)
-            if put_answers
-            else {
-                "endpoint": {
-                    "id": "ep_42",
-                    "state": "active",
-                    "consent": {"version": body.get("consent_version"), "current": True},
-                }
-            }
-        )
-    return httpx.Response(500, json={"error": "unexpected", "code": "unexpected"})
-
-
-@pytest.fixture(autouse=True)
-def _requests() -> None:
-    requests.clear()
-    put_answers.clear()
-
-
-def _session(root: Path) -> None:
-    directory = root / "sessions" / "session-42"
-    directory.mkdir(parents=True)
-    (directory / "transcript.jsonl").write_text("", encoding="utf-8")
-
-
-def _values(root: Path) -> dict[str, Any]:
-    """The stored ``team_bridge.*`` values, through the production reader.
-
-    ``settings_io.read_setting`` returns the VALUE (a scalar), not a row object —
-    the earlier ``.value`` call here raised AttributeError on every cell that
-    needed a value, which is what made this whole file fail before it was first
-    executed.
-    """
-
-    manager = ConfigManager(config_dir=root)
-    return {
-        key: settings_io.read_setting(manager, settings_io.BY_KEY[key])
-        for key in settings_io.BY_KEY
-        if key.startswith("team_bridge.")
-    }
-
-
-def _writes() -> list[httpx.Request]:
-    return [r for r in requests if r.method not in {"GET", "HEAD"}]
+def _enable(root: Path, value: bool = True) -> None:
+    settings_io.write_setting(ConfigManager(root), settings_io.BY_KEY["team_bridge.enabled"], value)
 
 
 @pytest.fixture
-def human_gate_open(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stand a consenting human in front of the gate, for SOME cells only.
+def placed(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every service placement request instead of touching a supervisor."""
 
-    Requested explicitly by the cells about the write path behind the gate. It is
-    deliberately NOT autouse: an autouse stub also stubbed the gate for the
-    gate's own tests, which then asserted against the stub instead of the
-    behaviour (review round 2, R2-3).
-    """
+    calls: list[str] = []
 
-    monkeypatch.setattr(setup_cli, "confirm_consent", lambda *a, **k: None)
+    class Outcome:
+        code = "installed"
+        detail = ""
+
+    def _sync(root):  # noqa: ANN001
+        calls.append(str(root))
+        return Outcome()
+
+    monkeypatch.setattr(install, "sync_connector_service", _sync)
+    return calls
 
 
-async def _preview(root: Path, **kwargs: Any) -> dict[str, Any]:
-    return await setup_cli.setup(root, credential_id=42, **kwargs)
+def test_a_machine_with_no_enrolment_is_refused_with_the_app_guidance(
+    tmp_path: Path, placed: list[str]
+) -> None:
+    """THE cell this round exists for: no consent, no CLI substitute, no write."""
 
+    result = setup_cli.setup(tmp_path)
 
-async def test_preview_exposes_served_consent_and_never_enrolls(tmp_path: Path) -> None:
-    result = await _preview(tmp_path)
-    assert result == {
-        "ok": True,
-        "code": "consent_preview",
-        "credential_id": 42,
-        "account_id": "acc_42",
-        "tenant_id": "tnt_42",
-        "consent": {**CONSENT, "source": "served"},
-    }
-    assert _writes() == []
+    assert result == {"ok": False, "code": setup_cli.CODE_CONSENT_UI_REQUIRED}
+    assert placed == []
+    # Nothing was enrolled and nothing was enabled by running the check.
+    assert Store(tmp_path).active_owner_readonly() is None
     assert Store(tmp_path).committed_owner_count() == 0
-    manager = ConfigManager(config_dir=tmp_path)
-    assert settings_io.read_setting(manager, settings_io.BY_KEY["team_bridge.session"]) == ""
-    assert settings_io.read_setting(manager, settings_io.BY_KEY["team_bridge.enabled"]) is False
-    assert [r for r in requests if r.url.path.endswith("/messaging/status")]
-    assert not any(r.url.path.endswith("/messaging/events") for r in requests)
 
 
-async def test_preview_cannot_use_default_on_enrollment_or_install(
+def test_the_refusal_copy_says_consent_is_in_the_app_and_names_the_action() -> None:
+    """The user-facing sentence is part of the contract, so it is pinned verbatim."""
+
+    from local_operator.i18n.keys import cli_team_bridge as _k
+
+    text = str(_k.setup_consent_ui_required().envelope(locale="en")["text"])
+    assert text == (
+        "Team Bridge consent is granted in the Local Operator app, not from a terminal. "
+        "Open the app once and enable Agent messages."
+    )
+
+
+def test_the_human_gate_is_gone_not_merely_disabled() -> None:
+    """No literal, no flag and no function may remain that could accept consent."""
+
+    assert not hasattr(setup_cli, "confirm_consent")
+    source = Path(setup_cli.__file__).read_text(encoding="utf-8")
+    for forbidden in ("accept_consent_version", "in_agent_shell", "isatty", "input("):
+        assert forbidden not in source, forbidden
+
+
+def test_the_command_has_no_option_that_could_carry_a_consent(tmp_path: Path) -> None:
+    """Enforced at the parser: there is nothing to pass a consent, session or tenant in."""
+
+    from local_operator.cli import build_cli_parser
+
+    parser = build_cli_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["team-bridge", "setup", "--accept-consent-version", "v2"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["team-bridge", "setup", "--session", "session-42"])
+    args = parser.parse_args(["team-bridge", "setup"])
+    assert not hasattr(args, "accept_consent_version")
+    assert not hasattr(args, "session")
+
+
+def test_enrolled_but_not_enabled_asks_for_the_app_and_places_nothing(
+    tmp_path: Path, placed: list[str]
+) -> None:
+    """An owner without the user's ON flag is "not asked yet", not "install it"."""
+
+    _enrol(tmp_path)
+    _enable(tmp_path, False)
+
+    result = setup_cli.setup(tmp_path)
+
+    assert result["ok"] is False
+    assert result["code"] == setup_cli.CODE_ENABLE_IN_APP_REQUIRED
+    assert result["account_id"] == "acc_1"
+    assert placed == []
+
+
+def test_an_absent_enabled_key_is_treated_as_not_enabled(tmp_path: Path, placed: list[str]) -> None:
+    _enrol(tmp_path)
+
+    result = setup_cli.setup(tmp_path)
+
+    assert result["code"] == setup_cli.CODE_ENABLE_IN_APP_REQUIRED
+    assert placed == []
+
+
+def test_enrolled_and_enabled_without_a_designation_asks_for_the_app(
+    tmp_path: Path, placed: list[str]
+) -> None:
+    _enrol(tmp_path, designated=None)
+    _enable(tmp_path)
+
+    result = setup_cli.setup(tmp_path)
+
+    assert result["code"] == setup_cli.CODE_DESIGNATION_MISSING
+    assert placed == []
+
+
+def test_a_ready_machine_places_the_receiver_through_the_one_shared_sync(
+    tmp_path: Path, placed: list[str]
+) -> None:
+    """Placement goes through sync_connector_service — the same function, same guards."""
+
+    _enrol(tmp_path)
+    _enable(tmp_path)
+
+    result = setup_cli.setup(tmp_path)
+
+    assert result["ok"] is True
+    assert result["code"] == setup_cli.CODE_READY
+    assert result["service"] == "installed"
+    assert result["session"] == "session-42"
+    assert placed == [str(tmp_path)]
+
+
+def test_a_refused_placement_is_reported_rather_than_called_ready(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from local_operator.team_bridge.connector import install
+    _enrol(tmp_path)
+    _enable(tmp_path)
 
-    monkeypatch.setattr(
-        install, "sync_connector_service", lambda root: (_ for _ in ()).throw(AssertionError)
-    )
-    result = await _preview(tmp_path)
-    assert result["code"] == "consent_preview"
-    assert _writes() == []
+    class Outcome:
+        code = "source_checkout"
+        detail = "runs from a checkout"
+
+    monkeypatch.setattr(install, "sync_connector_service", lambda root: Outcome())
+
+    result = setup_cli.setup(tmp_path)
+
+    assert result["ok"] is False
+    assert result["code"] == setup_cli.CODE_NOT_READY
+    assert result["service"] == "source_checkout"
 
 
-async def test_preview_does_not_reconcile_existing_designation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_plain_english_is_the_default_output_and_json_is_opt_in(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    called = False
+    """The refusal a person sees is the guidance copy, not a JSON blob."""
 
-    def forbidden(self: Any, check: Any) -> Any:
-        nonlocal called
-        called = True
-        return check
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: tmp_path)
 
-    monkeypatch.setattr(StatusDiscipline, "_sync_local_designation", forbidden)
-    await _preview(tmp_path)
-    assert called is False
+    assert setup_cli.main(_args(json=False)) == 1
+    out = capsys.readouterr().out
+    assert "granted in the Local Operator app, not from a terminal" in out
+    assert "{" not in out
 
-
-async def test_account_mismatch_refuses_before_status_or_write(tmp_path: Path) -> None:
-    result = await _preview(tmp_path, account_id="acc_17")
-    assert result["code"] == "account_mismatch"
-    assert requests == []
-    assert Store(tmp_path).committed_owner_count() == 0
+    assert setup_cli.main(_args(json=True)) == 1
+    out = capsys.readouterr().out
+    assert '"consent_ui_required"' in out
 
 
-async def test_unselected_tenant_refuses_before_any_write(tmp_path: Path) -> None:
-    result = await _preview(tmp_path, tenant_id="tnt_other")
-    assert result["code"] == "tenant_mismatch"
-    assert _writes() == []
-    assert Store(tmp_path).committed_owner_count() == 0
+def _args(*, json: bool):
+    import argparse
+
+    return argparse.Namespace(json=json)
 
 
-async def test_acceptance_needs_version_and_session_together(tmp_path: Path) -> None:
-    for kwargs in ({"accept_consent_version": CONSENT["version"]}, {"session": "session-42"}):
-        result = await _preview(tmp_path, **kwargs)
-        assert result["code"] == "acceptance_and_session_required"
-    assert requests == []
+def test_the_guide_is_the_only_place_that_could_promise_a_terminal_consent() -> None:
+    """A stale sentence in the guide would undo this round in the user's hands."""
 
+    from pathlib import Path as _Path
 
-async def test_stale_consent_version_is_refused_without_write_or_config(tmp_path: Path) -> None:
-    _session(tmp_path)
-    result = await _preview(
-        tmp_path,
-        account_id="acc_42",
-        tenant_id="tnt_42",
-        accept_consent_version="bridge_consent_v1",
-        session="session-42",
-    )
-    assert result["code"] == "consent_version_mismatch"
-    assert result["consent"]["version"] == CONSENT["version"]
-    assert _writes() == []
-    assert Store(tmp_path).committed_owner_count() == 0
-    manager = ConfigManager(config_dir=tmp_path)
-    assert settings_io.read_setting(manager, settings_io.BY_KEY["team_bridge.session"]) == ""
-    assert settings_io.read_setting(manager, settings_io.BY_KEY["team_bridge.enabled"]) is False
-
-
-async def test_no_accepted_served_text_means_no_preview_and_no_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The guard this module owns: only ACCEPTED served bytes may be shown.
-
-    ``consent_for_display`` decides which of served/cached/embedded copy a
-    surface may display (a same-version text change is refused there, inside the
-    client's own ``AcceptedTexts``). What THIS command must guarantee is that it
-    never proceeds on anything but an accepted SERVED answer, so that is what is
-    pinned here: no accepted served text → ``served_consent_required``, no
-    request that writes, no config or store change. The client-side same-version
-    comparison is pre-existing behaviour this PR does not alter and is out of
-    scope for this file.
-    """
-
-    monkeypatch.setattr(setup_cli, "consent_for_display", lambda check: None)
-    result = await _preview(tmp_path)
-    assert result["code"] == "served_consent_required"
-    assert _writes() == []
-    assert Store(tmp_path).committed_owner_count() == 0
-
-
-async def test_nonexistent_session_refuses_before_remote_consent(tmp_path: Path) -> None:
-    result = await _preview(
-        tmp_path,
-        accept_consent_version=CONSENT["version"],
-        session="session-42",
-    )
-    assert result["code"] == "session_not_found"
-    assert _writes() == []
-    assert Store(tmp_path).committed_owner_count() == 0
-
-
-async def test_no_local_commit_is_not_reported_as_success(
-    tmp_path: Path, human_gate_open: None
-) -> None:
-    _session(tmp_path)
-    put_answers.append({"endpoint": {"id": "ep_42", "state": "paused"}})
-    result = await _preview(
-        tmp_path,
-        accept_consent_version=CONSENT["version"],
-        session="session-42",
-    )
-    assert result["code"] == "local_enrollment_failed"
-    assert result["local_enrollment"]["committed"] is False
-    manager = ConfigManager(config_dir=tmp_path)
-    assert settings_io.read_setting(manager, settings_io.BY_KEY["team_bridge.session"]) == ""
-    assert settings_io.read_setting(manager, settings_io.BY_KEY["team_bridge.enabled"]) is False
-
-
-async def test_explicit_setup_commits_owner_designation_and_wanted_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, human_gate_open: None
-) -> None:
-    _session(tmp_path)
-    placed: list[Path] = []
-    from local_operator.team_bridge.connector import install
-
-    monkeypatch.setattr(install, "sync_connector_service", lambda root: placed.append(root))
-    result = await _preview(
-        tmp_path,
-        accept_consent_version=CONSENT["version"],
-        session="session-42",
-    )
-    assert result["code"] == "setup_complete"
-    assert result["local_enrollment"]["committed"] is True
-    values = _values(tmp_path)
-    assert values["team_bridge.session"] == "session-42"
-    assert values["team_bridge.enabled"] is True
-    owner = Store(tmp_path).active_owner_readonly()
-    assert owner is not None
-    assert (owner.credential_id, owner.account_id, owner.tenant_id, owner.endpoint_id) == (
-        42,
-        "acc_42",
-        "tnt_42",
-        "ep_42",
-    )
-    assert Store(tmp_path).designated_session_for_readonly(owner) == "session-42"
-    receipt = Store(tmp_path).owner_consent_receipt_readonly(owner)
-    assert receipt is not None and receipt["consent_version"] == CONSENT["version"]
-    # TWO syncs on this path, and that is pre-existing product behaviour, not a
-    # defect here: ``TeamBridgeClient.put_settings`` reconciles the connector when
-    # the commit lands, and setup's own verification calls it again. Both are
-    # locked and idempotent, so the property this cell pins is "the receiver was
-    # placed for THIS root", not a call count.
-    assert placed and set(placed) == {tmp_path}
-    writes = _writes()
-    assert len(writes) == 1 and writes[0].method == "PUT"
-    assert json.loads(writes[0].content) == {
-        "state": "active",
-        "tenant_id": "tnt_42",
-        "consent_version": CONSENT["version"],
-        "consented_via": "settings",
-    }
-    assert writes[0].headers["authorization"] == "Bearer token-42"
-    assert any(r.url.path.endswith("/messaging/events") for r in requests)
-    # The real client wrote the wanted state through settings_io, not a direct
-    # config or enrollment-store shortcut in setup_cli.
-    assert settings_io.BY_KEY["team_bridge.session"].key == "team_bridge.session"
-
-
-# -- the human gate on accepting consent (review MAJOR-3) ------------------------
-
-
-def test_acceptance_is_refused_from_an_agent_shell(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An agent may preview and hand over the command; it may not consent.
-
-    This is the backend-only replacement for the desktop consent dialog, which
-    is bearer-gated and whose bearer agent children have stripped. Without this
-    gate, a prompt injection reads the version from the read-only preview and
-    self-consents in a second command.
-    """
-
-    import sys
-
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
-    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
-    monkeypatch.setenv("LOCAL_OPERATOR_AGENT_SHELL", "1")
-    assert (
-        setup_cli.confirm_consent(
-            "bridge_consent_v2", "text", account_id="acc_42", tenant_id="tnt_42", session="s1"
-        )
-        == "human_required"
-    )
-
-
-def test_acceptance_is_refused_without_a_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
-    import sys
-
-    monkeypatch.delenv("LOCAL_OPERATOR_AGENT_SHELL", raising=False)
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
-    monkeypatch.setattr(sys.stdout, "isatty", lambda: False, raising=False)
-    assert (
-        setup_cli.confirm_consent(
-            "bridge_consent_v2", "text", account_id="acc_42", tenant_id="tnt_42", session="s1"
-        )
-        == "human_required"
-    )
-
-
-@pytest.mark.parametrize(
-    ("answer", "expected"),
-    [("y", None), ("yes", None), ("", "consent_not_accepted"), ("n", "consent_not_accepted")],
-)
-def test_acceptance_at_a_terminal_needs_an_explicit_yes(
-    monkeypatch: pytest.MonkeyPatch, answer: str, expected: str | None
-) -> None:
-    import sys
-
-    monkeypatch.delenv("LOCAL_OPERATOR_AGENT_SHELL", raising=False)
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
-    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
-    monkeypatch.setattr("builtins.input", lambda *a: answer, raising=False)
-    assert (
-        setup_cli.confirm_consent(
-            "bridge_consent_v2", "text", account_id="acc_42", tenant_id="tnt_42", session="s1"
-        )
-        == expected
-    )
-
-
-async def test_a_refused_gate_writes_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _session(tmp_path)
-    monkeypatch.setattr(setup_cli, "confirm_consent", lambda *a, **k: "human_required")
-    result = await _preview(
-        tmp_path, accept_consent_version=CONSENT["version"], session="session-42"
-    )
-    assert result["code"] == "human_required"
-    assert _writes() == []
-    assert Store(tmp_path).committed_owner_count() == 0
-    assert _values(tmp_path).get("team_bridge.enabled") is not True
+    guide = _Path(__file__).resolve().parents[3] / "local_operator" / "guides" / "team-bridge"
+    text = (guide / "GUIDE.md").read_text(encoding="utf-8")
+    lowered = text.lower()
+    for forbidden in ("speed bump", "human gate", "--accept-consent-version"):
+        assert forbidden not in lowered, forbidden
+    assert "not from a terminal" in lowered

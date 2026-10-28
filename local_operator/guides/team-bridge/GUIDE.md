@@ -49,50 +49,47 @@ Check these in order. The receiver is not installed until all of them hold.
 1. **Radient sign-in.** Run `lop login-status`. If Radient is missing or
    expired, run `lop login radient` and finish its browser flow yourself. Never
    accept account terms for the user or ask for their provider password/token.
-2. **A Team plan organization** where agent messages are available. The setup
-   preview refuses if the organization is not eligible. Plan changes belong to
-   the user in the Radient console.
-3. **Preview the exact served consent**, using the credential row id from
-   `login-status`:
+2. **A Team plan organization** where agent messages are available. If the
+   organization is not eligible, the app cannot enable agent messages and the
+   receiver has nothing to deliver; plan changes belong to the user in the
+   Radient console.
+3. **Consent is granted in the app, and only in the app.** There is no terminal
+   path to it, deliberately: consent is the desktop bearer's act (#3022), and a
+   command that could grant it would be a way for an agent — or a prompt
+   injection — to enrol the user's machine without them. So:
+
+   > Team Bridge consent is granted in the Local Operator app, not from a
+   > terminal. Open the app once and enable Agent messages.
+
+   On a machine where the app can run, the user opens it once, signs in as the
+   account owner, and turns on **Agent messages**; that single act commits the
+   consent version, the account, the organization and the chief-of-staff
+   session. Nothing else is needed from a terminal, and nothing else is
+   possible.
+4. **On a headless or server-only machine, say this limit out loud.** Such a
+   machine **cannot enrol itself**: no app, no consent, no receiver. It becomes
+   ready in one of two ways, both of which the user must choose:
+   - run the app once against the same configuration folder (the default,
+     `~/.local-operator`, unless they set `LOCAL_OPERATOR_CONFIG_DIR`), signed in
+     as the account owner; or
+   - copy an already-consented configuration folder from the machine that did
+     it, matching the same account.
+
+   Consent is a decision, so it cannot be automated, and there is no
+   `--yes`/`--consent` flag to add. Do not invent one, and do not copy a
+   `team_bridge` state database from an unrelated account.
+5. **Check readiness from a terminal.** This is read-only unless the machine is
+   already consented and enabled:
 
    ```bash
-   lop team-bridge setup --credential-id <id>
+   lop team-bridge setup
+   lop team-bridge setup --json
    ```
 
-   This is read-only: it does not enroll, enable, designate or install. Its
-   JSON includes the accepted account id, tenant id and the full consent text.
-   Show that text to the user and let them decide. The session id is the id of
-   their existing chief-of-staff session (plain `lop sessions` shows session
-   ids; `lop sessions --help` documents the listing filters). The consent
-   version is data, not approval by itself.
-4. **Acceptance is the user's, at their own terminal.** Prepare the exact
-   command from the preview and hand it to them to run:
-
-   ```bash
-   lop team-bridge setup --credential-id <id> \
-     --account-id <preview.account_id> --tenant-id <preview.tenant_id> \
-     --accept-consent-version <preview.consent.version> --session <session-id>
-   ```
-
-   The command prints the served consent text in full, names the account,
-   organization and chief-of-staff session, and asks for an explicit `y`. It
-   refuses when it is not run at a terminal (`human_required`) and when it
-   descends from an agent's shell.
-
-   **That is a speed bump, not a security boundary**, and this guide will not
-   claim otherwise: the marker is an environment variable and a TTY can be
-   simulated, so an agent that deliberately works around both can still run the
-   command. The real control is that the *user* accepts: run everything up to
-   and including the preview, then hand the acceptance command over. Do not run
-   the acceptance yourself, and do not strip the marker to make it "just work".
-
-   It re-reads the served consent and refuses if the account, tenant, version
-   or existing session differs (`account_mismatch`, `tenant_mismatch`,
-   `served_consent_required`, `consent_version_mismatch`, `session_not_found`).
-   It then uses the same production enrollment and designation functions as the
-   desktop flow. This path needs no desktop bearer and no running desktop app.
-5. The switch `team_bridge.enabled` is set by that explicit setup. Check
-   current state with `lop team-bridge receiver status` or `lop config list`.
+   It reports one of `ready`, `consent_ui_required`, `enable_in_app_required`,
+   `designation_missing` or `not_ready`. When the machine is ready it places the
+   receiver through the same `sync_connector_service` every surface uses, and
+   says so; otherwise it changes nothing.
 6. **The default configuration folder** (`~/.local-operator`). The receiver is
    shared per user, so it is only installed for that folder. A run with a
    different `LOCAL_OPERATOR_CONFIG_DIR` is refused (see troubleshooting).
@@ -104,8 +101,11 @@ automatically whenever agent messages are enrolled or turned on, and at every
 start of `lop serve`, the desktop app, the TUI and the mobile daemon. On a
 backend-only machine, or to check:
 
-1. Set up consent and the chief of staff explicitly as above if this is a new
-   machine. Run `lop team-bridge receiver status`.
+1. Run `lop team-bridge setup`. If it answers `consent_ui_required`, this machine
+   has never consented: stop and tell the user to open the app once and turn on
+   Agent messages (the sentence above). Do not look for a terminal workaround —
+   there is none, by design. Once they have done it, run `lop team-bridge setup`
+   again, then `lop team-bridge receiver status`.
 2. If `Agent messages:` is not `on for this machine`, work through the
    prerequisites above. `install` never enrols or turns anything on.
 3. Run `lop team-bridge receiver install`. It is idempotent and safe to repeat.
@@ -185,9 +185,17 @@ back** and never assumes it worked:
 
 - `installed`, `current` or `registered`: success. `registered` means the
   registration was already correct and was only started again.
-- `human_required` (from `setup`): the acceptance command must be run by the
-  user at their own terminal, not from an agent. Have them run the exact command
-  printed in the preview.
+- `consent_ui_required` (from `setup`): no consent exists on this machine. It is
+  granted in the Local Operator app, not from a terminal — have the user open the
+  app once and enable Agent messages. On a headless machine, see the limit in
+  "Prerequisites".
+- `enable_in_app_required` (from `setup`): an account is enrolled but agent
+  messages are not switched on for this machine. Same fix: the app, once.
+- `designation_missing` (from `setup`): enrolled, but no chief-of-staff session is
+  committed. The user chooses that session in the app.
+- `not_ready` (from `setup`): ready in principle, but the service could not be
+  placed. The `service` field carries the real code (`source_checkout`,
+  `failed`, …) — treat it as the matching entry below.
 - `not_wanted` (`--json`: `not_wanted: true`): agent messages are not set up or
   are off. Nothing was installed. Follow the printed steps.
 - `source_checkout`: this `lop` runs from a source checkout and will not point
@@ -207,7 +215,9 @@ foreground run next to an installed receiver is harmless but pointless.
 ## What not to do
 
 - Never enrol, consent, choose a chief of staff or change the approval mode on
-  the user's behalf. Those are their decisions, made in the desktop app.
+  the user's behalf. Those are their decisions, made in the desktop app, and
+  there is no CLI path to consent for exactly that reason — do not try to build
+  one, simulate a terminal for one, or ask the user to paste a consent token.
 - Never hand-write the plist, unit or task, and never point it at a
   worktree's Python. `install` is the only supported writer.
 - Never run `install` with a scratch `HOME` or a non-default config folder to
