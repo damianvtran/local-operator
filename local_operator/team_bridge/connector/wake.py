@@ -630,7 +630,11 @@ async def handle_message_available(
         # §5.6: no designation = arrivals do not wake — badge only.
         return {"action": "badge_only", "message_id": message_id}
 
-    token = f"connector:{uuid.uuid4()}"
+    from local_operator.team_bridge.store import CONNECTOR_CLAIM_TOKEN_PREFIX
+
+    # The prefix is load-bearing: the loop tells a connector's mid-handoff
+    # claim (re-drive after its lease) from a session's own claim by it.
+    token = f"{CONNECTOR_CLAIM_TOKEN_PREFIX}{uuid.uuid4()}"
     import time as _time
 
     try:

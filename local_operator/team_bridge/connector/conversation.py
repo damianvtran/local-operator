@@ -670,7 +670,7 @@ async def handle_conversation_available(
     ``skipped`` (the message is no longer in the conversation's history).
     """
 
-    from ..store import Store, StoreRefused
+    from ..store import CONNECTOR_CLAIM_TOKEN_PREFIX, Store, StoreRefused
 
     message_id = ref.message_id
     store = Store(config_dir)
@@ -685,7 +685,9 @@ async def handle_conversation_available(
     if designation is None:  # the fence above guarantees this, kept for typing
         return {"action": "badge_only", "message_id": message_id}
 
-    token = f"connector:{uuid.uuid4()}"
+    # The prefix is load-bearing: the loop tells a connector's mid-handoff
+    # claim (re-drive after its lease) from a session's own claim by it.
+    token = f"{CONNECTOR_CLAIM_TOKEN_PREFIX}{uuid.uuid4()}"
     try:
         store.claim(owner, message_id, designation, token, expiry=time.time() + CLAIM_TTL_S)
     except StoreRefused as failure:

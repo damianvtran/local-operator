@@ -938,6 +938,245 @@ def test_spine_claimed_elsewhere_skips(tmp_path, monkeypatch) -> None:
     assert record["delivered"] == []
 
 
+class _FakeClock:
+    """``time.time`` under the test's control: the claim lease (900 s) and the
+    hold schedule both read it, so a lease can expire without waiting."""
+
+    def __init__(self) -> None:
+        self.now = time.time()
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _one_pending_ref(store: Store, owner: OwnerSnapshot, message_id: str = "bmsg_1") -> None:
+    """A durable feed ref the next iteration drains (a 204 still drains it)."""
+
+    store.record_feed_batch(
+        owner, feed_seq(3), [f"message_available:message_id={message_id}"], resync_required=False
+    )
+
+
+async def _quiet_events(*args: Any, **kwargs: Any) -> None:
+    return None  # 204: no new traffic; only the committed ref is drained
+
+
+def _iterate(owner: OwnerSnapshot, tmp_path: Path) -> dict[str, Any]:
+    return asyncio.run(
+        loop_mod.run_iteration(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
+    )
+
+
+def test_dead_connector_claim_is_redriven_after_the_lease_exactly_once(
+    tmp_path, monkeypatch
+) -> None:
+    """PR #3038 review R2-3: a connector killed mid-spine leaves its claim
+    ``held`` (its ``finally`` never ran). The restarted connector's spine is
+    refused ``claimed_elsewhere``; the loop used to consume the ref with no
+    hold, so after the lease lapsed nothing referenced the message and it was
+    never delivered. It must now park a hold due at the lease expiry, then
+    deliver exactly once."""
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    record, _ = _wire_spine(monkeypatch, tmp_path)
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    # What a SIGKILLed spine leaves behind: its connector-minted claim, held.
+    store.claim(
+        owner, "bmsg_1", "sess_cos", "connector:dead-owner", expiry=clock.now + wake_mod.CLAIM_TTL_S
+    )
+    _one_pending_ref(store, owner)
+
+    first = _iterate(owner, tmp_path)
+    assert [o["action"] for o in first["handled"]] == ["claimed_elsewhere"]
+    assert record["delivered"] == []
+    assert store.drain_feed_refs(owner, 3) == []
+    hold = store.screening_hold(owner, "bmsg_1")
+    assert hold is not None and hold["hold_code"] == loop_mod.HOLD_STALE_CLAIM
+    assert hold["retry_at"] >= clock.now + wake_mod.CLAIM_TTL_S
+
+    # Before the lease lapses the parked message is not due: nothing moves.
+    clock.now += wake_mod.CLAIM_TTL_S - 60
+    _iterate(owner, tmp_path)
+    assert record["delivered"] == []
+
+    clock.now += 60 + loop_mod.STALE_CLAIM_MARGIN_S + 1
+    _iterate(owner, tmp_path)
+    assert len(record["delivered"]) == 1
+    assert store.screening_hold(owner, "bmsg_1") is None
+    for _ in range(3):  # later passes never deliver it again
+        clock.now += wake_mod.CLAIM_TTL_S
+        _iterate(owner, tmp_path)
+    assert len(record["delivered"]) == 1
+
+
+def test_live_second_holder_is_never_double_delivered(tmp_path, monkeypatch) -> None:
+    """The parked retry must be a no-op when the claim belonged to a LIVE
+    spine: that holder delivers and releases, and a released claim retires the
+    parked row instead of re-driving it."""
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    record, _ = _wire_spine(monkeypatch, tmp_path)
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    real_deliver = wake_mod.deliver_wake
+    _one_pending_ref(store, owner)
+
+    async def scenario() -> None:
+        in_handoff = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def held_deliver(*args: Any, **kwargs: Any) -> str:
+            in_handoff.set()
+            await finish.wait()
+            return await real_deliver(*args, **kwargs)
+
+        monkeypatch.setattr(wake_mod, "deliver_wake", held_deliver)
+        holder = asyncio.create_task(
+            wake_mod.handle_message_available(
+                owner, "bmsg_1", config_dir=tmp_path, auth_store=None, access=_access(owner)
+            )
+        )
+        await in_handoff.wait()  # the live holder is mid-handoff, claim held
+        racing = await loop_mod.run_iteration(
+            owner, config_dir=tmp_path, access=_access(owner), auth_store=None
+        )
+        assert [o["action"] for o in racing["handled"]] == ["claimed_elsewhere"]
+        hold = store.screening_hold(owner, "bmsg_1")
+        assert hold is not None and hold["hold_code"] == loop_mod.HOLD_STALE_CLAIM
+        finish.set()
+        assert (await holder)["action"] == "delivered"
+
+    asyncio.run(scenario())
+    assert len(record["delivered"]) == 1
+    clock.now += wake_mod.CLAIM_TTL_S + loop_mod.STALE_CLAIM_MARGIN_S + 1
+    retried = _iterate(owner, tmp_path)
+    assert retried["retries"]["outcomes"] == [{"message_id": "bmsg_1", "action": "retired"}]
+    assert store.screening_hold(owner, "bmsg_1") is None
+    clock.now += wake_mod.CLAIM_TTL_S
+    _iterate(owner, tmp_path)
+    assert len(record["delivered"]) == 1
+
+
+def test_a_session_claim_is_never_parked_for_redelivery(tmp_path, monkeypatch) -> None:
+    """A session's own ``ack working`` claim proves the message already reached
+    a session: the ref is consumed as before, with no parked retry."""
+
+    store, owner = _enroll(tmp_path)
+    record, _ = _wire_spine(monkeypatch, tmp_path)
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    store.claim(owner, "bmsg_1", "sess_cos", str(uuid.uuid4()), expiry=time.time() + 300)
+    _one_pending_ref(store, owner)
+    out = _iterate(owner, tmp_path)
+    assert [o["action"] for o in out["handled"]] == ["claimed_elsewhere"]
+    assert store.screening_hold(owner, "bmsg_1") is None
+    assert record["delivered"] == []
+
+
+#: The connector entry point run in a REAL child process, parked mid-spine:
+#: the claim is taken, then screening blocks forever. Only the transport and
+#: screening seams are faked; the signal path, the loop, the claim and the
+#: machine lock are the production ones.
+_MID_SPINE_CHILD = r"""
+import asyncio, sys
+from pathlib import Path
+from types import SimpleNamespace
+from local_operator.team_bridge import pull as pull_mod
+from local_operator.team_bridge.client import TeamBridgeClient
+from local_operator.team_bridge.connector import __main__ as main_mod
+from local_operator.team_bridge.connector import wake as wake_mod
+
+config_dir, marker = Path(sys.argv[1]), Path(sys.argv[2])
+polls = []
+
+async def events(owner, *, config_dir, access, after=None, wait=None, client=None):
+    from local_operator.team_bridge.store import Store
+    from local_operator.team_bridge.types import feed_seq
+    polls.append(1)
+    if len(polls) == 1:
+        refs = ["message_available:message_id=bmsg_1"]
+        Store(config_dir).record_feed_batch(owner, feed_seq(3), refs, resync_required=False)
+        return {"cursor": 3, "refs": refs, "resync": False}
+    await asyncio.sleep(3600)
+
+async def access(self):
+    return SimpleNamespace(credential_id=1)
+
+async def message(owner, message_id, *, config_dir, access, client=None):
+    return SimpleNamespace(message_id=message_id)
+
+async def fetch(owner, message_id, *, config_dir, access, auth_store):
+    return {"message": {"id": message_id}}
+
+async def screen(owner, item, *, config_dir, auth_store, settings=None):
+    marker.write_text("in-spine")  # the claim is held from here on
+    await asyncio.sleep(3600)
+
+pull_mod.events = events
+pull_mod.message = message
+TeamBridgeClient.current_access = access
+wake_mod.fetch_item = fetch
+wake_mod.screen_item = screen
+wake_mod.engagement_hold = lambda designation, config_dir: ""
+sys.exit(main_mod.main(["--config-dir", str(config_dir)]))
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX stop signals")
+@pytest.mark.parametrize("signame", ["SIGTERM", "SIGHUP"])
+def test_stop_signal_mid_spine_releases_the_claim_and_exits_zero(tmp_path, signame) -> None:
+    """R2-3 part 1: launchd's SIGTERM (bootout, logout, reboot) used to kill
+    the connector with the default action, so the spine's ``finally:
+    release_claim`` never ran and the claim stayed held for the whole lease.
+    A stop signal must now release it and exit 0 within the bounded window."""
+
+    import signal as signal_mod
+
+    from local_operator.team_bridge.connector import __main__ as main_mod
+
+    store, owner = _enroll(tmp_path)
+    _enable_bridge(tmp_path)
+    marker = tmp_path / "in-spine"
+    script = tmp_path / "child.py"
+    script.write_text(_MID_SPINE_CHILD, encoding="utf-8")
+    root = str(Path(__file__).resolve().parents[3])
+    child = subprocess.Popen(
+        [sys.executable, str(script), str(tmp_path), str(marker)],
+        cwd=root,
+        env={"PYTHONPATH": root, "PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 60
+        while not marker.exists():
+            assert child.poll() is None, child.communicate()[1].decode()[-2000:]
+            assert time.monotonic() < deadline, "child never reached the spine"
+            time.sleep(0.05)
+        held = store.claim_status(owner, "bmsg_1")
+        assert held is not None and held["state"] == "held" and held["connector"]
+        sent = time.monotonic()
+        child.send_signal(getattr(signal_mod, signame))
+        code = child.wait(timeout=main_mod.STOP_GRACE_S + main_mod.STOP_CANCEL_S + 10)
+        elapsed = time.monotonic() - sent
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+    _, stderr = child.communicate()
+    assert code == 0, stderr.decode()[-2000:]
+    assert elapsed < main_mod.STOP_GRACE_S + main_mod.STOP_CANCEL_S
+    released = store.claim_status(owner, "bmsg_1")
+    assert released is not None and released["state"] == "released"
+    # The machine lock went with it: a successor connector can start at once.
+    with ConnectorLock(tmp_path):
+        pass
+
+
 def test_spine_body_hash_mismatch_reholds(tmp_path, monkeypatch) -> None:
     store, owner = _enroll(tmp_path)
     record, _ = _wire_spine(monkeypatch, tmp_path, body="real body")

@@ -52,6 +52,7 @@ __all__ = [
     "ACK_PENDING",
     "ACK_CONFIRMED",
     "ACK_CONFLICT",
+    "CONNECTOR_CLAIM_TOKEN_PREFIX",
     "SCHEMA_VERSION",
     "Store",
     "StoreRefused",
@@ -167,6 +168,13 @@ _V3_COLUMNS = {
     ),
     "screening_breaker": frozenset({"account_scope", "failures", "open_until", "updated_at"}),
 }
+
+#: Every claim a connector spine mints starts with this (``connector:<uuid>``);
+#: a session's ``ack working`` claim (team_bridge.tool) never does. The loop
+#: reads the distinction through :meth:`Store.claim_status` to tell "a
+#: connector died holding this mid-handoff" (re-drive after the lease) from
+#: "a session already has this message" (never re-deliver).
+CONNECTOR_CLAIM_TOKEN_PREFIX = "connector:"
 
 #: Ack intent lifecycle: exactly one of these states, no others.
 ACK_PENDING = "pending"
@@ -4605,6 +4613,7 @@ class Store:
         hold_code: str,
         *,
         retry_at: float | None = None,
+        keep_existing: bool = False,
     ) -> None:
         """Durably quarantine a VALID-LIVE-OWNER early refusal (H3-Q8).
 
@@ -4613,14 +4622,21 @@ class Store:
         reason must still survive an inbox refresh instead of disappearing.
         An invalid owner gets no fresh writes at all (this method refuses —
         a non-resolving namespace must not accumulate state).
+
+        ``keep_existing`` writes only when no row exists for the message. The
+        connector's stale-claim park uses it: a row already there is already
+        a durable retry (possibly the live claimant's own hold, written after
+        its release), and overwriting it with a park that later retires on
+        that release would drop the message.
         """
 
+        verb = "INSERT OR IGNORE" if keep_existing else "INSERT OR REPLACE"
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
             conn.execute(
-                "INSERT OR REPLACE INTO screening_holds (owner_key, message_id, hold_code, "
+                f"{verb} INTO screening_holds (owner_key, message_id, hold_code, "
                 "retry_at, created_at) VALUES (?,?,?,?,?)",
                 (
                     _owner_key(owner),
@@ -4811,6 +4827,40 @@ class Store:
             return None
 
     # -- claims (CAS lease) --------------------------------------------------
+
+    def claim_status(self, owner: OwnerSnapshot, message_id: str) -> dict[str, Any] | None:
+        """The claim row's lifecycle facts for ``message_id`` — never its token.
+
+        WHY (PR #3038 review R2-3): a connector killed mid-spine (launchd
+        bootout, reboot) leaves its claim ``held`` until ``expires_at``; the
+        restarted connector's spine is then refused ``claimed`` and used to
+        consume the feed ref with no retry, so the message was never
+        delivered. The loop needs three facts to schedule — not deliver — a
+        durable retry: whether the row is still ``held`` (and until when),
+        and whether its holder is a CONNECTOR spine (token minted with
+        :data:`CONNECTOR_CLAIM_TOKEN_PREFIX`) rather than a session's own
+        ``ack working`` claim (which proves the message already reached a
+        session). The token itself is lease authority and stays private.
+        Read-only; ``None`` when no row exists or the store is unreadable.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                row = conn.execute(
+                    "SELECT token, state, expires_at FROM claims "
+                    "WHERE owner_key = ? AND message_id = ?",
+                    (_owner_key(owner), message_id),
+                ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        return {
+            "state": str(row["state"]),
+            "expires_at": float(row["expires_at"]),
+            "connector": str(row["token"]).startswith(CONNECTOR_CLAIM_TOKEN_PREFIX),
+        }
 
     def claim(
         self,

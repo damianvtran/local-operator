@@ -114,6 +114,11 @@ HOLD_CODES = (
     # card to engage it (team_bridge.engagement). Listed so the owner's surface
     # renders the specific reason rather than ``unknown_hold``.
     "open_chief_of_staff",
+    # Not a screening outcome either: the connector's wait for a DEAD
+    # connector's mid-handoff claim to expire before re-driving the message
+    # (team_bridge.connector.loop.HOLD_STALE_CLAIM). Transient — at most one
+    # claim lease — but listed so it renders as itself, not ``unknown_hold``.
+    "stale_claim",
 )
 
 #: Per-type RAW utf8 caps on the fetched body (§8.3 screening inputs).
