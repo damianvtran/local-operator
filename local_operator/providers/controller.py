@@ -492,11 +492,13 @@ class ReadOnlyUsageSnapshot:
       credits.
     - ``reports``: the cached reports for the persisted account(s), identity
       stripped. ``[]`` with ``unavailable=False`` is a genuine "nothing cached".
-    - ``may_be_stale`` / ``cached_at``: freshness. The seam opens
-      ``immutable=1`` to guarantee it never WRITES, which means it cannot see an
-      uncheckpointed WAL — so a non-empty ``-wal`` beside the database is the
-      signal that ``reports`` may be behind, possibly still naming an account a
-      committed DELETE removed. Staleness is DISCLOSED, not withheld: the
+    - ``may_be_stale`` / ``cached_at``: freshness. Where the seam cannot read
+      a WAL without creating a file it opens ``immutable=1``, which cannot see
+      uncheckpointed frames — so a non-empty ``-wal`` beside such a snapshot is
+      the signal that ``reports`` may be behind, possibly still naming an
+      account a committed DELETE removed. (The auth store reads a live
+      writer's WAL directly and is then current; see
+      ``AuthStore._connect_read_only``.) Staleness is DISCLOSED, not withheld: the
       reports are still returned (a blank phone /usage on a busy desktop would
       be the worse failure), flagged so the surface renders "cached, as of T
       (may be out of date)" and can exclude a removed account. ``cached_at``
@@ -1007,19 +1009,20 @@ class ProviderController:
         result (``reports == []``, ``unavailable=False``), and freshness
         (``may_be_stale``/``cached_at``).
 
-        Freshness is load-bearing, not decorative: ``immutable=1`` guarantees the
-        no-write property but cannot see an uncheckpointed WAL, so a non-empty
-        ``-wal`` means the numbers may be behind — and an INVENTORY built from
-        them could name an account a committed DELETE removed. Staleness is
-        therefore DISCLOSED, not withheld: the snapshot is RETURNED with
-        ``may_be_stale=True`` (and ``cached_at``), both for the inventory and for
-        an explicit provider, so a busy desktop never blanks the phone's
-        ``/usage`` exactly when the user wants to see credits. A flagged,
-        clearly-labelled snapshot is never PRESENTED as current — the surface
-        renders "cached, as of T (may be out of date)" and may exclude a removed
-        account — which satisfies the safety rule without hiding usable data. The
-        one state that stays UNAVAILABLE is an unreadable/foreign schema, where
-        nothing trustworthy exists to return at all.
+        Freshness is load-bearing, not decorative: an ``immutable=1`` snapshot
+        (taken where a WAL read would create a file) cannot see an uncheckpointed
+        WAL, so a non-empty ``-wal`` beside it means the numbers may be behind —
+        and an INVENTORY built from them could name an account a committed
+        DELETE removed. Staleness is therefore DISCLOSED, not withheld: the
+        snapshot is RETURNED with ``may_be_stale=True`` (and ``cached_at``),
+        both for the inventory and for an explicit provider, so a busy desktop
+        never blanks the phone's ``/usage`` exactly when the user wants to see
+        credits. A flagged, clearly-labelled snapshot is never PRESENTED as
+        current — the surface renders "cached, as of T (may be out of date)" and
+        may exclude a removed account — which satisfies the safety rule without
+        hiding usable data. The one state that stays UNAVAILABLE is an
+        unreadable/foreign schema, where nothing trustworthy exists to return at
+        all.
 
         The returned reports carry NO account identity: identity and vendor notes
         are stripped here rather than trusted to the renderer.

@@ -10237,8 +10237,8 @@ def _cached_phone_usage() -> dict[str, Any]:
             # Protocol (no close); this factory always builds the concrete
             # AuthStore.open_read_only handle, which owns the connection.
             cast(AuthStore, controller.auth_store).close()
-    # Empty/absent is successful; unreadable is not. Preserve immutable-read
-    # freshness instead of guessing it from individual report timestamps.
+    # Empty/absent is successful; unreadable is not. Forward the seam's own
+    # may-be-stale flag instead of guessing freshness from report timestamps.
     if snapshot.unavailable:
         raise RuntimeError("cached usage unavailable")
     import math
