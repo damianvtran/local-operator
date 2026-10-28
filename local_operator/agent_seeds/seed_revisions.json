@@ -251,6 +251,26 @@
         "effort": null,
         "delegate": true,
         "class": "proactive"
+      },
+      {
+        "sha": "5f08285ee660d9212b535b1d7c2e60b032532fbc",
+        "version": "1.5.6",
+        "instructions_sha256": "966dd93d5796e3bd0bfdb492498658cd6e0e7f0e505fedda080e48b298109eca",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": "proactive"
+      },
+      {
+        "sha": "66b13c81c0b3a7975fab3579c08073dc6743b376",
+        "version": "1.5.6",
+        "instructions_sha256": "52a8ced411ea1d9fd448a9ef1e6e60c2447e04e5ce37e4884e0c4cd812974434",
+        "description": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+        "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": "proactive"
       }
     ],
     "architect": [
@@ -651,6 +671,22 @@
         "instructions_sha256": "ace534b358da4149f8c7176d457897127e751ced5d6bf9a13136a0e36c1f8682",
         "description": "Organizing the Library — naming and tagging saved assets, finding what needs attention, or asking what the Library holds.",
         "tools": null,
+        "effort": null,
+        "delegate": true,
+        "class": "proactive"
+      },
+      {
+        "sha": "5a52df7f8dc1c6b01294007baa95f8a3118951eb",
+        "version": "1.1.0",
+        "instructions_sha256": "95a2d980b1c9e50e74c583574fb2e60ccbdc86abe66bec1fd6039461f27ffffd",
+        "description": "Organizing the Library — naming and tagging saved assets, finding what needs attention, or asking what the Library holds.",
+        "tools": [
+          "library",
+          "read",
+          "glob",
+          "grep",
+          "todo"
+        ],
         "effort": null,
         "delegate": true,
         "class": "proactive"

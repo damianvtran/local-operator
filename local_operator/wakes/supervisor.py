@@ -75,7 +75,9 @@ import argparse
 import asyncio
 import logging
 import os
+import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -2406,6 +2408,53 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
     pass or the next one (≤ ``SLICE_S``). ``--once`` awaits the pass inline for
     the same reason.
     """
+    from local_operator.wakes.owned_runtimes import (
+        OWNER_ENV,
+        SUPERVISOR_PID_ENV,
+        spawn_token,
+        sweep,
+    )
+
+    # This token belongs to THIS supervisor invocation, not to the store. It is
+    # propagated only to candidates launch actually forks for this process;
+    # adoption or another root's runtime cannot be claimed. The stop handler
+    # installed just below turns a unit SIGTERM into cancellation, and ONLY that
+    # path runs the ownership sweep in serve()'s finally (see ``stop_requested``).
+    owner_token = spawn_token()
+    os.environ[OWNER_ENV] = owner_token
+    # The stamp gate: ``launch`` stamps only where os.getpid() equals this, so
+    # the token cannot travel past the runtimes this process forks itself.
+    os.environ[SUPERVISOR_PID_ENV] = str(os.getpid())
+    # A UNIT STOP MUST REACH THE SWEEP. Under KillMode=process systemd signals
+    # only this process, and SIGTERM's default action terminates without running
+    # any cleanup: measured on a real store, `systemctl stop` exited -15 and the
+    # supervisor's owned runtime outlived it. Installing a stop handler turns a
+    # signal into task cancellation, so serve()'s finally block runs the
+    # ownership sweep and the runtimes drain (#3028 Q-S1).
+    #
+    # THE SWEEP IS FOR A STOP, NEVER FOR A RETIREMENT. The supervisor's whole
+    # contract is to START a runtime and leave the wake to it: a session fires its
+    # own overdue wakes on load, seconds after the engage returns. A sweep on
+    # every exit therefore SIGTERMed the runtime a `--once` pass (or a loop that
+    # just ran out of fireable wakes) had started, before its wake fired —
+    # tests/e2e/test_cold_wake_e2e.py failed on both CI platforms with "the
+    # supervised cold wake never ran its turn" and passed with the sweep removed.
+    # An idle runtime outliving its supervisor is the normal, pre-existing shape:
+    # its own residency rules end it. Only a SIGNAL means "this unit is going
+    # away, take your work with you", so only a signal sets ``stop_requested``.
+    stop_requested = False
+    running = asyncio.current_task()
+    loop = asyncio.get_running_loop()
+
+    def _on_stop() -> None:
+        nonlocal stop_requested
+        stop_requested = True
+        if running is not None:
+            running.cancel()
+
+    stop_signals: list[signal.Signals] = []
+    if running is not None and threading.current_thread() is threading.main_thread():
+        stop_signals = _install_stop_handlers(loop, _on_stop)
     sweeper = _Sweeper()
     triggers_seat = _TriggerSweep(config_dir)
     residency = _ResidencySweep(config_dir)
@@ -2584,10 +2633,57 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                     cleanup_error is old for old in cleanup_errors
                 ):
                     cleanup_errors.append(cleanup_error)
+        # KillMode=process means systemd signalled only this process. Forward
+        # SIGTERM to the runtimes this invocation owns so a working turn drains
+        # and a parked approval is denied instead of surviving the unit stop.
+        # Do this after engagement seats have shut down, so no new candidate is
+        # spawned behind the sweep. Gated on a real stop signal: see the
+        # ``stop_requested`` comment above for why a retirement must not sweep.
+        #
+        # ANY INVOCATION'S MARKER, NOT JUST THIS ONE'S (#3028 review r3, MAJOR-1).
+        # Since a retirement stopped sweeping, a runtime outlives the invocation
+        # that spawned it, and the next invocation carries a NEW token — so the
+        # long-lived parked runtime a stop exists for is exactly one this token
+        # never matched. The sweep is keyed on the wake-supervisor marker being
+        # PRESENT (``sweep(any_owner=True)`` skips a process without one) and on
+        # this config root: the `lop serve` daemon's runtimes and interactive or
+        # mesh-created sessions carry no marker and are never signalled, and
+        # another root's runtimes are out of reach. Consequence, deliberate: a
+        # stop also reaches runtimes a CONCURRENT supervisor in the same store
+        # spawned (nothing makes one store's supervisor a singleton). That is the
+        # stop's meaning — "wake delivery for this store is going away" — and
+        # each such runtime drains its turn and denies its parked gate exactly as
+        # on a stop; the surviving supervisor re-engages any wake still due.
+        if stop_requested:
+            sweep(config_dir, any_owner=True, why="supervisor stop")
+        for stop_signal in stop_signals:
+            try:
+                loop.remove_signal_handler(stop_signal)
+            except (RuntimeError, ValueError):
+                pass
         if cleanup_errors:
             if primary_error is not None:
                 cleanup_errors.insert(0, primary_error)
             raise BaseExceptionGroup("supervisor cleanup failures", cleanup_errors)
+
+
+def _install_stop_handlers(
+    loop: asyncio.AbstractEventLoop, on_stop: Callable[[], None]
+) -> list[signal.Signals]:
+    """Route SIGTERM/SIGINT to ``on_stop``; return the signals actually installed.
+
+    A seam so a test can fire the stop the event loop would, without sending a
+    real signal to the test process. Platforms without loop signal support
+    (Windows, a non-main thread) install nothing, and serve() then never sweeps.
+    """
+    installed: list[signal.Signals] = []
+    for stop_signal in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(stop_signal, on_stop)
+            installed.append(stop_signal)
+        except (NotImplementedError, RuntimeError, ValueError):
+            pass
+    return installed
 
 
 async def _sleep_in_slices(
@@ -2686,6 +2782,12 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(serve(config_dir(), once=args.once))
     except KeyboardInterrupt:
         return 130
+    except asyncio.CancelledError:
+        # A unit stop (SIGTERM/SIGINT) cancels the loop so serve()'s finally
+        # block runs the ownership sweep. That is a REQUESTED stop, not a crash:
+        # 0 keeps `Restart=on-failure` from restarting a supervisor a person
+        # just stopped.
+        return 0
 
 
 if __name__ == "__main__":

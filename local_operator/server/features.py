@@ -970,6 +970,27 @@ def static_feature_flags() -> dict[str, Any]:
         # `1` is the first contract revision; row/occurrence fields are
         # additive and do not bump it.
         "library": 1,
+        # THE OPERATOR'S INBOX (`docs/design/notifications-inbox.md`): the
+        # `/v1/desktop/notifications` routes (list, count, detail, PATCH, seen)
+        # over the items agents raise with `notify` plus the open asks, and the
+        # `notifications` invalidation frame on `GET /v1/desktop/events`. Its OWN
+        # key: the page, the sidebar destination, the `/notifications` slash
+        # destination and the feed branch are all NEW surfaces, so a renderer
+        # must recognise an older backend as "no inbox" and offer none of them
+        # (the sidebar strips the `notifications` id on save unless this key is
+        # present, decision D10). `1` is the first contract revision; item and
+        # answer fields are additive and do not bump it. Served to the relay
+        # through `_feature_flags()` like every key here.
+        "notifications": 1,
+        # THE NATIVE SEEN DOOR (D11): this core's inbox accepts per-item
+        # ``evidence.surface: "native"`` receipts — touch/press/scroll edges
+        # re-checked exactly like the desktop's, recorded as ``in_view`` with
+        # their surface. It exists as its own key because the CONSUMER is the
+        # relay: the phone turns its receipt feed on only when this is present,
+        # and a core that predates it must be recognisable as "no native
+        # receipts" rather than silently refusing every one (the refusal native
+        # #117 would retry every 500 ms). ``1`` is the first contract revision.
+        "notifications_seen": 1,
         # THE DESKTOP SIDEBAR'S DESTINATION LAYOUT: the route pair
         # `GET`/`PUT /v1/desktop/sidebar-layout` over one stored preference (the
         # rows above the `More` fold and the rows below it). ADDITIVE — an older

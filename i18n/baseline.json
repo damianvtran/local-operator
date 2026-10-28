@@ -82,7 +82,11 @@
     "local_operator/tui/agent_authoring.py",
     "local_operator/tui/widgets/agent_form.py",
     "local_operator/tui/team_authoring.py",
-    "local_operator/tui/widgets/team_form.py"
+    "local_operator/tui/widgets/team_form.py",
+    "local_operator/tui/notifications_attention.py",
+    "local_operator/tui/notifications_model.py",
+    "local_operator/tui/notifications_render.py",
+    "local_operator/tui/widgets/notifications_view.py"
   ],
   "files": {
     "local_operator/action_class.py": 2,
@@ -255,6 +259,10 @@
     "local_operator/web_search/service.py": 4,
     "local_operator/web_search/tool.py": 2,
     "scripts/i18n/check.py": 25,
-    "scripts/i18n/generate.py": 12
+    "scripts/i18n/generate.py": 12,
+    "local_operator/tui/notifications_attention.py": 0,
+    "local_operator/tui/notifications_model.py": 0,
+    "local_operator/tui/notifications_render.py": 0,
+    "local_operator/tui/widgets/notifications_view.py": 0
   }
 }

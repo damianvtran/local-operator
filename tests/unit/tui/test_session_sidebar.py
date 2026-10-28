@@ -10,6 +10,7 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -5460,6 +5461,60 @@ async def test_the_fleet_note_lights_under_the_pointer():
         assert sidebar._set_asks_hover(span[1] + pad, y) is True
         assert sidebar._asks_hover is False
         assert sidebar._set_asks_hover(2, 0) is False
+
+
+@pytest.mark.asyncio
+async def test_switching_sources_carries_the_skill_ink_flag_with_the_aside():
+    """M2: the two composer affordances travel together on the sidebar path.
+
+    ``_restore_sidebar_aside`` returned ``set_allows_shell`` alone, so switching
+    to a source with NO parked aside left skill expansion off in the main chat
+    (a real ``$research`` got no ink until an aside was opened and closed), and
+    switching to a source WITH one left expansion on inside the card, where the
+    submit never expands. Both directions are exercised through the park/restore
+    pair the session switch runs.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(130, 30)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        panel = app._open_aside()
+        await pilot.pause()
+        assert panel is not None and panel.is_open, "premise: the aside opened"
+        assert editor._allows_skill_expansion is False, "premise: the aside borrows the composer"
+        assert editor._allows_shell is False, "premise: so does bang-mode"
+
+        # A stand-in for the source the switch parks: only the aside fields
+        # this path reads, so the test cannot drift with the rest of the model.
+        outgoing: Any = SimpleNamespace(
+            draft=SimpleNamespace(aside=None, shell_mode=False),
+            aside_open=True,
+            aside_generation=0,
+        )
+        app._park_sidebar_aside(outgoing)
+        await pilot.pause()
+        parked = outgoing.draft.aside
+        assert parked is not None and not panel.is_open, "premise: the switch parked the aside"
+
+        plain: Any = SimpleNamespace(
+            draft=SimpleNamespace(aside=None, shell_mode=False),
+            aside_open=False,
+            aside_generation=0,
+        )
+        app._restore_sidebar_aside(plain)
+        await pilot.pause()
+        assert editor._allows_skill_expansion is True, "main chat must ink a `$name` again"
+        assert editor._allows_shell is True
+
+        parked_source: Any = SimpleNamespace(
+            draft=SimpleNamespace(aside=parked, shell_mode=False),
+            aside_open=False,
+            aside_generation=parked.generation,
+        )
+        app._restore_sidebar_aside(parked_source)
+        await pilot.pause()
+        assert editor._allows_skill_expansion is False, "an aside question never expands"
+        assert editor._allows_shell is False
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,115 @@
+{
+  "schema": 1,
+  "audit_id": "nt25a1",
+  "audit_kind": "independent_current_byte_namespace_audit",
+  "locale": "fr",
+  "namespace": "wire.slash.notifications_page",
+  "audit_date": "2026-10-25",
+  "source_audit_revision": "3c16a9e77c63dce7082af6137e151421b6cbf2be",
+  "observed_checkout_head": "329b5c581784df1082dbd0630c0f814c7a3c0c8f",
+  "current_bytes_match_audited_hashes": true,
+  "key_count": {
+    "en": 1,
+    "target": 1
+  },
+  "verdict": "passed",
+  "result": "clean-with-findings",
+  "verdict_reason": "No blocker/major; literal read preserved and measured help width 46/50 cells. One nonblocking cross-surface terminology finding remains recorded.",
+  "auditor": {
+    "agent": "translation-auditor",
+    "session": "766adb539e6a",
+    "model": "openai/gpt-6-astra",
+    "actual_model_source": "Session runtime header: Model: openai/gpt-6-astra",
+    "fallback_used": false,
+    "independence": "Separate agent/context from both translators; did not draft, polish or modify either translation. Independently read all catalogue values and context sidecars and derived parser/format/width results here."
+  },
+  "translator": {
+    "agent": "coder",
+    "model": "Opus5.5",
+    "date": "2026-10-25",
+    "source": "Delegation brief; separate translator, not this auditor; session identifier not supplied"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.json",
+      "sha256": "9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594"
+    },
+    "en_context_sidecar": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.context.json",
+      "sha256": "2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/fr/wire.slash.notifications_page.json",
+      "sha256": "b7e183e9efbd5a40c1819556433bca46ed5c98029fefd152e6a1352dca4b3952"
+    }
+  },
+  "guidance": {
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "b916f3d1c30b0a2e18fc94ca51d130f60e86b3b17b1918aa51f5c5da6d52ec39"
+    }
+  },
+  "artifacts": [
+    "audit.log",
+    "report.md",
+    "recheck.py.txt",
+    "receipt.json"
+  ],
+  "audit_log": {
+    "path": "audit.log",
+    "state": "present",
+    "actual_output": true
+  },
+  "findings": [
+    {
+      "id": "FR-CORE-1",
+      "severity": "MINOR",
+      "key": "wire.slash.notifications_page.help",
+      "current_text": "Questions et infos des agents ; read : tout lu",
+      "proposed_text": "Demandes et mises à jour d’agents ; read : tout lu",
+      "reason": "This command describes the same notification kinds as the UI but calls them Questions / infos instead of the UI’s Demandes / mises à jour; align discoverability vocabulary without changing literal read.",
+      "evidence": "rich.cells.cell_len: current 46 cells; proposed 50 cells; sidecar maxCells=50. UI filter.kind_asks=Demandes and filter.kind_updates=Mises à jour were read in the audited target catalogue.",
+      "disposition": "proposed; not edited; non-blocking cross-surface terminology finding"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "result": "clean-with-findings",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0,
+    "findings_total": 1
+  },
+  "limitations": [
+    "LLM linguistic audit, not a native-speaker attestation.",
+    "No browser/native/rendered-fit, deployment or release claim.",
+    "Only requested audit artifacts written; no catalogue/code/ledger/git modifications."
+  ],
+  "cross_surface_terminology_inputs": {
+    "namespace": "ui.notifications",
+    "input_hashes": {
+      "en": {
+        "path": "src/i18n/catalogues/en/ui.notifications.json",
+        "sha256": "ce0c8d6d9af80980667741dd6d289ab7312d04aaea0e717e5cef4cf55c2b37ae"
+      },
+      "fr": {
+        "path": "src/i18n/catalogues/fr/ui.notifications.json",
+        "sha256": "c9176eb1f3a692cda0ce73c511862e729b039b38bf111277f8d56c6ebfc6e50c"
+      },
+      "context": {
+        "path": "src/i18n/catalogues/en/ui.notifications.context.json",
+        "sha256": "3804068c75073ce9663f73539b508cbb46e495488dc47e5dd97aa80fd1a6918e"
+      }
+    },
+    "read_terms": {
+      "ui.notifications.filter.kind_asks": "Demandes",
+      "ui.notifications.filter.kind_updates": "Mises à jour"
+    }
+  }
+}

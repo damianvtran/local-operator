@@ -40,6 +40,7 @@ from local_operator.session.runtime.serving import (
     AskUnavailableError,
     ServingSessionHandle,
 )
+from tests.unit.legacy_skill_payload import legacy_skill_payload
 
 
 class FakeSession:
@@ -305,28 +306,12 @@ def make_handle(auto_approve: bool = False) -> tuple[ServingSessionHandle, FakeS
 
 
 def _skill_payload(typed: str) -> str:
-    """The persisted form of a ``$skill`` invocation: what a CLIENT sent.
+    """A ``$skill`` invocation in the LEGACY persisted form.
 
-    Built from the REAL ``Skill`` and the REAL renderer, the way the fold-parity
-    test does it: a hand-spelled tag would pin a payload shape the product never
-    produces, and it is the payload's own ``invocation`` attribute that the fix
-    reads back. Expansion is the client's duty (a desktop renders it in
-    ``local-operator-ui``'s ``skill-invocation.ts``), which is why the harness is
-    handed this and never the typed line.
+    Old transcripts never migrate, so the reader stays and this pins its input;
+    ``legacy_skill_payload`` reproduces the deleted writer's escaping.
     """
-    from local_operator.skills.discovery import Skill
-    from local_operator.skills.invoke import parse_invocation, render_invocation
-
-    skill = Skill(
-        name="research",
-        description="research things",
-        file_path=Path("/skills/research/SKILL.md"),
-        base_dir=Path("/skills/research"),
-        source="user",
-    )
-    invocation = parse_invocation(typed, {"research": skill})
-    assert invocation is not None
-    return render_invocation(invocation, "# Research\n\nSKILL_BODY_MARKER\n")
+    return legacy_skill_payload(typed)
 
 
 def test_default_conversation_name_is_empty_not_a_placeholder() -> None:
@@ -665,6 +650,51 @@ async def test_concurrent_gate_answers_have_one_authoritative_winner() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_signal_exit_refuses_parked_and_later_gates() -> None:
+    """M1 on #3028: once a signal commits the exit, no gate parks on a person.
+
+    A parked approval is denied (``False``, the stop/timeout answer) and the
+    count says so; a gate opened afterwards answers at once instead of parking
+    a fresh card that would hold the drain open again; an ask answers ``None``.
+    """
+    handle, _ = make_handle(auto_approve=False)
+    parked = asyncio.ensure_future(handle._approval_gate("bash", "Allow?"))
+    await asyncio.sleep(0)
+    assert handle.is_busy() is True
+
+    assert handle.refuse_gates_for_exit() == 1
+    assert await asyncio.wait_for(parked, timeout=2) is False
+    assert handle.is_busy() is False
+
+    assert await asyncio.wait_for(handle._approval_gate("bash", "again"), timeout=1) is False
+    assert handle._pending_futures == {}
+    question = SimpleNamespace(id="q1", question="Proceed?", options=[], secret=False)
+    assert await asyncio.wait_for(handle._ask_gate([question]), timeout=1) is None
+
+
+@pytest.mark.asyncio
+async def test_a_signal_between_two_questions_does_not_park_the_second() -> None:
+    """m1 (agent review round 2 on #3028): the exit flag is re-read per question.
+
+    q1 is answered in the same tick the exit is committed; the refusal finds
+    nothing parked (q1's future is already settled), so a single entry check
+    let q2 park after the refusal. The loop now stops and returns what it has.
+    """
+    handle, _ = make_handle(auto_approve=False)
+    q1 = SimpleNamespace(id="q1", question="First?", options=[], secret=False)
+    q2 = SimpleNamespace(id="q2", question="Second?", options=[], secret=False)
+    asked = asyncio.ensure_future(handle._ask_gate([q1, q2]))
+    await asyncio.sleep(0)
+    (future,) = list(handle._pending_futures.values())
+    future.set_result({"q1": ["yes"]})
+    assert handle.refuse_gates_for_exit() == 0
+    answer = await asyncio.wait_for(asked, timeout=1)
+    assert answer == {"q1": ["yes"]}, answer
+    assert handle._pending_futures == {}
+    assert handle.is_busy() is False
+
+
+@pytest.mark.asyncio
 async def test_concurrent_explicit_steers_preserve_dispatch_order() -> None:
     handle, session = make_handle()
     receipts = await asyncio.gather(
@@ -687,6 +717,89 @@ async def test_pending_gate_is_busy_until_ordinary_timeout(monkeypatch) -> None:
     assert await waiting is False
     assert handle.is_busy() is False
     assert serving_mod.PENDING_REQUEST_TIMEOUT_S == 0.05
+
+
+class _PhoneAttachesMidWait:
+    """A registrant with nothing attached until the test attaches a phone.
+
+    Answers by KIND (``attached_surfaces``/``watching_surfaces``), the shape the
+    current RuntimeServer publishes, so flipping ``surfaces`` is the same change
+    the relay's attach makes to what ``_gate_timeout_s`` reads.
+    """
+
+    def __init__(self) -> None:
+        self.surfaces: frozenset[str] = frozenset()
+
+    def attached_surfaces(self) -> frozenset[str]:
+        return self.surfaces
+
+    def watching_surfaces(self) -> frozenset[str]:
+        return self.surfaces
+
+    def set_record_pending(self, pending: str | None) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gate_kind", ["approval", "ask"])
+async def test_a_gate_that_expired_unattended_records_the_wait_it_actually_had(
+    monkeypatch, gate_kind: str
+) -> None:
+    """The row says how long the gate WAITED, not what the policy says now.
+
+    PR #3030 QA finding X1: a gate opened with nothing attached and
+    notifications off waits the short cap; a phone attaching mid-wait flips the
+    policy to the 24 h park, and the recorder re-read the policy when it wrote
+    the row — so a 30-second expiry was recorded (and replayed to the model and
+    the phone) as ``waited_s: 86400``. Driven through the REAL gates so the
+    value asserted is the one the gate hands the recorder, not one this test
+    supplied.
+    """
+    monkeypatch.setattr(serving_mod, "PENDING_REQUEST_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(
+        ServingSessionHandle, "_unattended_gate_hours", lambda self: 24, raising=False
+    )
+    # Notifications OFF and nothing attached: the one case the short cap is for.
+    monkeypatch.setattr(
+        "local_operator.tui.notify.notifications_enabled", lambda: False, raising=False
+    )
+    handle, session = make_handle(auto_approve=False)
+    registrant = _PhoneAttachesMidWait()
+    handle._registrant = registrant  # type: ignore[assignment]
+    appended: list[Any] = []
+
+    class _Transcript:
+        async def append_message(self, message):  # noqa: ANN001
+            appended.append(message)
+
+    setattr(session, "transcript", _Transcript())
+    assert handle._gate_timeout_s() == 0.05, "precondition: the gate opens on the short cap"
+
+    async def _open_gate() -> Any:
+        if gate_kind == "approval":
+            return await handle._approval_gate("bash", "rm -rf build/")
+        question = AskQuestion(
+            id="go",
+            question="Deploy?",
+            options=[AskOption(label="Yes"), AskOption(label="No")],
+        )
+        return await handle._ask_gate([question])
+
+    waiting = asyncio.ensure_future(_open_gate())
+    # Two ticks: one to enter the wrapper, one for the gate to park its future.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert handle._pending_futures, "precondition: the gate is parked before the attach"
+    # The phone attaches while the gate is parked on the short wait.
+    registrant.surfaces = frozenset({"daemon"})
+    assert handle._gate_timeout_s() == 24 * 3600.0, "precondition: attach switches the policy"
+
+    settled = await asyncio.wait_for(waiting, 5)
+
+    assert settled in (False, None), "the short wait must still expire"
+    assert appended, "the expiry was not recorded at all"
+    waited = appended[0].details["waited_s"]
+    assert waited == 0.05, f"recorded waited_s={waited!r}; the gate waited the 0.05 s short cap"
 
 
 @pytest.mark.asyncio
@@ -1508,6 +1621,22 @@ async def test_attach_seeds_streaming_from_flag_for_mid_turn_subscriber() -> Non
     session.is_streaming = True
     handle.subscribe(lambda: None)
     assert handle._fold.projection.streaming is True
+
+
+def test_a_committed_departure_ignores_the_warm_window() -> None:
+    """#3028 node control (c): an idle signalled runtime must leave, not wait 120 s.
+
+    Residency keeps a runtime warm for an imminent wake; a signal drain is not
+    residency. The warm-window term therefore stops holding once ``_draining``
+    is latched, so the turn boundary ends the runtime and its successor owns
+    the next occurrence.
+    """
+    handle, _ = make_handle()
+    handle.next_wake_due_at = lambda: 0  # type: ignore[method-assign]
+    handle._draining = False
+    assert handle.may_refresh() == "wake due within the warm window"
+    handle._draining = True
+    assert handle.may_refresh() == ""
 
 
 # --- next_wake_due_at: the reaper's warmth signal ----------------------------

@@ -56,6 +56,7 @@ from local_operator.server.routes import (
     desktop_mcp,
     desktop_mesh,
     desktop_monitors,
+    desktop_notifications,
     desktop_preferences,
     desktop_profiles,
     desktop_projects,
@@ -1005,6 +1006,11 @@ app.include_router(desktop_session_files.router)
 # the sessions router, so declaration order cannot shadow a session child; the
 # service's own content route is id-addressed and never accepts a path.
 app.include_router(desktop_library.router)
+# The operator's inbox (`features.notifications`). `/v1/desktop/notifications`
+# shares no prefix with the sessions router, and its literal children (`/count`,
+# `/seen`) are declared BEFORE the `/{item_id}` template inside the module, so
+# a literal can never be read as an item id.
+app.include_router(desktop_notifications.router)
 # The desktop's own PREFERENCES: `/v1/desktop/sidebar-layout`, the sidebar's
 # persisted destination order (capability `features.sidebar_layout`). It is a
 # single-segment literal path (`/v1/desktop/sidebar-layout`) with no child

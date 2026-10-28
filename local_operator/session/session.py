@@ -455,6 +455,10 @@ SUBAGENT_ROSTER_CUSTOM_TYPE = _roster_sidecar.SUBAGENT_ROSTER_CUSTOM_TYPE
 SUBAGENT_ROSTER_SIDECAR = _roster_sidecar.SUBAGENT_ROSTER_SIDECAR
 _SUBAGENT_ROSTER_VERSION = _roster_sidecar.SUBAGENT_ROSTER_VERSION
 _SUBAGENT_SUMMARY_CHARS = 500
+#: The Librarian's duty-session tools when her packaged seed cannot be read
+#: (#3028, review round 2 m2): the seed 1.1.0 list, every entry read-tier.
+#: Kept equal to the seed by ``test_librarian_tool_surface``.
+_LIBRARIAN_FALLBACK_TOOLS: tuple[str, ...] = ("library", "read", "glob", "grep", "todo")
 
 #: The build THIS PROCESS loaded, read once and memoised. Compared against the
 #: install on disk by ``update.classify_import_failure``, which is the only way
@@ -928,6 +932,37 @@ _PER_TOKEN_EVENT_TYPES = (
 #: the merge added, and ``set_ask_handler`` re-runs one entry of it. A tool
 #: added to the registry with a session-gated builder and not added here is
 #: advertised to nobody.
+def _ordinal(n: int) -> str:
+    if 10 <= n % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _notify_sentence(outcome: Any) -> str:
+    """What the ``notify`` tool tells the model about one write (§1.3).
+
+    Model-facing English (a tool result), so it is not catalogued. Each arm
+    names what happened and, where the next move differs, what to do — the
+    dismissed arm especially, so a wake that ticks every five minutes stops
+    re-raising something the operator already set aside.
+    """
+    item = outcome.item_id
+    if outcome.action == "unchanged":
+        return f"Unchanged — {item} already says this."
+    if outcome.action == "absorbed":
+        return (
+            f"The operator dismissed {item}; the update was recorded without notifying. "
+            "Use a higher priority or a new key only if it now needs them."
+        )
+    if outcome.action == "updated":
+        return f"Updated {item} ({_ordinal(max(1, outcome.repeat_count - 1))} update)."
+    if outcome.action == "revived":
+        return f"Raised {item} again at {outcome.priority} priority; it was dismissed before."
+    return f"Notified (id {item})."
+
+
 def _deferred_availability(name: str, published: bool) -> str:
     """The line a ``tool://`` read appends when it activated a deferred tool.
 
@@ -985,6 +1020,12 @@ SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     # Appended last for the same prefix reason as `sessions`.
     "generate_video",
     "video_status",
+    # The inbox tool is gated on `notify_inbox`, a field only the session's own
+    # per-turn context binds, so — exactly the `no_reply` lesson above — without
+    # this line the tool is created nowhere a real session looks. A child never
+    # receives it (`_job_id` is set before the merge, so the builder refuses).
+    # Appended last for the same prefix reason as `sessions`.
+    "notify",
 )
 
 #: Tag put on a tool executor that :func:`_op_scoped_execute` already wrapped, so
@@ -3536,6 +3577,27 @@ class Session:
         #: consumed exactly once by ``_finalize_attention_notify``.
         self._run_triggers: set[str] = set()
         self._run_notify_requested: bool = False
+        #: Set when THIS run posted an inbox item through ``notify`` (any
+        #: priority; ``docs/design/notifications-inbox.md`` §3.4). Reset with
+        #: ``_run_notify_requested``. It is what lets a ``notify:true`` wake turn
+        #: end quietly: the operator asked to be told, and the item told them.
+        self._run_notified: bool = False
+        #: Whether THIS run raised (or handed off) a `high` item banner. Read by
+        #: exactly one consumer, ``_finalize_attention_notify``: a run that
+        #: already put a banner on the operator's screen does not also raise the
+        #: completion banner for itself (contract §3.4).
+        self._run_notified_banner: bool = False
+        #: Installed by the serving handle when this session runs under a
+        #: `RuntimeServer` (`serving.py`, `_tui_viewer_active`). It answers
+        #: whether an attached terminal is BOTH showing this conversation and
+        #: being typed in — the rung-4 stand-down's evidence. Absent (None) for a
+        #: session with no runtime, which every caller reads as "cannot tell" and
+        #: so notifies (contract §6.3).
+        self._notify_tui_probe: Callable[[], Any] | None = None
+        #: Background raises of this run's held `high` item banners (the
+        #: runtime rung's grace), settled before the run's end is judged.
+        self._pending_item_banners: list[asyncio.Task[Any]] = []
+        self._item_banner_generation = 0
         #: The raw ``custom_type`` of every INTERNAL-class input this run
         #: consumed, beside the trigger record and reset with it. The class
         #: vocabulary deliberately collapses all of them into "internal", and
@@ -3984,6 +4046,15 @@ class Session:
         #: this task instead — see :meth:`_spawn_selected_model_write`.
         self._selected_model_task: "asyncio.Future[None] | None" = None
         self._system_blocks_provider = system_blocks_provider
+        if getattr(system_blocks_provider, "session_notify_membership", False):
+            # Factory-created providers render before their warm tool snapshot
+            # gains session-owned doors. Membership is authoritative here; a
+            # child/one-shot/output-contract never acquires the notify clause.
+            setattr(
+                system_blocks_provider,
+                "notify_available",
+                lambda: any(tool.name == "notify" for tool in self._tools),
+            )
         self._frozen_system_blocks: list[str] | None = None
         self._last_system_blocks: list[str] | None = None
         self._system_state_message_id: str | None = None
@@ -5178,6 +5249,9 @@ class Session:
         # arrives LATER, which is why ``set_ask_handler`` re-runs it: the ask
         # hook is installed by the front end long after this returns.
         self._merge_capability_tools()
+        # AFTER the merge: ``task``/``wake`` arrive there, and the declaration
+        # below must see the whole inventory it narrows.
+        self._declare_librarian_inventory()
         # The session, not an OperatorApp, owns state that must survive a second
         # frontend joining. Constructed after every durable source above has
         # restored so the first snapshot is already authoritative.
@@ -13745,11 +13819,15 @@ class Session:
         # drops ``ask``; clearing the contract restores the door, so re-run the
         # merge and let the builder decide (it refuses wherever the door stays
         # ``None`` for some other reason).
+        # ``notify`` shares the door's exclusions (``_notify_inbox_callable``),
+        # so it follows the same drop/re-merge.
         if contract is not None:
-            if any(tool.name == "no_reply" for tool in self._tools):
-                self.refresh_tools([tool for tool in self._tools if tool.name != "no_reply"])
+            if any(tool.name in ("no_reply", "notify") for tool in self._tools):
+                self.refresh_tools(
+                    [tool for tool in self._tools if tool.name not in ("no_reply", "notify")]
+                )
         else:
-            self._merge_capability_tools(("no_reply",))
+            self._merge_capability_tools(("no_reply", "notify"))
 
     def materialize_declared_tools(self) -> tuple[str, ...]:
         """Grant the SCHEMAS of this session's declared tools that are lazy.
@@ -15990,6 +16068,13 @@ class Session:
             notify = False
         if notify and kind != "error" and self._proactive_banner_veto(event):
             notify = False
+        # ONE BANNER PER EVENT (contract §3.4): a run that already raised a
+        # `high` item banner — or handed it to the desktop's update channel —
+        # does not also raise the completion banner for itself. `error` is
+        # exempt: a turn that died always notifies, whatever else it said. The
+        # unseen completion mark is untouched; this gates banners only.
+        if notify and kind != "error" and self._run_notified_banner:
+            notify = False
         # THE BANNER-BUDGET STASH (review MAJOR-2): whether this publish is one
         # of her check-in banners is judged HERE, once, beside ``notify``. The
         # stamping seam in ``_publish_attention_outcome`` spends the budget
@@ -16243,6 +16328,229 @@ class Session:
             return None
         return self._quiet_end_refusal
 
+    def _notify_inbox_callable(self) -> Callable[..., Awaitable[str]] | None:
+        """The ``notify`` tool's inbox door, or ``None`` where no inbox reads this session.
+
+        createIf rung 3 (``docs/design/notifications-inbox.md`` §3.2): the tool
+        exists only for a TOP-LEVEL conversation the operator's own listings
+        show, because that is the conversation an item can send them back to.
+        ``None`` for:
+
+        * a delegated child (``_job_id``): it reports through ``hub`` and its
+          parent decides whether the operator needs an item, so one event is
+          one item, attributed to a conversation the operator can open;
+        * a session the listings HIDE (``resume.is_user_session`` false, the
+          predicate ``_session_may_announce`` gates banners on): a hidden
+          session puts nothing on the operator's screen;
+        * a one-shot host or an output-contract session (the ``quiet_end``
+          exclusions — the host's product is the final text);
+        * ``LOP_NOTIFY=0``.
+
+        The gate answers "is there an inbox the operator reads for this
+        session" — reachability, not host identity (AGENTS.md footprint ladder).
+        """
+        if self._job_id is not None or self._one_shot_exit or self._output_contract is not None:
+            return None
+        from local_operator.tools import builtin
+
+        if not builtin.notify_enabled():
+            return None
+        if not self._session_is_listed():
+            return None
+        return self._notify_inbox
+
+    def _session_is_listed(self) -> bool:
+        """Whether the operator's own listings show this session (``is_user_session``).
+
+        A session with no directory answers YES, the ``_session_may_announce``
+        rule: absence of a marker means the user's own.
+        """
+        directory = getattr(getattr(self, "transcript", None), "directory", None)
+        if not directory:
+            return True
+        try:
+            from local_operator.resume import is_user_session
+
+            return is_user_session(Path(directory))
+        except Exception:  # noqa: BLE001 — an unanswered question keeps the tool
+            logger.debug("notify: could not read the session origin", exc_info=True)
+            return True
+
+    async def _notify_inbox(
+        self,
+        *,
+        title: str,
+        body: str,
+        priority: str,
+        key: str,
+        links: list[dict[str, str]],
+        anchor_id: str,
+    ) -> str:
+        """Persist unread; presence never proves a newly written callout was seen.
+
+        Even a focused session with fresh machine input may be scrolled up,
+        covered, or showing a child. Only a later item-specific render receipt
+        can acknowledge this revision. L1b owns bounded banner grace; it must
+        re-read the item's read watermark before claiming delivery.
+        """
+        from local_operator.notifications.store import NotificationStore
+
+        root = Path(self._config_dir)
+        store = NotificationStore(root)
+        outcome = await asyncio.to_thread(
+            store.notify,
+            session_id=self.session_id,
+            title=title,
+            body_md=body,
+            priority=priority,
+            key=key,
+            links=links,
+            anchor_id=anchor_id,
+            session_title=self.conversation_name,
+            agent_id=self._agent_id or "",
+        )
+        self._run_notified = True
+        # THE BANNER, decided here because this is the only place that knows
+        # the write's action, revision and priority. Best-effort: a banner is
+        # chrome and the item is already durable, so a delivery failure leaves
+        # an unread row rather than failing the tool call the model made.
+        if outcome.priority == "high":
+            await self._route_item_banner(root, store, outcome, title=title, body=body)
+        return _notify_sentence(outcome)
+
+    async def _route_item_banner(
+        self, root: Path, store: Any, outcome: Any, *, title: str, body: str
+    ) -> None:
+        """Decide a `high` revision's banner now; raise it after its grace.
+
+        TWO HALVES, because the grace cannot run inside the tool call (round-1
+        N2/Q4). The in-view receipt that may cancel the banner needs the
+        notify call's own result row ON SCREEN (its anchor), and that row only
+        renders once this call has returned. So:
+        - the ROUTE is decided here, synchronously and uncached: nothing to
+          raise (normal/low, unchanged/absorbed, a gated switch), or handed to
+          an advertising desktop (whose feed holds the grace itself);
+        - the runtime rung's hold-then-claim runs as a background task, and
+          the run's end waits for it, bounded, before deciding the completion
+          banner (:meth:`_settle_item_banners`). That way the one-banner-per-
+          event rule sees what really happened (round-1 R1).
+        """
+        from local_operator.notifications import delivery as _delivery
+
+        try:
+            route = await asyncio.to_thread(
+                _delivery.route_item,
+                root,
+                action=outcome.action,
+                priority=outcome.priority,
+                # R2-2: a TUI showing this conversation with the operator active
+                # in it is the surface that acknowledges the card, so the
+                # runtime must not raise its detached banner over it. The probe
+                # answers True only on real evidence; unknown is None and
+                # notifies (§6.3).
+                tui_watching=self._notify_tui_evidence(),
+            )
+        except Exception:  # noqa: BLE001 — chrome must not fail the write
+            logger.debug("notify: banner routing failed", exc_info=True)
+            return
+        logger.info(
+            "notify: item %s %s banner rung=%s (%s) for %s",
+            outcome.item_id,
+            outcome.action,
+            route.rung,
+            route.detail,
+            self.session_id,
+        )
+        if route.rung == _delivery.RUNG_TUI_VIEWER:
+            # The TUI is showing it; its rung 3 stands down and its receipt
+            # reads the item. Nothing to hand off and no banner to raise, and
+            # the run's completion banner is NOT the same event (R1), so
+            # spoken_for stays False.
+            return
+        if route.spoken_for:
+            # Handed to an advertising desktop: the feed raises it (contract
+            # §3.4 suppression applies now — the handoff is the banner).
+            self._run_notified_banner = True
+            return
+        if route.rung != _delivery.RUNG_DETACHED:
+            return
+
+        generation = self._item_banner_generation
+
+        async def raise_after_grace() -> None:
+            # THE PROBE IS RE-READ HERE, not inherited from the write-time
+            # route (R6-2). The grace exists so an in-view receipt can cancel
+            # the banner, which means the operator may well have switched to
+            # this conversation while it ran; carrying the write-time answer
+            # would raise the banner over the screen they moved to. Unknown
+            # (None) still notifies — the fail-open direction of §6.3.
+            result = await asyncio.to_thread(
+                _delivery.deliver_item,
+                root,
+                item_id=outcome.item_id,
+                revision=int(outcome.revision),
+                priority=outcome.priority,
+                action=outcome.action,
+                session_id=self.session_id,
+                title=title,
+                body=body,
+                store=store,
+                tui_watching=self._notify_tui_evidence(),
+            )
+            logger.info(
+                "notify: item %s banner after grace rung=%s (%s)",
+                outcome.item_id,
+                result.rung,
+                result.detail,
+            )
+            # Recorded HERE, not read back from the task: ``_spawn_background``
+            # wraps the coroutine and discards its return value. Only for the
+            # run that wrote it: a raise that outlived its run's bounded settle
+            # must not suppress the NEXT run's completion banner.
+            if result.spoken_for and generation == self._item_banner_generation:
+                self._run_notified_banner = True
+
+        task = self._spawn_background(raise_after_grace())
+        if task is not None:
+            self._pending_item_banners.append(task)
+
+    async def _settle_item_banners(self) -> None:
+        """Wait (bounded) for this run's held item banners before its end is judged.
+
+        The completion banner is suppressed only for an item banner that
+        actually went out (round-1 R1), so the run's end must know the outcome.
+        Bounded by the grace plus slack: a hung notifier must not hold a turn
+        end hostage, and an unfinished raise counts as "not raised" — the
+        conservative direction, which at worst costs a second banner rather
+        than none.
+        """
+        pending, self._pending_item_banners = self._pending_item_banners, []
+        if not pending:
+            self._item_banner_generation += 1
+            return
+        from local_operator.notifications.delivery import BANNER_GRACE_MS
+
+        # The raise itself sets ``_run_notified_banner``; this only bounds the
+        # wait so a hung notifier cannot hold the turn's end.
+        await asyncio.wait(pending, timeout=BANNER_GRACE_MS / 1000 + 3.0)
+        self._item_banner_generation += 1
+
+    def _notify_tui_evidence(self) -> Any:
+        """The attached TUI's input evidence, when the runtime reports one (L1b/L2).
+
+        ``None`` today: the ``activity`` control op that carries a TUI's
+        Key/MouseDown edges to its runtime lands with the TUI lane, and an
+        absent report is "not active" — the item stays unread, which is the
+        direction every unknown falls (§6.3).
+        """
+        probe = getattr(self, "_notify_tui_probe", None)
+        if not callable(probe):
+            return None
+        try:
+            return probe()
+        except Exception:  # noqa: BLE001 — unknown is "not active"
+            return None
+
     async def _quiet_end_refusal(self) -> str | None:
         """The refusal sentence for a quiet end, or ``None`` when it is allowed.
 
@@ -16280,7 +16588,12 @@ class Session:
             self._has_awaiting_user() and not self._body_turn_yields_to_person()
         ):
             return "A person asked this turn; answer them in one line."
-        if self._run_notify_requested:
+        # A ``notify:true`` delivery is answered by an inbox item as well as by
+        # text: the operator asked to be told, and the item (with its own
+        # banner per priority) tells them, durably, before the turn ends
+        # (docs/design/notifications-inbox.md §3.4). The person-asked rule above
+        # still wins — a human waiting on words gets words.
+        if self._run_notify_requested and not self._run_notified:
             return "This wake or monitor asked to tell the user; say what they need to know."
         return None
 
@@ -17141,6 +17454,9 @@ class Session:
             # publish) does the right thing without being taught a new field. A
             # deliberate stop is left exactly as it was.
             event = self._classify_cut_off(event)
+            # A held item banner decides whether this run's completion banner
+            # is redundant, so it settles first (bounded; see the method).
+            await self._settle_item_banners()
             # §14.2's ONE notify computation for the run this end closes,
             # stamped here so it rides the EMITTED end on both exit paths —
             # the immediate error/abort emission and the held end flushed from
@@ -17750,6 +18066,8 @@ class Session:
         # exactly once, at turn end, by ``_finalize_attention_notify``.
         self._run_triggers = set()
         self._run_notify_requested = False
+        self._run_notified = False
+        self._run_notified_banner = False
         self._run_input_types = set()
         self._run_wake_ids = set()
         self._run_catchup_unidentified = False
@@ -19871,6 +20189,11 @@ class Session:
             # kill switch, which is exactly where the tool must not exist. Its
             # presence is what ``build_no_reply_tool``'s createIf gate reads.
             quiet_end=self._quiet_end_callable(),
+            # THE INBOX DOOR (docs/design/notifications-inbox.md §3.2): the
+            # whole availability fact of ``notify`` — ``None`` for delegated
+            # children, hidden sessions, one-shot hosts, output-contract
+            # sessions and under the kill switch.
+            notify_inbox=self._notify_inbox_callable(),
             # The channel-spend ingest seam. ACTIVE only where a session owns a
             # fold: tools build a frozen record and call it, and the session
             # folds, journals and publishes. A bound method (not a value) so the
@@ -21923,8 +22246,12 @@ class Session:
         # this method just closed is a one-way latch — the mounted tool could
         # only refuse from here on. Drop it the way
         # ``set_ask_handler(None)`` drops ``ask``.
-        if any(tool.name == "no_reply" for tool in self._tools):
-            self.refresh_tools([tool for tool in self._tools if tool.name != "no_reply"])
+        # ``notify`` closes on the same latch (``_notify_inbox_callable``): a
+        # one-shot host's product is its final text, not an inbox item.
+        if any(tool.name in ("no_reply", "notify") for tool in self._tools):
+            self.refresh_tools(
+                [tool for tool in self._tools if tool.name not in ("no_reply", "notify")]
+            )
 
     def declare_headless_host(self) -> None:
         """Declare this session's host a HEADLESS print-mode host (turn-supplements R8).
@@ -27043,6 +27370,63 @@ class Session:
             return schedules
 
     # -- librarian engine attachment ----------------------------------------
+
+    def _declare_librarian_inventory(self) -> None:
+        """Bound the Librarian's DUTY session to her role's ``tools:`` list.
+
+        WHY THIS EXISTS. A role's ``tools:`` list is ENFORCED only where a host
+        declares it — ``lop exec --profile``/the SDK (``exec_startup``) and a
+        delegated child (``harness.subagent``). Her duty session is neither: the
+        wake supervisor opens it as a plain runtime and the attachment restore
+        only RECORDS the list (:attr:`attached_profile_tools`). So her seed's
+        empty ``tools:`` meant every tool, and on a headless worker under
+        ``tool_approval_mode: ask`` one write-tier call from an unattended pass
+        parked on an approval nobody could answer — holding the session busy
+        for a day and blocking every mesh update meanwhile.
+
+        THE RULE. On her duty session only (``_librarian_duty``, set from
+        ``librarian/state.json`` — never a session that merely ran ``/agent
+        librarian``), declare her role's list as the inventory. An installed
+        row that declares no list (a row installed before seed 1.1.0, the only
+        shape a pre-allow-list row can have) falls back to the PACKAGED seed's
+        list: an unattended pass must not run with everything because the row
+        predates the boundary. ``unattended=False``: the declaration narrows
+        reach but approves nothing — every tool on her list is read-tier, so a
+        pass has nothing to gate on, and anything an operator adds to her row
+        is still asked about. One-way for the session's life
+        (:meth:`set_tool_inventory`), which is what an unattended scope should
+        be. Best-effort: a failure leaves today's behaviour, never a broken
+        session.
+        """
+        if not getattr(self, "_librarian_duty", False):
+            return
+        # GATED ON THE DUTY FLAG ALONE (agent review round 1 on #3028, m1): the
+        # attachment is NOT the identity. ``_restore_attachment`` can leave it
+        # unresolved (``ProfileRegistryUnavailable``: empty agent name), and
+        # returning early then let her unattended pass run with every tool —
+        # fail-open on exactly the path this method closes. The attached row's
+        # list is used only when the attachment really is hers; anything else
+        # falls back to the packaged seed's list.
+        attached_is_hers = (self._goal_state.agent_name or "").strip().casefold() == "librarian"
+        try:
+            names: tuple[str, ...] = tuple(self._attached_profile_tools) if attached_is_hers else ()
+            if not names:
+                from local_operator.agent_profiles import load_seed
+
+                seed = load_seed("librarian")
+                names = tuple(seed.tools or ()) if seed is not None else ()
+            if not names:
+                # FAIL CLOSED (agent review round 2 on #3028, m2): an unreadable
+                # packaged seed must not leave her unattended pass with every
+                # tool. The literal is the 1.1.0 read-tier list.
+                names = _LIBRARIAN_FALLBACK_TOOLS
+            self.set_tool_inventory(list(names), unattended=False)
+        except Exception:  # noqa: BLE001 — never a reason her session fails to open
+            logger.debug("librarian: could not declare her tool inventory", exc_info=True)
+            try:
+                self.set_tool_inventory(list(_LIBRARIAN_FALLBACK_TOOLS), unattended=False)
+            except Exception:  # noqa: BLE001 — the same contract, one rung down
+                logger.debug("librarian: fallback inventory failed too", exc_info=True)
 
     def _librarian_is_hers(self) -> bool:
         """Whether THIS session is the one ``librarian/state.json`` names.

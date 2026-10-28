@@ -178,7 +178,9 @@ class _OneEvalTurn:
 
 
 @pytest.mark.asyncio
-async def test_the_eval_bridge_records_her_write_as_hers(isolated_root, tmp_path) -> None:
+async def test_the_eval_bridge_records_her_write_as_hers(
+    isolated_root, tmp_path, monkeypatch
+) -> None:
     """The route nearly every one of her writes actually took: an eval cell.
 
     ``tool("library", ...)`` inside a cell is a NESTED dispatch: the loop binds
@@ -196,6 +198,12 @@ async def test_the_eval_bridge_records_her_write_as_hers(isolated_root, tmp_path
 
     sid = await bootstrap.ensure_session(isolated_root)
     assert sid
+    # Her duty session is bounded to her seed's read-tier list since #3028, which
+    # has no ``eval`` — so this route is reachable only when an operator adds
+    # ``eval`` to her row. The property here is the context propagation through
+    # a nested dispatch, not her inventory (pinned in
+    # ``test_librarian_tool_surface.py``), so the bound is lifted for this cell.
+    monkeypatch.setattr(Session, "_declare_librarian_inventory", lambda self: None)
     report = tmp_path / "weekly.md"
     report.write_text("the Monday numbers", encoding="utf-8")
     seed_session(isolated_root, "feedfacecafe", write_rows("w1", 1.0, report))

@@ -1,0 +1,99 @@
+{
+  "schema": 1,
+  "audit_id": "nt25a1",
+  "audit_id_assigned_by": "manager delegation, 2026-10-25",
+  "audit_kind": "independent_current_byte_namespace_audit",
+  "locale": "zh-CN",
+  "namespace": "wire.errors.notifications",
+  "audit_date": "2026-10-25",
+  "audited_revision": "329b5c581784df1082dbd0630c0f814c7a3c0c8f",
+  "audited_revision_note": "Current working-tree bytes named by input_hashes; English source pin verified; task baseline 3c16a9e77c63dce7082af6137e151421b6cbf2be.",
+  "attestation_revision": "329b5c581784df1082dbd0630c0f814c7a3c0c8f",
+  "key_count": {
+    "en": 4,
+    "target": 4
+  },
+  "verdict": "passed",
+  "result": "clean-with-findings",
+  "verdict_reason": "All keys read against English/context; actual parser, argument and render checks passed. No unresolved blocker/major; minor register/terminology findings remain.",
+  "auditor": {
+    "agent": "translation-auditor",
+    "instance": "audit-zh-cn-6a81bd6cab5c",
+    "session": "6a81bd6cab5c",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host model-switch message: openai/gpt-6.1-sol after provider quota failures; not the requested anthropic/claude-opus-5-5.",
+    "date": "2026-10-25",
+    "independence": "Independent audit-zh-CN agent/context; authored none of the UI tr-zh-CN or L1-core-notify coder translations and made no catalogue/code/ledger edits."
+  },
+  "translator": {
+    "agent": "L1-core-notify coder",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-10-25"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.notifications.json",
+      "sha256": "f02bf1bc28f9c9e549a3ad8c34ead880315f4b39d25c36a869a1b3c5110f362c"
+    },
+    "en_context_sidecar": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.notifications.context.json",
+      "sha256": "07ad1e5da403a5fccde5648f04cd10bf1263cabc50f5e1804644630c7ce13106"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.errors.notifications.json",
+      "sha256": "f7334d805d7c10e17d82fe38335dfb449420b7ba8c14ce572ab8ee338a100888"
+    }
+  },
+  "artifacts": [
+    "report.md",
+    "audit.log",
+    "receipt.json"
+  ],
+  "audit_log": {
+    "path": "audit.log",
+    "state": "present",
+    "provenance": "Actual isolated core interpreter output produced independently by this auditor."
+  },
+  "findings": [
+    {
+      "key": "wire.errors.notifications.store_busy",
+      "severity": "minor",
+      "current": "通知存储目前正忙，未做任何更改。请稍后重试。",
+      "proposed_text": "通知存储目前正忙，未做任何更改。稍后重试。",
+      "reason": "The zh-CN style guide permits 请 only when source English says please; none of these English error sentences does. Remove the extra politeness marker without changing the remedy or {where}.",
+      "disposition": "unresolved; original translator/coder or design/QA to address"
+    },
+    {
+      "key": "wire.errors.notifications.store_full",
+      "severity": "minor",
+      "current": "这台电脑的磁盘空间已满，未做任何更改。请在存放{where}的卷上释放空间，然后重试。",
+      "proposed_text": "这台电脑的磁盘空间已满，未做任何更改。在存放{where}的卷上释放空间，然后重试。",
+      "reason": "The zh-CN style guide permits 请 only when source English says please; none of these English error sentences does. Remove the extra politeness marker without changing the remedy or {where}.",
+      "disposition": "unresolved; original translator/coder or design/QA to address"
+    },
+    {
+      "key": "wire.errors.notifications.store_unavailable",
+      "severity": "minor",
+      "current": "无法读取或写入通知存储。重试无济于事；请检查{where}及其所在的磁盘。",
+      "proposed_text": "无法读取或写入通知存储。重试无济于事；检查{where}及其所在的磁盘。",
+      "reason": "The zh-CN style guide permits 请 only when source English says please; none of these English error sentences does. Remove the extra politeness marker without changing the remedy or {where}.",
+      "disposition": "unresolved; original translator/coder or design/QA to address"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "result": "clean-with-findings",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 3,
+    "nit": 0,
+    "rejected": 0,
+    "findings_total": 3
+  },
+  "limitations": [
+    "LLM audit; no native-speaker attestation.",
+    "No browser/rendered-fit evidence claimed."
+  ],
+  "current_bytes_match_audited_hashes": true
+}

@@ -96,7 +96,7 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # namespace the locale already carried, and the append-only ledger gained a
     # second zh-CN row for it (the earlier row is retained at its superseded
     # source hash): the eighty-seventh.
-    assert len(chinese) == 87
+    assert len(chinese) == 91
     assert all(entry["status"] == "passed" for entry in chinese)
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried
@@ -149,7 +149,7 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # `hi/relay.health` row makes it FORTY-ONE.
     # The skill-write error re-audit (PR #3013) appends a second hi row for the
     # already-carried `wire.errors.desktop`: FORTY-TWO.
-    assert len(hindi) == 42
+    assert len(hindi) == 46
     assert all(entry["status"] == "passed" for entry in hindi)
     _assert_latest_row_is_fresh_and_earlier_rows_superseded(hindi)
 

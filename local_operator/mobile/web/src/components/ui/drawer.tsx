@@ -15,7 +15,8 @@ export interface DrawerItem {
 	id: string;
 	icon: ReactNode;
 	label: string;
-	count?: number;
+	/** A number, or pre-formatted text for a capped count (`99+`). */
+	count?: number | string;
 	href?: string;
 	onSelect?: () => void;
 	available?: boolean;

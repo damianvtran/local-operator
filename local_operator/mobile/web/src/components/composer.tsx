@@ -9,6 +9,7 @@
  * command) and a stop button appears beside it.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useFootFit } from "../lib/use-foot-fit";
 import { getCommands, HttpError, sendCommand, transcribeAudio } from "../api";
 import {
 	getPendingContinuation,
@@ -34,7 +35,7 @@ import {
 } from "../pending-echo";
 import { Sheet } from "./ui/sheet";
 import { UsageSheet } from "./usage-sheet";
-import { SessionStatus } from "./session-status";
+import { SessionStatus, meterFacts } from "./session-status";
 import { WorkingDirectoryChip } from "./directory-sheet";
 import { cn } from "../lib/cn";
 import { messageRuntime, useCapabilities, useDraft } from "../store";
@@ -420,7 +421,7 @@ const COMPOSER_PLACEHOLDER = "Message…";
      folder glyph gets `ps-1.5` in `WorkingDirectoryChip` for the same reason.
    Total height fits: 6 + 52 + 44 + 44 + 2 = 148 px, against 152 before. */
 const COMPOSER_SHELL =
-	"lo-composer mx-2 mb-[max(env(safe-area-inset-bottom),0.5rem)] flex flex-col rounded-frame bg-elevated px-2 pt-2 pb-0";
+	"lo-composer mx-2 mb-[max(env(safe-area-inset-bottom),0.5rem)] flex flex-col rounded-frame bg-elevated px-2 pt-2 pb-0.5";
 /* THE RIGHT-SIDE CONTROL CLUSTER, one shared constant for the real composer and
    the first-paint frame (operator finding A). The stop and send discs are 44 px
    `shrink-0` controls and the row carried no gap: the two circles touched, and
@@ -464,8 +465,18 @@ const COMPOSER_LEADING = "-ms-1.5";
    structure is FIXED (not a width- or content-dependent wrap), so the
    first-paint frame reserves exactly these lines and a stop button appearing
    cannot reflow the composer. */
+/* SHORT VIEWPORTS put the meta facts INLINE,
+   between attach and the stop/send pair, so the footer is one 44 px line
+   instead of two. `basis-0`, not `basis-auto` (QA round 3, O1): an auto basis
+   is the facts' max-content width (cwd 44 + model label + the 96 px reading =
+   248 px at 320), so the line breaker sent the 90 px action pair to a SECOND
+   line, and that third composer row took 44 px from the above-composer slot
+   (20.6 px left at 320x440, Approve/Deny 20.5 px visible). A zero basis lets
+   the facts take only the leftover width; the model label is the elastic
+   element and truncates, and the reading compacts itself below 359 px wide
+   (`SessionStatus` compact), so nothing on the line needs to wrap. */
 const COMPOSER_CHIP_ROW =
-	"order-last flex min-w-0 basis-full items-center gap-1 [@media(max-height:480px)]:order-none [@media(max-height:480px)]:basis-auto [@media(max-height:480px)]:flex-1";
+	"order-last flex min-w-0 basis-full items-center gap-1 overflow-x-clip short-column:order-none short-column:basis-0 short-column:flex-1";
 const COMPOSER_CHIP = "flex min-h-11 min-w-11 items-center text-meta tabular-nums text-ink-dim";
 
 /** The composer's box, empty, for the frames before a session's projection.
@@ -540,7 +551,9 @@ export function Composer({
 	effortOpen,
 	onCloseEffort,
 	autoFocus = false,
-	ended = projection.ended,
+	ended,
+	short = false,
+	onFitLevel,
 }: {
 	/** Route pid — the discovery record's, not the fold's (which stamps 0). */
 	pid: string;
@@ -576,7 +589,9 @@ export function Composer({
 	    calls it Ended, and a send to it is the same wake, so the placeholder
 	    and the failure copy must say the same thing the header does. Defaults
 	    to the projection's own flag for callers without the screen's health. */
-	ended?: boolean;
+	ended: boolean;
+	short?: boolean;
+	onFitLevel?: (level: number) => void;
 }) {
 	const [text, setText] = useDraft(pid);
 	/* U5/U8 (mobile UX batch 1): the sheet follows the draft only while the draft
@@ -660,6 +675,18 @@ export function Composer({
 		typeof navigator !== "undefined" &&
 		!!navigator.mediaDevices?.getUserMedia &&
 		typeof MediaRecorder !== "undefined";
+	/* EVERY INPUT THAT MOVES THE FACTS ROW'S GEOMETRY WITHOUT RESIZING THE ROW
+	   (QA Q2 = review R3-6): the model label, the reading's own rendered text
+	   (it spans spend, subagent spend and context, not just `usage`), and the
+	   mic, which takes 46 px from the line. Missing one let a cold load commit a
+	   stale level until the row's observer happened to fire. The count is passed
+	   on its own because the hook must know it even when it is not in the row. */
+	const queuedLabel = projection.queued_count > 0
+		? messageRuntime.t("relay.transcript.composer.queued", { count: projection.queued_count })
+		: "";
+	const readingKey = [projection.model_label, projection.effort, meterFacts(projection).label, micAvailable ? "mic" : ""].join("|");
+	const foot = useFootFit(short, readingKey, queuedLabel);
+	useEffect(() => { onFitLevel?.(foot.level); }, [foot.level, onFitLevel]);
 	const [dictation, setDictation] = useState<DictationState>("idle");
 	/* The transient outcome line (added / empty / discarded); lives in the same
 	   status row as the live states so nothing moves between them (D3). */
@@ -1527,27 +1554,31 @@ export function Composer({
 				{/* A single meta cluster replaces two 44 px bands. Each reading keeps
 				    its real picker; only the presentation changes, never send/retry
 				    routing or the pending-envelope lifetime. */}
-				<div className={COMPOSER_CHIP_ROW}>
-					{projection.queued_count > 0 ? (
-						<span className={cn(COMPOSER_CHIP, "shrink-0")}>
-							{messageRuntime.t("relay.transcript.composer.queued", { count: projection.queued_count })}
+				<div ref={foot.rowRef} data-foot-level={foot.level} data-short={short ? "" : undefined} className={COMPOSER_CHIP_ROW}>
+					{/* THE COUNT IS WHOLE OR ELSEWHERE, never a fragment (design D8):
+					    `shrink-0 whitespace-nowrap`, so its box is its intrinsic width
+					    and the fit counts it as pressure. When even the last level cannot
+					    seat it beside the folder and the model's floor (L4: 320 + mic),
+					    it moves whole to the ⋮ menu and stays here as screen-reader text,
+					    so the count is still announced with the composer. */}
+					{queuedLabel && foot.level < 4 ? (
+						<span data-foot="queued" className="flex min-h-11 shrink-0 items-center whitespace-nowrap text-meta tabular-nums text-ink-dim">
+							{queuedLabel}
 						</span>
-					) : null}
-					<div className={COMPOSER_CWD_ROW}><WorkingDirectoryChip sessionId={pid} cwd={shownCwd} onMoved={requestMove} /></div>
-					{/* SHORT VIEWPORTS KEEP THE MODEL CONTROL (design round 2 D6, corrected in
-					   code round 3 C3-3). D6's saving is VERTICAL — the meta facts stop
-					   taking a line of their own — so hiding the model button on top of
-					   that bought no height and cost two things: the active-model fact,
-					   and the only touch door to the model/effort sheet (this button is
-					   `onOpenModels`' sole caller; the sheet's other opener lives inside
-					   the sheet). The button now stays, `min-w-0 truncate` and all, so a
-					   narrow-and-short viewport truncates the NAME rather than losing the
-					   control. */}
-					<button type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, "min-w-0 flex-1 truncate active:text-ink")}
+					) : queuedLabel ? <span data-queued-moved className="sr-only">{queuedLabel}</span> : null}
+					<div data-foot="cwd" className={COMPOSER_CWD_ROW}><WorkingDirectoryChip sessionId={pid} cwd={shownCwd} onMoved={requestMove} /></div>
+					{/* The model chip is the model sheet's only door, so it never
+					   yields, and it never shows a bare glyph either: a lone ◇ did not
+					   say "model" (design D10), the label's first characters (`Cl…`)
+					   do. L3 pins it at its 44 px floor (`w-11 shrink-0`; without the
+					   width a `shrink-0` chip would take the whole label's width); every
+					   other level lets it grow into what is left. The mic is an action
+					   and keeps its full touch target at every level. */}
+					<button data-foot="model" type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, foot.level === 3 ? "w-11 shrink-0" : "min-w-0 flex-1 truncate", "active:text-ink")}
 						aria-label={messageRuntime.t("relay.chrome.composer.model_label", { label: [projection.model_label, projection.effort].filter(Boolean).join(" · ") })}>
 						<span className="truncate">{projection.model_label || "model"}{projection.effort ? ` · ${projection.effort}` : ""}</span>
 					</button>
-					<SessionStatus projection={projection} compact />
+					<SessionStatus projection={projection} compact short={short} mode={foot.level >= 2 ? "hidden" : foot.level === 1 ? "short" : "full"} />
 				</div>
 
 				<div className={COMPOSER_ACTION_CLUSTER}>

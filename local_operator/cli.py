@@ -17020,6 +17020,18 @@ def main() -> int:
         # `--help` (which argparse exits from inside `parse_args`) never pay it.
         _maybe_brand_process(args)
 
+        if args.subcommand == "serve" and not getattr(args, "reload", False):
+            # (``--reload`` is excluded: uvicorn's reloader re-imports the app in a CHILD
+            # whose only inherited channel is the environment, so it keeps today's env
+            # behaviour. It is a developer mode the desktop app never launches.)
+            # FIRST after branding, before the login-shell PATH probe below spawns anything:
+            # move the desktop bearer out of the environment so no child -- that probe's
+            # shell, a session runtime, a reload successor -- is ever handed it. Why a
+            # descriptor and not the environment: ``server.desktop.TOKEN_FD_ENV``.
+            from local_operator.server.desktop import adopt_spawn_bearer
+
+            adopt_spawn_bearer()
+
         # Prime the login-shell PATH only on paths that actually spawn
         # subprocess work: the interactive session, exec, serve and mobile all
         # run shell commands whose PATH must match a login terminal's, but

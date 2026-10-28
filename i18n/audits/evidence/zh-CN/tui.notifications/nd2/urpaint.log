@@ -1,0 +1,18 @@
+confirm_dismiss_session: logical='Fix the relay کی 1 اطلاع (6 اپ ڈیٹس) ہٹائیں؟ y/n'
+   painted_prefix=\u2067Fix the  ... endsPDI=True
+   VISUAL=⁧y/n ؟ﮟﯿﺋﺎﭩﮨ (ﺲﭩﯾﮈ ﭖﺍ 6) ﻉﻼ﻿ﻃﺍ 1 ﯽﮐ Fix the relay⁩
+confirm_dismiss_session: logical='ریلے ٹھیک کریں کی 1 اطلاع (1 اپ ڈیٹ) ہٹائیں؟ y/n'
+   painted_prefix=\u2067\u0631\u ... endsPDI=True
+   VISUAL=⁧y/n ؟ﮟﯿﺋﺎﭩﮨ (ﭧﯾﮈ ﭖﺍ 1) ﻉﻼ﻿ﻃﺍ 1 ﯽﮐ ﮟﯾﺮﮐ ﮏﯿﮭﭨ ﮯﻠﯾﺭ⁩
+confirm_dismiss_session: logical='PR #2943 review کی 3 اطلاعات (1 اپ ڈیٹ) ہٹائیں؟ y/n'
+   painted_prefix=\u2067PR #2943 ... endsPDI=True
+   VISUAL=⁧y/n ؟ﮟﯿﺋﺎﭩﮨ (ﭧﯾﮈ ﭖﺍ 1) ﺕﺎﻋﻼ﻿ﻃﺍ 3 ﯽﮐ PR #2943 review⁩
+hint_mark_all: logical='سب پڑھا ہوا'
+   painted_prefix=\u2067\u0633\u ... endsPDI=True
+   VISUAL=⁧ﺍﻮﮨ ﺎﮬﮍﭘ ﺐﺳ⁩
+hint_cancel: logical='منسوخ'
+   painted_prefix=\u2067\u0645\u ... endsPDI=True
+   VISUAL=⁧ﺥﻮﺴﻨﻣ⁩
+back: logical='→ اطلاعات'
+   painted_prefix=\u2067\u2192 \ ... endsPDI=True
+   VISUAL=⁧ﺕﺎﻋﻼ﻿ﻃﺍ →⁩

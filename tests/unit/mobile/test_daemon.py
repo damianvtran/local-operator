@@ -292,7 +292,16 @@ def test_http_gate_and_login_flow() -> None:
     # `stt` is the availability probe, pinned to the isolated fixture's answer
     # (no credentials are stored there).
     payload = authed.json()
-    assert sorted(payload) == ["capabilities", "degraded", "sessions", "unread"]
+    # ``notifications`` is the inbox badge block (docs/design/notifications-
+    # inbox.md §5.4), a SIBLING of ``unread`` for that block's own reason: an
+    # absent key must read as "this relay has no inbox", never as a zero.
+    assert sorted(payload) == [
+        "capabilities",
+        "degraded",
+        "notifications",
+        "sessions",
+        "unread",
+    ]
     assert payload["sessions"] == [] and payload["degraded"] == []
     # No store exists in this fixture, which is an EMPTY pile, not an
     # unreadable one: the healthy shape with a zero count — proof the degraded

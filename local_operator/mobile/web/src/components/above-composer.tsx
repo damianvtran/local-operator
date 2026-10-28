@@ -78,12 +78,24 @@ export function AboveComposerStack({
 			const row = node.querySelector<HTMLElement>("[data-slot-rest]");
 			if (!row || node.scrollHeight <= node.clientHeight) return;
 			const slot = node.getBoundingClientRect();
-			const target = row.getBoundingClientRect();
+			/* A long ask's first option can be below the CARD'S inner scroller,
+			   not merely below the slot. Reveal it there first; otherwise the
+			   slot measures an unclipped row and rests at its end while the
+			   decision remains hidden. Only a scroller whose content actually
+			   overflows is moved. */
+			for (let ancestor = row.parentElement; ancestor && ancestor !== node; ancestor = ancestor.parentElement) {
+				if (ancestor.scrollHeight <= ancestor.clientHeight + 1) continue;
+				const box = ancestor.getBoundingClientRect();
+				const inside = row.getBoundingClientRect();
+				if (inside.top < box.top) ancestor.scrollTop += inside.top - box.top;
+				else if (inside.bottom > box.bottom) ancestor.scrollTop += inside.bottom - box.bottom;
+			}
+			const visible = row.getBoundingClientRect();
 			// Already whole in view: leave the reader's position alone.
-			if (target.top >= slot.top && target.bottom <= slot.bottom) return;
+			if (visible.top >= slot.top && visible.bottom <= slot.bottom) return;
 			// The row's bottom on the slot's bottom edge, so the card's head
 			// stays as close above it as the slot allows.
-			node.scrollTop += target.bottom - slot.bottom;
+			node.scrollTop += visible.bottom - slot.bottom;
 		};
 		rest();
 		if (typeof ResizeObserver === "undefined") return;

@@ -1,0 +1,584 @@
+== en
+ c=0    other  u=0  other  [47] Dismiss 0 notifications (0 updates) from S? y/n  
+ c=0    other  u=1  one    [46] Dismiss 0 notifications (1 update) from S? y/n  
+ c=0    other  u=2  other  [47] Dismiss 0 notifications (2 updates) from S? y/n  
+ c=0    other  u=5  other  [47] Dismiss 0 notifications (5 updates) from S? y/n  
+ c=0    other  u=6  other  [47] Dismiss 0 notifications (6 updates) from S? y/n  
+ c=0    other  u=11 other  [48] Dismiss 0 notifications (11 updates) from S? y/n  
+ c=1    one    u=0  other  [46] Dismiss 1 notification (0 updates) from S? y/n  
+ c=1    one    u=1  one    [45] Dismiss 1 notification (1 update) from S? y/n  
+ c=1    one    u=2  other  [46] Dismiss 1 notification (2 updates) from S? y/n  
+ c=1    one    u=5  other  [46] Dismiss 1 notification (5 updates) from S? y/n  
+ c=1    one    u=6  other  [46] Dismiss 1 notification (6 updates) from S? y/n  
+ c=1    one    u=11 other  [47] Dismiss 1 notification (11 updates) from S? y/n  
+ c=2    other  u=0  other  [47] Dismiss 2 notifications (0 updates) from S? y/n  
+ c=2    other  u=1  one    [46] Dismiss 2 notifications (1 update) from S? y/n  
+ c=2    other  u=2  other  [47] Dismiss 2 notifications (2 updates) from S? y/n  
+ c=2    other  u=5  other  [47] Dismiss 2 notifications (5 updates) from S? y/n  
+ c=2    other  u=6  other  [47] Dismiss 2 notifications (6 updates) from S? y/n  
+ c=2    other  u=11 other  [48] Dismiss 2 notifications (11 updates) from S? y/n  
+ c=3    other  u=0  other  [47] Dismiss 3 notifications (0 updates) from S? y/n  
+ c=3    other  u=1  one    [46] Dismiss 3 notifications (1 update) from S? y/n  
+ c=3    other  u=2  other  [47] Dismiss 3 notifications (2 updates) from S? y/n  
+ c=3    other  u=5  other  [47] Dismiss 3 notifications (5 updates) from S? y/n  
+ c=3    other  u=6  other  [47] Dismiss 3 notifications (6 updates) from S? y/n  
+ c=3    other  u=11 other  [48] Dismiss 3 notifications (11 updates) from S? y/n  
+ c=5    other  u=0  other  [47] Dismiss 5 notifications (0 updates) from S? y/n  
+ c=5    other  u=1  one    [46] Dismiss 5 notifications (1 update) from S? y/n  
+ c=5    other  u=2  other  [47] Dismiss 5 notifications (2 updates) from S? y/n  
+ c=5    other  u=5  other  [47] Dismiss 5 notifications (5 updates) from S? y/n  
+ c=5    other  u=6  other  [47] Dismiss 5 notifications (6 updates) from S? y/n  
+ c=5    other  u=11 other  [48] Dismiss 5 notifications (11 updates) from S? y/n  
+ c=6    other  u=0  other  [47] Dismiss 6 notifications (0 updates) from S? y/n  
+ c=6    other  u=1  one    [46] Dismiss 6 notifications (1 update) from S? y/n  
+ c=6    other  u=2  other  [47] Dismiss 6 notifications (2 updates) from S? y/n  
+ c=6    other  u=5  other  [47] Dismiss 6 notifications (5 updates) from S? y/n  
+ c=6    other  u=6  other  [47] Dismiss 6 notifications (6 updates) from S? y/n  
+ c=6    other  u=11 other  [48] Dismiss 6 notifications (11 updates) from S? y/n  
+ c=11   other  u=0  other  [48] Dismiss 11 notifications (0 updates) from S? y/n  
+ c=11   other  u=1  one    [47] Dismiss 11 notifications (1 update) from S? y/n  
+ c=11   other  u=2  other  [48] Dismiss 11 notifications (2 updates) from S? y/n  
+ c=11   other  u=5  other  [48] Dismiss 11 notifications (5 updates) from S? y/n  
+ c=11   other  u=6  other  [48] Dismiss 11 notifications (6 updates) from S? y/n  
+ c=11   other  u=11 other  [49] Dismiss 11 notifications (11 updates) from S? y/n  
+ c=21   other  u=0  other  [48] Dismiss 21 notifications (0 updates) from S? y/n  
+ c=21   other  u=1  one    [47] Dismiss 21 notifications (1 update) from S? y/n  
+ c=21   other  u=2  other  [48] Dismiss 21 notifications (2 updates) from S? y/n  
+ c=21   other  u=5  other  [48] Dismiss 21 notifications (5 updates) from S? y/n  
+ c=21   other  u=6  other  [48] Dismiss 21 notifications (6 updates) from S? y/n  
+ c=21   other  u=11 other  [49] Dismiss 21 notifications (11 updates) from S? y/n  
+ c=22   other  u=0  other  [48] Dismiss 22 notifications (0 updates) from S? y/n  
+ c=22   other  u=1  one    [47] Dismiss 22 notifications (1 update) from S? y/n  
+ c=22   other  u=2  other  [48] Dismiss 22 notifications (2 updates) from S? y/n  
+ c=22   other  u=5  other  [48] Dismiss 22 notifications (5 updates) from S? y/n  
+ c=22   other  u=6  other  [48] Dismiss 22 notifications (6 updates) from S? y/n  
+ c=22   other  u=11 other  [49] Dismiss 22 notifications (11 updates) from S? y/n  
+ c=25   other  u=0  other  [48] Dismiss 25 notifications (0 updates) from S? y/n  
+ c=25   other  u=1  one    [47] Dismiss 25 notifications (1 update) from S? y/n  
+ c=25   other  u=2  other  [48] Dismiss 25 notifications (2 updates) from S? y/n  
+ c=25   other  u=5  other  [48] Dismiss 25 notifications (5 updates) from S? y/n  
+ c=25   other  u=6  other  [48] Dismiss 25 notifications (6 updates) from S? y/n  
+ c=25   other  u=11 other  [49] Dismiss 25 notifications (11 updates) from S? y/n  
+ c=101  other  u=0  other  [49] Dismiss 101 notifications (0 updates) from S? y/n  
+ c=101  other  u=1  one    [48] Dismiss 101 notifications (1 update) from S? y/n  
+ c=101  other  u=2  other  [49] Dismiss 101 notifications (2 updates) from S? y/n  
+ c=101  other  u=5  other  [49] Dismiss 101 notifications (5 updates) from S? y/n  
+ c=101  other  u=6  other  [49] Dismiss 101 notifications (6 updates) from S? y/n  
+ c=101  other  u=11 other  [50] Dismiss 101 notifications (11 updates) from S? y/n  
+ c=1234 other  u=0  other  [51] Dismiss 1,234 notifications (0 updates) from S? y/n  
+ c=1234 other  u=1  one    [50] Dismiss 1,234 notifications (1 update) from S? y/n  
+ c=1234 other  u=2  other  [51] Dismiss 1,234 notifications (2 updates) from S? y/n  
+ c=1234 other  u=5  other  [51] Dismiss 1,234 notifications (5 updates) from S? y/n  
+ c=1234 other  u=6  other  [51] Dismiss 1,234 notifications (6 updates) from S? y/n  
+ c=1234 other  u=11 other  [52] Dismiss 1,234 notifications (11 updates) from S? y/n  
+== fr
+ c=0    one    u=0  one    [53] Ignorer 0 notification (0 mise à jour) de « S » ? y/n  
+ c=0    one    u=1  one    [53] Ignorer 0 notification (1 mise à jour) de « S » ? y/n  
+ c=0    one    u=2  other  [54] Ignorer 0 notification (2 mises à jour) de « S » ? y/n  
+ c=0    one    u=5  other  [54] Ignorer 0 notification (5 mises à jour) de « S » ? y/n  
+ c=0    one    u=6  other  [54] Ignorer 0 notification (6 mises à jour) de « S » ? y/n  
+ c=0    one    u=11 other  [55] Ignorer 0 notification (11 mises à jour) de « S » ? y/n  
+ c=1    one    u=0  one    [53] Ignorer 1 notification (0 mise à jour) de « S » ? y/n  
+ c=1    one    u=1  one    [53] Ignorer 1 notification (1 mise à jour) de « S » ? y/n  
+ c=1    one    u=2  other  [54] Ignorer 1 notification (2 mises à jour) de « S » ? y/n  
+ c=1    one    u=5  other  [54] Ignorer 1 notification (5 mises à jour) de « S » ? y/n  
+ c=1    one    u=6  other  [54] Ignorer 1 notification (6 mises à jour) de « S » ? y/n  
+ c=1    one    u=11 other  [55] Ignorer 1 notification (11 mises à jour) de « S » ? y/n  
+ c=2    other  u=0  one    [54] Ignorer 2 notifications (0 mise à jour) de « S » ? y/n  
+ c=2    other  u=1  one    [54] Ignorer 2 notifications (1 mise à jour) de « S » ? y/n  
+ c=2    other  u=2  other  [55] Ignorer 2 notifications (2 mises à jour) de « S » ? y/n  
+ c=2    other  u=5  other  [55] Ignorer 2 notifications (5 mises à jour) de « S » ? y/n  
+ c=2    other  u=6  other  [55] Ignorer 2 notifications (6 mises à jour) de « S » ? y/n  
+ c=2    other  u=11 other  [56] Ignorer 2 notifications (11 mises à jour) de « S » ? y/n  
+ c=3    other  u=0  one    [54] Ignorer 3 notifications (0 mise à jour) de « S » ? y/n  
+ c=3    other  u=1  one    [54] Ignorer 3 notifications (1 mise à jour) de « S » ? y/n  
+ c=3    other  u=2  other  [55] Ignorer 3 notifications (2 mises à jour) de « S » ? y/n  
+ c=3    other  u=5  other  [55] Ignorer 3 notifications (5 mises à jour) de « S » ? y/n  
+ c=3    other  u=6  other  [55] Ignorer 3 notifications (6 mises à jour) de « S » ? y/n  
+ c=3    other  u=11 other  [56] Ignorer 3 notifications (11 mises à jour) de « S » ? y/n  
+ c=5    other  u=0  one    [54] Ignorer 5 notifications (0 mise à jour) de « S » ? y/n  
+ c=5    other  u=1  one    [54] Ignorer 5 notifications (1 mise à jour) de « S » ? y/n  
+ c=5    other  u=2  other  [55] Ignorer 5 notifications (2 mises à jour) de « S » ? y/n  
+ c=5    other  u=5  other  [55] Ignorer 5 notifications (5 mises à jour) de « S » ? y/n  
+ c=5    other  u=6  other  [55] Ignorer 5 notifications (6 mises à jour) de « S » ? y/n  
+ c=5    other  u=11 other  [56] Ignorer 5 notifications (11 mises à jour) de « S » ? y/n  
+ c=6    other  u=0  one    [54] Ignorer 6 notifications (0 mise à jour) de « S » ? y/n  
+ c=6    other  u=1  one    [54] Ignorer 6 notifications (1 mise à jour) de « S » ? y/n  
+ c=6    other  u=2  other  [55] Ignorer 6 notifications (2 mises à jour) de « S » ? y/n  
+ c=6    other  u=5  other  [55] Ignorer 6 notifications (5 mises à jour) de « S » ? y/n  
+ c=6    other  u=6  other  [55] Ignorer 6 notifications (6 mises à jour) de « S » ? y/n  
+ c=6    other  u=11 other  [56] Ignorer 6 notifications (11 mises à jour) de « S » ? y/n  
+ c=11   other  u=0  one    [55] Ignorer 11 notifications (0 mise à jour) de « S » ? y/n  
+ c=11   other  u=1  one    [55] Ignorer 11 notifications (1 mise à jour) de « S » ? y/n  
+ c=11   other  u=2  other  [56] Ignorer 11 notifications (2 mises à jour) de « S » ? y/n  
+ c=11   other  u=5  other  [56] Ignorer 11 notifications (5 mises à jour) de « S » ? y/n  
+ c=11   other  u=6  other  [56] Ignorer 11 notifications (6 mises à jour) de « S » ? y/n  
+ c=11   other  u=11 other  [57] Ignorer 11 notifications (11 mises à jour) de « S » ? y/n  
+ c=21   other  u=0  one    [55] Ignorer 21 notifications (0 mise à jour) de « S » ? y/n  
+ c=21   other  u=1  one    [55] Ignorer 21 notifications (1 mise à jour) de « S » ? y/n  
+ c=21   other  u=2  other  [56] Ignorer 21 notifications (2 mises à jour) de « S » ? y/n  
+ c=21   other  u=5  other  [56] Ignorer 21 notifications (5 mises à jour) de « S » ? y/n  
+ c=21   other  u=6  other  [56] Ignorer 21 notifications (6 mises à jour) de « S » ? y/n  
+ c=21   other  u=11 other  [57] Ignorer 21 notifications (11 mises à jour) de « S » ? y/n  
+ c=22   other  u=0  one    [55] Ignorer 22 notifications (0 mise à jour) de « S » ? y/n  
+ c=22   other  u=1  one    [55] Ignorer 22 notifications (1 mise à jour) de « S » ? y/n  
+ c=22   other  u=2  other  [56] Ignorer 22 notifications (2 mises à jour) de « S » ? y/n  
+ c=22   other  u=5  other  [56] Ignorer 22 notifications (5 mises à jour) de « S » ? y/n  
+ c=22   other  u=6  other  [56] Ignorer 22 notifications (6 mises à jour) de « S » ? y/n  
+ c=22   other  u=11 other  [57] Ignorer 22 notifications (11 mises à jour) de « S » ? y/n  
+ c=25   other  u=0  one    [55] Ignorer 25 notifications (0 mise à jour) de « S » ? y/n  
+ c=25   other  u=1  one    [55] Ignorer 25 notifications (1 mise à jour) de « S » ? y/n  
+ c=25   other  u=2  other  [56] Ignorer 25 notifications (2 mises à jour) de « S » ? y/n  
+ c=25   other  u=5  other  [56] Ignorer 25 notifications (5 mises à jour) de « S » ? y/n  
+ c=25   other  u=6  other  [56] Ignorer 25 notifications (6 mises à jour) de « S » ? y/n  
+ c=25   other  u=11 other  [57] Ignorer 25 notifications (11 mises à jour) de « S » ? y/n  
+ c=101  other  u=0  one    [56] Ignorer 101 notifications (0 mise à jour) de « S » ? y/n  
+ c=101  other  u=1  one    [56] Ignorer 101 notifications (1 mise à jour) de « S » ? y/n  
+ c=101  other  u=2  other  [57] Ignorer 101 notifications (2 mises à jour) de « S » ? y/n  
+ c=101  other  u=5  other  [57] Ignorer 101 notifications (5 mises à jour) de « S » ? y/n  
+ c=101  other  u=6  other  [57] Ignorer 101 notifications (6 mises à jour) de « S » ? y/n  
+ c=101  other  u=11 other  [58] Ignorer 101 notifications (11 mises à jour) de « S » ? y/n  
+ c=1234 other  u=0  one    [58] Ignorer 1 234 notifications (0 mise à jour) de « S » ? y/n  
+ c=1234 other  u=1  one    [58] Ignorer 1 234 notifications (1 mise à jour) de « S » ? y/n  
+ c=1234 other  u=2  other  [59] Ignorer 1 234 notifications (2 mises à jour) de « S » ? y/n  
+ c=1234 other  u=5  other  [59] Ignorer 1 234 notifications (5 mises à jour) de « S » ? y/n  
+ c=1234 other  u=6  other  [59] Ignorer 1 234 notifications (6 mises à jour) de « S » ? y/n  
+ c=1234 other  u=11 other  [60] Ignorer 1 234 notifications (11 mises à jour) de « S » ? y/n  
+== es
+ c=0    other  u=0  other  [57] ¿Descartar 0 notificaciones (0 actualizaciones) de S? y/n  
+ c=0    other  u=1  one    [55] ¿Descartar 0 notificaciones (1 actualización) de S? y/n  
+ c=0    other  u=2  other  [57] ¿Descartar 0 notificaciones (2 actualizaciones) de S? y/n  
+ c=0    other  u=5  other  [57] ¿Descartar 0 notificaciones (5 actualizaciones) de S? y/n  
+ c=0    other  u=6  other  [57] ¿Descartar 0 notificaciones (6 actualizaciones) de S? y/n  
+ c=0    other  u=11 other  [58] ¿Descartar 0 notificaciones (11 actualizaciones) de S? y/n  
+ c=1    one    u=0  other  [55] ¿Descartar 1 notificación (0 actualizaciones) de S? y/n  
+ c=1    one    u=1  one    [53] ¿Descartar 1 notificación (1 actualización) de S? y/n  
+ c=1    one    u=2  other  [55] ¿Descartar 1 notificación (2 actualizaciones) de S? y/n  
+ c=1    one    u=5  other  [55] ¿Descartar 1 notificación (5 actualizaciones) de S? y/n  
+ c=1    one    u=6  other  [55] ¿Descartar 1 notificación (6 actualizaciones) de S? y/n  
+ c=1    one    u=11 other  [56] ¿Descartar 1 notificación (11 actualizaciones) de S? y/n  
+ c=2    other  u=0  other  [57] ¿Descartar 2 notificaciones (0 actualizaciones) de S? y/n  
+ c=2    other  u=1  one    [55] ¿Descartar 2 notificaciones (1 actualización) de S? y/n  
+ c=2    other  u=2  other  [57] ¿Descartar 2 notificaciones (2 actualizaciones) de S? y/n  
+ c=2    other  u=5  other  [57] ¿Descartar 2 notificaciones (5 actualizaciones) de S? y/n  
+ c=2    other  u=6  other  [57] ¿Descartar 2 notificaciones (6 actualizaciones) de S? y/n  
+ c=2    other  u=11 other  [58] ¿Descartar 2 notificaciones (11 actualizaciones) de S? y/n  
+ c=3    other  u=0  other  [57] ¿Descartar 3 notificaciones (0 actualizaciones) de S? y/n  
+ c=3    other  u=1  one    [55] ¿Descartar 3 notificaciones (1 actualización) de S? y/n  
+ c=3    other  u=2  other  [57] ¿Descartar 3 notificaciones (2 actualizaciones) de S? y/n  
+ c=3    other  u=5  other  [57] ¿Descartar 3 notificaciones (5 actualizaciones) de S? y/n  
+ c=3    other  u=6  other  [57] ¿Descartar 3 notificaciones (6 actualizaciones) de S? y/n  
+ c=3    other  u=11 other  [58] ¿Descartar 3 notificaciones (11 actualizaciones) de S? y/n  
+ c=5    other  u=0  other  [57] ¿Descartar 5 notificaciones (0 actualizaciones) de S? y/n  
+ c=5    other  u=1  one    [55] ¿Descartar 5 notificaciones (1 actualización) de S? y/n  
+ c=5    other  u=2  other  [57] ¿Descartar 5 notificaciones (2 actualizaciones) de S? y/n  
+ c=5    other  u=5  other  [57] ¿Descartar 5 notificaciones (5 actualizaciones) de S? y/n  
+ c=5    other  u=6  other  [57] ¿Descartar 5 notificaciones (6 actualizaciones) de S? y/n  
+ c=5    other  u=11 other  [58] ¿Descartar 5 notificaciones (11 actualizaciones) de S? y/n  
+ c=6    other  u=0  other  [57] ¿Descartar 6 notificaciones (0 actualizaciones) de S? y/n  
+ c=6    other  u=1  one    [55] ¿Descartar 6 notificaciones (1 actualización) de S? y/n  
+ c=6    other  u=2  other  [57] ¿Descartar 6 notificaciones (2 actualizaciones) de S? y/n  
+ c=6    other  u=5  other  [57] ¿Descartar 6 notificaciones (5 actualizaciones) de S? y/n  
+ c=6    other  u=6  other  [57] ¿Descartar 6 notificaciones (6 actualizaciones) de S? y/n  
+ c=6    other  u=11 other  [58] ¿Descartar 6 notificaciones (11 actualizaciones) de S? y/n  
+ c=11   other  u=0  other  [58] ¿Descartar 11 notificaciones (0 actualizaciones) de S? y/n  
+ c=11   other  u=1  one    [56] ¿Descartar 11 notificaciones (1 actualización) de S? y/n  
+ c=11   other  u=2  other  [58] ¿Descartar 11 notificaciones (2 actualizaciones) de S? y/n  
+ c=11   other  u=5  other  [58] ¿Descartar 11 notificaciones (5 actualizaciones) de S? y/n  
+ c=11   other  u=6  other  [58] ¿Descartar 11 notificaciones (6 actualizaciones) de S? y/n  
+ c=11   other  u=11 other  [59] ¿Descartar 11 notificaciones (11 actualizaciones) de S? y/n  
+ c=21   other  u=0  other  [58] ¿Descartar 21 notificaciones (0 actualizaciones) de S? y/n  
+ c=21   other  u=1  one    [56] ¿Descartar 21 notificaciones (1 actualización) de S? y/n  
+ c=21   other  u=2  other  [58] ¿Descartar 21 notificaciones (2 actualizaciones) de S? y/n  
+ c=21   other  u=5  other  [58] ¿Descartar 21 notificaciones (5 actualizaciones) de S? y/n  
+ c=21   other  u=6  other  [58] ¿Descartar 21 notificaciones (6 actualizaciones) de S? y/n  
+ c=21   other  u=11 other  [59] ¿Descartar 21 notificaciones (11 actualizaciones) de S? y/n  
+ c=22   other  u=0  other  [58] ¿Descartar 22 notificaciones (0 actualizaciones) de S? y/n  
+ c=22   other  u=1  one    [56] ¿Descartar 22 notificaciones (1 actualización) de S? y/n  
+ c=22   other  u=2  other  [58] ¿Descartar 22 notificaciones (2 actualizaciones) de S? y/n  
+ c=22   other  u=5  other  [58] ¿Descartar 22 notificaciones (5 actualizaciones) de S? y/n  
+ c=22   other  u=6  other  [58] ¿Descartar 22 notificaciones (6 actualizaciones) de S? y/n  
+ c=22   other  u=11 other  [59] ¿Descartar 22 notificaciones (11 actualizaciones) de S? y/n  
+ c=25   other  u=0  other  [58] ¿Descartar 25 notificaciones (0 actualizaciones) de S? y/n  
+ c=25   other  u=1  one    [56] ¿Descartar 25 notificaciones (1 actualización) de S? y/n  
+ c=25   other  u=2  other  [58] ¿Descartar 25 notificaciones (2 actualizaciones) de S? y/n  
+ c=25   other  u=5  other  [58] ¿Descartar 25 notificaciones (5 actualizaciones) de S? y/n  
+ c=25   other  u=6  other  [58] ¿Descartar 25 notificaciones (6 actualizaciones) de S? y/n  
+ c=25   other  u=11 other  [59] ¿Descartar 25 notificaciones (11 actualizaciones) de S? y/n  
+ c=101  other  u=0  other  [59] ¿Descartar 101 notificaciones (0 actualizaciones) de S? y/n  
+ c=101  other  u=1  one    [57] ¿Descartar 101 notificaciones (1 actualización) de S? y/n  
+ c=101  other  u=2  other  [59] ¿Descartar 101 notificaciones (2 actualizaciones) de S? y/n  
+ c=101  other  u=5  other  [59] ¿Descartar 101 notificaciones (5 actualizaciones) de S? y/n  
+ c=101  other  u=6  other  [59] ¿Descartar 101 notificaciones (6 actualizaciones) de S? y/n  
+ c=101  other  u=11 other  [60] ¿Descartar 101 notificaciones (11 actualizaciones) de S? y/n  
+ c=1234 other  u=0  other  [61] ¿Descartar 1.234 notificaciones (0 actualizaciones) de S? y/n  
+ c=1234 other  u=1  one    [59] ¿Descartar 1.234 notificaciones (1 actualización) de S? y/n  
+ c=1234 other  u=2  other  [61] ¿Descartar 1.234 notificaciones (2 actualizaciones) de S? y/n  
+ c=1234 other  u=5  other  [61] ¿Descartar 1.234 notificaciones (5 actualizaciones) de S? y/n  
+ c=1234 other  u=6  other  [61] ¿Descartar 1.234 notificaciones (6 actualizaciones) de S? y/n  
+ c=1234 other  u=11 other  [62] ¿Descartar 1.234 notificaciones (11 actualizaciones) de S? y/n  
+== zh-CN
+ c=0    other  u=0  other  [34] 清除来自S的0条通知（0条更新）？y/n  
+ c=0    other  u=1  other  [34] 清除来自S的0条通知（1条更新）？y/n  
+ c=0    other  u=2  other  [34] 清除来自S的0条通知（2条更新）？y/n  
+ c=0    other  u=5  other  [34] 清除来自S的0条通知（5条更新）？y/n  
+ c=0    other  u=6  other  [34] 清除来自S的0条通知（6条更新）？y/n  
+ c=0    other  u=11 other  [35] 清除来自S的0条通知（11条更新）？y/n  
+ c=1    other  u=0  other  [34] 清除来自S的1条通知（0条更新）？y/n  
+ c=1    other  u=1  other  [34] 清除来自S的1条通知（1条更新）？y/n  
+ c=1    other  u=2  other  [34] 清除来自S的1条通知（2条更新）？y/n  
+ c=1    other  u=5  other  [34] 清除来自S的1条通知（5条更新）？y/n  
+ c=1    other  u=6  other  [34] 清除来自S的1条通知（6条更新）？y/n  
+ c=1    other  u=11 other  [35] 清除来自S的1条通知（11条更新）？y/n  
+ c=2    other  u=0  other  [34] 清除来自S的2条通知（0条更新）？y/n  
+ c=2    other  u=1  other  [34] 清除来自S的2条通知（1条更新）？y/n  
+ c=2    other  u=2  other  [34] 清除来自S的2条通知（2条更新）？y/n  
+ c=2    other  u=5  other  [34] 清除来自S的2条通知（5条更新）？y/n  
+ c=2    other  u=6  other  [34] 清除来自S的2条通知（6条更新）？y/n  
+ c=2    other  u=11 other  [35] 清除来自S的2条通知（11条更新）？y/n  
+ c=3    other  u=0  other  [34] 清除来自S的3条通知（0条更新）？y/n  
+ c=3    other  u=1  other  [34] 清除来自S的3条通知（1条更新）？y/n  
+ c=3    other  u=2  other  [34] 清除来自S的3条通知（2条更新）？y/n  
+ c=3    other  u=5  other  [34] 清除来自S的3条通知（5条更新）？y/n  
+ c=3    other  u=6  other  [34] 清除来自S的3条通知（6条更新）？y/n  
+ c=3    other  u=11 other  [35] 清除来自S的3条通知（11条更新）？y/n  
+ c=5    other  u=0  other  [34] 清除来自S的5条通知（0条更新）？y/n  
+ c=5    other  u=1  other  [34] 清除来自S的5条通知（1条更新）？y/n  
+ c=5    other  u=2  other  [34] 清除来自S的5条通知（2条更新）？y/n  
+ c=5    other  u=5  other  [34] 清除来自S的5条通知（5条更新）？y/n  
+ c=5    other  u=6  other  [34] 清除来自S的5条通知（6条更新）？y/n  
+ c=5    other  u=11 other  [35] 清除来自S的5条通知（11条更新）？y/n  
+ c=6    other  u=0  other  [34] 清除来自S的6条通知（0条更新）？y/n  
+ c=6    other  u=1  other  [34] 清除来自S的6条通知（1条更新）？y/n  
+ c=6    other  u=2  other  [34] 清除来自S的6条通知（2条更新）？y/n  
+ c=6    other  u=5  other  [34] 清除来自S的6条通知（5条更新）？y/n  
+ c=6    other  u=6  other  [34] 清除来自S的6条通知（6条更新）？y/n  
+ c=6    other  u=11 other  [35] 清除来自S的6条通知（11条更新）？y/n  
+ c=11   other  u=0  other  [35] 清除来自S的11条通知（0条更新）？y/n  
+ c=11   other  u=1  other  [35] 清除来自S的11条通知（1条更新）？y/n  
+ c=11   other  u=2  other  [35] 清除来自S的11条通知（2条更新）？y/n  
+ c=11   other  u=5  other  [35] 清除来自S的11条通知（5条更新）？y/n  
+ c=11   other  u=6  other  [35] 清除来自S的11条通知（6条更新）？y/n  
+ c=11   other  u=11 other  [36] 清除来自S的11条通知（11条更新）？y/n  
+ c=21   other  u=0  other  [35] 清除来自S的21条通知（0条更新）？y/n  
+ c=21   other  u=1  other  [35] 清除来自S的21条通知（1条更新）？y/n  
+ c=21   other  u=2  other  [35] 清除来自S的21条通知（2条更新）？y/n  
+ c=21   other  u=5  other  [35] 清除来自S的21条通知（5条更新）？y/n  
+ c=21   other  u=6  other  [35] 清除来自S的21条通知（6条更新）？y/n  
+ c=21   other  u=11 other  [36] 清除来自S的21条通知（11条更新）？y/n  
+ c=22   other  u=0  other  [35] 清除来自S的22条通知（0条更新）？y/n  
+ c=22   other  u=1  other  [35] 清除来自S的22条通知（1条更新）？y/n  
+ c=22   other  u=2  other  [35] 清除来自S的22条通知（2条更新）？y/n  
+ c=22   other  u=5  other  [35] 清除来自S的22条通知（5条更新）？y/n  
+ c=22   other  u=6  other  [35] 清除来自S的22条通知（6条更新）？y/n  
+ c=22   other  u=11 other  [36] 清除来自S的22条通知（11条更新）？y/n  
+ c=25   other  u=0  other  [35] 清除来自S的25条通知（0条更新）？y/n  
+ c=25   other  u=1  other  [35] 清除来自S的25条通知（1条更新）？y/n  
+ c=25   other  u=2  other  [35] 清除来自S的25条通知（2条更新）？y/n  
+ c=25   other  u=5  other  [35] 清除来自S的25条通知（5条更新）？y/n  
+ c=25   other  u=6  other  [35] 清除来自S的25条通知（6条更新）？y/n  
+ c=25   other  u=11 other  [36] 清除来自S的25条通知（11条更新）？y/n  
+ c=101  other  u=0  other  [36] 清除来自S的101条通知（0条更新）？y/n  
+ c=101  other  u=1  other  [36] 清除来自S的101条通知（1条更新）？y/n  
+ c=101  other  u=2  other  [36] 清除来自S的101条通知（2条更新）？y/n  
+ c=101  other  u=5  other  [36] 清除来自S的101条通知（5条更新）？y/n  
+ c=101  other  u=6  other  [36] 清除来自S的101条通知（6条更新）？y/n  
+ c=101  other  u=11 other  [37] 清除来自S的101条通知（11条更新）？y/n  
+ c=1234 other  u=0  other  [38] 清除来自S的1,234条通知（0条更新）？y/n  
+ c=1234 other  u=1  other  [38] 清除来自S的1,234条通知（1条更新）？y/n  
+ c=1234 other  u=2  other  [38] 清除来自S的1,234条通知（2条更新）？y/n  
+ c=1234 other  u=5  other  [38] 清除来自S的1,234条通知（5条更新）？y/n  
+ c=1234 other  u=6  other  [38] 清除来自S的1,234条通知（6条更新）？y/n  
+ c=1234 other  u=11 other  [39] 清除来自S的1,234条通知（11条更新）？y/n  
+== ru
+ c=0    many   u=0  many   [47] Скрыть 0 уведомлений (0 обновлений) из «S»? y/n  
+ c=0    many   u=1  one    [47] Скрыть 0 уведомлений (1 обновление) из «S»? y/n  
+ c=0    many   u=2  few    [47] Скрыть 0 уведомлений (2 обновления) из «S»? y/n  
+ c=0    many   u=5  many   [47] Скрыть 0 уведомлений (5 обновлений) из «S»? y/n  
+ c=0    many   u=6  many   [47] Скрыть 0 уведомлений (6 обновлений) из «S»? y/n  
+ c=0    many   u=11 many   [48] Скрыть 0 уведомлений (11 обновлений) из «S»? y/n  
+ c=1    one    u=0  many   [47] Скрыть 1 уведомление (0 обновлений) из «S»? y/n  
+ c=1    one    u=1  one    [47] Скрыть 1 уведомление (1 обновление) из «S»? y/n  
+ c=1    one    u=2  few    [47] Скрыть 1 уведомление (2 обновления) из «S»? y/n  
+ c=1    one    u=5  many   [47] Скрыть 1 уведомление (5 обновлений) из «S»? y/n  
+ c=1    one    u=6  many   [47] Скрыть 1 уведомление (6 обновлений) из «S»? y/n  
+ c=1    one    u=11 many   [48] Скрыть 1 уведомление (11 обновлений) из «S»? y/n  
+ c=2    few    u=0  many   [47] Скрыть 2 уведомления (0 обновлений) из «S»? y/n  
+ c=2    few    u=1  one    [47] Скрыть 2 уведомления (1 обновление) из «S»? y/n  
+ c=2    few    u=2  few    [47] Скрыть 2 уведомления (2 обновления) из «S»? y/n  
+ c=2    few    u=5  many   [47] Скрыть 2 уведомления (5 обновлений) из «S»? y/n  
+ c=2    few    u=6  many   [47] Скрыть 2 уведомления (6 обновлений) из «S»? y/n  
+ c=2    few    u=11 many   [48] Скрыть 2 уведомления (11 обновлений) из «S»? y/n  
+ c=3    few    u=0  many   [47] Скрыть 3 уведомления (0 обновлений) из «S»? y/n  
+ c=3    few    u=1  one    [47] Скрыть 3 уведомления (1 обновление) из «S»? y/n  
+ c=3    few    u=2  few    [47] Скрыть 3 уведомления (2 обновления) из «S»? y/n  
+ c=3    few    u=5  many   [47] Скрыть 3 уведомления (5 обновлений) из «S»? y/n  
+ c=3    few    u=6  many   [47] Скрыть 3 уведомления (6 обновлений) из «S»? y/n  
+ c=3    few    u=11 many   [48] Скрыть 3 уведомления (11 обновлений) из «S»? y/n  
+ c=5    many   u=0  many   [47] Скрыть 5 уведомлений (0 обновлений) из «S»? y/n  
+ c=5    many   u=1  one    [47] Скрыть 5 уведомлений (1 обновление) из «S»? y/n  
+ c=5    many   u=2  few    [47] Скрыть 5 уведомлений (2 обновления) из «S»? y/n  
+ c=5    many   u=5  many   [47] Скрыть 5 уведомлений (5 обновлений) из «S»? y/n  
+ c=5    many   u=6  many   [47] Скрыть 5 уведомлений (6 обновлений) из «S»? y/n  
+ c=5    many   u=11 many   [48] Скрыть 5 уведомлений (11 обновлений) из «S»? y/n  
+ c=6    many   u=0  many   [47] Скрыть 6 уведомлений (0 обновлений) из «S»? y/n  
+ c=6    many   u=1  one    [47] Скрыть 6 уведомлений (1 обновление) из «S»? y/n  
+ c=6    many   u=2  few    [47] Скрыть 6 уведомлений (2 обновления) из «S»? y/n  
+ c=6    many   u=5  many   [47] Скрыть 6 уведомлений (5 обновлений) из «S»? y/n  
+ c=6    many   u=6  many   [47] Скрыть 6 уведомлений (6 обновлений) из «S»? y/n  
+ c=6    many   u=11 many   [48] Скрыть 6 уведомлений (11 обновлений) из «S»? y/n  
+ c=11   many   u=0  many   [48] Скрыть 11 уведомлений (0 обновлений) из «S»? y/n  
+ c=11   many   u=1  one    [48] Скрыть 11 уведомлений (1 обновление) из «S»? y/n  
+ c=11   many   u=2  few    [48] Скрыть 11 уведомлений (2 обновления) из «S»? y/n  
+ c=11   many   u=5  many   [48] Скрыть 11 уведомлений (5 обновлений) из «S»? y/n  
+ c=11   many   u=6  many   [48] Скрыть 11 уведомлений (6 обновлений) из «S»? y/n  
+ c=11   many   u=11 many   [49] Скрыть 11 уведомлений (11 обновлений) из «S»? y/n  
+ c=21   one    u=0  many   [48] Скрыть 21 уведомление (0 обновлений) из «S»? y/n  
+ c=21   one    u=1  one    [48] Скрыть 21 уведомление (1 обновление) из «S»? y/n  
+ c=21   one    u=2  few    [48] Скрыть 21 уведомление (2 обновления) из «S»? y/n  
+ c=21   one    u=5  many   [48] Скрыть 21 уведомление (5 обновлений) из «S»? y/n  
+ c=21   one    u=6  many   [48] Скрыть 21 уведомление (6 обновлений) из «S»? y/n  
+ c=21   one    u=11 many   [49] Скрыть 21 уведомление (11 обновлений) из «S»? y/n  
+ c=22   few    u=0  many   [48] Скрыть 22 уведомления (0 обновлений) из «S»? y/n  
+ c=22   few    u=1  one    [48] Скрыть 22 уведомления (1 обновление) из «S»? y/n  
+ c=22   few    u=2  few    [48] Скрыть 22 уведомления (2 обновления) из «S»? y/n  
+ c=22   few    u=5  many   [48] Скрыть 22 уведомления (5 обновлений) из «S»? y/n  
+ c=22   few    u=6  many   [48] Скрыть 22 уведомления (6 обновлений) из «S»? y/n  
+ c=22   few    u=11 many   [49] Скрыть 22 уведомления (11 обновлений) из «S»? y/n  
+ c=25   many   u=0  many   [48] Скрыть 25 уведомлений (0 обновлений) из «S»? y/n  
+ c=25   many   u=1  one    [48] Скрыть 25 уведомлений (1 обновление) из «S»? y/n  
+ c=25   many   u=2  few    [48] Скрыть 25 уведомлений (2 обновления) из «S»? y/n  
+ c=25   many   u=5  many   [48] Скрыть 25 уведомлений (5 обновлений) из «S»? y/n  
+ c=25   many   u=6  many   [48] Скрыть 25 уведомлений (6 обновлений) из «S»? y/n  
+ c=25   many   u=11 many   [49] Скрыть 25 уведомлений (11 обновлений) из «S»? y/n  
+ c=101  one    u=0  many   [49] Скрыть 101 уведомление (0 обновлений) из «S»? y/n  
+ c=101  one    u=1  one    [49] Скрыть 101 уведомление (1 обновление) из «S»? y/n  
+ c=101  one    u=2  few    [49] Скрыть 101 уведомление (2 обновления) из «S»? y/n  
+ c=101  one    u=5  many   [49] Скрыть 101 уведомление (5 обновлений) из «S»? y/n  
+ c=101  one    u=6  many   [49] Скрыть 101 уведомление (6 обновлений) из «S»? y/n  
+ c=101  one    u=11 many   [50] Скрыть 101 уведомление (11 обновлений) из «S»? y/n  
+ c=1234 few    u=0  many   [51] Скрыть 1 234 уведомления (0 обновлений) из «S»? y/n  
+ c=1234 few    u=1  one    [51] Скрыть 1 234 уведомления (1 обновление) из «S»? y/n  
+ c=1234 few    u=2  few    [51] Скрыть 1 234 уведомления (2 обновления) из «S»? y/n  
+ c=1234 few    u=5  many   [51] Скрыть 1 234 уведомления (5 обновлений) из «S»? y/n  
+ c=1234 few    u=6  many   [51] Скрыть 1 234 уведомления (6 обновлений) из «S»? y/n  
+ c=1234 few    u=11 many   [52] Скрыть 1 234 уведомления (11 обновлений) из «S»? y/n  
+== vi
+ c=0    other  u=0  other  [37] Ẩn 0 thông báo (0 cập nhật) từ S? y/n  
+ c=0    other  u=1  other  [37] Ẩn 0 thông báo (1 cập nhật) từ S? y/n  
+ c=0    other  u=2  other  [37] Ẩn 0 thông báo (2 cập nhật) từ S? y/n  
+ c=0    other  u=5  other  [37] Ẩn 0 thông báo (5 cập nhật) từ S? y/n  
+ c=0    other  u=6  other  [37] Ẩn 0 thông báo (6 cập nhật) từ S? y/n  
+ c=0    other  u=11 other  [38] Ẩn 0 thông báo (11 cập nhật) từ S? y/n  
+ c=1    other  u=0  other  [37] Ẩn 1 thông báo (0 cập nhật) từ S? y/n  
+ c=1    other  u=1  other  [37] Ẩn 1 thông báo (1 cập nhật) từ S? y/n  
+ c=1    other  u=2  other  [37] Ẩn 1 thông báo (2 cập nhật) từ S? y/n  
+ c=1    other  u=5  other  [37] Ẩn 1 thông báo (5 cập nhật) từ S? y/n  
+ c=1    other  u=6  other  [37] Ẩn 1 thông báo (6 cập nhật) từ S? y/n  
+ c=1    other  u=11 other  [38] Ẩn 1 thông báo (11 cập nhật) từ S? y/n  
+ c=2    other  u=0  other  [37] Ẩn 2 thông báo (0 cập nhật) từ S? y/n  
+ c=2    other  u=1  other  [37] Ẩn 2 thông báo (1 cập nhật) từ S? y/n  
+ c=2    other  u=2  other  [37] Ẩn 2 thông báo (2 cập nhật) từ S? y/n  
+ c=2    other  u=5  other  [37] Ẩn 2 thông báo (5 cập nhật) từ S? y/n  
+ c=2    other  u=6  other  [37] Ẩn 2 thông báo (6 cập nhật) từ S? y/n  
+ c=2    other  u=11 other  [38] Ẩn 2 thông báo (11 cập nhật) từ S? y/n  
+ c=3    other  u=0  other  [37] Ẩn 3 thông báo (0 cập nhật) từ S? y/n  
+ c=3    other  u=1  other  [37] Ẩn 3 thông báo (1 cập nhật) từ S? y/n  
+ c=3    other  u=2  other  [37] Ẩn 3 thông báo (2 cập nhật) từ S? y/n  
+ c=3    other  u=5  other  [37] Ẩn 3 thông báo (5 cập nhật) từ S? y/n  
+ c=3    other  u=6  other  [37] Ẩn 3 thông báo (6 cập nhật) từ S? y/n  
+ c=3    other  u=11 other  [38] Ẩn 3 thông báo (11 cập nhật) từ S? y/n  
+ c=5    other  u=0  other  [37] Ẩn 5 thông báo (0 cập nhật) từ S? y/n  
+ c=5    other  u=1  other  [37] Ẩn 5 thông báo (1 cập nhật) từ S? y/n  
+ c=5    other  u=2  other  [37] Ẩn 5 thông báo (2 cập nhật) từ S? y/n  
+ c=5    other  u=5  other  [37] Ẩn 5 thông báo (5 cập nhật) từ S? y/n  
+ c=5    other  u=6  other  [37] Ẩn 5 thông báo (6 cập nhật) từ S? y/n  
+ c=5    other  u=11 other  [38] Ẩn 5 thông báo (11 cập nhật) từ S? y/n  
+ c=6    other  u=0  other  [37] Ẩn 6 thông báo (0 cập nhật) từ S? y/n  
+ c=6    other  u=1  other  [37] Ẩn 6 thông báo (1 cập nhật) từ S? y/n  
+ c=6    other  u=2  other  [37] Ẩn 6 thông báo (2 cập nhật) từ S? y/n  
+ c=6    other  u=5  other  [37] Ẩn 6 thông báo (5 cập nhật) từ S? y/n  
+ c=6    other  u=6  other  [37] Ẩn 6 thông báo (6 cập nhật) từ S? y/n  
+ c=6    other  u=11 other  [38] Ẩn 6 thông báo (11 cập nhật) từ S? y/n  
+ c=11   other  u=0  other  [38] Ẩn 11 thông báo (0 cập nhật) từ S? y/n  
+ c=11   other  u=1  other  [38] Ẩn 11 thông báo (1 cập nhật) từ S? y/n  
+ c=11   other  u=2  other  [38] Ẩn 11 thông báo (2 cập nhật) từ S? y/n  
+ c=11   other  u=5  other  [38] Ẩn 11 thông báo (5 cập nhật) từ S? y/n  
+ c=11   other  u=6  other  [38] Ẩn 11 thông báo (6 cập nhật) từ S? y/n  
+ c=11   other  u=11 other  [39] Ẩn 11 thông báo (11 cập nhật) từ S? y/n  
+ c=21   other  u=0  other  [38] Ẩn 21 thông báo (0 cập nhật) từ S? y/n  
+ c=21   other  u=1  other  [38] Ẩn 21 thông báo (1 cập nhật) từ S? y/n  
+ c=21   other  u=2  other  [38] Ẩn 21 thông báo (2 cập nhật) từ S? y/n  
+ c=21   other  u=5  other  [38] Ẩn 21 thông báo (5 cập nhật) từ S? y/n  
+ c=21   other  u=6  other  [38] Ẩn 21 thông báo (6 cập nhật) từ S? y/n  
+ c=21   other  u=11 other  [39] Ẩn 21 thông báo (11 cập nhật) từ S? y/n  
+ c=22   other  u=0  other  [38] Ẩn 22 thông báo (0 cập nhật) từ S? y/n  
+ c=22   other  u=1  other  [38] Ẩn 22 thông báo (1 cập nhật) từ S? y/n  
+ c=22   other  u=2  other  [38] Ẩn 22 thông báo (2 cập nhật) từ S? y/n  
+ c=22   other  u=5  other  [38] Ẩn 22 thông báo (5 cập nhật) từ S? y/n  
+ c=22   other  u=6  other  [38] Ẩn 22 thông báo (6 cập nhật) từ S? y/n  
+ c=22   other  u=11 other  [39] Ẩn 22 thông báo (11 cập nhật) từ S? y/n  
+ c=25   other  u=0  other  [38] Ẩn 25 thông báo (0 cập nhật) từ S? y/n  
+ c=25   other  u=1  other  [38] Ẩn 25 thông báo (1 cập nhật) từ S? y/n  
+ c=25   other  u=2  other  [38] Ẩn 25 thông báo (2 cập nhật) từ S? y/n  
+ c=25   other  u=5  other  [38] Ẩn 25 thông báo (5 cập nhật) từ S? y/n  
+ c=25   other  u=6  other  [38] Ẩn 25 thông báo (6 cập nhật) từ S? y/n  
+ c=25   other  u=11 other  [39] Ẩn 25 thông báo (11 cập nhật) từ S? y/n  
+ c=101  other  u=0  other  [39] Ẩn 101 thông báo (0 cập nhật) từ S? y/n  
+ c=101  other  u=1  other  [39] Ẩn 101 thông báo (1 cập nhật) từ S? y/n  
+ c=101  other  u=2  other  [39] Ẩn 101 thông báo (2 cập nhật) từ S? y/n  
+ c=101  other  u=5  other  [39] Ẩn 101 thông báo (5 cập nhật) từ S? y/n  
+ c=101  other  u=6  other  [39] Ẩn 101 thông báo (6 cập nhật) từ S? y/n  
+ c=101  other  u=11 other  [40] Ẩn 101 thông báo (11 cập nhật) từ S? y/n  
+ c=1234 other  u=0  other  [41] Ẩn 1.234 thông báo (0 cập nhật) từ S? y/n  
+ c=1234 other  u=1  other  [41] Ẩn 1.234 thông báo (1 cập nhật) từ S? y/n  
+ c=1234 other  u=2  other  [41] Ẩn 1.234 thông báo (2 cập nhật) từ S? y/n  
+ c=1234 other  u=5  other  [41] Ẩn 1.234 thông báo (5 cập nhật) từ S? y/n  
+ c=1234 other  u=6  other  [41] Ẩn 1.234 thông báo (6 cập nhật) từ S? y/n  
+ c=1234 other  u=11 other  [42] Ẩn 1.234 thông báo (11 cập nhật) từ S? y/n  
+== ur
+ c=0    other  u=0  other  [38] S کی 0 اطلاعات (0 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=0    other  u=1  one    [37] S کی 0 اطلاعات (1 اپ ڈیٹ) ہٹائیں؟ y/n  
+ c=0    other  u=2  other  [38] S کی 0 اطلاعات (2 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=0    other  u=5  other  [38] S کی 0 اطلاعات (5 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=0    other  u=6  other  [38] S کی 0 اطلاعات (6 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=0    other  u=11 other  [39] S کی 0 اطلاعات (11 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=1    one    u=0  other  [36] S کی 1 اطلاع (0 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=1    one    u=1  one    [35] S کی 1 اطلاع (1 اپ ڈیٹ) ہٹائیں؟ y/n  
+ c=1    one    u=2  other  [36] S کی 1 اطلاع (2 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=1    one    u=5  other  [36] S کی 1 اطلاع (5 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=1    one    u=6  other  [36] S کی 1 اطلاع (6 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=1    one    u=11 other  [37] S کی 1 اطلاع (11 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=2    other  u=0  other  [38] S کی 2 اطلاعات (0 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=2    other  u=1  one    [37] S کی 2 اطلاعات (1 اپ ڈیٹ) ہٹائیں؟ y/n  
+ c=2    other  u=2  other  [38] S کی 2 اطلاعات (2 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=2    other  u=5  other  [38] S کی 2 اطلاعات (5 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=2    other  u=6  other  [38] S کی 2 اطلاعات (6 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=2    other  u=11 other  [39] S کی 2 اطلاعات (11 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=3    other  u=0  other  [38] S کی 3 اطلاعات (0 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=3    other  u=1  one    [37] S کی 3 اطلاعات (1 اپ ڈیٹ) ہٹائیں؟ y/n  
+ c=3    other  u=2  other  [38] S کی 3 اطلاعات (2 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=3    other  u=5  other  [38] S کی 3 اطلاعات (5 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=3    other  u=6  other  [38] S کی 3 اطلاعات (6 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=3    other  u=11 other  [39] S کی 3 اطلاعات (11 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=5    other  u=0  other  [38] S کی 5 اطلاعات (0 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=5    other  u=1  one    [37] S کی 5 اطلاعات (1 اپ ڈیٹ) ہٹائیں؟ y/n  
+ c=5    other  u=2  other  [38] S کی 5 اطلاعات (2 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=5    other  u=5  other  [38] S کی 5 اطلاعات (5 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=5    other  u=6  other  [38] S کی 5 اطلاعات (6 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=5    other  u=11 other  [39] S کی 5 اطلاعات (11 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=6    other  u=0  other  [38] S کی 6 اطلاعات (0 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=6    other  u=1  one    [37] S کی 6 اطلاعات (1 اپ ڈیٹ) ہٹائیں؟ y/n  
+ c=6    other  u=2  other  [38] S کی 6 اطلاعات (2 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=6    other  u=5  other  [38] S کی 6 اطلاعات (5 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=6    other  u=6  other  [38] S کی 6 اطلاعات (6 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=6    other  u=11 other  [39] S کی 6 اطلاعات (11 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=11   other  u=0  other  [39] S کی 11 اطلاعات (0 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=11   other  u=1  one    [38] S کی 11 اطلاعات (1 اپ ڈیٹ) ہٹائیں؟ y/n  
+ c=11   other  u=2  other  [39] S کی 11 اطلاعات (2 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=11   other  u=5  other  [39] S کی 11 اطلاعات (5 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=11   other  u=6  other  [39] S کی 11 اطلاعات (6 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=11   other  u=11 other  [40] S کی 11 اطلاعات (11 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=21   other  u=0  other  [39] S کی 21 اطلاعات (0 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=21   other  u=1  one    [38] S کی 21 اطلاعات (1 اپ ڈیٹ) ہٹائیں؟ y/n  
+ c=21   other  u=2  other  [39] S کی 21 اطلاعات (2 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=21   other  u=5  other  [39] S کی 21 اطلاعات (5 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=21   other  u=6  other  [39] S کی 21 اطلاعات (6 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=21   other  u=11 other  [40] S کی 21 اطلاعات (11 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=22   other  u=0  other  [39] S کی 22 اطلاعات (0 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=22   other  u=1  one    [38] S کی 22 اطلاعات (1 اپ ڈیٹ) ہٹائیں؟ y/n  
+ c=22   other  u=2  other  [39] S کی 22 اطلاعات (2 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=22   other  u=5  other  [39] S کی 22 اطلاعات (5 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=22   other  u=6  other  [39] S کی 22 اطلاعات (6 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=22   other  u=11 other  [40] S کی 22 اطلاعات (11 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=25   other  u=0  other  [39] S کی 25 اطلاعات (0 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=25   other  u=1  one    [38] S کی 25 اطلاعات (1 اپ ڈیٹ) ہٹائیں؟ y/n  
+ c=25   other  u=2  other  [39] S کی 25 اطلاعات (2 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=25   other  u=5  other  [39] S کی 25 اطلاعات (5 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=25   other  u=6  other  [39] S کی 25 اطلاعات (6 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=25   other  u=11 other  [40] S کی 25 اطلاعات (11 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=101  other  u=0  other  [40] S کی 101 اطلاعات (0 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=101  other  u=1  one    [39] S کی 101 اطلاعات (1 اپ ڈیٹ) ہٹائیں؟ y/n  
+ c=101  other  u=2  other  [40] S کی 101 اطلاعات (2 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=101  other  u=5  other  [40] S کی 101 اطلاعات (5 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=101  other  u=6  other  [40] S کی 101 اطلاعات (6 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=101  other  u=11 other  [41] S کی 101 اطلاعات (11 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=1234 other  u=0  other  [42] S کی 1,234 اطلاعات (0 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=1234 other  u=1  one    [41] S کی 1,234 اطلاعات (1 اپ ڈیٹ) ہٹائیں؟ y/n  
+ c=1234 other  u=2  other  [42] S کی 1,234 اطلاعات (2 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=1234 other  u=5  other  [42] S کی 1,234 اطلاعات (5 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=1234 other  u=6  other  [42] S کی 1,234 اطلاعات (6 اپ ڈیٹس) ہٹائیں؟ y/n  
+ c=1234 other  u=11 other  [43] S کی 1,234 اطلاعات (11 اپ ڈیٹس) ہٹائیں؟ y/n  
+== hi
+ c=0    one    u=0  one    [27] S की 0 सूचना (0 अपडेट) हटाएँ? y/n  
+ c=0    one    u=1  one    [27] S की 0 सूचना (1 अपडेट) हटाएँ? y/n  
+ c=0    one    u=2  other  [27] S की 0 सूचना (2 अपडेट) हटाएँ? y/n  
+ c=0    one    u=5  other  [27] S की 0 सूचना (5 अपडेट) हटाएँ? y/n  
+ c=0    one    u=6  other  [27] S की 0 सूचना (6 अपडेट) हटाएँ? y/n  
+ c=0    one    u=11 other  [28] S की 0 सूचना (11 अपडेट) हटाएँ? y/n  
+ c=1    one    u=0  one    [27] S की 1 सूचना (0 अपडेट) हटाएँ? y/n  
+ c=1    one    u=1  one    [27] S की 1 सूचना (1 अपडेट) हटाएँ? y/n  
+ c=1    one    u=2  other  [27] S की 1 सूचना (2 अपडेट) हटाएँ? y/n  
+ c=1    one    u=5  other  [27] S की 1 सूचना (5 अपडेट) हटाएँ? y/n  
+ c=1    one    u=6  other  [27] S की 1 सूचना (6 अपडेट) हटाएँ? y/n  
+ c=1    one    u=11 other  [28] S की 1 सूचना (11 अपडेट) हटाएँ? y/n  
+ c=2    other  u=0  one    [28] S की 2 सूचनाएँ (0 अपडेट) हटाएँ? y/n  
+ c=2    other  u=1  one    [28] S की 2 सूचनाएँ (1 अपडेट) हटाएँ? y/n  
+ c=2    other  u=2  other  [28] S की 2 सूचनाएँ (2 अपडेट) हटाएँ? y/n  
+ c=2    other  u=5  other  [28] S की 2 सूचनाएँ (5 अपडेट) हटाएँ? y/n  
+ c=2    other  u=6  other  [28] S की 2 सूचनाएँ (6 अपडेट) हटाएँ? y/n  
+ c=2    other  u=11 other  [29] S की 2 सूचनाएँ (11 अपडेट) हटाएँ? y/n  
+ c=3    other  u=0  one    [28] S की 3 सूचनाएँ (0 अपडेट) हटाएँ? y/n  
+ c=3    other  u=1  one    [28] S की 3 सूचनाएँ (1 अपडेट) हटाएँ? y/n  
+ c=3    other  u=2  other  [28] S की 3 सूचनाएँ (2 अपडेट) हटाएँ? y/n  
+ c=3    other  u=5  other  [28] S की 3 सूचनाएँ (5 अपडेट) हटाएँ? y/n  
+ c=3    other  u=6  other  [28] S की 3 सूचनाएँ (6 अपडेट) हटाएँ? y/n  
+ c=3    other  u=11 other  [29] S की 3 सूचनाएँ (11 अपडेट) हटाएँ? y/n  
+ c=5    other  u=0  one    [28] S की 5 सूचनाएँ (0 अपडेट) हटाएँ? y/n  
+ c=5    other  u=1  one    [28] S की 5 सूचनाएँ (1 अपडेट) हटाएँ? y/n  
+ c=5    other  u=2  other  [28] S की 5 सूचनाएँ (2 अपडेट) हटाएँ? y/n  
+ c=5    other  u=5  other  [28] S की 5 सूचनाएँ (5 अपडेट) हटाएँ? y/n  
+ c=5    other  u=6  other  [28] S की 5 सूचनाएँ (6 अपडेट) हटाएँ? y/n  
+ c=5    other  u=11 other  [29] S की 5 सूचनाएँ (11 अपडेट) हटाएँ? y/n  
+ c=6    other  u=0  one    [28] S की 6 सूचनाएँ (0 अपडेट) हटाएँ? y/n  
+ c=6    other  u=1  one    [28] S की 6 सूचनाएँ (1 अपडेट) हटाएँ? y/n  
+ c=6    other  u=2  other  [28] S की 6 सूचनाएँ (2 अपडेट) हटाएँ? y/n  
+ c=6    other  u=5  other  [28] S की 6 सूचनाएँ (5 अपडेट) हटाएँ? y/n  
+ c=6    other  u=6  other  [28] S की 6 सूचनाएँ (6 अपडेट) हटाएँ? y/n  
+ c=6    other  u=11 other  [29] S की 6 सूचनाएँ (11 अपडेट) हटाएँ? y/n  
+ c=11   other  u=0  one    [29] S की 11 सूचनाएँ (0 अपडेट) हटाएँ? y/n  
+ c=11   other  u=1  one    [29] S की 11 सूचनाएँ (1 अपडेट) हटाएँ? y/n  
+ c=11   other  u=2  other  [29] S की 11 सूचनाएँ (2 अपडेट) हटाएँ? y/n  
+ c=11   other  u=5  other  [29] S की 11 सूचनाएँ (5 अपडेट) हटाएँ? y/n  
+ c=11   other  u=6  other  [29] S की 11 सूचनाएँ (6 अपडेट) हटाएँ? y/n  
+ c=11   other  u=11 other  [30] S की 11 सूचनाएँ (11 अपडेट) हटाएँ? y/n  
+ c=21   other  u=0  one    [29] S की 21 सूचनाएँ (0 अपडेट) हटाएँ? y/n  
+ c=21   other  u=1  one    [29] S की 21 सूचनाएँ (1 अपडेट) हटाएँ? y/n  
+ c=21   other  u=2  other  [29] S की 21 सूचनाएँ (2 अपडेट) हटाएँ? y/n  
+ c=21   other  u=5  other  [29] S की 21 सूचनाएँ (5 अपडेट) हटाएँ? y/n  
+ c=21   other  u=6  other  [29] S की 21 सूचनाएँ (6 अपडेट) हटाएँ? y/n  
+ c=21   other  u=11 other  [30] S की 21 सूचनाएँ (11 अपडेट) हटाएँ? y/n  
+ c=22   other  u=0  one    [29] S की 22 सूचनाएँ (0 अपडेट) हटाएँ? y/n  
+ c=22   other  u=1  one    [29] S की 22 सूचनाएँ (1 अपडेट) हटाएँ? y/n  
+ c=22   other  u=2  other  [29] S की 22 सूचनाएँ (2 अपडेट) हटाएँ? y/n  
+ c=22   other  u=5  other  [29] S की 22 सूचनाएँ (5 अपडेट) हटाएँ? y/n  
+ c=22   other  u=6  other  [29] S की 22 सूचनाएँ (6 अपडेट) हटाएँ? y/n  
+ c=22   other  u=11 other  [30] S की 22 सूचनाएँ (11 अपडेट) हटाएँ? y/n  
+ c=25   other  u=0  one    [29] S की 25 सूचनाएँ (0 अपडेट) हटाएँ? y/n  
+ c=25   other  u=1  one    [29] S की 25 सूचनाएँ (1 अपडेट) हटाएँ? y/n  
+ c=25   other  u=2  other  [29] S की 25 सूचनाएँ (2 अपडेट) हटाएँ? y/n  
+ c=25   other  u=5  other  [29] S की 25 सूचनाएँ (5 अपडेट) हटाएँ? y/n  
+ c=25   other  u=6  other  [29] S की 25 सूचनाएँ (6 अपडेट) हटाएँ? y/n  
+ c=25   other  u=11 other  [30] S की 25 सूचनाएँ (11 अपडेट) हटाएँ? y/n  
+ c=101  other  u=0  one    [30] S की 101 सूचनाएँ (0 अपडेट) हटाएँ? y/n  
+ c=101  other  u=1  one    [30] S की 101 सूचनाएँ (1 अपडेट) हटाएँ? y/n  
+ c=101  other  u=2  other  [30] S की 101 सूचनाएँ (2 अपडेट) हटाएँ? y/n  
+ c=101  other  u=5  other  [30] S की 101 सूचनाएँ (5 अपडेट) हटाएँ? y/n  
+ c=101  other  u=6  other  [30] S की 101 सूचनाएँ (6 अपडेट) हटाएँ? y/n  
+ c=101  other  u=11 other  [31] S की 101 सूचनाएँ (11 अपडेट) हटाएँ? y/n  
+ c=1234 other  u=0  one    [32] S की 1,234 सूचनाएँ (0 अपडेट) हटाएँ? y/n  
+ c=1234 other  u=1  one    [32] S की 1,234 सूचनाएँ (1 अपडेट) हटाएँ? y/n  
+ c=1234 other  u=2  other  [32] S की 1,234 सूचनाएँ (2 अपडेट) हटाएँ? y/n  
+ c=1234 other  u=5  other  [32] S की 1,234 सूचनाएँ (5 अपडेट) हटाएँ? y/n  
+ c=1234 other  u=6  other  [32] S की 1,234 सूचनाएँ (6 अपडेट) हटाएँ? y/n  
+ c=1234 other  u=11 other  [33] S की 1,234 सूचनाएँ (11 अपडेट) हटाएँ? y/n  

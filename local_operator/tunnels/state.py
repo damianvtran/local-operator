@@ -23,7 +23,19 @@ import time
 from pathlib import Path
 from typing import Any
 
-from local_operator.tunnels import config, gateway
+# `gateway` is NOT imported here, deliberately: it is the connector's HTTP server
+# and pulls jwt/starlette/httpx at module level, and this module is ALSO what the
+# terminal's always-on five-second park poll imports (`tui/app.py`,
+# `_poll_tunnel_park`). That poll runs on the event loop, so a module-level import
+# here cost a cold first tick ~36 ms with nothing parked and ~340 ms with a park,
+# stalling a conversation switch or a keystroke that landed on it (PR #3046
+# review, m2). Only the WRITER, `mark_parked`, needs gateway's vocabulary, and it
+# runs inside the connector, where gateway is already loaded; it imports it
+# locally. The vocabulary stays in gateway rather than moving here because
+# `TERMINAL_REMEDY` is keyed by gateway's reason codes and kept beside the
+# sentences on purpose. `test_tunnel_park_notice.py` holds this to a fresh
+# interpreter's `sys.modules`.
+from local_operator.tunnels import config
 
 #: A parked connector re-announces itself on one of these, never on every
 #: attempt: a plist that is reloaded in a loop (or a reboot loop) must not be
@@ -96,6 +108,8 @@ def mark_parked(
     rather than passed in, so the sentence this file carries and the sentence
     `lop tunnel status` prints are the same string by construction.
     """
+    from local_operator.tunnels import gateway  # lazy: see the module imports
+
     at = int(time.time()) if now is None else now
     previous = parked()
     # Narrowed explicitly rather than through a `same` flag: the two facts below

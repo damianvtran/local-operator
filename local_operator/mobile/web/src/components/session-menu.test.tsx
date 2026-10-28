@@ -129,4 +129,64 @@ describe("SessionMenu", () => {
 		fireEvent.keyDown(window, { key: "Escape" });
 		expect(onClose).toHaveBeenCalledTimes(1);
 	});
+
+	/* The footer's meter is the spend sheet's only other door, and at the
+	   tightest fit level it yields to the row's width (review Q2 / design D5).
+	   This row is that door: present only while the footer cannot offer it. */
+	it("carries a Spend & context row only while the footer's meter has yielded", () => {
+		const onClose = vi.fn();
+		const onOpenSpend = vi.fn();
+		setup({ onClose, onOpenSpend, showSpend: true });
+		fireEvent.click(screen.getByRole("button", { name: /Spend & context/ }));
+		expect(onOpenSpend).toHaveBeenCalledTimes(1);
+		expect(onClose).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not duplicate the spend door while the meter is on screen", () => {
+		setup({ onOpenSpend: vi.fn(), showSpend: false });
+		expect(screen.queryByRole("button", { name: /Spend & context/ })).toBeNull();
+	});
+
+	it("places the spend row beside Approvals, the other ▸ row (D11)", () => {
+		setup({ onOpenSpend: vi.fn(), showSpend: true });
+		const names = screen.getAllByRole("button").map((row) => row.getAttribute("aria-label") ?? row.textContent?.trim());
+		expect(names.slice(-2)).toEqual(["Spend & context▸", "Approvals…▸"]);
+	});
+
+	/* Opening this sheet takes focus off the composer, which on a phone closes
+	   the keyboard and refits the footer (design D9 = review R3-2a): the row
+	   must not leave the open dialog under the reader's finger. */
+	it("latches the footer's moved-out rows for the life of one opening (D9)", () => {
+		const props: MenuProps = { open: true, onClose: vi.fn(), pinned: false, onTogglePin: vi.fn(async () => true), onOpenApprovals: vi.fn(), onOpenSpend: vi.fn(), showSpend: true, showQueued: true, queuedCount: 2 };
+		const view = render(<SessionMenu {...props} />);
+		expect(screen.getByRole("button", { name: /Spend & context/ })).toBeTruthy();
+		expect(screen.getByText("2 queued")).toBeTruthy();
+		/* The keyboard closes: the footer has room again. */
+		view.rerender(<SessionMenu {...props} showSpend={false} showQueued={false} />);
+		expect(screen.getByRole("button", { name: /Spend & context/ })).toBeTruthy();
+		expect(screen.getByText("2 queued")).toBeTruthy();
+		/* The latched count's FIGURE stays live: a frozen figure would be false. */
+		view.rerender(<SessionMenu {...props} showSpend={false} showQueued={false} queuedCount={1} />);
+		expect(screen.getByText("1 queued")).toBeTruthy();
+		/* The next opening reads the footer afresh. */
+		view.rerender(<SessionMenu {...props} open={false} showSpend={false} showQueued={false} />);
+		view.rerender(<SessionMenu {...props} showSpend={false} showQueued={false} />);
+		expect(screen.queryByRole("button", { name: /Spend & context/ })).toBeNull();
+		expect(screen.queryByText(/queued/)).toBeNull();
+	});
+
+	it("does not add a row that was absent when the menu opened", () => {
+		const props: MenuProps = { open: true, onClose: vi.fn(), pinned: false, onTogglePin: vi.fn(async () => true), onOpenApprovals: vi.fn(), onOpenSpend: vi.fn(), showSpend: false };
+		const view = render(<SessionMenu {...props} />);
+		view.rerender(<SessionMenu {...props} showSpend showQueued queuedCount={2} />);
+		expect(screen.queryByRole("button", { name: /Spend & context/ })).toBeNull();
+		expect(screen.queryByText(/queued/)).toBeNull();
+	});
+
+	it("states a moved-out queued count as text, not a control", () => {
+		setup({ showQueued: true, queuedCount: 12 });
+		const line = screen.getByText("12 queued");
+		expect(line.closest("button")).toBeNull();
+		expect(screen.queryByRole("button", { name: /queued/ })).toBeNull();
+	});
 });

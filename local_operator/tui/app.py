@@ -173,8 +173,6 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.frontend_state import MCP_SUBCOMMANDS as _MCP_SUBCOMMANDS
 from local_operator.session.frontend_state import CostKnowledge
-
-# Shared loop semantics stay import-light for detached owners.
 from local_operator.session.goal_loop import (
     _BOTCHED_COUNT_RE,
     DEFAULT_LOOP_ITERATIONS,
@@ -187,6 +185,9 @@ from local_operator.session.goal_loop import (
     MAX_LOOP_JUDGE_FAILURES,
     _parse_loop_verdict,
 )
+
+# Shared loop semantics stay import-light for detached owners.
+from local_operator.session.mcp_status import RestoredMcpStartupOutcome
 from local_operator.session.protocol import SessionProtocol, ViewerSessionProtocol
 from local_operator.session.runtime.types import (
     BUILD_DRAIN_PROGRESS_S,
@@ -398,7 +399,11 @@ from local_operator.tui.widgets.ask_queue import (
     ask_rows,
 )
 from local_operator.tui.widgets.assistant import AssistantBlock
-from local_operator.tui.widgets.command_picker import CommandPicker
+from local_operator.tui.widgets.command_picker import (
+    CommandPicker,
+    SkillScanRegion,
+    skill_scan_region,
+)
 from local_operator.tui.widgets.copy_picker import CopyPickerScreen
 from local_operator.tui.widgets.editor import (
     ASIDE_PLACEHOLDER,
@@ -456,6 +461,13 @@ from local_operator.tui.widgets.link_picker import LinkPickerScreen
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.move_picker import MovePickerScreen
 from local_operator.tui.widgets.network_panel import NetworkCommandRequested
+from local_operator.tui.widgets.notifications_view import (
+    NotificationsView,
+    NotificationsViewAnswerRequested,
+    NotificationsViewCountsChanged,
+    NotificationsViewDismissed,
+    NotificationsViewOpenConversation,
+)
 from local_operator.tui.widgets.org_chart_messages import OrgChartViewDismissed
 from local_operator.tui.widgets.projects_send import (
     SendTarget,
@@ -1235,6 +1247,13 @@ def _frontend_revision(session: Any) -> Any:
 #: deliberately not half-built here.
 _BACKGROUND_NOTIFY_MAX_PER_TICK = 3
 
+#: Seconds between two ``activity`` reports to the session's owner (R6-1).
+#: Contract §6.1's throttle for the TUI's input evidence: the runtime keeps one
+#: stamp and asks only "is the operator here NOW", so a report per keystroke
+#: would add a socket write to the typing path and buy nothing. Ten seconds is
+#: well inside the 120 s freshness window the reader applies.
+TUI_ACTIVITY_REPORT_S = 10.0
+
 
 def _announceable_kind(entry: CatalogEntry) -> str:
     """The notification kind a catalog row is announced under.
@@ -1516,6 +1535,26 @@ def _skill_body_has_content(body: str | None) -> TypeGuard[str]:
         if end != -1:
             text = rest[end + 4 :]
     return bool(text.strip())
+
+
+class _SkillExpansion(NamedTuple):
+    """What an inline `$skill` submit sends, split so the ROW stays the user's.
+
+    ``text`` is the message verbatim with collapsed pastes expanded, and it is
+    BOTH the row and the prefix of the payload. ``block`` is the tail block
+    carrying one body per name in ``skills`` (text order), or ``""`` when
+    nothing attached. ``payload`` is what the model receives, and the row is
+    recovered from it by stripping the block — which is what makes the live and
+    replayed rows agree by construction rather than by two branches agreeing.
+    """
+
+    text: str
+    skills: tuple[str, ...]
+    block: str
+
+    @property
+    def payload(self) -> str:
+        return f"{self.text}\n\n{self.block}" if self.block else self.text
 
 
 #: Transport wording that means THE RUNTIME IS GONE, as opposed to a refusal
@@ -1997,6 +2036,14 @@ RESUME_PAGE_TRIGGER_ROWS = 4
 #: Hidden-only pages still advance through yielded bursts until real content
 #: fills the reserve, the cursor stops advancing, or the reader takes over.
 RESUME_FILL_MAX_PAGES = 16
+# ...and the TOTAL a single reveal may mount, across every burst. The
+# per-burst cap alone bounded nothing: reaching it re-armed the fill, which
+# restarted the attempt counter at zero, so a view whose scroll never reaches
+# the goal kept mounting until the pending head emptied — one warm legacy
+# revisit mounted 20,200 blocks (the whole 27,003-message history) before
+# settling to 38. Four bursts is far more than any viewport needs (the
+# reserve is one screenful, ~2-3 pages) while still bounding the worst case.
+RESUME_FILL_TOTAL_PAGES = RESUME_FILL_MAX_PAGES * 4
 
 #: The row that stands in for the un-rendered head of a resumed conversation.
 #: It exists because the failure mode of a display bound is a user believing
@@ -5213,6 +5260,23 @@ class OperatorApp(App[None]):
         #: next unrelated change.
         self._background_notify_pending = False
         self._background_notify_revision: tuple[int, int, int] | None = None
+        #: The inbox's TUI duties (lane L2, ``notifications_attention``): each
+        #: leg's own in-flight latch, the banner leg's store-stat doorbell
+        #: (``None`` so the FIRST tick always looks), and the first-visible
+        #: stamp per on-screen notify card for in-view reads.
+        self._inbox_notify_pending = False
+        #: The store doorbell's last-scanned tuple. Its arity grew when the ask
+        #: index joined it (T7), so the annotation is opaque rather than a
+        #: fixed-width tuple that a future column would have to chase.
+        self._inbox_notify_stamp: tuple[int, ...] | None = None
+        self._inbox_seen_pending = False
+        self._inbox_card_seen_at: dict[str, int] = {}
+        #: Retry backoff for a banner whose spawn reported nothing (T4): the
+        #: interval doubles per barren pass up to
+        #: ``_BACKGROUND_NOTIFY_MAX_RETRY_TICKS``, the completion leg's own
+        #: bound, and resets whenever a pass raises something.
+        self._inbox_notify_retry_ticks = 0
+        self._inbox_notify_retry_wait = 0
         #: Retry backoff for a delivery that failed: how many ticks to wait
         #: before the next attempt, and how many of those are still owed. The
         #: interval doubles per barren attempt so the revision-forgetting retry
@@ -5848,6 +5912,10 @@ class OperatorApp(App[None]):
         #: reads as the notice changing its mind (review round 2, R6).
         self._resume_fill_active = False
         self._resume_fill_serial = 0
+        #: The view a fill stood down on because it could not be laid out.
+        #: Held so the extent hook can re-arm the reserve once the view is
+        #: on screen again — standing down is only safe if showing it resumes.
+        self._resume_fill_deferred_view: Any = None
         #: SINGLE-FLIGHT guard for the deferred page check: while set, a check
         #: is already scheduled and `_transcript_scrolled` must not queue a
         #: second. See that method for why unbounded requeues were a cascade.
@@ -6444,6 +6512,9 @@ class OperatorApp(App[None]):
         # keep its worker pointed at the previous config root.
         self._library_view: Any | None = None
         self._library_focus_restore: Any | None = None
+        #: The ``/notifications`` page (lane L2): a sibling of the library mode.
+        self._notifications_view: Any | None = None
+        self._notifications_focus_restore: Any | None = None
         # The projects mode (``/project show``), a fourth sibling of the same
         # MODE contract: it replaces the transcript region, so it is held here
         # for the same reason — the Esc chain and every approval/ask/clear
@@ -9766,7 +9837,7 @@ class OperatorApp(App[None]):
         if isinstance(snapshot, AsideSnapshot) and panel is not None:
             source.aside_open = True
             source.aside_generation = snapshot.generation
-            editor.set_allows_shell(False)
+            editor.set_aside_owns(True)
             editor.placeholder = ASIDE_PLACEHOLDER
             editor.set_commands([])
             editor.set_records_history(False)
@@ -9776,7 +9847,7 @@ class OperatorApp(App[None]):
             self._sync_aside_fork_hint()
         else:
             source.aside_open = False
-            editor.set_allows_shell(True)
+            editor.set_aside_owns(False)
             editor.set_shell_mode(source.draft.shell_mode)
             editor.placeholder = self._composer_placeholder_for(editor)
             editor.set_commands(self._offered_commands())
@@ -9865,6 +9936,43 @@ class OperatorApp(App[None]):
         # so without this a gate parked on the session the user just left waits
         # in silence, its card painted into a viewer showing something else.
         self._note_viewer_watching(outgoing, displaying=False)
+
+    def _note_viewer_activity(self, *, monotonic_at: float) -> None:
+        """Tell the session's owner that a REAL input edge just landed (R6-1).
+
+        The runtime's item ladder stands its own rung 4 down for a conversation
+        this terminal is BOTH showing and being typed in, so it has to know the
+        second half. ``viewer_watch`` already carries the first.
+
+        THROTTLED TO ONE REPORT PER ``TUI_ACTIVITY_REPORT_S``: the runtime keeps
+        only the newest stamp, so a per-keystroke frame would buy nothing and put
+        a socket write on the typing path. This runs on ``on_event`` for every
+        Key/MouseDown, so the guard is the cheap comparison below, not a timer.
+
+        ONLY AN EPOCH MILLISECOND CROSSES THE WIRE. No keycode, no text: the age
+        of the newest edge is all the ladder reads (contract §6.1).
+        """
+        last = getattr(self, "_activity_reported_at", 0.0)
+        if monotonic_at - last < TUI_ACTIVITY_REPORT_S:
+            return
+        session = self._session
+        client = getattr(session, "_client", None)
+        report = getattr(client, "activity", None)
+        if report is None:
+            return
+        self._activity_reported_at = monotonic_at
+        stamp = int(time.time() * 1000)
+
+        async def _signal() -> None:
+            try:
+                await report(input_at_ms=stamp)
+            except Exception:  # noqa: BLE001 — routing chrome never breaks typing
+                logger.debug("viewer activity signal failed", exc_info=True)
+
+        try:
+            self.run_worker(_signal(), exclusive=False, exit_on_error=False)
+        except Exception:  # noqa: BLE001 — nor does failing to schedule it
+            logger.debug("viewer activity signal could not be scheduled", exc_info=True)
 
     def _note_viewer_watching(self, source: SessionInteraction, *, displaying: bool) -> None:
         """Tell a source's owner whether this terminal still shows its session.
@@ -11791,6 +11899,7 @@ class OperatorApp(App[None]):
             tuple[UnansweredPeer, ...],
             dict[str, int],
             tuple[bool, tuple[tuple[str, str], ...], dict[str, str]],
+            dict[str, int] | None,
         ]:
             from local_operator.paths import config_dir
             from local_operator.session.peer_rows import read_listing
@@ -11854,8 +11963,15 @@ class OperatorApp(App[None]):
             ask_marks: dict[str, int] = {}
             from local_operator.asks import policy
 
-            if self._ask_index_poll % ASK_INDEX_POLL_EVERY == 0 and policy.enabled():
-                ask_marks, _ask_total = self._read_fleet_asks()
+            # THE INBOX FIGURE rides the same slow cadence and the same worker
+            # hop (notifications design §11): an indexed COUNT plus the open
+            # asks' read marks — no new timer. ``None`` means "not read this
+            # tick", which is not zero.
+            inbox_counts: dict[str, int] | None = None
+            if self._ask_index_poll % ASK_INDEX_POLL_EVERY == 0:
+                if policy.enabled():
+                    ask_marks, _ask_total = self._read_fleet_asks()
+                inbox_counts = self._read_inbox_counts(root)
             self._ask_index_poll += 1
             # The tally is NOT carried out of here: A4 derives the total by
             # SUMMING the marks at paint time, and the current session's live
@@ -11878,7 +11994,16 @@ class OperatorApp(App[None]):
             else:
                 categories, primaries = (), {}
             tag_groups = (enabled, categories, primaries)
-            return entries, pins, total, peer_rows, unanswered, ask_marks, tag_groups
+            return (
+                entries,
+                pins,
+                total,
+                peer_rows,
+                unanswered,
+                ask_marks,
+                tag_groups,
+                inbox_counts,
+            )
 
         async def refresh() -> None:
             try:
@@ -11890,6 +12015,7 @@ class OperatorApp(App[None]):
                     unanswered,
                     ask_marks,
                     tag_groups,
+                    inbox_counts,
                 ) = await asyncio.to_thread(collect)
                 if (
                     generation != self._sidebar_refresh_generation
@@ -11914,6 +12040,8 @@ class OperatorApp(App[None]):
                 # (A3) rather than being overwritten by an index that lags it.
                 self._ask_marks = dict(ask_marks)
                 self._paint_sidebar_asks()
+                if inbox_counts is not None:
+                    self._paint_notifications_total(inbox_counts)
                 self._prewarm_sidebar(list(self._session_sidebar.visible_entries))
                 # THE SAME READ THAT PAINTS THE PEER TIER IS THE PARK DETECTOR
                 # (design note §1 A1): edges off rows this poll already holds,
@@ -12832,9 +12960,22 @@ class OperatorApp(App[None]):
             forked=bool(getattr(session, "wears_inherited_title", False)),
         )
         self._wire_mcp_status(session)
-        self._report_mcp_startup(session)
         if replay_history:
             self._render_resumed_history(session)
+        # AFTER the replay, for the SAME load-bearing reason
+        # ``_report_attachment_restore`` documents four lines below: a durable
+        # failure row is a fact about THIS conversation's last runtime, so it
+        # belongs at its end, directly above the composer. Raised before the
+        # replay — where this call used to sit — it became block 0 of N and the
+        # replayed history was appended after it, which put the rows thousands of
+        # lines above the reader on any resumed conversation that had an outcome
+        # to report. A cold open now ALWAYS has one (the checkpoint's outcome is
+        # restored by ``_restore_cold_details``), so the ordering is what makes
+        # the reveal's rows the ones the reader is looking at rather than the
+        # ones they have to scroll back for. Costs nothing on an empty
+        # transcript: the replay no-ops there, so the boot splash is untouched
+        # and the row lands under it.
+        self._report_mcp_startup(session)
         # AFTER the replay, and the order is load-bearing (D1). A stale
         # attachment is by definition only reachable on a session that ALREADY
         # RAN, so this notice always lands on a transcript with history. Raised
@@ -14751,7 +14892,7 @@ class OperatorApp(App[None]):
             if not chained:
                 self._start_resume_fill()
 
-    def _start_resume_fill(self, *, target: float | None = None) -> None:
+    def _start_resume_fill(self, *, target: float | None = None, attempt: int = 0) -> None:
         """Top up a newly revealed projection, not every subsequent resize.
 
         Raw-event tail bounds are deliberately cheap first paint, not geometry:
@@ -14779,7 +14920,7 @@ class OperatorApp(App[None]):
                 self._reconcile_head_notice()
                 return
             if self._resume_fill_active:
-                self._fill_resume_until_scrollable(target=target)
+                self._fill_resume_until_scrollable(attempt, target=target)
 
         if not view.call_after_refresh(start):
             # SAME UNKEPT PROMISE as the insert seam, one screen away: the
@@ -14828,6 +14969,25 @@ class OperatorApp(App[None]):
         finished. Only exhaustion, non-advancing cursors or user input stop it.
         """
         view = self._transcript_view()
+        if not view.display or not view.size.height:
+            # A VIEW THAT CANNOT BE LAID OUT HAS NO GOAL TO MEASURE. Its
+            # `container_size` keeps the last real height, but nothing lays it
+            # out while it is hidden, so `scroll_y` stays 0 and `virtual_size`
+            # does not move however many blocks are mounted — while
+            # `settled()` measures progress by the pending head, which always
+            # shrinks. Every page therefore reads as progress, the goal is
+            # never reached, and the fill runs blind until the head empties:
+            # 1,123 pages / 20,254 blocks on the legacy fixture, invisible, and
+            # returned to the reader on reveal (review round 1, M1 — the
+            # subagent view, org chart, settings and file viewer all hide the
+            # transcript). Standing down here PREVENTS the chain;
+            # `RESUME_FILL_TOTAL_PAGES` stays as the backstop. Showing the view
+            # lays it out, which fires the extent hook that re-arms this.
+            self._resume_fill_active = False
+            self._resume_fill_deferred_view = view
+            self._release_resume_tail_hold()
+            self._reconcile_head_notice()
+            return
         viewport = view.container_size.height or view.size.height
         notice = self._resume_head_notice
         prefix = notice.virtual_region.bottom if notice is not None and notice.parent is view else 0
@@ -14863,11 +15023,21 @@ class OperatorApp(App[None]):
                 if not progressed:
                     self._resume_fill_active = False
                     self._reconcile_head_notice()
+                elif _attempt + 1 >= RESUME_FILL_TOTAL_PAGES:
+                    # The total budget, not the burst cap, is what ends a chain.
+                    # Pages past the viewport are the reader's to ask for; the
+                    # fill must not keep mounting them while a view refuses to
+                    # scroll (see RESUME_FILL_TOTAL_PAGES).
+                    self._resume_fill_active = False
+                    self._release_resume_tail_hold()
+                    self._reconcile_head_notice()
                 elif _attempt + 1 >= RESUME_FILL_MAX_PAGES:
                     # A long hidden prefix is not a reason to strand the
                     # reader. Yield an additional idle frame between bursts;
                     # _start_resume_fill fences the new callback to this view.
-                    self._start_resume_fill(target=target)
+                    # The RUNNING count is carried in, so the burst boundary
+                    # cannot be mistaken for the end of the budget.
+                    self._start_resume_fill(target=target, attempt=_attempt + 1)
                 else:
                     self._fill_resume_until_scrollable(_attempt + 1, target=target)
 
@@ -15877,6 +16047,13 @@ class OperatorApp(App[None]):
         copy already matches (R8), so a window drag pays two integer
         comparisons per frame rather than a rebuild and a spacing pass.
         """
+        deferred, self._resume_fill_deferred_view = self._resume_fill_deferred_view, None
+        if deferred is not None and deferred is self._transcript:
+            # The reserve a hidden fill declined to mount is still owed. Shown
+            # and laid out is exactly the state it needs, and this hook is the
+            # one place told about every geometry change.
+            if deferred.display and deferred.size.height and not self._resume_paging:
+                self._start_resume_fill()
         if self._resume_head_notice is None:
             return
         self._reconcile_head_notice()
@@ -18359,6 +18536,9 @@ class OperatorApp(App[None]):
             "/hub",
             "/resume",
             "/notifications",
+            # The receipt listing's own name (decision D2): the same local-only
+            # handler, so the same exemption.
+            "/unread",
         }
     )
 
@@ -20788,15 +20968,14 @@ class OperatorApp(App[None]):
         ``resolve_markers`` orders images by where the citation sits and a
         payload spliced in ahead of one would move it.
 
-        A ``$skill`` LEADING the argument expands here, through the same
-        ``_expand_invocation`` the bare-prompt path uses. The argument is its
-        OWN string, whose offset 0 is exactly where the user's ``$`` sits, so
-        the anchored parser needs no change to serve ``/team backend $research
-        fix the login bug`` — and the money/shell guards it gets from anchoring
-        (``$100``, a non-leading ``$research``) keep holding here unaltered.
-        Calling that method rather than re-resolving a body locally is what
-        keeps ONE answer to "what does an invocation expand to": the paste
-        splice into the request alone, the empty-body warning and the
+        A ``$skill`` ANYWHERE in the argument expands here, through the same
+        ``_expand_invocation`` the bare-prompt path uses: ``/team backend
+        $research fix the login bug`` and ``/team backend fix it $research`` are
+        the same gesture the composer already honours. The argument is its OWN
+        string, so the trigger scans exactly the text the user addressed to the
+        model and nothing before it. Calling that method rather than
+        re-resolving a body locally keeps ONE answer to "what does an invocation
+        expand to": the paste splice, the per-skill notices and the
         never-raises contract all live inside it.
         """
         images = resolve_markers(request, attachments or {})
@@ -20817,11 +20996,17 @@ class OperatorApp(App[None]):
         # expansion lands after — and it puts a human approval gate in a task
         # nothing awaits. If this ever needs TUI-side notices, the fix is making
         # this method async as its own refactor, not a task launched from here.
-        sent = self._expand_invocation(request, attachments)
-        # `row` mirrors `on_editor_submitted`: an invocation keeps the TYPED
-        # argument as its row (the body belongs in the payload, never the
-        # ledger), everything else shows the paste-expanded text.
-        row = request if sent is not None else expand_pastes(request, attachments or {})
+        # The surface's own scan region: the request tail is the whole string
+        # here, and its first token is leading — the ink computes the same
+        # region from the slash line (`skill_scan_region`), so `/team backend
+        # $RESEARCH` inks what submit fires.
+        region = skill_scan_region(request, argument=True)
+        expansion = self._expand_invocation(request, attachments, region=region)
+        # `row` mirrors `on_editor_submitted`: the argument with its pastes
+        # expanded, whether or not a skill attached. The body rides the payload
+        # only, and replay strips the block.
+        row = expansion.text if expansion is not None else expand_pastes(request, attachments or {})
+        sent = expansion.payload if expansion is not None else None
         # `typed=` keeps the naming split: the chip line names the thread, the
         # payload is what the model is sent.
         self._submit_prompt(row, images, attachments, sent=sent, typed=request)
@@ -22416,6 +22601,15 @@ class OperatorApp(App[None]):
         outcome = getattr(session, "mcp_startup", None)
         if outcome is None:
             return
+        # WHETHER THIS OUTCOME IS NEWS OR HISTORY — provenance, not connection
+        # state. `is_cold` answered the wrong question: the owner's first live
+        # snapshot is installed while the facade is still mid-bind
+        # (`_finish_sync` runs after an await), so a genuinely LIVE round read as
+        # cold, was labelled "last session", and its new failures were never
+        # announced (review round 2, MAJOR-2). The durable checkpoint's outcome
+        # arrives as ``RestoredMcpStartupOutcome``; every owner or in-process
+        # round is the base class, so the type IS the provenance.
+        restored = isinstance(outcome, RestoredMcpStartupOutcome)
         toast = self.query_one(Toast)
         payload = format_mcp_startup(outcome, max_cells=toast.content_cells)
         if payload is None:
@@ -22492,28 +22686,47 @@ class OperatorApp(App[None]):
                 # semantic lamp colour `format_mcp_startup` derived through the
                 # band's own rule.
                 before = toast.generation
-                toast.show(text, duration_ms=duration_ms, owner=MCP_STARTUP_TOAST_OWNER)
+                # A RESTORED round does not interrupt (review round 1,
+                # MINOR-1). The toast is this app's "this just happened"
+                # surface — it is one-shot, it takes the single courtesy slot,
+                # and on a cold open it announced yesterday's dead servers as
+                # breaking news even when no runtime would ever engage. Its
+                # content is already on screen as a durable row, worded as
+                # history; the interruption is what adds nothing. Nothing is
+                # recorded as told either, so the first LIVE round announcing
+                # the same servers still gets its card.
+                if not restored:
+                    toast.show(text, duration_ms=duration_ms, owner=MCP_STARTUP_TOAST_OWNER)
                 if toast.generation != before and toast.display:
                     announce = _McpAnnounce(sentence, toast.generation)
                     self._last_mcp_announce = announce
                     self._announced_mcp_startup[session_key] = announce
         if not outcome.failures:
             return
-        # No "server" in the wording: one failure key is ``discovery`` (the
-        # config layer itself), and "MCP server discovery failed" would name a
-        # server that does not exist. ``/mcp`` is named on the durable line
-        # because it is the standing answer and this is the surface with room to
-        # point at it — except when the failure text is already a ``/mcp``
-        # command, where the pointer is skipped instead of doubling the dash
-        # (design review D5).
         for name, error in sorted(outcome.failures.items()):
             notice_key = (session_key, name, str(error))
+            # ONE resolution of the column for this notice, used by the
+            # composition, the fold hint and the fit record below (see there).
+            column = self._mcp_notice_painted_column()
+            # THE LEDGER SAYS THIS SESSION ALREADY RECORDED THIS FAILURE, so this
+            # outcome CONFIRMS a row rather than reporting one, and the row is
+            # left EXACTLY AS PAINTED. It is not restated into the present tense:
+            # that edit frees thirteen cells (" last session"), and whenever it
+            # crosses a fold boundary the row changes height and the adaptive
+            # gap rule flips the next row's spacing — measured at 62, 90 and 110
+            # columns, the transcript lost two rows (review round 2, MAJOR-1).
+            # The history label stays true ("failed last session"), and the live
+            # news has its own surfaces: the toast and the status band, neither
+            # of which reflows the transcript.
+            #
+            # The KEY is consulted before the view, deliberately: a failure
+            # another session recorded is this session's to write (two
+            # conversations in one process legitimately show the same server),
+            # and a view that was rebuilt holds no rows at all — that gap is
+            # ``deferred`` in round 1's notes.
             if notice_key in self._mcp_failure_notices:
                 continue
             self._mcp_failure_notices.add(notice_key)
-            # ONE resolution of the column for this notice, used by both the
-            # composition and the fit record below (see there).
-            column = self._mcp_notice_painted_column()
             # The pointer is appended ONLY when the line does not already name
             # ``/mcp`` itself. The auth requirement leads with its own
             # ``/mcp reauth`` command, so appending "— /mcp for details" gave the
@@ -22524,9 +22737,18 @@ class OperatorApp(App[None]):
             # rather than an instruction; when the text is already the command,
             # the reader has the answer. WHICH form it takes is now a budget
             # question as well — see :meth:`_mcp_notice_line`.
+            # `fold_width=column` is the SAME resolution the sentence was
+            # fitted to, handed over because a notice wraps itself when it is
+            # built: without it the rows are authored at the 80-column fallback
+            # and paint at the wrong height for one frame, which the adaptive
+            # spacing rule turns into a blank line above every row and then takes
+            # back (QA round 1, Q1).
             block = self._system_notice_block(
-                self._mcp_notice_line(name, str(error), budget=NoticeBlock.body_budget(column)),
+                self._mcp_notice_line(
+                    name, str(error), budget=NoticeBlock.body_budget(column), restored=restored
+                ),
                 "error",
+                fold_width=column,
             )
             # What the ladder needs to re-run if the column moves, carried ON the
             # block — see ``NoticeBlock.mcp_failure_fit`` for why it is not a side
@@ -22535,9 +22757,39 @@ class OperatorApp(App[None]):
             # built let the two describe different columns if anything moved
             # between the calls (review round 4, R4-1).
             block.mcp_failure_fit = (name, str(error), column)
+            block.mcp_failure_history = restored
 
-    def _mcp_notice_line(self, name: str, error: str, *, budget: int | None = None) -> str:
+    def _mcp_failure_row(self, name: str, error: str) -> NoticeBlock | None:
+        """The row already on screen for ``(name, error)``, if there is one.
+
+        Identity comes from ``NoticeBlock.mcp_failure_fit``, which every MCP
+        failure row carries — the same field ``_refit_mcp_failure_notices`` reads
+        to re-run its ladder. Asking the VIEW rather than remembering the widget
+        is what keeps this honest across a rebuild: a view that was swapped out
+        holds no rows, and one that was built carries its own. Restricts to the
+        current transcript for the same reason every other removal does — another
+        conversation's rows are not this one's to restate.
+        """
+        for block in self._transcript_view().query(".notice-block"):
+            if not isinstance(block, NoticeBlock):
+                continue
+            fit = block.mcp_failure_fit
+            if fit is not None and fit[0] == name and fit[1] == error:
+                return block
+        return None
+
+    def _mcp_notice_line(
+        self, name: str, error: str, *, budget: int | None = None, restored: bool = False
+    ) -> str:
         """``MCP <name> failed: <error>`` plus its signpost, fitted to the column.
+
+        ``restored`` states the fact about the PREVIOUS runtime instead —
+        ``MCP <name> failed last session: <error>`` — because a checkpoint's
+        failure is not a claim about now. The same server can already be healthy
+        in the round that lands a moment later, and the unqualified sentence then
+        contradicts the live toast on the same screen (QA round 1, Q2). The tense
+        is part of the composed HEAD, so the signpost ladder and the width budget
+        run over it unchanged: one ladder, one budget, two voices.
 
         The pointer is the standing answer to "where do I read this properly?"
         and the one part of the line that must never be SPLIT: a wrapped
@@ -22580,7 +22832,11 @@ class OperatorApp(App[None]):
         """
         from rich.cells import cell_len
 
-        head = f"MCP {name} failed: {error}"
+        head = (
+            f"MCP {name} failed last session: {error}"
+            if restored
+            else f"MCP {name} failed: {error}"
+        )
         if "/mcp" in error:
             # The failure text is already the command (the auth family), so the
             # signpost would double the dash and spend cells saying it twice.
@@ -22591,7 +22847,11 @@ class OperatorApp(App[None]):
                 return head + pointer
         trimmed_error = _drop_trailing_parenthetical(error)
         if trimmed_error != error:
-            trimmed = f"MCP {name} failed: {trimmed_error}"
+            trimmed = (
+                f"MCP {name} failed last session: {trimmed_error}"
+                if restored
+                else f"MCP {name} failed: {trimmed_error}"
+            )
             if cell_len(trimmed + _MCP_NOTICE_POINTER_SHORT) <= budget:
                 return trimmed + _MCP_NOTICE_POINTER_SHORT
         return head
@@ -22708,8 +22968,16 @@ class OperatorApp(App[None]):
             if fit is None or fit[2] <= column:
                 continue
             name, error, _ = fit
+            # The TENSE travels with the row: re-fitting a projected "failed last
+            # session" line to a narrower column must not quietly turn it into a
+            # claim about now (QA round 1, Q2).
             block.restate(
-                self._mcp_notice_line(name, error, budget=NoticeBlock.body_budget(column)),
+                self._mcp_notice_line(
+                    name,
+                    error,
+                    budget=NoticeBlock.body_budget(column),
+                    restored=block.mcp_failure_history,
+                ),
                 "error",
             )
             block.mcp_failure_fit = (name, error, column)
@@ -25507,27 +25775,16 @@ class OperatorApp(App[None]):
         # fix, if it is ever wanted, is moving this expansion into a worker —
         # which disturbs the submit ORDERING this docstring calls load-bearing
         # and so deserves its own change, not a line in this one.
-        sent = self._expand_invocation(text, message.attachments)
-        # An INVOCATION keeps the typed line as its row; everything else shows
-        # the expanded text (design §2.5).
-        #
-        # §2.5's `text == sent` rule bought replay consistency for ordinary
-        # prompts, and it does not reach this path: `$skill` already has a
-        # display/sent split — `sent` is the rendered body, the row is the typed
-        # line, and `harness.rows.typed_line_of` exists to keep a resumed row
-        # from becoming
-        # the whole SKILL.md. Expanding the row here made live and REPLAY
-        # disagree for the paste case alone, because `render_invocation` records
-        # the typed line in the payload's `invocation=` attribute and replay
-        # repaints from that (review round 2, MAJOR-2).
-        #
-        # The attribute is deliberately NOT expanded to close it from the other
-        # side: it travels inside the payload the model receives, so a payload
-        # carrying the paste in both the request and the attribute would send it
-        # TWICE, on every turn of that message's life, to fix a transcript row.
-        # Showing the typed line instead makes paste and non-paste `$skill`
-        # behave identically and makes the two rows agree by construction.
-        row = text if sent is not None else expand_pastes(text, message.attachments)
+        expansion = self._expand_invocation(text, message.attachments)
+        # ONE row for both paths: the message with its collapsed pastes
+        # expanded. An attached skill adds a tail block to the PAYLOAD only, and
+        # `harness.rows.user_row_text` strips that block on replay — so live and
+        # resumed rows agree by construction, and the old `row = text if sent`
+        # branch (which existed only to keep an invocation's row off its body)
+        # is gone. The `typed=` split stays for the paste case: image labels and
+        # a failed-send hand-back must read the chip line, not the expanded log.
+        row = expansion.text if expansion is not None else expand_pastes(text, message.attachments)
+        sent = expansion.payload if expansion is not None else None
         source = self._interaction
         source.turn.submitted_draft = SessionDraft(
             text=message.text, attachments=dict(message.attachments)
@@ -28060,6 +28317,25 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001 — the picker may already be gone
             logger.debug("could not set the picker ask total", exc_info=True)
 
+    @staticmethod
+    def _read_inbox_counts(root: Any) -> dict[str, int] | None:
+        """The inbox's badge figures, or None when the store cannot be read.
+
+        ``notifications.items.counts`` is the ONE reader every surface badges
+        from, so the footer, the desktop pill and the relay block always agree.
+        A store that has never been written is not created by this read: an
+        absent ``notifications.db`` is zero updates, and the open-ask half
+        still counts. A failure answers None so a broken store paints nothing
+        rather than a ``0`` the footer cannot substantiate.
+        """
+        try:
+            from local_operator.notifications import items as inbox
+
+            return inbox.counts(root)
+        except Exception:  # noqa: BLE001 — absence is not emptiness
+            logger.debug("could not read the inbox counts", exc_info=True)
+            return None
+
     def _read_fleet_asks(self) -> tuple[dict[str, int], int]:
         """``(per-session outstanding counts, fleet total)`` from the index.
 
@@ -28613,8 +28889,12 @@ class OperatorApp(App[None]):
             return
         self.run_worker(self._load_fleet_asks(), group="ask-fleet", exclusive=True)
 
-    async def _load_fleet_asks(self) -> None:
-        """Read the index off-thread, then mount the ONE list on it."""
+    async def _load_fleet_asks(self, highlight: str | None = None) -> None:
+        """Read the index off-thread, then mount the ONE list on it.
+
+        ``highlight`` names the ask the cursor starts on — the notifications
+        page's ``a`` hands over the exact ask the operator chose.
+        """
         from local_operator.asks import store
         from local_operator.asks.visibility import lapsed_visible_ms
         from local_operator.paths import config_dir
@@ -28640,7 +28920,7 @@ class OperatorApp(App[None]):
         # comes when the wire is quiet.
         self._sync_ask_tick()
         await self._refresh_fleet_titles()
-        self._mount_ask_list(scope=SCOPE_FLEET)
+        self._mount_ask_list(highlight, scope=SCOPE_FLEET)
 
     async def _reload_fleet_rows(self) -> None:
         """Re-read the fleet rows after an answer, keeping the list on them."""
@@ -31396,6 +31676,7 @@ class OperatorApp(App[None]):
             and self._review_view is None
             and self._schedule_view is None
             and self._library_view is None
+            and self._notifications_view is None
         )
         self.screen.set_class(boot, BOOT_LAYOUT_CLASS)
 
@@ -32732,6 +33013,268 @@ class OperatorApp(App[None]):
 
         self.run_worker(run(), group="background-notify")
 
+    def _notify_inbox_items(self) -> None:
+        """Rung 3 of the item banner ladder (contract §3.5), off the event loop.
+
+        A running TUI is the surface the runtime's rung-4 check stands down for
+        (``serving._tui_viewer_running``), so this process must raise what no
+        desktop feed will: claim first in ``notifications.db``, raise through
+        the SAME detached banner the completion announcer uses, release on a
+        spawn that reported nothing. ``normal``/``low`` never reach it. Gated on
+        the store file's stat, so a quiet tick costs no SQL.
+        """
+        if getattr(self, "_inbox_notify_pending", False):
+            return
+        from local_operator.tui.notify import notifications_enabled
+
+        if not notifications_enabled():
+            return
+        if self._inbox_notify_retry_ticks > 0:
+            # A barren attempt asked for a delay: count it down here rather than
+            # scanning again, so a host that cannot deliver does one pass per
+            # interval instead of one per second (T4, the completion leg's M2).
+            #
+            # BEFORE THE LATCH IS ARMED, not after (R2-1). Round 1 set
+            # ``_inbox_notify_pending`` first and returned from further down, so
+            # the latch was never cleared: after ONE barren pass this surface
+            # raised no banner again for the life of the process — 140
+            # consecutive ticks measured with nothing delivered.
+            self._inbox_notify_retry_ticks -= 1
+            return
+        self._inbox_notify_pending = True
+
+        def collect() -> None:
+            from local_operator.paths import config_dir
+            from local_operator.session.runtime.presence import desktop_presence
+            from local_operator.tui import notifications_attention as inbox_attention
+            from local_operator.tui.widgets.notifications_view import _store_stamp
+
+            root = config_dir()
+            stamp = _store_stamp(root)
+            if stamp == getattr(self, "_inbox_notify_stamp", None):
+                return
+            # Recorded BEFORE the pass: a claim or release moves the stamp, so
+            # a released revision is re-examined on the very next tick.
+            self._inbox_notify_stamp = stamp
+
+            def desktop_delivers() -> bool:
+                presence = desktop_presence(root)
+                return presence is not None and presence.delivers("update")
+
+            tick = inbox_attention.announce_items(
+                root,
+                raise_one=self._raise_inbox_banner,
+                raise_digest=self._raise_inbox_digest,
+                desktop_delivers_update=desktop_delivers,
+                held_session_id=self._inbox_banner_held_session(),
+            )
+            if tick.released:
+                # THE CLAIM CAME BACK, SO THE REVISION IS STILL OWED (T4). Round
+                # 1 forgot the stamp and retried on the very next tick, which on
+                # a host whose spawn always reports nothing (Windows, Linux
+                # without notify-send) was two write transactions per unread
+                # item per second, forever. The completion announcer's own
+                # backoff is the established answer, and the store's banner
+                # cooldown bounds it further.
+                self._inbox_notify_retry_wait = min(
+                    max(1, self._inbox_notify_retry_wait * 2),
+                    _BACKGROUND_NOTIFY_MAX_RETRY_TICKS,
+                )
+                self._inbox_notify_stamp = None
+            elif tick.raised or tick.digested:
+                self._inbox_notify_retry_wait = 0
+            if tick.held:
+                # A HELD ROW IS NOT A COVERED ROW (R2-1). It is inside its
+                # BANNER_GRACE_MS hold, waiting for a receipt that may cancel
+                # it — and because a hold writes nothing, the store stamp is
+                # unchanged, so the stamp gate below would skip this revision
+                # forever and it would never banner. Forget the stamp and let
+                # the next tick look again; the hold lasts 2.5 s, so this is a
+                # handful of cheap reads, not a loop.
+                self._inbox_notify_stamp = None
+
+        async def run() -> None:
+            try:
+                await asyncio.to_thread(collect)
+            except Exception:
+                logger.debug("inbox item banner pass skipped", exc_info=True)
+            finally:
+                self._inbox_notify_pending = False
+                self._inbox_notify_retry_ticks = self._inbox_notify_retry_wait
+
+        self.run_worker(run(), group="inbox-notify")
+
+    def _inbox_banner_held_session(self) -> str:
+        """The session whose items this TUI must NOT banner, or ``""``.
+
+        T2: an item written by the conversation on screen is not news — the
+        operator is looking at its card, and the in-view receipt is the
+        acknowledgement that fits. The rule is the completion announcer's own
+        attached-session conjunction evaluated for the same reason
+        (``_background_notify_*``), narrowed to what a banner needs to know:
+
+        * this window is showing that conversation (one screen, no full-page
+          mode over the transcript, the transcript displayed);
+        * the app holds real focus, so the operator is plausibly reading it;
+        * no session transition is pending, which would make the id stale.
+
+        Anything unprovable yields ``""``, and an empty hold fails toward
+        NOTIFYING rather than toward silence (the direction every unknown takes
+        here).
+
+        The GRACE is deliberately not consulted: it is per revision, not per
+        session, and ``announce_items`` applies it to every row it examines.
+        """
+        if (
+            len(self.screen_stack) != 1
+            or not self.app_focus
+            or self._session_transition_pending
+            or self._interaction.display_only
+        ):
+            return ""
+        transcript = self._transcript_view()
+        if not transcript.display:
+            return ""
+        return self._resumable_session_id()
+
+    def _raise_inbox_banner(self, row: Mapping[str, Any]) -> bool:
+        """One item's OS banner, under the PRIVACY FLAG every other rung applies.
+
+        T1: this leg used to hand the model's own title and body straight to the
+        detached notifier, so with ``display.notification_session_name`` off the
+        item's subject line reached a lock screen while rungs 2 and 4 were
+        sending the brand and the house sentence. ``delivery.banner_text`` is the
+        one place that reads the flag (failing closed), so this rung asks it too
+        rather than keeping a second opinion. ``argv_safe`` for the completion
+        announcer's reason: model-written text can begin with ``-``.
+        """
+        from local_operator.notifications.delivery import banner_text
+        from local_operator.tui.notify import argv_safe, detached_notify
+
+        title, body = banner_text(str(row.get("title") or ""), str(row.get("body_md") or ""))
+        return bool(
+            detached_notify(
+                argv_safe(title),
+                argv_safe(body),
+                session_id=str(row.get("session_id") or ""),
+            )
+        )
+
+    def _raise_inbox_digest(self, rows: Sequence[Mapping[str, Any]]) -> bool:
+        """One name-free banner for the items over the per-tick cap."""
+        from local_operator.i18n.keys import tui_notifications as inbox_keys
+        from local_operator.i18n.text import tr as inbox_tr
+        from local_operator.tui.notify import detached_notify
+
+        text = inbox_tr("tui.notifications")
+        return bool(
+            detached_notify(
+                text(inbox_keys.banner_digest_title(count=len(rows))),
+                text(inbox_keys.banner_digest_body()),
+            )
+        )
+
+    def _receipt_inbox_items_in_view(self) -> None:
+        """Mark this session's notify items read when their card was SEEN.
+
+        The design's TUI evidence (§17.3): the card is in the transcript's
+        visible region of the focused session with nothing over it
+        (``_completion_anchor_visible``'s own conjunction), the terminal has
+        REAL focus evidence (a focus report or the bounded cmux probe; never
+        Textual's startup value), and a real key or mouse press landed AFTER
+        the card became visible. The store's ``seen`` door re-checks every
+        item. A plain terminal without focus reports never auto-reads — its
+        items read only by explicit gestures, which is honest, not a bug.
+        """
+        if getattr(self, "_inbox_seen_pending", False):
+            return
+        session = self._session
+        session_id = str(getattr(session, "session_id", "") or "")
+        if not session_id or not getattr(self, "_attention_focus_observed", False):
+            return
+        visible = self._visible_notify_cards()
+        if not visible:
+            return
+        input_at = getattr(self, "_attention_input_at", 0.0)
+        if not input_at:
+            return
+        # The press stamp is monotonic; the store compares epoch ms. Convert
+        # through ONE now-pair so the two clocks cannot drift apart mid-call.
+        input_at_ms = int((time.time() - (time.monotonic() - input_at)) * 1000)
+        self._inbox_seen_pending = True
+
+        def collect() -> None:
+            from local_operator.paths import config_dir
+            from local_operator.tui import notifications_attention as inbox_attention
+
+            root = config_dir()
+            rows = inbox_attention.unread_for_session(root, session_id)
+            items, since = inbox_attention.seen_candidates(
+                rows, visible, session_id=session_id, input_at_ms=input_at_ms
+            )
+            inbox_attention.submit_seen(
+                root, items, session_id=session_id, input_at_ms=input_at_ms, visible_since_ms=since
+            )
+
+        async def run() -> None:
+            try:
+                await asyncio.to_thread(collect)
+            except Exception:
+                logger.debug("inbox in-view receipt skipped", exc_info=True)
+            finally:
+                self._inbox_seen_pending = False
+
+        self.run_worker(run(), group="inbox-seen")
+
+    def _visible_notify_cards(self) -> list[Any]:
+        """``notify`` cards painted in the visible transcript, with first-seen stamps.
+
+        The completion anchor's visibility rule, per card: the app shows one
+        screen, a focused window and no pending transition; the card's last
+        row is inside the transcript viewport; and the screen's hit test at
+        that row lands on the card (nothing covers it). The first tick that
+        sees a card stamps it; scrolling it off drops the stamp, so a card
+        that comes back has to be seen again.
+        """
+        from local_operator.tui.notifications_attention import VisibleCard
+        from local_operator.tui.widgets.tool_card import ToolCard
+
+        stamps: dict[str, int] = getattr(self, "_inbox_card_seen_at", {})
+        if (
+            len(self.screen_stack) != 1
+            or not self.app_focus
+            or self._session_transition_pending
+            or self._interaction.display_only
+            or self._sidebar_frame_pending
+        ):
+            self._inbox_card_seen_at = {}
+            return []
+        transcript = self._transcript_view()
+        if not transcript.display:
+            self._inbox_card_seen_at = {}
+            return []
+        viewport = transcript.content_region
+        now_ms = int(time.time() * 1000)
+        seen: dict[str, int] = {}
+        cards: list[Any] = []
+        for card in transcript.query(ToolCard):
+            if getattr(card, "tool_name", "") != "notify" or not card.display:
+                continue
+            end = card.region.bottom - 1
+            if not (viewport.y <= end < viewport.bottom and card.region.width > 0):
+                continue
+            try:
+                top, _ = self.screen.get_widget_at(card.region.x + card.region.width // 2, end)
+            except Exception:  # noqa: BLE001 — an unresolvable point is not visible
+                continue
+            if not (top is card or card in top.ancestors):
+                continue
+            anchor = str(card.tool_call_id)
+            seen[anchor] = stamps.get(anchor, now_ms)
+            cards.append(VisibleCard(anchor, seen[anchor]))
+        self._inbox_card_seen_at = seen
+        return cards
+
     def _attention_focus_refresh_due(self) -> bool:
         """Whether this tick may re-ask the host for focus evidence.
 
@@ -32792,6 +33335,9 @@ class OperatorApp(App[None]):
         if isinstance(event, events.InputEvent) and not event.is_forwarded:
             if isinstance(event, (events.Key, events.MouseDown)):
                 self._attention_input_at = time.monotonic()
+                # The runtime's rung-4 stand-down reads this (PROBE-2): a
+                # throttled epoch stamp, never the event itself.
+                self._note_viewer_activity(monotonic_at=self._attention_input_at)
                 # Snapshot only evidence already observed BEFORE dispatch. A key
                 # cannot authorize a future token, even inside the expiry window.
                 # Only what is ALREADY observed: the poll's rendered receipt or
@@ -32827,6 +33373,11 @@ class OperatorApp(App[None]):
         # flight for it, must not also silence every other session's
         # completion. This leg has a pending latch of its own.
         self._notify_background_completions()
+        # The inbox's two TUI duties ride the same tick, each with its own
+        # latch (``notifications_attention``): rung-3 banners for claimed
+        # ``high`` items, and in-view receipts for this session's notify cards.
+        self._notify_inbox_items()
+        self._receipt_inbox_items_in_view()
         if getattr(self, "_attention_poll_pending", False):
             return
         session = self._session
@@ -34084,10 +34635,10 @@ class OperatorApp(App[None]):
 
         ``sent`` splits what the transcript SHOWS from what the model RECEIVES,
         for the one case where they legitimately differ: a ``$skill`` manual
-        invocation, whose row must stay the short line the user typed while the
-        model gets that line with the SKILL.md body prepended. ``None`` — every
-        other caller — means the two are the same string, which is the property
-        the echo registry depends on everywhere else.
+        invocation, whose row is the line the user typed while the model gets
+        that line with the skill bodies appended in an ``<operator-skills>`` tail
+        block. ``None`` — every other caller — means the two are the same string,
+        which is the property the echo registry depends on everywhere else.
 
         Everything DOWNSTREAM of the row takes ``sent``: the steer queue, the
         compaction hold, and the turn itself, because those are the paths whose
@@ -38802,6 +39353,153 @@ class OperatorApp(App[None]):
         self._close_library_view()
         self._cmd_librarian("open", self._system_notice)
 
+    # -- the notifications page (``/notifications``) -----------------------
+
+    def _cmd_notifications_page(self, arg: str, notice: NoticeFn) -> None:
+        """``/notifications`` — open the inbox; ``/notifications read`` — mark all.
+
+        The PAGE is the receipt (the ``/settings`` rule): it replaces the
+        transcript region, so a notice printed behind it would be read only
+        after leaving. ``read`` is the page's own ``A`` gesture: it opens the
+        page and ARMS its one-line confirm over the whole unread scope, so the
+        typed form and the key share one guard and one boundary (design §8.1).
+        The old completion-receipt listing is ``/unread`` (decision D2), and a
+        stray argument here says so instead of silently opening the page.
+        """
+        word = arg.strip().lower()
+        if word and word != "read":
+            from local_operator.i18n.keys import tui_notifications as keys
+            from local_operator.i18n.text import tr
+
+            text = tr("tui.notifications")
+            notice(text(keys.refused_argument()) + " " + text(keys.pointer_unread()))
+            return
+        self._open_notifications_view(confirm_mark_all=word == "read")
+
+    def _open_notifications_view(self, *, confirm_mark_all: bool = False) -> None:
+        """Enter the full-page notifications mode (idempotent while it is up).
+
+        The library mode's contract, one sibling later: capture focus, hide the
+        transcript, mount before ``#input-dock``, add the shared layout class and
+        make the composer inert. A second ``/notifications read`` while the page
+        is up arms the confirm on the page already there instead of remounting.
+        """
+        self._close_file_viewer()
+        if self._notifications_view is not None:
+            if confirm_mark_all:
+                self._notifications_view.action_mark_all()
+            return
+        self._close_agent_form()
+        self._close_team_form()
+        self._close_settings_view()
+        self._notifications_focus_restore = self.focused
+        view = NotificationsView(confirm_mark_all=confirm_mark_all)
+        self._notifications_view = view
+        self._transcript_view().display = False
+        self.screen.mount(view, before=self.query_one("#input-dock"))
+        self.screen.add_class(SETTINGS_LAYOUT_CLASS)
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(True)
+
+    def _close_notifications_view(self) -> bool:
+        """Leave the notifications mode and restore the conversation. True if open."""
+        view = self._notifications_view
+        if view is None:
+            return False
+        self._notifications_view = None
+        view.remove()
+        self.screen.remove_class(SETTINGS_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(False)
+        restore = self._notifications_focus_restore
+        self._notifications_focus_restore = None
+        try:
+            target = (
+                restore
+                if restore is not None and restore.is_attached and restore.display
+                else self._editor()
+            )
+            target.focus()
+        except Exception:
+            pass  # the widget that had focus is gone; the mode still closed
+        return True
+
+    def on_notifications_view_dismissed(self, message: NotificationsViewDismissed) -> None:
+        message.stop()
+        self._close_notifications_view()
+
+    def on_notifications_view_counts_changed(self, message: NotificationsViewCountsChanged) -> None:
+        """A page read or write moved the badge: repaint the footer note now.
+
+        Without this the sidebar would keep the pre-write figure until its next
+        slow-cadence poll, and the page and the footer would disagree about the
+        number on screen for up to ten seconds.
+        """
+        message.stop()
+        self._paint_notifications_total(message.counts)
+
+    def on_notifications_view_answer_requested(
+        self, message: NotificationsViewAnswerRequested
+    ) -> None:
+        """``a`` — answer through the EXISTING fleet ask list, cursor on that ask.
+
+        No second answer UI (design §8.2): the page closes, and the ONE ask
+        list opens on the fleet scope with the requested ask highlighted, which
+        is the same surface the sidebar's fleet note opens.
+        """
+        message.stop()
+        self._close_notifications_view()
+        from local_operator.asks import policy
+
+        if not policy.enabled():
+            return
+        self.run_worker(
+            self._load_fleet_asks(highlight=message.ask_id), group="ask-fleet", exclusive=True
+        )
+
+    def on_notifications_view_open_conversation(
+        self, message: NotificationsViewOpenConversation
+    ) -> None:
+        """``o`` — switch to the item's conversation by the sidebar's ONE switch.
+
+        ``_select_sidebar_session`` is the path the keystroke and the banner
+        click share; ``/resume`` is not equivalent (it denies queued approvals).
+        The page closes first, and ``esc`` on return does not reopen it.
+        """
+        message.stop()
+        self._close_notifications_view()
+        if message.session_id and message.session_id != getattr(self._session, "session_id", ""):
+            self._select_sidebar_session(message.session_id)
+
+    def _paint_notifications_total(self, counts: dict[str, int] | None) -> None:
+        """``notifications N`` on the sidebar footer: the cross-surface badge figure.
+
+        THE FORMULA IS THE BADGE'S OWN (D16): ``unread_count`` +
+        ``waiting_unread_count``, the number the desktop pill and the page header
+        also show, so no two surfaces can disagree about one inbox.
+
+        UNKNOWN PAINTS NOTHING. ``None`` means the store could not be read, and
+        the previous number is a statement about a store nobody can currently
+        see — a stale "3" is worse than no note, because the operator acts on it.
+        Clearing is therefore a deliberate write, not an early return.
+        """
+        sidebar = getattr(self, "_session_sidebar", None)
+        if sidebar is None:
+            return
+        if counts is None:
+            total = 0
+        else:
+            total = int(counts.get("unread_count") or 0) + int(
+                counts.get("waiting_unread_count") or 0
+            )
+        try:
+            sidebar.set_notifications_total(total)
+        except Exception:  # noqa: BLE001 — a footer fact never breaks a poll
+            logger.debug("could not paint the notifications note", exc_info=True)
+
     # -- the Librarian (``/librarian``) ------------------------------------
 
     def _cmd_librarian(self, arg: str, notice: NoticeFn) -> None:
@@ -39001,6 +39699,7 @@ class OperatorApp(App[None]):
             self._close_review_view,
             self._close_schedule_view,
             self._close_library_view,
+            self._close_notifications_view,
             self._close_projects_view,
             self._close_agent_form,
             self._close_team_form,
@@ -39254,6 +39953,7 @@ class OperatorApp(App[None]):
         self._close_review_view()
         self._close_import_view()
         self._close_library_view()
+        self._close_notifications_view()
         view = self._settings_view
         if view is None:
             return False
@@ -42026,7 +42726,9 @@ class OperatorApp(App[None]):
         """
         self._system_notice_block(body, kind)
 
-    def _system_notice_block(self, body: str, kind: NoticeKind = "info") -> NoticeBlock:
+    def _system_notice_block(
+        self, body: str, kind: NoticeKind = "info", *, fold_width: int = 0
+    ) -> NoticeBlock:
         """The same notice, handing back the block it created.
 
         One caller needs the block — the MCP failure notices re-run their signpost
@@ -42034,8 +42736,19 @@ class OperatorApp(App[None]):
         (``_refit_mcp_failure_notices``) — and that caller is a method on this app,
         so it calls this directly rather than widening the notice callback's type
         for every closure that produces nothing (review round 4, R4-5).
+
+        ``fold_width`` is the column this notice is ABOUT TO BE PAINTED IN, and
+        it has to come from the caller that resolved it: a notice wraps itself
+        when it is built, so a block authored without it folds at the 80-column
+        fallback and its ROW COUNT is pinned until ``on_resize`` lands a frame
+        later. That is not cosmetic here — the adaptive spacing rule asks whether
+        either neighbour ``spans_multiple_rows()``, so one frame of
+        narrow-authored rows puts a blank line above every one of them and the
+        next frame takes those rows (and the transcript's height) back. QA round
+        1, Q1 measured it on the real fixture: nine rows at ``[2,1,2,2,1,1,1,2,2]``
+        with ``gap-above`` on all of them, then all 1 row with one gap.
         """
-        block = NoticeBlock(body, kind)
+        block = NoticeBlock(body, kind, fold_width=fold_width)
         # While the boot CARD is up the notice is part of a centred composition;
         # below the card threshold the input is a full-width bar and the spine is
         # the axis everything shares. `_append_block` recomputes the boot layout
@@ -43227,8 +43940,15 @@ class OperatorApp(App[None]):
             self._cmd_accounts(notice)
         elif command == "/failovers":
             self._cmd_failovers(notice)
-        elif command == "/notifications":
+        elif command == "/unread":
+            # The completion-receipt listing's name (decision D2,
+            # docs/design/notifications-inbox.md §7): behaviour and receipt copy
+            # unchanged from the old `/notifications`.
             self._cmd_notifications(arg, notice)
+        elif command == "/notifications":
+            # The inbox page (lane L2). Frontend-LOCAL like `/library`: the
+            # rows are THIS machine's store, and the page is the receipt.
+            self._cmd_notifications_page(arg, notice)
         elif command == "/usage":
             self._cmd_usage(arg, notice)
         elif command == "/keys":
@@ -46072,6 +46792,17 @@ class OperatorApp(App[None]):
             self._welcome.refresh()
         if self._status is not None:
             self._status.refresh()
+        # Q2-1: the notifications page holds PAINTED rows, its header and its
+        # hint row between polls, and its 2 s poll only repaints when the STORE
+        # moved — so an open page kept the old language until an unrelated
+        # event (a key, a filter change, a new row) repainted it. Measured on
+        # the real app: the header stayed `通知 · 0条未读 · 0项待你处理` through a
+        # switch to ru and back to en, at 0.5 s, 3 s and 6 s. `_paint` is the
+        # same entry the poll uses, so a same-locale call is just one more
+        # paint of identical text.
+        view = self._notifications_view
+        if view is not None:
+            view._paint()
 
     def _apply_theme(self, name: str, *, preview: bool = False) -> None:
         """Switch every rendering surface to ``name``, live.
@@ -49108,8 +49839,8 @@ class OperatorApp(App[None]):
         word = arg.strip().casefold()
         if word not in ("", "read"):
             self._system_notice(
-                f"/notifications takes no such argument — got {arg!r}. "
-                "Send /notifications to list them, or /notifications read to mark them read.",
+                f"/unread takes no such argument — got {arg!r}. "
+                "Send /unread to list them, or /unread read to mark them read.",
                 "warning",
             )
             return
@@ -49263,7 +49994,7 @@ class OperatorApp(App[None]):
             # interpolating the exception would leak a path into a transcript.
             logger.exception("notifications: the receipt write failed")
             self._notice(
-                "/notifications could not clear the receipts, and nothing was cleared.",
+                "/unread could not clear the receipts, and nothing was cleared.",
                 "error",
             )
             return
@@ -50413,7 +51144,10 @@ class OperatorApp(App[None]):
         # the character. Returned in `_close_aside`. BEFORE the aside
         # placeholder: leaving bang-mode restores the resting invitation,
         # which would overwrite `Ask the aside…` if this ran after.
-        editor.set_allows_shell(False)
+        # Bang-mode AND the skill expansion go off together: the aside's
+        # submit returns before both, so a `$name` in a question is literal
+        # text — say so in the ink too.
+        editor.set_aside_owns(True)
         editor.placeholder = ASIDE_PLACEHOLDER
         # The command list is borrowed too, and returned in `_close_aside`.
         # `on_editor_submitted` routes a slash-shaped line to the aside as a
@@ -50538,7 +51272,7 @@ class OperatorApp(App[None]):
         self._aside_draft = None
         self._aside_draft_images = {}
         editor = self._editor()
-        editor.set_allows_shell(True)
+        editor.set_aside_owns(False)
         # The stashed draft comes back into the mode it was typed in: a
         # half-typed `!` command returned to a composer that silently left
         # bang-mode would send the command to the model on the next Enter.
@@ -51262,6 +51996,28 @@ class OperatorApp(App[None]):
             picker.set_notice("")
             return
         if message.command == "notifications":
+            # ONE row, the clearing form, under the `/unread` row's rule below:
+            # `alert=True` so the pre-selected only match is FILLED on the first
+            # Enter, never run — `/notifications ` + Enter is the keystroke a
+            # user reaches when they want to SEE the inbox. The page then asks
+            # its own y/n before anything is marked.
+            from local_operator.i18n.keys import tui_notifications as inbox_keys
+            from local_operator.i18n.text import tr as inbox_tr
+
+            picker.set_choices(
+                [
+                    ArgumentChoice(
+                        "read",
+                        inbox_tr("tui.notifications")(inbox_keys.arg_read()),
+                        alert=True,
+                    )
+                ]
+            )
+            picker.set_notice("")
+            return
+        if message.command == "unread":
+            # `/unread` is the completion-receipt listing's name (D2).
+            #
             # ONE row, and it is the clearing form — the bare command (which
             # lists) is what pressing Enter without a space already does, so
             # offering it here would be a row that restates the submit key.
@@ -55273,9 +56029,9 @@ class OperatorApp(App[None]):
     def _discovered_skills(self) -> dict[str, Skill]:
         """Discovered skills by name, rescanned only when the tree changed.
 
-        Read on EVERY submit to decide whether a leading ``$`` is an
-        invocation, so a bare rescan here would put a 17-25 ms filesystem walk
-        on the keystroke path. A ``roots_fingerprint`` probe (~0.29 ms) gates
+        Read on EVERY submit to decide whether a ``$name`` is an invocation,
+        so a bare rescan here would put a 17-25 ms filesystem walk on the
+        keystroke path. A ``roots_fingerprint`` probe (~0.29 ms) gates
         it instead: the walk runs only when a ``SKILL.md`` was added or edited.
 
         It used to cache for the whole session, justified by the rule that a
@@ -55416,80 +56172,91 @@ class OperatorApp(App[None]):
         return result.sent
 
     def _expand_invocation(
-        self, text: str, attachments: Mapping[int, Marked] | None = None
-    ) -> str | None:
-        """Expand a leading ``$skill``, splicing pastes into the REQUEST only.
+        self,
+        text: str,
+        attachments: Mapping[int, Marked] | None = None,
+        *,
+        region: SkillScanRegion | None = None,
+    ) -> _SkillExpansion | None:
+        """Attach the skill bodies this message names, or ``None`` for prose.
 
-        ``None`` means "not an invocation, send the text unchanged" — the
-        answer for ordinary prose, for ``$100``, and for any ``$word`` that is
-        not a discovered skill name. The body is read through the SAME
-        ``skill://`` resolver the ``read`` tool uses, so a manual invocation
-        and an agent-initiated read return byte-identical content, reference
-        listing included.
+        ``None`` means "nothing fired, send the text unchanged" — the answer for
+        ordinary prose, for ``$100``, and for any ``$name`` that is not a
+        discovered skill. The trigger itself is
+        :func:`local_operator.sigils.skill_mentions`, called through
+        :func:`local_operator.skills.invoke.plan_attachments`, so this method and
+        the composer's ink cannot disagree about which token fires.
 
-        A body that cannot be read is not a silent failure: the notice says so
-        and the raw text goes through untouched, because swallowing the user's
-        request would be the worse half of the trade.
+        **The scan reads the TYPED text**, with collapsed pastes still chips;
+        the payloads are spliced into the whole message afterwards. Both halves
+        matter:
 
-        **The ORDER is the whole point** (design §2.6). ``parse_invocation``
-        reads the TYPED text — the chip line, pastes still collapsed — and the
-        payloads go in afterwards, into ``invocation.request`` alone. Two
-        consequences, both wanted:
+        - A collapsed paste stays inert. Expanding first would let a pasted
+          document that merely quotes ``$research`` attach a skill nobody asked
+          for — the reason the old parser read the typed line too.
+        - Expansion never reaches a SKILL.md body, because the bodies are read
+          after the splice and appended as their own block.
 
-        - A draft that STARTS with ``[Paste #1, …]`` is not an invocation, and
-          must not become one. Expanding first and parsing after would let a
-          pasted document whose first line reads ``$research …`` fire a skill
-          nobody asked for.
-        - Expansion never reaches the SKILL.md body. That is the mirror of the
-          image defect ``on_compaction_ended`` records (a ``[Image #N]`` inside
-          a body shifted the citation positions and sent the attachments in the
-          wrong order): scoping the splice to the request closes the same hole
-          by construction rather than by hoping bodies never contain
-          ``[Paste #N]``.
+        THE NOTICES ARE PER SKILL and the message always sends. An empty body or
+        an unreadable one is named, and the remaining skills still attach; when
+        none attach the text goes as written. Swallowing the request would be the
+        worse half of the trade (``_expand_references`` strikes the same
+        bargain). Both sentences are the ones this method has always used,
+        unchanged, now that a message can carry more than one skill.
 
-        ``SkillInvocation`` is a ``NamedTuple``, so the request is swapped with
-        ``_replace`` and every other field — ``typed`` above all, which is what
-        replay repaints the user's row from — rides through untouched. The
-        ``invocation=`` attribute ``typed`` feeds therefore keeps the CHIP, and
-        must: it travels INSIDE the payload the model receives, so expanding it
-        would send the paste twice on every turn of that message's life, to fix
-        a transcript row (review round 2, MAJOR-2). The live row is put back on
-        the typed line instead, which is what makes it agree with replay.
+        A body is read through the SAME ``skill://`` resolver the ``read`` tool
+        uses, so a manual invocation and an agent-initiated read return
+        byte-identical content, reference listing included.
 
-        ``attachments`` is optional because a caller with no composer map behind
-        it still has a well-defined answer: nothing resolves, and the text goes
-        through as written.
+        ``region`` is the SURFACE gate computed by
+        :func:`command_picker.skill_scan_region` — the argument tail for a
+        `/team`-style command, the whole text otherwise. The main submit path
+        does not pass one because its own control flow has already established
+        that this is a plain prompt; the argument path passes the region it was
+        handed, so the ink and the expansion read the same slice.
         """
         skills = self._discovered_skills()
         if not skills:
             return None
         try:
-            from local_operator.skills.invoke import parse_invocation, render_invocation
-            from local_operator.skills.protocol import resolve_skill_url
-
-            invocation = parse_invocation(text, skills)
-            if invocation is None:
-                return None
-            invocation = invocation._replace(
-                request=expand_pastes(invocation.request, attachments or {})
+            from local_operator.skills.invoke import (
+                plan_attachments,
+                render_skill_block,
             )
-            body = resolve_skill_url(f"skill://{invocation.skill.name}", skills)
-            if not _skill_body_has_content(body):
-                # NOT a silent fall-through. Returning None here sends the raw
-                # `$research fix it` line as prose while the row on screen
-                # still reads like an invocation, so the user believes the
-                # skill fired and the model never saw it. An empty SKILL.md is
-                # the realistic cause (a stub someone has not written yet).
-                self._notice(
-                    f"skill `{invocation.skill.name}` has an empty body — sending your "
-                    "message as written",
-                    "warning",
-                )
-                return None
-            return render_invocation(invocation, body)
-        except Exception as exc:
+            from local_operator.skills.protocol import resolve_skill_url
+        except Exception as exc:  # noqa: BLE001 — send prose rather than nothing
             self._notice(f"could not load skill: {exc}", "warning")
             return None
+        segment = text if region is None else text[region.start : region.end]
+        planned = plan_attachments(segment, skills)
+        if not planned:
+            return None
+        entries: list[tuple[str, str]] = []
+        for attachment in planned:
+            name = attachment.skill.name
+            try:
+                body = resolve_skill_url(f"skill://{name}", skills)
+            except Exception as exc:  # noqa: BLE001 — one skill, not the message
+                self._notice(f"could not load skill: {exc}", "warning")
+                continue
+            if not _skill_body_has_content(body):
+                # NOT a silent fall-through. Skipping this body while sending
+                # the rest is right; skipping it in silence is not, because the
+                # row on screen reads like an invocation and the user would
+                # believe the skill fired.
+                self._notice(
+                    f"skill `{name}` has an empty body — sending your message as written",
+                    "warning",
+                )
+                continue
+            entries.append((name, body))
+        if not entries:
+            return None
+        return _SkillExpansion(
+            text=expand_pastes(text, attachments or {}),
+            skills=tuple(name for name, _ in entries),
+            block=render_skill_block(entries),
+        )
 
     def _skills_block(self) -> RichBlock | None:
         """Graceful introspection of the skills stream (exception-safe).
@@ -62828,10 +63595,18 @@ def _notifications_listing(
         # at 38 unread the short form named the ten rows above it while the write
         # covered all 38, one Enter away from a permanent clear of rows nobody
         # had seen (design round 1, D2).
+        # The command is `/unread` since decision D2; `/notifications read` now
+        # marks the INBOX read, so a receipt still naming it would send the
+        # reader to a different gesture over a different set. New keys in the
+        # English-only `tui.notifications` namespace rather than a reworded
+        # `tui.app` value, so the audited locale rows stay valid.
+        from local_operator.i18n.keys import tui_notifications as _inbox_keys
+
+        _inbox = tr("tui.notifications")
         if total > NOTIFICATIONS_LISTING_ROWS:
-            lines.append(_t(_x.notifications_mark_all_read(count=str(total))))
+            lines.append(_inbox(_inbox_keys.unread_mark_all(count=str(total))))
         else:
-            lines.append(_t(_x.notifications_mark_these_read()))
+            lines.append(_inbox(_inbox_keys.unread_mark_these()))
     return "\n".join(lines)
     return "\n".join(lines)
 
@@ -62927,7 +63702,7 @@ def _notifications_store_failure(
     )
 
     where = display_root(root)
-    action = "run /notifications read again" if clearing else "run /notifications again"
+    action = "run /unread read again" if clearing else "run /unread again"
     if failure is None:
         # No cause invented: the classifier does not own this, or it did not
         # reproduce when asked.

@@ -293,6 +293,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # so no id can contribute a separator or a ``..`` and none of these can name a path
     # under ``sessions/``. The files are DERIVED — the transcript is the truth, and a
     # deleted index is rebuilt by the next scan.
+    # -- notifications inbox store ------------------------------------------------------
+    # The quarantine renames a corrupt store ONE DIRECTORY OVER: the target is
+    # ``<config>/notifications.db.corrupt-<stamp>``, a sibling of the file it moves, and
+    # neither path is derived from a session id or can name anything under ``sessions/``.
+    # It runs only after sqlite has refused the file as a database, and the alternative to
+    # moving it is leaving a file every later open fails on.
+    # moving it is leaving a file every later open fails on (R5-1).
+    (
+        "local_operator/notifications/store.py::NotificationStore._quarantine",
+        "os.replace",
+        "Renames a corrupt <config>/notifications.db beside itself; no session path involved",
+    ),
     (
         "local_operator/code_requests/ledger.py::_write_json",
         "<path>.replace",
@@ -2610,6 +2622,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/tui/app.py::OperatorApp._close_team_form",
         "<path>.remove",
         "Textual TeamFormPage.remove unmounts the page; no filesystem path",
+    ),
+    (
+        "local_operator/tui/app.py::OperatorApp._close_notifications_view",
+        "<path>.remove",
+        "Textual NotificationsView.remove unmounts the page; no filesystem path",
     ),
     (
         "local_operator/tui/app.py::OperatorApp._close_review_view",

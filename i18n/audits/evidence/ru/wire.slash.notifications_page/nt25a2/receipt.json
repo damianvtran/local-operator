@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "audit_id": "nt25a2",
+  "locale": "ru",
+  "namespace": "wire.slash.notifications_page",
+  "record": "i18n/audits/evidence/ru/wire.slash.notifications_page/nt25a2/record.json",
+  "provenance": "Independent delta audit performed and bundle written by translation-auditor ffd16b7ff158, actual model openai/gpt-6-astra, 2026-10-25; original command output preserved.",
+  "hashes": {
+    "record.json": "76d315998c926fb47fe679ad631e9a9540d1b6fad91c0d3c52ff23085b4e9f71",
+    "report.md": "43b5b47a0234ed9623311db84bcf3f702fccabb2a1ffe0bddc8641072777a8c1",
+    "audit.log": "288fec4d6a8a11e123c5be1c422d5c0216526d944e188660b36311aa8053078b"
+  }
+}

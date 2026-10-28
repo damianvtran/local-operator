@@ -126,6 +126,7 @@ from local_operator.session.open_frame import (
     OPEN_FRAME_SNAPSHOT_BUDGET_S,
     align_page,
     build_frame,
+    late_index_stop,
     page_seq_bounds,
     paintable,
     served_bytes,
@@ -1388,6 +1389,41 @@ class DesktopSubscription:
     #: deadline is INSPECTABLE: a test asserts it and moves it past, instead of
     #: waiting ``RECONNECT_DWELL_S`` out.
     dwell_until: float = 0.0
+
+
+def _json_copy(value: Any) -> Any:
+    """A fresh copy of a JSON value, equal to ``json.loads(json.dumps(value))``.
+
+    WHY NOT THE ROUND TRIP (conversation-first-paint R5, 2026-10-27). The open
+    frame's ``_wire_rows`` used ``json.loads(entry.to_json())`` per row to copy
+    a cached page's payload before the frame steps edit it: 12 ms for a 200-row
+    page of the 51.7 MB fixture, on the event loop, before the snapshot. This
+    walks the same tree in ~3 ms.
+
+    WHY A COPY AT ALL: the page cache SHARES pages between requests
+    (``page_cache.TranscriptPageCache.get``), so a wire row must never alias the
+    cached entry. ``copy.deepcopy`` measured the same 12 ms as the round trip.
+
+    IDENTICAL TO THE ROUND TRIP, NOT MERELY CLOSE. A page payload comes from
+    ``json.loads`` of a journal line, so it is ``dict`` (str keys) / ``list`` /
+    scalars, and those are copied directly; a float is the same object, so its
+    ``repr`` (the wire spelling) cannot change. Anything else — a tuple, a
+    non-``str`` key, a subclass — is what the round trip NORMALISES, so that
+    subtree takes the round trip itself and keeps its exact old spelling.
+    """
+    kind = type(value)
+    if kind is dict:
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                return json.loads(json.dumps(value))
+            out[key] = _json_copy(item)
+        return out
+    if kind is list:
+        return [_json_copy(item) for item in value]
+    if kind is str or kind is int or kind is float or kind is bool or value is None:
+        return value
+    return json.loads(json.dumps(value))
 
 
 class DesktopSessionBridge:
@@ -4092,6 +4128,11 @@ class DesktopSessionBridge:
         cursor_missing = False
         cursor = before_id
         index: Any = None
+        # Per attempt: (rows prepended, that page's ``has_more``), so a late index
+        # can replay where the index-backed read stops (``late_index_stop``).
+        page_rows: list[tuple[int, bool]] = []
+        index_at_first_page = False
+        tail_read = before_id is None and through_id is None and around_id is None
         for attempt in range(OPEN_FRAME_MAX_RAW_PAGES):
             try:
                 page = await load_transcript_page(
@@ -4135,6 +4176,7 @@ class DesktopSessionBridge:
             if not rows:
                 break
             collected = rows + collected
+            page_rows.append((len(rows), page.has_more))
             if not collected:
                 break
             kept, reached = align_page(collected, limit, supplements=supplements)
@@ -4165,6 +4207,7 @@ class DesktopSessionBridge:
                 and around_id is None
             ):
                 index = await self._frame_index(deadline)
+                index_at_first_page = index is not None
             if (
                 index is not None
                 and len(paintable_rows) >= limit
@@ -4191,6 +4234,22 @@ class DesktopSessionBridge:
                 break
         if index is None:
             index = await self._frame_index(deadline)
+            if tail_read and not index_at_first_page:
+                # THE INDEX LANDED DURING THE HUNT (#3037 QA, O1; the relay twin
+                # carries the same rule): the facts will say ``ready``, so the rows
+                # must be the ones the index-backed read serves, not the blind
+                # hunt's overshoot the next read takes away.
+                stop = late_index_stop(
+                    [rows for rows, _more in page_rows],
+                    collected,
+                    index=index,
+                    limit=limit,
+                    supplements=supplements,
+                )
+                if stop is not None and stop < len(page_rows):
+                    collected = collected[-sum(rows for rows, _more in page_rows[:stop]) :]
+                    has_more = page_rows[stop - 1][1]
+                    order_pages = order_pages[:stop]
         # THE CUT IS APPLIED ONCE, HERE, AND IT IS THE CONTRACT ITSELF: at least
         # ``limit`` paintable rows, starting at a user row when one is in reach,
         # and exactly ``limit`` rows with ``head_reached=False`` when none is. A
@@ -4250,7 +4309,16 @@ class DesktopSessionBridge:
         second vocabulary for one screen.
         """
         return visible_transcript_rows(
-            [{**json.loads(entry.to_json()), "ts_source": "entry"} for entry in entries]
+            [
+                {
+                    "id": entry.id,
+                    "ts": entry.ts,
+                    "type": entry.type,
+                    "payload": _json_copy(entry.payload),
+                    "ts_source": "entry",
+                }
+                for entry in entries
+            ]
         )
 
     async def _frame_index(self, deadline: float) -> Any:

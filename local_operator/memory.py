@@ -16,6 +16,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import logging
 import os
 import re
 import shlex
@@ -35,6 +36,8 @@ from urllib.parse import parse_qs, urlsplit
 from local_operator.compaction.tokens import count_text_tokens
 from local_operator.redaction_shapes import match_shape_names
 from local_operator.supplements.denylist import is_sensitive
+
+logger = logging.getLogger(__name__)
 
 SESSION_EXPORT_NAME = "memory-session.jsonl"
 SCOPES = ("global", "session", "team", "agent")
@@ -988,6 +991,28 @@ _NOT_REPLACED_SQL = (
     "AND p.scope=c.scope AND p.owner=c.owner "
     "AND child.scope=c.scope AND child.owner=c.owner)"
 )
+
+
+@dataclass
+class _EchoBatch:
+    """Per-batch indexes :meth:`MemoryStore._compacted_echo` reads, built once.
+
+    ``arriving`` resolves a parent that is a same-entity op of this batch;
+    ``children`` finds a cross-entity child whose edge is not stored yet.
+    """
+
+    arriving: dict[str, list[dict[str, Any]]]
+    children: dict[str, set[str]]
+
+    @classmethod
+    def of(cls, batch: list[dict[str, Any]]) -> _EchoBatch:
+        arriving: dict[str, list[dict[str, Any]]] = {}
+        children: dict[str, set[str]] = {}
+        for op in batch:
+            arriving.setdefault(op["entity_id"], []).append(op)
+            for parent in op["parents"]:
+                children.setdefault(parent, set()).add(op["entity_id"])
+        return cls(arriving, children)
 
 
 class MemoryStore:
@@ -2712,6 +2737,8 @@ class MemoryStore:
                 tombs = {op["entity_id"] for op in batch if op["kind"] == "tombstone"}
             changed: set[str] = set()
             filled_gap = False
+            dropped = 0
+            echo_batch = _EchoBatch.of(batch)
             owners: set[tuple[str, str]] = (
                 {("session", self.identity.session_id)} if portable else set()
             )
@@ -2745,10 +2772,23 @@ class MemoryStore:
                     conflict = self._move_tombstone_conflict(db, op, old_ops)
                     if conflict:
                         raise MemoryError(conflict)
+                echo = self._compacted_echo(db, op, old_ops, echo_batch)
                 if contiguous:
                     seq = self._seq_high_water(db, op["origin_device"]) + 1
-                    if op["seq"] != seq:
+                    # A dropped echo at or below the floor is a re-send of history
+                    # this store already accounted for: idempotent, like the
+                    # held-op dedup above, never a gap.
+                    if op["seq"] != seq and not (echo and op["seq"] < seq):
                         raise MemoryError("Memory sequence gap; refresh peer state and retry.")
+                if echo:
+                    # Accepted, not stored: the seq is still evidence of the origin's
+                    # counter, so the floor moves exactly as for an insert and the next
+                    # contiguous arrival from this origin is not refused as a gap. No
+                    # `filled_gap`: nothing below a peer's cursor was added, so bumping
+                    # `stream-generation` would only make every peer resend everything.
+                    dropped += 1
+                    self._note_seq(db, op["origin_device"], op["seq"])
+                    continue
                 if len(old_ops) >= MAX_REVISIONS and op["kind"] != "tombstone":
                     raise MemoryError("Memory revision cap reached; no conflicts discarded.")
                 previous_max = self._seq_high_water(db, op["origin_device"])
@@ -2805,11 +2845,97 @@ class MemoryStore:
                     if directory and directory.is_dir():
                         self._export(db, owner, directory)
             db.commit()
+            if dropped:
+                # Counts only: op ids/entities are local identifiers with no place in a log.
+                logger.info("memory apply_ops dropped_compacted=%d of %d", dropped, len(batch))
             if tombs:
                 db.execute("INSERT INTO recall(recall) VALUES ('optimize')")
                 db.commit()
                 db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             return len(changed)
+
+    def _compacted_echo(
+        self,
+        db: sqlite3.Connection,
+        op: dict[str, Any],
+        old_ops: list[dict[str, Any]],
+        batch: _EchoBatch,
+    ) -> bool:
+        """Whether ``op`` (absent here) is a put compaction removed and must not re-admit.
+
+        WHY: ``apply_ops`` dedups by op id alone, so an op :meth:`compact` deleted
+        looks NEW the next time a peer that still holds it pushes it. Measured on
+        the 10-24 compaction: one peer re-sent 22,551 of the 25,192 dropped ops
+        within ~100 minutes (22,403 redacted puts under tombstones, 148 superseded
+        revisions), undoing the pass and bumping ``stream-generation`` per batch.
+
+        THE RULE: a put for an entity with a STORED tombstone. ``_reindex`` returns
+        before writing ``current`` for a tombstoned entity, ``show`` and
+        ``_move_tombstone_conflict`` return early for one, so the put is unreachable
+        by every reader of ITS entity. A tombstone that is only in this batch does
+        not count: ``_move_tombstone_conflict`` would then judge that tombstone
+        against a head set missing the put, and could let a move erase a sibling it
+        should have refused.
+
+        WHAT THIS GUARANTEES, and no more: the drop changes nothing any reader sees
+        now or after any later op, so two stores that exchange ops converge exactly
+        as they did without the filter. It is NOT "equivalent to admit-then-compact":
+        compaction may delete what a LATER op still needs; ingress must not. So the
+        put is still admitted when it may be one half of a cross-entity edge — the
+        only way a reader outside the dead entity resolves it by op id:
+
+        * a parent this store cannot resolve to the same entity, stored or in this
+          batch. The put is redacted, so ``replaces`` is unreadable; an unknown parent
+          may be the head of a LIVE fact this forgotten put replaced, and
+          ``_NOT_REPLACED_SQL`` stops hiding that fact if the child row is missing
+          when its head arrives later. Measured on the incident echo: 1,288 of
+          22,403 dead puts arrive with an unresolvable parent (all same-entity
+          revisions compaction removed), so this costs ~6% of the saving.
+        * a stored or in-batch child in another entity, or a known parent in one.
+        * a parent of a stored move-shaped tombstone (one naming a parent outside
+          this entity): a move's destination put may still arrive, and
+          ``show().moved_from`` reads the source head through that edge.
+
+        WHY SUPERSEDED REVISIONS OF LIVE ENTITIES ARE DELIBERATELY NOT DROPPED (the
+        other 148 of the echo; review round 1 on PR #3058, M1 and M2). A revision
+        with a stored descendant is unreadable today, but two readers resolve a
+        revision by op id when a LATER op names it: ``_NOT_REPLACED_SQL`` joins the
+        parent row of a ``replaces`` edge, and ``_move_tombstone_conflict`` counts a
+        move tombstone's same-entity parents as "covered". Dropping the revision
+        makes a later replacement fail to hide its target, and lets a later move
+        erase a correction the mover never saw — on this peer only, permanently.
+        Re-adding that rule needs a persisted ``(op_id -> entity_id)`` ledger of
+        dropped revisions (and ideally of compaction victims), consulted by BOTH
+        readers so a dropped parent resolves as covered/replaced rather than
+        unknown. Without it, do not drop a put of a live entity here.
+
+        Cost: one stored-entity read the caller already did, at most two indexed
+        lookups, and the entity's stored ops — never a store-wide walk.
+        """
+        if op["kind"] != "put" or not any(x["kind"] == "tombstone" for x in old_ops):
+            return False
+        entity, op_id = op["entity_id"], op["op_id"]
+        own = {existing["op_id"] for existing in old_ops} | {
+            other["op_id"] for other in batch.arriving[entity]
+        }
+        if any(parent not in own for parent in op["parents"]):
+            return False
+        if any(child_entity != entity for child_entity in batch.children.get(op_id, ())):
+            return False
+        if db.execute(
+            "SELECT 1 FROM causal_edges e JOIN ops c ON c.op_id=e.op_id "
+            "WHERE e.parent=? AND c.entity_id<>? LIMIT 1",
+            (op_id, entity),
+        ).fetchone():
+            return False
+        for tomb in old_ops:
+            if (
+                tomb["kind"] == "tombstone"
+                and op_id in tomb["parents"]
+                and any(parent not in own and parent != op_id for parent in tomb["parents"])
+            ):
+                return False
+        return True
 
     def import_session(self) -> None:
         if not self.session_dir or not self.identity.session_id:

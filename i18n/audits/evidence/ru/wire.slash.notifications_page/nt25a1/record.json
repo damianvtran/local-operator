@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "audit_id": "nt25a1",
+  "audit_kind": "independent_current_byte_namespace_audit",
+  "locale": "ru",
+  "namespace": "wire.slash.notifications_page",
+  "audit_date": "2026-10-25",
+  "audited_revision": "329b5c581784df1082dbd0630c0f814c7a3c0c8f",
+  "source_audit_revision": "3c16a9e77c63dce7082af6137e151421b6cbf2be",
+  "key_count": {
+    "en": 1,
+    "target": 1
+  },
+  "verdict": "changes_requested",
+  "verdict_reason": "Complete side-by-side semantic audit; see findings and actual mechanical output.",
+  "auditor": {
+    "agent": "translation-auditor",
+    "instance": "ffd16b7ff158",
+    "session": "ffd16b7ff158",
+    "model": "openai/gpt-6.1-sol",
+    "independence": "Independent auditor; authored none of the target translations or implementation. No catalogue edits made.",
+    "actual_model_source": "Latest session model-switch message: openai/gpt-6.1-sol, temporary quota fallback after anthropic/claude-sonnet-5-5; original requested model anthropic/claude-opus-5-5."
+  },
+  "translator": {
+    "agent": "L1-core-notify coder",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-10-25"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.json",
+      "sha256": "9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594"
+    },
+    "en_context_sidecar": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.context.json",
+      "sha256": "2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ru/wire.slash.notifications_page.json",
+      "sha256": "d1f0996ee378123fce3ffe0a42ba30818020c2f8e8bbd30db48486b9bfa64076"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "artifacts": [
+    "report.md",
+    "audit.log",
+    "receipt.json"
+  ],
+  "audit_log": {
+    "path": "audit.log",
+    "state": "present",
+    "command": "node /Users/damian/.local-operator/sessions/ffd16b7ff158/scratchpad/audit-ru.mjs wire.slash.notifications_page core",
+    "exit_code": 0
+  },
+  "findings": [
+    {
+      "id": "R5",
+      "key": "wire.slash.notifications_page.help",
+      "severity": "major",
+      "current": "Вопросы и новости агентов; read — всё прочитано",
+      "proposed": "Запросы, обновления; read помечает всё прочитанным",
+      "reason": "News (новости) changes the feature meaning and drifts from UI Обновления; Asks also drift from UI Запросы. The command description must describe marking all read, not merely state everything is read. Proposed text preserves literal read and measures exactly 50 cells."
+    }
+  ],
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 1,
+    "blocker": 0,
+    "major": 1,
+    "minor": 0,
+    "nit": 0,
+    "rejected": 0,
+    "findings_total": 1
+  },
+  "limitations": [
+    "LLM textual audit, not a native-speaker attestation.",
+    "No browser/rendered-fit validation; design/QA own rendered evidence.",
+    "Mechanical parser check uses the UI repository installed @formatjs/icu-messageformat-parser and intl-messageformat, without dependency installation. Unique typed-argument signatures are compared; plural category additions are intentional; exact =0/=1 and select false/other inspected in source and samples."
+  ]
+}
