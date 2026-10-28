@@ -915,11 +915,11 @@ def test_only_desktop_posture_reads_the_desktop_environment() -> None:
     """
     package = Path(desktop.__file__).resolve().parent.parent
     offenders: list[str] = []
-    # ``capture_launch_token`` is the one other reader, and it is not a gate: it
-    # runs once at ``lop serve`` boot to take the bearer OUT of the environment
-    # (so no model child inherits it, #3022 QA r1 Q1) and hands the value to
-    # ``desktop_posture``, which stays the only function that DECIDES the posture.
-    allowed = {Path(desktop.__file__).resolve(): {"desktop_posture", "capture_launch_token"}}
+    # ``adopt_spawn_bearer`` is the second reader, and it is the one that REMOVES the value:
+    # it moves the spawner's bearer out of ``os.environ`` into the module state
+    # ``desktop_posture`` reads, at serve start-up (operator ask a-772b). Same module, same
+    # single source of truth; it answers no gate question itself.
+    allowed = {Path(desktop.__file__).resolve(): {"desktop_posture", "adopt_spawn_bearer"}}
     for path in sorted(package.rglob("*.py")):
         relative = path.resolve().relative_to(package.parent).as_posix()
         for function, line in _env_reads_by_function(path):

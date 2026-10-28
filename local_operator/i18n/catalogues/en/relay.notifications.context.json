@@ -1,0 +1,433 @@
+{
+  "relay.notifications.title": {
+    "role": "screen title and drawer destination",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). The page heading and the navigation drawer row. One noun: the inbox of agent questions and updates across all conversations. Not OS push notifications.",
+    "maxCells": 24
+  },
+  "relay.notifications.back": {
+    "role": "back button accessible name",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Screen-reader name of the ‹ button that returns from the inbox to the conversation list."
+  },
+  "relay.notifications.select": {
+    "role": "header text button",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Enters multi-select mode so several rows can be marked read or dismissed at once.",
+    "maxCells": 12
+  },
+  "relay.notifications.filter.label": {
+    "role": "filter group accessible name",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). aria-label of the Unread/All chip group."
+  },
+  "relay.notifications.filter.unread": {
+    "role": "filter chip with count",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Chip that shows only unread items; {count} is the number of rows this tab lists (unread updates plus every open question). Keep the middle dot separator.",
+    "maxCells": 16
+  },
+  "relay.notifications.filter.unread_plain": {
+    "role": "filter chip without count",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Same chip before its count is known, or while the All tab is selected.",
+    "maxCells": 12
+  },
+  "relay.notifications.filter.all": {
+    "role": "filter chip",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Chip that shows read and unread items (dismissed ones are hidden).",
+    "maxCells": 10
+  },
+  "relay.notifications.section.waiting": {
+    "role": "list section header with count",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Pinned group of open questions agents are blocked on, across all conversations. {count} is the number of questions. Keep the middle dot separator.",
+    "maxCells": 28
+  },
+  "relay.notifications.section.today": {
+    "role": "list section header",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Day group for items updated today.",
+    "maxCells": 16
+  },
+  "relay.notifications.section.yesterday": {
+    "role": "list section header",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Day group for items updated yesterday.",
+    "maxCells": 16
+  },
+  "relay.notifications.section.earlier": {
+    "role": "list section header",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Day group for anything older than yesterday.",
+    "maxCells": 16
+  },
+  "relay.notifications.age.now": {
+    "role": "relative time",
+    "tone": "lowercase, terse",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Item age under a minute. Lowercase in English because it follows a source name after a middle dot.",
+    "maxCells": 12
+  },
+  "relay.notifications.age.minutes": {
+    "role": "relative time",
+    "tone": "terse abbreviation",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Item age in minutes; # is the number. Terse, after a middle dot.",
+    "maxCells": 12
+  },
+  "relay.notifications.age.hours": {
+    "role": "relative time",
+    "tone": "terse abbreviation",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Item age in hours; # is the number. Terse, after a middle dot.",
+    "maxCells": 12
+  },
+  "relay.notifications.age.days": {
+    "role": "relative time",
+    "tone": "terse",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Item age in days; # is the number.",
+    "maxCells": 14
+  },
+  "relay.notifications.row.high": {
+    "role": "priority chip",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Small warning-coloured chip on a high-priority update row.",
+    "maxCells": 8
+  },
+  "relay.notifications.row.repeat": {
+    "role": "repeat count chip",
+    "tone": "symbol + number",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). An update that was re-posted several times collapses to one row; {count} is how many times. Keep the × sign.",
+    "maxCells": 6
+  },
+  "relay.notifications.row.meta": {
+    "role": "row second line",
+    "tone": "no sentence punctuation",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). {source} is the conversation name, {age} a relative time from the age.* keys. Keep the middle dot."
+  },
+  "relay.notifications.row.unknown_source": {
+    "role": "fallback conversation name",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Shown when the item's conversation has no title or is gone."
+  },
+  "relay.notifications.row.a11y": {
+    "role": "row accessible name",
+    "tone": "Sentence case; full sentence with a period where the English has one.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Screen-reader name of a whole row. state select: unread adds 'Unread. '; priority select: high adds 'High priority. '. {title} is the agent's title, {source} the conversation, {age} a relative time. Keep the select arms and spacing."
+  },
+  "relay.notifications.row.dismiss": {
+    "role": "icon button accessible name",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Name of the ✕ that dismisses one update; {title} is the item title."
+  },
+  "relay.notifications.row.answer": {
+    "role": "icon button accessible name",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Name of the › on a question row; opens the Questions sheet to answer it. {title} is the question."
+  },
+  "relay.notifications.row.select": {
+    "role": "checkbox-like row name in selection mode",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). {title} is the item title; the row toggles its selection."
+  },
+  "relay.notifications.mark_all": {
+    "role": "text button",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Marks every loaded unread item read, after a confirmation.",
+    "maxCells": 20
+  },
+  "relay.notifications.confirm.mark_all": {
+    "role": "confirmation title",
+    "tone": "Sentence case; full sentence with a period where the English has one.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). ICU plural over the number of items to be marked read."
+  },
+  "relay.notifications.confirm.mark_all_body": {
+    "role": "confirmation body",
+    "tone": "Sentence case; full sentence with a period where the English has one.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Explains the safety bound: only what the screen has loaded is marked; anything arriving later stays unread."
+  },
+  "relay.notifications.confirm.dismiss_session": {
+    "role": "confirmation title",
+    "tone": "Sentence case; full sentence with a period where the English has one.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Dismiss every update from one conversation; plural over the count; {source} is the conversation name."
+  },
+  "relay.notifications.confirm.dismiss_session_body": {
+    "role": "confirmation body",
+    "tone": "Sentence case; full sentence with a period where the English has one.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Open questions cannot be dismissed here, and later arrivals are untouched."
+  },
+  "relay.notifications.confirm.cancel": {
+    "role": "button",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Cancels a confirmation.",
+    "maxCells": 12
+  },
+  "relay.notifications.confirm.read": {
+    "role": "button",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Confirms marking items read.",
+    "maxCells": 14
+  },
+  "relay.notifications.confirm.dismiss": {
+    "role": "button",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Confirms dismissing items (danger style).",
+    "maxCells": 12
+  },
+  "relay.notifications.select.count": {
+    "role": "selection header",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). {count} is the number of selected rows.",
+    "maxCells": 16
+  },
+  "relay.notifications.select.read": {
+    "role": "bottom bar button",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Marks the selected rows read.",
+    "maxCells": 10
+  },
+  "relay.notifications.select.dismiss": {
+    "role": "bottom bar button",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Dismisses selected updates; {count} counts only rows that can be dismissed (questions are skipped).",
+    "maxCells": 14
+  },
+  "relay.notifications.select.cancel": {
+    "role": "button",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Leaves selection mode.",
+    "maxCells": 12
+  },
+  "relay.notifications.load_more": {
+    "role": "button",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Loads the next page of older items.",
+    "maxCells": 16
+  },
+  "relay.notifications.loading": {
+    "role": "loading state accessible name",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Announced while the first page loads (skeleton rows)."
+  },
+  "relay.notifications.empty.caught_up.title": {
+    "role": "empty state title",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Unread tab with nothing unread.",
+    "maxCells": 24
+  },
+  "relay.notifications.empty.caught_up.body": {
+    "role": "empty state body",
+    "tone": "Sentence case; full sentence with a period where the English has one.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Reassures that nothing is waiting across conversations."
+  },
+  "relay.notifications.empty.caught_up.show_all": {
+    "role": "button",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Switches to the All tab.",
+    "maxCells": 24
+  },
+  "relay.notifications.empty.none.title": {
+    "role": "empty state title",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). All tab, inbox has never had anything.",
+    "maxCells": 28
+  },
+  "relay.notifications.empty.none.body": {
+    "role": "empty state body",
+    "tone": "Sentence case; full sentence with a period where the English has one.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Explains what will appear here."
+  },
+  "relay.notifications.error.load": {
+    "role": "error title",
+    "tone": "Sentence case; full sentence with a period where the English has one.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). First load failed; the page body is replaced by this and a retry button."
+  },
+  "relay.notifications.error.refresh": {
+    "role": "inline error",
+    "tone": "Sentence case; full sentence with a period where the English has one.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). A refresh failed while a list is shown: the stale list stays, writes pause. {time} is a local clock time of the last good read."
+  },
+  "relay.notifications.error.write": {
+    "role": "receipt error",
+    "tone": "Sentence case; full sentence with a period where the English has one.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). A write failed and nothing changed; {reason} is either error.unreachable or the server's own sentence."
+  },
+  "relay.notifications.error.unreachable": {
+    "role": "error clause",
+    "tone": "lowercase clause",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Inserted as {reason} in error.write when the computer running Local Operator could not be reached. Lowercase clause, no final period."
+  },
+  "relay.notifications.error.retry": {
+    "role": "button",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Retries a failed load.",
+    "maxCells": 14
+  },
+  "relay.notifications.receipt.read": {
+    "role": "receipt",
+    "tone": "terse, no final period",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). After marking read; # is the number changed. Parts of one receipt are joined with ' · '."
+  },
+  "relay.notifications.receipt.unread": {
+    "role": "receipt",
+    "tone": "terse, no final period",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). After marking unread; # is the number changed."
+  },
+  "relay.notifications.receipt.dismissed": {
+    "role": "receipt",
+    "tone": "terse, no final period",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). After dismissing; # is the number changed. Undo appears beside it."
+  },
+  "relay.notifications.receipt.restored": {
+    "role": "receipt",
+    "tone": "terse, no final period",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). After Undo or Restore brought dismissed items back."
+  },
+  "relay.notifications.receipt.nothing": {
+    "role": "receipt",
+    "tone": "terse, no final period",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). A write that changed nothing and skipped nothing."
+  },
+  "relay.notifications.receipt.live_ask": {
+    "role": "receipt clause",
+    "tone": "terse, no final period",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Open questions skipped by a dismiss; they stay until answered."
+  },
+  "relay.notifications.receipt.stale": {
+    "role": "receipt clause",
+    "tone": "terse, no final period",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Items that were updated after the reader looked, so the write left them unchanged (safety)."
+  },
+  "relay.notifications.receipt.gone": {
+    "role": "receipt clause",
+    "tone": "terse, no final period",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Items the store no longer has (removed elsewhere)."
+  },
+  "relay.notifications.receipt.already": {
+    "role": "receipt clause",
+    "tone": "terse, no final period",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Items already in the requested state."
+  },
+  "relay.notifications.receipt.undo": {
+    "role": "action button in receipt",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Reverts the write that produced the receipt.",
+    "maxCells": 8
+  },
+  "relay.notifications.detail.back": {
+    "role": "back button name",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Returns from one item to the inbox list.",
+    "maxCells": 24
+  },
+  "relay.notifications.detail.loading": {
+    "role": "loading text",
+    "tone": "Sentence case; full sentence with a period where the English has one.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Shown while one item loads."
+  },
+  "relay.notifications.detail.kind": {
+    "role": "detail eyebrow",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). priority select high/normal/other(low); kind select ask(question)/other(update). Keep the middle dot.",
+    "maxCells": 32
+  },
+  "relay.notifications.detail.open_conversation": {
+    "role": "primary button",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Opens the conversation the item came from.",
+    "maxCells": 24
+  },
+  "relay.notifications.detail.mark_read": {
+    "role": "button",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Marks this item read.",
+    "maxCells": 14
+  },
+  "relay.notifications.detail.mark_unread": {
+    "role": "button",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Marks this item unread again.",
+    "maxCells": 14
+  },
+  "relay.notifications.detail.dismiss": {
+    "role": "button",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Dismisses this update (danger style).",
+    "maxCells": 12
+  },
+  "relay.notifications.detail.restore": {
+    "role": "button",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Brings a dismissed update back.",
+    "maxCells": 12
+  },
+  "relay.notifications.detail.dismissed": {
+    "role": "status notice",
+    "tone": "Sentence case; full sentence with a period where the English has one.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Shown on a dismissed item's detail."
+  },
+  "relay.notifications.detail.section.anchor": {
+    "role": "section heading",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). The transcript excerpt where the agent raised this item.",
+    "maxCells": 28
+  },
+  "relay.notifications.detail.section.links": {
+    "role": "section heading",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Links the agent attached.",
+    "maxCells": 16
+  },
+  "relay.notifications.detail.section.waiting": {
+    "role": "section heading",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Open questions in the same conversation.",
+    "maxCells": 40
+  },
+  "relay.notifications.detail.waiting.answer": {
+    "role": "button",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Opens the Questions sheet to answer them.",
+    "maxCells": 24
+  },
+  "relay.notifications.detail.section.from": {
+    "role": "section heading",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). The source conversation card.",
+    "maxCells": 12
+  },
+  "relay.notifications.detail.from.state": {
+    "role": "conversation state",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). state select: live = Running, other = Not running.",
+    "maxCells": 16
+  },
+  "relay.notifications.detail.from.dismiss_all": {
+    "role": "button",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Starts dismissing every update from this conversation (confirmed first).",
+    "maxCells": 40
+  },
+  "relay.notifications.detail.section.projects": {
+    "role": "section heading",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Projects linked to the conversation.",
+    "maxCells": 24
+  },
+  "relay.notifications.detail.section.history": {
+    "role": "section heading",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Earlier revisions of a repeated update.",
+    "maxCells": 24
+  },
+  "relay.notifications.detail.missing.title": {
+    "role": "empty state title",
+    "tone": "Sentence case; no trailing period on a label.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). The item no longer exists (404).",
+    "maxCells": 32
+  },
+  "relay.notifications.detail.missing.body": {
+    "role": "empty state body",
+    "tone": "Sentence case; full sentence with a period where the English has one.",
+    "note": "Owned relay SPA copy for the phone-browser Notifications inbox (#/notifications; docs/design/notifications-inbox.md §9). Explains why it is gone."
+  }
+}

@@ -5202,6 +5202,14 @@ class MobileDaemon:
         # runtime spawn outside ``launch._spawn_runtime``, so it does not get
         # that function's scrub (review round 1, M1).
         env.pop(ENGAGED_ENV, None)
+        # The desktop bearer, for the same reason as the claim above: the viewer's spawn in
+        # ``launch._spawn_runtime`` scrubs it and this one did not (#3002 review r2, R2-1).
+        # A mobile daemon started from inside a desktop-owned tree would otherwise put the
+        # bearer into this runtime's exec-time environment, where ``ps -E`` -- and so any
+        # tool child of the session -- can read it (``agent_shell.DAEMON_BEARER_ENVS``).
+        from local_operator.agent_shell import without_daemon_bearer
+
+        without_daemon_bearer(env)
         # BOTH name axes, exactly as the viewer's own spawn in
         # ``session/runtime/launch.py`` does — this is the PHONE-started runtime,
         # and until now it was the one session start with no branding at all, so

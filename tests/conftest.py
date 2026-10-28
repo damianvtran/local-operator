@@ -89,6 +89,13 @@ _AMBIENT_VARS = (
     # rather than by each test remembering.
     "LOCAL_OPERATOR_NO_DESKTOP_LAUNCH",
     "LOCAL_OPERATOR_DESKTOP_TOKEN",
+    # The DESCRIPTOR channel for the same bearer (``server/desktop.TOKEN_FD_ENV``,
+    # #3039): a number naming an inherited pipe the daemon reads its bearer from at
+    # serve start-up. Scrubbed, not explained as harmless: an inherited value names a
+    # real descriptor of the parent process (a desktop-launched shell carries one), so
+    # a test calling ``adopt_spawn_bearer`` would read -- and close or ``dup2`` over --
+    # whatever that fd is in pytest, and open the plane on a token no test chose.
+    "LOCAL_OPERATOR_DESKTOP_TOKEN_FD",
     "LOCAL_OPERATOR_DESKTOP_ORIGINS",
     # The static-route root allowlist (``server/utils/static_roots.ROOTS_ENV``),
     # a directory list that WIDENS what the server will serve. An inherited value
@@ -1148,6 +1155,7 @@ def reset_desktop_launch_capture() -> Iterator[None]:
     """Give every test a process whose desktop bearer has not been captured.
 
     ``lop serve`` takes ``LOCAL_OPERATOR_DESKTOP_TOKEN`` out of the environment
+    (``desktop.adopt_spawn_bearer``)
     once per process (``server.desktop.capture_launch_token``) and latches the
     value; ``tests/unit/test_cli_serve.py`` runs ``serve_command`` in-process,
     so without this a later test's ``monkeypatch.setenv`` of the token would be
@@ -1156,9 +1164,9 @@ def reset_desktop_launch_capture() -> Iterator[None]:
 
     from local_operator.server import desktop
 
-    desktop._LAUNCH_TOKEN = None
+    desktop._SPAWN_BEARER = None
     yield
-    desktop._LAUNCH_TOKEN = None
+    desktop._SPAWN_BEARER = None
 
 
 @pytest.fixture(autouse=True)

@@ -152,6 +152,34 @@ _OVERLAP_MIN_CHARS = 200
 #: here — imported lazily by the factory or by something it calls, and never at
 #: module scope (see ``test_import_graph.py``, which pins that importing this
 #: module stays off these stacks).
+#:
+#: ``teams`` is the OPEN's cost rather than the factory's, and it is named here
+#: deliberately instead of relying on the closure that happens to pull it today:
+#: a cold open of a team-bound conversation resolves the manager's identity from
+#: the registry (``AttachedSession._cold_team_manager`` -> ``team_registry``),
+#: and ``import local_operator.teams`` measured 148.3 ms cold, 0.2 ms once
+#: resident (2026-10-27, a fresh interpreter, a loaded 10-core box). It is
+#: covered transitively by ``local_operator.tools.registry`` below — via
+#: ``tools/team_tool.py``'s module-scope import — which is exactly why it must
+#: ALSO be named: otherwise the open of a conversation that has no tools in play
+#: depends on another entry's incidental closure, and the first tool module that
+#: drops its team import silently re-opens the stall.
+#:
+#: THE REST OF THE OPEN-PATH GROUP below is the same shape of finding, measured
+#: the same way: a real cold open (``AttachedSession.cold`` over a 10,376-row
+#: transcript whose checkpoint names an active team) imports these modules for
+#: the first time — the prices and monitors tables, the mesh identity/placement
+#: a peer row is rendered from, and the tail anchor the page joins on — and each
+#: cost 5-10 ms cold against 0.0 ms warm. They qualify for this list by the rule
+#: the docstring states: no module-scope side effect (checked with an AST scan
+#: of every one), no heavy dependency chain, and no path that imports them at
+#: module scope (``test_import_graph.py``'s guards stay green).
+#:
+#: DELIBERATELY NOT warmed, and the reason is the rule rather than the cost: the
+#: cold open's ``local_operator.secrets.*`` group (~44 ms including the crypto
+#: stack), and the reveal path's `local_operator.tunnels.gateway` + ``jwt``
+#: (~500 ms cumulative). Both are heavy chains, and the tunnels one is a layering
+#: defect worth fixing where it is imported rather than paying for at every boot.
 _WARM_IMPORTS: tuple[str, ...] = (
     "mcp",
     "httpx",
@@ -162,9 +190,15 @@ _WARM_IMPORTS: tuple[str, ...] = (
     "local_operator.mcp.manager",
     "local_operator.model.configure",
     "local_operator.model.discovery",
+    "local_operator.model.prices",
+    "local_operator.monitors.store",
+    "local_operator.network.credentials.placement",
+    "local_operator.network.identity",
     "local_operator.providers.auth_store",
     "local_operator.session.session",
+    "local_operator.session.tail_anchor",
     "local_operator.skills.discovery",
+    "local_operator.teams",
     "local_operator.tools.registry",
 )
 
@@ -1271,8 +1305,43 @@ and write files. Those tools are genuinely unreachable in this session, not
 merely discouraged -- if a call is refused, say so and offer the manual path
 instead of retrying.
 
+Do not pass `scope`; everything you write is saved to the operator's account.
+
 Prefer the smallest change that answers the request, and prefer reporting what
 you did over asking permission you cannot be given."""
+
+
+def is_config_run_dir(session_dir: Path) -> bool:
+    """Whether ``session_dir`` is a CONFIGURATION RUN, by its two durable witnesses.
+
+    A purpose marker of ``agents-config`` OR an origin of ``agent-config``: either
+    one is enough, which is what makes every reader FAIL CLOSED on a damaged
+    marker (see :func:`apply_config_run_shape` for why the origin is the second
+    witness rather than a fallback). ONE predicate for both halves of the run's
+    boundary the composition root applies -- the registry scoping in ``_prepare``
+    and the tool declaration after construction -- because two copies of the
+    test would let a run be bounded by one and not the other.
+
+    NOT read by the viewer: ``session/attached.py``'s lazy registries still wrap
+    a run's registries in the conversation scope. That is deliberately left
+    alone and harmless: the run's own registries are unscoped, so ``<run>/roles``
+    is never written and the scoped view equals the account view, while the
+    page's own writes name ``scope='global'``. Routing the viewer through this
+    predicate is a viewer change with its own surface (``/agent`` and ``/team`` on
+    a cold session), not part of this fix.
+
+    Reads two small sidecars and never raises: both readers are tolerant by
+    contract, and an ordinary session (neither record) answers ``False``.
+    """
+    from local_operator.resume import ORIGIN_AGENT_CONFIG, session_origin
+    from local_operator.session.retention import (
+        AGENTS_CONFIG_PURPOSE,
+        read_desktop_purpose,
+    )
+
+    if read_desktop_purpose(session_dir) == AGENTS_CONFIG_PURPOSE:
+        return True
+    return session_origin(session_dir) == ORIGIN_AGENT_CONFIG
 
 
 def apply_config_run_shape(session: Any) -> bool:
@@ -1309,17 +1378,15 @@ def apply_config_run_shape(session: Any) -> bool:
     directory = getattr(getattr(session, "transcript", None), "directory", None)
     if not directory:
         return False
-    from local_operator.resume import ORIGIN_AGENT_CONFIG, session_origin
     from local_operator.session.retention import (
         AGENTS_CONFIG_PURPOSE,
         read_desktop_purpose,
     )
 
     session_dir = Path(directory)
-    recorded = read_desktop_purpose(session_dir)
-    if recorded != AGENTS_CONFIG_PURPOSE:
-        if session_origin(session_dir) != ORIGIN_AGENT_CONFIG:
-            return False
+    if not is_config_run_dir(session_dir):
+        return False
+    if read_desktop_purpose(session_dir) != AGENTS_CONFIG_PURPOSE:
         # The origin says run, the marker does not carry (or no longer parses to)
         # the purpose. Shapes the run anyway, and says so: the alternative is the
         # fail-OPEN direction, where the same damage silently hands the run the
@@ -4720,9 +4787,24 @@ async def _prepare(
     # conversation scope. Writes still delegate to the global store in S1.
     # Teams are scoped beside their creation below, because that registry is
     # built later and may legitimately be None.
+    #
+    # EXCEPT A CONFIGURATION RUN. Its whole job is to author the operator's
+    # ACCOUNT catalogue from the Agents page, which reads an unscoped registry
+    # (``desktop_profiles``), so a scoped run refuses every account ``update``
+    # (no host installs ``authorize_durable_write``, so the durable-write consent
+    # answers ``no_seam``) and files every ``create`` in ``<run>/roles``, a store
+    # no picker ever reads. The run's conversation scope is a dead store: it is
+    # hidden from every list and has no ``task`` tool, so no child inherits it.
+    # Its authority is the one it had before LOH-9 S2 scoped every session: the
+    # operator's own typed request, the server-owned op-scoped declaration
+    # (``AGENTS_CONFIG_TOOL_OPS``: no reset, sync or delete) and the page's settle
+    # summary. Decided from the same two witnesses that shape the run, so the
+    # registries and the declaration can never disagree about what it is.
     from local_operator.profile_scope import scope_agent_registry
 
-    agent_registry = scope_agent_registry(agent_registry, transcript_dir)
+    config_run = is_config_run_dir(transcript_dir)
+    if not config_run:
+        agent_registry = scope_agent_registry(agent_registry, transcript_dir)
 
     # --- tools + lazy knowledge (streams A and C) --------------------------
     from local_operator.harness.types import ToolContext
@@ -4823,11 +4905,14 @@ async def _prepare(
             file=sys.stderr,
         )
     else:
-        # LOH-9: teams are conversation-scoped too. A None registry keeps the
-        # existing degrade-one-feature behaviour (the tool is not advertised).
+        # LOH-9: teams are conversation-scoped too -- except in a configuration
+        # run, for the reason given at ``scope_agent_registry`` above. A None
+        # registry keeps the existing degrade-one-feature behaviour (the tool is
+        # not advertised).
         from local_operator.profile_scope import scope_team_registry
 
-        team_registry = scope_team_registry(team_registry, transcript_dir)
+        if not config_run:
+            team_registry = scope_team_registry(team_registry, transcript_dir)
     # The projects registry gets the same degrade-one-feature handling, for the
     # same reason: a store the user may never have touched must not take down
     # the whole boot. `ProjectRegistry` construction is read-only (it creates

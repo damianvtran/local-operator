@@ -571,3 +571,201 @@ def test_shared_parser_refuses_oversized_commands_before_any_parse(monkeypatch):
 
 def test_variable_write_detector_repeated_open_tokens_is_not_a_write():
     assert cand._variable_write("open(" * 20_000) is False
+
+
+# -- static shell variables and the answer's directory listing ------------------------------
+#
+# The incident these pin: a turn built its deliverables with ``D=~/Documents/<org>;
+# N="<name>"; cp memo.pdf "$D/$N.pdf"`` and a ``python -c '...outputfile=sys.argv[1])'
+# "$D/$N (editable).docx"``, after ``cd "$S"`` into a scratch directory taken from an inherited
+# variable, then ended its answer with "Files are in `~/Documents/<org>/`:" and the two bare
+# names. Every ``$``-built word was dropped and the listing was invisible to the prose scan,
+# so nothing became a candidate and no Highlights row was written. The two command shapes
+# below keep that turn's structure (statement order, quoting, the unresolvable ``$S``) with
+# neutral names.
+
+_ROW_250 = (
+    'set -e; S="$LOCAL_OPERATOR_SCRATCHPAD/memo"; D=~/Documents/Acme; '
+    'N="Acme-Scope-for-Counsel-2026-10-27"\n'
+    'rm -f "$D/$N.html" "$D/$N.docx" "$D/$N.pdf"\n'
+    'cp "$S/preview/memo.pdf" "$D/$N.pdf"\n'
+    'cd "$S"; uv run --quiet --with pypandoc_binary python -c \'\n'
+    "import pypandoc,sys\n"
+    'html=open("content.html").read()\n'
+    'pypandoc.convert_text("<h1>Acme</h1>"+html,"docx",format="html",outputfile=sys.argv[1])\''
+    ' "$D/$N (editable).docx"\n'
+    'cd "$D"; ls -la; echo "pages: $(pdfinfo "$N.pdf" | grep -c Pages)"'
+)
+_ROW_268 = (
+    'set -e; S="$LOCAL_OPERATOR_SCRATCHPAD/memo"; cd "$S"; cp content.html content.pre.html\n'
+    "python3 - <<'PY'\nimport pathlib\np=pathlib.Path(\"content.html\"); p.write_text("
+    "p.read_text().replace('a','b'))\nPY\n"
+    'bash build.sh "$S/preview" ; D=~/Documents/Acme; N="Acme-Scope-for-Counsel-2026-10-27"\n'
+    'cp preview/memo.pdf "$D/$N.pdf"\n'
+    "uv run --quiet --with pypandoc_binary python -c '\n"
+    "import pypandoc,sys\n"
+    'pypandoc.convert_text("<h1>Acme</h1>"+open("content.html").read(),"docx",format="html",'
+    'outputfile=sys.argv[1])\' "$D/$N (editable).docx"\n'
+    'for f in "$D/$N.pdf"; do echo "pdf: $(pdftotext "$f" - | wc -l)"; done\n'
+    'cd preview; rm -f hi*; ls -la "$D"'
+)
+_LISTING_ANSWER = (
+    "Both files are rebuilt.\n\nFiles are in `~/Documents/Acme/`:\n"
+    "- Acme-Scope-for-Counsel-2026-10-27.pdf\n"
+    "- Acme-Scope-for-Counsel-2026-10-27 (editable).docx \u2014 the same text, unstyled"
+)
+_DELIVERABLES = (
+    "~/Documents/Acme/Acme-Scope-for-Counsel-2026-10-27.pdf",
+    "~/Documents/Acme/Acme-Scope-for-Counsel-2026-10-27 (editable).docx",
+)
+
+
+def _home_turn(tmp_path: Path, monkeypatch, command: str, answer: str = "done"):
+    """Run ``command`` as one bash call with a pinned home holding both deliverables."""
+    monkeypatch.setattr(cand, "_scratch_roots", lambda: [])
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir(parents=True, exist_ok=True)
+    for path in _DELIVERABLES:
+        _write(home / path[2:])
+    return prefilter([call("bash", command=command)], answer, cwd=str(project), home=str(home))
+
+
+@pytest.mark.parametrize("command", [_ROW_250, _ROW_268], ids=["row-250", "row-268"])
+def test_the_incident_command_shapes_name_both_deliverables(
+    tmp_path: Path, monkeypatch, command: str
+) -> None:
+    """``$D/$N.pdf`` (cp destination) and ``"$D/$N (editable).docx"`` (a ``python -c`` that
+    writes ``sys.argv[1]``) resolve from the command's own literal assignments, although the
+    ``cd "$S"`` before them made the shell's directory unknowable."""
+    out = _home_turn(tmp_path, monkeypatch, command)
+    assert {(c.path, c.tier, c.kind) for c in out.candidates} == {
+        (_DELIVERABLES[0], 2, "pdf"),
+        (_DELIVERABLES[1], 2, "document"),
+    }
+    assert not any(c.linked_in_answer for c in out.candidates)
+
+
+def test_the_answer_listing_flags_both_deliverables_linked(tmp_path: Path, monkeypatch) -> None:
+    out = _home_turn(tmp_path, monkeypatch, _ROW_268, _LISTING_ANSWER)
+    assert {(c.path, c.tier, c.linked_in_answer) for c in out.candidates} == {
+        (_DELIVERABLES[0], 2, True),
+        (_DELIVERABLES[1], 2, True),
+    }
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A command substitution's value is only known at run time.
+        'D=$(cd ~/Documents && pwd)/Acme; cp a.pdf "$D/x.pdf"',
+        'D=`echo ~/Documents/Acme`; cp a.pdf "$D/x.pdf"',
+        # An inherited variable: the harness never saw the environment the command ran in.
+        'cp a.pdf "$ACME_OUT/x.pdf"',
+        # Used before it is assigned: at that point the shell expanded it to something else.
+        'cp a.pdf "$D/x.pdf"; D=~/Documents/Acme',
+        # A conditional assignment may not have run, including one after ``&&``.
+        'test -d q || D=~/Documents/Acme; cp a.pdf "$D/x.pdf"',
+        'D=~/x; [ -d ~/y ] && D=~/y; cp a.pdf "$D/b.pdf"',
+        'false && D=~/y; cp a.pdf "${D}/b.pdf"',
+        'if [ -n "$Z" ]; then\n  D=~/Documents/Acme\nfi\ncp a.pdf "$D/x.pdf"',
+        # A prefix assignment applies to that one command, not to the shell.
+        'D=~/Documents/Acme env > "$D/x.pdf"',
+        # A loop/``read`` variable is data, not text. Prefixes and opaque forms must not
+        # leave the value from an earlier literal assignment in place.
+        'for D in ~/Documents/Acme; do cp a.pdf "$D/x.pdf"; done',
+        'D=~/x; IFS= read -r D < f; cp a.pdf "$D/b.pdf"',
+        'D=~/x; builtin read D < f; cp a.pdf "$D/b.pdf"',
+        'D=~/x; command eval D=~/y; cp a.pdf "$D/b.pdf"',
+        'D=~/x; time D=~/y; cp a.pdf "$D/b.pdf"',
+        'D=~/x; while read D; do :; done < f; cp a.pdf "$D/b.pdf"',
+        'f() { D=~/y; }; D=~/x; f; cp a.pdf "$D/b.pdf"',
+        # Assignment forms outside the literal ``NAME=value`` grammar also invalidate NAME.
+        'D=~/x; D+=/y; cp a.pdf "$D/b.pdf"',
+        'D=~/x; D[0]=~/y; cp a.pdf "$D/b.pdf"',
+        'A=(~/x); cp a.pdf "$A/b.pdf"',
+        # Self-reference must hit the value bound, not grow exponentially in memory.
+        "D=xy;" + "D=$D$D;" * 27 + 'cp a "$D/b.pdf"',
+        # Single quotes keep ``$`` literal; a quoted ``~`` is a directory named ``~``.
+        "cp a.pdf '$D/x.pdf'",
+        'D="~/Documents/Acme"; cp a.pdf "$D/x.pdf"',
+        # An unquoted value with blanks word-splits: it is not one path.
+        "D='~/Documents/Ac me'; cp a.pdf $D/x.pdf",
+    ],
+)
+def test_a_variable_the_text_cannot_prove_stays_unresolved(tmp_path: Path, command: str) -> None:
+    assert cand.bash_effects(command).outputs == ()
+
+
+def test_the_tracked_variable_count_is_bounded() -> None:
+    assignments = ";".join(f"D{index}=~/x" for index in range(300))
+    assert cand.bash_effects(assignments + ';cp a "$D299/b.pdf"').outputs == ()
+
+
+def test_an_unknown_cd_still_drops_a_later_relative_write(tmp_path: Path) -> None:
+    effects = cand.bash_effects('D=~/Documents/Acme; cd "$X"; echo hi > x.md; cd "$D"; echo > y.md')
+    assert effects.outputs == ("~/Documents/Acme/y.md",)
+
+
+def test_a_known_variable_cd_becomes_the_shell_directory() -> None:
+    effects = cand.bash_effects('S=~/out; cd "$S"; echo a,b > r.csv; cd "${S}/sub" && echo > t.md')
+    assert effects.outputs == ("~/out/r.csv", "~/out/sub/t.md")
+
+
+def test_values_compose_and_subshell_assignments_do_not_leak() -> None:
+    effects = cand.bash_effects('D=~/x; E="$D/sub"; (D=~/elsewhere); echo > "${E}/o.md"')
+    assert effects.outputs == ("~/x/sub/o.md",)
+
+
+def test_an_argv_the_program_only_reads_is_not_an_output() -> None:
+    command = "python3 -c 'import sys; print(open(sys.argv[1]).read())' ~/in.csv > ~/out.txt"
+    assert cand.bash_effects(command).outputs == ("~/out.txt",)
+
+
+@pytest.mark.parametrize(
+    "uncertain",
+    ["$OPTS", "$X", "~/x/*.md", "~/x/{in,input}.md"],
+)
+def test_an_argv_index_after_an_uncertain_word_is_not_resolved(uncertain: str) -> None:
+    command = (
+        "python -c \"import sys; open(sys.argv[2], 'w').write('x')\" "
+        f"{uncertain} ~/x/in.md ~/x/out.md"
+    )
+    assert cand.bash_effects(command).outputs == ()
+
+
+def test_python_stdin_argv_skips_interpreter_flags() -> None:
+    command = "python3 -u - ~/x/out.md <<PY\nimport sys\nopen(sys.argv[1], 'w').write('x')\nPY"
+    assert cand.bash_effects(command).outputs == ("~/x/out.md",)
+
+
+def test_an_argv_write_inside_a_python_comment_does_not_count() -> None:
+    command = "python -c \"import sys  # open(sys.argv[1],'w')\nprint(1)\" ~/x/i.md"
+    assert cand.bash_effects(command).outputs == ()
+
+
+def test_backslash_newline_continuations_are_joined_before_lexing() -> None:
+    effects = cand.bash_effects('D=~/x;\\\nD=~/y; cp a.pdf \\\n "$D/b.pdf"')
+    assert effects.outputs == ("~/y/b.pdf", "~/y/b.pdf/a.pdf")
+
+
+def test_a_listed_name_the_turn_did_not_write_is_not_featured(tmp_path: Path, monkeypatch) -> None:
+    """The answer's word alone is never write evidence: both files exist, neither was written."""
+    out = _home_turn(tmp_path, monkeypatch, "ls ~/Documents/Acme", _LISTING_ANSWER)
+    assert out.candidates == () and out.rejected.get("already-visible") == 2
+
+
+# The shared renderer contract (local-operator-ui #1451) requires a directory-shaped
+# introducer and does not walk lists inside fenced/indented code.
+_FILE_INTRODUCER = "Edit ~/Documents/Acme/Makefile:\n- Acme-Scope-for-Counsel-2026-10-27.pdf"
+_FENCED_LISTING = (
+    "```\nFiles are in ~/Documents/Acme/:\n- Acme-Scope-for-Counsel-2026-10-27.pdf\n\n```"
+)
+
+
+@pytest.mark.parametrize(
+    "answer", [_FILE_INTRODUCER, _FENCED_LISTING], ids=["file-introducer", "fenced-code"]
+)
+def test_a_non_listing_never_flags_a_written_file(tmp_path: Path, monkeypatch, answer) -> None:
+    out = _home_turn(tmp_path, monkeypatch, _ROW_268, answer)
+    assert out.candidates and not any(c.linked_in_answer for c in out.candidates)

@@ -5180,3 +5180,146 @@ def test_a_promptless_team_create_carries_its_team_and_level_across_the_link(
         link.close("test")
     finally:
         _stop_all(served)
+
+
+def _preindex_tail_conversation() -> list[Any]:
+    """Two settled turns, then a LIVE run whose head the index calls out of reach.
+
+    The tail run is 110 tool calls, each followed by its ``session_spend.v1``
+    receipt (the ordinary shape of a live run: one receipt per provider round),
+    so its opening user row is ~220 JOURNAL rows above the end — past
+    ``tail_head_reachable``'s ``limit + 101`` at both limit 20 and limit 100 —
+    but only ~110 PAINTABLE rows, which a hunt left running reaches. That gap is
+    exactly where a frame built without the index and a frame built with it
+    used to disagree (#3037 QA, O1).
+    """
+    from local_operator.session.transcript import ENTRY_MESSAGE, TranscriptEntry
+
+    rows: list[Any] = []
+    ts = 1000.0
+
+    def add(id_: str, type_: str, payload: dict[str, Any]) -> None:
+        nonlocal ts
+        ts += 1
+        rows.append(TranscriptEntry(id_, ts, type_, payload))
+
+    def message(role: str, text: str) -> dict[str, Any]:
+        return {"kind": "message", "role": role, "content": [{"text": text}]}
+
+    for turn in range(3):
+        add(f"user{turn:02d}", ENTRY_MESSAGE, message("user", f"turn {turn}"))
+        calls = 110 if turn == 2 else 2
+        for call in range(calls):
+            add(f"tool{turn:02d}{call:04d}", ENTRY_MESSAGE, message("tool", "output"))
+            add(
+                f"spend{turn:02d}{call:04d}",
+                "custom",
+                {"custom_type": "session_spend.v1", "details": {}},
+            )
+        if turn < 2:  # the last run is still LIVE: no closing answer yet
+            add(f"ans{turn:02d}", ENTRY_MESSAGE, message("assistant", f"answer {turn}"))
+            add(
+                f"ckpt{turn:02d}",
+                "custom",
+                {
+                    "custom_type": "frontend_state_checkpoint_v1",
+                    "details": {"state": {"session_id": "seed", "sequence": turn}},
+                },
+            )
+    return rows
+
+
+async def _append_preindex_case(directory: Path, case: str) -> None:
+    """Grow the journal through the REAL writer, in the three shapes QA measured."""
+    from local_operator.harness.types import Message, TextContent
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    if case == "new_run":
+        # Close the live run, then open a new one: the tail head is the last row.
+        await transcript.append_message(
+            Message(role="assistant", content=[TextContent(text="done")])
+        )
+        await transcript.append_message(Message(role="user", content=[TextContent(text="next")]))
+        return
+    for call in range(1 if case == "one" else 50):
+        await transcript.append_message(
+            Message(role="tool", content=[TextContent(text="output")], tool_call_id=f"x{call}")
+        )
+
+
+def _canonical_frame_digest(frame: dict[str, Any]) -> str:
+    """The frame's sha256 with the per-build identity fields stripped.
+
+    ``epoch`` and ``journal_generation`` are minted per index build and ``cwd`` is
+    the host's; everything else is what a client paints or acts on.
+    """
+    import hashlib
+
+    stripped = {k: v for k, v in frame.items() if k not in {"epoch", "journal_generation", "cwd"}}
+    return hashlib.sha256(json.dumps(stripped, sort_keys=True).encode()).hexdigest()
+
+
+@pytest.mark.parametrize("limit", [20, 100])
+@pytest.mark.parametrize("case", ["one", "fifty", "new_run"])
+def test_the_owner_open_frame_before_the_index_lands_is_the_frame_after_it(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, case: str, limit: int
+) -> None:
+    """The phone's first frame after a restart IS the frame it gets a moment later.
+
+    #3037 QA (O1): a relay read whose index is not resident at attempt 0 (the
+    refresh is only scheduled) ran the head hunt to its budget, and then the
+    final index fetch — the refresh having landed meanwhile — labelled that
+    over-long page ``ready``. Measured on the real fixture at limit 20 with 50
+    appends: 102 rows, ``head_cut: false`` first; 20 rows, ``head_cut: true``
+    on every read after. A ``ready`` frame is final by contract, so the client
+    painted the first and then replaced it.
+
+    The pre-index state is held still: the first ``_stored_frame_index`` call
+    answers ``None`` (the real cold branch's answer at attempt 0) and every later
+    call is the real one over a resident index — the refresh landing during the
+    hunt, deterministically.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    _write_frame_journal(server_b.root, SESSION, _preindex_tail_conversation())
+    _warm_frame_index(server_b.root, SESSION)
+    asyncio.run(_append_preindex_case(server_b.root / "sessions" / SESSION, case))
+    _warm_frame_index(server_b.root, SESSION)
+
+    original = server_b._stored_frame_index  # noqa: SLF001 — the seam under test
+    calls: list[int] = []
+
+    def _lands_during_the_hunt(session_id: str) -> Any:
+        calls.append(1)
+        return None if len(calls) == 1 else original(session_id)
+
+    monkeypatch.setattr(server_b, "_stored_frame_index", _lands_during_the_hunt)
+    first = _owner_frame(server_b, limit=limit)
+    assert len(calls) >= 2, "the read never re-asked for the index"
+    monkeypatch.setattr(server_b, "_stored_frame_index", original)
+    server_b._frame_memo.clear()  # noqa: SLF001 — the steady read must BUILD, not replay
+    steady = _owner_frame(server_b, limit=limit)
+
+    assert steady["runs_state"] == "ready", steady
+    assert first["runs_state"] == "ready", first
+    assert (len(first["entries"]), first["head_cut"]) == (
+        len(steady["entries"]),
+        steady["head_cut"],
+    )
+    assert _canonical_frame_digest(first) == _canonical_frame_digest(steady)
+
+
+def test_the_owner_open_frame_whose_index_never_lands_says_building(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no index at any point the frame is labelled ``building``, never ``ready``.
+
+    The other half of the first-paint contract: a frame the owner could not
+    check against the index promises a replacement, so the client does not
+    treat the over-long hunt as final.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    _write_frame_journal(server_b.root, SESSION, _preindex_tail_conversation())
+    monkeypatch.setattr(server_b, "_stored_frame_index", lambda session_id: None)
+    frame = _owner_frame(server_b, limit=20)
+    assert frame["runs_state"] == "building" and frame["runs"] == [], frame

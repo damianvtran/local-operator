@@ -89,8 +89,43 @@ ONBOARDING_SEEN = "seen"
 #: authority: no write is ever performed BECAUSE this key says so, and a missing
 #: key never proves anything either (the server's own no-op-when-an-endpoint-
 #: exists rule is the authoritative stickiness).
+#:
+#: ``pending:<endpoint_id>:<head>`` (D1, review R3/R2-1) is the one other
+#: value: THIS machine's default-on POST created ``endpoint_id`` but the local
+#: owner commit failed or was vetoed. Without it the account was marked
+#: ``done`` from the hub's answer alone, the surface then read state C, and no
+#: path ever bound the device ("on, but deaf"). The status discipline retries
+#: ONLY the local commit against that exact endpoint — never a second POST —
+#: seeded at ``head``, the feed head read BEFORE the original POST (``0`` when
+#: there was none, a brand-new endpoint), so a message that arrived while the
+#: device could not receive is never skipped. It still suppresses a repeat
+#: POST exactly like ``done``; an explicit OFF or a Turn off overwrites it
+#: with ``done``.
 DEFAULT_TEAM_BRIDGE_ENROLLMENT: Mapping[str, str] = {}
 DEFAULT_ENROLLMENT_DONE = "done"
+DEFAULT_ENROLLMENT_PENDING_PREFIX = "pending:"
+
+
+def pending_default_enrollment(endpoint_id: str, head: int | None) -> str:
+    """The ``pending:<endpoint_id>:<head>`` marker value (see above)."""
+
+    return f"{DEFAULT_ENROLLMENT_PENDING_PREFIX}{endpoint_id}:{head if head is not None else 0}"
+
+
+def parse_pending_default_enrollment(value: Any) -> tuple[str, int] | None:
+    """``(endpoint_id, pre-POST head)`` from a pending marker, else ``None``.
+
+    Anything malformed reads as "no pending commit": the retry is a recovery,
+    and a hand-edited value must never point it at an endpoint or a cursor.
+    """
+
+    if not isinstance(value, str) or not value.startswith(DEFAULT_ENROLLMENT_PENDING_PREFIX):
+        return None
+    endpoint_id, sep, head = value[len(DEFAULT_ENROLLMENT_PENDING_PREFIX) :].rpartition(":")
+    if not sep or not endpoint_id or not head.isdigit() or (len(head) > 1 and head[0] == "0"):
+        return None
+    return endpoint_id, int(head)
+
 
 #: ``team_bridge.session`` — the designated CoS session id (RFC §5.6/§13.6).
 #: The connector wakes ONE session per account, and the designation is the
@@ -134,9 +169,13 @@ def _default_enrollment(value: Any) -> Mapping[str, str]:
     if not isinstance(value, Mapping):
         return {}
     return {
-        account: DEFAULT_ENROLLMENT_DONE
+        account: state
         for account, state in value.items()
-        if isinstance(account, str) and account.strip() and state == DEFAULT_ENROLLMENT_DONE
+        if isinstance(account, str)
+        and account.strip()
+        and (
+            state == DEFAULT_ENROLLMENT_DONE or parse_pending_default_enrollment(state) is not None
+        )
     }
 
 
@@ -228,7 +267,9 @@ class TeamBridgeSettings:
         )
 
 
-def record_default_enrollment(config_dir: "Path", account_id: str) -> None:
+def record_default_enrollment(
+    config_dir: "Path", account_id: str, value: str = DEFAULT_ENROLLMENT_DONE
+) -> None:
     """Record a completed default-enrollment consent write for ``account_id``.
 
     Retained through the consent hold: no production path calls this while the
@@ -253,6 +294,8 @@ def record_default_enrollment(config_dir: "Path", account_id: str) -> None:
 
     if not isinstance(account_id, str) or not account_id.strip():
         raise ValueError("account_id must be a non-empty string")
+    if value != DEFAULT_ENROLLMENT_DONE and parse_pending_default_enrollment(value) is None:
+        raise ValueError("value must be 'done' or a pending:<endpoint_id>:<head> marker")
 
     from local_operator import settings_io
     from local_operator.config import CONFIG_FILE_NAME, ConfigManager
@@ -265,9 +308,11 @@ def record_default_enrollment(config_dir: "Path", account_id: str) -> None:
         settings_io.require_readable_config_path(Path(config_dir) / CONFIG_FILE_NAME)
         manager = ConfigManager(config_dir)
         current = dict(TeamBridgeSettings.from_config(manager).default_enrollment)
-        if current.get(account_id) == DEFAULT_ENROLLMENT_DONE:
+        # ``done`` is terminal: a pending marker landing after a Turn off (which
+        # writes ``done``) must never reopen the retry it closed.
+        if current.get(account_id) in (DEFAULT_ENROLLMENT_DONE, value):
             return
-        current[account_id] = DEFAULT_ENROLLMENT_DONE
+        current[account_id] = value
         settings_io._store(manager, DEFAULT_ENROLLMENT_PATH, current)
 
 

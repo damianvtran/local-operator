@@ -11367,17 +11367,6 @@ def serve_command(host: str, port: int, reload: bool, *, listener_fd: int | None
     if not _serve_bind_is_loopback_only(host):
         return _refuse_non_loopback_bind(host, port)
 
-    # THE DESKTOP BEARER LEAVES THE ENVIRONMENT before anything is spawned, so
-    # no session runtime and no model command can inherit it or read it back
-    # out of this process with `ps eww` (PR #3022 QA round 1, Q1; see
-    # ``server.desktop.capture_launch_token``). NOT under ``--reload``: uvicorn's
-    # reloader re-imports the app in a CHILD that reads the plane from its own
-    # environment, and that development mode is not a desktop-spawned daemon.
-    if not reload:
-        from local_operator.server.desktop import capture_launch_token
-
-        capture_launch_token()
-
     # A DAEMON IS A HOSTING PLANE, NOT A CHAT AN AGENT OPENED. This process is
     # about to become the ``lop serve`` daemon the operator's front ends (the
     # desktop app's backend, the phone relay's child, the TUI server) talk to,
@@ -17030,6 +17019,18 @@ def main() -> int:
         # a no-op everywhere else. Placed after the parse so `--version` and
         # `--help` (which argparse exits from inside `parse_args`) never pay it.
         _maybe_brand_process(args)
+
+        if args.subcommand == "serve" and not getattr(args, "reload", False):
+            # (``--reload`` is excluded: uvicorn's reloader re-imports the app in a CHILD
+            # whose only inherited channel is the environment, so it keeps today's env
+            # behaviour. It is a developer mode the desktop app never launches.)
+            # FIRST after branding, before the login-shell PATH probe below spawns anything:
+            # move the desktop bearer out of the environment so no child -- that probe's
+            # shell, a session runtime, a reload successor -- is ever handed it. Why a
+            # descriptor and not the environment: ``server.desktop.TOKEN_FD_ENV``.
+            from local_operator.server.desktop import adopt_spawn_bearer
+
+            adopt_spawn_bearer()
 
         # Prime the login-shell PATH only on paths that actually spawn
         # subprocess work: the interactive session, exec, serve and mobile all

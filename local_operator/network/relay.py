@@ -9434,6 +9434,7 @@ class RelayServer:
             OPEN_FRAME_MAX_ROWS,
             align_page,
             build_frame,
+            late_index_stop,
             page_seq_bounds,
             paintable,
             served_bytes,
@@ -9467,6 +9468,11 @@ class RelayServer:
         cursor_missing = False
         cursor = before_id
         index: Any = None
+        # Per attempt: (rows prepended, that page's ``has_more``, sources so far),
+        # so a late index can replay where the index-backed read would have
+        # stopped (``late_index_stop``) and restore that read's own flags.
+        page_rows: list[tuple[int, bool, int]] = []
+        index_at_first_page = False
         frame_at = time.monotonic()
         for attempt in range(OPEN_FRAME_MAX_RAW_PAGES):
             read_at = time.monotonic()
@@ -9534,6 +9540,7 @@ class RelayServer:
             if not rows:
                 break
             collected = rows + collected
+            page_rows.append((len(rows), page.has_more, len(sources)))
             kept, reached = align_page(collected, limit)
             paintable_rows = paintable(collected)
             if reached and len(paintable(kept)) >= limit:
@@ -9549,6 +9556,7 @@ class RelayServer:
             if attempt == 0 and index is None and before_id is None:
                 index_at = time.monotonic()
                 index = self._stored_frame_index(session_id)
+                index_at_first_page = index is not None
                 if open_trace.enabled():
                     open_trace.mark(
                         "b.index",
@@ -9589,6 +9597,23 @@ class RelayServer:
                     fresh=index is not None,
                     final=True,
                 )
+            if before_id is None and not index_at_first_page:
+                # THE INDEX LANDED DURING THE HUNT (#3037 QA, O1): this read ran
+                # blind past the page where the index-backed read stops, and the
+                # facts just fetched will label the frame ``ready`` — final. So
+                # serve the frame that read serves, from the pages already in
+                # hand, rather than one the client's next read takes rows from.
+                stop = late_index_stop(
+                    [rows for rows, _more, _sources in page_rows],
+                    collected,
+                    index=index,
+                    limit=limit,
+                )
+                if stop is not None and stop < len(page_rows):
+                    keep = sum(rows for rows, _more, _sources in page_rows[:stop])
+                    collected = collected[-keep:]
+                    has_more = page_rows[stop - 1][1]
+                    sources = sources[: page_rows[stop - 1][2]]
         kept, reached = align_page(collected, limit)
         result = build_frame(
             kept,

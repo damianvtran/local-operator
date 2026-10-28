@@ -87,6 +87,14 @@ def commit_settings_enrollment(
     have enabled it. The consent hold (#2712) therefore forbids the status
     discipline from reaching this function; only the explicit write may.
 
+    WHICH CONSENT AN EXPLICIT WRITE COMMITS UNDER (D1, review R1-2). Either the
+    echo the surface just sent, or, for a resume that sends none, the hub's own
+    CURRENT record for this member on the answer to that same guarded write
+    (``TeamBridgeClient._commit_explicit_enable``). That second source is a
+    deliberate change from "a bare resume is never an opt-in": without it a
+    reinstalled or wiped machine had no product path to bind itself to an
+    endpoint whose consent still binds. A status read still never reaches here.
+
     WHY THE REFUSALS. A machine already holding a committed owner returns
     ``False`` instead of replacing it: the store's one-owner model gives no safe
     way to retire another namespace implicitly, and a different owner needs an

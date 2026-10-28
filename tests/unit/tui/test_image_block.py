@@ -35,6 +35,7 @@ from local_operator.tui.images import (
     set_escape_writer,
 )
 from local_operator.tui.widgets.image_block import ImageBlock
+from tests.unit.tui.conftest import await_session_boot
 
 CELL = CellSize(8, 16)
 
@@ -514,6 +515,13 @@ async def test_resume_replays_prompt_and_tool_images(monkeypatch) -> None:
         ),
     ]
     async with app.run_test(size=(100, 50)) as pilot:
+        # The replay is not on the mount path: the boot worker warms imports in a
+        # thread (`_boot_session` -> `asyncio.to_thread(warm_session_imports)`) and
+        # only then adopts the session and renders its history. One `pause()` does
+        # not wait for that thread, so on a loaded runner this counted 0 blocks
+        # (`LOP_TEST_SLOW_BOOT_WARM_S=0.4` reproduces it every time). Wait on the
+        # worker, not on a turn count.
+        await await_session_boot(app)
         await pilot.pause()
         blocks = list(app.query(ImageBlock))
         # One from the user prompt replay, one from the tool-result replay.
@@ -545,6 +553,9 @@ async def test_resume_replays_missing_image_as_receipt(monkeypatch) -> None:
         Message(role="user", content=_user_content("gone [Image #1]", "")),
     ]
     async with app.run_test(size=(100, 40)) as pilot:
+        # Same race as the replay above: the history renders only after the boot
+        # worker's warm-up thread returns and the session is adopted.
+        await await_session_boot(app)
         await pilot.pause()
         blocks = list(app.query(ImageBlock))
         assert len(blocks) == 1

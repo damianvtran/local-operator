@@ -12,8 +12,10 @@ THE RETRY RULE (UX U2). After a card is signed, an apply that refuses is either 
 still succeed -- or PERMANENT for that card: the policy it signed moved, the recipient's
 key changed, the request window ended. Offering "Try again" on a permanent refusal sends a
 non-technical operator round a loop that cannot end. :func:`retryable` is the one
-classification every surface reads, and anything it does not name is treated as permanent
-(the safe answer: a "new request needed" remedy can be wrong only by being one extra step).
+classification every surface reads, and a refusal CODE it does not name is treated as
+permanent (the safe answer: a "new request needed" remedy can be wrong only by being one
+extra step). A receipt detail that is not a code at all -- prose, an exception class name --
+is the exception, and :func:`outcome` says why.
 
 COPY RULES, same as :mod:`local_operator.network.credentials.messages`: plain sentence
 case (design N1, no capitals for emphasis), a next step a person can actually take, and no
@@ -23,6 +25,7 @@ running any CLI commands"). The CLI renderers may add the command beside the sen
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 #: Apply refusals after which the SAME signed card can still succeed. Everything else is
@@ -76,6 +79,123 @@ _REASONS: dict[str, str] = {
 
 _UNKNOWN_REASON = "The change was refused."
 
+#: Refusal codes the credential apply can store that have no sentence of their own yet. They
+#: ARE codes -- permanent for the card, worded as :data:`_UNKNOWN_REASON` -- and are listed
+#: so :data:`KNOWN_CODES` can tell a code from prose. ``test_every_refusal_code_is_known``
+#: walks the credential modules' refusal literals and fails when one is missing here.
+_UNWORDED_CODES = frozenset(
+    {
+        "approval_anchor_mismatch",
+        "approval_anchor_missing",
+        "approval_anchor_unavailable",
+        "approval_decision_conflict",
+        "approval_invalid",
+        "approval_not_approved",
+        "approval_not_runnable",
+        "approval_receipt_refused",
+        "approval_record_tampered",
+        "approval_request_conflict",
+        "approval_requester_mismatch",
+        "approval_run_in_flight",
+        "approval_signature_invalid",
+        "approval_signing_unavailable",
+        "approval_withdraw_conflict",
+        "bad_request",
+        "consent_action_refused",
+        "consent_execution_missing",
+        "consent_identity_invalid",
+        "consent_invalid",
+        "consent_not_enabled",
+        "consent_origin_refused",
+        "consent_path_invalid",
+        "consent_revision_invalid",
+        "consent_run_stale",
+        "consent_source_mismatch",
+        "consent_subset_refused",
+        "consent_unsupported",
+        "credential_approval_unsupported",
+        "credential_authority_unavailable",
+        "credential_disclosure_changed",
+        "credential_operation_mismatch",
+        "credential_path_invalid",
+        "credential_presence_required",
+        "credential_prompt_cancelled",
+        "credential_request_changed",
+        "credential_sign_in_flight",
+        "credential_sign_rate_limited",
+        "device_bound",
+        "finite_disclosure_invalid",
+        "finite_future_scope_conflict",
+        "finite_intent_missing",
+        "finite_journal_unknown",
+        "finite_policy_unknown",
+        "finite_projection_withheld",
+        "finite_recovery_failed",
+        "finite_recovery_pending",
+        "finite_supersede_unneeded",
+        "inherit_account_required",
+        "inherit_account_unknown",
+        "inherit_inventory_unreadable",
+        "inherit_login_ambiguous",
+        "inherit_no_native_login",
+        "inherit_not_applicable",
+        "inherit_org_unknown",
+        "inherit_permission_exists",
+        "inherit_record_unreadable",
+        "inherit_recovery_pending",
+        "inherit_request_open",
+        "inherit_scope_unrepresentable",
+        "inherit_transport_not_ready",
+        "inherit_withdrawn",
+        "lifecycle_counter_exhausted",
+        "lifecycle_invalid",
+        "lifecycle_path_invalid",
+        "local_only",
+        "network_enrollment_snapshot_changed",
+        "no_local_credential",
+        "not_a_holder",
+        "not_owner",
+        "profile_parent_missing",
+        "protocol_error",
+        "scope_mismatch",
+        "scope_unknown",
+        "unknown_approval",
+    }
+)
+
+#: Every value of a failed receipt's ``detail`` that IS a refusal code (#3002 review r3,
+#: M1). Anything else is not a code at all: ``approvals.py`` stores the whole "the run was
+#: superseded: ..." sentence there, and ``finite_share._release_run`` falls back to an
+#: exception's class name (``OSError``, ``KeyError``) for a failure that was not a refusal.
+#: Reading those as unmapped CODES labelled them "The change was refused." and permanent,
+#: so the operator lost the real reason and ``_refuse_spent`` blocked a retry that could
+#: well succeed (an fs error, a superseded run). See :func:`outcome`.
+KNOWN_CODES = frozenset(_REASONS) | RETRYABLE_CODES | _UNWORDED_CODES
+
+#: The SHAPE of a refusal code, the backstop beside :data:`KNOWN_CODES`: a code raised by a
+#: module outside the credential package (``enrollment``'s, the store's) keeps the permanent
+#: "refused" reading instead of being shown raw as if it were prose. ONE lowercase word with
+#: no underscore counts too (#3039 review m-3): ``expired`` or ``declined`` is a code that
+#: lost its prefix, and reading it as prose offered "Try again" on a refusal that cannot
+#: succeed. Neither failure detail the whitelist exists for has this shape -- the supersede
+#: receipt is a sentence with spaces, and an exception class name is CamelCase.
+_CODE_SHAPE = re.compile(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*")
+
+
+def is_refusal_code(value: str) -> bool:
+    """Whether a stored failure ``detail`` is a refusal code rather than prose (review r3 M1)."""
+    return value in KNOWN_CODES or _CODE_SHAPE.fullmatch(value) is not None
+
+
+#: The longest raw detail shown as a reason. The record's receipts are device-local, but
+#: an exception class name or a supersede sentence is the most a reader needs.
+_RAW_REASON_MAX_CHARS = 300
+
+#: A filesystem path inside a raw detail (POSIX, ``~``-relative or a Windows drive), the
+#: same shape ``server.utils.desktop_onboard.detail`` scrubs from receipts: an OS error can
+#: name a profile path or a temporary key file, and the card needs the fact, not the path.
+_PATH_RE = re.compile(r"(?<![\w:])(?:~?/[^\s\"']+|[A-Za-z]:\\[^\s\"']+)")
+
 #: Every surface's sentence for a permanent refusal (UX U1/U2). It names the rule, not a
 #: command: the requester files a new card, which the operator then approves.
 NEW_REQUEST_NEEDED = (
@@ -102,12 +222,39 @@ def remedy(code: str) -> str:
     return TRY_AGAIN if retryable(code) else NEW_REQUEST_NEEDED
 
 
+def _raw_reason(detail: str) -> str:
+    """A non-code failure detail as a readable reason: printable, path-free, bounded."""
+    # A control character becomes a SPACE, not nothing: dropping it would glue the words
+    # either side together, and a path glued to a word escapes the scrub's boundary.
+    text = " ".join("".join(ch if ch.isprintable() else " " for ch in detail).split())
+    text = _PATH_RE.sub("[path]", text)
+    if len(text) > _RAW_REASON_MAX_CHARS:
+        text = text[: _RAW_REASON_MAX_CHARS - 1].rstrip() + "\u2026"
+    return text
+
+
 def outcome(code: str) -> dict[str, Any]:
     """The machine-plus-words block a surface renders for one apply refusal.
 
     ``retryable`` is the ONLY signal a renderer may use to offer "Try again" (UX U2); the
     two sentences are what it shows. ``code`` rides verbatim for clients that switch on it.
+
+    A value that is not a refusal code (:func:`is_refusal_code`) is a failure DETAIL (review
+    r3, M1): its own words become the reason, sanitized, and it is classified RETRYABLE. That
+    is the conservative direction here, unlike for a code: the apply re-verifies the
+    signature, decision, window and policy on every attempt, so a retry against a card that
+    really is spent stores the real refusal code and is then refused as permanent -- while
+    marking an ``OSError`` or a superseded run permanent locked the operator out of a card
+    the same click could still apply. ``""`` (no receipt detail at all) keeps the generic
+    permanent reading it always had.
     """
+    if code and not is_refusal_code(code):
+        return {
+            "code": code,
+            "retryable": True,
+            "reason": _raw_reason(code) or _UNKNOWN_REASON,
+            "remedy": TRY_AGAIN,
+        }
     return {
         "code": code,
         "retryable": retryable(code),

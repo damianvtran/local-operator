@@ -1003,11 +1003,11 @@ async def test_a_skill_invocation_expands_the_REQUEST_but_not_the_BODY() -> None
 
         sent = await _sent(pilot, session)
         assert "Read primary sources." in sent, "the skill body was not sent"
-        assert payload in sent, "the request's paste was not expanded"
+        assert payload in sent, "the message's paste was not expanded"
         assert sent.count("ERROR line 39") == 1, "the payload was spliced twice"
-        # The typed line rides the opening tag so replay repaints the row the
-        # live session showed. It must carry the CHIP, not 40 lines of log.
-        assert 'invocation="$research [Paste #1, 40 lines] why does this fail?"' in sent
+        # The body is appended AFTER the expansion, so the log never reaches it.
+        body = sent[sent.index("<operator-skills>") :]
+        assert "ERROR line 39" not in body, "the paste was spliced into the body"
 
 
 # -- Slice B: the slash-command tail ------------------------------------------
@@ -1338,14 +1338,13 @@ async def test_loop_pursues_the_payload_not_the_chip() -> None:
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("skill_root")
 async def test_a_skill_with_a_paste_shows_the_SAME_row_live_and_on_replay() -> None:
-    """MAJOR-2. The property that broke is the EQUALITY, so that is what is pinned.
+    """The property is the EQUALITY, so that is what is pinned.
 
-    `render_invocation` records the typed line in the payload's ``invocation=``
-    attribute and replay repaints from it, so expanding the live row made the
-    two disagree for the paste case alone. The attribute is deliberately left
-    holding the chip \u2014 it travels inside the payload the model receives, so
-    expanding it would send the paste twice on every turn of that message's life
-    \u2014 and the live row is put back on the typed line to match.
+    The live row is `expand_pastes(text)`, exactly what an ordinary prompt
+    shows, and the skill body rides a tail block that replay strips. Both rows
+    are therefore the same string BY CONSTRUCTION rather than by two branches
+    agreeing — the old display/sent split existed only for the invocation line
+    and is gone.
 
     Asserted as live == replay rather than against either value alone: a future
     change that moves both together is fine, one that moves only one is the bug.
@@ -1363,10 +1362,11 @@ async def test_a_skill_with_a_paste_shows_the_SAME_row_live_and_on_replay() -> N
         sent = await _sent(pilot, session)
         live = _transcript_text(app)
 
-    # The model still receives the whole log; only the ROW is the typed line.
-    assert payload in sent, "the request's paste stopped being expanded"
-    assert "[Paste #1, 40 lines]" in live, "the live row lost the paste receipt"
-    assert "ERROR line 39" not in live, "the live row shows the payload again"
+    # The model receives the whole log, and so does the row: a skill invocation
+    # shows exactly what an ordinary prompt with a paste shows.
+    assert payload in sent, "the message's paste stopped being expanded"
+    assert "ERROR line 39" in live, "the live row lost the expanded paste"
+    assert "[Paste #1, 40 lines]" not in live, "the live row shows the bare chip"
 
     replay_session = FakeSession()
     replay_session._history = [SimpleNamespace(role="user", text=sent, content=[])]
@@ -1377,7 +1377,9 @@ async def test_a_skill_with_a_paste_shows_the_SAME_row_live_and_on_replay() -> N
         await pilot.pause()
         replayed = _transcript_text(replay_app)
 
-    assert "$research [Paste #1, 40 lines] why does this fail?" in replayed
+    # Painted rows are gutter-prefixed per line, so compare the last line and
+    # then the whole user row rather than a multi-line substring.
+    assert "ERROR line 39 why does this fail?" in replayed
     assert _user_row(live) == _user_row(replayed), "live and replay disagree"
 
 

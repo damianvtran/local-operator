@@ -4419,13 +4419,13 @@ class ServingSessionHandle(SessionHandle):
         and run the call as a background task so the title arrives ALONGSIDE
         the turn rather than after it.
 
-        ``text`` is the SENT message, and for a ``$skill`` invocation that is
-        the EXPANDED payload rather than the line the user typed: expansion is
-        the CLIENT's duty (a desktop renders ``skills.invoke.render_invocation``'s
-        payload itself, in ``local-operator-ui``'s ``skill-invocation.ts``), so
-        the harness never sees the typed line on its own. Naming from the
-        payload titles the conversation "The user invoked the `research`
-        skill…" and puts the whole SKILL.md body in the list row — the defect
+        ``text`` is the SENT message, and a ``$skill`` invocation is the line
+        the user typed followed by a tail block carrying the bodies. Expansion
+        is the CLIENT's duty, so the harness sees that payload rather than the
+        typed line alone; ``harness.rows.user_row_text`` strips complete blocks,
+        which is what keeps the title on the user's words instead of titling the
+        thread "The user invoked the `research` skill…" and putting the whole
+        SKILL.md body in the list row — the defect
         ``docs/design/history-fold-convergence.md`` row D8 calls out.
 
         Collapsed HERE rather than at the one call site today, because this is

@@ -122,3 +122,29 @@ class McpStartupOutcome:
         if self.settling:
             return False
         return bool(self.connected) or bool(self.failures)
+
+
+@dataclass(frozen=True)
+class RestoredMcpStartupOutcome(McpStartupOutcome):
+    """A startup outcome read back out of a session's DURABLE CHECKPOINT.
+
+    The provenance, as a type, because it is the only thing that separates two
+    objects carrying identical data: the round the last runtime finished (this
+    class) and a round some live runtime just reported (the base class). A front
+    end that renders a failure row has to know which one it is holding — one is
+    history and must stay stated in the past tense, the other is news.
+
+    Why not a field. ``_json_value(session.mcp_startup)`` is what the checkpoint
+    and the wire carry, and a new field would appear in both (``"restored":
+    false`` on every snapshot, forever); a subclass contributes no field, so the
+    payload is byte-identical and an older reader is unaffected.
+
+    Why not connection state. ``AttachedSession.is_cold`` was tried and is wrong
+    by construction: the owner's first snapshot is installed while the facade is
+    still mid-bind (``_finish_sync`` runs after an await), so a genuinely LIVE
+    round reports through a facade that is still cold — and was then labelled
+    history and never announced (review round 2, MAJOR-2).
+
+    Constructed in exactly one place, ``_restore_cold_details``' install of the
+    durable checkpoint; every owner or in-process round builds the base class.
+    """

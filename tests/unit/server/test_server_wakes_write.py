@@ -31,6 +31,7 @@ from httpx import ASGITransport, AsyncClient
 from local_operator.config import ConfigManager
 from local_operator.server.routes import desktop_wakes
 from local_operator.wakes.store import read_entry
+from tests.unit.legacy_skill_payload import legacy_skill_payload
 
 TOKEN = "desktop-wakes-write-token"
 
@@ -91,24 +92,13 @@ def _request_id(n: int) -> str:
 
 
 def _skill_payload(typed: str) -> str:
-    """A ``$skill`` invocation as a CLIENT sends it: the expanded payload.
+    """A ``$skill`` invocation in the LEGACY persisted form.
 
-    Expansion is the client's duty, so a schedule whose prompt invokes a skill
-    stores and posts the payload — the shape this title is derived from.
+    The reader is kept forever (old transcripts never migrate), so this pins the
+    shape it must keep reading; ``legacy_skill_payload`` reproduces the deleted
+    writer's attribute escaping.
     """
-    from local_operator.skills.discovery import Skill
-    from local_operator.skills.invoke import parse_invocation, render_invocation
-
-    skill = Skill(
-        name="research",
-        description="research things",
-        file_path=Path("/skills/research/SKILL.md"),
-        base_dir=Path("/skills/research"),
-        source="user",
-    )
-    invocation = parse_invocation(typed, {"research": skill})
-    assert invocation is not None
-    return render_invocation(invocation, "# Research\n\nSKILL_BODY_MARKER\n")
+    return legacy_skill_payload(typed)
 
 
 def _snapshot_count(directory: Path) -> int:

@@ -126,6 +126,7 @@ from local_operator.session.open_frame import (
     OPEN_FRAME_SNAPSHOT_BUDGET_S,
     align_page,
     build_frame,
+    late_index_stop,
     page_seq_bounds,
     paintable,
     served_bytes,
@@ -4127,6 +4128,11 @@ class DesktopSessionBridge:
         cursor_missing = False
         cursor = before_id
         index: Any = None
+        # Per attempt: (rows prepended, that page's ``has_more``), so a late index
+        # can replay where the index-backed read stops (``late_index_stop``).
+        page_rows: list[tuple[int, bool]] = []
+        index_at_first_page = False
+        tail_read = before_id is None and through_id is None and around_id is None
         for attempt in range(OPEN_FRAME_MAX_RAW_PAGES):
             try:
                 page = await load_transcript_page(
@@ -4170,6 +4176,7 @@ class DesktopSessionBridge:
             if not rows:
                 break
             collected = rows + collected
+            page_rows.append((len(rows), page.has_more))
             if not collected:
                 break
             kept, reached = align_page(collected, limit, supplements=supplements)
@@ -4200,6 +4207,7 @@ class DesktopSessionBridge:
                 and around_id is None
             ):
                 index = await self._frame_index(deadline)
+                index_at_first_page = index is not None
             if (
                 index is not None
                 and len(paintable_rows) >= limit
@@ -4226,6 +4234,22 @@ class DesktopSessionBridge:
                 break
         if index is None:
             index = await self._frame_index(deadline)
+            if tail_read and not index_at_first_page:
+                # THE INDEX LANDED DURING THE HUNT (#3037 QA, O1; the relay twin
+                # carries the same rule): the facts will say ``ready``, so the rows
+                # must be the ones the index-backed read serves, not the blind
+                # hunt's overshoot the next read takes away.
+                stop = late_index_stop(
+                    [rows for rows, _more in page_rows],
+                    collected,
+                    index=index,
+                    limit=limit,
+                    supplements=supplements,
+                )
+                if stop is not None and stop < len(page_rows):
+                    collected = collected[-sum(rows for rows, _more in page_rows[:stop]) :]
+                    has_more = page_rows[stop - 1][1]
+                    order_pages = order_pages[:stop]
         # THE CUT IS APPLIED ONCE, HERE, AND IT IS THE CONTRACT ITSELF: at least
         # ``limit`` paintable rows, starting at a user row when one is in reach,
         # and exactly ``limit`` rows with ``head_reached=False`` when none is. A

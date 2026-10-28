@@ -19,6 +19,8 @@ export type Route =
 	| { name: "pair" }
 	| { name: "library" }
 	| { name: "library-asset"; assetId: string }
+	| { name: "notifications" }
+	| { name: "notification"; itemId: string }
 	| { name: "session"; sessionId: string; jobId?: string };
 
 export function parseHash(hash: string): Route {
@@ -37,6 +39,11 @@ export function parseHash(hash: string): Route {
 	if (libraryAsset) {
 		return { name: "library-asset", assetId: decodeURIComponent(libraryAsset[1]) };
 	}
+	/* The inbox (notifications design §9): the reel and one item. Ids carry a
+	   `:` for asks (`ask:<session>:<ask>`), so the segment is percent-decoded. */
+	if (path === "/notifications") return { name: "notifications" };
+	const notification = path.match(/^\/notifications\/([^/]+)$/);
+	if (notification) return { name: "notification", itemId: decodeURIComponent(notification[1]) };
 	const agent = path.match(/^\/s\/([^/]+)\/a\/([^/]+)$/);
 	if (agent) {
 		return {
