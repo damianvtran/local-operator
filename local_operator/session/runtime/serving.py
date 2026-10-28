@@ -31,6 +31,7 @@ import secrets
 import time
 import unicodedata
 import uuid
+import weakref
 from asyncio import InvalidStateError
 from collections import deque
 from collections.abc import Mapping, Sequence
@@ -11016,8 +11017,17 @@ class ServingSessionHandle(SessionHandle):
             # to defer onto; the next ``_notify`` still re-checks.
             return
         self._ask_refresh_scheduled = True
+        # WEAKLY, for the same reason as the channel re-check in ``Session``:
+        # the loop's timer must not pin a disposed handle (and its session).
+        ref = weakref.ref(self)
+
+        def fire() -> None:
+            handle = ref()
+            if handle is not None:
+                handle._flush_ask_refresh()
+
         try:
-            loop.call_later(max(delay, 0.0), self._flush_ask_refresh)
+            loop.call_later(max(delay, 0.0), fire)
         except RuntimeError:
             # A closing loop: nothing left to publish to.
             self._ask_refresh_scheduled = False

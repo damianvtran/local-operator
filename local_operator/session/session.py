@@ -14797,7 +14797,18 @@ class Session:
             # No loop (a synchronous caller or test host): the next tick re-reads.
             return
         self._channel_pending_recheck_scheduled = True
-        loop.call_later(max(delay, 0.0), self._flush_channel_pending_recheck)
+        # WEAKLY: a pending timer is a loop-owned strong edge, and a disposed
+        # session must stay collectable for up to a floor after its last tick
+        # (``test_launch_subagent``'s retention cells pin that). A collected
+        # session has no band to publish to, so the re-check simply lapses.
+        ref = weakref.ref(self)
+
+        def fire() -> None:
+            session = ref()
+            if session is not None:
+                session._flush_channel_pending_recheck()
+
+        loop.call_later(max(delay, 0.0), fire)
 
     def _flush_channel_pending_recheck(self) -> None:
         """Re-read the sidecar; publish the spend band only if it changed.
