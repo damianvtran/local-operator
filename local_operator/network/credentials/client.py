@@ -54,8 +54,10 @@ from local_operator.network.credentials.placement import (
 from local_operator.network.credentials.state import PlacementState
 from local_operator.network.credentials.types import (
     BROKER_ERROR_TTL_MS,
+    MAX_PEER_RETRY_AFTER_MS,
     NO_RETRY,
     PEER_BROKER_OP,
+    QUOTA_REASON_POOL_DEPLETED,
     BrokerError,
     CredentialPlacementEntry,
     Grant,
@@ -437,6 +439,7 @@ class MeshCredentialClient:
         ttl = BROKER_ERROR_TTL_MS.get(status, 0)
         if ttl == NO_RETRY:
             ttl = UNSUPPORTED_OBSERVATION_MS
+        floor = False
         row = self.state.observation(key, now=now)
         if row is None:
             return None
@@ -457,6 +460,9 @@ class MeshCredentialClient:
             # that nobody stated. No stated remainder ⇒ 0 ⇒ the sentence keeps
             # "for now", exactly as the fresh one does.
             owner_ms = int(row.get("owner_retry_after_ms") or 0)
+            # A remembered clamped value is still a floor while it counts down: the
+            # owner's reset lies beyond it, so "at least" stays true (#3108 r2 m1).
+            floor = owner_ms >= MAX_PEER_RETRY_AFTER_MS
             if owner_ms:
                 stamp = float(row.get("observed_at") or 0.0)
                 current = time.time() if now is None else now
@@ -468,6 +474,14 @@ class MeshCredentialClient:
             owner_device=str(row.get("owner_device") or self.owner_of(key)),
             owner_device_name=self.owner_label(key),
             retry_after_ms=ttl,
+            retry_after_is_floor=floor,
+            # A CACHED ``quota_blocked`` IS ALWAYS THE OWNER'S OWN STATE (#3108 review
+            # r2-m1): the holder-exclusion answer is never remembered (``_from_reply``
+            # / ``_detail_from_owner`` return it uncached), so whatever reached the
+            # cache was the owner's pool. Rebuilt without the marker, a 0-remainder
+            # cached refusal read as the holder's exclusion again and a concurrent
+            # ask rendered the borrower's own cooldowns for it.
+            reason=QUOTA_REASON_POOL_DEPLETED if status == "quota_blocked" else "",
         )
 
     def _remember(self, key: str, error: BrokerError) -> None:
@@ -1422,12 +1436,14 @@ class MeshCredentialClient:
         """Turn a leg-1 control reply into a grant or a refusal.
 
         ``resting`` is the cooldown set this ask excluded. When the owner answers
-        that the exclusion left nothing (``quota_blocked`` with no remainder of its
-        own — the owner's ``peer_excluded`` arm), the answer is this device's own
-        rest, rendered from its cooldowns and NOT remembered (review round 1, m1):
-        caching it would record a refusal (or a ``withdrawn`` receipt) that outlives
-        the cooldowns it describes, and the cooldowns already are the record. An
-        owner-measured ``quota_blocked`` (non-zero remainder: its own block) is the
+        that the exclusion left nothing (the owner's ``peer_excluded`` arm, marked
+        ``reason: holder_excluded``; an older owner's unmarked ``quota_blocked`` with
+        no remainder, see :attr:`BrokerError.is_holder_exclusion`), the answer is this
+        device's own rest, rendered from its cooldowns and NOT remembered (review
+        round 1, m1): caching it would record a refusal (or a ``withdrawn`` receipt)
+        that outlives the cooldowns it describes, and the cooldowns already are the
+        record. An owner-measured ``quota_blocked`` (its own block, or a pool spent by
+        usage, marked ``pool_depleted`` whether or not its reopening is known) is the
         owner's state and is cached as before.
         """
         if not isinstance(reply, dict):
@@ -1454,7 +1470,7 @@ class MeshCredentialClient:
             self._remember_grant(key, grant)
             return grant
         refused = BrokerError.from_detail(detail)
-        if resting and refused.code == "quota_blocked" and not refused.retry_after_ms:
+        if resting and refused.is_holder_exclusion:
             return self._resting_refusal(key, label, resting)
         error = self._render(refused, key, label)
         self._remember(key, error)
@@ -1492,7 +1508,7 @@ class MeshCredentialClient:
             self._remember_grant(key, grant)
             return detail
         error = self._render(BrokerError.from_detail(detail), key, label)
-        if excluded and error.code == "quota_blocked" and not error.retry_after_ms:
+        if excluded and error.is_holder_exclusion:
             # The answer to the HOLDER'S exclusion, not an owner-side state (review
             # round 1, m1): the holder's cooldowns are the record, and caching this
             # here — the relay shares the session's observation file — would make

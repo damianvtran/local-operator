@@ -95,6 +95,7 @@ if TYPE_CHECKING:  # the store path stays an optional, import-guarded argument
         CacheAffinityHint,
         EndpointModeResolver,
     )
+    from local_operator.providers.account_policy import ResetCandidate
     from local_operator.providers.usage import QuotaHealth, UsageReport
     from local_operator.providers.usage_cache import UsageCacheStore
 
@@ -750,6 +751,69 @@ def credential_identity(credential: "StoredCredential | Mapping[str, Any]") -> s
         if value:
             return str(value)[:IDENTITY_LIMIT]
     return None
+
+
+@dataclasses.dataclass(frozen=True)
+class RowQuotaFact:
+    """One enabled row's quota gates, as :meth:`AuthStore.quota_eligibility` read them.
+
+    Non-secret by construction: an id, two remainders and a verdict word.
+    """
+
+    credential_id: int
+    #: The persisted block's remainder for the model (``blocked_remaining_ms``); 0 = none.
+    blocked_ms: int
+    #: The selector's usage verdict: ``healthy``/``reserve``/``depleted``/``unknown``.
+    usage_state: str
+    #: For a ``depleted`` verdict, ms until a FRESH report proves it reopens;
+    #: ``None`` when that is not proven (stale evidence, no stated reset).
+    usage_depleted_reopens_ms: int | None = None
+
+    @property
+    def quota_limited(self) -> bool:
+        """Out of the selection for quota alone — a live block or spent usage."""
+        return self.blocked_ms > 0 or self.usage_state == "depleted"
+
+    @property
+    def wait_ms(self) -> int | None:
+        """When BOTH gates are open again, or ``None`` when that is not proven."""
+        if self.usage_state != "depleted":
+            return self.blocked_ms
+        if self.usage_depleted_reopens_ms is None:
+            return None
+        return max(self.blocked_ms, self.usage_depleted_reopens_ms)
+
+
+@dataclasses.dataclass(frozen=True)
+class QuotaEligibility:
+    """Every candidate row's quota gates, and what they prove about the pool."""
+
+    rows: tuple[RowQuotaFact, ...] = ()
+
+    @property
+    def all_quota_limited(self) -> bool:
+        """True only when there ARE rows and quota alone excludes every one.
+
+        An ``unknown`` verdict is not a limit (the selector fails open on it),
+        so one row with no usable evidence keeps this False — an empty pick
+        must then have another cause, and no quota claim is made.
+        """
+        return bool(self.rows) and all(row.quota_limited for row in self.rows)
+
+    @property
+    def retry_after_ms(self) -> int:
+        """The earliest PROVEN reopening across the pool, or 0 when none is proven.
+
+        All rows must have a proven reopening: a row whose own reopening is
+        unknown could serve sooner than any stated one, so the earliest stated
+        time would be a claim the evidence does not support.
+        """
+        if not self.all_quota_limited:
+            return 0
+        waits = [row.wait_ms for row in self.rows]
+        if any(wait is None for wait in waits):
+            return 0
+        return min(int(wait) for wait in waits if wait is not None)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -4000,33 +4064,9 @@ class AuthStore:
         """
         if not rows:
             return []
-        from local_operator.providers.account_policy import (
-            reset_candidate,
-            reset_ranked_ids,
-        )
+        from local_operator.providers.account_policy import reset_ranked_ids
 
-        try:
-            now_ms = self._now_ms()
-            candidates = [
-                reset_candidate(
-                    row.id,
-                    self._cached_usage_report(row, provider),
-                    model_id,
-                    now_ms,
-                    max_age_ms=self._usage_pick_max_age_ms,
-                )
-                for row in rows
-            ]
-        except Exception:
-            # Cache failure is unknown evidence, not an account outage.
-            # Keep the existing fail-open contract for optional readers.
-            logger.debug("account pick: cached evidence unavailable", exc_info=True)
-            from local_operator.providers.account_policy import ResetCandidate
-
-            candidates = [ResetCandidate(row.id) for row in rows]
-        finally:
-            if self._usage_cache is not None:
-                self._usage_cache.close()
+        candidates = self._reset_candidates(rows, provider, model_id)
         by_id = {row.id: row for row in rows}
         allowed = {
             candidate.account_id for candidate in candidates if candidate.state != "depleted"
@@ -4076,6 +4116,103 @@ class AuthStore:
                 )
             )
         return ordered
+
+    def _reset_candidates(
+        self, rows: list[StoredCredential], provider: str, model_id: str
+    ) -> list["ResetCandidate"]:
+        """Each row's cached usage verdict — THE eligibility evidence of the pick.
+
+        One builder for both readers: :meth:`_base_selection_order` drops the
+        ``depleted`` rows from inference selection, and :meth:`quota_eligibility`
+        explains an empty selection from the very same verdicts, so the reason a
+        peer is told can never disagree with the reason the pick came back empty.
+        """
+        from local_operator.providers.account_policy import (
+            ResetCandidate,
+            reset_candidate,
+        )
+
+        try:
+            now_ms = self._now_ms()
+            return [
+                reset_candidate(
+                    row.id,
+                    self._cached_usage_report(row, provider),
+                    model_id,
+                    now_ms,
+                    max_age_ms=self._usage_pick_max_age_ms,
+                )
+                for row in rows
+            ]
+        except Exception:
+            # Cache failure is unknown evidence, not an account outage.
+            # Keep the existing fail-open contract for optional readers.
+            logger.debug("account pick: cached evidence unavailable", exc_info=True)
+            return [ResetCandidate(row.id) for row in rows]
+        finally:
+            if self._usage_cache is not None:
+                self._usage_cache.close()
+
+    def quota_eligibility(
+        self,
+        provider: str,
+        model_id: str,
+        *,
+        exclude_credential_ids: Collection[int] | None = None,
+    ) -> "QuotaEligibility":
+        """Why each enabled row is (not) servable for ``model_id``, on quota grounds.
+
+        WHY (2026-10-28, remote quota follow-up): the mesh broker explained an
+        empty resolve from the persisted SQL blocks alone, but the selector also
+        drops rows whose cached usage says ``depleted``. Once one block timer
+        lapsed while the usage evidence still said spent, every login was
+        unusable for quota and a borrower was told ``no_local_credential`` —
+        "nothing is signed in here", cached with a re-login remedy — for a pool
+        that heals on its own. This read answers from the SAME two gates the
+        selection applies (:meth:`is_blocked_for_model`'s remainder and
+        :meth:`_reset_candidates`' verdict), so it adds no quota policy.
+
+        ``exclude_credential_ids`` are the rows the caller's resolve hid (a
+        holder's approval scope, its own resting rows): they were never
+        candidates, so they neither explain nor contradict the empty answer.
+        Read-only: nothing is blocked, demoted, pinned or written.
+
+        THE SAME ROW SOURCE AS THE PICK (#3108 review n1): a local provider resolves
+        only its ACTIVE endpoint row (``_usable_key_rows``), so that is the row read
+        here; reading every stored row would explain the empty pick from rows the
+        pick never considered.
+        """
+        from local_operator.providers.local import LOCAL_PROVIDER_IDS, resolve_base_url
+
+        hidden = set(exclude_credential_ids or ())
+        if provider in LOCAL_PROVIDER_IDS:
+            selected = self.active_local_credential(provider, resolve_base_url(provider))
+            candidates = [selected] if selected is not None else []
+        else:
+            candidates = self.list_credentials(provider)
+        rows = [row for row in candidates if row.id not in hidden]
+        # The storage spelling, as ``_selection_order`` hands the selector: the
+        # usage cache is keyed by it, so an alias would read every row as unknown.
+        storage = self._storage_id(provider)
+        verdicts = {c.account_id: c for c in self._reset_candidates(rows, storage, model_id)}
+        now_ms = self._now_ms()
+        facts: list[RowQuotaFact] = []
+        for row in rows:
+            blocked_ms = int(self.blocked_remaining_ms(row.id, provider, model_id))
+            verdict = verdicts.get(row.id)
+            depleted = verdict is not None and verdict.state == "depleted"
+            reopens = verdict.reopens_at_ms if depleted and verdict is not None else None
+            facts.append(
+                RowQuotaFact(
+                    credential_id=row.id,
+                    blocked_ms=blocked_ms,
+                    usage_state=verdict.state if verdict is not None else "unknown",
+                    usage_depleted_reopens_ms=(
+                        max(0, reopens - now_ms) if reopens is not None else None
+                    ),
+                )
+            )
+        return QuotaEligibility(rows=tuple(facts))
 
     @staticmethod
     def _hash_order(rows: list[StoredCredential], session_id: str) -> list[StoredCredential]:
