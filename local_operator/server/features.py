@@ -354,6 +354,9 @@ def static_feature_flags() -> dict[str, Any]:
         # unloaded pages and carry server-side Undo receipts. Clients must not
         # silently fall back to a first-page action against an older backend.
         "notification_bulk_selection": 1,
+        # V2 freezes ask notification read marks too, but never grants ask
+        # settlement authority. Older selection tokens retain update-only counts.
+        "notification_bulk_ask_read": 1,
         "mcp": 1,
         "mcp_auth": 1,
         # Sessionless MCP management: `GET/POST /v1/desktop/mcp` and

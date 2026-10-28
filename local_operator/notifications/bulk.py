@@ -1,10 +1,11 @@
-"""Bounded, update-only inbox selections and transactional Undo receipts.
+"""Bounded inbox selections and transactional notification-state Undo receipts.
 
 The SQLite sequence changes for *every* row write, not only content revisions.
 A filter and a server-captured watermark therefore describe a safe subset even
 without shipping every matching id to the client: anything arriving or changing
-after preview is excluded. Ask state lives elsewhere and is deliberately never
-part of this transaction. Its count is informational, not settlement authority.
+after preview is excluded. V1 selections remain update-only. V2 captures bounded
+ask refs separately and may acknowledge their notification read marks. Ask
+settlement lives elsewhere and is never part of this transaction or Undo.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from local_operator.notifications import bulk_asks
 from local_operator.notifications.store import NotificationStore, now_ms
 
 TOKEN_TTL_MS = 10 * 60 * 1000
@@ -90,7 +92,42 @@ def _housekeep(conn: sqlite3.Connection, stamp: int) -> None:
         "DELETE FROM bulk_rows WHERE token IN (SELECT token FROM bulk_tokens WHERE expires_at<=?)",
         (stamp,),
     )
+    conn.execute(
+        "DELETE FROM bulk_ask_refs WHERE token IN "
+        "(SELECT token FROM bulk_tokens WHERE expires_at<=?)",
+        (stamp,),
+    )
     conn.execute("DELETE FROM bulk_tokens WHERE expires_at<=?", (stamp,))
+
+
+def _retained_rows(conn: sqlite3.Connection) -> int:
+    return int(
+        conn.execute(
+            "SELECT (SELECT count(*) FROM bulk_rows)+(SELECT count(*) FROM bulk_ask_refs)"
+        ).fetchone()[0]
+    )
+
+
+def _session_badges(conn: sqlite3.Connection, answer: dict[str, Any]) -> None:
+    """Fence authoritative bounded scope badges with their own coherent sequence.
+
+    The route's global counts are read after commit and may include another
+    writer. They cannot lend their newer high_water to these transaction-local
+    scope counts, or a client could pin stale data ahead of a newer event.
+    """
+    scopes = answer["session_counts"]
+    for entry in scopes.values():
+        entry["unread_count"] = 0
+    if scopes:
+        marks = ",".join("?" for _ in scopes)
+        for row in conn.execute(
+            "SELECT session_id,count(*) FROM items WHERE dismissed_at IS NULL "
+            f"AND read_rev<revision AND session_id IN ({marks}) GROUP BY session_id",
+            list(scopes),
+        ):
+            scopes[row[0]]["unread_count"] = row[1]
+    row = conn.execute("SELECT v FROM meta WHERE k='next_seq'").fetchone()
+    answer["counts_high_water"] = int(row[0]) - 1 if row else 0
 
 
 def _room(conn: sqlite3.Connection) -> None:
@@ -124,6 +161,7 @@ def preview(
     *,
     scope: str,
     skipped_ask_count: int,
+    ask_rows: Sequence[Mapping[str, Any]] = (),
     now: int | None = None,
 ) -> dict[str, Any]:
     """Freeze a selection without changing any notification or ask.
@@ -140,9 +178,12 @@ def preview(
         high_water = int(row[0]) - 1 if row else 0
         where, params = _where(filters, high_water)
         aggregates = _aggregates(conn, where, params, filters.get("count_session_ids", []))
-        count = aggregates["eligible_count"]
+        v2 = bool(filters.get("include_ask_reads"))
+        count = aggregates["eligible_count"] + (len(ask_rows) if v2 else 0)
         if count > MAX_ROWS:
             raise SelectionError("selection_too_large", 413)
+        if v2 and _retained_rows(conn) + len(ask_rows) > MAX_ROWS:
+            raise SelectionError("receipt_capacity", 429)
         token = secrets.token_urlsafe(32)
         expires = stamp + TOKEN_TTL_MS
         conn.execute(
@@ -158,12 +199,15 @@ def preview(
                 skipped_ask_count,
             ),
         )
+        if v2:
+            bulk_asks.capture(conn, token, ask_rows)
+            bulk_asks.preview_counts(aggregates, bulk_asks.snapshots(conn, token))
         return {
             "token": token,
             "through_seq": high_water,
             "expires_at": expires,
             **aggregates,
-            "skipped_ask_count": skipped_ask_count,
+            "skipped_ask_count": 0 if v2 else skipped_ask_count,
         }
 
     return store._write(body, "bulk_preview")
@@ -190,12 +234,18 @@ def refresh(
         filters = json.loads(selection["filters_json"])
         where, params = _where(filters, selection["through_seq"])
         where, params = _exclude(where, params, sorted(set(excluded_ids)))
+        aggregates = _aggregates(conn, where, params, filters.get("count_session_ids", []))
+        v2 = bool(filters.get("include_ask_reads"))
+        if v2:
+            bulk_asks.preview_counts(
+                aggregates, bulk_asks.valid_rows(conn, token, store.config_dir, excluded_ids)
+            )
         return {
             "token": token,
             "through_seq": selection["through_seq"],
             "expires_at": selection["expires_at"],
-            **_aggregates(conn, where, params, filters.get("count_session_ids", [])),
-            "skipped_ask_count": selection["skipped_ask_count"],
+            **aggregates,
+            "skipped_ask_count": 0 if v2 else selection["skipped_ask_count"],
         }
 
     return store._write(body, "bulk_refresh")
@@ -223,6 +273,7 @@ def apply(
         _housekeep(conn, stamp)
         sessions: list[str] = []
         excluded_count = 0
+        v2 = False
         if selection_token is not None:
             selection = _token(conn, selection_token, scope, stamp)
             if selection["op"] is not None:
@@ -234,6 +285,7 @@ def apply(
             eligible = int(selection["eligible_count"])
             asks = int(selection["skipped_ask_count"])
             filters = json.loads(selection["filters_json"])
+            v2 = bool(filters.get("include_ask_reads"))
             sessions = filters.get("count_session_ids", [])
             where, params = _where(filters, boundary)
             if exclusions:
@@ -243,6 +295,15 @@ def apply(
                     [*params, *exclusions],
                 ).fetchone()[0]
             eligible -= excluded_count
+            if v2:
+                selected_asks = len(bulk_asks.snapshots(conn, token, exclusions))
+                excluded_asks = asks - selected_asks
+                excluded_count += excluded_asks
+                eligible -= excluded_asks
+                asks = 0 if op in ("read", "unread") else selected_asks
+                # All v2 identities were frozen at select-all; choosing dismiss
+                # only subtracts asks, never discovers a fresh operation scope.
+                eligible -= asks
             where, params = _exclude(where, params, exclusions)
             rows = conn.execute(
                 "SELECT " + _COLUMNS + " FROM items WHERE " + where, params
@@ -270,7 +331,7 @@ def apply(
                 (token, scope, stamp + TOKEN_TTL_MS, boundary, eligible, asks),
             )
         changed = [row for row in rows if store.item_changes(row, op)]
-        retained = int(conn.execute("SELECT count(*) FROM bulk_rows").fetchone()[0])
+        retained = _retained_rows(conn)
         if len(changed) > MAX_ROWS or retained + len(changed) > MAX_ROWS:
             raise SelectionError("receipt_capacity", 429)
         for row in changed:
@@ -300,6 +361,10 @@ def apply(
             "expires_at": stamp + TOKEN_TTL_MS,
             "replayed": False,
         }
+        if v2:
+            ask_changes = bulk_asks.apply(conn, store, token, op, stamp, exclusions)
+            bulk_asks.result_counts(answer, ask_changes)
+            _session_badges(conn, answer)
         conn.execute(
             "UPDATE bulk_tokens SET op=?,result_json=?,expires_at=?,request_json=? WHERE token=?",
             (op, json.dumps(answer), answer["expires_at"], request_json, token),
@@ -364,6 +429,9 @@ def undo(
             "expires_at": selection["expires_at"],
             "replayed": False,
         }
+        if original.get("selection_version") == 2:
+            bulk_asks.result_counts(answer, bulk_asks.undo(conn, store, token))
+            _session_badges(conn, answer)
         conn.execute(
             "UPDATE bulk_tokens SET undo_json=? WHERE token=?", (json.dumps(answer), token)
         )

@@ -358,7 +358,7 @@ def test_v1_store_upgrades_without_losing_rows(client, tmp_path):
     assert selection["eligible_count"] == 1
     assert store.get(ids[0])["revision"] == 1
     with sqlite3.connect(store.path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == module.SCHEMA_VERSION
         assert conn.execute("SELECT count(*) FROM bulk_tokens").fetchone()[0] == 1
 
 
