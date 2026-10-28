@@ -293,6 +293,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "lease path, not a pathname or a translated/copyable session entry",
     ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
+    "local_operator/disk_pressure.py": (
+        1,
+        "``RECEIPT_DIRNAME`` ('disk-reclaim-receipts'): lives at the DEVICE-level "
+        "config root (<config>/disk-reclaim-receipts/), a sibling of sessions/ -- "
+        "never an entry of a session directory, so no session copy carries it.",
+    ),
     "local_operator/memory_maintenance.py": (
         3,
         "``LOCK_NAME``/``STAMP_NAME``/``ATTEMPT_NAME`` ('.compact.lock', '.compact.stamp', "

@@ -43,9 +43,7 @@ CONTRACT
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
-import json
 import os
 import shutil
 import subprocess
@@ -1374,21 +1372,23 @@ def preview_payload(plan_: Plan) -> dict[str, Any]:
 
 
 def write_receipt_atomic(path: Path, payload: dict[str, Any]) -> None:
-    """Temp file + fsync + ``os.replace`` so a reader never sees half a receipt."""
+    """Write a receipt atomically, through the SANCTIONED session manifest writer.
+
+    Delegates to ``delegated_retention._write_cleanup_manifest`` rather than
+    carrying its own tmp+fsync+``os.replace``+``unlink`` sequence: that writer
+    is already the reviewed/allow-listed shape for exactly this operation
+    (temp beside target, fsync, rename, cleanup on failure), and duplicating
+    it would grow the no-session-deletion allow-list for no behaviour gain.
+
+    The receipt directory is created 0o700 here first, so the whole receipt
+    tree stays private. The manifest writer's temp file inherits the process
+    umask on rename (0o644 typically), which is acceptable: a receipt carries
+    only paths and sizes, never secrets, inside that private directory.
+    """
+    from local_operator.session.delegated_retention import _write_cleanup_manifest
+
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".receipt-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=False)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)  # our own temp file only, never a candidate
-        raise
+    _write_cleanup_manifest(path, payload)
 
 
 @dataclass
