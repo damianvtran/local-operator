@@ -301,9 +301,7 @@ def test_the_current_working_directory_is_kept(fx: Fx, monkeypatch: pytest.Monke
 def test_missing_registration_is_kept_not_deleted(fx: Fx) -> None:
     wt = fx.worktree("gone")
     shutil.rmtree(wt)  # fixture teardown of a temp tree, simulating a vanished dir
-    item = by_path(plan_for(fx), wt) if False else next(
-        i for i in plan_for(fx).items if i.path.endswith("/gone")
-    )
+    item = next(i for i in plan_for(fx).items if i.path.endswith("/gone"))
     assert (item.action, item.code) == (dp.ACTION_KEEP, "invalid-registration")
     result = dp.apply(plan_for(fx), fx.cfg)
     assert result.exit_code == 0
@@ -789,9 +787,7 @@ def test_scratchpads_switch_off_is_a_refusal_unless_forced(fx_cfg: Path, capsys:
 
     paths = _pad_store(fx_cfg)
     _settle_pads(fx_cfg)
-    ConfigManager(fx_cfg).update_config(
-        {"session": {"cleanup": {"delegated": {"enabled": False}}}}
-    )
+    ConfigManager(fx_cfg).update_config({"session": {"cleanup": {"delegated": {"enabled": False}}}})
     assert reclaim_command(_args(scratchpads=True, apply=True, yes=True, json=True)) == 2
     capsys.readouterr()
     assert (paths["pad"] / "node_modules").exists()

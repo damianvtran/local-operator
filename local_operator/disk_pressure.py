@@ -532,9 +532,7 @@ def _inside(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
-def _keep(
-    ctx: RepoContext, path: str, code: str, reason: str, **evidence: Any
-) -> Item:
+def _keep(ctx: RepoContext, path: str, code: str, reason: str, **evidence: Any) -> Item:
     return Item(
         id=f"{CATEGORY_WORKTREE}:{path}",
         category=CATEGORY_WORKTREE,
@@ -598,9 +596,7 @@ def _assess(ctx: RepoContext, reg: Registration, path: str) -> Item:
         return _keep(ctx, path, "invalid-registration", "directory missing or a symlink")
     git_entry = os.path.join(reg.path, ".git")
     if os.path.islink(git_entry) or not os.path.isfile(git_entry):
-        return _keep(
-            ctx, path, "invalid-registration", ".git is not a plain gitdir-pointer file"
-        )
+        return _keep(ctx, path, "invalid-registration", ".git is not a plain gitdir-pointer file")
     # The listed path is a real linked worktree of THIS repository only if its
     # own idea of the common dir and toplevel agree with the registration.
     gitdir = _run_git(path, "rev-parse", "--path-format=absolute", "--absolute-git-dir")
