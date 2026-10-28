@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import io
 import struct
+import threading
 import zlib
 
 import pytest
@@ -141,77 +142,94 @@ def test_output_strips_source_metadata():
     assert b"secret-location" not in data
 
 
-def test_render_caches_per_key_and_renders_once(monkeypatch):
-    monkeypatch.setattr(avatar_cache, "COMPOSITE_CACHE", avatar_cache.AvatarCache())
+def _no_composite_state():
+    """Core keeps no composite: no cache attribute, no in-flight table."""
+
+    assert not hasattr(avatar_cache, "COMPOSITE_CACHE")
+    assert not any("CACHE" in name or "IN_FLIGHT" in name for name in vars(na))
+
+
+def test_render_is_stateless_and_bounded(monkeypatch):
     calls = []
     real = na.compose
     monkeypatch.setattr(na, "compose", lambda *a, **k: calls.append(1) or real(*a, **k))
     variant = na.Variant("person", "light", 64, "BT")
-    key = (("root", ORIGIN), (1, "acc_1", "login-a"), "notification", 1, "acc_ben")
 
     async def burst():
         return await asyncio.gather(
-            *[
-                na.render(variant, origin=ORIGIN, account_id="acc_ben", photo=None, cache_key=key)
-                for _ in range(5)
-            ]
+            *[na.render(variant, origin=ORIGIN, account_id="acc_ben", photo=None) for _ in range(5)]
         )
 
     results = asyncio.run(burst())
+    # Deterministic output, but every call renders: nothing is retained to hit.
     assert len(set(results)) == 1
-    assert len(calls) == 1
-    # An auth transition on that scope purges the composite with the raw cache.
-    avatar_cache.admit(("root", ORIGIN), None)
-    assert avatar_cache.COMPOSITE_CACHE.get(key) is None
+    assert len(calls) == 5
+    _no_composite_state()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "cache_control,etag,retained",
-    [("private", '"one"', True), ("no-store", '"one"', False), ("private", None, False)],
-)
-async def test_derivative_retention_never_exceeds_upstream(
-    tmp_path, monkeypatch, cache_control, etag, retained
-):
+def _client(tmp_path, store, headers=None, body=None):
     import httpx
 
     from local_operator.team_bridge.client import TeamBridgeClient
-    from tests.unit.team_bridge.test_avatar import AvatarStore
 
-    monkeypatch.setattr(avatar_cache, "AVATAR_CACHE", avatar_cache.AvatarCache())
-    monkeypatch.setattr(avatar_cache, "COMPOSITE_CACHE", avatar_cache.AvatarCache())
-    headers = {"content-type": "image/jpeg", "cache-control": cache_control}
-    if etag:
-        headers["etag"] = etag
-    client = TeamBridgeClient(
-        tmp_path,
-        store=AvatarStore(),
-        transport=httpx.MockTransport(
-            lambda _: httpx.Response(200, content=_jpeg(), headers=headers)
-        ),
-    )
-    result = await client.notification_avatar(
+    transport = None
+    if headers is not None:
+        transport = httpx.MockTransport(
+            lambda _: httpx.Response(200, content=body or _jpeg(), headers=headers)
+        )
+    return TeamBridgeClient(tmp_path, store=store, transport=transport)
+
+
+def _call(client, v: str | None = "0123456789abcdef"):
+    return client.notification_avatar(
         "acc_2",
         tenant_id="tenant_a",
         kind="person",
         theme="light",
         size=64,
         initials="BT",
-        v="0123456789abcdef",
+        v=v,
         expected_account_id="acc_1",
     )
-    assert result.startswith(b"\x89PNG")
-    assert bool(avatar_cache.COMPOSITE_CACHE._entries) is retained
 
 
 @pytest.mark.asyncio
-async def test_auth_transition_during_render_cannot_store_or_return_old_composite(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("cache_control,etag", [("private", '"one"'), ("no-store", None)])
+async def test_photo_render_leaves_only_the_raw_entity_rules(
+    tmp_path, monkeypatch, cache_control, etag
 ):
-    from local_operator.team_bridge.client import BridgeRefusal, TeamBridgeClient
+    """QA Q1 condition: no derived variant can outlive (or out-retain) the raw entity."""
+
     from tests.unit.team_bridge.test_avatar import AvatarStore
 
-    monkeypatch.setattr(avatar_cache, "COMPOSITE_CACHE", avatar_cache.AvatarCache())
+    monkeypatch.setattr(avatar_cache, "AVATAR_CACHE", avatar_cache.AvatarCache())
+    headers = {"content-type": "image/jpeg", "cache-control": cache_control}
+    if etag:
+        headers["etag"] = etag
+    client = _client(tmp_path, AvatarStore(), headers)
+    for theme in ("light", "dark"):
+        result = await client.notification_avatar(
+            "acc_2",
+            tenant_id="tenant_a",
+            kind="person",
+            theme=theme,
+            size=64,
+            initials="BT",
+            v="0123456789abcdef",
+            expected_account_id="acc_1",
+        )
+        assert result.startswith(b"\x89PNG")
+    # The raw cache follows upstream (validator kept; no-store kept nothing),
+    # and no composite exists anywhere to diverge from it.
+    assert len(avatar_cache.AVATAR_CACHE._entries) == (1 if cache_control == "private" else 0)
+    _no_composite_state()
+
+
+@pytest.mark.asyncio
+async def test_auth_transition_during_render_returns_nothing(tmp_path, monkeypatch):
+    from local_operator.team_bridge.client import BridgeRefusal
+    from tests.unit.team_bridge.test_avatar import AvatarStore
+
     store = AvatarStore()
     real = na.compose
 
@@ -221,17 +239,129 @@ async def test_auth_transition_during_render_cannot_store_or_return_old_composit
         return result
 
     monkeypatch.setattr(na, "compose", switch)
-    client = TeamBridgeClient(tmp_path, store=store)
     with pytest.raises(BridgeRefusal) as failure:
-        await client.notification_avatar(
-            "acc_2",
-            tenant_id="tenant_a",
-            kind="person",
-            theme="light",
-            size=64,
-            initials="BT",
-            v=None,
-            expected_account_id="acc_1",
-        )
+        await _call(_client(tmp_path, store), v=None)
     assert failure.value.http_status == 409
-    assert not avatar_cache.COMPOSITE_CACHE._entries
+    _no_composite_state()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_caller_during_auth_transition_leaves_nothing(tmp_path, monkeypatch):
+    """Review R1 condition: cancel the caller, switch login, let the worker finish.
+
+    Before, the shielded worker could insert an old-login composite after the
+    purge. Now the worker's bytes have nowhere to go: assert that the worker
+    really ran to completion and that no module state grew.
+    """
+
+    from tests.unit.team_bridge.test_avatar import AvatarStore
+
+    store = AvatarStore()
+    real = na.compose
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def held(*args, **kwargs):
+        entered.set()
+        release.wait(5)
+        try:
+            return real(*args, **kwargs)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(na, "compose", held)
+    before = {k: v for k, v in vars(na).items() if isinstance(v, (dict, list, set))}
+    task = asyncio.ensure_future(_call(_client(tmp_path, store), v=None))
+    assert await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    store.incarnation = "login-a-again"
+    release.set()
+    assert await asyncio.to_thread(finished.wait, 5)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # Give the shielded thread's completion a loop turn to settle.
+    await asyncio.sleep(0.05)
+    _no_composite_state()
+    after = {k: v for k, v in vars(na).items() if isinstance(v, (dict, list, set))}
+    assert after == before
+    # The pending slot was released, so the renderer is not left wedged.
+    assert (
+        len(
+            await na.render(
+                na.Variant("person", "light", 64, "BT"),
+                origin=ORIGIN,
+                account_id="acc_ben",
+                photo=None,
+            )
+        )
+        > 0
+    )
+
+
+def _exclusion_mask(side=256):
+    """The pixels compose() clears or covers: badge + marker clearances, outside the circle."""
+
+    from PIL import ImageChops
+
+    gap = max(1, int(side * na.GAP_RATIO))
+    badge = int(side * na.BADGE_RATIO)
+    marker = int(side * na.AGENT_MARKER_RATIO)
+    mask = Image.new("L", (side, side), 0)
+    mask.paste(na._circle_mask(badge + 2 * gap), (side - badge - gap, side - badge - gap))
+    top = Image.new("L", (side, side), 0)
+    top.paste(na._circle_mask(marker + 2 * gap), (side - marker - gap, -gap))
+    return ImageChops.lighter(
+        ImageChops.lighter(mask, top), ImageChops.invert(na._circle_mask(side))
+    )
+
+
+def test_initials_ink_never_meets_the_badge_or_marker():
+    """Design D1: 0 % of any A-Z/0-9 pair's ink falls in an overlay clearance."""
+
+    import itertools
+    import string
+
+    from PIL import ImageChops
+
+    exclusion = _exclusion_mask()
+    chars = string.ascii_uppercase + string.digits
+    lost = []
+    for pair in ("".join(p) for p in itertools.product(chars, repeat=2)):
+        glyphs = na._placeholder(256, (0, 0, 0), pair).convert("L")
+        if ImageChops.multiply(glyphs, exclusion).getbbox() is not None:
+            lost.append(pair)
+    assert lost == []
+
+
+def test_initials_survive_in_the_actual_composite():
+    """End-to-end control for D1: the rendered PNG keeps every glyph pixel opaque."""
+
+    from PIL import ImageChops
+
+    for kind in ("person", "person_agent"):
+        image = _render(kind=kind, theme="light", size=256, initials="WQ")
+        ink = na._placeholder(256, (0, 0, 0), "WQ").convert("L")
+        # Every pixel where the glyph draws must still be white and opaque.
+        white = image.convert("L").point([255 if v > 200 else 0 for v in range(256)])
+        alpha = image.getchannel("A").point([255 if v == 255 else 0 for v in range(256)])
+        kept = ImageChops.multiply(white, alpha)
+        solid_ink = ink.point([255 if v == 255 else 0 for v in range(256)])
+        assert solid_ink.getbbox() is not None
+        assert ImageChops.subtract(solid_ink, kept).getbbox() is None, kind
+
+
+def _contrast(fill):
+    def channel(v):
+        v /= 255
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+    r, g, b = (channel(c) for c in fill)
+    return 1.05 / (0.2126 * r + 0.7152 * g + 0.0722 * b + 0.05)
+
+
+@pytest.mark.parametrize("palette", [na._PALETTE_LIGHT, na._PALETTE_DARK])
+def test_every_palette_fill_holds_white_initials_at_normal_text_contrast(palette):
+    """Design D2: >= 4.5:1, the small-text bar, since 32/48 px appearances are small."""
+
+    assert all(_contrast(fill) >= 4.5 for fill in palette), [
+        (f"#{r:02x}{g:02x}{b:02x}", round(_contrast((r, g, b)), 2)) for r, g, b in palette
+    ]

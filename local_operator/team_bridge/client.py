@@ -3527,9 +3527,9 @@ class TeamBridgeClient:
         """``(scope, authority)`` for the CURRENT login, exactly as ``fetch_avatar`` keys it.
 
         Local only (no refresh, no network): the notification composite uses it
-        to key its cache under the same prefix the raw cache uses, so one
-        ``avatar_cache.admit`` purges both. Refuses like ``fetch_avatar`` does
-        when the captured viewer is not the signed-in login.
+        to fence its render to the same login ``fetch_avatar`` authorized under.
+        Refuses like ``fetch_avatar`` does when the captured viewer is not the
+        signed-in login.
         """
 
         from local_operator.paths import config_dir
@@ -3565,10 +3565,15 @@ class TeamBridgeClient:
         """Render only after current-avatar authorization, never from stale bytes.
 
         The directory join belongs to the tenant-scoped desktop caller. Here
-        tenant is an isolation key, NOT a replacement for the existing hub
-        avatar authorization. No-photo placeholders make no network request.
-        The login captured before network/CPU work is checked afterwards too;
-        a queued decode cannot resurrect an image from a previous login.
+        tenant is validated as part of the closed contract (the desktop keys its
+        display cache by it), NOT a replacement for the existing hub avatar
+        authorization. No-photo placeholders make no network request. The login
+        captured before network/CPU work is checked afterwards too; a queued
+        decode cannot return an image from a previous login.
+
+        Stateless: the composite is returned and forgotten. Display retention
+        is the desktop main process's (A0: in memory, <= 15 minutes, cleared on
+        auth transitions); see ``notification_avatar``'s module docstring.
         """
         from local_operator.team_bridge import avatar_cache
         from local_operator.team_bridge import notification_avatar as na
@@ -3602,50 +3607,22 @@ class TeamBridgeClient:
 
         variant = na.Variant(kind=kind, theme=theme, size=size, initials=initials)
         photo: bytes | None = None
-        retain = True
-        try:
-            if v is not None:
-                photo, _mime = await self.fetch_avatar(
-                    sender_account_id, v=v, size=size, expected_account_id=expected_account_id
-                )
-                # Absence means no-store, no validator, expiry or eviction.
-                # Derivatives must never have more retention than the entity
-                # whose current authorization justified their creation.
-                raw = avatar_cache.AVATAR_CACHE.get((scope, authority, sender_account_id, v, size))
-                retain = raw is not None and raw.body == photo
-            check_owner()
-        except (BridgeRefusal, BridgeSignInRequired):
-            avatar_cache.COMPOSITE_CACHE.admit(scope, None)
-            raise
-        identity = hashlib.sha256(photo).hexdigest() if photo is not None else None
-        key = (
-            scope,
-            authority,
-            tenant_id,
-            na.RENDER_VERSION,
-            sender_account_id,
-            v,
-            identity,
-            initials if photo is None else None,
-            kind,
-            theme,
-            size,
-        )
-        try:
-            data = await na.render(
-                variant,
-                origin=self._base_url,
-                account_id=sender_account_id,
-                photo=photo,
-                cache_key=key,
-                retain=retain,
-                check_owner=check_owner,
+        if v is not None:
+            # The raw entity keeps its own rules (revalidated per use, no-store
+            # honoured) in ``fetch_avatar``; nothing derived from it is kept here.
+            photo, _mime = await self.fetch_avatar(
+                sender_account_id, v=v, size=size, expected_account_id=expected_account_id
             )
-            check_owner()
-            return data
-        except (BridgeRefusal, BridgeSignInRequired, na.AvatarImageRejected):
-            avatar_cache.COMPOSITE_CACHE.admit(scope, None)
-            raise
+        check_owner()
+        data = await na.render(
+            variant,
+            origin=self._base_url,
+            account_id=sender_account_id,
+            photo=photo,
+            check_owner=check_owner,
+        )
+        check_owner()
+        return data
 
     async def fetch_attachment(
         self,

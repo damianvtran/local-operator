@@ -8,10 +8,9 @@ RETENTION EXPIRY. Entries also age out after ``ttl_s`` (15 minutes) of wall
 time since they were stored. That bounds how long a photo lingers in memory
 after its sender stops appearing; it is NOT a freshness lifetime -- a live
 entry still needs the hub's conditional 304 under the current login before
-reuse, and an expired one simply costs a cold fetch. The same class backs the
-notification composite cache (``notification_avatar.py``), whose keys share
-the ``(scope, authority, ...)`` prefix so ``admit`` purges both on an auth
-transition.
+reuse, and an expired one simply costs a cold fetch. Rendered notification
+composites (``notification_avatar.py``) are deliberately NOT cached in core:
+the desktop main process owns display retention.
 """
 
 from __future__ import annotations
@@ -20,14 +19,11 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from threading import Lock
 from time import monotonic
-from typing import Any, Callable
+from typing import Callable
 
 Scope = tuple[str, str]
 Authority = tuple[int, str, str]
-#: ``(scope, authority, *identity)``. The raw cache uses ``(target, v, size)``
-#: as identity; the composite cache adds its render variant. Only the two-item
-#: prefix is interpreted here.
-Key = tuple[Any, ...]
+Key = tuple[Scope, Authority, str, str, int]
 
 #: Retention, not freshness: see the module docstring.
 RETENTION_S = 15 * 60
@@ -106,18 +102,13 @@ class AvatarCache:
 
 
 AVATAR_CACHE = AvatarCache()
-#: Rendered notification composites (``notification_avatar.py``): same bounds
-#: as the raw entities, keyed by the same ``(scope, authority)`` prefix.
-COMPOSITE_CACHE = AvatarCache()
 
 
 def admit(scope: Scope, authority: Authority | None) -> None:
-    """Apply one observed login authority to EVERY avatar-derived cache.
+    """Apply one observed login authority to the raw avatar cache.
 
-    The single entry point so an auth transition (sign-out, A->B->A) cannot
-    purge raw photos yet leave their rendered composites behind. Reads the
-    module globals at call time so a test's monkeypatched cache is honoured.
+    Reads the module global at call time so a test's monkeypatched cache is
+    honoured. Core keeps no derived (composite) cache to purge alongside it.
     """
 
     AVATAR_CACHE.admit(scope, authority)
-    COMPOSITE_CACHE.admit(scope, authority)

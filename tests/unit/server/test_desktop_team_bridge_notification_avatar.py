@@ -2,8 +2,8 @@
 
 Proves the closed query, the owner-avatar equality rule, the viewer fence, that
 the only upstream read is the closed ``/accounts/{id}/avatar`` relay, that a
-placeholder touches no network, and that composites are keyed under (and purged
-with) the current login.
+placeholder touches no network, and that core keeps no composite (the desktop
+owns display retention) while still fencing each render to the current login.
 """
 
 import io
@@ -21,7 +21,6 @@ def proxy(request, monkeypatch):
     from local_operator.team_bridge import avatar_cache
 
     monkeypatch.setattr(avatar_cache, "AVATAR_CACHE", avatar_cache.AvatarCache())
-    monkeypatch.setattr(avatar_cache, "COMPOSITE_CACHE", avatar_cache.AvatarCache())
     return request.getfixturevalue("attachment_proxy")
 
 
@@ -128,29 +127,30 @@ def test_upstream_failure_is_a_refusal_not_a_stale_image(proxy):
     state.update(serve_type="image/jpeg", serve=_jpeg(), etag='"one"')
     _png(client.get(f"{URL}?{PHOTO_Q}"))
     state["error"] = (404, "avatar_not_found")
-    # The composite for the old bytes is cached, but the photo path
+    # Nothing derived from the old bytes is kept, and the photo path
     # revalidates first: a revoked/stale hash gets no image.
     assert client.get(f"{URL}?{PHOTO_Q}").status_code == 404
 
 
-def test_composite_cache_is_keyed_by_login_and_purged_on_transition(proxy):
+def test_each_request_renders_under_the_current_login_and_keeps_nothing(proxy):
     from local_operator.team_bridge import avatar_cache
+    from local_operator.team_bridge import notification_avatar as na
 
     client, _, state = proxy
-    _png(client.get(f"{URL}?{BASE_Q}"))
-    assert len(avatar_cache.COMPOSITE_CACHE._entries) == 1
-    first = next(iter(avatar_cache.COMPOSITE_CACHE._entries))
-    _png(client.get(f"{URL}?{BASE_Q}"))
-    assert len(avatar_cache.COMPOSITE_CACHE._entries) == 1  # served from cache
-    # A->B->A: same account, new login incarnation -> the old render is gone.
+    first = client.get(f"{URL}?{BASE_Q}")
+    _png(first)
+    assert not hasattr(avatar_cache, "COMPOSITE_CACHE")
+    # A->B->A: same account, new login incarnation -> still rendered, no state.
     state["incarnation"] = "login-a-again"
-    _png(client.get(f"{URL}?{BASE_Q}"))
-    assert first not in avatar_cache.COMPOSITE_CACHE._entries
-    assert len(avatar_cache.COMPOSITE_CACHE._entries) == 1
-    # Sign-out purges composites too.
+    again = client.get(f"{URL}?{BASE_Q}")
+    _png(again)
+    assert again.content == first.content
+    assert not any("CACHE" in name or "IN_FLIGHT" in name for name in vars(na))
+    # Sign-out refuses rather than rendering from anything retained.
     state["store"].rows = []
-    client.get(f"{URL}?{BASE_Q}")
-    assert len(avatar_cache.COMPOSITE_CACHE._entries) == 0
+    signed_out = client.get(f"{URL}?{BASE_Q}")
+    assert signed_out.status_code == 401
+    assert signed_out.json()["detail"]["code"] == "bridge_signin_required"
 
 
 def test_capability_is_advertised():

@@ -2595,13 +2595,15 @@ async def get_notification_avatar(
     """One precomposed PNG for a Team Bridge OS notification's image slot.
 
     Capability ``team_bridge_notification_avatar``. The desktop main process
-    calls this (never the renderer with a URL) after it has ALREADY posted
-    the notification, so nothing here is on the delivery path.
+    calls this (never the renderer with a URL) to warm its display cache, and
+    on a miss waits at most 250 ms before posting with initials anyway (the
+    operator's bounded-wait decision), so this route can never hold a
+    notification back beyond that budget.
 
     Closed query, every name single-valued:
 
-    * ``tenant_id`` the directory/event tenant (isolates retention, never
-      overrides hub authorization); ``kind`` ``person|person_agent``;
+    * ``tenant_id`` the directory/event tenant (part of the desktop's display
+      cache key; never overrides hub authorization); ``kind`` ``person|person_agent``;
       ``theme`` ``light|dark``; ``size``
       ``64|256``; ``initials`` 0-2 letters/digits (may be empty);
       ``expected_account_id`` the captured VIEWER receipt, as on ``/avatar``.
@@ -2613,6 +2615,11 @@ async def get_notification_avatar(
     contract pins a ``person_agent``'s avatar to its OWNER's account (which is
     the path id), so an avatar naming any other account is refused rather than
     drawn under someone else's name.
+
+    ``private, no-store``: core renders statelessly and keeps no composite. The
+    desktop main process owns display retention (A0: in memory, <= 15 minutes,
+    cleared on auth transitions); an HTTP/disk cache here could not apply its
+    login fence.
     """
 
     from local_operator.team_bridge import notification_avatar as na
