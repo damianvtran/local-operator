@@ -31,10 +31,12 @@ def _reject(rows: list[dict], record: str) -> None:
 def test_r4_1_a_mid_line_split_into_short_pieces_is_refused() -> None:
     """The reviewer's 9.2x case: `abcabc` emitted as `bc` then `ab`.
 
-    Guarded by ``MIN_CUT`` (both pieces are two characters, so neither counts as
-    a cut) — the mutation matrix in the PR comment records that attribution
-    rather than crediting the cursor for it. The cursor-only counterpart below
-    uses pieces that are long enough to pass ``MIN_CUT``.
+    Guarded by the LINE CURSOR, not by ``MIN_CUT``: both pieces are two
+    characters, so both count as cuts, and it is one source line answering two
+    emitted lines that refuses the epoch. The mutation matrix in the PR comment
+    records that attribution; `MIN_CUT`'s own isolated fixture is
+    `test_a_one_character_fragment_must_be_a_whole_word` in
+    `test_round5_units.py`.
     """
     _reject(_span("abcabc"), "user: bc\n\tab")
 

@@ -117,22 +117,126 @@ def test_identifier_pool_is_not_a_second_word_membership_escape_hatch() -> None:
         )
 
 
-def test_s17_an_identifier_pool_line_is_content_and_must_be_source_derived() -> None:
-    """S-17: the pool was exempt from the line matcher and independently admitted
-    68 -> 92 o200k tokens (1.35x). It is now carried content: a pool line whose
-    payload is not a line of the source record is refused, not exempted.
-    """
-    from local_operator.saver.validate import HEADER, SaverRejected, check_provenance
-
-    rows = [
-        {"role": "user", "content": [{"type": "text", "text": "please patch src/app/views.py for the parser"}]}
-    ] + [
-        {"role": "user", "content": [{"type": "text", "text": f"filler line {n}"}]} for n in range(6)
+def _pool_span(source: str, lines: int = 6) -> list[dict]:
+    """One real source row plus filler, so an epoch can reduce something."""
+    return [{"role": "user", "content": [{"type": "text", "text": source}]}] + [
+        {"role": "user", "content": [{"type": "text", "text": f"filler line {n}"}]}
+        for n in range(lines)
     ]
-    with pytest.raises(SaverRejected):
+
+
+def test_s17_a_pool_line_may_not_cost_more_than_its_span() -> None:
+    """S-17's amplification, at its measured 68 -> 92 shape.
+
+    The pool line used to be exempt from the line matcher and matched by
+    substring, so it could list any fragment or repetition of any source word:
+    security reproduced 68 -> 92 o200k tokens (1.35x) on a span with no
+    deletion left to pay for it. The verifier now charges it on both sides —
+    every token must be a source-derived identifier AND one use per identifier
+    the span holds — so a payload that costs more than the span's own
+    identifier material is refused rather than exempted.
+
+    The fixture this replaces (`src/app/views.py` alone over a seven-line span)
+    was not a guard: it is exactly the shape an honest compact pool emits, and
+    it was the reason the round-5 replay accepted 0 of 131 real epochs.
+    """
+    from local_operator.saver.validate import check_provenance
+
+    words = ("alpha bravo charlie delta echo foxtrot golf hotel india juliett kilo lima " * 5)
+    rows = _pool_span(words.strip())
+    record = "user: [radient:ids mentioned in this part] " + " ".join(
+        ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"] * 12
+    )
+    tokenizer = pytest.importorskip(
+        "radient_context_reduction.tokenize", reason="reference tokenizer not on PYTHONPATH"
+    )
+    assert tokenizer.token_count_text(record) > tokenizer.token_count_text(words), (
+        "fixture must amplify: it is the 1.35x shape, not a rounding difference"
+    )
+    with pytest.raises(SaverRejected, match="provenance"):
+        check_provenance(HEADER + "\n" + record, rows)
+
+
+def test_the_identifier_pool_is_a_disclosure_line_and_is_accepted() -> None:
+    """The reducer's own compact pool: source-derived identifiers, used once.
+
+    No source LINE holds this payload and none ever could — the reducer joins
+    identifiers from several rows into one line — so a verifier that demands it
+    be content refuses every compact epoch. It is admitted as a disclosure unit
+    whose tokens are all identifiers of the span.
+    """
+    from local_operator.saver.validate import check_provenance
+
+    rows = _pool_span(
+        "the parser choked\nsrc/app/views.py\nConnectionError\nsee https://example.com/a/b"
+    )
+    check_provenance(
+        HEADER
+        + "\nuser: [radient:ids mentioned in this part] "
+        "src/app/views.py ConnectionError https://example.com/a/b",
+        rows,
+    )
+
+
+def test_a_pool_only_epoch_over_a_one_line_span_is_still_a_reduction() -> None:
+    """Disclosure lines are paid for by the deletions, not charged a second time.
+
+    Counting the pool line as an EMITTED line makes a one-record span whose only
+    emitted line is the pool line read as "no reduction" (emitted 1, span 1) and
+    refuses it. That is the manager's replay finding, stated as a number: the
+    pool is not content, so it is not in the content count.
+    """
+    from local_operator.saver.validate import check_provenance
+
+    rows = [{"role": "user", "content": [{"type": "text", "text": "src/app/views.py raised"}]}]
+    check_provenance(
+        HEADER + "\nuser: [radient:ids mentioned in this part] src/app/views.py", rows
+    )
+
+
+def test_a_pool_payload_past_the_reducers_own_cap_is_refused() -> None:
+    """More than `DEEP_IDS_CHARS` (2400) is not a rendering of anything.
+
+    Isolated from the one-use budget: the span holds 45 identifiers and the
+    payload lists 45 of them, so only the reducer's own 2400-character bound
+    can refuse it.
+    """
+    from local_operator.saver.validate import check_provenance
+
+    paths = [
+        f"/Users/damian/local-operator/.worktrees/saver-lo1/pkg_{n:02d}/module_{n:02d}.py"
+        for n in range(45)
+    ]
+    rows = _pool_span("\n".join(paths))
+    payload = " ".join(paths)
+    assert len(payload) > 2400
+    with pytest.raises(SaverRejected, match="provenance"):
+        check_provenance(HEADER + "\nuser: [radient:ids mentioned in this part] " + payload, rows)
+
+
+def test_a_harness_state_preview_must_be_the_preview_of_its_record() -> None:
+    """O5 is a FUNCTION of the row it replaces, so an invented preview dies.
+
+    The honest one is accepted in the same fixture, which is what makes this a
+    guard rather than a rejection of the shape: the preview is recomputed from
+    the source record and compared.
+    """
+    from local_operator.saver.validate import check_provenance
+
+    rows = _pool_span("[session-state]\n## Knowledge and session state\nGuides are procedures.")
+    honest = (
+        "user: [radient:harness state omitted, 62 chars]"
+        " [session-state] ## Knowledge and session state"
+    )
+    check_provenance(HEADER + "\n" + honest, rows)
+    with pytest.raises(SaverRejected, match="provenance"):
         check_provenance(
-            HEADER + "\nuser: [radient:ids mentioned in this part] src/app/views.py", rows
+            HEADER
+            + "\nuser: [radient:harness state omitted, 62 chars]"
+            " [session-state] ## Invented heading",
+            rows,
         )
+
 
 def test_two_text_blocks_have_distinct_source_occurrences() -> None:
     from local_operator.saver.provenance import check_records

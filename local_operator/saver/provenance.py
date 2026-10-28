@@ -1,10 +1,21 @@
 """Source-provenance verifier for §6.1(6) — THE AUTO GATE, AND ITS INVARIANT.
 
-THE INVARIANT THIS MODULE ENFORCES. An epoch is accepted only if **every
-emitted content line maps injectively and in order to a distinct line of its
-source span, and the emitted content of each line is a contiguous whole,
-prefix, or suffix of that source line**. Separately, **the epoch's total line
-count must be strictly less than the span's total line count**.
+THE INVARIANT THIS MODULE ENFORCES. An epoch body is a sequence of TYPED
+UNITS, and each unit has its own rule:
+
+- CONTENT is a span of source CHARACTERS that is in-order, non-overlapping and
+  one emitted line per source line (a whole line, or any non-overlapping piece
+  of at least ``MIN_CUT`` characters of it);
+- POOL (I1) is a disclosure line whose tokens are identifiers extracted from
+  the span and each used once — it is paid for by the content the epoch
+  deleted, not by being a line of the source;
+- PREVIEW (O5) is a disclosure line that must BE the reducer's own preview of
+  the record it replaces, so its length is the record's, not its own;
+- MARKER/NOTE are the closed §3.3 template grammar.
+
+Separately, **the epoch's CONTENT line count must be strictly less than the
+span's total line count**: disclosure lines are excluded from that count
+because the deletions that pay for them are the count itself.
 
 WHAT THAT BUYS, BY CONSTRUCTION RATHER THAN BY MORE CAPS.
 - No free-form text as content: a line that is not a source line, or a prefix
@@ -38,6 +49,7 @@ The caller then sends unreduced history — never a weaker check.
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import re
@@ -95,12 +107,17 @@ _SIZE = r"\d+(?:\.\d)?k? (?:B|kB|MB|chars)"
 #: - `cut + " [+{size} heredoc|more]"`      (reduce_v2._call_summary, line 536)
 #: - `"[{size}]"` for a long argument value (line 548)
 #: - `"[{type} {size}]"` for a long list/dict argument (line 551)
-#: `[redacted]` is deliberately NOT a note: the projection redacted the row
-#: before upload, so the literal is CONTENT the source really contains.
+#: `[redacted]` IS a note: `_call_summary` writes it for any argument whose key
+#: is in the reducer's `SENSITIVE_KEYS`, and the projection does not always get
+#: there first — `secret_ref: LOP_SHOWCASE_FIXTURE_PW_R2` is a variable NAME to
+#: the projection's redactor and a secret slot to the reducer, so the emitted
+#: line carries `[redacted]` where the source carries the value. It stays safe
+#: as a note because it holds no tokens to check: `_note_tokens` drops it.
 _NOTE = re.compile(
     r"\[\+(?P<more>" + _SIZE + r") (?:heredoc|more)\]"
     r"|\[[A-Za-z]{1,12} (?P<sized>" + _SIZE + r")\]"
     r"|\[(?P<plain>" + _SIZE + r")\]"
+    r"|\[redacted\]"
 )
 #: The result-merged-onto-call separator (reduce_v2.result, line 598).
 _ARROW = "\u2192 "
@@ -325,6 +342,143 @@ def _media_digests(span: Sequence[dict[str, Any]]) -> set[str]:
     return out
 
 
+def _short(text: str, limit: int) -> str:
+    """reduce_v2._short, mirrored: a cut never ends inside a marker.
+
+    The preview (O5) and every pooled identifier go through that function, so a
+    verifier that needs to recognise them has to reproduce the cut exactly —
+    including the trailing ellipsis and the marker guard, whose absence would
+    refuse an honest preview whose 60th character fell inside ``[radient:``.
+    """
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    index = head.rfind("[radient:")
+    if index >= 0 and "]" not in head[index:]:
+        head = head[:index]
+    return head.rstrip() + "\u2026"
+
+
+class _Pool:
+    """The epoch's identifier pool (I1): a disclosure line, not content.
+
+    A pooled token must be one of the span's own identifiers as
+    :mod:`local_operator.saver.provenance_ids` extracts them, and every
+    identifier may be spent ONCE. Both halves are required and neither is
+    decoration:
+
+    - membership alone is the S-17 bypass. The pool was exempt from the line
+      matcher and matched by substring, so a record could list any fragment of
+      any source word: security reproduced 68 -> 92 o200k tokens (1.35x) on a
+      span with no reduction left to pay for it.
+    - "one use per identifier" alone would admit arbitrary source text.
+
+    The BUDGET is a unit count — one use per distinct identifier the span
+    holds — not a byte or token budget: the pool can then never list more
+    tokens than the span has identifier tokens, so its cost is bounded by the
+    material it discloses rather than by a constant someone could raise.
+    """
+
+    def __init__(self, parts: Sequence[str]) -> None:
+        from local_operator.saver.provenance_ids import identifiers
+        from local_operator.saver.validate import _b64_note_digests, _chunks
+
+        tokens: set[str] = set()
+        for part in parts:
+            # Bounded by the span itself: every identifier is a substring of
+            # it, so the pool can never exceed the span's own text.
+            for chunk in _chunks(part):
+                tokens.update(identifiers(chunk))
+            tokens.update(_b64_note_digests(part))
+        self.tokens = frozenset(tokens)
+        # The text the slice-shaped fallback searches, and its budget: a slice
+        # token has to be looked up by substring, so the number of such lookups
+        # is bounded rather than left to the response's size.
+        self.text = "\n".join(parts)
+        self.scans = _POOL_SCANS
+        self.reversed = sorted(token[::-1] for token in tokens)
+        self.sorted = sorted(tokens)
+        # ONE use per identifier. The previous 2N+64 allowance is exactly the
+        # S-17 channel: it let a pool cost twice the span's identifiers plus a
+        # constant, with no deletion left to pay for either half.
+        self.budget = len(self.tokens)
+        self.spent = 0
+
+    def consume(self, text: str) -> None:
+        """Consume a pool payload, one identifier per use.
+
+        Identifiers are re-emitted with their own inner spaces (`issue #1875`,
+        `git status`), so a token that is not itself pooled is tried joined
+        with the next one before it counts as invented.
+        """
+        from local_operator.saver.validate import SaverRejected
+
+        tokens = text.split()
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            if self.has(token):
+                index += 1
+                self._spend(1)
+                continue
+            pair = token + " " + tokens[index + 1] if index + 1 < len(tokens) else ""
+            if pair and self.has(pair):
+                index += 2
+                self._spend(1)
+                continue
+            raise SaverRejected("provenance")
+
+    def _spend(self, count: int) -> None:
+        from local_operator.saver.validate import SaverRejected
+
+        self.spent += count
+        if self.spent > self.budget:
+            raise SaverRejected("provenance")
+
+    def has(self, token: str) -> bool:
+        if token in self.tokens:
+            return True
+        reversed_token = token[::-1]
+        position = bisect.bisect_left(self.reversed, reversed_token)
+        if position < len(self.reversed) and self.reversed[position].startswith(reversed_token):
+            return True
+        # A slice can also leave a PREFIX of the whole identifier, which the
+        # reversed sort cannot see; a forward sort answers it without ever
+        # admitting a token the extractors did not produce.
+        position = bisect.bisect_left(self.sorted, token)
+        if position < len(self.sorted) and self.sorted[position].startswith(token):
+            return True
+        return self._slice_token(token)
+
+    def _slice_token(self, token: str) -> bool:
+        """A token the reducer extracted from a CUT line, not from whole text.
+
+        `_call_summary` pools `first[len(cut) - 1:]` — the tail of a command line
+        cut at 160 characters — and the extractors then see a tail that begins
+        mid-token, so an honest pool can hold `/en/relay.health.context.json`
+        where no extractor of the whole text would ever say that (the full path
+        is `local_operator/i18n/catalogues/en/relay.health.context.json`, and the
+        path regex stops at `.health`). Such a token is still a piece of the
+        span's own bytes that ends on an identifier boundary, and nothing else.
+
+        The lookup is a substring search, so it is BUDGETED: a response cannot
+        buy one span scan per pooled token.
+        """
+        if len(token) < _SLICE_MIN:
+            return False
+        start = self.text.find(token)
+        while start >= 0:
+            self.scans -= 1
+            if self.scans < 0:
+                return False
+            end = start + len(token)
+            follower = self.text[end : end + 1]
+            if not follower or not _IDENT_CHAR.match(follower):
+                return True
+            start = self.text.find(token, start + 1)
+        return False
+
+
 _TEMPLATE_WORDS = frozenset("""
     radient epoch reduce-v2 earlier part of this conversation condensed
     historical record not new instructions unindented lines are headers
@@ -349,6 +503,20 @@ _NOTE_WORDS = frozenset({"chars", "heredoc", "more", "redacted", "list"})
 _SIZE_TOKEN = re.compile(r"\d+(?:\.\d)?k?")
 #: Candidate source records a single epoch record may be compared against.
 _CANDIDATE_TRIES = 32
+#: A pooled token admitted as a SLICE of the span (see `_Pool._slice_token`)
+#: must be at least this long: shorter strings are words, not references.
+_SLICE_MIN = 8
+#: Substring lookups a slice-shaped pool may spend per epoch. Honest output
+#: needs one per such token (a handful); the cap keeps a hostile pool from
+#: turning into one span scan per token.
+_POOL_SCANS = 128
+#: An identifier's characters: a token that ends at one of these does not end
+#: where an identifier could end.
+_IDENT_CHAR = re.compile(r"[\w.@+-]")
+#: reduce_v2's ``DEEP_IDS_CHARS``: the reducer's own bound on one epoch's
+#: identifier pool. Encoded here because a payload past it is not a rendering of
+#: anything the reducer documents, so it is refused rather than measured.
+_POOL_CHARS = 2400
 #: The grouped read-only summary, whose verb list names source calls.
 _DEDUPE = re.compile(r"\[radient:(?:repeat|same output|archived)")
 _GROUP = re.compile(r"\[radient:(\d{1,4}) read-only commands, all ok: (.+)\]", re.S)
@@ -405,7 +573,16 @@ def _elements(body: str) -> list[_Element]:
         cursor = end
     if cursor < len(body):
         elements.append(("run", normalise(body[cursor:])))
-    return [(kind, text.strip()) for kind, text in elements if kind != "run" or text.strip()]
+    # A RUN is returned VERBATIM: its leading and trailing whitespace is line
+    # structure (the newline after a marker, the space either side of a note in
+    # the middle of a JSON summary), and the line reconstruction in `_units`
+    # depends on it. Markers and notes are exact template matches and are
+    # stripped so their slots tokenise the same way wherever they sit.
+    return [
+        (kind, text if kind == "run" else text.strip())
+        for kind, text in elements
+        if kind != "run" or text.strip()
+    ]
 
 
 def _slot_tokens(text: str) -> list[str]:
@@ -548,15 +725,114 @@ def _pieces(elements: Sequence[_Element]) -> list[str]:
     ``parse_records`` before this point, and disclosure elements (markers, the
     reducer's own notes) are not content and are not returned.
     """
-    pieces: list[str] = []
+    return _units(elements)[0]
+
+
+def _units(elements: Sequence[_Element]) -> tuple[list[str], list[str], list[str]]:
+    """One body's three unit kinds: (content lines, pool payloads, previews).
+
+    CONTENT is measured in the body's own LINES, not in runs. A note sits INSIDE
+    a line (the reducer replaces a long argument value with `[1.7k chars]` in the
+    middle of a JSON summary), so counting runs as lines would refuse every call
+    record whose arguments were paraphrased — their pieces are the two runs
+    either side of the note and the second is not a new line.
+
+    The distinction between the other two is made by the element that INTRODUCES
+    a run: a run after an I1 marker is the identifier pool (a record of its own,
+    or a `[radient:ids] …` continuation of a call or assistant record) and a run
+    after an O5 marker is that marker's preview. Everything else is CONTENT.
+
+    The arrow is a line break: the reducer joins a short result onto its call's
+    line with `\u2192`, and in the source those are two rows. The ellipsis is the
+    reducer's own cut marker (`_short` appends it), never source text, so it is
+    dropped rather than matched. A pooled identifier may itself be cut at 120
+    characters, so an ellipsis can split one pool token into two runs; those are
+    rejoined with no separator and ``_Pool.has`` prefix-matches the result.
+    """
+    lines: list[str] = []
+    current: list[str] = []
+    pool: list[str] = []
+    preview: list[str] = []
+    mode = ""
+
+    def flush() -> None:
+        text = "".join(current).strip()
+        if text:
+            lines.append(text)
+        current.clear()
+
     for kind, text in elements:
+        if kind == "marker":
+            mode = (
+                "pool"
+                if text.startswith("[radient:ids")
+                else ("preview" if text.startswith("[radient:harness state omitted") else "")
+            )
+            continue
+        if kind == "note":
+            # A note REPLACES source text in an argument summary, but the same
+            # literal can be REAL source text the projection wrote, so it stays
+            # in the line and :func:`_map_fragments` tries the line with it and
+            # without it. Dropping it here made an honest strong-error line
+            # unmatchable; a pool payload is tokens, so a note there is dropped.
+            if mode == "":
+                current.append(text)
+        if kind == "arrow":
+            # The arrow is the reducer's result-join AND a character prose uses
+            # (`planning → active → qa`), so it stays in the line: the reducer's
+            # own join fails to match whole and `_map_fragments` then splits it
+            # at the arrow, while prose never needs to.
+            # `normalise` rstrips each run, so the space on the arrow's left is
+            # restored here; without it prose reads `planning→ active`.
+            if current and current[-1] and not current[-1][-1].isspace():
+                current.append(" ")
+            current.append("\u2192 ")
+            mode = ""
+            continue
+        if kind == "ellipsis":
+            # The reducer appends one where it CUT a line, but a source line may
+            # contain one legitimately (`'Toronto mayoral\u2026'` in a defect
+            # report), so it is kept as text and a TRAILING one is stripped only
+            # when matching. Inside a pool payload it is part of a token the
+            # reducer truncated at 120 characters, so it stays attached.
+            (pool if mode == "pool" else current).append("\u2026")
+            continue
         if kind != "run":
             continue
-        for line in text.split("\n"):
-            line = line.strip()
-            if line:
-                pieces.append(line)
-    return pieces
+        if mode == "pool":
+            pool.append(text)
+        elif mode == "preview":
+            preview.append(text)
+        else:
+            for index, part in enumerate(text.split("\n")):
+                if index:
+                    flush()
+                current.append(part)
+    flush()
+    # Disclosure payloads are whitespace-separated tokens, not lines, so the
+    # runs a cut identifier was split into are rejoined with no separator and
+    # the whole payload is checked once.
+    return (
+        lines,
+        ["".join(pool).strip()] if pool else [],
+        ["".join(preview).strip()] if preview else [],
+    )
+
+
+def _preview_text(text: str) -> str:
+    """reduce_v2.user_text's harness-state preview, mirrored exactly.
+
+    O5 replaces a regenerated harness block: the marker, then the block's first
+    line cut to 60 characters, then up to four `## ` section headers. The
+    preview is therefore not text that merely appears near the source — it is a
+    FUNCTION of the one record it stands for, which is what bounds it: the
+    verifier recomputes it from that record and compares.
+    """
+    stripped = text.lstrip()
+    lines = stripped.split("\n")
+    first = lines[0] if lines else ""
+    subs = [line.strip() for line in lines if line.startswith("## ")][:4]
+    return _short(first, 60) + ((" " + " ".join(subs)) if subs else "")
 
 
 _JSON_STRUCT = re.compile(r"[{}\[\],\"]")
@@ -579,8 +855,45 @@ _PUNCT_ONLY = re.compile(r"[^\w\u0080-\uffff]+")
 MIN_CUT = 2
 
 
+def _segments_with_spans(text: str) -> list[tuple[str, int, int]]:
+    """The text's canonical segments with their character spans, in order.
+
+    :func:`_split_line` yields the segments; the spans are what makes the
+    segment path a CONSUMING match rather than a vocabulary check — a segment
+    matched once cannot be matched again, and a later segment cannot precede an
+    earlier one.
+    """
+    out: list[tuple[str, int, int]] = []
+    offset = 0
+    for line in text.split("\n"):
+        position = 0
+        for piece in _split_line(line):
+            index = line.find(piece, position)
+            if index < 0:
+                continue
+            position = index + len(piece)
+            out.append((piece, offset + index, offset + index + len(piece)))
+        offset += len(line) + 1
+    return out
+
+
+def _word_in(text: str, start: int, length: int) -> bool:
+    """Is ``text[start:start+length]`` a whole whitespace-delimited word?"""
+    before = text[start - 1] if start else " "
+    after = text[start + length] if start + length < len(text) else " "
+    return before.isspace() and after.isspace()
+
+
 def _map_fragments(out: Sequence[str], record: _Rec) -> bool:
     """THE INVARIANT, implemented exactly: order, distinctness, real deletion.
+
+    A fragment must be a contiguous piece of ONE source line and need not touch
+the line's edges: the reducer's own cuts land mid-line (an archive head is the
+first ~160 characters of a block, so it starts and ends wherever the character
+count falls), and the replay measured whole/prefix/suffix-only matching
+refusing every honest archive record. What keeps that from becoming the
+re-segmentation primitive is the LINE cursor: a source line answers at most one
+emitted line, so a line cannot be shredded into pieces of itself.
 
     For a record whose source lines are ``src[0..n-1]`` and whose emitted
     content lines are ``out[0..m-1]``, in order::
@@ -614,26 +927,108 @@ def _map_fragments(out: Sequence[str], record: _Rec) -> bool:
     refuses the reviewer's `abcabc` -> `bc` + `ab` case, and the mutation matrix
     in the PR comment shows that deleting `cursor = found + 1` flips it.
     """
-    source = [line for line in record.text.split("\n") if line.strip()]
-    if not source:
+    source = record.text
+    if not source.strip():
         return not out
-    cursor = 0
-    for line in out:
+    # The source is indexed by LINE first: one source line answers at most one
+    # emitted line, which is the property that stops a line being shredded into
+    # pieces of itself (round 4: `abcabc` as `bc` + `ab`, 9.2x). A fragment may
+    # sit anywhere inside its line — the reducer's own cuts land mid-line — but
+    # it may not move backwards and it may not share a line with another.
+    offsets: list[tuple[str, int]] = []
+    position = 0
+    for line in source.split("\n"):
+        offsets.append((line, position))
+        position += len(line) + 1
+    whole = {line for line, _ in offsets if line.strip()}
+    segments: list[tuple[str, int, int]] | None = None
+    starts: list[int] = []
+    index = 0
+    used = 0
+    pending: list[tuple[str, int]] = [(line, 0) for line in reversed(out)]
+    while pending:
+        line, depth = pending.pop()
+        # A note is disclosure where it REPLACED source text and content where
+        # the source really holds that literal (`[redacted]` in a test's own
+        # assertion output), so both readings are tried: with it, then without.
+        # A TRAILING ellipsis is dropped from each reading: it is `_short`'s cut
+        # marker, so the source continues where the line stops.
+        readings = (line, _NOTE.sub("", line).strip())
+        variants: list[str] = []
+        for reading in readings:
+            if reading.endswith("\u2026"):
+                reading = reading[:-1]
+            if reading and reading not in variants:
+                variants.append(reading)
+        bare = variants[-1] if len(variants) > 1 else ""
         found = -1
-        for index in range(cursor, len(source)):
-            candidate = source[index]
-            if line == candidate or (
-                len(line) >= MIN_CUT and (candidate.startswith(line) or candidate.endswith(line))
-            ):
-                found = index
+        for variant in variants:
+            for line_index in range(index, len(offsets)):
+                text, at = offsets[line_index]
+                hit = text.find(variant)
+                if hit < 0:
+                    continue
+                if (
+                    len(variant) < MIN_CUT
+                    and variant not in whole
+                    and not _word_in(text, hit, len(variant))
+                ):
+                    # A single character is the re-segmentation primitive UNLESS
+                    # it is a whole word of the source: a merged one-line result
+                    # (`→ 2`) is exactly that, and refusing it cost an epoch.
+                    continue
+                found = line_index
+                taken = at + hit + len(variant)
                 break
-        if found < 0:
+            if found >= 0:
+                break
+        if found >= 0:
+            index = found + 1
+            if segments is not None:
+                used = max(used, bisect.bisect_left(starts, taken))
+            continue
+        if "\u2192 " in line and depth < 4:
+            # The reducer's ` → body` join: the source holds the command and the
+            # result on two rows, so the joined line is split and each half is
+            # matched on its own. Bounded, because prose may hold many arrows and
+            # splitting those would be one emitted line per arrow.
+            head, _, tail = line.partition("\u2192 ")
+            pending.append((tail.strip(), depth + 1))
+            pending.append((head.strip(), depth + 1))
+            continue
+        # THE SECOND DOCUMENTED RENDERING. `_call_summary` re-renders a dict
+        # argument as canonical JSON with `i`/`intent` dropped, secret keys
+        # redacted and every long value replaced by a note, so the emitted line
+        # is not a span of the source line in any punctuation-preserving sense:
+        # the source row holds the RAW argument text, whose key order and
+        # separators differ. It is still only the row's own tokens, in the row's
+        # own order, each used once — which is what the segment cursor checks.
+        # The punctuation itself is grammar and is capped, so a line of nothing
+        # but braces cannot ride the path.
+        if segments is None:
+            segments = _segments_with_spans(source)
+            starts = [segment[1] for segment in segments]
+        floor = offsets[index][1] if index < len(offsets) else len(source)
+        used = max(used, bisect.bisect_left(starts, floor))
+        text = bare or variants[0]
+        pieces = _split_line(text)
+        structural = len(text) - sum(len(piece) for piece in pieces)
+        if not pieces or structural > 6 * len(pieces) + 8:
             return False
-        cursor = found + 1
+        for piece in pieces:
+            while used < len(segments) and (
+                segments[used][0] != piece or segments[used][1] < floor
+            ):
+                used += 1
+            if used >= len(segments):
+                return False
+            floor = segments[used][2]
+            used += 1
+        index = bisect.bisect_right([at for _, at in offsets], floor - 1)
     return True
 
 
-def _check_line_budget(records: Sequence[tuple[str, str]], span_lines: int) -> None:
+def _check_line_budget(emitted: int, span_lines: int) -> None:
     """The invariant's reduction half, at the granularity the contract states.
 
     "The epoch's total line count must be strictly less than the span's total
@@ -642,12 +1037,29 @@ def _check_line_budget(records: Sequence[tuple[str, str]], span_lines: int) -> N
     real-session replay costs 92 of 131 epochs: measured, 30/131 per-record
     against 122/131 here. The contract sentence is the span-level one, so that is
     what ships; the number is reported either way rather than tuned.
+
+    ``emitted`` counts CONTENT lines only. A disclosure line — the identifier
+    pool, an O5 preview — is not content: it is what the deleted content pays
+    for, so counting it here charges the same deletion twice and a one-record
+    epoch whose only line is a pool line is refused for "no reduction" (the
+    manager's replay: pool-only epochs are 17 of the first 131). Each disclosure
+    unit is bounded by its own rule instead (``_Pool``, ``_preview_text``).
     """
     from local_operator.saver.validate import SaverRejected
 
-    emitted = sum(1 + body.count("\n") for _label, body in records)
     if emitted >= max(span_lines, 1):
         raise SaverRejected("provenance")
+
+
+def _check_pool(payload: str, pool: _Pool) -> None:
+    """One pool payload: source-derived identifiers, each spent once."""
+    from local_operator.saver.validate import SaverRejected
+
+    if len(payload) > _POOL_CHARS:
+        # The reducer's own pool bound (`DEEP_IDS_CHARS`). A payload past it is
+        # not a documentable rendering of anything, so it is refused on sight.
+        raise SaverRejected("provenance")
+    pool.consume(payload)
 
 
 def _check_bounds(elements: Sequence[_Element], record: _Rec) -> tuple[int, int]:
@@ -708,46 +1120,75 @@ def check_records(
 
     records_by_role, parts, media = source_records(span)
     derived = _derived_digests(parts)
+    pool = _Pool(parts)
     cursors: dict[str, int] = defaultdict(int)
     consumed: set[str] = set()
     scans = [_SLOT_SCANS]
     span_chars = sum(record.chars for group in records_by_role.values() for record in group)
     records = parse_records(text)
     span_lines = sum(record.lines for group in records_by_role.values() for record in group)
-    _check_line_budget(records, span_lines)
-    # THE SECOND HALF OF THE INVARIANT: the epoch must be strictly FEWER lines
-    # than the span. Disclosure lines count, so every marker and note has to be
-    # paid for by real deletions — that is their whole budget, and it is why
-    # they cannot be multiplied into a token amplifier (round 3: S-15, R3-1).
+    # THE SECOND HALF OF THE INVARIANT: the epoch must be strictly FEWER content
+    # lines than the span, so a record cannot be reproduced line for line and a
+    # source line cannot be shredded (round 3: S-15, R3-2). Disclosure units are
+    # proved by their own rule below, so they are not counted twice here.
+    units = []
+    emitted = 0
     for label, body in records:
         if deadline is not None and time.monotonic() > deadline:
             raise SaverRejected("busy")
-        kind, name = _label_parts(label)
         elements = _elements(body)
-        # NO POOL EXEMPTION (S-17). The identifier pool used to be checked by a
-        # separate token-set rule and skipped the line matcher entirely, which
-        # was a bypass: security reproduced 68 -> 92 o200k tokens (1.35x) with
-        # it. A `[radient:ids …]` line is now carried content like any other and
-        # goes through the same cursor, so if it is not source-derived it is
-        # refused rather than exempted.
-        pieces = _pieces(elements)
-        if kind == "call" and not pieces and len(elements) == 1:
+        pieces, pools, previews = _units(elements)
+        for payload in pools:
+            # THE DISCLOSURE CHANNEL, and it is charged on both sides: every
+            # pooled token must be a source-derived identifier and every
+            # identifier is spendable once, so the pool can never carry more
+            # than the span's own identifier material (S-17 was the exemption
+            # that made this uncounted: 68 -> 92 o200k tokens on a span with
+            # nothing deleted to pay for it).
+            _check_pool(payload, pool)
+        emitted += len(pieces)
+        units.append((label, elements, pieces, pools, previews))
+    _check_line_budget(emitted, span_lines)
+    for label, elements, pieces, pools, previews in units:
+        if deadline is not None and time.monotonic() > deadline:
+            raise SaverRejected("busy")
+        kind, name = _label_parts(label)
+        if kind == "call" and not pieces and not previews and len(elements) == 1:
             verbs = _group_verbs(elements[0][1], scans)
             if verbs is not None:
                 _consume_group(records_by_role.get("call", []), {"call": 0}, consumed, verbs)
                 continue
+        disclosure_only = pools and not pieces and not previews
+        if disclosure_only:
+            # A pool record stands for the records it discloses, not for one of
+            # them: it spends no candidate, so it cannot shadow a later record's
+            # source (the manager's replay measured a consumed-early pool line
+            # making a later call record unreachable). Its own disclosure is
+            # still capped, but against ITSELF: no source record can be named
+            # for a payload that stands in for many, and `_check_bounds` only
+            # needs the counts.
+            if sum(1 for element_kind, _ in elements if element_kind == "marker") > 1:
+                raise SaverRejected("provenance")
+            owner = _Rec(text=body, identity="", lines=1, chars=len(body))
+            _check_bounds(elements, owner)
+            _check_slots(elements, owner, media, derived, scans, span_chars)
+            continue
         candidates = records_by_role.get(kind, [])
         # Consumption, not source order, is what bounds reuse: the epoch may
         # carry a dedupe record for an earlier row after later ones, so one
         # wrap is allowed. Each source record is spent once.
-        start = cursors[kind]
-        order = list(range(start, len(candidates))) + list(range(0, start))
+        start = min(cursors[kind], len(candidates))
         matched: _Rec | None = None
         tried = 0
         furthest = start
-        for position in order:
+        # The rotation is modulo, not two list slices: building the wrapped
+        # order per record copies the whole candidate list, which is O(n²) over
+        # an epoch and would break the linearity property (S-1).
+        for offset in range(len(candidates)):
+            if deadline is not None and time.monotonic() > deadline:
+                raise SaverRejected("busy")
+            position = (start + offset) % len(candidates)
             candidate = candidates[position]
-            furthest = max(furthest, position + 1)
             if name and candidate.name != name:
                 continue
             if candidate.identity in consumed:
@@ -758,7 +1199,13 @@ def check_records(
                 # fabrication or an honest shape this verifier lacks a form for;
                 # either way the answer is to send unreduced history.
                 raise SaverRejected("busy")
-            if not _map_fragments(pieces, candidate):
+            if previews:
+                # A preview is a FUNCTION of the one record it replaces, so it
+                # must be that record's own preview — not a line of the source
+                # and not free text near it.
+                if previews[0] != _preview_text(candidate.text):
+                    continue
+            elif not _map_fragments(pieces, candidate):
                 continue
             # Slots can select among same-role candidates: a grouped
             # `call: [radient:1 read-only commands, all ok: grep]` names the
@@ -769,10 +1216,14 @@ def check_records(
             except SaverRejected:
                 continue
             matched = candidate
+            furthest = max(furthest, position + 1)
             break
         if matched is None:
             raise SaverRejected("provenance")
         consumed.add(matched.identity)
+        # The cursor follows the MATCH, never the furthest position merely
+        # LOOKED at: an advance on a skipped candidate spends the rest of that
+        # role's records for a later record that would have matched them.
         cursors[kind] = min(furthest, len(candidates))
     _ = (canonical_bytes, span_bytes, epoch_bytes)
 
