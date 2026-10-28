@@ -4545,6 +4545,25 @@ class TestTheStreamCompletedStopBoundary:
         assert outcome.steps == 0
         assert text.count("tool_execution_end") == 2  # both paired
 
+    @staticmethod
+    def _policy_stamp_from_record(outcome: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """The opt-in stamp as the SEALED record carries it (F1 / Q-1).
+
+        Both places a later reader looks without the launcher log: the
+        ``progress_guards`` row in ``events.jsonl`` and the field in
+        ``outcome.json``. Returned as ``(outcome.json value, events rows)``.
+        """
+
+        root = outcome.record_root
+        assert root is not None
+        stamped = json.loads((root / "outcome.json").read_text(encoding="utf-8"))["progress_guards"]
+        rows = [
+            json.loads(line)
+            for line in (root / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        return stamped, [row for row in rows if row.get("kind") == "progress_guards"]
+
     #: The task030 shape on the REAL stack: one no-op chord per turn, forever.
     _NOOP_CALL = (
         "mcp__episode_actions_apply_actions",
@@ -4598,6 +4617,14 @@ class TestTheStreamCompletedStopBoundary:
         assert outcome.steps == 8
         assert outcome.terminal_reason == "max-steps"
         assert "progress_stop" not in text
+        # F1's other half: OFF is a STATED absence, not a missing key -- an
+        # off-policy run has to be classifiable too, or the stamp only prevents
+        # half the pooling it exists for.
+        stamped, rows = self._policy_stamp_from_record(outcome)
+        assert stamped == {"on": False, "guards": []}
+        assert stamped == outcome.progress_guards
+        assert len(rows) == 1
+        assert rows[0]["on"] is False and rows[0]["guards"] == []
 
     @pytest.mark.asyncio
     async def test_progress_guards_never_stop_an_advancing_screen(
@@ -4617,6 +4644,57 @@ class TestTheStreamCompletedStopBoundary:
         assert outcome.steps == 8
         assert outcome.terminal_reason == "max-steps"
         assert "progress_stop" not in text
+        # F1: a run that ENDS AT THE BUDGET with the flag on must be tellable
+        # from the same run with it off -- that ending is where the flag leaves
+        # no other trace, and the record is the only place it can be read.
+        stamped, rows = self._policy_stamp_from_record(outcome)
+        assert stamped == outcome.progress_guards
+        assert stamped["on"] is True
+        assert [guard["code"] for guard in stamped["guards"]] == [
+            "repeated-batch",
+            "no-change",
+            "ask-loop",
+        ]
+        assert stamped["guards"] == [
+            {"code": "repeated-batch", "threshold": 4},
+            {"code": "no-change", "threshold": 6},
+            {"code": "ask-loop", "threshold": 3},
+        ]
+        assert len(rows) == 1
+        assert rows[0]["on"] is True and rows[0]["guards"] == stamped["guards"]
+
+    @pytest.mark.asyncio
+    async def test_the_budget_names_the_ending_on_the_guards_final_step(
+        self, real_arm_scratch: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """F2: one terminal reason per step -- the runner's ``max-steps`` wins.
+
+        The frozen repeat completes its window on the episode's LAST allowed
+        step (``max_steps=5``; the window closes at batch 5). The runner folds
+        ``steps_taken >= max_steps`` into ``truncated`` before it evaluates any
+        guard, so the same stop is a budget truncation there. The bridge used to
+        report the guard's code instead, and the two arms then disagreed on the
+        label of one identical ending.
+        """
+
+        from local_operator.evaluation.runner.guards import progress_guards
+
+        calls, outcome, text = await self._run(
+            real_arm_scratch,
+            monkeypatch,
+            script=[[self._NOOP_CALL]],
+            max_steps=5,
+            progress_guards=progress_guards(),
+            frozen=True,
+        )
+        assert outcome.steps == 5
+        assert outcome.status == "truncated"
+        assert outcome.terminal_reason == "max-steps"
+        assert "progress_stop" not in text
+        # The policy that produced this ending -- the one that used to be
+        # indistinguishable from an off-policy run -- is still stamped.
+        stamped, _rows = self._policy_stamp_from_record(outcome)
+        assert stamped["on"] is True
 
 
 def test_identical_read_only_pixels_are_neutral_and_do_not_escalate_action_streak(

@@ -154,6 +154,7 @@ from local_operator.evaluation.runner.guards import (
     EpisodeGuard,
     GuardInput,
     GuardVerdict,
+    describe_progress_policy,
 )
 from local_operator.evaluation.runner.model import EpisodeTurn
 from local_operator.evaluation.runner.provider_client import (
@@ -321,13 +322,21 @@ BUDGET_ACK = (
 PROGRESS_GUARD_TERMINAL = "progress-guard"
 
 #: The model-facing half of a progress-guard truncation, appended after the
-#: screen the stopping batch produced. It states the guard's own detail and
-#: what it means -- the actions ran and the screen did not change -- so the
-#: model is not left to invent a transport failure (task030's final claim).
+#: screen the stopping batch produced, so the model is not left to invent a
+#: transport failure (task030's final claim).
+#:
+#: THE CAUSE COMES FROM THE GUARD, NEVER FROM THIS SENTENCE. It carries the
+#: fired guard's own ``detail`` and NOTHING about what changed, because the
+#: policy admits three guards and only two of them are about a static screen:
+#: ``repeated-batch`` and ``no-change`` are, but ``ask-loop`` stops a run of
+#: ``ask_user`` batches whose screens may all have moved. A sentence asserting
+#: "the screen and text stayed identical" would therefore tell an ask-loop run
+#: something false about its own stop, and the next reader would have to
+#: distrust the one place the arm explains itself.
 PROGRESS_STOP_ACK = (
     "Episode stopped for lack of progress: {}. Your actions were delivered and "
-    "executed; the screen and text stayed identical. The run will be scored on "
-    "the state reached. Do not call this tool again."
+    "executed. The run will be scored on the state reached. Do not call this "
+    "tool again."
 )
 
 #: The ``terminal_reason`` a bridge records when its observation binding could
@@ -1910,6 +1919,18 @@ class ActionBridge:
 
         if self.progress_guards is None or self.progress_budget is None:
             return None
+        if self._steps >= self.max_steps:
+            # THE BUDGET WINS THE BOUNDARY, as it does on the runner. The
+            # runner folds ``steps_taken >= max_steps`` into ``truncated``
+            # BEFORE it evaluates any guard, so a window that completes on the
+            # episode's final allowed step is a ``max-steps`` truncation there.
+            # The bridge charges the epoch at admission and evaluates the
+            # window after it, so without this check the same step would report
+            # the guard's code -- two readers deriving two terminal reasons for
+            # one stop, and the design asks readers to tell the two apart by
+            # ``terminal_reason`` alone. No verdict here: the next call hits the
+            # budget admission below, and the driver names ``max-steps``.
+            return None
         self._progress_turns.append(EpisodeTurn(observation=decided_on, batch=batch))
         del self._progress_turns[:-RECENT_TURNS_WINDOW]
         snapshot = GuardInput(
@@ -2806,6 +2827,16 @@ class SessionArmOutcome:
     #: groups the admitted epoch never charged. ADDITIVE field -- historical
     #: rows and the ``steps`` semantics stay exactly as shipped.
     attempted_groups: int = 0
+    #: The no-progress policy that was IN FORCE for this run, as
+    #: :func:`~local_operator.evaluation.runner.guards.describe_progress_policy`
+    #: states it (``{"on": bool, "guards": [{"code", "threshold"}, ...]}``).
+    #: WHY IT IS HERE: this arm builds no ``EvidenceManifest``, so the launcher's
+    #: ``EpisodeSpec.metadata`` stamp reaches the reply arm only. Without this
+    #: field an on-policy and an off-policy session run of one task are
+    #: evidence-identical -- the pooling the opt-in must never cause. A stated
+    #: ``{"on": False}`` is data; a ``None`` here would mean the stamp itself
+    #: failed, which is never a normal ending.
+    progress_guards: Mapping[str, Any] = field(default_factory=dict)
     #: The stable token naming why the run ended: ``finish`` / ``max-steps`` /
     #: ``bridge-wedged`` on the terminalled paths; for an ``agent_stop`` or a
     #: ``failed`` the reason read from the end-of-turn facts (see
@@ -2853,7 +2884,14 @@ async def run_session_episode(
     ``progress_guards`` opts the episode into the runner's no-progress policy
     (pass ``runner.guards.progress_guards()``); see
     :attr:`ActionBridge.progress_guards`. ``None`` keeps the arm's historical
-    behaviour, and the launcher stamps which one ran.
+    behaviour. WHICHEVER ONE RAN IS STAMPED IN THE ARM'S OWN RECORD -- a
+    ``progress_guards`` row in ``events.jsonl`` and ``progress_guards`` in
+    ``outcome.json`` (see
+    :func:`~local_operator.evaluation.runner.guards.describe_progress_policy`).
+    This arm builds no manifest, so the launcher's ``EpisodeSpec.metadata``
+    stamp reaches only the reply arm: without the row here, an on-policy and an
+    off-policy session run of the same task are evidence-identical and get
+    pooled, which is the one thing the opt-in is not allowed to cause.
 
     The order of calls mirrors ``EpisodeRunner`` deliberately, comment for
     comment where the two could drift: prepare is allocation-free, the rescue
@@ -2866,6 +2904,11 @@ async def run_session_episode(
     """
 
     started_ms = int(time.time() * 1000)
+    #: The policy stamp for the arm's own record, computed ONCE here so every
+    #: ending -- including the two failure paths -- carries the same value, and
+    #: so a pre-flight refusal states the policy it refused under rather than
+    #: going silently blank. See ``SessionArmOutcome.progress_guards``.
+    policy_stamp = describe_progress_policy(progress_guards)
     # Record-level failures that are not the sink's own storage failures (an
     # event-fold error, a write into a closed sink). Declared before the try so
     # the failure path can report them too.
@@ -2886,6 +2929,7 @@ async def run_session_episode(
             status="failed_pre_bundle",
             episode_id=spec.episode_id,
             record_root=record_root,
+            progress_guards=policy_stamp,
             terminal_reason="record-sink",
             diagnostic=error.sentence,
             duration_ms=int(time.time() * 1000) - started_ms,
@@ -3033,6 +3077,13 @@ async def run_session_episode(
                 "sources": {name: str(path) for name, path in resolved_sources.items()},
             },
         )
+        # THE COMPARABILITY STAMP, in the record beside the declaration it
+        # belongs with: whether the no-progress policy was in force, and its
+        # thresholds. Written from ``policy_stamp`` -- the same value the
+        # outcome carries -- so the row and the outcome cannot disagree, and
+        # early enough that it survives an episode that dies mid-turn (a run
+        # that failed still has to be classifiable as on- or off-policy).
+        record.write("progress_guards", dict(policy_stamp))
 
         renderer = ObservationRenderer(config.artifact_root)
         bridge = ActionBridge(
@@ -3542,6 +3593,7 @@ async def run_session_episode(
             score=score,
             steps=steps,
             attempted_groups=bridge.attempted_groups,
+            progress_guards=policy_stamp,
             terminal_reason=terminal_reason,
             diagnostic=diagnostic,
             record_incomplete=record_failure is not None,
@@ -3629,6 +3681,7 @@ async def run_session_episode(
             status="failed_pre_bundle" if adapter_session is None else "failed",
             episode_id=spec.episode_id,
             record_root=record_root,
+            progress_guards=policy_stamp,
             terminal_reason=_failure_terminal_reason(error),
             diagnostic=f"{type(error).__name__}: {error}",
             rescue_required=rescue_required,
@@ -4263,6 +4316,7 @@ def _outcome_json(outcome: SessionArmOutcome) -> dict[str, Any]:
         "score": score_payload,
         "steps": outcome.steps,
         "attempted_groups": outcome.attempted_groups,
+        "progress_guards": dict(outcome.progress_guards),
         "terminal_reason": outcome.terminal_reason,
         "diagnostic": outcome.diagnostic,
         "rescue_required": outcome.rescue_required,

@@ -283,6 +283,59 @@ async def test_the_budget_still_wins_when_it_is_reached_first(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_the_budget_names_the_stop_when_the_window_closes_on_its_last_step(
+    tmp_path: Path,
+) -> None:
+    """F2: one terminal reason per step -- the runner's ``max-steps`` wins.
+
+    ``max_steps=4`` and ``RepeatedBatchGuard(4)``: the fourth identical batch
+    both completes the window and spends the last step. The runner folds
+    ``steps_taken >= max_steps`` into ``truncated`` BEFORE it evaluates guards,
+    so that same stop is a budget truncation there; reporting the guard's code
+    here made two readers derive two reasons for one ending.
+    """
+
+    world = _World(lambda step: (STATIC,))
+    bridge, records = _bridge(tmp_path, world, guards=progress_guards(), max_steps=4)
+    replies = await _drive(bridge, [NOOP] * 6)
+
+    assert len(world.batches) == 4  # the final step RAN; only the label moved
+    assert bridge.steps == 4
+    assert bridge.progress_stop_code is None
+    assert _last_fire(replies) is None
+    assert "progress_stop" not in [kind for kind, _ in records]
+    # The ending is still terminal and still named, by the budget. (The budget
+    # branch is reachable once per later call -- it marks the token terminal and
+    # answers, and the pre-existing shape lets the next call land there again --
+    # so only its presence is asserted.)
+    assert bridge.end_requested == "max-steps"
+    assert "budget" in [kind for kind, _ in records]
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "the same action batch was issued 4 times without observable change",
+        "6 consecutive actions left frames and text unchanged",
+        "3 consecutive ask_user turns",
+    ],
+)
+def test_the_stop_sentence_states_the_guards_cause_and_no_other(detail: str) -> None:
+    """F3: the sentence carries the fired guard's own detail, nothing more.
+
+    ``ask-loop`` is a reachable stop whose screens may all have moved, so a hard
+    coded "the screen and text stayed identical" told those runs something false
+    about their own stop -- and the next reader would have to distrust the one
+    place the arm explains itself.
+    """
+
+    sentence = PROGRESS_STOP_ACK.format(detail)
+    assert detail in sentence
+    assert "screen" not in sentence and "identical" not in sentence
+    assert "delivered and executed" in sentence
+
+
+@pytest.mark.asyncio
 async def test_two_bridges_never_share_a_window(tmp_path: Path) -> None:
     """Guard state is per bridge (per episode), even with shared guard objects."""
 

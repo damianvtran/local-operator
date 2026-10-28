@@ -56,6 +56,7 @@ __all__ = [
     "NoChangeGuard",
     "RepeatedBatchGuard",
     "default_guards",
+    "describe_progress_policy",
     "progress_guards",
 ]
 
@@ -386,6 +387,11 @@ class RepeatedBatchGuard:
     as evidence of progress.
     """
 
+    #: The stable ``GuardVerdict.code`` this guard reports. Named once so the
+    #: verdict it returns and the description a record keeps of the policy in
+    #: force (:func:`describe_progress_policy`) cannot disagree.
+    CODE = "repeated-batch"
+
     def __init__(self, repeats: int = 4) -> None:
         if repeats < 2:
             raise ValueError("repeats must be at least 2")
@@ -393,13 +399,17 @@ class RepeatedBatchGuard:
             raise ValueError(f"repeats must not exceed RECENT_TURNS_WINDOW ({RECENT_TURNS_WINDOW})")
         self._repeats = repeats
 
+    def describe(self) -> dict[str, Any]:
+        """The code and threshold in force, for a record (never for the check)."""
+        return {"code": self.CODE, "threshold": self._repeats}
+
     def evaluate(self, snapshot: GuardInput) -> GuardVerdict:
         span = _action_span(snapshot.recent_turns, self._repeats)
         keys = {_batch_key(turn) for turn in _acted(span)}
         if len(keys) == 1 and _unchanged_observations(span):
             return GuardVerdict(
                 kind="truncate",
-                code="repeated-batch",
+                code=self.CODE,
                 detail=(
                     f"the same action batch was issued {self._repeats} times "
                     "without observable change"
@@ -433,6 +443,10 @@ class NoChangeGuard:
     between them, the actions changed nothing.
     """
 
+    #: The stable ``GuardVerdict.code`` this guard reports; see
+    #: :attr:`RepeatedBatchGuard.CODE` for why it is named here.
+    CODE = "no-change"
+
     def __init__(self, repeats: int = 6) -> None:
         if repeats < 2:
             raise ValueError("repeats must be at least 2")
@@ -442,6 +456,10 @@ class NoChangeGuard:
             )
         self._repeats = repeats
 
+    def describe(self) -> dict[str, Any]:
+        """The code and threshold in force, for a record (never for the check)."""
+        return {"code": self.CODE, "threshold": self._repeats}
+
     def evaluate(self, snapshot: GuardInput) -> GuardVerdict:
         span = _action_span(snapshot.recent_turns, self._repeats)
         if any(not turn.observation.frames for turn in span):
@@ -449,7 +467,7 @@ class NoChangeGuard:
         if _unchanged_observations(span):
             return GuardVerdict(
                 kind="truncate",
-                code="no-change",
+                code=self.CODE,
                 detail=f"{self._repeats} consecutive actions left frames and text unchanged",
             )
         return CONTINUE
@@ -463,12 +481,20 @@ class AskLoopGuard:
     turn (or a real person's attention).
     """
 
+    #: The stable ``GuardVerdict.code`` this guard reports; see
+    #: :attr:`RepeatedBatchGuard.CODE` for why it is named here.
+    CODE = "ask-loop"
+
     def __init__(self, asks: int = 3) -> None:
         if asks < 1:
             raise ValueError("asks must be positive")
         if asks > RECENT_TURNS_WINDOW:
             raise ValueError(f"asks must not exceed RECENT_TURNS_WINDOW ({RECENT_TURNS_WINDOW})")
         self._asks = asks
+
+    def describe(self) -> dict[str, Any]:
+        """The code and threshold in force, for a record (never for the check)."""
+        return {"code": self.CODE, "threshold": self._asks}
 
     def evaluate(self, snapshot: GuardInput) -> GuardVerdict:
         decided = _decided(snapshot.recent_turns)
@@ -483,7 +509,7 @@ class AskLoopGuard:
         ):
             return GuardVerdict(
                 kind="truncate",
-                code="ask-loop",
+                code=self.CODE,
                 detail=f"{self._asks} consecutive ask_user turns",
             )
         return CONTINUE
@@ -525,3 +551,43 @@ def progress_guards() -> tuple[EpisodeGuard, ...]:
     """
 
     return (RepeatedBatchGuard(), NoChangeGuard(), AskLoopGuard())
+
+
+def describe_progress_policy(guards: Sequence[EpisodeGuard] | None) -> dict[str, Any]:
+    """The no-progress policy IN FORCE, in a form a sealed record can carry.
+
+    WHY THIS TRAVELS WITH THE RECORD. ``--progress-guards`` changes what an
+    episode's ending MEANS: with it on, a stop on the Nth identical batch is
+    "the model floundered" (``truncated``, reason = the guard's code); with it
+    off, the same run goes on to the step cap and is "the model ran out of
+    steps" (``truncated``, reason ``max-steps``). Two runs of one task are
+    therefore comparable only if a reader of the SEALED record can tell which
+    policy produced it -- and the arm that can turn the flag on is the one with
+    no manifest to carry a stamp (the session arm records ``events.jsonl`` +
+    ``outcome.json`` only, see ``run_session_episode``).
+
+    Thresholds travel beside the boolean for the same reason: moving
+    ``RepeatedBatchGuard(4)`` to 6 changes what both arms stop on, and it is
+    equally invisible after the fact.
+
+    ``None`` -- the historical behaviour -- is reported as a STATED absence
+    (``{"on": false, "guards": []}``), never as a missing key: an off-run has to
+    be classifiable too, or the stamp only half solves the pooling it exists to
+    prevent.
+    """
+
+    if guards is None:
+        return {"on": False, "guards": []}
+    described: list[dict[str, Any]] = []
+    for guard in guards:
+        if not isinstance(guard, (RepeatedBatchGuard, NoChangeGuard, AskLoopGuard)):
+            # The bridge enforces the same admission rule (TURN_WINDOW_GUARD_TYPES).
+            # A guard this table cannot describe has a threshold that would go
+            # unrecorded, and a silently partial stamp is worse than none: it
+            # reads as "no threshold to state".
+            raise TypeError(
+                f"{type(guard).__name__} states no threshold; only the turn-window guards "
+                "can be described here"
+            )
+        described.append(guard.describe())
+    return {"on": True, "guards": described}
