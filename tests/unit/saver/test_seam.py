@@ -86,6 +86,7 @@ class Provider:
 @pytest.fixture()
 def rig(tmp_path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(chain_mod._ProcessState, "paused", False)
+    monkeypatch.setattr(chain_mod._ProcessState, "transport_paused", False)
     monkeypatch.delenv("LOP_RADIENT_SAVER", raising=False)
     server = FakeServer()
 

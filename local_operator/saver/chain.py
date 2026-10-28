@@ -97,19 +97,35 @@ NOTICE_RATE_LIMITED = "rate_limited"
 NOTICE_DISABLED = "disabled"
 #: Contract r5 S3-6: the message at the frontier is too large to ever upload.
 NOTICE_OVERSIZE = "oversize"
+#: Contract r6 S3-7 (b): a ``Content-Encoding`` rejection pauses Saver for the
+#: PROCESS. The closed reason is ``transport``; its keyed copy is the existing
+#: ``notice.unavailable`` ("unavailable right now, so this turn sends your full
+#: history"), which says exactly what the user sees. A dedicated key would
+#: change the English source and re-open every locale's audit for no gain in
+#: meaning. It is still its OWN reason class, so it notices once per session
+#: even after a transient ``unavailable`` notice in the same session.
+NOTICE_TRANSPORT = "transport"
 
 NoticeSink = Callable[["Msg"], Awaitable[None]]
 SpendSink = Callable[[Any], None]
 
 
 class _ProcessState:
-    """Process-scoped pause (§6: 404/403 ⇒ pause for the PROCESS).
+    """Process-scoped pause (§6: 404/403 ⇒ pause for the PROCESS; r6 S3-7 b).
 
     A route that does not exist on this server, or refuses this client
-    outright, will not appear on the next turn of another session either.
+    outright, will not appear on the next turn of another session either. Nor
+    will an encoded answer to an identity request: whatever path rewrites the
+    encoding (a proxy, an edge Worker) rewrites it for every session.
     """
 
     paused = False
+    #: r6 S3-7 (b), kept apart from ``paused`` so the pause carries its notice:
+    #: the notice is "one per session", so a session that never uploaded still
+    #: hears once, on its next due prefetch, why it is sending full history.
+    #: (A chain IS one session's stream, so its ``_noticed`` set is the
+    #: per-session dedupe.)
+    transport_paused = False
 
 
 @dataclass
@@ -176,6 +192,9 @@ class SaverChain:
     #: only after a further boundary step of conversation, never per turn.
     _raised_attempt: tuple[tuple[int, str], int] | None = None
     _oversize_noticed_pending: bool = False
+    #: S3-7 (b): the process is paused for ``transport`` and this session has
+    #: not been told yet (``_maybe_prefetch`` is synchronous; ``_apply`` sends).
+    _transport_noticed_pending: bool = False
 
     def __post_init__(self) -> None:
         # A stream not yet bound to a session passes ``None``: keep the
@@ -221,6 +240,7 @@ class SaverChain:
         self.frozen_ids = frozenset(message.id for message in source[: self.frontier] if message.id)
         self._maybe_prefetch(rows, encoded, request)
         await self._flush_oversize_notice()
+        await self._flush_transport_notice()
         return spliced
 
     # -- §3.2 step 1: verify ------------------------------------------------
@@ -268,9 +288,11 @@ class SaverChain:
             if prefetch.oversized_unit is not None and _is_oversize_refusal(exc):
                 # S3-6: a 413, or 503 ``saver_busy``, answering an oversized-head
                 # upload marks that unit instead of backing off, so a slow
-                # reducer can never become a per-turn retry loop. Marked only
-                # when the chain has not moved since the upload, so the offset
-                # still names the same bytes.
+                # reducer can never become a per-turn retry loop. r6 S3-9 adds
+                # every timeout, reset and transport error on that upload: a
+                # slow UPLINK otherwise re-sends megabytes after each back-off.
+                # Marked only when the chain has not moved since the upload, so
+                # the offset still names the same bytes.
                 if (
                     prefetch.chain_generation == self.chain_generation
                     and prefetch.frontier == self.frontier
@@ -349,6 +371,11 @@ class SaverChain:
         if self._prefetch is not None or not self._may_call():
             return
         if len(rows) - self.frontier < self.call_again_after:
+            return
+        if _ProcessState.transport_paused:
+            # S3-7 (b): an upload in this process met an encoded answer. Nothing
+            # is sent; ``_apply`` delivers this session's one notice.
+            self._transport_noticed_pending = True
             return
         suffix_rows = rows[self.frontier :]
         suffix_bytes = encoded[self.frontier :]
@@ -528,6 +555,12 @@ class SaverChain:
                 await self._fail_open(NOTICE_UNAVAILABLE)
             return
         if isinstance(exc, SaverRejected):
+            if exc.reason == "bad_encoding":
+                # r6 S3-7 (b): deterministic, like 404/403 — the path that
+                # encoded this answer will encode the next one too.
+                _ProcessState.transport_paused = True
+                await self._fail_open(NOTICE_TRANSPORT)
+                return
             await self._fail_open(NOTICE_REJECTED)
             return
         if isinstance(exc, (httpx.HTTPError, OSError, asyncio.TimeoutError, CanonicalError)):
@@ -536,6 +569,11 @@ class SaverChain:
             return
         self._paused_until = time.monotonic() + TRANSPORT_BACKOFF_S
         await self._fail_open(NOTICE_UNAVAILABLE)
+
+    async def _flush_transport_notice(self) -> None:
+        if self._transport_noticed_pending:
+            self._transport_noticed_pending = False
+            await self._fail_open(NOTICE_TRANSPORT)
 
     async def _fail_open(self, reason: str) -> None:
         self.failing_open = True
@@ -591,8 +629,19 @@ def _is_oversize_refusal(exc: BaseException) -> bool:
     The 503's body is never read (S-31), so a 503 answering an oversized-head
     upload is treated as ``saver_busy``: the contract's rule is that such an
     upload is not retried either way.
+
+    Contract r6 S3-9 widens it to any timeout, reset or other transport error
+    (``httpx.TransportError`` covers write/read/pool timeouts, connect errors
+    and ``RemoteProtocolError``; ``OSError`` a reset surfacing raw). The
+    client's limits are per operation (§6: 3 s, connect 0.5 s): a 2.5 MiB POST
+    at 2 Mbit/s raised ``WriteTimeout`` after 3.1 s on a loopback throttle
+    (measured), and each 60 s back-off would otherwise end in another
+    multi-MiB upload. Only the oversized-head upload is marked; an ordinary
+    upload's transport failure keeps its timed back-off.
     """
-    return isinstance(exc, SaverHTTPError) and exc.status in (413, 503)
+    if isinstance(exc, SaverHTTPError):
+        return exc.status in (413, 503)
+    return isinstance(exc, (httpx.TransportError, OSError, asyncio.TimeoutError))
 
 
 def head_unit_len(rows: Sequence[dict[str, Any]]) -> int:
@@ -820,6 +869,8 @@ def notice_message(reason: str) -> "Msg":
         NOTICE_RATE_LIMITED: _rs.notice_rate_limited,
         NOTICE_DISABLED: _rs.notice_disabled,
         NOTICE_OVERSIZE: _rs.notice_oversize,
+        # S3-7 (b): reuses the ``unavailable`` copy (see NOTICE_TRANSPORT).
+        NOTICE_TRANSPORT: _rs.notice_unavailable,
     }.get(reason, _rs.notice_unavailable)()
 
 

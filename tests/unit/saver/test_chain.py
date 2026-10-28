@@ -31,15 +31,22 @@ from local_operator.saver.chain import (
 )
 from local_operator.saver.client import SaverClient
 from local_operator.saver.projection import ProjectionCache, shape_only_redaction
-from tests.unit.saver.fake_prepare import FakeServer
+from tests.unit.saver.fake_prepare import (
+    CountingStream,
+    FakeServer,
+    ThrottledUplink,
+    gzip_bomb,
+    spy_decoders,
+)
 
 MODEL = ModelSpec(provider="anthropic", model_id="claude-test")
 
 
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The process-wide 404/403 pause is a class attribute: reset it per test.
+    # The process-wide 404/403 and S3-7 pauses are class attributes: reset per test.
     monkeypatch.setattr(chain_mod._ProcessState, "paused", False)
+    monkeypatch.setattr(chain_mod._ProcessState, "transport_paused", False)
     monkeypatch.setattr("local_operator.saver.client.destination_allowed", lambda base: True)
 
 
@@ -300,6 +307,55 @@ async def test_backoff_per_status(status: int, notice: str, scope: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_s3_7_an_encoded_answer_pauses_the_process_with_one_notice_per_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The LO1 fixture named in §6.1 check 1, "Transport" (contract r6 S3-7):
+    a gzip bomb is rejected with zero body bytes consumed and no decoder built,
+    then zero prepare calls over the next 20 turns — in THIS session and in
+    another session of the same process, each told exactly once."""
+    server = FakeServer()
+    streams: list[CountingStream] = []
+
+    def bomb(body, payload):
+        stream = CountingStream(gzip_bomb())
+        streams.append(stream)
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json", "content-encoding": "gzip"},
+            stream=stream,
+        )
+
+    server.mutate = bomb
+    built = spy_decoders(monkeypatch)
+    rig = Rig(server)
+    await rig.turns(0, 7)  # the first due prepare, answered by the bomb
+    assert len(server.requests) == 1
+    assert [s.pulled for s in streams] == [0] and built == []
+    # Reason class ``transport``; its copy is the ``unavailable`` key (no new English).
+    assert rig.chain._noticed == {"transport"} and rig.notices == ["unavailable"]
+    assert chain_mod._ProcessState.transport_paused
+    await rig.turns(7, 27)  # 20 more turns
+    other = Rig(server, session_id="s2")
+    await other.turns(0, 20)
+    await rig.close()
+    await other.close()
+    assert len(server.requests) == 1  # zero further prepare calls, any session
+    assert rig.notices == ["unavailable"]  # one notice for this session
+    assert other.notices == ["unavailable"]  # and one for the session that never uploaded
+    assert other.chain._noticed == {"transport"}
+    assert rig.chain.frontier == 0 and rig.chain.failing_open
+
+
+@pytest.mark.asyncio
+async def test_s3_7_the_transport_pause_reuses_the_unavailable_copy() -> None:
+    """No new English: the ``transport`` reason renders ``notice.unavailable``."""
+    assert chain_mod.notice_message("transport").code == (
+        chain_mod.notice_message("unavailable").code
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_redirect_pauses_saver_and_is_not_followed() -> None:
     server = FakeServer()
     server.status = 307
@@ -410,6 +466,50 @@ async def test_s3_6_freezes_up_to_the_unit_then_resumes_past_it_once_it_leaves_t
     assert rig.chain.frontier > big_row  # froze past it
     assert rig.notices == ["oversize"]  # still exactly one notice
     assert rig.chain._oversize_mark is None
+
+
+@pytest.mark.asyncio
+async def test_s3_9_a_2_mbit_uplink_times_out_once_and_marks_the_unit() -> None:
+    """The LO1 fixture named in §6.1 check 1, "Hard barrier" (contract r6 S3-9):
+    a 1.5 MiB result behind a 2 Mbit/s uplink makes ≤ 1 upload over 20 turns.
+
+    The back-off is cleared before every turn: without the S3-9 mark the 60 s
+    transport back-off is what spaces the retries, and on a real session it
+    expires between turns."""
+    server = FakeServer()
+    rig = Rig(server)
+    uplink = ThrottledUplink(server)
+    rig.client._http._transport = uplink  # noqa: SLF001 — throttle the link only
+    for i in range(23):
+        rig.chain._paused_until = 0
+        await rig.turn(*_block(i, **({"big": int(1.5 * 1024 * 1024)} if i == 3 else {})))
+    await rig.close()
+    big = [r for r in server.requests if len(r.content) > MAX_UPLOAD_BYTES]
+    assert len(big) == 1 and len(uplink.timed_out) == 1  # one oversized upload, ever
+    # Cut at a message boundary inside unit + 1 MiB: ~1.5 MiB, ~6.4 s at 2 Mbit/s.
+    assert uplink.timed_out[0] / uplink.bytes_per_s > uplink.write_timeout_s
+    assert rig.chain._oversize_mark is not None
+    assert rig.notices == ["oversize"]
+    # The timed-out upload is the LAST request of any size: once marked, the
+    # remaining turns of the 20 send nothing while the unit heads the suffix.
+    assert server.requests[-1] is big[0]
+    assert all(len(r.content) <= MAX_UPLOAD_BYTES for r in server.requests if r not in big)
+
+
+@pytest.mark.asyncio
+async def test_s3_9_a_transport_error_on_an_ordinary_upload_keeps_its_backoff() -> None:
+    """Negative control: only an OVERSIZED-head upload is marked. A timeout on
+    an ordinary (≤ 1 MiB) upload is the timed back-off and the ``unavailable``
+    notice, with no mark."""
+    server = FakeServer()
+    server.raise_exc = httpx.WriteTimeout("slow")
+    rig = Rig(server)
+    await rig.turns(0, 12)
+    await rig.close()
+    assert len(server.requests) == 1
+    assert rig.notices == ["unavailable"]
+    assert rig.chain._oversize_mark is None
+    assert rig.chain._paused_until > 0
 
 
 @pytest.mark.asyncio

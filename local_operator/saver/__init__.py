@@ -9,7 +9,7 @@ failover, rotation, API keys and subscription OAuth all keep working, and
 Radient never receives a provider credential (contract §2, S-32).
 
 THE CONTRACT IS EXTERNAL. Every rule here is pinned by the Radient Saver
-production contract (``CONTRACT.md`` rev4 in the radient-context-reduction
+production contract (``CONTRACT.md`` rev6 in the radient-context-reduction
 repository; the agent-server ``internal/saver`` package is the server half).
 Section numbers in comments (§3.1, §6.1, ...) refer to that document.
 

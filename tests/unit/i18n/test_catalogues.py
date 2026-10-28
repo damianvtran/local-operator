@@ -257,6 +257,10 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
         "wire.incidents",
         "wire.memory",
         "wire.notices",
+        # Radient Saver LO1 (PR #3078): the 17-key settings and fail-open notice
+        # copy, carried with its independently audited ledger row at the
+        # current en bytes; it sorts before wire.remote_compute.
+        "wire.radient_saver",
         "wire.remote_compute",
         "wire.settings",
         "wire.slash",

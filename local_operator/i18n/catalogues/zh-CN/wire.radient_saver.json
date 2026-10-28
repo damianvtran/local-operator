@@ -1,0 +1,19 @@
+{
+  "wire.radient_saver.section.title": "Radient Saver（测试版）",
+  "wire.radient_saver.section.description": "精简智能体每个回合都要重新发送的对话历史。Saver绝不会把你的AI提供商凭据发送给Radient。更改从下一回合起生效。",
+  "wire.radient_saver.mode.label": "Radient Saver（测试版）",
+  "wire.radient_saver.mode.help": "测试版功能。将对话历史中可精简的部分发送给Radient；Radient完成精简后不保留其中任何内容。Saver绝不会把你的AI提供商凭据发送给Radient。每笔费用都从Radient点数中扣除；需登录Radient且余额大于零才能使用。LOP_RADIENT_SAVER会覆盖此设置。",
+  "wire.radient_saver.mode.choice.off.label": "关闭",
+  "wire.radient_saver.mode.choice.off.description": "绝不向Radient发送历史（默认）",
+  "wire.radient_saver.mode.choice.opt_in.label": "按会话启用",
+  "wire.radient_saver.mode.choice.opt_in.description": "可用，但在会话开启前保持关闭",
+  "wire.radient_saver.mode.choice.auto.label": "auto",
+  "wire.radient_saver.mode.choice.auto.description": "已登录且有余额时，所有会话均开启",
+  "wire.radient_saver.notice.unavailable": "Radient Saver暂时不可用，因此本回合将发送完整历史。其余一切照常。",
+  "wire.radient_saver.notice.rejected": "Radient Saver返回的响应未通过安全检查，已丢弃，因此本回合将发送完整历史。",
+  "wire.radient_saver.notice.signed_out": "由于未登录Radient，Radient Saver已在此会话中暂停。运行/login radient后即可使用。",
+  "wire.radient_saver.notice.no_credit": "由于Radient余额为零，Radient Saver已在此会话中暂停。前往console.radienthq.com充值后即可使用。",
+  "wire.radient_saver.notice.rate_limited": "Radient Saver正忙，因此在其重新接受请求前将发送完整历史。",
+  "wire.radient_saver.notice.disabled": "当前配置下无法使用Radient Saver，因此将发送完整历史。",
+  "wire.radient_saver.notice.oversize": "此对话中有一条消息超出了Radient Saver可处理的大小，因此该消息保持原样。Saver会继续精简对话的其余部分。"
+}

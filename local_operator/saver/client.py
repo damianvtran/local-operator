@@ -24,9 +24,10 @@ callers:
 - a 3xx is NEVER followed: it is an answer like any other non-200, so the
   history and the bearer go to exactly one URL.
 
-The response body is read through a hard cap BEFORE decoding (§6.1 check 1),
-and an error body is never read at all: only the status code leaves this module
-(S-31: the server's text is never interpolated anywhere).
+The response body is read as RAW transport bytes through a hard cap BEFORE any
+JSON decoding, and no content decoder is ever built (§6.1 check 1, contract r6
+S3-7); an error body is never read at all: only the status code leaves this
+module (S-31: the server's text is never interpolated anywhere).
 """
 
 from __future__ import annotations
@@ -174,15 +175,30 @@ async def _read_capped(response: httpx.Response, max_bytes: int) -> bytes:
     """The body, refused past ``max_bytes`` (R) while it streams (§6.1 check 1).
 
     Any ``Content-Encoding`` other than identity is refused UNREAD (contract r5
-    S3-1), and the cap counts DECODED bytes (``aiter_bytes``, never
-    ``aiter_raw``) as defence in depth.
+    S3-1): not one body byte is pulled, so no decoder exists to be fed. The
+    chain turns that refusal into a process-wide pause (r6 S3-7 b).
     """
     encoding = response.headers.get("content-encoding", "").strip().lower()
     if encoding not in ("", "identity"):
         raise SaverRejected("bad_encoding")
+    return await _read_raw_capped(response, max_bytes)
+
+
+async def _read_raw_capped(response: httpx.Response, max_bytes: int) -> bytes:
+    """RAW transport bytes, refused past ``max_bytes`` (contract r6 S3-7 a).
+
+    ``aiter_raw`` and never ``aiter_bytes``/``aread``/``.content``: those make
+    httpx pick a decoder from the response's OWN ``Content-Encoding``, which is
+    exactly the attacker input the identity rule excludes. Its gzip decoder
+    inflates each 64 KiB transport read whole, so a 65 KB gzip arrives as ONE
+    64 MiB chunk before any counter could trip (measured, httpx 0.28.1). Under
+    identity raw bytes ARE the body, so counting them loses nothing; and if
+    the header check above ever regressed, an encoded body would still be
+    capped at its wire size and then fail strict JSON, never inflated.
+    """
     chunks: list[bytes] = []
     total = 0
-    async for chunk in response.aiter_bytes():
+    async for chunk in response.aiter_raw():
         total += len(chunk)
         if total > max_bytes:
             raise SaverRejected("too_large")

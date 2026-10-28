@@ -1,0 +1,19 @@
+{
+  "wire.radient_saver.section.title": "Radient Saver (bêta)",
+  "wire.radient_saver.section.description": "Raccourcit l’historique de conversation que votre agent renvoie à chaque tour. Saver n’envoie jamais à Radient les identifiants de votre fournisseur d’IA. Les modifications s’appliquent dès le tour suivant.",
+  "wire.radient_saver.mode.label": "Radient Saver (bêta)",
+  "wire.radient_saver.mode.help": "Bêta. Envoie à Radient la partie de votre historique de conversation prête à être raccourcie ; Radient la raccourcit sans rien en conserver. Saver n’envoie jamais à Radient les identifiants de votre fournisseur d’IA. Chaque montant facturé est déduit de vos crédits Radient, ce qui nécessite une connexion à Radient avec un solde positif. LOP_RADIENT_SAVER prime sur ce paramètre.",
+  "wire.radient_saver.mode.choice.off.label": "désactivé",
+  "wire.radient_saver.mode.choice.off.description": "n’envoie jamais l’historique à Radient (par défaut)",
+  "wire.radient_saver.mode.choice.opt_in.label": "sur demande",
+  "wire.radient_saver.mode.choice.opt_in.description": "disponible, mais désactivé tant qu’une session ne l’active pas",
+  "wire.radient_saver.mode.choice.auto.label": "auto",
+  "wire.radient_saver.mode.choice.auto.description": "activé pour chaque session tant que vous êtes connecté et disposez de crédit",
+  "wire.radient_saver.notice.unavailable": "Radient Saver est indisponible pour le moment : ce tour envoie donc votre historique complet. Rien d’autre n’est affecté.",
+  "wire.radient_saver.notice.rejected": "Radient Saver a répondu, mais sa réponse n’a pas passé les contrôles de sécurité : elle a donc été écartée et ce tour envoie votre historique complet.",
+  "wire.radient_saver.notice.signed_out": "Radient Saver est en pause pour cette session, car vous n’êtes pas connecté à Radient. Lancez /login radient pour l’utiliser.",
+  "wire.radient_saver.notice.no_credit": "Radient Saver est en pause pour cette session, car votre solde Radient est épuisé. Ajoutez du crédit sur console.radienthq.com pour l’utiliser.",
+  "wire.radient_saver.notice.rate_limited": "Radient Saver est occupé : votre historique complet est donc envoyé jusqu’à ce qu’il accepte de nouveau des requêtes.",
+  "wire.radient_saver.notice.disabled": "Radient Saver n’est pas disponible avec cette configuration : votre historique complet est donc envoyé.",
+  "wire.radient_saver.notice.oversize": "Un message de cette conversation est trop volumineux pour Radient Saver : il reste donc intact. Saver continue de raccourcir le reste de la conversation."
+}
