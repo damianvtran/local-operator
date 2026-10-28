@@ -2,12 +2,26 @@
 
 import time
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 from local_operator.harness.jobs import AsyncJob, AsyncJobManager
 from local_operator.harness.types import Usage
 from local_operator.session import frontend_state as fs
+from local_operator.session.session import Session
+
+
+def _components(usage):
+    """The cost components of a usage the fixture always populates.
+
+    ``AsyncJob.usage`` and ``Usage.cost_components`` are Optional in the model, so
+    pyright rejects a bare chain. Asserting here narrows them for the type checker
+    AND turns a fixture that lost its components into a clear failure rather than an
+    ``AttributeError`` or an index error three lines later.
+    """
+    assert usage is not None and usage.cost_components is not None
+    return usage.cost_components
 
 
 def _fixture():
@@ -55,12 +69,12 @@ def test_usage_and_progress_notifications_invalidate_before_observers():
     prior = store.state.jobs[0]
     observed = []
     manager.subscribe_changes(lambda: observed.append(store.refresh_from_session(session).jobs[0]))
-    job.usage.cost_components[0].usd_cost = 0.025
+    _components(job.usage)[0].usd_cost = 0.025
     job.latest_details = {"progress": "updated"}
     manager.note_usage_changed()
-    assert observed[-1].usage.cost_components[0].usd_cost == 0.025
+    assert _components(observed[-1].usage)[0].usd_cost == 0.025
     assert observed[-1].latest_details["progress"] == "updated"
-    assert prior.usage.cost_components[0].usd_cost == 0.001
+    assert _components(prior.usage)[0].usd_cost == 0.001
 
 
 def test_child_accounting_invalidates_parent_row_before_listener():
@@ -80,14 +94,15 @@ def test_unversioned_extension_rows_are_rebuilt():
     # A source outside the manager's notification contract must not be cached.
     job._projection_source = None
     store.refresh_from_session(session)
-    job.usage.cost_components[0].usd_cost = 0.25
+    _components(job.usage)[0].usd_cost = 0.25
     store.refresh_from_session(session)
-    assert store.state.jobs[0].usage.cost_components[0].usd_cost == 0.25
+    assert _components(store.state.jobs[0].usage)[0].usd_cost == 0.25
 
 
 def test_independent_paint_pricing_changes_without_row_mutation(monkeypatch):
     manager, job, session, store = _fixture()
-    quote = [None, True]
+    # Mixed element types by design (None/float and bool), so typed as Any.
+    quote: list[Any] = [None, True]
     monkeypatch.setattr(fs, "job_subtree_cost", lambda *a, **k: tuple(quote))
     store.refresh_from_session(session)
     before = store.state.jobs[0]
@@ -139,18 +154,21 @@ async def test_runner_entry_invalidates_registration_snapshot():
         await started.wait()
         store.refresh_from_session(session)
         assert store.state.jobs[0].started_at is not None
-        assert manager.get(jid).status == "running"
+        running = manager.get(jid)
+        assert running is not None and running.status == "running"
     finally:
         release.set()
         await asyncio.gather(*list(manager._tasks.values()))
 
 
 def test_real_subscribe_boundary_reuses_warm_usage(monkeypatch):
-    from local_operator.session.session import Session
-
     manager, job, session, store = _fixture()
     session._frontend_state_store = store
-    first = Session.subscribe_frontend(session, lambda event: None)
+    # A stand-in on purpose: the real ``Session`` needs a provider, a harness and
+    # a transcript, none of which the subscribe boundary reads. The cast says so
+    # to the type checker instead of hiding it.
+    as_session = cast(Session, session)
+    first = Session.subscribe_frontend(as_session, lambda event: None)
     original = fs._freeze_usage
     count = 0
 
@@ -160,7 +178,7 @@ def test_real_subscribe_boundary_reuses_warm_usage(monkeypatch):
         return original(value)
 
     monkeypatch.setattr(fs, "_freeze_usage", freeze)
-    second = Session.subscribe_frontend(session, lambda event: None)
+    second = Session.subscribe_frontend(as_session, lambda event: None)
     try:
         assert count == 0
         assert second.sync.snapshot.jobs[0].usage == first.sync.snapshot.jobs[0].usage
