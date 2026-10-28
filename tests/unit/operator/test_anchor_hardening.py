@@ -35,6 +35,10 @@ FULL, READ = 0x001F01FF, 0x001200A9
 WRITE_DAC = 0x00040000
 
 
+_WINDIR = "C:\\Windows"
+_POWERSHELL = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+
+
 def _anchor() -> OperatorAnchor:
     spki = b"\x04" + bytes(range(64))
     return OperatorAnchor(key_id=key_id_for(spki), spki=spki, backend="file-only", presence=False)
@@ -233,6 +237,7 @@ def test_windows_install_command_is_elevated_and_hardens_the_dacl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(trust, "_on_windows", lambda: True)
+    monkeypatch.setattr(trust, "_system_windows_directory", lambda: _WINDIR)
     staged = Path("C:/Users/alice/.local-operator/operator/anchor.json")
     target = Path("C:/ProgramData/local-operator/operators/alice.json")
     digest = "ab" * 32
@@ -275,6 +280,7 @@ def test_windows_printed_line_has_nothing_either_shell_expands(
     cmd.exe's 8191-character limit.
     """
     monkeypatch.setattr(trust, "_on_windows", lambda: True)
+    monkeypatch.setattr(trust, "_system_windows_directory", lambda: _WINDIR)
     target = Path("C:/ProgramData/local-operator/operators/alice.json")
 
     command = trust.install_commands(Path(staged), target, "cd" * 32)
@@ -282,7 +288,7 @@ def test_windows_printed_line_has_nothing_either_shell_expands(
 
     argument = command[0][-1]
     assert not set('$`"%!') & set(argument), argument[:120]
-    assert line == f'powershell -NoProfile -NonInteractive -Command "{argument}"'
+    assert line == f'{_POWERSHELL} -NoProfile -NonInteractive -Command "{argument}"'
     assert len(line) < 8191
     assert f"$staged={trust._ps_quote(str(Path(staged)))}" in _inner_script(command)
 
@@ -292,6 +298,7 @@ def test_install_anchor_on_windows_prints_and_never_runs_the_elevation(
 ) -> None:
     """lop never raises a UAC prompt itself: the operator runs the printed command."""
     monkeypatch.setattr(trust, "_on_windows", lambda: True)
+    monkeypatch.setattr(trust, "_system_windows_directory", lambda: _WINDIR)
     monkeypatch.setattr(handlers, "_is_privileged", lambda: False)
     monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", tmp_path / "anchor-root")
     ran: list[Any] = []
@@ -620,3 +627,222 @@ def test_load_anchor_never_raises_when_the_security_reader_breaks(
 
     assert not loaded.usable and not loaded.root_owned
     assert "could not be read" in loaded.reason, loaded.reason
+
+
+# ---------------------------------------------------------------------------
+# Round 2 remediation: R2-1 (unresolved root), Q3 (one read), R2-2 (raw ids),
+# R2-3 (curly quotes), R2-4 (powershell by full path), R2-N1/N2
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("print_only", [True, False])
+def test_an_unresolved_windows_root_prints_no_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    print_only: bool,
+) -> None:
+    """R2-1: with the root unresolved there is no command to run — none is printed.
+
+    The unresolved root is ``\\nonexistent-local-operator-anchor``, whose parent
+    is the drive root; a printed elevated line would re-ACL ``C:\\``.
+    """
+    monkeypatch.setattr(trust, "_on_windows", lambda: True)
+    monkeypatch.setattr(trust, "_system_windows_directory", lambda: _WINDIR)
+    monkeypatch.setattr(
+        trust, "_windows_program_data_resolution", lambda: (None, "the steering reason")
+    )
+    monkeypatch.setattr(handlers, "_is_privileged", lambda: False)
+    ran: list[Any] = []
+    monkeypatch.setattr(handlers.subprocess, "run", lambda *a, **k: ran.append(a))
+    handlers.stage_anchor(tmp_path / "config", _anchor())
+    assert trust.anchor_dir() == trust._UNRESOLVED_ROOT
+
+    code = handlers.install_anchor(tmp_path / "config", print_only=print_only)
+
+    out = capsys.readouterr()
+    assert code != 0 and ran == []
+    assert "RunAs" not in out.out + out.err and "powershell" not in (out.out + out.err).lower()
+    assert "the steering reason" in out.err, out.err
+
+
+def test_the_elevated_script_runs_the_root_guard_before_anything_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-1 defence in depth: the SCRIPT refuses a wrong root before any native call."""
+    monkeypatch.setattr(trust, "_on_windows", lambda: True)
+    monkeypatch.setattr(trust, "_system_windows_directory", lambda: _WINDIR)
+    target = Path("C:/ProgramData/local-operator/operators/alice.json")
+    script = _inner_script(trust.install_commands(Path("C:/s/anchor.json"), target, "ab" * 32))
+
+    guard_at = script.index(trust._WINDOWS_ROOT_GUARD)
+    assert guard_at < script.index("LopDef") and guard_at < script.index("LopDir $root")
+    assert f"-notmatch '^{trust._WINDOWS_ROOT_PATTERN}$'" in script
+
+
+@pytest.mark.parametrize(
+    "directory",
+    [
+        # The unresolved root's directory: ``$root`` would be ``\`` — the drive root.
+        "\\nonexistent-local-operator-anchor",
+        "C:\\",
+        "C:",
+        "C:\\local-operator\\operators",
+        "C:\\Users\\alice\\local-operator\\operators",
+        "C:\\ProgramData\\..\\local-operator\\operators",
+        "C:\\x\\..\\ProgramData\\local-operator\\operators",
+        "C:ProgramData\\local-operator\\operators",
+        "\\\\server\\share\\ProgramData\\local-operator\\operators",
+        "\\\\?\\C:\\ProgramData\\local-operator\\operators",
+        "C:\\ProgramData\\local-operator\\operators\\more",
+    ],
+)
+def test_the_root_guard_pattern_refuses(directory: str) -> None:
+    """The guard's pattern, over Windows-SPELLED strings (a POSIX ``Path`` would
+    keep ``/`` and never match, proving nothing). ``re`` and .NET agree on this
+    pattern; ``-match`` is case-insensitive, hence IGNORECASE. windows-latest
+    runs the real script against a drive root."""
+    import re
+
+    assert not re.fullmatch(trust._WINDOWS_ROOT_PATTERN, directory, re.IGNORECASE)
+
+
+@pytest.mark.parametrize(
+    "directory",
+    [
+        "C:\\ProgramData\\local-operator\\operators",
+        "d:\\programdata\\local-operator\\operators",
+        "D:\\a\\_temp\\t0\\ProgramData\\local-operator\\operators",
+    ],
+)
+def test_the_root_guard_pattern_admits_the_programdata_layout(directory: str) -> None:
+    import re
+
+    assert re.fullmatch(trust._WINDOWS_ROOT_PATTERN, directory, re.IGNORECASE)
+
+
+def test_the_staged_file_is_read_once_for_the_guard_digest_and_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA Q3: a swap right after the guard's read must not reach the install.
+
+    Adapted from QA's ``toctou.py``: the FIRST read of the staged file returns
+    the benign copy and then rewrites the file with an admitting one. With one
+    read the guard, the digest and the install all see the benign copy.
+    """
+    from dataclasses import replace
+
+    _installed(monkeypatch)
+    root = tmp_path / "config"
+    monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", tmp_path / "anchor-root")
+    staged = handlers.stage_anchor(root, _anchor())
+    evil = anchor_bytes(replace(_anchor(), devices=({"device_id": "evil"},)))
+    real_read = Path.read_bytes
+    reads: list[Path] = []
+
+    def read_then_swap(self: Path) -> bytes:
+        data = real_read(self)
+        if self == staged:
+            reads.append(self)
+            if len(reads) == 1:
+                staged.write_bytes(evil)
+        return data
+
+    monkeypatch.setattr(Path, "read_bytes", read_then_swap)
+    installed_bytes: list[bytes] = []
+    monkeypatch.setattr(handlers, "_is_privileged", lambda: False)
+    monkeypatch.setattr(handlers.shutil, "which", lambda name: "/usr/bin/sudo")
+
+    def fake_sudo(command: list[list[str]], name: str) -> int:
+        # The digest in argv is what the privileged step installs.
+        digest = command[-1][-2]
+        installed_bytes.append(
+            anchor_bytes(_anchor())
+            if digest == hashlib.sha256(anchor_bytes(_anchor())).hexdigest()
+            else evil
+        )
+        return 0
+
+    monkeypatch.setattr(handlers, "_install_with_sudo_stdin", fake_sudo)
+
+    handlers.install_anchor(root, sudo_secret="ADMIN_PW")
+
+    assert len(reads) == 1, f"the staged file was read {len(reads)} times"
+    assert installed_bytes in ([], [anchor_bytes(_anchor())]), "the admitting copy was installed"
+
+
+def test_a_revoked_string_id_turned_into_a_number_is_an_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R2-2: the guard compares ids exactly as the runtime does.
+
+    The runtime's ``device_is_revoked`` compares the raw value to the
+    certificate's string id, so a JSON number never revokes ``"1234"``; the
+    guard must therefore read the staged copy as dropping that revocation.
+    """
+    _installed(monkeypatch, {"device_id": "123456789012", "revoked": True})
+
+    code, fed = _sudo_secret_install(
+        tmp_path, monkeypatch, {"device_id": 123456789012, "revoked": True}
+    )
+
+    assert code == 2 and fed == []
+    assert "123456789012" in capsys.readouterr().err
+    staged = trust.load_staged_anchor(tmp_path / "config")
+    assert staged is not None
+    assert not trust.device_is_revoked(staged, "123456789012"), "the runtime's own reading"
+
+
+@pytest.mark.parametrize("quote", ["\u2018", "\u2019", "\u201a", "\u201b", "'"])
+def test_ps_quote_doubles_every_powershell_single_quote(quote: str) -> None:
+    """R2-3: PowerShell's tokenizer treats U+2018..U+201B as ``'``."""
+    value = f"C:\\Users\\o{quote}brien"
+    quoted = trust._ps_quote(value)
+    assert quoted == f"'C:\\Users\\o{quote}{quote}brien'"
+    inner = quoted[1:-1]
+    singles = "'\u2018\u2019\u201a\u201b"
+    # Every quote-class character inside appears in doubled runs only.
+    import re
+
+    assert all(len(run) % 2 == 0 for run in re.findall(f"[{singles}]+", inner))
+
+
+def test_powershell_is_called_by_its_full_system_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-4: never by PATH lookup, for the outer token AND the elevated child."""
+    monkeypatch.setattr(trust, "_on_windows", lambda: True)
+    monkeypatch.setattr(trust, "_system_windows_directory", lambda: _WINDIR)
+    target = Path("C:/ProgramData/local-operator/operators/alice.json")
+
+    command = trust.install_commands(Path("C:/s/anchor.json"), target, "ab" * 32)
+
+    assert command[0][0] == _POWERSHELL
+    assert f"-FilePath '{_POWERSHELL}'" in command[0][-1]
+    line = trust.format_install_commands(command)
+    assert line == f'{_POWERSHELL} -NoProfile -NonInteractive -Command "{command[0][-1]}"'
+    assert not set('$`"%!') & set(command[0][-1])
+    script = _inner_script(command)
+    assert "$ProgressPreference='SilentlyContinue'" in script, "R2-N1"
+    assert "finally{" in script.split("$hr=LopDir $root", 1)[1], "R2-N2: handles in finally"
+
+
+@pytest.mark.parametrize("windir", [None, "C:\\Win dows", "C:\\Win%x%", "Windows"])
+def test_an_unusable_windows_directory_prints_no_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    windir: str | None,
+) -> None:
+    """R2-4: the literal path must survive both shells; if it cannot, refuse."""
+    monkeypatch.setattr(trust, "_on_windows", lambda: True)
+    monkeypatch.setattr(trust, "_system_windows_directory", lambda: windir)
+    monkeypatch.setattr(handlers, "_is_privileged", lambda: False)
+    monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", tmp_path / "anchor-root")
+    handlers.stage_anchor(tmp_path / "config", _anchor())
+
+    code = handlers.install_anchor(tmp_path / "config", print_only=True)
+
+    out = capsys.readouterr()
+    assert code != 0 and "RunAs" not in out.out + out.err
+    assert "PowerShell" in out.err, out.err

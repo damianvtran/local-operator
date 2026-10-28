@@ -699,8 +699,7 @@ def load_anchor(uid: int | str | None = None) -> AnchorLoad:
             anchor=None,
             path=path,
             root_owned=False,
-            reason=_windows_program_data_resolution()[1]
-            or "the ProgramData folder could not be resolved",
+            reason=_unresolved_root_reason(),
         )
     if not _path_is_symlink_free(path):
         # ``exists=True``, because something IS in the anchor's place and the
@@ -872,6 +871,16 @@ def load_staged_anchor(config_root: Path) -> OperatorAnchor | None:
         raw = staging_path(config_root).read_bytes()
     except OSError:
         return None
+    return parse_staged_anchor(raw)
+
+
+def parse_staged_anchor(raw: bytes) -> OperatorAnchor | None:
+    """Parse staged-anchor BYTES the caller already read, or ``None``.
+
+    Split from :func:`load_staged_anchor` so the install can judge, hash and
+    install ONE read (QA Q3): reading the file again for each would let a swap
+    between the reads pass a benign copy to the guard and install another.
+    """
     try:
         return OperatorAnchor.from_json(json.loads(raw.decode("utf-8")))
     except (UnicodeDecodeError, ValueError):
@@ -931,10 +940,46 @@ _POSIX_INSTALL_SCRIPT = (
 _SID_SYSTEM, _SID_ADMINS, _SID_USERS = "S-1-5-18", "S-1-5-32-544", "S-1-5-32-545"
 
 
-def _ps_quote(value: str) -> str:
-    """A PowerShell single-quoted literal: no expansion, ``'`` doubled."""
-    return "'" + value.replace("'", "''") + "'"
+#: Every character PowerShell's tokenizer reads as a single quote: ASCII ``'``
+#: AND the typographic U+2018..U+201B (R2-3). Doubling only ``'`` left
+#: ``o\u2019brien`` able to close the literal, and these values (the staged path,
+#: the target) reach the ELEVATED script.
+_PS_SINGLE_QUOTES = "'\u2018\u2019\u201a\u201b"
 
+
+def _ps_quote(value: str) -> str:
+    """A PowerShell single-quoted literal: no expansion, every single quote doubled.
+
+    Each quote character is doubled AS ITSELF, so the literal's value is the
+    input unchanged — PowerShell un-doubles any pair of quote-class characters.
+    """
+    return "'" + re.sub(f"([{_PS_SINGLE_QUOTES}])", r"\1\1", value) + "'"
+
+
+#: The only directory shape the elevated script will touch (R2-1, defence in
+#: depth): an absolute drive-letter path ending ``\ProgramData\local-operator\
+#: operators``, with no ``.``/``..`` segment. The Python side already refuses an
+#: unresolved root (:func:`install_refusal`); this is what still holds if a
+#: future caller forgets. Without it the unresolved root
+#: ``\nonexistent-local-operator-anchor`` made ``$root`` the DRIVE ROOT, and the
+#: administrator's approval would have replaced ``C:\``'s DACL. A SUFFIX, not
+#: the exact system path, because the native suite installs into scratch trees
+#: and must keep exercising this same script. Valid for Python's ``re`` and
+#: .NET's regex alike (``-match`` is case-insensitive, as the tests use it).
+_WINDOWS_ROOT_PATTERN = (
+    r"[A-Za-z]:\\(?:(?!\.\.?\\)[^\\/:*?\"<>|]+\\)*ProgramData\\local-operator\\operators"
+)
+
+#: Runs before any native call: ``$dir`` must match the pattern, ``$root`` must be
+#: exactly its parent and ``$target`` exactly one name inside it, so the three
+#: values cannot disagree about where the install lands.
+_WINDOWS_ROOT_GUARD = (
+    f"if(($dir -notmatch '^{_WINDOWS_ROOT_PATTERN}$') -or "
+    "($root -ne $dir.Substring(0,$dir.Length-10)) -or "
+    "($target.Substring(0,[Math]::Max(0,$target.LastIndexOf('\\'))) -ne $dir)){"
+    'throw "refusing to install into $dir, which is not a ProgramData\\local-operator'
+    '\\operators folder; nothing was installed"}'
+)
 
 #: The elevated script's native calls, declared through ``Reflection.Emit`` rather
 #: than ``Add-Type``: ``Add-Type`` compiles C# through files in the ELEVATED
@@ -966,7 +1011,8 @@ function LopErr{[Runtime.InteropServices.Marshal]::GetLastWin32Error()}"""  # no
 #: is a junction/symlink, and then checked and re-ACL'd THROUGH THAT HANDLE, so
 #: no path is re-resolved between the check and the write (R1-2). Directories
 #: are held open without ``FILE_SHARE_DELETE`` until the install ends, so they
-#: cannot be renamed or swapped underneath it. Every helper is ``Lop``-prefixed
+#: cannot be renamed or swapped underneath it, and closed in ``finally`` on every
+#: path, refusals included (R2-N2). Every helper is ``Lop``-prefixed
 #: because PowerShell resolves an ALIAS before a function: a helper named ``Dir``
 #: would silently run ``Get-ChildItem``. Variables are case-INSENSITIVE too
 #: (a local ``$n`` once shadowed the native type ``$N``), hence ``$LopNative``.
@@ -1004,10 +1050,12 @@ $FileSd=LopBytes 'O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)'
 function LopDir($path){
 [void]$LopNative::CreateDirectoryW($path,(LopSA $DirSd))
 $h=LopOpen $path 0xE0080 3 3 ([IntPtr]::Zero) $true $false
-LopOwned (LopSd $h $path) $path
+try{LopOwned (LopSd $h $path) $path
 if(-not $LopNative::SetKernelObjectSecurity($h,[uint32]5,$DirSd)){throw "could not restrict $path (error $(LopErr)); nothing was installed"}
-LopVerify (LopSd $h $path) $path
+LopVerify (LopSd $h $path) $path}catch{[void]$LopNative::CloseHandle($h);throw}
 $h}
+$hr=$null;$hd=$null
+try{
 $hr=LopDir $root
 $hd=LopDir $dir
 $old=LopOpen $target 0x80 3 7 ([IntPtr]::Zero) $false $true
@@ -1023,7 +1071,7 @@ try{$fs.Write($bytes,0,$bytes.Length);$fs.Flush($true);LopVerify (LopSd $hf $tmp
 if(-not $LopNative::MoveFileExW($tmp,$target,9)){throw "could not move the anchor into place (error $(LopErr))"}
 $hv=LopOpen $target 0x20080 3 7 ([IntPtr]::Zero) $false $false
 try{LopVerify (LopSd $hv $target) $target}finally{[void]$LopNative::CloseHandle($hv)}
-[void]$LopNative::CloseHandle($hd);[void]$LopNative::CloseHandle($hr)
+}finally{foreach($x in $hd,$hr){if($x){[void]$LopNative::CloseHandle($x)}}}
 Write-Output "installed the operator anchor at $target\""""  # noqa: E501
 
 
@@ -1056,6 +1104,9 @@ def _windows_install_script(staging: Path, target: Path, digest_hex: str) -> str
     head = "\n".join(
         [
             "$ErrorActionPreference='Stop'",
+            # R2-N1: module auto-load's progress record otherwise reaches the
+            # redirected output as CLIXML after the success line.
+            "$ProgressPreference='SilentlyContinue'",
             f"$root={_ps_quote(str(target.parent.parent))}",
             f"$dir={_ps_quote(str(target.parent))}",
             f"$target={_ps_quote(str(target))}",
@@ -1072,6 +1123,7 @@ def _windows_install_script(staging: Path, target: Path, digest_hex: str) -> str
         [
             head,
             "try{",
+            _WINDOWS_ROOT_GUARD,
             _WINDOWS_PINVOKE,
             _WINDOWS_INSTALL_BODY,
             "}catch{[Console]::Error.WriteLine($_.Exception.Message);exit 1}",
@@ -1087,7 +1139,7 @@ def _windows_install_script(staging: Path, target: Path, digest_hex: str) -> str
 _PASTE_UNSAFE = frozenset('$`"%!')
 
 
-def _windows_outer_command(script: str) -> str:
+def _windows_outer_command(script: str, powershell: str) -> str:
     """The non-elevated launcher: unpack ``script`` in memory, run it elevated.
 
     WHY IT IS SPELLED THIS WAY (R1-3). Round 1 printed
@@ -1111,7 +1163,8 @@ def _windows_outer_command(script: str) -> str:
 
     blob = base64.b64encode(gzip.compress(script.encode("utf-8"), 9, mtime=0)).decode("ascii")
     outer = (
-        "exit (Start-Process -FilePath powershell -Verb RunAs -Wait -PassThru -ArgumentList "
+        f"exit (Start-Process -FilePath {_ps_quote(powershell)} -Verb RunAs -Wait -PassThru "
+        "-ArgumentList "
         "('-NoProfile -NonInteractive -EncodedCommand '+[Convert]::ToBase64String("
         "[Text.Encoding]::Unicode.GetBytes([IO.StreamReader]::new("
         "[IO.Compression.GZipStream]::new([IO.MemoryStream]::new("
@@ -1122,6 +1175,56 @@ def _windows_outer_command(script: str) -> str:
     if unsafe:  # pragma: no cover — a constant-shape guard; the test drives quoting
         raise ValueError(f"the Windows install line would carry {sorted(unsafe)}")
     return outer
+
+
+def windows_powershell_path() -> str | None:
+    """``<windir>\\System32\\WindowsPowerShell\\v1.0\\powershell.exe``, never by PATH.
+
+    WHY A FULL PATH (R2-4): the operator pastes the line into a NON-elevated
+    shell, which resolves a bare ``powershell`` through the user's own (HKCU-
+    writable) PATH — so the binary the UAC prompt elevates could be the gated
+    user's. The directory comes from ``GetSystemWindowsDirectoryW`` (env-free,
+    the same source R1-1 pins the root with), never ``%SystemRoot%``.
+
+    ``None`` unless every segment is plain ``[A-Za-z0-9._-]``: the path is
+    embedded LITERALLY in the printed line, and there is no spelling of a path
+    with a space (or ``%``/``$``/quote) that both cmd.exe and PowerShell run as a
+    bare first token — PowerShell needs ``& "..."``, which cmd.exe rejects.
+    Refusing is the honest answer on such a host; no default install has one.
+    """
+    windows_dir = _system_windows_directory()
+    if not windows_dir or not re.fullmatch(r"[A-Za-z]:(?:\\[A-Za-z0-9._-]+)+", windows_dir):
+        return None
+    return windows_dir + "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+
+
+def _unresolved_root_reason() -> str:
+    """Why :func:`anchor_dir` answered :data:`_UNRESOLVED_ROOT`, in one sentence."""
+    if _on_windows():
+        return (
+            _windows_program_data_resolution()[1] or "the ProgramData folder could not be resolved"
+        )
+    return "this platform has no location for the operator anchor"
+
+
+def install_refusal() -> str | None:
+    """Why no install command can be produced on this host, or ``None``.
+
+    R2-1: with the root unresolved, the target is under
+    ``\\nonexistent-local-operator-anchor``, whose parent is the DRIVE ROOT —
+    the printed elevated command would have re-ACL'd ``C:\\``. The load side
+    already reads that state as "no anchor"; the install side must not print a
+    privileged command for it. On Windows an unlocatable PowerShell (R2-4) is
+    the same kind of refusal. Every install path asks this FIRST.
+    """
+    if anchor_dir() == _UNRESOLVED_ROOT:
+        return _unresolved_root_reason()
+    if _on_windows() and windows_powershell_path() is None:
+        return (
+            "Windows PowerShell could not be located from the system directory "
+            f"({_system_windows_directory()!r}), so there is no safe command to print"
+        )
+    return None
 
 
 def install_commands(staging: Path, target: Path, digest_hex: str) -> list[list[str]]:
@@ -1145,8 +1248,12 @@ def install_commands(staging: Path, target: Path, digest_hex: str) -> list[list[
     which reopens the same swap race for the script itself.
     """
     if _on_windows():
-        outer = _windows_outer_command(_windows_install_script(staging, target, digest_hex))
-        return [["powershell", "-NoProfile", "-NonInteractive", "-Command", outer]]
+        powershell = windows_powershell_path()
+        if powershell is None:
+            raise ValueError(install_refusal() or "Windows PowerShell could not be located")
+        script = _windows_install_script(staging, target, digest_hex)
+        outer = _windows_outer_command(script, powershell)
+        return [[powershell, "-NoProfile", "-NonInteractive", "-Command", outer]]
     group = "wheel" if sys.platform == "darwin" else "root"
     hasher = "shasum -a 256" if sys.platform == "darwin" else "sha256sum"
     script = _POSIX_INSTALL_SCRIPT.replace("{hash}", hasher)
@@ -1191,12 +1298,25 @@ def device_is_revoked(anchor: OperatorAnchor, device_id: str) -> bool:
     fills this in; the predicate lives here so the runtime does not grow its own
     copy of the rule.
     """
-    if not anchor.devices:
-        return False
-    for entry in anchor.devices:
-        if entry.get("device_id") == device_id and entry.get("revoked"):
-            return True
-    return False
+    return device_id in revoked_device_ids(anchor)
+
+
+def revoked_device_ids(anchor: OperatorAnchor) -> list[Any]:
+    """The anchor's revoked device ids, RAW — exactly as the runtime compares them.
+
+    ONE definition for the runtime (:func:`device_is_revoked`) and the install
+    guard that judges whether a write admits a device (R2-2): the guard used to
+    ``str()`` the ids while the runtime compared raw values, so a revoked
+    ``"1234"`` re-staged as the JSON number ``1234`` looked unchanged to the
+    guard yet revoked nothing at runtime. A list, not a set: JSON values need not
+    be hashable, and ``in`` on a list is the same ``==`` the runtime used.
+    """
+    return [e.get("device_id") for e in anchor.devices if e.get("revoked")]
+
+
+def open_device_ids(anchor: OperatorAnchor) -> list[Any]:
+    """The anchor's listed, NOT revoked device ids, raw (see :func:`revoked_device_ids`)."""
+    return [e.get("device_id") for e in anchor.devices if not e.get("revoked")]
 
 
 def is_presence_backend(backend: str) -> bool:

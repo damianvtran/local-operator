@@ -131,15 +131,14 @@ def _admitted_devices(installed: Any, staged: Any) -> list[str]:
     is not an admission. Pure over two anchors, sorted for a stable message.
     """
 
-    def revoked(anchor: Any) -> set[str]:
-        return {str(e.get("device_id")) for e in anchor.devices if e.get("revoked")}
-
-    def listed_open(anchor: Any) -> set[str]:
-        return {str(e.get("device_id")) for e in anchor.devices if not e.get("revoked")}
-
-    unrevoked = revoked(installed) - revoked(staged)
-    added = listed_open(staged) - listed_open(installed)
-    return sorted(unrevoked | added)
+    # R2-2: the SAME id lists the runtime revokes by, compared with the same raw
+    # ``==`` — no ``str()``, which once made a revoked ``"1234"`` re-staged as
+    # the number ``1234`` look unchanged here while revoking nothing at runtime.
+    staged_revoked = trust_module.revoked_device_ids(staged)
+    installed_open = trust_module.open_device_ids(installed)
+    unrevoked = [d for d in trust_module.revoked_device_ids(installed) if d not in staged_revoked]
+    added = [d for d in trust_module.open_device_ids(staged) if d not in installed_open]
+    return sorted({repr(d) if not isinstance(d, str) else d for d in unrevoked + added})
 
 
 def install_anchor(
@@ -184,9 +183,26 @@ def install_anchor(
         return 2
     staged = staging_path(root)
     target = anchor_path()
-    if sudo_secret:
+    refusal = trust_module.install_refusal()
+    if refusal is not None:
+        # R2-1: no root (or no PowerShell) means no command — print the reason,
+        # never an elevated line whose ``$root`` is the drive root.
+        print(
+            f"the operator anchor cannot be installed on this machine: {refusal}; "
+            "nothing was installed",
+            file=sys.stderr,
+        )
+        return 1
+    # Q3: ONE read. The device guard, the digest and the install all use these
+    # bytes, so a swap of the user-writable staged file between two reads can no
+    # longer show the guard a benign copy and install another.
+    try:
+        staged_bytes: bytes | None = staged.read_bytes()
+    except OSError:
+        staged_bytes = None
+    if sudo_secret and staged_bytes is not None:
         installed = load_anchor()
-        staged_anchor = load_staged_anchor(root)
+        staged_anchor = trust_module.parse_staged_anchor(staged_bytes)
         if installed.usable and installed.anchor is not None and staged_anchor is not None:
             admitted = _admitted_devices(installed.anchor, staged_anchor)
             if admitted:
@@ -198,10 +214,6 @@ def install_anchor(
                     file=sys.stderr,
                 )
                 return 2
-    try:
-        staged_bytes = staged.read_bytes()
-    except OSError:
-        staged_bytes = None
     if staged_bytes is None:
         # R1-4 (§4's rule applied to the init-shaped refusals): the remedy names the
         # product action, not the terminal verb that performs it.

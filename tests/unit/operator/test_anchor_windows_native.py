@@ -234,13 +234,13 @@ def test_install_refuses_a_planted_junction_and_leaves_the_decoy_alone(
     decoy = tmp_path / "decoy"
     decoy.mkdir()
     before = _acl(decoy)
-    (tmp_path / "local-operator").mkdir()
+    (tmp_path / "ProgramData" / "local-operator").mkdir(parents=True)
     # Administrators-owned (what an elevated runner creates anyway), so the ONLY
     # thing wrong with the tree is the junction.
-    _icacls(str(tmp_path / "local-operator"), "/setowner", ADMINS)
-    _junction(tmp_path / "local-operator" / "operators", decoy)
+    _icacls(str(tmp_path / "ProgramData" / "local-operator"), "/setowner", ADMINS)
+    _junction(tmp_path / "ProgramData" / "local-operator" / "operators", decoy)
     staged, digest = _staged(tmp_path)
-    target = tmp_path / "local-operator" / "operators" / "anchor.json"
+    target = tmp_path / "ProgramData" / "local-operator" / "operators" / "anchor.json"
 
     result = _run_inner(trust.install_commands(staged, target, digest))
 
@@ -258,7 +258,7 @@ def test_install_replaces_a_planted_grant_and_refuses_a_foreign_owner(
 ) -> None:
     """R1-2: an attacker's explicit ACE is GONE after install; a foreign owner refuses."""
     monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", None)
-    operators = tmp_path / "local-operator" / "operators"
+    operators = tmp_path / "ProgramData" / "local-operator" / "operators"
     operators.mkdir(parents=True)
     _icacls(str(operators.parent), "/setowner", ADMINS)
     _icacls(str(operators), "/setowner", ADMINS)
@@ -277,7 +277,7 @@ def test_install_replaces_a_planted_grant_and_refuses_a_foreign_owner(
     monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", operators)
     assert trust.load_anchor("anchor").usable
 
-    foreign = tmp_path / "foreign"
+    foreign = tmp_path / "foreign" / "ProgramData"
     (foreign / "local-operator").mkdir(parents=True)
     _icacls(str(foreign / "local-operator"), "/setowner", USERS)
     result = _run_inner(
@@ -298,7 +298,11 @@ def test_the_printed_line_installs_when_pasted_into_either_shell(
     not prompt on the runner (administrator, UAC off). The target is a scratch
     root via the test seam, never the real ProgramData anchor.
     """
-    monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", tmp_path / "local-operator" / "operators")
+    operators = tmp_path / "ProgramData" / "local-operator" / "operators"
+    monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", operators)
+    # The elevated script creates only the two directories it owns (CreateDirectoryW
+    # is not recursive); ProgramData itself always exists on a real host.
+    operators.parent.parent.mkdir(parents=True)
     staged, digest = _staged(tmp_path)
     target = trust.anchor_path("anchor")
     line = trust.format_install_commands(trust.install_commands(staged, target, digest))
@@ -318,3 +322,75 @@ def test_the_printed_line_installs_when_pasted_into_either_shell(
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert target.read_bytes() == staged.read_bytes()
     assert load.usable, load.reason
+
+
+# ---------------------------------------------------------------------------
+# Round 2 remediation, on real Windows: R2-1 (no command for an unresolved root;
+# the elevated script refuses a drive-root target) and R2-4 (full path).
+# ---------------------------------------------------------------------------
+
+_INSTALL_PROBE = (
+    "import sys\n"
+    "from pathlib import Path\n"
+    "from local_operator.operator import handlers, trust\n"
+    "from local_operator.operator.trust import OperatorAnchor\n"
+    "from local_operator.operator.verify import key_id_for\n"
+    "spki = b'\\x04' + bytes(range(64))\n"
+    "a = OperatorAnchor(key_id=key_id_for(spki), spki=spki, backend='file-only', presence=False)\n"
+    "root = Path(sys.argv[1])\n"
+    "handlers.stage_anchor(root, a)\n"
+    "print('ROOT', trust.anchor_dir())\n"
+    "print('RC', handlers.install_anchor(root, print_only=True))\n"
+)
+
+
+def test_an_unresolved_root_prints_no_command(tmp_path: Path) -> None:
+    """R2-1: a fresh process with ``SystemDrive`` removed resolves no root, and
+    ``install --print-only`` then prints the reason and NO elevated command."""
+    env = {k: v for k, v in os.environ.items() if k.upper() != "SYSTEMDRIVE"}
+    result = subprocess.run(
+        [sys.executable, "-c", _INSTALL_PROBE, str(tmp_path / "config")],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    out = result.stdout + result.stderr
+    print("unresolved root install ->", out.strip().replace("\n", " | "))
+    assert result.returncode == 0, result.stderr
+    if f"ROOT {trust._UNRESOLVED_ROOT}" not in result.stdout:
+        pytest.skip("this host resolved ProgramData without SystemDrive")
+    assert "RC 1" in result.stdout
+    assert "RunAs" not in out and "powershell" not in out.lower()
+    assert "cannot be installed on this machine" in result.stderr
+
+
+def test_the_elevated_script_refuses_a_drive_root_target(tmp_path: Path) -> None:
+    """R2-1 defence in depth: handed the unresolved root anyway (``$root`` = the
+    drive root), the elevated script refuses before touching anything."""
+    staged, digest = _staged(tmp_path)
+    drive_root = Path(Path.cwd().anchor)
+    before = _acl(drive_root)
+    target = Path(str(trust._UNRESOLVED_ROOT)) / "probe.json"
+
+    result = _run_inner(trust.install_commands(staged, target, digest))
+
+    after = _acl(drive_root)
+    print("drive-root target -> rc", result.returncode, "|", result.stderr.strip()[:200])
+    print("drive root ACL unchanged ->", before == after)
+    assert result.returncode != 0
+    assert "refusing to install into" in result.stderr
+    assert before == after
+    assert not Path(str(trust._UNRESOLVED_ROOT)).exists()
+
+
+def test_the_printed_line_names_powershell_by_full_path() -> None:
+    """R2-4: the printed launcher and the elevated child are the System32 binary."""
+    command = trust.install_commands(
+        Path("C:/s/anchor.json"), Path("C:/ProgramData/local-operator/operators/a.json"), "ab" * 32
+    )
+    line = trust.format_install_commands(command)
+    print("printed line head ->", line[:140])
+    expected = trust.windows_powershell_path()
+    assert expected is not None and Path(expected).is_file()
+    assert command[0][0] == expected and f"-FilePath '{expected}'" in command[0][-1]

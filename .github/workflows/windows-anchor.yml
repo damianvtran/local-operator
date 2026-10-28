@@ -73,4 +73,4 @@ jobs:
           $rc = $LASTEXITCODE
           $out
           if ($rc -ne 0) { exit $rc }
-          if (-not ($out | Where-Object { $_ -match '^10 passed in ' })) { Write-Error "expected exactly 10 native tests to pass"; exit 1 }
+          if (-not ($out | Where-Object { $_ -match '^13 passed in ' })) { Write-Error "expected exactly 13 native tests to pass"; exit 1 }
