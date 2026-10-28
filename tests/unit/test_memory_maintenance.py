@@ -772,3 +772,105 @@ def test_a_future_dated_attempt_stamp_does_not_hold_passes_in_backoff(
     _churn(_store(tmp_path))
     (tmp_path / "memory" / mm.ATTEMPT_NAME).write_text(f"{time.time() + 3 * DAY}\n")
     assert mm.run_pass(tmp_path)["status"] == "ran"
+
+
+# ---------------------------------------------------------------------------
+# Rebase onto #3059 (capture eviction + recall telemetry) and review r5 m1
+# ---------------------------------------------------------------------------
+
+
+def _recall_rows(config: Path) -> set[str]:
+    db = sqlite3.connect(config / "memory" / "memory.db")
+    try:
+        return {row[0] for row in db.execute("SELECT entity FROM recall_stats")}
+    finally:
+        db.close()
+
+
+def test_an_expiry_tombstone_drops_the_facts_recall_telemetry(tmp_path: Path) -> None:
+    """#3059 deletes ``recall_stats`` for a tombstoned entity in ``_reindex``; the
+    expiry pass tombstones through ``forget_many``, so its rows go too."""
+    store = _store(tmp_path)
+    _capture(store, "m1", "Recalled once then left to go stale", time.time() - 15 * DAY)
+    entity, _, _ = _only_row(tmp_path)
+    store.note_recall([entity])
+    assert _recall_rows(tmp_path) == {entity}
+    assert mm.run_pass(tmp_path)["expired"] == 1
+    assert _recall_rows(tmp_path) == set()
+
+
+def test_eviction_and_expiry_tombstones_are_never_mistaken_for_each_other(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An EVICTION (#3059, budget) stays final for its text; an EXPIRY (this PR)
+    is re-capturable and is never counted as an eviction."""
+    from local_operator import memory_capture
+    from local_operator.memory import is_expiry_tombstone
+
+    store = _store(tmp_path)
+    old = time.time() - 15 * DAY
+    _capture(store, "m1", "Oldest capture the budget will evict first", old - 60)
+    monkeypatch.setattr(memory_capture, "CAPTURE_SESSION_TOKENS", 20)
+    _capture(store, "m2", "Newer capture that will merely expire later on", old)
+    assert memory_capture.capture_status(store)["evicted"] == 1
+    db = sqlite3.connect(tmp_path / "memory" / "memory.db")
+    try:
+        [evict] = [
+            json.loads(r[0]) for r in db.execute("SELECT data FROM ops WHERE kind='tombstone'")
+        ]
+    finally:
+        db.close()
+    assert not is_expiry_tombstone(evict)
+    monkeypatch.setattr(memory_capture, "CAPTURE_SESSION_TOKENS", 16_000)
+
+    assert mm.run_pass(tmp_path)["expired"] == 1
+    db = sqlite3.connect(tmp_path / "memory" / "memory.db")
+    try:
+        kinds = [
+            is_expiry_tombstone(json.loads(r[0]))
+            for r in db.execute("SELECT data FROM ops WHERE kind='tombstone'")
+        ]
+    finally:
+        db.close()
+    assert sorted(kinds) == [False, True]
+    # Expiry is not an eviction in status.
+    assert memory_capture.capture_status(store)["evicted"] == 1
+
+    now = time.time()
+    _capture(store, "m3", "Oldest capture the budget will evict first", now)
+    _capture(store, "m4", "Newer capture that will merely expire later on", now)
+    assert set(_facts(tmp_path)) == {"Newer capture that will merely expire later on"}
+
+
+def test_owed_ids_whose_op_compaction_dropped_are_pruned(tmp_path: Path) -> None:
+    """Review r5 m1: an owed id whose op no longer exists is dropped on read and
+    on save, so a still-legacy peer stops reporting it as pending."""
+    from local_operator.network import memory as net
+
+    store = _store(tmp_path)
+    live = store.put("session", {"title": "Kept", "body": "still in the journal"})
+    store.put("session", {"title": "Other", "body": "creates the store"})
+    db = sqlite3.connect(tmp_path / "memory" / "memory.db")
+    try:
+        [held] = [
+            r[0] for r in db.execute("SELECT op_id FROM ops WHERE entity_id=?", (live["id"],))
+        ]
+    finally:
+        db.close()
+    gone = "op-compaction-deleted"
+    net._save_legacy_pending(store, "peer-legacy", [gone, held], False)
+    assert net.legacy_pending(store, "peer-legacy") == {"ids": [held], "overflow": False}
+    # Written before the prune existed: the read path drops it as well.
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta VALUES (?,?)",
+            (net._legacy_key("peer-legacy"), json.dumps({"ids": [gone], "overflow": False})),
+        )
+        conn.commit()
+    assert net.legacy_pending(store, "peer-legacy") == {"ids": [], "overflow": False}
+    net._save_legacy_pending(store, "peer-legacy", [gone], False)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM meta WHERE key=?", (net._legacy_key("peer-legacy"),)
+        ).fetchone()
+    assert row is None
