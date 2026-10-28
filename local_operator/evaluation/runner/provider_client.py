@@ -158,6 +158,43 @@ UNCHANGED_FRAMES_NOTE = (
 )
 
 
+#: What the observation markers above MEAN, for the model. ONE definition, read
+#: by both engagements: the reply arm's system prompt (``build_system_prompt``)
+#: and the session arm's first-prompt header (``session_arm.render_prompt_header``)
+#: embed this exact text, because both render observations through the same
+#: ``_ContextBuilder`` and so show the model the same markers.
+#:
+#: WHY IT IS SHARED (measured 2026-10-28). The session arm used to render the
+#: markers without ever explaining them: on a sealed screenshot-only episode
+#: the model was delivered 239 image blocks and still ended with "this
+#: session's observations contained no textual state at all, so I was working
+#: blind"; on another it read the marker as a dead channel. The reply arm's
+#: explanation existed, it just lived inside one arm's prompt.
+#:
+#: CONSTRAINTS. The text is the reply arm's pre-extraction paragraph, byte for
+#: byte: it sits in that arm's cached system prompt, pinned by digest in
+#: ``test_compact_action_binding``, and rewording it would make every reply-arm
+#: run after the change incomparable with the ones before. So edit it only as a
+#: deliberate prompt change for BOTH arms. It names only markers either arm can
+#: actually show; the two compaction markers come from the harness's shared
+#: compaction, which a session runs too. Its one generic "screenshot-only
+#: benchmark" phrase names no benchmark, so the session header's no-benchmark
+#: vocabulary rule is checked on the header's OWN text, with this guide removed.
+OBSERVATION_MARKER_GUIDE = f"""\
+"{UNCHANGED_OBSERVATION}" means the observation's TEXT repeats the
+previous one's; "{NO_TEXTUAL_STATE}" means the adapter published no text for
+this step, which is normal for a screenshot-only benchmark and means the
+screenshot is the whole state; "[screenshot omitted ...]" marks an older
+screenshot that a newer one has replaced. A message starting
+<previous-context-summary> summarises turns that are no longer shown.
+
+An observation that says the screenshot is byte-identical to the previous
+one's is telling you your last action did nothing. Treat that as evidence, not
+noise: repeating an action that already had no effect wastes the step budget.
+Change something -- a different target, a different action kind, a "wait" if
+the surface may still be painting, or a scroll to bring the target into view."""
+
+
 def unchanged_frames_note(streak: int) -> str:
     """Escalate evidence, not enforcement: legitimate loading may stay static.
 
@@ -1579,18 +1616,7 @@ def build_system_prompt(
 Each user message is one observation of the screen: its text, and a screenshot
 when one is attached. Your own earlier replies contain the actions you already
 took and any public factual observations you recorded.
-"{UNCHANGED_OBSERVATION}" means the observation's TEXT repeats the
-previous one's; "{NO_TEXTUAL_STATE}" means the adapter published no text for
-this step, which is normal for a screenshot-only benchmark and means the
-screenshot is the whole state; "[screenshot omitted ...]" marks an older
-screenshot that a newer one has replaced. A message starting
-<previous-context-summary> summarises turns that are no longer shown.
-
-An observation that says the screenshot is byte-identical to the previous
-one's is telling you your last action did nothing. Treat that as evidence, not
-noise: repeating an action that already had no effect wastes the step budget.
-Change something -- a different target, a different action kind, a "wait" if
-the surface may still be painting, or a scroll to bring the target into view.
+{OBSERVATION_MARKER_GUIDE}
 
 Every observation lists its frames on a "Frames:" line as "<frame_id>
 (<width>x<height>)", one per attached screenshot, in order. Any action that

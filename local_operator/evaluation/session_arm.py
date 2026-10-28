@@ -151,6 +151,7 @@ from local_operator.evaluation.runner.model import EpisodeTurn
 from local_operator.evaluation.runner.provider_client import (
     DEFAULT_KEEP_RECENT_FRAMES,
     DEFAULT_REBUILD_EVERY_FRAMES,
+    OBSERVATION_MARKER_GUIDE,
     _ContextBuilder,
     build_completion_challenge,
 )
@@ -247,12 +248,48 @@ REMOTE_TOPOLOGY_NOTE = (
 )
 
 
+#: The observation-metadata key an adapter publishes the remote computer's
+#: operating system under (a short identifier such as ``"linux"``). Any adapter
+#: may set it; the arm reads it from observation zero, which it already holds.
+REMOTE_PLATFORM_METADATA_KEY = "vm_platform"
+
+#: Display names for the identifiers adapters actually publish. Any OTHER
+#: well-formed identifier is stated verbatim -- it is still the adapter's fact.
+_PLATFORM_NAMES = {"linux": "Linux", "windows": "Windows", "macos": "macOS", "darwin": "macOS"}
+
+#: The guest-identity sentence. WHY: the session's own system context names the
+#: platform it runs on -- the LOCAL host (``Platform: Darwin`` on this machine)
+#: -- and nothing named the remote computer's, so a model on a Linux guest was
+#: told only about the Mac. One environment fact, never task advice (no
+#: shortcut lists): it says which machine each platform fact describes.
+REMOTE_PLATFORM_NOTE = (
+    "The remote computer runs {platform}; any platform named elsewhere in your "
+    "context describes the local machine, not the remote computer.\n"
+)
+
+
+def remote_platform_of(observation: Observation) -> str | None:
+    """The remote OS the adapter declared on ``observation``, or ``None``.
+
+    Strict on purpose: metadata is adapter-supplied text that would land in the
+    model's prompt, so only a short identifier is accepted. Anything else --
+    absent, empty, prose, a non-string -- is UNKNOWN, and an unknown platform is
+    omitted rather than guessed.
+    """
+
+    value = observation.metadata.get(REMOTE_PLATFORM_METADATA_KEY)
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,31}", value):
+        return None
+    return _PLATFORM_NAMES.get(value.lower(), value)
+
+
 def render_prompt_header(
     *,
     tool_name: str,
     surface: ActionSurface,
     tool_names: Sequence[str],
     confined: bool,
+    remote_platform: str | None = None,
 ) -> str:
     """The first prompt's protocol paragraph, plus the topology when it applies.
 
@@ -264,13 +301,23 @@ def render_prompt_header(
     when ``task`` is in the inventory. A session with no local tools gets the
     bare header: with nothing to confuse the remote computer with, there is
     no topology to state (see ``REMOTE_TOPOLOGY_NOTE`` for the why).
+
+    ``remote_platform`` (from :func:`remote_platform_of`) adds the guest's OS,
+    and is omitted when unknown. Every header ends with the shared
+    ``OBSERVATION_MARKER_GUIDE``: the arm renders observations through the reply
+    arm's builder, so it shows the same markers and owes the same explanation.
+    The header is rendered ONCE per episode (the first prompt), so it never
+    changes inside an episode's cached prefix.
     """
 
     header = PROMPT_HEADER.format(tool_name=tool_name)
+    if remote_platform is not None:
+        header += REMOTE_PLATFORM_NOTE.format(platform=remote_platform)
+    guide = OBSERVATION_MARKER_GUIDE + "\n"
     present = set(tool_names)
     local = [name for name in _LOCAL_REACH_TOOLS if name in present]
     if not local:
-        return header
+        return header + guide
     entry = "typing text, or `paste_text`" if surface.paste_text else "typing text"
     delegation = (
         " Agents you delegate to run in that same workspace and cannot reach the "
@@ -278,12 +325,16 @@ def render_prompt_header(
         if "task" in present
         else ""
     )
-    return header + REMOTE_TOPOLOGY_NOTE.format(
-        local_tools=", ".join(f"`{name}`" for name in local),
-        workspace="an isolated scratch workspace" if confined else "a local workspace",
-        tool_name=tool_name,
-        entry=entry,
-        delegation=delegation,
+    return (
+        header
+        + REMOTE_TOPOLOGY_NOTE.format(
+            local_tools=", ".join(f"`{name}`" for name in local),
+            workspace="an isolated scratch workspace" if confined else "a local workspace",
+            tool_name=tool_name,
+            entry=entry,
+            delegation=delegation,
+        )
+        + guide
     )
 
 
@@ -3103,6 +3154,7 @@ async def run_session_episode(
                     # The INSTALLED confinement (see ``EpisodeSession.confined``),
                     # not this function's optional argument.
                     confined=handle.confined,
+                    remote_platform=remote_platform_of(observation),
                 )
                 + "\n"
                 + text
