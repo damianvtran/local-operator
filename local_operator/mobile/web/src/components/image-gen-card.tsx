@@ -209,7 +209,7 @@ export function ImageGenCard({
 		<div data-testid="image-gen-card" className="min-w-0">
 			<ToolRow entry={rowEntry}>
 				{generatingBody ? (
-					<div className="flex flex-col items-start gap-2 pt-0.5 pb-1.5 pl-6">
+					<div className="flex flex-col items-start gap-2 pt-0.5 pb-1.5 ps-6">
 						{/* The tile: the square the finished picture will land
 						    in (the transcript's own 160px attachment frame), so
 						    the done state does not reflow the card. The sweep
@@ -229,7 +229,7 @@ export function ImageGenCard({
 						    card flinching exactly when they asked it to stop. `min-h-11`
 						    pins the slot so the running -> cancelling swap moves
 						    nothing. */}
-						<div className="flex min-h-11 w-full items-center gap-2 pr-1.5">
+						<div className="flex min-h-11 w-full items-center gap-2 pe-1.5">
 							{view.progress !== null ? (
 								/* The determinate branch, rendered ONLY off a
 								   fraction the feed carried (the adapter maps
@@ -291,7 +291,7 @@ export function ImageGenCard({
 							)}
 						</div>
 						{view.logs.length > 0 ? (
-							<div className="flex w-full flex-col gap-0.5 pr-1.5">
+							<div className="flex w-full flex-col gap-0.5 pe-1.5">
 								{view.logs.map((line, i) => (
 									<p
 										key={i}
@@ -308,15 +308,15 @@ export function ImageGenCard({
 					   hold word stands alone — no tile, no bar, nothing the card
 					   never showed — in the CONTROL SLOT, trailing edge, where the
 					   cancel control was: the same slot the running hold keeps
-					   (UX round 1, U4: the one word must not move left-to-right
+					   (UX round 1, U4: the one word must not move start-to-right
 					   between the two holds). The 44px row floor holds (design
 					   D1: the press must not lift the card's bottom edge under the
 					   thumb that just stopped it; the vertical padding rides the
 					   CONTAINER, the running body's own composition, so the padded
 					   row measures the same with and without the control the hold
 					   replaced). */
-					<div className="w-full pt-0.5 pb-1.5 pl-6">
-						<div className="flex min-h-11 w-full items-center gap-2 pr-1.5">
+					<div className="w-full pt-0.5 pb-1.5 ps-6">
+						<div className="flex min-h-11 w-full items-center gap-2 pe-1.5">
 							<span aria-hidden className="min-w-0 flex-1" />
 							<span
 								data-testid="image-gen-hold"
@@ -327,7 +327,7 @@ export function ImageGenCard({
 						</div>
 					</div>
 				) : view.state === "done" ? (
-					<div className="flex flex-col gap-1.5 pt-0.5 pb-1.5 pl-6">
+					<div className="flex flex-col gap-1.5 pt-0.5 pb-1.5 ps-6">
 						{/* The finished artifact renders through the transcript's
 						    EXISTING attachment paths — one component per family, never
 						    a copy here (the frozen attachment contract's requirement).
@@ -365,7 +365,7 @@ export function ImageGenCard({
 						</p>
 					</div>
 				) : view.state === "failed" ? (
-					<div className="flex flex-col gap-1 pt-0.5 pb-1.5 pl-6 pr-1.5">
+					<div className="flex flex-col gap-1 pt-0.5 pb-1.5 ps-6 pe-1.5">
 						{view.error ? (
 							/* THE MESSAGE IS THE PROVIDER'S OWN, verbatim: the
 							   frozen contract says the surfaces never receive
@@ -387,11 +387,11 @@ export function ImageGenCard({
 					/* The cancel conflict (`media_already_completed`): the stop
 					   raced a job that had already finished. Stated plainly and
 					   quietly — NEVER as an error, because nothing failed. */
-					<p className={`${STATE_LINE} pt-0.5 pb-1.5 pl-6 pr-1.5`}>
+					<p className={`${STATE_LINE} pt-0.5 pb-1.5 ps-6 pe-1.5`}>
 						already finished
 					</p>
 				) : view.state === "cancelled" ? (
-					<div className="flex flex-col gap-1.5 pt-0.5 pb-1.5 pl-6">
+					<div className="flex flex-col gap-1.5 pt-0.5 pb-1.5 ps-6">
 						<p className={STATE_LINE}>cancelled</p>
 						{onRestart || onSteer ? (
 							<div className="flex gap-2">
@@ -419,8 +419,8 @@ export function ImageGenCard({
 					   meaning of the carried number: it counts the requests
 					   AHEAD of this one, never the off-by-one reading
 					   "position N" invited. */
-					<div className="w-full pt-0.5 pb-1.5 pl-6">
-						<div className="flex min-h-11 w-full items-center gap-2 pr-1.5">
+					<div className="w-full pt-0.5 pb-1.5 ps-6">
+						<div className="flex min-h-11 w-full items-center gap-2 pe-1.5">
 							<p className={`${STATE_LINE} min-w-0 flex-1`}>
 								queued
 								{/* The queue position, ONLY when the feed carries it —

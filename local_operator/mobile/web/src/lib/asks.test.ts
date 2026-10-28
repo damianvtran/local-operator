@@ -34,8 +34,10 @@ function englishRuntime() {
 		() => ({ backendLocale: "en", uiLocale: "en", direction: "ltr", revision: 0 }),
 		() => {},
 	);
-	for (const [namespace, messages] of Object.entries(BUNDLED_OWNED)) {
-		runtime.registerBundle(namespace, "en", { ...messages });
+	for (const [namespace, locales] of Object.entries(BUNDLED_OWNED)) {
+		for (const [locale, messages] of Object.entries(locales)) {
+			runtime.registerBundle(namespace, locale, { ...messages });
+		}
 	}
 	return runtime;
 }

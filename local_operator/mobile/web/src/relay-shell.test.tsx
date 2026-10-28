@@ -23,7 +23,9 @@
  */
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { messageRuntime, useLocaleSnapshot } from "./store";
+import { messageRuntime, retainConfigStream, useLocaleSnapshot } from "./store";
+import { BUNDLED_OWNED } from "./i18n/bundled.gen";
+import { FetchStreamFixture as Stream, settleStream } from "./sse-test-fixture";
 
 /** The exact copy the shell hardcoded BEFORE this slice (the identity target). */
 const BEFORE = {
@@ -63,12 +65,13 @@ describe("relay.shell extraction", () => {
 		}
 	});
 
-	it("keeps the document EN/LTR under a French backend, because the copy is English", () => {
+	it("follows the actual owned-copy language, not the backend preference", () => {
 		// The contract from #2297: lang/dir describe the ACTUAL rendered owned-copy
-		// language (uiLocale), not the backend preference. With only an English
-		// owned bundle, a French backend still paints EN/LTR.
+		// language (uiLocale), not the backend preference. French has no owned
+		// relay bundle, so it still paints EN/LTR; Urdu's audited relay bundle is
+		// shipped, so an Urdu backend paints ur/RTL.
 		expect(messageRuntime.uiLocaleFor("fr")).toBe("en");
-		expect(messageRuntime.uiLocaleFor("ur")).toBe("en");
+		expect(messageRuntime.uiLocaleFor("ur")).toBe("ur");
 		const { result, unmount } = renderHook(() => useLocaleSnapshot());
 		expect(result.current.uiLocale).toBe("en");
 		expect(result.current.direction).toBe("ltr");
@@ -102,5 +105,62 @@ describe("relay.shell extraction", () => {
 		expect(after).toBeGreaterThan(before);
 		expect(result.current.backendLocale).toBeNull(); // untouched: not a wire change
 		unmount();
+	});
+
+	it("switches the real document en→ur→en only after every owned synthetic bundle is complete", async () => {
+		// These values are fixtures, not Urdu translations. They exercise the same
+		// generated manifest, registration, config event and root metadata path.
+		/* The config channel is a FETCH-streamed SSE reader, not an EventSource:
+		   the tunnel's 60 s lease rotation needs the fetch lifecycle. Drive the
+		   same fixture the rest of the config tests use — one probing response
+		   settles presence, then the live subscription's own stream carries the
+		   frames. */
+		vi.useFakeTimers();
+		Stream.instances = [];
+		vi.stubGlobal("fetch", vi.fn()
+			.mockResolvedValueOnce(new Response(null, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			}))
+			.mockImplementation(Stream.fetch));
+		const englishBefore = messageRuntime.t("relay.shell.list.empty");
+		for (const [namespace, locales] of Object.entries(BUNDLED_OWNED)) {
+			const english = locales.en;
+			expect(english).toBeTruthy();
+			messageRuntime.registerBundle(namespace, "ur", Object.fromEntries(
+				Object.keys(english).map(key => [key, `UR-FIXTURE ${key}`]),
+			));
+		}
+		const { result, unmount } = renderHook(() => useLocaleSnapshot());
+		const release = retainConfigStream();
+		await settleStream();
+		expect(Stream.instances).toHaveLength(1);
+		const source = Stream.instances[0];
+		const emit = async (language: string) => {
+			await act(async () => {
+				source.emit("config", JSON.stringify({ changed_keys: ["language"], language }));
+				await settleStream();
+			});
+		};
+		try {
+			await emit("ur");
+			expect(result.current).toMatchObject({ backendLocale: "ur", uiLocale: "ur", direction: "rtl" });
+			expect(document.documentElement.lang).toBe("ur");
+			expect(document.documentElement.dir).toBe("rtl");
+			expect(messageRuntime.t("relay.shell.list.empty")).toBe("UR-FIXTURE relay.shell.list.empty");
+			await emit("en");
+			expect(result.current).toMatchObject({ backendLocale: "en", uiLocale: "en", direction: "ltr" });
+			expect(document.documentElement.lang).toBe("en");
+			expect(document.documentElement.dir).toBe("ltr");
+			expect(messageRuntime.t("relay.shell.list.empty")).toBe(englishBefore);
+		} finally {
+			await emit("en");
+			release();
+			unmount();
+			vi.useRealTimers();
+			vi.unstubAllGlobals();
+			messageRuntime.registerBundle("relay.shell", "en", { ...BEFORE });
+			Stream.instances = [];
+		}
 	});
 });

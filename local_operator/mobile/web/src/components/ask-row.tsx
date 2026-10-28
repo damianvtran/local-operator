@@ -58,20 +58,20 @@ export function AskRow({ entry }: { entry: TranscriptEntry }) {
 			<button
 				type="button"
 				onClick={() => hasDetails && setOpen(!open)}
-				className="flex min-h-11 w-full items-center gap-1.5 text-left select-none"
+				className="flex min-h-11 w-full items-center gap-1.5 text-start select-none"
 			>
 				<span aria-hidden className={cn("w-4 shrink-0 text-center font-mono text-mono-sm", tone)}>
 					{GLYPH[status] ?? "•"}
 				</span>
 				<span className="min-w-0 flex-1 text-body-sm text-ink-muted">{entry.text}</span>
 				{hasDetails ? (
-					<span aria-hidden className="shrink-0 text-ink-dim">
+					<span aria-hidden className="lo-directional shrink-0 text-ink-dim">
 						{open ? "▾" : "▸"}
 					</span>
 				) : null}
 			</button>
 			{open ? (
-				<div className="flex flex-col gap-1.5 pb-1.5 pl-5">
+				<div className="flex flex-col gap-1.5 pb-1.5 ps-5">
 					{pairs.length > 0 ? (
 						<dl className="flex flex-col gap-1.5">
 							{pairs.map((pair, index) => (

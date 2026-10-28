@@ -70,7 +70,7 @@ describe("SessionStatus", () => {
 		const spend = container.querySelector('[data-testid="session-status-spend"]');
 		expect(context?.textContent).toBe("6.2%/200k");
 		expect(spend?.textContent).toBe("$1.25");
-		// `ml-auto` sits on the SECOND cell, so each keeps a fixed edge and a
+		// `ms-auto` sits on the SECOND cell, so each keeps a fixed edge and a
 		// lone reading neither reflows nor floats: context hugs the left,
 		// spend the right — the single-cell states mirror the pair.
 		expect(spend?.className).toContain("ms-auto");
