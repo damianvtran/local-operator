@@ -59,7 +59,11 @@ T = TypeVar("T")
 #: merge into two agents. ``local_id`` (the registry id / skill link id the
 #: ``/hub/links`` rows carry) addresses exactly one row of exactly ``kind``;
 #: renderers gate on the ``hub_items_by_id`` capability before sending it.
-LocalId = Field(default=None, min_length=1, max_length=128)
+#: ``pattern`` refuses a whitespace-only id as a 422, like the empty string: no
+#: registry or skill link id is blank, so the request is malformed rather than an
+#: unknown item. ``name`` is deliberately left alone: its whitespace-only form has
+#: always been a 404 (its lookup strips), and released callers keep that answer.
+LocalId = Field(default=None, min_length=1, max_length=128, pattern=r"\S")
 
 
 def _one_address(

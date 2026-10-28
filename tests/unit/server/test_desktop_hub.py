@@ -704,6 +704,42 @@ async def test_retry_by_local_id_clears_and_checks_only_that_row(api) -> None:
     assert items[f"agent:{lower.id}"]["error_class"] == "hub-error"
 
 
+async def test_a_manual_retry_by_local_id_retires_only_that_rows_failure(api) -> None:
+    """U10 for the desktop's per-row Retry: the id arm of ``clear_failure``.
+
+    MANUAL mode is the point: there a retry is a dry run (``would-merge``) and the
+    stale failure is retired by ``clear_failure`` -- with auto on the retry merges
+    and that call never runs, which is why the auto-mode retry test above cannot
+    see a ``clear_failure`` that drops ``local_id`` (it would then match no row).
+    """
+
+    client, root, hub = api
+    _agents, lower, upper = _seed_twins(root, hub)
+    ConfigManager(root).set_config_value("hub", {"auto_update": {"agents": False}})
+    await client.post("/v1/desktop/hub/updates/check", json=mutation(kind="agent"))
+
+    def fail_both(doc: dict[str, Any]) -> None:
+        for item in doc["items"].values():
+            item.update(error_class="hub-error", last_error="500 Server Error")
+
+    store = svc_module.HubSyncContext(
+        config_dir=root, config_manager=ConfigManager(root), client_for_tenant=lambda _t: None
+    ).store()
+    store.mutate(fail_both)
+
+    retried = await client.post(
+        "/v1/desktop/hub/updates/retry", json=mutation(kind="agent", local_id=lower.id)
+    )
+    assert retried.status_code == 200, retried.text
+    (report,) = retried.json()["result"]["reports"]
+    assert report["local_id"] == lower.id and report["outcome"] == "would-merge"
+    items = store.load()["items"]
+    assert items[f"agent:{lower.id}"]["error_class"] is None
+    assert items[f"agent:{lower.id}"]["state"] == "available"
+    # The case twin was not addressed, so its failure stands.
+    assert items[f"agent:{upper.id}"]["error_class"] == "hub-error"
+
+
 async def test_a_team_is_addressed_by_local_id_and_never_as_another_kind(api) -> None:
     client, root, hub = api
     _seed(root, hub)
@@ -754,6 +790,8 @@ async def test_an_unknown_local_id_is_the_same_404_shape_as_an_unknown_name(api)
         ("check", {"local_id": "x"}),
         # Bounded like `name`.
         ("check", {"kind": "agent", "local_id": ""}),
+        ("apply", {"kind": "agent", "local_id": "   "}),
+        ("retry", {"kind": "agent", "local_id": "\t"}),
         ("check", {"kind": "agent", "local_id": "x" * 129}),
         # The resolve arm looks its row up by name; an id there is refused.
         (
