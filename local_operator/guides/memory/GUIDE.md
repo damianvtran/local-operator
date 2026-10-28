@@ -71,7 +71,8 @@ whose recorded session is a conversation here, are proposed.
 Mixed builds: facts over 256 wire tokens need `memory-item-512`. Sync withholds them
 from an older peer (`lop memory status` shows `withheld_pending`) and delivers them
 once it updates. A session memory log holding one cannot be imported by an older
-build; a move that places such a fact says so. Run `lop-update` on that device.
+build; a store, move or triage that places such a fact in a session says so. Run
+`lop-update` on that device.
 
 ## Existing read/write/edit tools
 
