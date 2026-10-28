@@ -256,6 +256,9 @@ async def run(plan: RunPlan, *, on_progress: Any | None = None) -> RunResult:
         leaks=leaks,
         detector_proven=bool(detector.get("self_test_ok") and detector.get("negative_control_tripped")),
         detector_observed=bool(observed_classes),
+        # Whether ANY selected case declares a permitted plant: if none does, the
+        # pipeline half of the proof is out of this run's scope, not failed.
+        detector_observable=any(case.must_allow_plants for case in plan.cases),
         registry_audited=registry_audited,
         corpus_clean=not contaminated,
         full_dataset=plan.full_dataset,

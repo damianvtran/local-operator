@@ -317,10 +317,9 @@ def test_validity_requires_everything() -> None:
         {"failed": 1},
         {"leaks": 1},
         {"detector_proven": False},
-        {"detector_observed": False},
         {"registry_audited": False},
         {"corpus_clean": False},
-        {"dataset_balanced": False},
+        {"detector_observed": False},
     ],
 )
 def test_validity_fails_on_any_missing_clause(override) -> None:
@@ -343,6 +342,46 @@ def test_validity_fails_on_any_missing_clause(override) -> None:
     verdict = validity(**base)
     assert not verdict.clean
     assert verdict.reasons
+
+
+def test_an_unbalanced_corpus_is_partial_not_untrustworthy() -> None:
+    """A corpus-composition gap is a scope limit, not a broken harness.
+
+    Review R1's dataset observation (46 answer vs 123 refuse against design 7.2's
+    answer >= refuse) must not be reported as "the run cannot be trusted": the numbers
+    are real, the corpus is not yet able to support the corpus-level claim.
+    """
+
+    verdict = validity(
+        planned=10,
+        measured=10,
+        invalid=0,
+        failed=0,
+        leaks=0,
+        detector_proven=True,
+        detector_observed=True,
+        registry_audited=True,
+        corpus_clean=True,
+        full_dataset=True,
+        dataset_balanced=False,
+    )
+    assert verdict.clean
+    assert verdict.partial
+    assert any("answer set" in reason for reason in verdict.partial_reasons)
+
+
+def test_unobservable_detector_is_partial_unobserved_is_unclean() -> None:
+    """Two different facts: "this selection cannot observe" vs "it should have and did not"."""
+
+    common = dict(
+        planned=10, measured=10, invalid=0, failed=0, leaks=0,
+        detector_proven=True, registry_audited=True, corpus_clean=True,
+        full_dataset=True, dataset_balanced=True,
+    )
+    out_of_scope = validity(**common, detector_observed=False, detector_observable=False)
+    assert out_of_scope.clean and out_of_scope.partial
+    broken = validity(**common, detector_observed=False, detector_observable=True)
+    assert not broken.clean
 
 
 def test_filtered_run_is_partial_even_when_clean() -> None:

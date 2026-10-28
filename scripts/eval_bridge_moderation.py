@@ -418,12 +418,10 @@ def _exit_code(result, summary) -> int:
         for reason in verdict.reasons:
             print(f"  - {reason}", file=sys.stderr)
         return EXIT_FAILURES
-    if not verdict.full_dataset:
-        print(
-            "PARTIAL: this run measured cleanly but did not cover the whole dataset "
-            "(a category/control/limit filter was applied). It is not a corpus result.",
-            file=sys.stderr,
-        )
+    if verdict.partial:
+        print("PARTIAL: measured cleanly, but this is not a corpus result:", file=sys.stderr)
+        for reason in verdict.partial_reasons:
+            print(f"  - {reason}", file=sys.stderr)
         return EXIT_PARTIAL
     return EXIT_OK
 
