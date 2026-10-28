@@ -16,7 +16,7 @@ platform's own user service manager:
 |---|---|---|
 | macOS | launchd | LaunchAgent `com.local-operator.bridge-connector` in `~/Library/LaunchAgents` |
 | Linux | `systemctl --user` | unit `local-operator-bridge-connector.service` in `~/.config/systemd/user` |
-| Windows | Task Scheduler | task `Local Operator bridge connector` (logon trigger, current user, no elevation) |
+| Windows | Task Scheduler | task `Local Operator bridge connector-<per-user suffix>` (logon trigger, current user, no elevation) |
 
 It is user scope everywhere: no admin rights, no system service.
 
@@ -63,7 +63,8 @@ Check these in order. The receiver is not installed until all of them hold.
    JSON includes the accepted account id, tenant id and the full consent text.
    Show that text to the user and let them decide. The session id is the id of
    their existing chief-of-staff session (plain `lop sessions` shows session
-   ids; `lop sessions --help` documents the listing filters). The consent version is data, not approval by itself.
+   ids; `lop sessions --help` documents the listing filters). The consent
+   version is data, not approval by itself.
 4. **Only after the user explicitly accepts that exact text**, run the same
    command with every identity pin and the chosen session:
 

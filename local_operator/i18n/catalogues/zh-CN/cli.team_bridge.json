@@ -24,7 +24,7 @@
   "cli.team_bridge.outcome.removed": "接收器服务已停止并移除。",
   "cli.team_bridge.outcome.absent": "没有可移除的接收器服务。",
   "cli.team_bridge.outcome.not_wanted": "此机器上的智能体消息尚未设置或已关闭，因此未安装任何内容。",
-  "cli.team_bridge.outcome.not_wanted_hint": "先设置智能体消息：登录Radient（在TUI中运行`/login radient`），然后在桌面应用的设置中或通过`lop config edit team_bridge.enabled true`开启智能体消息，并选择你的幕僚长。之后再次运行此命令。",
+  "cli.team_bridge.outcome.not_wanted_hint": "先设置智能体消息：用`lop login radient`登录，从`lop login-status`获取凭据行ID，然后运行`lop team-bridge setup --credential-id <id>`。阅读其提供的同意声明，并使用你选择的准确账号、租户、同意声明版本和幕僚长会话再次运行该命令。之后再次运行此命令。",
   "cli.team_bridge.outcome.remove_hint": "智能体消息仍处于开启状态，因此下次启动Local Operator时会重新安装接收器。要停止接收消息，关闭智能体消息：`lop config edit team_bridge.enabled false`。",
   "cli.team_bridge.outcome.no_supervisor": "此机器上没有用户服务管理器，因此无法安装接收器。{detail}",
   "cli.team_bridge.outcome.no_user_manager": "systemd没有此登录用户的用户会话，因此未能安装接收器。{detail}",
@@ -35,5 +35,11 @@
   "cli.team_bridge.outcome.failed": "无法更改接收器：{detail}",
   "cli.team_bridge.logs.none": "{path}处尚无接收器日志。",
   "cli.team_bridge.logs.header": "{path}的末尾日志行：",
-  "cli.team_bridge.outcome.note": "说明：{detail}"
+  "cli.team_bridge.outcome.note": "说明：{detail}",
+  "cli.team_bridge.help.setup": "无需桌面应用即可设置智能体消息：预览或明确接受提供的同意声明",
+  "cli.team_bridge.setup.credential": "Radient凭据行ID，由`lop login-status`显示（必填）",
+  "cli.team_bridge.setup.account": "用于与已登录账号核对的账号ID（接受时必填）",
+  "cli.team_bridge.setup.tenant": "预览中的组织ID（接受时必填）",
+  "cli.team_bridge.setup.consent": "仅接受预览中显示的准确同意声明版本；需要--session",
+  "cli.team_bridge.setup.session": "现有幕僚长会话的ID；接受同意声明时必须一并提供"
 }

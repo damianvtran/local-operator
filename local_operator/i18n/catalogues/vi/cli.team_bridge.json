@@ -24,7 +24,7 @@
   "cli.team_bridge.outcome.removed": "Dịch vụ bộ nhận đã được dừng và gỡ bỏ.",
   "cli.team_bridge.outcome.absent": "Không có dịch vụ bộ nhận nào để gỡ bỏ.",
   "cli.team_bridge.outcome.not_wanted": "Tin nhắn tác nhân chưa được thiết lập hoặc đã tắt trên máy này, nên không có gì được cài đặt.",
-  "cli.team_bridge.outcome.not_wanted_hint": "Thiết lập tin nhắn tác nhân trước: đăng nhập Radient (`/login radient` trong TUI), rồi bật tin nhắn tác nhân trong cài đặt ứng dụng máy tính hoặc bằng `lop config edit team_bridge.enabled true`, và chọn chánh văn phòng của bạn. Sau đó chạy lại lệnh này.",
+  "cli.team_bridge.outcome.not_wanted_hint": "Thiết lập tin nhắn tác nhân trước: đăng nhập bằng `lop login radient`, lấy id hàng thông tin xác thực từ `lop login-status`, rồi chạy `lop team-bridge setup --credential-id <id>`. Đọc nội dung đồng ý được cung cấp và chạy lại lệnh với đúng tài khoản, tổ chức, phiên bản đồng ý và phiên chánh văn phòng mà bạn chọn. Sau đó chạy lại lệnh này.",
   "cli.team_bridge.outcome.remove_hint": "Tin nhắn tác nhân vẫn bật, nên bộ nhận sẽ được cài đặt lại vào lần khởi động Local Operator tiếp theo. Để ngừng nhận tin nhắn, tắt tin nhắn tác nhân: `lop config edit team_bridge.enabled false`.",
   "cli.team_bridge.outcome.no_supervisor": "Máy này không có trình quản lý dịch vụ người dùng, nên không thể cài đặt bộ nhận. {detail}",
   "cli.team_bridge.outcome.no_user_manager": "systemd không có phiên người dùng cho tài khoản đăng nhập này, nên không cài đặt được bộ nhận. {detail}",
@@ -35,5 +35,11 @@
   "cli.team_bridge.outcome.failed": "Không thay đổi được bộ nhận: {detail}",
   "cli.team_bridge.logs.none": "Chưa có nhật ký bộ nhận tại {path}.",
   "cli.team_bridge.logs.header": "Các dòng cuối của {path}:",
-  "cli.team_bridge.outcome.note": "Lưu ý: {detail}"
+  "cli.team_bridge.outcome.note": "Lưu ý: {detail}",
+  "cli.team_bridge.help.setup": "Thiết lập tin nhắn tác nhân không cần ứng dụng máy tính: xem trước hoặc chấp nhận rõ ràng nội dung đồng ý được cung cấp",
+  "cli.team_bridge.setup.credential": "Id hàng thông tin xác thực Radient do `lop login-status` hiển thị (bắt buộc)",
+  "cli.team_bridge.setup.account": "Id tài khoản được đối chiếu với tài khoản đã đăng nhập (bắt buộc để chấp nhận)",
+  "cli.team_bridge.setup.tenant": "Id tổ chức trong bản xem trước (bắt buộc để chấp nhận)",
+  "cli.team_bridge.setup.consent": "Chỉ chấp nhận đúng phiên bản đồng ý hiển thị trong bản xem trước; yêu cầu --session",
+  "cli.team_bridge.setup.session": "Id phiên chánh văn phòng hiện có; phải cung cấp cùng với việc chấp nhận đồng ý"
 }

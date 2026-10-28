@@ -7748,6 +7748,139 @@
       },
       "status": "passed",
       "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 1 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581",
+      "translator": {
+        "agent": "receiver-i18n-translator",
+        "model": "openai/gpt-6-astra (initial 37-key wave; follow-up identity confirmation pending)",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "receiver-i18n-audit",
+        "model": "identity confirmation pending",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "held",
+      "note": "Translation and independent review work recorded during implementation; final current-byte audit/provenance confirmation pending before activation. English fallback remains active."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581",
+      "translator": {
+        "agent": "receiver-i18n-translator",
+        "model": "openai/gpt-6-astra (initial 37-key wave; follow-up identity confirmation pending)",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "receiver-i18n-audit",
+        "model": "identity confirmation pending",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "held",
+      "note": "Translation and independent review work recorded during implementation; final current-byte audit/provenance confirmation pending before activation. English fallback remains active."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581",
+      "translator": {
+        "agent": "receiver-i18n-translator",
+        "model": "openai/gpt-6-astra (initial 37-key wave; follow-up identity confirmation pending)",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "receiver-i18n-audit",
+        "model": "identity confirmation pending",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "held",
+      "note": "Translation and independent review work recorded during implementation; final current-byte audit/provenance confirmation pending before activation. English fallback remains active."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581",
+      "translator": {
+        "agent": "receiver-i18n-translator",
+        "model": "openai/gpt-6-astra (initial 37-key wave; follow-up identity confirmation pending)",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "receiver-i18n-audit",
+        "model": "identity confirmation pending",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "held",
+      "note": "Translation and independent review work recorded during implementation; final current-byte audit/provenance confirmation pending before activation. English fallback remains active."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581",
+      "translator": {
+        "agent": "receiver-i18n-translator",
+        "model": "openai/gpt-6-astra (initial 37-key wave; follow-up identity confirmation pending)",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "receiver-i18n-audit",
+        "model": "identity confirmation pending",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "held",
+      "note": "Translation and independent review work recorded during implementation; final current-byte audit/provenance confirmation pending before activation. English fallback remains active."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581",
+      "translator": {
+        "agent": "receiver-i18n-translator",
+        "model": "openai/gpt-6-astra (initial 37-key wave; follow-up identity confirmation pending)",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "receiver-i18n-audit",
+        "model": "identity confirmation pending",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "held",
+      "note": "Translation and independent review work recorded during implementation; final current-byte audit/provenance confirmation pending before activation. English fallback remains active."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "67b13e6e4aade0e71d324ef13078e87e2ceedf0378604a7b20985f742201b581",
+      "translator": {
+        "agent": "receiver-i18n-translator",
+        "model": "openai/gpt-6-astra (initial 37-key wave; follow-up identity confirmation pending)",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "receiver-i18n-audit",
+        "model": "identity confirmation pending",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "held",
+      "note": "Translation and independent review work recorded during implementation; final current-byte audit/provenance confirmation pending before activation. English fallback remains active."
     }
   ]
 }

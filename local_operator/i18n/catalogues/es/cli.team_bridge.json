@@ -24,7 +24,7 @@
   "cli.team_bridge.outcome.removed": "El servicio del receptor se ha detenido y eliminado.",
   "cli.team_bridge.outcome.absent": "No hay ningún servicio receptor que eliminar.",
   "cli.team_bridge.outcome.not_wanted": "Los mensajes de agentes no están configurados o están desactivados en esta máquina, por lo que no se ha instalado nada.",
-  "cli.team_bridge.outcome.not_wanted_hint": "Primero configura los mensajes de agentes: inicia sesión en Radient (`/login radient` en la TUI), luego activa los mensajes de agentes en los ajustes de la aplicación de escritorio o con `lop config edit team_bridge.enabled true`, y elige tu jefe de gabinete. Después, vuelve a ejecutar este comando.",
+  "cli.team_bridge.outcome.not_wanted_hint": "Primero configura los mensajes de agentes: inicia sesión con `lop login radient`, obtén el id de la fila de credenciales con `lop login-status` y después ejecuta `lop team-bridge setup --credential-id <id>`. Lee el consentimiento proporcionado y repite el comando con la cuenta, el tenant, la versión del consentimiento y la sesión del jefe de gabinete exactos que hayas elegido. Después, vuelve a ejecutar este comando.",
   "cli.team_bridge.outcome.remove_hint": "Los mensajes de agentes siguen activados, por lo que el receptor se volverá a instalar la próxima vez que se inicie Local Operator. Para dejar de recibir mensajes, desactiva los mensajes de agentes: `lop config edit team_bridge.enabled false`.",
   "cli.team_bridge.outcome.no_supervisor": "Esta máquina no tiene un gestor de servicios de usuario, por lo que no se puede instalar el receptor. {detail}",
   "cli.team_bridge.outcome.no_user_manager": "systemd no tiene una sesión de usuario para esta cuenta, por lo que no se ha podido instalar el receptor. {detail}",
@@ -35,5 +35,11 @@
   "cli.team_bridge.outcome.failed": "No se ha podido modificar el receptor: {detail}",
   "cli.team_bridge.logs.none": "Aún no hay un registro del receptor en {path}.",
   "cli.team_bridge.logs.header": "Últimas líneas de {path}:",
-  "cli.team_bridge.outcome.note": "Nota: {detail}"
+  "cli.team_bridge.outcome.note": "Nota: {detail}",
+  "cli.team_bridge.help.setup": "Configurar los mensajes de agentes sin la aplicación de escritorio: previsualizar o aceptar explícitamente el consentimiento proporcionado",
+  "cli.team_bridge.setup.credential": "Id de la fila de credenciales de Radient mostrada por `lop login-status` (obligatorio)",
+  "cli.team_bridge.setup.account": "Id de la cuenta que se comparará con la cuenta que ha iniciado sesión (obligatorio para aceptar)",
+  "cli.team_bridge.setup.tenant": "Id de la organización de la previsualización (obligatorio para aceptar)",
+  "cli.team_bridge.setup.consent": "Aceptar únicamente la versión exacta del consentimiento mostrada en la previsualización; requiere --session",
+  "cli.team_bridge.setup.session": "Id de una sesión existente del jefe de gabinete; debe acompañar la aceptación del consentimiento"
 }
