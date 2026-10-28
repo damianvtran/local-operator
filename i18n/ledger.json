@@ -7615,6 +7615,139 @@
       },
       "status": "passed",
       "note": "Independent i18n audit round 2 PASS (terminal) at target SHA-256 8a7726aecb5c43747b2f207d4fbb02b0649cf5ae60a47b4835c6bbac6eaaf3cf, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6413121758. Round 1 audit FAILED at the previous target SHA-256 f19ea0f7a6fe1df732b997ed41a0433ad9b5dd4481fe08205e40f06e2d745315 (auditor: reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49), anthropic/claude-opus-5-5, 2026-10-26, result failed, findings 1): https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. IA-HI-1 MAJOR fixed: detail.mark_read and confirm.read \"\u092a\u0922\u093c\u093e \u0939\u0941\u0906\" (status) -> \"\u092a\u0922\u093c\u093e \u0939\u0941\u0906 \u0915\u0930\u0947\u0902\" (action, 8/14). Same-pass MINORs: mark_all -> \"\u0938\u092d\u0940 \u0915\u094b \u092a\u0922\u093c\u093e \u0939\u0941\u0906 \u091a\u093f\u0939\u094d\u0928\u093f\u0924 \u0915\u0930\u0947\u0902\" (18/20, plural agreement); IA-X-M1 select.read -> \"\u092a\u0922\u093c\u093e \u0939\u0941\u0906 \u0915\u0930\u0947\u0902\" (8/10). New target SHA-256 8a7726aecb5c43747b2f207d4fbb02b0649cf5ae60a47b4835c6bbac6eaaf3cf. Round-2 audit recorded above replaced auditor/status at these bytes. Round 2 scope per the audit: the changed keys plus their toggle and receipt neighbours. Original translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 f19ea0f7a6fe1df732b997ed41a0433ad9b5dd4481fe08205e40f06e2d745315). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: all budgeted keys fit (max ratio receipt.undo 8/8)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+      "translator": {
+        "agent": "coder (lopdev; session c8ef7d0911ec; PR #3072 remediation 3bc73b5c003)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev; session 324e4c273380)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 1 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+      "translator": {
+        "agent": "coder (lopdev; session c8ef7d0911ec; PR #3072 remediation 3bc73b5c003)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev; session 324e4c273380)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 0 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+      "translator": {
+        "agent": "coder (lopdev; session c8ef7d0911ec; PR #3072 remediation 3bc73b5c003)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev; session 324e4c273380)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 1 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings",
+      "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+      "translator": {
+        "agent": "coder (lopdev; session c8ef7d0911ec; PR #3072 remediation 3bc73b5c003)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev; session 324e4c273380)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 2 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+      "translator": {
+        "agent": "coder (lopdev; session c8ef7d0911ec; PR #3072 remediation 3bc73b5c003)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev; session 324e4c273380)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 1 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings",
+      "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+      "translator": {
+        "agent": "coder (lopdev; session c8ef7d0911ec; PR #3072 remediation 3bc73b5c003)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev; session 324e4c273380)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 0 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+      "translator": {
+        "agent": "coder (lopdev; session c8ef7d0911ec; PR #3072 remediation 3bc73b5c003)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev; session 324e4c273380)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 1 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried."
     }
   ]
 }
