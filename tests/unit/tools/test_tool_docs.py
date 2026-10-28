@@ -319,8 +319,8 @@ MEASURED_TOKENS: dict[str, int] = {
     # to thread_root_id's own field note. Every op is still discoverable.
     # Neither the document soft cap nor the start-context budget changes.
     # 777 -> 1674: the doc now covers the OP SET THE TOOL ACTUALLY HAS. Before this
-    # branch it documented four ops (take_up/ack/send/reply) while the tool shipped
-    # fourteen; `directory`, `dm`, `shared_conversations`/`shared_history` and the six
+    # branch it documented four ops (take_up/ack/send/reply) while main's tool shipped
+    # ten and this branch adds four more; `directory`, `dm`, `shared_conversations`/`shared_history` and the six
     # room ops (`channels`, `channel_create`, `channel_post`, `channel_history`,
     # `channel_thread`, `react`) had no entry at all, so a model reading the reference
     # had to guess, and the new `dm` blurb forward-references `channel_history` for
