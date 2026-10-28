@@ -1386,6 +1386,37 @@ The owner is a role for one window, not a standing job. Whoever cuts the
 release is also responsible for telling every contributor in the window where
 it landed.
 
+### PyPI storage cap and per-release size
+
+PyPI caps a project at **10 GB total**, every release counts, and this project
+ships several a day. Measured on 0.90.17, one release cost ~59 MB (pure wheel
+19.98 MB, `macosx_11_0_universal2` wheel 20.14 MB, sdist 18.85 MB); the cap was
+hit and v0.90.18/19 failed with `400 Project size too large`. Two changes bring
+a release to ~29 MB:
+
+- **Slim wheels.** `publish.yml` runs `scripts/slim_wheel.py` on the pure wheel
+  (the macOS wheel is retagged from it): `#` comments are stripped, while
+  docstrings, shebang/coding lines, pragma comments (`# type:`, `# noqa`,
+  `# pragma`, `# pyright:`, `# fmt:`) and every line number are kept. Each
+  module must be `ast.dump(..., include_attributes=True)`-identical with an
+  equal line count, or the build fails. `ci.yml` `packaging-smoke-build` and
+  `release-gate.yml` run the same step, so a PR the slimmer cannot verify fails
+  before a release does.
+- **The sdist lives on the GitHub Release** (`sdist-release` job), not on
+  PyPI. Nothing installs it from PyPI: the updater, desktop app and install
+  scripts take wheels, and the Dockerfile builds from the tree.
+
+`scripts/check_dist_size.py` is the guard: a wheel over **18 MiB** fails, over
+16 MiB warns, and `--wheels-only` fails `pypi-publish` if anything but wheels is
+about to upload. A red budget means find what grew; do not move the line
+without re-reading the script's docstring.
+
+**Retention is the operator's decision.** Suggested policy: keep every release
+from the last ~30 days and the last patch of every minor. Deleting a PyPI
+release is a manual, irreversible operator action on pypi.org; agents never
+delete releases or files. Quota-increase requests are pending as
+pypi/support#12738 and pypi/support#12882.
+
 ### What the release owner does
 
 1. **Collect** from each merger in the window: PR number, merge SHA, and

@@ -481,6 +481,15 @@ jobs:
           python -m pip install build
           python -m build --wheel --outdir dist/packaging-smoke
 
+      # The release ships a comment-stripped wheel (scripts/slim_wheel.py, for
+      # PyPI's 10 GB project cap), so the smoke legs must install that exact
+      # shape, and a PR whose code the slimmer cannot verify must fail here
+      # rather than at release time. The size guard catches growth early too.
+      - name: Slim the wheel and check its size budget
+        run: |
+          python scripts/slim_wheel.py dist/packaging-smoke/local_operator-*-py3-none-any.whl
+          python scripts/check_dist_size.py dist/packaging-smoke
+
       - uses: actions/upload-artifact@v7
         with:
           name: packaging-smoke-wheel

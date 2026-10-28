@@ -503,3 +503,40 @@ def test_the_gate_check_would_catch_a_second_publisher_job() -> None:
         "steps": [{"uses": "softprops/action-gh-release@v3"}],
     }
     assert "brand-new-publisher" in _ungated_publishers(doc)
+
+
+# --- PyPI's 10 GB project cap: slim wheels, no sdist on PyPI ---------------------
+# v0.90.18/19 were refused with `400 Project size too large`. The fix is two edits to
+# this workflow that are each one silent deletion away from reopening the cap: the
+# slimming step and the wheels-only assertion before the upload.
+
+
+def _step_index(steps: list[dict[Any, Any]], needle: str) -> int:
+    """Index of the first step whose ``run:`` or ``uses:`` contains ``needle``."""
+    for index, step in enumerate(steps):
+        if needle in str(step.get("run", "")) or needle in str(step.get("uses", "")):
+            return index
+    raise AssertionError(f"no step contains {needle!r}")
+
+
+def test_release_build_slims_the_wheel_and_splits_the_sdist_before_upload() -> None:
+    steps = _workflow()["jobs"]["release-build"]["steps"]
+    slim = _step_index(steps, "scripts/slim_wheel.py")
+    assert "mv dist/*.tar.gz sdist/" in steps[slim]["run"]
+    assert "check_dist_size.py --wheels-only dist/" in steps[slim]["run"]
+    assert slim < _step_index(steps, "actions/upload-artifact")
+
+
+def test_pypi_upload_is_preceded_by_the_wheels_only_guard() -> None:
+    steps = _workflow()["jobs"]["pypi-publish"]["steps"]
+    guard = _step_index(steps, "check_dist_size.py --wheels-only dist/")
+    assert guard < _step_index(steps, "pypa/gh-action-pypi-publish")
+    assert "if" not in steps[guard] and not steps[guard].get("continue-on-error")
+
+
+def test_the_sdist_is_attached_to_the_github_release() -> None:
+    doc = _workflow()
+    assert _publishing_jobs(doc).get("sdist-release") == "softprops/action-gh-release"
+    job = doc["jobs"]["sdist-release"]
+    assert job["permissions"] == {"contents": "write"}
+    assert "release-sdist" in str(job["steps"])
