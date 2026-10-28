@@ -1,0 +1,94 @@
+# Disk-pressure reclaim — `lop disk reclaim`
+
+The sanctioned, measure-first, fail-closed way to recover disk. It exists so that
+nobody needs an ad-hoc `rm -rf` / `shutil.rmtree` sweep under pressure (issue
+#2676: one such sweep deleted a live runtime generation).
+
+```
+lop disk reclaim [--repo PATH]... [--go-build-cache] [--scratchpads]
+                 [--min-idle-minutes N] [--apply [--yes]] [--force] [--json]
+```
+
+* **Default is a dry run.** It lists what *would* be reclaimed and what is **kept,
+  with the reason**, grouped by reason so you can act on a whole class. Nothing is
+  removed.
+* **`--apply`** re-prints the preview, asks for a typed `yes` (`--yes` skips the
+  prompt for scripts), then removes **only the previewed items**, re-checking
+  every condition at removal time. An item that stopped qualifying is skipped and
+  reported.
+* **`--json`** prints the receipt document for either mode. Apply also writes it
+  to `<config>/disk-reclaim-receipts/<timestamp>-<pid>.json` — first as an
+  *intent* before the first removal, then updated after each item — with
+  `shutil.disk_usage` readings before and after.
+* Exit codes: `0` success · `1` an item failed or was skipped · `2` usage error,
+  refused category, or confirmation declined/unavailable.
+* Naming no category is a usage error. Nothing is defaulted or discovered.
+
+## Sizes are measurements, not promises
+
+Sizes are *allocated* bytes (`st_blocks*512`) from a bounded walk (`>=` means the
+walk was truncated: a lower bound). Hardlinks, shared git objects, APFS clones and
+block rounding mean **allocated or logical bytes are not reclaimed bytes**. The
+only honest figure of what was freed is the receipt's before/after
+`disk_usage`.
+
+## Categories
+
+### Linked git worktrees — `--repo PATH` (repeatable)
+
+You name each repository; its registered *linked* worktrees are enumerated with
+`git worktree list --porcelain`. The primary checkout is never a candidate and
+nothing is removed except through `git worktree remove <path>` **without
+`--force`** — git's own refusal is the last word. A worktree is reclaimable only
+when **all** hold; the first that fails is the reported reason:
+
+| Predicate | Kept as |
+|---|---|
+| git can inspect it; registration valid, directory exists, belongs to this repo | `uninspectable`, `invalid-registration` (never deleted or pruned here) |
+| not locked (reason shown) | `locked` |
+| not this process's cwd / the `--repo` argument | `cwd` |
+| no process has its cwd inside it (`lsof`) | `in-use`; `lsof` unavailable → `in-use-unknown` |
+| idle ≥ `--min-idle-minutes` (default and **floor 60**; lower is rejected, exit 2) | `recent`; walk bound hit or unreadable → `idle-unproven` |
+| clean: `git status --porcelain --untracked-files=all` empty (ignored files do not count) | `dirty` |
+| pushed (HEAD contained in a remote-tracking ref, branch at HEAD) **or** merged (HEAD an ancestor of `origin/HEAD`\|`origin/main`\|`origin/master`) | `unpushed` |
+
+*Idle* is the newest mtime of the worktree's admin files (`HEAD`, `index`,
+`logs/HEAD` in its gitdir) and a bounded walk of the working tree (`.git`
+skipped). *In use* is a positive signal only (`lsof` cwd table); when it cannot be
+established the worktree is kept. Remote refs are as last fetched — no network is
+used, which can only make "pushed/merged" more conservative.
+
+**Tracked or unmerged worktree evidence is never cache.** A worktree with
+unpushed commits, uncommitted changes or a lock is *kept*; deciding about it is
+the owner's job. External hygiene tools must call this command (or stay
+measure-only) rather than sweeping worktree directories themselves.
+
+### Go build cache — `--go-build-cache`
+
+Resolved with `go env GOCACHE` and refused unless it is an absolute, existing,
+non-symlink directory that is not `/`, `$HOME` or a parent of it, does not contain
+the config dir, and carries Go's marker `README` ("This directory holds cached
+build artifacts from the Go build system"). Removed only with `go clean -cache`
+run with `GOCACHE` pinned to the validated path. Dry run measures only.
+
+### Session scratchpads — `--scratchpads`
+
+Composes with `lop sessions cleanup --scratchpads-only`: the same
+`run_delegated_pass` dry-run preview, then a confirmed apply confined to the
+previewed pads, under the same config policy, retention window
+(`max_age_hours`), `--force` semantics and guards (live claim/lease, armed wake,
+unread mail, current session, manifests). There is no retention override.
+Transcripts, session records, config and credentials are never touched. The
+build/cache vocabulary is the one in `local_operator/scratchpad.py`; Mongo and
+other arbitrary data directories are deliberately **not** in it.
+
+## Never touched
+
+Transcripts, session records, config, credentials/secrets, arbitrary user files,
+and the primary checkout.
+
+## Implementation
+
+`local_operator/disk_pressure.py` (planner, predicates, applier, receipt) and
+`local_operator/disk_cli.py` (parser + presentation). Tests:
+`tests/unit/test_disk_pressure.py`.
