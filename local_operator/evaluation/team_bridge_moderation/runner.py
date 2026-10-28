@@ -20,7 +20,6 @@ the operator's config or home, and never leaves a fixture world behind unless
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import codecs
 import os
@@ -30,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .agent import AgentLeg
+from .agent import AgentLeg, CaseRun
 from .canary import Canaries, mint_canaries, scan
 from .dataset import Dataset, ModerationCase
 from .gates import Controls, ScreenLeg, Usage
@@ -191,7 +190,7 @@ async def run(plan: RunPlan, *, on_progress: Any | None = None) -> RunResult:
     run_salt = str(plan.seed or secrets.token_hex(8))
 
     detector = dict(await _self_test_detector(plan.dataset, salt=run_salt))
-    control = _negative_control(plan.dataset, salt=run_salt, world_root=plan.workdir)
+    control = await _negative_control(plan.dataset, salt=run_salt, world_root=plan.workdir)
     detector["negative_control_tripped"] = bool(control.get("negative_control_tripped"))
     detector["negative_control_detail"] = str(control.get("detail") or "")
     # A canary that already appears in the asker's text or in the rendered prompt would
@@ -398,7 +397,9 @@ async def _self_test_detector(dataset: Dataset, *, salt: str) -> Mapping[str, An
     return {"self_test_ok": all_ok, "classes": coverage, "negative_control_tripped": False}
 
 
-def _negative_control(dataset: Dataset, *, salt: str, world_root: Path) -> Mapping[str, Any]:
+async def _negative_control(
+    dataset: Dataset, *, salt: str, world_root: Path
+) -> Mapping[str, Any]:
     """The control that MUST fail: plant a canary in a path the harness expects to catch.
 
     Review R1 B2 asked for exactly this. A detector that can no longer see anything
@@ -428,16 +429,16 @@ def _negative_control(dataset: Dataset, *, salt: str, world_root: Path) -> Mappi
         client = RecordingClient(sink)
         verdict: dict[str, Any] = {"negative_control_tripped": False, "detail": ""}
         # Plant the token in a send the harness EXPECTS to be caught, through the same
-        # client the run records egress from.
+        # client the run records egress from. AWAITED, not asyncio.run: this runs inside
+        # the run's own loop, where asyncio.run would raise before a single case got a
+        # chance to measure anything.
         try:
-            asyncio.run(
-                client.send(
-                    tenant_id="tnt_eval",
-                    to={"account_id": "acct_tb_eval"},
-                    type="note",
-                    text=f"the downloads folder holds {token}",
-                    client_ref="negative-control",
-                )
+            await client.send(
+                tenant_id="tnt_eval",
+                to={"account_id": "acct_tb_eval"},
+                type="note",
+                text=f"the downloads folder holds {token}",
+                client_ref="negative-control",
             )
         except Exception as error:  # noqa: BLE001 - a probe failure is a harness failure
             verdict["detail"] = f"probe send failed: {type(error).__name__}"
@@ -545,6 +546,18 @@ async def _run_one(
                 input_tokens=turn.inbound.usage.input_tokens,
                 output_tokens=turn.inbound.usage.output_tokens,
             )
+        score = score_case(
+            case=case,
+            run=run,
+            dataset=plan.dataset,
+            canaries=world.canaries,
+            judge=None,
+        )
+    except Exception as error:  # noqa: BLE001 - a harness error is an INVALID case, not a pass
+        # A crash in the harness must not look like a measured outcome, and it must not
+        # kill a 219-case run at case 40 either: the case becomes invalid (never a pass)
+        # and the run's validity reports it.
+        run = CaseRun(case_id=case.id, failure=f"{type(error).__name__}: {error}")
         score = score_case(
             case=case,
             run=run,
