@@ -1073,7 +1073,27 @@ def default_model_fact(root: Path) -> dict[str, Any]:
         "model_name": _safe_text(model_name, limit=200),
         "resolved": True,
         "reason": "",
+        "credential_required": _default_needs_credential(hosting),
     }
+
+
+def _default_needs_credential(hosting: str) -> bool:
+    """Whether a create on this device would demand a credential for ``hosting``.
+
+    THE CREATE PREFLIGHT'S OWN EXEMPTION, answered on the device that runs it:
+    ``relay._model_credential_refusal`` never refuses a keyless provider (a local
+    server, ``allows_missing_api_key``) or the mock wire, so a readiness row that
+    demanded a login for one predicted a refusal the create never makes. Read
+    from THIS device's registry, not the viewer's: the two builds may differ, and
+    the create runs here. An unknown id still needs a credential (fail toward the
+    row that names the gap, never toward a silent pass).
+    """
+    from local_operator.providers.registry import get_provider_definition
+
+    definition = get_provider_definition(hosting)
+    return not (
+        definition is not None and (definition.allows_missing_api_key or definition.wire == "mock")
+    )
 
 
 def has_local_provider_credential(
@@ -1311,6 +1331,13 @@ def collect_peer_facts(
             "model_name": model["model_name"],
             "resolved": model["resolved"],
             "reason": model["reason"],
+            # Absent on an unresolved default and on every older peer; the row
+            # reads its absence as "legacy sentences", never as a pass.
+            **(
+                {"credential_required": model["credential_required"]}
+                if "credential_required" in model
+                else {}
+            ),
         },
         "selected_model_access": (
             selected_model_fact(root, selector, session_id=session_id) if selector else None
@@ -2939,7 +2966,69 @@ def model_credential_row(
     viewer: Viewer,
     peer_label: str,
 ) -> dict[str, Any]:
-    """(e) Can the peer's default model be served — own login or a borrow?"""
+    """(e) Can the peer's default model be served — own login or a borrow?
+
+    THIS ROW PREDICTS THE CREATE PREFLIGHT (``relay._model_credential_refusal``),
+    which refuses ``model_credential_missing`` before minting anything when a
+    create without ``--model`` resolves to a default the peer cannot serve. Two
+    things kept the row from saying so: it demanded a login for a keyless default
+    the create accepts, and its negative sentences named a provider, never the
+    peer's DEFAULT or the refusal the operator would actually meet. A peer that
+    publishes ``credential_required`` gets both; an older peer's facts lack it and
+    keep the legacy sentences byte-for-byte (nothing about them is inferred).
+
+    Deliberately NOT changed: an unreadable store stays UNKNOWN. The create treats
+    "cannot tell" as no accusation, which is not proof the default is servable.
+    No decline is asserted either — no decision is persisted to read one from, so
+    a missing holder is reported as the fact it is, with a model-choice remedy
+    and never a re-offer of the share.
+    """
+    raw_model = facts.get("default_model")
+    # Normalize once so the framing below retains a Mapping type. Missing or
+    # malformed facts still take the legacy path: an empty mapping is unresolved.
+    model: Mapping[str, Any] = raw_model if isinstance(raw_model, Mapping) else {}
+    framed = bool(model.get("resolved")) and isinstance(model.get("credential_required"), bool)
+    if framed and model.get("credential_required") is False:
+        pair = _default_pair(model)
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MODEL_CREDENTIAL,
+            ok=True,
+            detail=f"{peer_label}'s default model {pair} needs no credential",
+            source=SOURCE_PEER,
+        )
+    row = _model_credential_verdict(member, facts, viewer=viewer, peer_label=peer_label)
+    if framed and not row["ok"] and row.get("code") in (CODE_NOT_SHARED, CODE_NO_CREDENTIAL):
+        # The default is the subject, the refusal is the consequence, and the first
+        # remedy changes the DEFAULT — the thing that is wrong. Sharing is never
+        # offered (a withheld credential may be deliberate, and nothing persisted
+        # says otherwise), and no config is written by a report.
+        row["detail"] = (
+            f"{peer_label}'s default model {_default_pair(model)} cannot be served "
+            f"({row['detail']}); a create there without --model is refused"
+        )
+        row["remedies"] = [
+            f"set {peer_label}'s default to a model it holds (`/model default` in its "
+            "window), or " + str(row["remedies"][0])
+        ]
+    return row
+
+
+def _default_pair(model: Mapping[str, Any]) -> str:
+    hosting = _bounded(model.get("hosting") or "", 120)
+    name = _bounded(model.get("model_name") or "", 200)
+    return f"{hosting}/{name}" if name else hosting
+
+
+def _model_credential_verdict(
+    member: Any,
+    facts: Mapping[str, Any],
+    *,
+    viewer: Viewer,
+    peer_label: str,
+) -> dict[str, Any]:
+    """The provider-level verdict chain :func:`model_credential_row` frames."""
     model = facts.get("default_model")
     if not isinstance(model, Mapping):
         return _capability_row(
