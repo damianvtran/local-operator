@@ -1208,8 +1208,13 @@ def _with_carry_block(archive: Archive, blocks: list[dict[str, Any]]) -> list[di
 
 
 def strategy_for_model(model_spec: ModelSpec) -> Literal["snapcompact", "context-full"]:
-    """snapcompact iff the model can read images back; else context-full."""
-    return "snapcompact" if model_spec.supports_images else "context-full"
+    """snapcompact iff the model is KNOWN to read images back; else context-full.
+
+    Known, not defaulted: see ``compaction.thresholds.resolve_strategy`` for
+    why an undescribed model must not have its history archived as frames.
+    """
+    stated = getattr(model_spec, "supports_images_stated", True)
+    return "snapcompact" if model_spec.supports_images and stated else "context-full"
 
 
 #: ``Shape.id`` grammar: ``<advance>on<line_pitch>-bw@<width>``. Parsed back

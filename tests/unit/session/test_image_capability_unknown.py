@@ -25,6 +25,7 @@ import pytest
 from local_operator.harness.types import (
     ImageContent,
     Message,
+    ModelSpec,
     NoticeEvent,
     StreamEndEvent,
     StreamTextDelta,
@@ -168,3 +169,85 @@ async def test_a_session_on_a_stated_text_only_model_still_strips(tmp_path) -> N
     )
     assert sent == 0, "a model whose listing denies images was sent one"
     assert len(notices) == 1, "the strip must still be announced"
+
+
+# -- what the "unknown → send images" default must NOT decide ----------------
+#
+# PR #3071 QA Q2: ``auto`` compaction picked snapcompact for every undescribed
+# model, because the built spec turned "unknown" into True. Snapcompact archives
+# history AS image frames, so a text-only model that never saw an image was
+# wedged after its first compaction and its archived turns reached the model as
+# nothing. The spec now carries whether the capability was STATED.
+
+
+def test_an_undescribed_model_is_sent_images_but_not_known_to_read_them(silent_legs) -> None:
+    spec = build_model_spec("openrouter", _VISION_ROUTE)
+    assert spec.supports_images is True
+    assert spec.supports_images_stated is False
+
+
+def test_a_described_model_states_its_capability_either_way() -> None:
+    vision = DiscoveredModel(id="vendor/vision", name="V", supports_images=True)
+    text = DiscoveredModel(id="vendor/text", name="T", supports_images=False)
+    for row, expected in ((vision, True), (text, False)):
+        info = info_from_discovered_model("openrouter", row.id, row, openrouter_default_model_info)
+        spec = build_model_spec("openrouter", row.id, info)
+        assert (spec.supports_images, spec.supports_images_stated) == (expected, True)
+
+
+def test_auto_compaction_uses_frames_only_for_a_stated_vision_model(silent_legs) -> None:
+    from local_operator.compaction.api import CompactionSettings
+    from local_operator.compaction.snapcompact import strategy_for_model
+    from local_operator.compaction.thresholds import resolve_strategy
+
+    settings = CompactionSettings()
+    assert settings.strategy == "auto"
+    undescribed = build_model_spec("openrouter", _VISION_ROUTE)
+    row = DiscoveredModel(id="vendor/vision", name="V", supports_images=True)
+    stated = build_model_spec(
+        "openrouter",
+        "vendor/vision",
+        info_from_discovered_model(
+            "openrouter", "vendor/vision", row, openrouter_default_model_info
+        ),
+    )
+
+    assert resolve_strategy(settings, undescribed) == "context-full"
+    assert strategy_for_model(undescribed) == "context-full"
+    assert resolve_strategy(settings, stated) == "snapcompact"
+    assert strategy_for_model(stated) == "snapcompact"
+
+
+def test_a_session_whose_images_were_refused_compacts_to_text(tmp_path) -> None:
+    """Review m1: once the provider has refused images, frames would be
+    stripped on the way out, so ``auto`` must resolve to context-full even for
+    a model that STATES image support."""
+    from local_operator.compaction.api import CompactionSettings
+
+    spec = ModelSpec(provider="test", model_id="vision", context_window=100_000)
+    session = Session(
+        model=spec,
+        stream_fn=_Stream(),
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable", "env"],
+    )
+    settings = CompactionSettings()
+    assert session._resolve_strategy(settings) == "snapcompact"
+    session._images_rejected = True
+    assert session._resolve_strategy(settings) == "context-full"
+    # An explicit setting is the operator's choice and still wins.
+    assert session._resolve_strategy(CompactionSettings(strategy="snapcompact")) == "snapcompact"
+
+
+def test_falling_to_the_placeholder_is_logged(silent_legs, caplog) -> None:
+    """The episode's log said nothing about running on a stand-in; now one line does."""
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="local_operator.model.configure"):
+        configure.resolve_model_info("openrouter", _VISION_ROUTE)
+    lines = [r.getMessage() for r in caplog.records if "placeholder defaults" in r.getMessage()]
+    assert lines == [
+        f"openrouter/{_VISION_ROUTE}: no metadata source described this model "
+        "(image input unknown, context window unknown); using placeholder defaults"
+    ]

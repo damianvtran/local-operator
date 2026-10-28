@@ -3099,6 +3099,50 @@ def test_the_wordings_providers_actually_use_are_all_recognised(message: str) ->
     assert is_image_rejection(ProviderError(400, message))
 
 
+@pytest.mark.parametrize(
+    "status, message",
+    [
+        # OpenRouter, when no endpoint behind the id takes images.
+        (404, "No endpoints found that support image input"),
+        # DeepSeek direct: the wire schema has no image part at all.
+        (
+            422,
+            "Failed to deserialize the JSON body into the target type: messages[0]: "
+            "unknown variant `image_url`, expected `text` at line 1 column 120",
+        ),
+        (
+            400,
+            "Failed to deserialize the JSON body into the target type: messages[0]: "
+            "unknown variant `image_url`, expected `text`",
+        ),
+        # OpenAI-compatible gateways.
+        (400, "Invalid content type. image_url is only supported by certain models."),
+        (400, "image_url is not supported"),
+    ],
+)
+def test_a_text_only_model_refusing_images_is_an_image_rejection(status, message) -> None:
+    """The MODALITY refusals (PR #3071 M1/Q1): an undescribed model is sent
+    images, so a text-only endpoint behind one must be recognised in BOTH
+    forms, or the session re-sends the image and fails every turn."""
+    from local_operator.providers.failover import is_image_modality_rejection
+
+    raised = ProviderError(status, message)
+    assert is_image_rejection(raised)
+    assert is_image_rejection(str(raised))
+    assert is_image_modality_rejection(raised)
+    assert is_image_modality_rejection(str(raised))
+
+
+def test_a_block_refusal_is_not_a_modality_refusal_and_5xx_is_neither() -> None:
+    from local_operator.providers.failover import is_image_modality_rejection
+
+    assert not is_image_modality_rejection(ProviderError(400, "Could not process image"))
+    assert not is_image_modality_rejection(
+        ProviderError(503, "No endpoints found that support image input")
+    )
+    assert not is_image_rejection(ProviderError(503, "No endpoints found that support image input"))
+
+
 def test_only_the_count_refusal_is_provider_scoped() -> None:
     """The count refusal names a per-request limit, not a bad block, so it is
     the one image rejection the session may lift on a provider switch."""
