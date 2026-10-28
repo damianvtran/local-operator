@@ -2285,7 +2285,11 @@ async def conversation_cos_read_grant(
     Reads served under the grant are audited on the hub, per page.
     """
     _require_conversation_id(conversation_id)
-    _refuse_write_scope(request)
+    # ONE closed table for both verbs (review round 2, MINOR E): a share is never
+    # scoped, and an unknown query name is REFUSED rather than silently ignored, so
+    # the grant and the revoke cannot disagree about which spellings are legal.
+    if set(request.query_params) - {"tenant_id", "expected_account_id"}:
+        _raise_read("invalid_request")
 
     client = _conversation_client(config_manager)
     return reply(

@@ -69,8 +69,8 @@ def _not_designated() -> dict[str, str]:
     return _refusal(
         "not_designated",
         "this session is not the account's chief-of-staff session, so the mailbox and "
-        "owner-shared conversations belong to that session; use directory/dm/channel_post "
-        "to collaborate from here",
+        "owner-shared conversations belong to that session; from here use directory, dm, "
+        "channel_create, channel_post, channel_history, channel_thread or react",
     )
 
 

@@ -318,7 +318,16 @@ MEASURED_TOKENS: dict[str, int] = {
     # repeated op roster left the description and the thread-reply clause moved
     # to thread_root_id's own field note. Every op is still discoverable.
     # Neither the document soft cap nor the start-context budget changes.
-    "bridge": 777,
+    # 777 -> 1674: the doc now covers the OP SET THE TOOL ACTUALLY HAS. Before this
+    # branch it documented four ops (take_up/ack/send/reply) while the tool shipped
+    # fourteen; `directory`, `dm`, `shared_conversations`/`shared_history` and the six
+    # room ops (`channels`, `channel_create`, `channel_post`, `channel_history`,
+    # `channel_thread`, `react`) had no entry at all, so a model reading the reference
+    # had to guess, and the new `dm` blurb forward-references `channel_history` for
+    # reading the reply. Measured by this test's own ledger print ON THIS HEAD (1674),
+    # never carried across. The pair-lane caveat on `send` earns its tokens: without it
+    # an agent answers a DM with `send`, which no Team Bridge UI shows.
+    "bridge": 1674,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds

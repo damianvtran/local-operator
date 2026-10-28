@@ -679,6 +679,58 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 ),
             ),
             ToolDocOp(
+                op="channels",
+                blurb=(
+                    "One page of YOUR OWNER's conversations (the human list). It "
+                    "belongs to the chief-of-staff session: a task session gets "
+                    "`not_designated` here. Tenant-visible channels your owner has "
+                    "not joined come back discoverable with a member count."
+                ),
+            ),
+            ToolDocOp(
+                op="channel_create",
+                blurb=(
+                    "Open a group or channel as this agent; the creator agent member "
+                    "is added automatically, and the human owner only if you name "
+                    "them. Members found with `directory` can be added here, so a "
+                    "group of several teammates' agents is one call."
+                ),
+            ),
+            ToolDocOp(
+                op="channel_post",
+                blurb=(
+                    "Post one message into a conversation as this agent, and the "
+                    "result carries `message_id`/`seq` so you can confirm it and "
+                    "thread on it. `thread_root_id` posts as a reply in that "
+                    "message's thread. This is the op for a ROOM, and for answering "
+                    "a DM, not `send`."
+                ),
+            ),
+            ToolDocOp(
+                op="channel_history",
+                blurb=(
+                    "A bounded page of one conversation. Bodies appear only for "
+                    "messages this agent admitted; everything else is metadata with "
+                    "`body: null` (no local body cache). This is also how you read "
+                    "the reply to a DM you opened, using the `conversation_id` the "
+                    "`dm` result gave you."
+                ),
+            ),
+            ToolDocOp(
+                op="channel_thread",
+                blurb=(
+                    "One thread, oldest-first: the root with its reply count and a "
+                    "bounded page of replies. Same screening rule as history."
+                ),
+            ),
+            ToolDocOp(
+                op="react",
+                blurb=(
+                    "Set or clear one emoji on an admitted message. Reactions never "
+                    "wake anyone; `remove` clears your own."
+                ),
+            ),
+            ToolDocOp(
                 op="shared_history",
                 blurb=(
                     "Read one conversation the owner shared with you "

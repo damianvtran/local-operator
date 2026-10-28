@@ -18651,12 +18651,16 @@ class Session:
     async def _open_pending_body_turn(self, *, selected: tuple[str, str] | None = None) -> None:
         """Claim this session's oldest pending BODY for the turn about to run.
 
-        ONLY a session the bridge runtime already admitted reaches here (owner
-        pinned, generation live, designated, consenting — all inside
-        ``bridge_runtime_for_session``), and only when a read-only check finds a
-        ``pending`` row for THIS session. Anything else leaves
-        ``transform_context`` unset, so an ordinary turn pays nothing and no
-        other session's row is ever served.
+        THE GATE IS THE ROW, NOT THE DESIGNATION (review round 2, MINOR D). The
+        bridge runtime is built for EVERY writer session of the enrolled owner, so
+        presence proves only owner/generation/consent — it no longer proves "this
+        is the chief-of-staff session". What keeps a body out of the wrong session
+        is ``pending_body_reservation_for(owner, session_id)``: reservations are
+        scoped per session, so a non-designated session finds no row and
+        ``open()`` returns False. That scoping is the invariant to preserve; the
+        earlier wording here asserted a designation check the construction no
+        longer performs, which is the same false-contract class as the ask-ledger
+        write fixed in round 1.
         """
 
         self._pending_body_turn = None
