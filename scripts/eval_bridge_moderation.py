@@ -312,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         return _dry_run(dataset, plan, as_json=args.json, stripped=stripped)
 
-    preflight = _preflight_credentials(plan.model_route, workdir)
+    preflight = _preflight_agent_shell() or _preflight_credentials(plan.model_route, workdir)
     if preflight is not None:
         print(preflight, file=sys.stderr)
         return EXIT_PREFLIGHT
@@ -411,6 +411,30 @@ def _dry_run(dataset, plan, *, as_json: bool, stripped: list[str]) -> int:
         print(f"  stripped inherited env: {', '.join(sorted(stripped))}")
     print("no model call was made and no fixture was written")
     return EXIT_OK
+
+
+def _preflight_agent_shell() -> str | None:
+    """Refuse before any spend when this shell may not open a session.
+
+    ``sdk.open_session`` applies the CLI's agent-shell rule: a session may be opened
+    from the operator's own terminal, from a shell whose session holds ``task``, or
+    with the documented escape - and not otherwise. Discovering that on case 1 of 219
+    costs the operator a confusing failure; asking the rule directly costs nothing.
+    """
+
+    try:
+        from local_operator.agent_shell import exec_session_refusal
+    except Exception:  # noqa: BLE001 - an unimportable guard is the caller's problem
+        return None
+    refusal = exec_session_refusal()
+    if not refusal:
+        return None
+    return (
+        f"this shell may not open a session: {refusal}\n"
+        f"The evaluation drives a real session per case. Run it from a normal terminal, "
+        f"or from a shell whose session holds the `task` tool, rather than working around "
+        f"the guard."
+    )
 
 
 def _preflight_credentials(route: tuple[str, str], workdir: Path) -> str | None:
