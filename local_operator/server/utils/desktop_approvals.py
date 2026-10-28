@@ -23,11 +23,12 @@ record holds a reference NAME and this module never reads the secret store.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
 from local_operator.network import approvals as approval_store
-from local_operator.network.credentials import inheritance
+from local_operator.network.credentials import consent, finite_share, inheritance
 from local_operator.network.types import MeshRefusal
 
 
@@ -45,9 +46,25 @@ def approval_rows(root: Path | None = None) -> list[dict[str, Any]]:
         # plain-language summary/details come from the SIGNED record at read time (never
         # stored text) so a UI that knows the keys can state what is signed, and one that
         # does not simply ignores them. Every other kind keeps the frozen row byte for byte.
-        extras = inheritance.row_extras(record)
-        if extras is not None:
-            row.update(extras)
+        if finite_share.has_intent(record):
+            # Presence wins over parsing: malformed/mixed intent is never a
+            # generic onboarding card that an older client could blindly sign.
+            row["can_approve_here"] = False
+            row["finite_share"] = {"version": 1, "valid": False}
+            try:
+                data = finite_share.checked_intent(record)
+                row["finite_share"] = {
+                    "version": 1,
+                    "valid": True,
+                    "request_digest": record["request_digest"],
+                    **data,
+                }
+            except MeshRefusal as error:
+                row["finite_share"]["refusal_code"] = error.code
+        else:
+            extras = inheritance.row_extras(record)
+            if extras is not None:
+                row.update(extras)
         rows.append(row)
     return rows
 
@@ -68,6 +85,8 @@ def approve(root: Path | None, approval_id: str) -> dict[str, Any]:
     record = approval_store.load_record(approval_id, root=root)
     if record.get("kind") not in approval_store.KINDS:
         raise MeshRefusal("approval_invalid", "This build cannot approve this authority kind")
+    if finite_share.has_intent(record):
+        consent.refuse("finite_confirmation_required")
     if inheritance.intent(record) is not None:
         # REFUSED BEFORE THE SIGNER RUNS. The desktop card cannot yet state what a credential
         # permission signs (it would read the request's operator-key anchor as an
@@ -92,6 +111,51 @@ def approve(root: Path | None, approval_id: str) -> dict[str, Any]:
         approval_id, signature_hex=signature_hex, decided_at=decided_at, root=root
     )
     return _decision(decided)
+
+
+def _finite_snapshot(
+    root: Path | None, approval_id: str, digest: str, *, state: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Bind a displayed finite-only card to the existing signer/admission path."""
+    from local_operator.network import enrollment
+    from local_operator.network.identity import load as load_identity
+
+    enrollment.bound_profile(root)
+    record = approval_store.load_record(approval_id, root=root)
+    data = finite_share.checked_intent(record)
+    if record["state"] != state or time.time() >= record["expires_at"]:
+        consent.refuse("finite_state_changed")
+    if digest != record["request_digest"] or digest != approval_store.request_digest(record):
+        consent.refuse("finite_snapshot_changed")
+    identity = load_identity(root)
+    if identity is None or identity.device_id != data["owner_device"]:
+        consent.refuse("finite_owner_mismatch")
+    return record, data
+
+
+def approve_finite(root: Path | None, approval_id: str, digest: str) -> dict[str, Any]:
+    """Sign the displayed finite scope through the ordinary presence-gated signer."""
+    record, _data = _finite_snapshot(root, approval_id, digest, state="requested")
+    decided_at = time.time()
+    signature = approval_store.sign_decision(
+        kind=record["kind"], request_id=record["request_id"],
+        request_digest=record["request_digest"], decided_at=decided_at,
+    )
+    return _decision(approval_store.approve(
+        approval_id, signature_hex=signature, decided_at=decided_at, root=root
+    ))
+
+
+def apply_finite(root: Path | None, approval_id: str, digest: str) -> dict[str, Any]:
+    """Apply only the signed subject, never HTTP-authored owner/key/scope selectors."""
+    _record, data = _finite_snapshot(root, approval_id, digest, state="approved")
+    expected = {field: data[field] for field in (
+        "owner_device", "network_id", "recipient_device", "key", "scope"
+    )}
+    finite_share.apply(approval_id, expected, root=root)
+    # Apply owns fresh signature, policy, fingerprint, retained-fence and replay
+    # checks. Do not mark the card applied merely because a signer returned yes.
+    return {"approval_id": approval_id, "state": "applied"}
 
 
 def deny(root: Path | None, approval_id: str) -> dict[str, Any]:

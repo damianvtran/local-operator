@@ -28,6 +28,47 @@ def intent(record: dict[str, Any]) -> dict[str, Any] | None:
     return what.get(OP) if isinstance(what, dict) and isinstance(what.get(OP), dict) else None
 
 
+def has_intent(record: dict[str, Any]) -> bool:
+    """Classify even malformed finite intent before any generic signing path."""
+    what = record.get("what")
+    return isinstance(what, dict) and OP in what
+
+
+def checked_intent(record: dict[str, Any]) -> dict[str, Any]:
+    """Share one exact authority shape between disclosure and application.
+
+    Rendering must not admit a mixed onboarding/credential request as a finite
+    card. This is structural validation only: it never signs or mutates policy.
+    Application still performs its existing fresh subject/consent checks.
+    """
+    data = intent(record)
+    if (
+        record.get("kind") != "device_onboard"
+        or data is None
+        or set(record.get("what", {})) != {OP, "anchor"}
+    ):
+        consent.refuse("finite_intent_missing")
+    fields = {
+        "owner_device", "network_id", "recipient_device", "public_key_fingerprint",
+        "key", "scope", "denies", "policy_revision", "guard",
+    }
+    consent._exact(data, fields, fields)
+    fingerprint = data["public_key_fingerprint"]
+    if (
+        not isinstance(fingerprint, str)
+        or len(fingerprint) != 71
+        or not fingerprint.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in fingerprint[7:])
+        or not isinstance(data["guard"], dict)
+    ):
+        consent.refuse("finite_disclosure_invalid")
+    if data["guard"]:
+        consent._ref(data["guard"].get("id"))
+        consent._revision(data["guard"].get("revision"))
+    details(record)
+    return data
+
+
 def summary(record: dict[str, Any]) -> str | None:
     data = intent(record)
     if data is None:
@@ -334,34 +375,7 @@ def _apply(approval_id: str, expected: dict[str, Any], root: Path | None = None)
             "replay cannot clear a later withdrawal. "
             "Request a new exact finite-share approval; no install or connection ran.",
         )
-    data = intent(source)
-    if data is None or set(source.get("what", {})) != {OP, "anchor"}:
-        consent.refuse("finite_intent_missing")
-    consent._exact(
-        data,
-        {
-            "owner_device",
-            "network_id",
-            "recipient_device",
-            "public_key_fingerprint",
-            "key",
-            "scope",
-            "denies",
-            "policy_revision",
-            "guard",
-        },
-        {
-            "owner_device",
-            "network_id",
-            "recipient_device",
-            "public_key_fingerprint",
-            "key",
-            "scope",
-            "denies",
-            "policy_revision",
-            "guard",
-        },
-    )
+    data = checked_intent(source)
     for field in ("owner_device", "network_id", "recipient_device", "key", "scope"):
         if data[field] != expected.get(field):
             consent.refuse("finite_subject_mismatch")

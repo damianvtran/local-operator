@@ -41,13 +41,20 @@ from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_approvals import (
     ApprovalDecision,
     ApprovalList,
+    FiniteShareAcknowledgment,
     NetworkEnrollmentAcknowledgment,
     OnboardProbe,
     OnboardRequest,
 )
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import errors, reply
-from local_operator.server.utils.desktop_approvals import approval_rows, approve, deny
+from local_operator.server.utils.desktop_approvals import (
+    apply_finite,
+    approval_rows,
+    approve,
+    approve_finite,
+    deny,
+)
 
 router = APIRouter(tags=["Desktop approvals"], dependencies=[Depends(require_desktop)])
 
@@ -110,6 +117,29 @@ async def approve_approval(request: Request, approval_id: str):
 async def deny_approval(request: Request, approval_id: str):
     """The operator's no — ordinary, write-once, the safe direction (§2.4)."""
     return reply(await _local(request, lambda: deny(_root(request), approval_id)))
+
+
+@router.post(
+    "/v1/desktop/approvals/{approval_id}/approve-finite-share",
+    response_model=CRUDResponse[ApprovalDecision],
+)
+async def approve_finite_share(
+    request: Request, approval_id: str, body: FiniteShareAcknowledgment
+):
+    """Require a finite-specific displayed snapshot before the existing OS gesture."""
+    return reply(await _local(
+        request, lambda: approve_finite(_root(request), approval_id, body.request_digest)
+    ))
+
+
+@router.post("/v1/desktop/approvals/{approval_id}/apply-finite-share", response_model=CRUDResponse[Any])
+async def apply_finite_share(
+    request: Request, approval_id: str, body: FiniteShareAcknowledgment
+):
+    """Apply existing signed finite authority; generic onboarding remains forbidden."""
+    return reply(await _local(
+        request, lambda: apply_finite(_root(request), approval_id, body.request_digest)
+    ))
 
 
 @router.post("/v1/desktop/approvals/probe", response_model=CRUDResponse[Any])

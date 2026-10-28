@@ -775,6 +775,9 @@ def static_feature_flags() -> dict[str, Any]:
         # POST would 404 on a backend without it. Absent, the tab simply has no
         # approval affordance, which is the pre-onboarding state.
         "approvals": 1,
+        # Dedicated digest-bound finite disclosure/sign/apply, never generic
+        # onboarding approval. Older clients retain their read-only fallback.
+        "credential_finite_share": 1,
         # Existing signed SSH onboarding, surfaced without a new trust engine.
         "mesh_onboard": 1,
         # THE ONE DIAL on the projects surface: `POST

@@ -47,6 +47,9 @@ class ApprovalRow(BaseModel):
     details: list[str] | None = Field(default=None, exclude_if=lambda value: value is None)
     can_approve_here: bool | None = Field(default=None, exclude_if=lambda value: value is None)
     approve_remedy: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    finite_share: dict[str, Any] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     typed_approval: dict[str, Any] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -63,6 +66,15 @@ class ApprovalDecision(BaseModel):
     state: str
     #: ``{"key_id": ...}``; ``""`` when the decision carries no signature (a deny).
     signature: dict[str, Any]
+
+
+class FiniteShareAcknowledgment(BaseModel):
+    """A displayed snapshot, not authority selectors supplied by the renderer."""
+
+    model_config = {"extra": "forbid", "strict": True}
+    authority_version: int = Field(ge=1, le=1)
+    scope: Literal["finite_share"]
+    request_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class OnboardProbe(BaseModel):

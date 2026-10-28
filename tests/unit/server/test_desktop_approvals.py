@@ -225,6 +225,8 @@ def test_frozen_paths_remain_and_onboarding_is_additive() -> None:
     assert routes == {
         ("/v1/desktop/approvals", ("GET",)),
         ("/v1/desktop/approvals/{approval_id}/approve", ("POST",)),
+        ("/v1/desktop/approvals/{approval_id}/approve-finite-share", ("POST",)),
+        ("/v1/desktop/approvals/{approval_id}/apply-finite-share", ("POST",)),
         ("/v1/desktop/approvals/{approval_id}/deny", ("POST",)),
         ("/v1/desktop/approvals/probe", ("POST",)),
         ("/v1/desktop/approvals/request", ("POST",)),
