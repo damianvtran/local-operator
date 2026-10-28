@@ -125,9 +125,11 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator
@@ -852,7 +854,10 @@ class TranscriptIndex:
     publication_identity: tuple[int, int, int] | None = field(
         default=None, repr=False, compare=False
     )
-    read_model_marker: bool = field(default=False, repr=False, compare=False)
+    #: The read-model token this document referenced when it was read, if any.
+    #: A naming-only write reuses that immutable companion instead of rebuilding
+    #: it; a new derivation leaves it ``None`` and publishes a fresh one.
+    read_model_token: str | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.source_views = SourceProjectionViews.build(self.source_projection_facts)
@@ -988,7 +993,7 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
         checkpoints=parsed_checkpoints,
         messages=parsed_messages,
         publication_identity=raw.get("_publication_identity"),
-        read_model_marker=isinstance(raw.get("read_model"), dict),
+        read_model_token=_marker_token(raw.get("read_model")),
         sig=sig,
         coverage=coverage,
         naming=naming if isinstance(naming, dict) else {},
@@ -1016,6 +1021,53 @@ def read_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | Non
     return _index_from_raw(_read_raw(config_dir, session_id))
 
 
+@contextmanager
+def _publish_lock(path: Path) -> Iterator[None]:
+    """Serialize one session's writers on every platform; readers never lock.
+
+    ``fcntl`` DOES NOT EXIST ON WINDOWS, and this runs inside
+    ``refresh_index``/``patch_naming``: an unconditional import made the whole
+    cache raise there and left ``checkpoints_view`` at ``error``. Use the POSIX
+    advisory lock where it exists, ``msvcrt.locking`` where it does not, and an
+    in-process lock either way — so a platform with neither still serialises the
+    writers this process has, and the same thread can never deadlock itself.
+    Atomic replace is what protects READERS, so they take no lock at all.
+    """
+    with _PUBLISH_THREADS.setdefault(str(path), threading.Lock()):
+        handle = None
+        try:
+            try:
+                import fcntl as _fcntl
+            except ImportError:  # pragma: no cover - Windows only
+                _fcntl = None  # type: ignore[assignment]
+            if _fcntl is not None:
+                handle = path.open("a")
+                _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+            else:
+                try:
+                    import msvcrt as _msvcrt
+                except ImportError:  # pragma: no cover - exotic platforms
+                    _msvcrt = None  # type: ignore[assignment]
+                # ``getattr`` because this module is only importable on Windows:
+                # a POSIX type-checker sees a stub without these members, and the
+                # lock's absence there is exactly the branch we are NOT in.
+                locking = getattr(_msvcrt, "locking", None) if _msvcrt else None
+                if _msvcrt is not None and locking is not None:
+                    handle = path.open("a")
+                    handle.seek(0)
+                    locking(handle.fileno(), getattr(_msvcrt, "LK_LOCK", 1), 1)
+            yield
+        finally:
+            if handle is not None:
+                handle.close()
+
+
+def _marker_token(marker: Any) -> str | None:
+    """The token a canonical ``read_model`` field names, or ``None``."""
+    token = marker.get("publication_id") if isinstance(marker, dict) else None
+    return token if isinstance(token, str) else None
+
+
 def write_index(
     config_dir: str | Path,
     session_id: str,
@@ -1031,42 +1083,45 @@ def write_index(
     torn documents. Best-effort because an unwritable cache must cost the speed
     of the next read, never the read itself.
 
-    THE READ MODEL IS PUBLISHED IN THE SAME CRITICAL SECTION. ``naming`` is
-    mutable metadata a concurrent ``patch_naming`` overwrites, so this merge and
-    the immutable projection built from the merged object must be one step under
-    one lock: a projection made before the merge would pair a stale name with the
-    canonical document, and a JSON write outside the lock would overwrite the
-    patch outright. Derivation is finished before entry and readers take no lock,
-    so the section holds neither a scan nor a decode of the index's own output.
+    TWO PHASES, deliberately. The immutable read-model companion is BUILT FIRST,
+    OUTSIDE the lock: its build is the expensive part, and holding the lock for
+    it serialised every naming patch behind a scan (measured as ~1.2 s added to
+    an append refresh, which then missed the first frame's wait). The lock then
+    covers only what must be atomic together — the mutable ``naming`` merge a
+    concurrent ``patch_naming`` can race, the naming sidecar published from the
+    merged object, and the canonical replace. A companion built before another
+    writer's replace is simply an unreferenced file the collector reclaims.
 
     ``expected_publication`` is compare-and-publish for a DELAYED writer (the
     parsed-HIT migration): it republishes only the document it actually read, so
     it can never overwrite newer naming, a newer scan, or a moved journal.
     """
-    path = index_path(config_dir, session_id)
-    try:
-        from local_operator.session import index_read_model
+    from local_operator.session import index_read_model
 
+    path = index_path(config_dir, session_id)
+    marker: dict[str, Any] | None = None
+    try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Threads in one process publish naming/scan snapshots concurrently too:
-        # a fixed temp path let two writers produce one torn document.
+        try:
+            marker = index_read_model.reuse(config_dir, session_id, index)
+            if marker is None and not index_read_model.failed(
+                config_dir, session_id, index.publication_identity
+            ):
+                marker = index_read_model.publish(config_dir, session_id, index)
+        except (OSError, ValueError, sqlite3.Error):
+            # An optional acceleration must never cost the canonical index: the
+            # JSON-only publication and its fallback stay correct. The failure is
+            # remembered per canonical publication so an exact HIT does not retry
+            # a doomed multi-MB build on every open.
+            index_read_model.remember_failure(config_dir, session_id, index.publication_identity)
+            logger.debug("read-model publication unavailable for %s", session_id, exc_info=True)
+            marker = None
+
+        # Threads in one process publish naming/scan snapshots concurrently too.
         tmp = path.with_suffix(f".{os.getpid()}.{uuid4().hex}.tmp")
         try:
-            # ONE CRITICAL SECTION: merge the mutable naming a concurrent
-            # ``patch_naming`` may just have written, mint the immutable
-            # projection from the SAME merged object, then replace the canonical
-            # document. Derivation is finished before entry and readers never take
-            # this lock, so the section holds no scan and no JSON decode of the
-            # index's own output.
-            import fcntl
-
-            with path.with_suffix(".publish.lock").open("a") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+            with _publish_lock(path.with_suffix(".publish.lock")):
                 if expected_publication is not None:
-                    # A delayed parsed-HIT migration must prove the document it
-                    # read is still the one on disk, and that the journal it
-                    # scanned has not moved; otherwise it would republish stale
-                    # naming/scan facts over newer ones.
                     current = path.stat()
                     if (
                         current.st_ino,
@@ -1088,20 +1143,21 @@ def write_index(
                         # newer item). Neither may clobber the other, and both are
                         # filtered to turns that still exist.
                         items = dict(merged.get("items") or {})
-                        if isinstance(own, dict) and index.naming.get("prompt_version") == (
-                            NAMING_PROMPT_VERSION
+                        if (
+                            isinstance(own, dict)
+                            and index.naming.get("prompt_version") == NAMING_PROMPT_VERSION
                         ):
                             items.update({k: v for k, v in own.items() if k in live})
                         index.naming = {"prompt_version": NAMING_PROMPT_VERSION, "items": items}
-                marker = None
-                try:
-                    marker = index_read_model.publish(config_dir, session_id, index)
-                except (OSError, ValueError, sqlite3.Error):
-                    # An optional read model must never cost the canonical index:
-                    # the JSON-only publication and its fallback stay correct.
-                    logger.debug(
-                        "read-model publication unavailable for %s", session_id, exc_info=True
-                    )
+                if marker is not None:
+                    try:
+                        index_read_model.write_naming(config_dir, session_id, marker, index.naming)
+                    except OSError:
+                        # Naming is part of the projection's authority; without it
+                        # the manifest falls back rather than serving pending names
+                        # it cannot prove.
+                        logger.debug("read-model naming unavailable for %s", session_id)
+                        marker = None
                 tmp.write_text(
                     json.dumps(_document(index, marker), separators=(",", ":")), encoding="utf-8"
                 )
@@ -1110,6 +1166,10 @@ def write_index(
                 tmp.replace(path)
         finally:
             tmp.unlink(missing_ok=True)
+        if marker is not None:
+            # Reclaim outside the lock: unlink cost must not sit in the critical
+            # section, and a failed removal is simply retained.
+            index_read_model.collect(config_dir, session_id, marker["publication_id"])
     except OSError:
         logger.warning("could not write the transcript index for %s", session_id, exc_info=True)
 
@@ -1155,8 +1215,13 @@ _HEAD_KEYS = ("version", "sig", "scan", "journal_generation")
 
 def _read_resume_head(
     config_dir: str | Path, session_id: str
-) -> tuple[dict[str, Any], ScanState, str] | None:
-    """``(sig, scan, journal_generation)`` from the cache file's first bytes.
+) -> tuple[dict[str, Any], ScanState, str, int] | None:
+    """``(sig, scan, journal_generation, document_bytes)`` from the first bytes.
+
+    ``document_bytes`` comes from the SAME open descriptor's ``fstat``. The paint
+    hold runs on the event loop, so the hydration charge it needs must not cost a
+    second path lookup (``stat``) on that loop: the bounded head read is already
+    happening here, and one ``fstat`` on the handle is all this adds.
 
     WHY (conversation-first-paint R2): the paint hold must decide whether a
     refresh is payable by the bytes it will RE-READ, and that is
@@ -1173,6 +1238,7 @@ def _read_resume_head(
     """
     try:
         with index_path(config_dir, session_id).open("rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
             head = handle.read(_RESUME_HEAD_BYTES)
     except OSError:
         return None
@@ -1205,7 +1271,7 @@ def _read_resume_head(
         or not isinstance(generation, str)
     ):
         return None
-    return sig, scan, generation
+    return sig, scan, generation, size
 
 
 def _rederive_bytes(
@@ -1234,20 +1300,23 @@ def _cached_refresh_cost(
 
     An exact disk HIT avoids journal work, not ``_read_raw``/``_index_from_raw``:
     the cache still contains the entire transcript's derived facts. Price that
-    document before starting its uninterruptible JSON step, using only a
-    stat and the bounded resume head. Missing/old heads retain the previous
+    document before starting its uninterruptible JSON step. Both figures come
+    from the ONE bounded head read (its ``fstat`` sizes the document), because
+    this runs inside the paint hold's event-loop decision and a separate ``stat``
+    there would be new loop I/O. Missing/old heads retain the previous
     unknown-rederivation policy, but an existing document is never free.
 
     This describes a REFRESH, which reads disk even if an older object is held.
     A validated resident HIT bypasses refresh in the consumers; charging it here
     as resident would exempt work that ``refresh_index`` actually still does.
     """
-    cache = _stat_or_none(index_path(config_dir, session_id))
-    if cache is None:
-        return False, None, 0
     head = _read_resume_head(config_dir, session_id)
-    rederive = _rederive_bytes(journal, *head) if head is not None else None
-    return True, rederive, cache.st_size
+    if head is None:
+        # No head means no document this build can vouch for; the pre-head rule
+        # (whatever a fresh reader sees) is the caller's fallback, not ours.
+        return _stat_or_none(index_path(config_dir, session_id)) is not None, None, 0
+    rederive = _rederive_bytes(journal, *head[:3])
+    return True, rederive, head[3]
 
 
 def _sweep_missing(config_dir: str | Path) -> None:
@@ -1284,6 +1353,14 @@ def patch_naming(config_dir: str | Path, session_id: str, items: dict[str, Any])
     (size -1), so the next refresh treats it as stale, scans the journal, and
     carries the naming forward (see :func:`preserved_naming`). Returns whether
     the write was attempted.
+
+    THIS READ IS OUTSIDE THE LOCK, and that is deliberate rather than a claim:
+    it only decides which document shape to hand ``write_index`` (an existing
+    index, a version-mismatched one, or the empty skeleton). The merge that
+    must be atomic — this patch against whatever a concurrent writer landed —
+    happens INSIDE ``write_index``, which re-reads ``naming`` under the publish
+    lock and unions it with this write winning. An earlier version of this
+    docstring claimed the whole function was under that lock; it never was.
     """
     raw = _read_raw(config_dir, session_id)
     index = _index_from_raw(raw)
@@ -3034,6 +3111,11 @@ def scan_payable_in_budget(
 #: budget anyone is expected to reach.
 _PAINT_HOLD_CEILING_S = 15.0
 
+#: In-process writer serialisation per publish-lock path. USED BY EVERY PLATFORM:
+#: the advisory lock is cross-PROCESS, this one is cross-THREAD, and neither
+#: replaces the other (a thread cannot flock its own descriptor twice safely).
+_PUBLISH_THREADS: dict[str, threading.Lock] = {}
+
 #: Live hold counts per session key. LOOP-ONLY MUTATION, like ``_IN_FLIGHT``.
 _PAINT_HOLDS: dict[tuple[str, str], int] = {}
 #: When each live hold's count last rose from zero (``time.monotonic``). Only
@@ -3671,19 +3753,26 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Tas
     return task, True
 
 
-def _checkpoint_items(index: TranscriptIndex) -> list[tuple[Checkpoint, Any]]:
-    """Resolve raw naming items once; both publications use the same turn policy."""
-    naming = index.naming if isinstance(index.naming, dict) else {}
-    items = naming.get("items") if naming.get("prompt_version") == NAMING_PROMPT_VERSION else {}
+def resolve_naming_items(
+    checkpoints: list[Checkpoint], naming: Any
+) -> list[tuple[Checkpoint, Any]]:
+    """Pair each checkpoint with the raw naming item its turn owns.
+
+    THE ONE SPELLING of the turn policy, shared by the canonical manifest and the
+    read model: a completion belongs to the LAST user checkpoint of its turn, and
+    only a prompt-version-matching section supplies items at all.
+    """
+    section = naming if isinstance(naming, dict) else {}
+    items = section.get("items") if section.get("prompt_version") == NAMING_PROMPT_VERSION else {}
     items = items if isinstance(items, dict) else {}
-    users = {c.turn: c.id for c in index.checkpoints if c.kind == KIND_USER}
+    users = {c.turn: c.id for c in checkpoints if c.kind == KIND_USER}
     return [
         (c, items.get(users.get(c.turn)) if c.kind == KIND_COMPLETION else None)
-        for c in index.checkpoints
+        for c in checkpoints
     ]
 
 
-def _checkpoint_entry(checkpoint: Checkpoint, item: Any) -> dict[str, Any]:
+def checkpoint_entry(checkpoint: Checkpoint, item: Any) -> dict[str, Any]:
     """Evaluate naming at read time: cooldown expiry needs no publication write."""
     from local_operator.session import checkpoint_naming
 
@@ -3706,7 +3795,10 @@ def _manifest_state(
     """The D9 wire shape for the checkpoints manifest."""
     checkpoints: list[dict[str, Any]] = []
     if index is not None:
-        checkpoints = [_checkpoint_entry(c, item) for c, item in _checkpoint_items(index)]
+        checkpoints = [
+            checkpoint_entry(c, item)
+            for c, item in resolve_naming_items(index.checkpoints, index.naming)
+        ]
     payload: dict[str, Any] = {"session_id": session_id, "index": {"state": state}}
     if built_at is not None:
         payload["index"]["built_at"] = built_at
@@ -3869,3 +3961,9 @@ def _reset_for_tests() -> None:
     _PAINT_HOLD_SINCE.clear()
     _PAINT_RELEASED.clear()
     _DEFERRED.clear()
+    # The read model's own in-process state is keyed by the same roots, so a
+    # suite that re-creates a tmp_path must not inherit a memo or a remembered
+    # publication failure from the previous one.
+    from local_operator.session import index_read_model
+
+    index_read_model.reset_for_tests()

@@ -51,6 +51,14 @@ particular an inode can be recycled onto identical byte length and mtime after
 an unlink/replace; strengthening that requires a new end-to-end content witness,
 not a guessed ctime after the page read.
 
+``mtime`` IS ALSO COARSER THAN THE WRITES IT MUST SEPARATE. ``st_mtime`` is a
+float stopwatch with filesystem-dependent resolution, so two rewrites that land
+inside one tick and keep the size are indistinguishable here — the index's own
+witness has exactly the same resolution, which is why this cache is never weaker
+than the facts it is joined to. Raising it means a shared, stronger source
+witness carried from the page read through the index key, not a second opinion
+computed here.
+
 ``compact_file``'s new inode is caught; ordinary equal-size rewrites are caught
 by mtime. The remaining deliberately restored witness is documented rather than
 silently upgraded: consumers and the index share the same protocol.

@@ -9926,13 +9926,27 @@ class RelayServer:
         return self._stored_frame_index(session_id)
 
     def _stored_projection(self, operation: Any, *args: Any, **kwargs: Any) -> Any:
-        """Run SQLite through the relay's existing page worker, never its link reader."""
+        """Run SQLite through the relay's existing page worker, never its link reader.
+
+        THE WAIT IS THE READ MODEL'S OWN, NOT THE PAGE READ'S. This hop runs on a
+        LINK thread, and ``SESSION_HISTORY_PAGE_READ_BOUND_S`` is 60 s: a broken
+        or slow companion could therefore park a peer's link thread for a minute
+        for an optimization it can simply skip. When the bound expires the caller
+        falls back to the original rederive path, which is the answer it would
+        have produced anyway.
+        """
+        from local_operator.session import index_read_model as rm
+
         with self._page_loop_lock:
             loop = self._page_loop_locked()
             future = asyncio.run_coroutine_threadsafe(
                 asyncio.to_thread(operation, *args, **kwargs), loop
             )
-        return future.result(timeout=SESSION_HISTORY_PAGE_READ_BOUND_S)
+        try:
+            return future.result(timeout=rm.READ_MODEL_WAIT_S)
+        except TimeoutError:
+            future.cancel()
+            return rm.Result("stale", reason="read-model wait bound")
 
     def _stored_frame_index(self, session_id: str) -> Any:
         """The transcript-index facts for one open-frame page, or ``None`` (cold).

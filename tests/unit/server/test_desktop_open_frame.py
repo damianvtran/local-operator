@@ -1145,3 +1145,65 @@ async def test_a_frame_whose_index_lands_during_the_hunt_is_the_steady_frame(
             steady["head_cut"],
         )
         assert canonical(first) == canonical(steady)
+
+
+@pytest.mark.asyncio
+async def test_projection_journal_ordinals_match_the_resident_join(tmp_path: Path) -> None:
+    """R2/Q1: coordinates describe what the page SERVES, never a dropped row.
+
+    Same code, same fixture, same request: the resident join is the control, and
+    the projection must produce its payload exactly. The pre-fix projection added
+    the opener of a row the cap had dropped (``limit=5`` answered ``{u0005}``
+    where the head served ``{u0001..u0005}``).
+    """
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=6)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        key = ti._key(harness.root, harness.session_id)
+        ti._remember(key, index, ti.index_path(harness.root, harness.session_id).stat().st_mtime)
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        params = {"limit": 5, "open_frame": 1, "journal_order": 1}
+        control = (await harness.client.get(url, params=params)).json()["result"]
+        assert control["journal_order_state"] == "ready"
+        # The resident join emits an opener axis, not one entry per served row:
+        # each row carries its own ``journal_seq``.
+        assert control["journal_ordinals"], control
+        assert all(row.get("journal_seq") is not None for row in control["entries"])
+
+        ti._reset_for_tests()  # no resident index: the companion is the only source
+        projected = (await harness.client.get(url, params=params)).json()["result"]
+        assert projected == control
+
+
+@pytest.mark.asyncio
+async def test_an_append_warm_reopen_still_reaches_final_runs(tmp_path: Path) -> None:
+    """Q5: the companion must not cost the append path its ready first frame.
+
+    A companion published for the PREVIOUS journal is stale for the suffix, so the
+    read falls back to the refresh the ORIGINAL path waits on; that wait is what
+    used to land inside the frame budget (5/6 quiet opens) and what a lock-held
+    companion build pushed outside it (0/6). Deterministic here: after an append
+    the first frame must carry the settled runs the steady frame carries, not a
+    ``building`` placeholder.
+    """
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=3)
+        ti.refresh_index(harness.root, harness.session_id)
+        directory = harness.root / "sessions" / harness.session_id
+        await Transcript(directory).append_message(
+            Message(role="tool", content=[TextContent(text="appended")], tool_call_id="x1")
+        )
+        ti._reset_for_tests()
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/history"
+        params = {"limit": 50, "open_frame": 1}
+        first = (await harness.client.get(url, params=params)).json()["result"]
+        steady = (await harness.client.get(url, params=params)).json()["result"]
+        if first["runs_state"] != "ready":
+            # An honest building answer is allowed, but ONLY with no facts: what
+            # is forbidden is a ready frame whose runs are the pre-append set.
+            assert first["runs"] == []
+        assert steady["runs_state"] == "ready"
+        assert first["runs"] == steady["runs"]

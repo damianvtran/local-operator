@@ -2279,7 +2279,7 @@ async def test_hydration_and_rederivation_cost_sum_without_stranding_fallback(tm
     journal = journal_path(tmp_path).stat()
     head = ti._read_resume_head(tmp_path, SID)
     assert head is not None
-    rederive = ti._rederive_bytes(journal, *head)
+    rederive = ti._rederive_bytes(journal, *head[:3])
     hydration = ti.index_path(tmp_path, SID).stat().st_size
     budget = ti._FIRST_PAINT_SCAN_BYTES_PER_S * ti._FIRST_PAINT_WAIT_S
     assert rederive < budget and hydration < budget < rederive + hydration
@@ -2576,9 +2576,12 @@ def test_the_cache_head_states_the_resume_point_without_a_full_parse(tmp_path):
     index = refreshed(tmp_path)
     head = ti._read_resume_head(tmp_path, SID)
     assert head is not None
-    sig, scan, generation = head
+    sig, scan, generation, size = head
     assert scan == index.scan and generation == index.journal_generation
     assert (sig["size"], sig["inode"]) == (index.sig["size"], index.sig["inode"])
+    # document_bytes rides the same descriptor, so no extra stat is needed on
+    # the event loop to price hydration.
+    assert size == ti.index_path(tmp_path, SID).stat().st_size
     raw = ti.index_path(tmp_path, SID).read_bytes()
     assert raw.index(b'"scan":') < ti._RESUME_HEAD_BYTES, "scan must ride in the head"
 

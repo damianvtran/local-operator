@@ -5394,3 +5394,25 @@ def test_the_owner_open_frame_whose_index_never_lands_says_building(
     monkeypatch.setattr(server_b, "_stored_frame_index", lambda session_id: None)
     frame = _owner_frame(server_b, limit=20)
     assert frame["runs_state"] == "building" and frame["runs"] == [], frame
+
+
+def test_the_read_model_wait_cannot_park_a_link_thread(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m3: an optimization must not spend the page read's 60 s bound."""
+    import time as _time
+
+    from local_operator.session import index_read_model as rm
+
+    _server_a, server_b, _h, _p = peer_pair
+    assert rm.READ_MODEL_WAIT_S < relay.SESSION_HISTORY_PAGE_READ_BOUND_S
+    monkeypatch.setattr(rm, "READ_MODEL_WAIT_S", 0.05)
+
+    def hangs(*args: Any, **kwargs: Any) -> Any:
+        _time.sleep(1.0)
+        return rm.Result("ready", "late")
+
+    started = _time.monotonic()
+    result = server_b._stored_projection(hangs)
+    elapsed = _time.monotonic() - started
+    assert result.state == "stale" and elapsed < 0.9, (result, elapsed)
