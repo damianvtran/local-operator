@@ -16,6 +16,7 @@ from local_operator.tools.public_copy import (
 )
 from tests.unit.secrets.test_public_copy_boundaries import (
     UI_CATALOGUE,
+    UI_ORIGIN_SSH,
     _context,
     _git,
     _public_repo,
@@ -142,18 +143,6 @@ async def test_missing_kernel_confinement_never_runs_git(tmp_path, monkeypatch):
         "no", {"path": UI_CATALOGUE, "repo_root": str(root)}, context=context
     )
     assert result.is_error
-
-
-@pytest.mark.asyncio
-async def test_linked_metadata_outside_confinement_is_not_read(tmp_path):
-    root = _ui_repo(tmp_path)
-    linked = tmp_path / "jail"
-    _git(root, "worktree", "add", "--detach", str(linked), "HEAD")
-    context = _context(linked, tmp_path).model_copy(update={"confinement_root": str(linked)})
-    result = await execute_read_public_copy(
-        "no", {"path": UI_CATALOGUE, "repo_root": str(linked)}, context=context
-    )
-    assert result.is_error, "linked metadata outside confinement was accepted"
 
 
 @pytest.mark.asyncio
@@ -443,3 +432,288 @@ async def test_every_git_probe_disables_transports_and_lazy_fetch(tmp_path, monk
     )
     assert not result.is_error, result.text
     assert observed
+
+
+def _per_user_temp() -> Path:
+    """The directory the macOS sandbox lets a confined child READ.
+
+    ``ToolConfinement`` allows reads of ``/private/var/folders`` (its documented
+    residual), so a repository there is the discriminating placement. It is
+    named explicitly rather than inherited from ``tmp_path``: pytest's base
+    follows ``TMPDIR``, so the original test passed or failed with the rig and
+    code review called the reader clean on a rig that hid the gap.
+    """
+    import sys
+
+    from local_operator.tools.confinement import sandbox_unavailable_reason
+
+    if sys.platform != "darwin" or sandbox_unavailable_reason() is not None:
+        pytest.skip("the per-user-temp read allowance is a macOS seatbelt property")
+    # ``getconf`` rather than ``os.confstr``: the Darwin name is not in Python's
+    # table. It is the directory the sandbox profile names (/private/var/folders).
+    reported = subprocess.run(
+        ["getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    return Path(reported).resolve()
+
+
+@pytest.fixture
+def user_temp_dir():
+    import shutil
+    import uuid
+
+    base = _per_user_temp() / f"pcr-{uuid.uuid4().hex}"
+    base.mkdir()
+    try:
+        yield base
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_linked_metadata_in_per_user_temp_is_refused(user_temp_dir, tmp_path):
+    """The sandbox lets Git read per-user temp, so the READER must refuse it."""
+    import subprocess
+
+    from local_operator.tools.confinement import ToolConfinement
+
+    root = _ui_repo(user_temp_dir)
+    jail = tmp_path / "jail"
+    jail.mkdir()
+    linked = jail / "wt"
+    _git(root, "worktree", "add", "--detach", str(linked), "HEAD")
+    assert (linked / ".git").is_file()
+    common = (root / ".git").resolve()
+    # CONTROL: the sandbox alone would have served this. Without it a green
+    # result could be an unrelated refusal, which is how the gap was missed.
+    probe = subprocess.run(
+        ToolConfinement.at(jail).wrap(["/bin/cat", str(common / "HEAD")]),
+        capture_output=True,
+        check=False,
+    )
+    assert probe.returncode == 0, "the kernel sandbox no longer allows this read; revisit the test"
+
+    context = _context(linked, tmp_path).model_copy(update={"confinement_root": str(jail)})
+    result = await execute_read_public_copy(
+        "no", {"path": UI_CATALOGUE, "repo_root": str(linked)}, context=context
+    )
+    assert result.is_error
+    assert result.details["refusal"]["code"] == "public_copy_git_metadata_outside_confinement"
+    assert result.details["refusal"]["reason"] == "git_dir_outside_root"
+    assert "Type or paste" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_alternates_outside_confinement_are_refused(user_temp_dir, tmp_path):
+    """Object alternates are followed by Git just like the common dir."""
+    donor = _ui_repo(user_temp_dir)
+    clone = tmp_path / "clone"
+    _git(donor, "clone", "-q", "--shared", str(donor), str(clone))
+    _git(clone, "remote", "set-url", "origin", UI_ORIGIN_SSH)
+    assert (clone / ".git/objects/info/alternates").is_file()
+    context = _context(clone, tmp_path).model_copy(update={"confinement_root": str(clone)})
+    result = await execute_read_public_copy(
+        "no", {"path": UI_CATALOGUE, "repo_root": str(clone)}, context=context
+    )
+    assert result.is_error
+    assert result.details["refusal"]["reason"] == "alternates_outside_root"
+
+
+@pytest.mark.asyncio
+async def test_a_self_contained_confined_checkout_still_reads(tmp_path):
+    root = _ui_repo(tmp_path)
+    context = _context(root, tmp_path).model_copy(update={"confinement_root": str(root)})
+    result = await execute_read_public_copy(
+        "ok", {"path": UI_CATALOGUE, "repo_root": str(root)}, context=context
+    )
+    assert not result.is_error, result.text
+
+
+@pytest.mark.asyncio
+async def test_unconfined_linked_worktree_is_unaffected(user_temp_dir, tmp_path):
+    root = _ui_repo(user_temp_dir)
+    linked = tmp_path / "wt"
+    _git(root, "worktree", "add", "--detach", str(linked), "HEAD")
+    result = await execute_read_public_copy(
+        "ok",
+        {"path": UI_CATALOGUE, "repo_root": str(linked)},
+        context=_context(tmp_path, tmp_path),
+    )
+    assert not result.is_error, result.text
+
+
+def _refusal_body(result):
+    """The structured repair fields a refusal returns: ``details`` AND the text line."""
+    assert result.is_error
+    body = result.details["refusal"]
+    first, _, rest = result.text.partition("\n")
+    assert first.startswith("refused: ")
+    # providers never see ``details``: the same object must be in the text.
+    assert json.loads(rest) == body
+    return body
+
+
+@pytest.mark.asyncio
+async def test_wrong_checkout_for_path_names_the_repository_to_use(tmp_path):
+    """U1/J: core path against the UI checkout is 'use the other checkout', not 'never'."""
+    root = _ui_repo(tmp_path)
+    result = await execute_read_public_copy(
+        "x",
+        {"path": "local_operator/i18n/catalogues/en/wire.slash.json", "repo_root": str(root)},
+        context=_context(tmp_path, tmp_path),
+    )
+    body = _refusal_body(result)
+    assert body["code"] == "public_copy_repository_not_allowed"
+    assert body["reason"] == "wrong_checkout_for_path"
+    assert body["checkout_is"] == "damianvtran/local-operator-ui"
+    assert body["path_needs"] == "damianvtran/local-operator"
+    assert body["accepted_repositories"] == [
+        "damianvtran/local-operator",
+        "damianvtran/local-operator-ui",
+    ]
+    assert set(body["path_families"]) == set(body["accepted_repositories"])
+
+
+@pytest.mark.asyncio
+async def test_untrusted_origin_is_told_apart_from_a_wrong_checkout(tmp_path):
+    """U1/L: a lookalike origin is 'never allowed', and its URL is not echoed."""
+    secret_host = "https://token123:hunter2@example.invalid/damianvtran/local-operator-ui.git"
+    root = _ui_repo(tmp_path, origin=secret_host)
+    result = await execute_read_public_copy(
+        "x", {"path": UI_CATALOGUE, "repo_root": str(root)}, context=_context(tmp_path, tmp_path)
+    )
+    body = _refusal_body(result)
+    assert body["reason"] == "origin_not_accepted"
+    assert body["checkout_is"] is None
+    assert "token123" not in result.text and "example.invalid" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_typo_and_blank_root_are_distinguishable(tmp_path):
+    ctx = _context(tmp_path, tmp_path)
+    typo = await execute_read_public_copy(
+        "x", {"path": UI_CATALOGUE, "repo_root": str(tmp_path / "nope")}, context=ctx
+    )
+    blank = await execute_read_public_copy(
+        "x", {"path": UI_CATALOGUE, "repo_root": "   "}, context=ctx
+    )
+    assert _refusal_body(typo)["reason"] == "repo_root_does_not_exist"
+    assert _refusal_body(typo)["repo_root"] == str(tmp_path / "nope")
+    assert _refusal_body(blank)["reason"] == "repo_root_blank_or_not_a_string"
+
+
+@pytest.mark.asyncio
+async def test_subdirectory_root_says_it_is_not_the_checkout_root(tmp_path):
+    """U3: a subdirectory must not be reported as a wrong path."""
+    root = _ui_repo(tmp_path)
+    result = await execute_read_public_copy(
+        "x",
+        {"path": "i18n/catalogues/en/wire.slash.json", "repo_root": str(root / "src")},
+        context=_context(tmp_path, tmp_path),
+    )
+    body = _refusal_body(result)
+    assert body["code"] == "public_copy_path_not_allowed"
+    assert body["reason"] == "repo_root_is_not_the_checkout_root"
+    assert "src/i18n" not in result.text.split("\n", 1)[0]
+
+
+@pytest.mark.asyncio
+async def test_declared_filter_names_the_path_and_driver(tmp_path):
+    root = _ui_repo(tmp_path)
+    (root / ".gitattributes").write_text("*.json filter=custom-driver\n")
+    _git(root, "add", ".gitattributes")
+    _git(root, "commit", "-qm", "attrs")
+    result = await execute_read_public_copy(
+        "x", {"path": UI_CATALOGUE, "repo_root": str(root)}, context=_context(tmp_path, tmp_path)
+    )
+    body = _refusal_body(result)
+    assert body["code"] == "public_copy_filter_not_supported"
+    assert body["reason"] == "path_declares_git_filter"
+    assert body["path"] == UI_CATALOGUE and body["filter"] == "custom-driver"
+
+
+@pytest.mark.asyncio
+async def test_home_root_session_is_told_about_repo_root(tmp_path):
+    """U2: the first failure points at the option that exists for it."""
+    result = await execute_read_public_copy(
+        "x", {"path": UI_CATALOGUE}, context=_context(tmp_path, tmp_path)
+    )
+    body = _refusal_body(result)
+    assert result.text.startswith("refused: the workspace is not a git checkout")
+    assert body["fix"] == "pass repo_root"
+    # an explicit root that is not a checkout keeps the plain legacy sentence
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    again = await execute_read_public_copy(
+        "x", {"path": UI_CATALOGUE, "repo_root": str(plain)}, context=_context(tmp_path, tmp_path)
+    )
+    assert again.is_error and again.details is None
+
+
+@pytest.mark.asyncio
+async def test_absolute_path_with_a_root_is_not_called_empty(tmp_path):
+    root = _ui_repo(tmp_path)
+    result = await execute_read_public_copy(
+        "x",
+        {"path": str(root / UI_CATALOGUE), "repo_root": str(root)},
+        context=_context(tmp_path, tmp_path),
+    )
+    assert _refusal_body(result)["code"] == "public_copy_path_must_be_relative"
+
+
+@pytest.mark.asyncio
+async def test_loose_default_origin_is_not_recorded_as_verified(tmp_path):
+    """D1/D4: the default path keeps its loose match but never claims a verified identity."""
+    root = _ui_repo(tmp_path, origin="/local/mirror/damianvtran/local-operator-ui.git")
+    result = await execute_read_public_copy(
+        "x", {"path": UI_CATALOGUE}, context=_context(root, tmp_path)
+    )
+    assert not result.is_error, result.text
+    assert result.details["repository"] is None
+    assert result.details["repository_verified"] is False
+    audit = json.loads(Path(result.details["audit_log"]).read_text().splitlines()[-1])
+    assert audit["repository"] is None and audit["repository_verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_no_origin_is_null_not_an_empty_string(tmp_path):
+    """D4: a core checkout with no origin reads on the default root, with ``None`` identity."""
+    core = _public_repo(tmp_path)
+    result = await execute_read_public_copy(
+        "x",
+        {"path": "local_operator/i18n/catalogues/en/wire.slash.json"},
+        context=_context(core, tmp_path),
+    )
+    assert not result.is_error, result.text
+    assert result.details["repository"] is None
+    assert result.details["repository_verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_verified_explicit_root_records_the_identity(tmp_path):
+    root = _ui_repo(tmp_path)
+    result = await execute_read_public_copy(
+        "x", {"path": UI_CATALOGUE, "repo_root": str(root)}, context=_context(tmp_path, tmp_path)
+    )
+    assert result.details["repository"] == "damianvtran/local-operator-ui"
+    assert result.details["repository_verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_missing_promisor_blob_is_not_called_uncommitted(tmp_path):
+    """Q1: the file IS committed; only its object is unavailable."""
+    root = _ui_repo(tmp_path)
+    blob = subprocess.check_output(
+        ["git", "-C", str(root), "rev-parse", f"HEAD:{UI_CATALOGUE}"], text=True
+    ).strip()
+    loose = root / ".git" / "objects" / blob[:2] / blob[2:]
+    assert loose.is_file(), "fixture precondition: the blob is a loose object"
+    moved = tmp_path / "moved-object"
+    loose.rename(moved)
+    result = await execute_read_public_copy(
+        "x", {"path": UI_CATALOGUE, "repo_root": str(root)}, context=_context(tmp_path, tmp_path)
+    )
+    body = _refusal_body(result)
+    assert body["code"] == "public_copy_blob_unavailable"
+    assert body["reason"] == "object_missing_locally"
+    assert "not committed" not in result.text

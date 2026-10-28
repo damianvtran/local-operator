@@ -138,7 +138,17 @@ is **not** a redaction toggle:
   `damianvtran/local-operator-ui` **on github.com** (SSH or HTTPS), and only that
   repository's existing path family is exposed. Local origins, other hosts,
   unrelated repositories and core/UI path-family mismatches refuse. Relative
-  selectors resolve against the session cwd, never the process cwd.
+  selectors resolve against the session cwd, never the process cwd. The selector
+  chooses where to read and grants no access: it is not a permission.
+* A refusal is `refused: <code>` followed by one JSON line of technical repair
+  fields (the accepted repositories and their path families, plus the one
+  requirement that failed: the checkout that was found against the one the path
+  needs, the path or driver at fault, the confinement root, the pinned commit).
+  The same object is in the result `details`, but providers never see
+  `details`, so the text line is the model's only copy. The prose explaining the
+  fields lives in the `repo_root` schema description; the route adds no new
+  human-facing sentence, in keeping with AGENTS.md "Internationalization is
+  mandatory". The pre-existing refusal sentences are unchanged.
 * The default-root UI roots are keyed to **checkout identity, not path shape**: a
   `src/i18n/...` path is served only when the workspace root is the checkout
   root and the **last two path components** of `git remote get-url origin`,
@@ -173,9 +183,14 @@ is **not** a redaction toggle:
   Built-in CRLF normalization remains supported; arbitrary custom filters do not.
 * A trusted session confinement applies to the selected root and resolved copy
   path **before any Git/content read**. Confined Git commands use the existing
-  kernel sandbox or refuse; the path check alone cannot constrain a linked
-  worktree's external common Git directory or object alternates. No root
-  selector broadens confinement or creates a persistent permission grant.
+  kernel sandbox or refuse. The sandbox alone is not enough, so the reader also
+  refuses when `git rev-parse --git-dir`, `--git-common-dir` or any
+  `objects/info/alternates` entry resolves outside the confinement root. That
+  closes a measured gap: the macOS sandbox deliberately allows reads of
+  `/private/var/folders` (per-user temp), so a linked worktree confined to its own
+  directory whose common `.git` sat in per-user temp was readable by Git inside
+  the sandbox. The shared sandbox allowlist is unchanged. No root selector
+  broadens confinement or creates a persistent permission grant.
 * The resolved workspace root must equal `git rev-parse --show-toplevel`:
   `ls-files` and `diff` are cwd-relative while `show HEAD:<path>` is
   toplevel-relative, so a workspace below the checkout root could validate one
@@ -186,17 +201,22 @@ is **not** a redaction toggle:
 * Every successful read appends a JSON line to
   `<config dir>/audit/public-copy-reads.jsonl` **before** the content is
   returned: timestamp, session, path, key, character count, selected-content
-  SHA-256, canonical repository root, normalized repository identity, pinned
-  commit SHA and this document. The same provenance accompanies the result;
-  the audit store remains the caller's, not the selected repository's. If the record cannot be written, the read is refused. On POSIX the
-  log is opened without following links (`O_NOFOLLOW`, relative to a directory
-  opened the same way, and `O_NONBLOCK` so a FIFO fails the open instead of
-  blocking it), must be a regular file, lives in a `0700` directory and is
-  kept at mode `0600`; a symlinked log or audit directory refuses the read, and
-  an existing permissive file is tightened on the pinned descriptor or the
-  read is refused. Windows has none of those flags: it refuses the two link
-  cases by `lstat`, checks that the opened handle is a regular file, and relies
-  on ACLs rather than mode bits.
+  SHA-256, canonical repository root, repository identity, whether that
+  identity was verified, pinned commit SHA and this document. The identity is
+  recorded only from the strict GitHub-origin check, as `null` with
+  `repository_verified: false` otherwise; the default root keeps its historical
+  looser gate for admission but never claims a verified identity from it. The
+  same provenance is in the result `details` (transcript and audit; not
+  model-visible, because providers never see `details`). The audit store stays
+  the caller's, not the selected repository's. If the record cannot be written,
+  the read is refused. On POSIX the log is opened without following links
+  (`O_NOFOLLOW`, relative to a directory opened the same way, and `O_NONBLOCK`
+  so a FIFO fails the open instead of blocking it), must be a regular file,
+  lives in a `0700` directory and is kept at mode `0600`; a symlinked log or
+  audit directory refuses the read, and an existing permissive file is
+  tightened on the pinned descriptor or the read is refused. Windows has none of
+  those flags: it refuses the two link cases by `lstat`, checks that the opened
+  handle is a regular file, and relies on ACLs rather than mode bits.
 * Nothing else is exempt. `bash`, `read`, `grep` and every other tool still go
   through the normal redaction pass; a genuine secret read with any of them is
   masked exactly as before.
