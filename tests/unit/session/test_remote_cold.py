@@ -870,6 +870,76 @@ async def test_a_cold_viewer_prefers_the_live_wake_index_over_the_checkpoint(
 
 
 @pytest.mark.asyncio
+async def test_a_cold_viewer_restores_the_durable_mcp_startup_outcome(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``mcp_startup`` is durable for the same reason ``mcp_servers`` is.
+
+    The checkpoint carries the last runtime's startup OUTCOME, and it is what the
+    transcript's MCP failure rows are rendered from. Left unrestored, a cold
+    frame cannot know the failures it is about to be told about: the reveal
+    paints without them, and the outcome — replayed from the SAME durable record
+    once a runtime attaches — appends them after the first frame, which is the
+    tail shift this restore removes.
+
+    Asserted on both surfaces because both are read: the FACADE attribute is what
+    every in-process caller asks (the notice projection, the toast, the status
+    band, ``/mcp``), and the frontend state is what the wire carries to a viewer
+    that never runs this code.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = _seed_transcript(tmp_path, SESSION_ID)
+
+    from local_operator.session.frontend_state import (
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        FrontendSessionState,
+    )
+    from local_operator.session.mcp_status import McpStartupOutcome
+    from local_operator.session.transcript import Transcript
+
+    failures = {"github": "discovery hit an unreadable config", "peersvc": "cannot reach host"}
+    transcript = Transcript(directory)
+    await transcript.append_custom(
+        FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+        {
+            "checkpoint_id": "c1",
+            "state": FrontendSessionState(
+                session_id=SESSION_ID,
+                epoch="previous-owner",
+                mcp_startup={
+                    "configured": ["github", "peersvc"],
+                    "connected": [],
+                    "failures": failures,
+                    "tool_count": 0,
+                    "settling": False,
+                },
+            ).model_dump(mode="json"),
+        },
+    )
+    transcript.flush()
+    transcript.close()
+
+    viewer = await AttachedSession.cold(
+        SESSION_ID, config_dir=tmp_path, cwd=str(tmp_path), takeover_factory=_never
+    )
+    try:
+        outcome = viewer.mcp_startup
+        assert isinstance(
+            outcome, McpStartupOutcome
+        ), "the cold facade must expose the typed outcome in-process readers ask for"
+        assert outcome.failures == failures
+        assert viewer.frontend_state.mcp_startup == {
+            "configured": ["github", "peersvc"],
+            "connected": [],
+            "failures": failures,
+            "tool_count": 0,
+            "settling": False,
+        }
+    finally:
+        await viewer.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_restored_context_reading_keeps_the_window_it_was_measured_against(
     tmp_path: Path, monkeypatch
 ) -> None:
