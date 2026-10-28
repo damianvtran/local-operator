@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 import subprocess
@@ -602,7 +603,7 @@ def _drive_across_leases(owner: OwnerSnapshot, config_dir: Path, clock: _Clock) 
 
 
 def test_a_stop_between_the_reservation_and_the_card_still_posts_the_card(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, caplog
 ) -> None:
     """PR #3063 reviews m6/M5: the reservation proves an admission, not a
     card. A stop that cancelled the card hand-off left every replay
@@ -633,11 +634,54 @@ def test_a_stop_between_the_reservation_and_the_card_still_posts_the_card(
     assert [row["state"] for row in rows] == ["pending"] and rows[0]["card_posted_at"] is None
 
     monkeypatch.setattr(conversation_mod, "deliver_wake", real_deliver)
-    _run(a, config_dir)
-    _drive_across_leases(a, config_dir, clock)
+    with caplog.at_level(logging.WARNING, logger=conversation_mod.logger.name):
+        _run(a, config_dir)
+        _drive_across_leases(a, config_dir, clock)
     assert len(transcripts["sess_a"]) == 1, "the card is owed once, never twice"
     rows = _reservation_rows(config_dir)
     assert len(rows) == 1 and rows[0]["card_posted_at"] is not None
+    # Review m12: the one re-posted card is visible, as a closed line.
+    assert caplog.text.count("bridge: card re-posted code=card_unrecorded") == 1
+
+
+@pytest.mark.parametrize("settled", ["retired", "completed"])
+def test_an_unmarked_settled_reservation_gets_no_card(tmp_path, monkeypatch, settled) -> None:
+    """PR #3063 review m11: a reservation that is no longer live (``retired``
+    after a re-login's binding mismatch, or ``completed`` once the body was
+    served) but whose card was never recorded posted a card anyway — a wake
+    for a body that will never arrive, or was already answered. It is
+    recorded and answered ``duplicate`` instead. Totals at the END, across
+    leases."""
+
+    clock = _Clock()
+    monkeypatch.setattr(time, "time", clock)
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    _enroll(config_dir, a, "sess_a")
+
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+    real_deliver = conversation_mod.deliver_wake
+
+    async def stopped_at_the_card(*args: Any, **kwargs: Any) -> str:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(conversation_mod, "deliver_wake", stopped_at_the_card)
+    with pytest.raises(asyncio.CancelledError):
+        _run(a, config_dir)
+    from local_operator.team_bridge.store import state_db_path
+
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute("UPDATE body_reservations SET state = ?", (settled,))
+
+    monkeypatch.setattr(conversation_mod, "deliver_wake", real_deliver)
+    _run(a, config_dir)
+    _drive_across_leases(a, config_dir, clock)
+    assert transcripts["sess_a"] == []
+    rows = _reservation_rows(config_dir)
+    assert [row["state"] for row in rows] == [settled]
+    assert rows[0]["card_posted_at"] is not None
 
 
 def test_a_replay_after_a_posted_card_never_posts_again_across_leases(

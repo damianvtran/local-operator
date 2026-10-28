@@ -526,6 +526,27 @@ async def recorded_read_verdict(
     (the spine hands off with that receipt and never screens again), or
     ``(None, None)`` when there is no such intent and screening decides.
 
+    THE INVARIANT (PR #3063 review M6, after five rounds of a fix opening the
+    next defect): **a recorded read verdict replaces exactly one thing — the
+    model call. Every other gate still runs before the handoff, in the same
+    order as a fresh screen**:
+
+    1. the local producer fence (bridge on, owner/generation, credential pin,
+       consent receipt, designation) — the caller, before this function;
+    2. the recorded verdict was made under THIS enrollment generation (the
+       message's screening receipt names its ``creator_generation``); a
+       verdict from before a re-login is not this owner's decision — screen;
+    3. the hub's CURRENT authority — messaging available, organization
+       eligible, endpoint active, consent current for the served version —
+       through ``scheduler.verified_status_capture``, the very gate a fresh
+       screen runs (``recorded_verdict_authority`` below);
+    4. then the spine's own post-screen gates (body-hash S-20, envelope,
+       FENCES #2–#4, the S-12 ACK binding) exactly as after a fresh screen.
+
+    What is NOT re-run is the model: re-screening a message the hub already
+    reads as read can only mint a second tuple the write-once ledger refuses
+    (reviews M3/M4: a ``lop`` update between a stop and the restart).
+
     ONE RULE (PR #3063 reviews m4, M3, M4): a recorded read intent IS the
     screening decision already made and sent for this message. Whatever
     interrupted the handoff — a stop during the ACK POST (intent ``pending``)
@@ -572,10 +593,23 @@ async def recorded_read_verdict(
     fetched = hashlib.sha256(text.encode("utf-8")).hexdigest() if text is not None else None
     if fetched is None or stored.get("body_sha256") != fetched:
         return None, None
+    if state not in (_pull.ACK_CONFIRMED, _pull.ACK_PENDING):
+        return None, None
+    # Gate 2: same enrollment generation. The intent row carries none, but
+    # the screening receipt the verdict came from does; without a matching
+    # one this is not THIS owner's decision, so screening decides afresh.
+    try:
+        receipt_row = Store(config_dir).receipt_for_message(owner, message_id)
+    except StoreRefused:
+        receipt_row = None
+    if (
+        receipt_row is None
+        or str(receipt_row.get("body_sha256") or "") != fetched
+        or int(receipt_row.get("creator_generation") or -1) != int(owner.enrollment_generation)
+    ):
+        return None, None
     if state == _pull.ACK_CONFIRMED:
         return None, stored
-    if state != _pull.ACK_PENDING:
-        return None, None
     try:
         outcome = await _pull.recover_ack(
             owner, message_id, "read", config_dir=config_dir, access=access
@@ -586,6 +620,44 @@ async def recorded_read_verdict(
     if replayed != _pull.ACK_CONFIRMED:
         return f"ack_not_confirmed:{replayed or 'unknown'}", None
     return None, stored
+
+
+async def recorded_verdict_authority(owner: Any, *, config_dir: Path, auth_store: Any) -> str:
+    """Gate 3 of the recorded-verdict invariant; ``""`` when it passes.
+
+    The SAME authority gate a fresh screen runs before any model call
+    (``scheduler.verified_status_capture`` over the production sealed status
+    fetcher): messaging available, organization eligible, endpoint active,
+    consent current for the served version, generation live across the read.
+    A refusal is the same ``policy_stale`` hold a fresh screen would give,
+    and a local sign-in/identity refusal is classified exactly as
+    ``screen_item`` classifies it; hub-side failures propagate to the loop's
+    backoff, also as they do there. No model call, no policy publication.
+    """
+
+    from local_operator.team_bridge import scheduler as _scheduler
+    from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
+    from local_operator.team_bridge.store import Store, StoreRefused
+
+    try:
+        await _scheduler.verified_status_capture(
+            store=Store(config_dir),
+            owner=owner,
+            status_fetcher=_scheduler.default_status_fetcher(
+                config_dir=config_dir, owner=owner, auth_store=auth_store
+            ),
+        )
+    except StoreRefused as refusal:
+        return refusal.code if refusal.code == "policy_stale" else f"policy_stale:{refusal.code}"
+    except (BridgeRefusal, BridgeSignInRequired) as failure:
+        local = isinstance(failure, BridgeSignInRequired) or failure.code in {
+            "bridge_owner_mismatch",
+            "bridge_owner_moved",
+        }
+        if not local:
+            raise
+        return "policy_stale"
+    return ""
 
 
 def _confirmed_screen_result(stored: Mapping[str, Any]) -> Any:
@@ -778,9 +850,15 @@ async def handle_message_available(
         if recovery_code:
             return {"action": "hold", "message_id": message_id, "code": recovery_code}
         if recovered is not None:
-            # A recorded, confirmed read verdict for these bytes IS the
-            # screening decision: hand off with it, never screen again (see
-            # ``recorded_read_verdict``; reviews M3/M4).
+            # THE INVARIANT (see ``recorded_read_verdict``): the recorded
+            # verdict replaces only the model call. Gate 3 — the hub's
+            # current authority, the same gate a fresh screen runs — comes
+            # first, then everything after the screen as usual (review M6).
+            authority_code = await recorded_verdict_authority(
+                owner, config_dir=config_dir, auth_store=auth_store
+            )
+            if authority_code:
+                return {"action": "hold", "message_id": message_id, "code": authority_code}
             result = _confirmed_screen_result(recovered)
         else:
             result = await screen_item(

@@ -1104,6 +1104,25 @@ _BODY_RESERVATION_COLUMNS = frozenset(
 #: silently consumes an admitted message.
 BODY_RESERVATION_STATES = ("pending", "claimed", "completed", "retired")
 
+#: The hold-row upsert every writer shares (PR #3063 review m10): a hold
+#: re-written for the same message keeps the row's FIRST ``created_at`` — the
+#: age the owner sees is how long the message has waited, not how long since
+#: its latest reason. Relies on the table's (owner_key, message_id) key.
+_HOLD_UPSERT = (
+    "ON CONFLICT(owner_key, message_id) DO UPDATE SET "
+    "hold_code = excluded.hold_code, retry_at = excluded.retry_at"
+)
+
+#: What a replay owes for an admission's card (PR #3063 reviews M5/m11).
+#: ``owed``: the reservation is still live (pending/claimed) and no card was
+#: recorded — post it. ``posted``: recorded — a duplicate. ``settled``: the
+#: reservation is completed/retired with no record — the body was served or
+#: will never be, so a card now would wake the agent for nothing; record it
+#: and stop.
+CARD_OWED = "owed"
+CARD_POSTED = "posted"
+CARD_SETTLED = "settled"
+
 #: Closed reason vocabulary for ``last_error`` on a reservation. The column is
 #: written from a caller argument, so an OPEN string is how third-party text
 #: could reach a durable row that is supposed to be contentless (B2). A reason
@@ -2189,29 +2208,42 @@ class Store:
         if "card_posted_at" not in columns:
             conn.execute("ALTER TABLE body_reservations ADD COLUMN card_posted_at REAL")
 
-    def body_card_posted(self, owner: OwnerSnapshot, conversation_id: str, message_id: str) -> bool:
-        """Whether this admission's CARD was handed off (PR #3063 review M5).
+    def body_card_status(
+        self, owner: OwnerSnapshot, conversation_id: str, message_id: str
+    ) -> str | None:
+        """What a replay owes for this admission's CARD, or ``None`` (no row).
 
-        WHY ON THE RESERVATION: the reservation proves the hub admitted the
-        message; only this column proves the session was woken for it. A
-        replay therefore owes the card exactly when the reservation exists
-        and this is unset — a fact about THIS admission's card, never inferred
+        WHY ON THE RESERVATION (PR #3063 review M5): the reservation proves the
+        hub admitted the message; only ``card_posted_at`` proves the session
+        was woken for it — a fact about THIS admission's card, never inferred
         from some other row (a hold of any code once read as "card owed" and
-        posted a second card). Live-owner fenced; a fenced owner reads False.
+        posted a second card). WHY THE STATE TOO (review m11): an unrecorded
+        card is owed only while the reservation is live; a completed or
+        retired one answers :data:`CARD_SETTLED`. Live-owner fenced; a fenced
+        owner reads ``None``.
+
+        A READ THAT TAKES THE WRITE LOCK (review n6): the column is additive
+        and may not exist yet on a store last opened by an older binary, so
+        this runs the guarded ``ALTER`` under ``BEGIN IMMEDIATE`` first — the
+        same serialised step :meth:`mark_body_card_posted` runs.
         """
 
         with self._connect() as conn:
             self._init(conn)
             if self._live_generation(conn, owner) != owner.enrollment_generation:
-                return False
+                return None
             self._begin_write(conn)
             self._ensure_card_posted_column(conn)
             row = conn.execute(
-                "SELECT card_posted_at FROM body_reservations WHERE owner_key = ? "
+                "SELECT state, card_posted_at FROM body_reservations WHERE owner_key = ? "
                 "AND conversation_id = ? AND message_id = ?",
                 (_owner_key(owner), conversation_id, message_id),
             ).fetchone()
-            return row is not None and row["card_posted_at"] is not None
+            if row is None:
+                return None
+            if row["card_posted_at"] is not None:
+                return CARD_POSTED
+            return CARD_OWED if row["state"] in ("pending", "claimed") else CARD_SETTLED
 
     def mark_body_card_posted(
         self, owner: OwnerSnapshot, conversation_id: str, message_id: str, *, now: float
@@ -4550,9 +4582,12 @@ class Store:
                     raise StoreRefused(
                         "write_once_conflict", "attempt already committed its outcome"
                     )
+                # Upsert, never REPLACE (PR #3063 review m10): a re-drive held
+                # again for a NEW reason must keep the row's ``created_at``,
+                # or the owner-visible hold age resets on every pass.
                 conn.execute(
-                    "INSERT OR REPLACE INTO screening_holds (owner_key, message_id, "
-                    "hold_code, retry_at, created_at) VALUES (?,?,?,?,?)",
+                    "INSERT INTO screening_holds (owner_key, message_id, "
+                    "hold_code, retry_at, created_at) VALUES (?,?,?,?,?) " + _HOLD_UPSERT,
                     (key, message_id, hold_code, retry_at, time.time()),
                 )
 
@@ -4739,14 +4774,20 @@ class Store:
         that release would drop the message.
         """
 
-        verb = "INSERT OR IGNORE" if keep_existing else "INSERT OR REPLACE"
+        # An existing row keeps its ``created_at`` either way (PR #3063
+        # review m10): ``keep_existing`` leaves it untouched; otherwise the
+        # code and schedule move IN PLACE. INSERT OR REPLACE deleted and
+        # re-inserted the row, so every re-hold reset the visible hold age.
+        on_conflict = (
+            "ON CONFLICT(owner_key, message_id) DO NOTHING" if keep_existing else _HOLD_UPSERT
+        )
         with self._connect() as conn:
             self._init(conn)
             self._begin_write(conn)
             self._require_live(conn, owner)
             conn.execute(
-                f"{verb} INTO screening_holds (owner_key, message_id, hold_code, "
-                "retry_at, created_at) VALUES (?,?,?,?,?)",
+                "INSERT INTO screening_holds (owner_key, message_id, hold_code, "
+                "retry_at, created_at) VALUES (?,?,?,?,?) " + on_conflict,
                 (
                     _owner_key(owner),
                     _contentless_delivery_key(message_id),

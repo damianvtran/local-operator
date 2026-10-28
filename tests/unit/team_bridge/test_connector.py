@@ -1341,11 +1341,14 @@ def test_a_stop_during_the_read_ack_post_is_flushed_and_delivered_once(
         # stands in for the model call only.
         if Store(config_dir).find_pending_intent(owner_, "bmsg_1", "read") is not None:
             return screening_mod.ScreenResult("hold", hold_code="ack_recovery")
-        return await screened(
+        result = await screened(
             owner_, item, config_dir=config_dir, auth_store=auth_store, settings=settings
         )
+        _commit_screening_receipt(config_dir, owner_, result.receipt)
+        return result
 
     monkeypatch.setattr(wake_mod, "screen_item", screening_step_5)
+    _hub_status(monkeypatch, owner)
     real_wire_ack = wire.ack
 
     async def stopped_mid_post(message_id: str, **kwargs: Any) -> dict[str, Any]:
@@ -1381,6 +1384,92 @@ def test_a_stop_during_the_read_ack_post_is_flushed_and_delivered_once(
     assert store.drain_feed_refs(owner, 3) == []
 
 
+def _hub_status(monkeypatch: Any, owner: OwnerSnapshot) -> dict[str, Any]:
+    """The hub's CURRENT status as the production sealed fetcher returns it.
+
+    The recorded-verdict path runs the same authority gate a fresh screen
+    runs (``scheduler.verified_status_capture``, PR #3063 review M6), so a
+    rig that hands off on a recorded verdict must answer a lawful status. The
+    returned dict is live: a case flips ``available`` or the endpoint
+    ``state`` to model the hub withdrawing authority while the device is off.
+    Only the transport is faked; normalization, consent currency and the
+    floor advance are the real ones.
+    """
+
+    from local_operator.team_bridge import scheduler as scheduler_mod
+    from local_operator.team_bridge.client import (
+        SCREENING_TEMPLATE_V1,
+        SCREENING_VERSION_V1,
+    )
+
+    hub = {"available": True, "endpoint_state": "active", "fetches": 0}
+
+    def fetcher(*, config_dir: Path, owner: Any, auth_store: Any = None, transport: Any = None):
+        async def _fetch() -> Any:
+            hub["fetches"] += 1
+            raw = {
+                "api_version": "1",
+                "available": hub["available"],
+                "tenants": [
+                    {
+                        "tenant_id": owner.tenant_id,
+                        "tenant_name": "Org",
+                        "eligible": True,
+                        "endpoint": {
+                            "id": owner.endpoint_id,
+                            "label": "e",
+                            "state": hub["endpoint_state"],
+                        },
+                        "counts": {"unread": 0, "requests_pending": 0, "blocked": 0},
+                    }
+                ],
+                "guidance": {"version": "bridge-guidance-v1", "text": "g"},
+                "screening": {"version": SCREENING_VERSION_V1, "template": SCREENING_TEMPLATE_V1},
+                "consent": {"version": "bridge_consent_v1", "text": "c"},
+            }
+            return scheduler_mod.VerifiedStatus(scheduler_mod._VERIFIED_TOKEN, raw)
+
+        return _fetch
+
+    monkeypatch.setattr(scheduler_mod, "default_status_fetcher", fetcher)
+    return hub
+
+
+def _commit_screening_receipt(config_dir: Path, owner: OwnerSnapshot, receipt: Any) -> None:
+    """What the REAL screener commits before it answers ``deliver``.
+
+    ``Store.finish_screening`` writes the message's receipt with its
+    ``creator_generation``; the recorded-verdict path reads exactly that to
+    refuse a verdict from before a re-login (review M6, gate 2). Fake screens
+    that stand in for the whole cycle must therefore write it too.
+    """
+
+    from local_operator.team_bridge.store import _owner_key, state_db_path
+
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO screening_receipts (owner_key, message_id, "
+            "body_sha256, template_sha256, prompt_version, model, verdict, categories, "
+            "envelope_digest, admission_revision, policy_epoch, creator_generation, "
+            "created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                _owner_key(owner),
+                "bmsg_1",
+                receipt.body_sha256,
+                receipt.template_sha256,
+                receipt.prompt_version,
+                receipt.model,
+                receipt.verdict,
+                json.dumps(sorted(receipt.categories)),
+                "e" * 64,
+                "rev-1",
+                1,
+                owner.enrollment_generation,
+                time.time(),
+            ),
+        )
+
+
 def _stop_during_the_read_ack_post(monkeypatch, tmp_path) -> tuple[Any, ...]:
     """A connector stopped DURING the read-ACK POST, the m4 shape: the intent
     is durable and pending, the hub never answered, the ref is still due."""
@@ -1412,9 +1501,11 @@ def _stop_during_the_read_ack_post(monkeypatch, tmp_path) -> tuple[Any, ...]:
             body_sha256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
             categories=(),
         ).validated()
+        _commit_screening_receipt(config_dir, owner_, receipt)
         return ScreenResult(disposition="deliver", receipt=receipt)
 
     monkeypatch.setattr(wake_mod, "screen_item", screen)
+    _hub_status(monkeypatch, owner)
     real_wire_ack = wire.ack
 
     async def stopped_mid_post(message_id: str, **kwargs: Any) -> dict[str, Any]:
@@ -1490,9 +1581,11 @@ def test_a_confirmed_read_with_a_stopped_handoff_delivers_on_its_verdict(
             body_sha256=hashlib.sha256(body.encode("utf-8")).hexdigest(),
             categories=(),
         ).validated()
+        _commit_screening_receipt(config_dir, owner_, receipt)
         return ScreenResult(disposition="deliver", receipt=receipt)
 
     monkeypatch.setattr(wake_mod, "screen_item", screen)
+    _hub_status(monkeypatch, owner)
     delivered_fake = wake_mod.deliver_wake
 
     async def stopped_at_the_handoff(*args: Any, **kwargs: Any) -> str:
@@ -1516,6 +1609,148 @@ def test_a_confirmed_read_with_a_stopped_handoff_delivers_on_its_verdict(
     assert len(wire.refs) == 1  # and never re-sent the ACK
     assert store.screening_hold(owner, "bmsg_1") is None
     assert store.drain_feed_refs(owner, 3) == []
+
+
+def _confirmed_then_stopped_at_the_handoff(monkeypatch, tmp_path) -> tuple[Any, ...]:
+    """The r4/r5 probe shape: screened, read ACK CONFIRMED by the hub, then a
+    stop cancels the handoff. Returns the rig with the stop already applied."""
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    record, body = _wire_spine(monkeypatch, tmp_path)
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    wire, access = _real_ack_access(monkeypatch, owner)
+    screens: list[int] = []
+
+    async def screen(owner_, item, *, config_dir, auth_store, settings=None):
+        screens.append(int(owner_.enrollment_generation))
+        receipt = _receipt(body)
+        _commit_screening_receipt(config_dir, owner_, receipt)
+        return ScreenResult(disposition="deliver", receipt=receipt)
+
+    monkeypatch.setattr(wake_mod, "screen_item", screen)
+    hub = _hub_status(monkeypatch, owner)
+    delivered_fake = wake_mod.deliver_wake
+
+    async def stopped_at_the_handoff(*args: Any, **kwargs: Any) -> str:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(wake_mod, "deliver_wake", stopped_at_the_handoff)
+    _one_pending_ref(store, owner)
+    with pytest.raises(asyncio.CancelledError):
+        _iterate(owner, tmp_path, access)
+    recorded = store.recorded_intent(owner, "bmsg_1", "read")
+    assert recorded is not None and recorded["state"] == "confirmed"
+    monkeypatch.setattr(wake_mod, "deliver_wake", delivered_fake)
+    return clock, store, owner, record, wire, access, screens, hub
+
+
+_ACROSS_A_LEASE_S = max(wake_mod.CLAIM_TTL_S, loop_mod.RETRY_MAX_S) + 5
+
+
+@pytest.mark.parametrize("withdrawn", ["available", "endpoint_state"])
+def test_a_recorded_verdict_still_passes_the_hubs_current_authority(
+    tmp_path, monkeypatch, withdrawn
+) -> None:
+    """PR #3063 review M6 (the r5 probe). The invariant: a recorded read
+    verdict replaces ONLY the model call. Here the hub withdrew messaging (or
+    deactivated the endpoint) while the device was off; the recorded-verdict
+    path skipped the screen and with it the hub-status gate, and handed the
+    message off anyway. It must hold ``policy_stale`` — visibly — for as long
+    as the hub withholds authority, and deliver once on its stored verdict
+    (still no model call) when the hub restores it. Totals at the END."""
+
+    clock, store, owner, record, wire, access, screens, hub = (
+        _confirmed_then_stopped_at_the_handoff(monkeypatch, tmp_path)
+    )
+    if withdrawn == "available":
+        hub["available"] = False
+    else:
+        hub["endpoint_state"] = "disabled"
+    for _ in range(4):  # across more than one 15-minute claim lease
+        _iterate(owner, tmp_path, access)
+        clock.now += _ACROSS_A_LEASE_S
+    assert record["delivered"] == []
+    hold = store.screening_hold(owner, "bmsg_1")
+    assert hold is not None and hold["hold_code"] == "policy_stale"
+    assert hub["fetches"] >= 1  # the gate actually asked the hub
+
+    hub.update(available=True, endpoint_state="active")
+    for _ in range(4):
+        _iterate(owner, tmp_path, access)
+        clock.now += _ACROSS_A_LEASE_S
+    assert len(record["delivered"]) == 1
+    assert screens == [1]  # the only model call is the original screen
+    assert len(wire.refs) == 1  # one hub ACK, the original
+    assert store.screening_hold(owner, "bmsg_1") is None
+
+
+def test_a_verdict_confirmed_before_a_relogin_is_not_handed_off_after_it(
+    tmp_path, monkeypatch
+) -> None:
+    """PR #3063 review M6, the re-login variant: ``owner_key`` survives a
+    same-account re-login, so the recorded intent is still found, but the
+    verdict was made for the OLD enrollment generation. Gate 2 refuses it and
+    the message is screened afresh under the new generation, then delivered
+    exactly once. Totals at the end, across leases."""
+
+    clock, store, owner, record, wire, access, screens, _hub = (
+        _confirmed_then_stopped_at_the_handoff(monkeypatch, tmp_path)
+    )
+    relogged = OwnerSnapshot(
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        tenant_id=owner.tenant_id,
+        endpoint_id=owner.endpoint_id,
+        canonical_base_url=owner.canonical_base_url,
+        enrollment_generation=store.invalidate(owner),
+    )
+    store.record_feed_batch(
+        relogged,
+        feed_seq(9),
+        ["message_available:message_id=bmsg_1"],
+        resync_required=False,
+    )
+    for _ in range(4):
+        _iterate(relogged, tmp_path, access)
+        clock.now += _ACROSS_A_LEASE_S
+    assert screens == [1, 2]  # the old verdict was not reused under gen 2
+    assert len(record["delivered"]) == 1
+    assert store.screening_hold(relogged, "bmsg_1") is None
+
+
+def test_a_screening_rehold_keeps_the_hold_age(tmp_path, monkeypatch) -> None:
+    """PR #3063 review m10: a re-drive held AGAIN by screening (which writes
+    through ``Store.persist_hold``) used INSERT OR REPLACE, so the hold's
+    ``created_at`` reset on every pass and its age read 0 forever. The age
+    must grow across passes while the reason changes."""
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    _wire_spine(monkeypatch, tmp_path)
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    codes = iter(["policy_stale", "breaker_open"] * 4)
+
+    async def screening_holds(owner_, item, *, config_dir, auth_store, settings=None):
+        code = next(codes)
+        Store(config_dir).persist_hold(owner_, "bmsg_1", code)  # screening's own write
+        return ScreenResult(disposition="hold", hold_code=code)
+
+    monkeypatch.setattr(wake_mod, "screen_item", screening_holds)
+    _one_pending_ref(store, owner)
+    ages: list[tuple[str, int]] = []
+    for _ in range(4):
+        _iterate(owner, tmp_path)
+        hold = store.screening_hold(owner, "bmsg_1")
+        assert hold is not None
+        ages.append((hold["hold_code"], int(clock.now - hold["created_at"])))
+        clock.now += 3700
+    assert [code for code, _ in ages] == ["policy_stale", "breaker_open"] * 2
+    assert [age for _, age in ages] == [0, 3700, 7400, 11100]
 
 
 def test_recoding_a_hold_keeps_its_age(tmp_path, monkeypatch) -> None:
