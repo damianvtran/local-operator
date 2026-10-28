@@ -52,6 +52,7 @@ import binascii
 import json
 import logging
 import re
+import threading
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Literal
@@ -82,6 +83,10 @@ _MEDIA_NEEDLES = ('"data"', '"attachment"', '"mime_type"')
 _MEDIA_KEYS = ("data", "attachment")
 
 Kind = Literal["document", "image"]
+
+#: ``(records, truncated)``: the transcript-derived half of a listing, the unit the cache holds.
+#: A tuple so the shared cached value cannot be appended to by a caller.
+_Inventory = tuple[tuple[dict[str, Any], ...], bool]
 
 
 def _maybe_user_row(line: str) -> bool:
@@ -169,7 +174,41 @@ def _item(
         if digest is not None
         else _str_or_none(block.get("stored_path"))
     )
+    injection = block.get("injection")
+    # Transcript-derived only. ``exists``/``stored`` (and a ``bytes`` taken from the store
+    # copy) are filesystem facts that change without any journal write, so they are NOT part
+    # of this record: :func:`_with_disk_state` stats them on every listing.
+    return {
+        "message_id": message_id,
+        "ts": ts,
+        "index": index,
+        "kind": kind,
+        "attachment": digest,
+        "filename": _str_or_none(block.get("filename")) or _str_or_none(block.get("name")),
+        "mime_type": mime,
+        "bytes": size,
+        "path": _str_or_none(block.get("path")),
+        "stored_path": stored_path,
+        "injection": injection if injection in ("native", "extracted", "reference") else None,
+    }
+
+
+def _with_disk_state(record: dict[str, Any]) -> dict[str, Any]:
+    """A fresh wire item: the cached row record plus ``exists``/``stored`` stat'd NOW.
+
+    WHY PER CALL. The operator requirement is that a file which is no longer there SAYS SO
+    rather than failing silently, and the canvas derives "Moved or deleted"/"gone" directly
+    from these two flags. In a settled conversation nothing is ever appended to the journal,
+    so a flag computed at scan time and cached against the journal's identity would never
+    turn ``False`` (PR #3042 round-2 R2-1). At most two stats per item (``MAX_ITEMS`` caps the
+    list) is cheap beside a journal rescan, and the route already runs this off the event loop.
+
+    Returns a NEW dict every time, so a caller mutating its listing cannot corrupt the cache.
+    """
+    item = dict(record)
+    size = item["bytes"]
     stored = False
+    stored_path = item["stored_path"]
     if stored_path is not None:
         try:
             stat = Path(stored_path).stat()
@@ -180,32 +219,20 @@ def _item(
                 size = stat.st_size
         except OSError:
             stored = False
-    origin = _str_or_none(block.get("path"))
     # Whether the ORIGIN is still where the person attached it from. ``None`` when the row
     # names no origin (a pasted screenshot) - unknown is not "gone". Stat'd here rather than
     # by the renderer so one listing answers every row without a per-row bridge round trip.
     exists: bool | None = None
+    origin = item["path"]
     if origin is not None:
         try:
             exists = Path(origin).is_file()
         except OSError:
             exists = None
-    injection = block.get("injection")
-    return {
-        "message_id": message_id,
-        "ts": ts,
-        "index": index,
-        "kind": kind,
-        "attachment": digest,
-        "filename": _str_or_none(block.get("filename")) or _str_or_none(block.get("name")),
-        "mime_type": mime,
-        "bytes": size,
-        "path": origin,
-        "exists": exists,
-        "stored_path": stored_path,
-        "stored": stored,
-        "injection": injection if injection in ("native", "extracted", "reference") else None,
-    }
+    item["bytes"] = size
+    item["exists"] = exists
+    item["stored"] = stored
+    return item
 
 
 def items_from_row(row: Any, store: AttachmentStore) -> list[dict[str, Any]]:
@@ -241,10 +268,16 @@ def items_from_row(row: Any, store: AttachmentStore) -> list[dict[str, Any]]:
     return found
 
 
-#: Settled-turn re-reads and materialise share this small revision cache. A hit costs one stat;
-#: edits and compression invalidate on the source's physical identity. Nothing is written to disk.
+#: Settled-turn re-reads and materialise share this small revision cache of TRANSCRIPT-DERIVED
+#: records (no ``exists``/``stored``: those are re-stat'd per call). A hit costs one stat of the
+#: journal; edits and compression invalidate on the source's physical identity. Nothing is
+#: written to disk. The route reads it from ``asyncio.to_thread`` workers, so every
+#: get/move/set/evict happens under ``_CACHE_LOCK``: an unlocked ``move_to_end`` racing another
+#: thread's eviction raises ``KeyError`` (PR #3042 round-2 R2-2). The scan itself runs outside
+#: the lock so one slow journal never serialises every other session's listing.
 _CACHE_SIZE = 8
-_INVENTORY_CACHE: OrderedDict[tuple[str, str, int, int, int, int], dict[str, Any]] = OrderedDict()
+_INVENTORY_CACHE: OrderedDict[tuple[str, str, int, int, int, int], _Inventory] = OrderedDict()
+_CACHE_LOCK = threading.Lock()
 
 
 def _inventory_cache_key(directory: Path) -> tuple[str, str, int, int, int, int] | None:
@@ -256,6 +289,25 @@ def _inventory_cache_key(directory: Path) -> tuple[str, str, int, int, int, int]
     return (str(directory), str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
 
+def _inventory(session_dir: Path) -> _Inventory:
+    """The cached (or freshly scanned) row records. Shared and read-only: never mutate."""
+    cache_key = _inventory_cache_key(session_dir)
+    if cache_key is not None:
+        with _CACHE_LOCK:
+            cached = _INVENTORY_CACHE.get(cache_key)
+            if cached is not None:
+                _INVENTORY_CACHE.move_to_end(cache_key)
+                return cached
+    result = _scan_user_attachments(session_dir)
+    if cache_key is not None:
+        with _CACHE_LOCK:
+            _INVENTORY_CACHE[cache_key] = result
+            _INVENTORY_CACHE.move_to_end(cache_key)
+            while len(_INVENTORY_CACHE) > _CACHE_SIZE:
+                _INVENTORY_CACHE.popitem(last=False)
+    return result
+
+
 def list_user_attachments(session_dir: Path) -> dict[str, Any]:
     """``{items, truncated}`` for the conversation in ``session_dir``, oldest first.
 
@@ -263,27 +315,16 @@ def list_user_attachments(session_dir: Path) -> dict[str, Any]:
     position in its message's ``content`` so two attachments on one message keep the order
     the person attached them in. A session with no journal answers an empty list. Raises
     :class:`compression.ArchiveError` for an archive this build cannot decode - an honest
-    failure the route maps to an error, never an empty "nothing attached".
+    failure the route maps to an error, never an empty "nothing attached". The answer is
+    always freshly built (new dicts), with ``exists``/``stored`` stat'd on this call.
     """
-    session_dir = Path(session_dir)
-    cache_key = _inventory_cache_key(session_dir)
-    if cache_key is not None:
-        cached = _INVENTORY_CACHE.get(cache_key)
-        if cached is not None:
-            _INVENTORY_CACHE.move_to_end(cache_key)
-            return cached
-    result = _scan_user_attachments(session_dir)
-    if cache_key is not None:
-        _INVENTORY_CACHE[cache_key] = result
-        _INVENTORY_CACHE.move_to_end(cache_key)
-        while len(_INVENTORY_CACHE) > _CACHE_SIZE:
-            _INVENTORY_CACHE.popitem(last=False)
-    return result
+    records, truncated = _inventory(Path(session_dir))
+    return {"items": [_with_disk_state(record) for record in records], "truncated": truncated}
 
 
-def _scan_user_attachments(session_dir: Path) -> dict[str, Any]:
+def _scan_user_attachments(session_dir: Path) -> _Inventory:
     if not compression.has_transcript(session_dir):
-        return {"items": [], "truncated": False}
+        return (), False
     store = store_for_transcript_dir(session_dir)
     items: list[dict[str, Any]] = []
     truncated = False
@@ -301,7 +342,7 @@ def _scan_user_attachments(session_dir: Path) -> dict[str, Any]:
             items.append(item)
         if truncated:
             break
-    return {"items": items, "truncated": truncated}
+    return tuple(items), truncated
 
 
 def find_user_attachment(session_dir: Path, digest: str) -> dict[str, Any] | None:
@@ -313,7 +354,8 @@ def find_user_attachment(session_dir: Path, digest: str) -> dict[str, Any] | Non
     attached twice under two names materialises under the name used most recently.
     """
     found = None
-    for item in list_user_attachments(session_dir)["items"]:
-        if item.get("attachment") == digest:
-            found = item
-    return found
+    # Membership needs only the cached records; stat just the one item that is returned.
+    for record in _inventory(Path(session_dir))[0]:
+        if record.get("attachment") == digest:
+            found = record
+    return None if found is None else _with_disk_state(found)

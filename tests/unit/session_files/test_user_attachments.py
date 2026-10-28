@@ -364,3 +364,57 @@ async def test_materialise_copies_a_listed_attachment_and_refuses_others(
     foreign, _ = _stored(directory, b"someone else's bytes", "text/plain")
     assert (await client.post(f"{base}/{foreign}/materialise")).status_code == 404
     assert (await client.post(f"{base}/not-a-digest/materialise")).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_listing_restats_origin_and_store_copy_without_a_journal_change(api) -> None:
+    """R2-1 (PR #3042 round 2): a moved/deleted file must SAY SO in a settled conversation.
+
+    The inventory cache is keyed on the journal's identity, and nothing is appended to the
+    journal when the person deletes the original or the store is pruned. So ``exists`` and
+    ``stored`` must be re-stat'd on every listing, never served from the cached scan.
+    """
+    client, cfg = api
+    directory = _session(cfg)
+    digest, store_copy = _stored(directory, b"quarterly numbers", "text/plain")
+    origin = cfg.parent / "Downloads" / "report.txt"
+    origin.parent.mkdir(parents=True, exist_ok=True)
+    origin.write_bytes(b"quarterly numbers")
+    write_journal(
+        directory,
+        [
+            _user(
+                "u1",
+                1.0,
+                [
+                    {
+                        "type": "document",
+                        "filename": "report.txt",
+                        "mime_type": "text/plain",
+                        "path": str(origin),
+                        "attachment": digest,
+                    }
+                ],
+            )
+        ],
+    )
+    journal = directory / "transcript.jsonl"
+    before = (await client.get(URL)).json()["result"]["items"][0]
+    assert (before["exists"], before["stored"]) == (True, True)
+    identity = journal.stat()
+    origin.unlink()
+    store_copy.unlink()
+    # Precondition of the regression: the journal is untouched, so the cache key still hits.
+    after_stat = journal.stat()
+    assert (after_stat.st_ino, after_stat.st_size, after_stat.st_mtime_ns) == (
+        identity.st_ino,
+        identity.st_size,
+        identity.st_mtime_ns,
+    )
+    after = (await client.get(URL)).json()["result"]["items"][0]
+    assert (after["exists"], after["stored"]) == (False, False)
+    # Each answer is freshly built: mutating one listing cannot leak into the next (R2-3).
+    first = list_user_attachments(directory)
+    first["items"][0]["filename"] = "mutated"
+    first["items"].clear()
+    assert list_user_attachments(directory)["items"][0]["filename"] == "report.txt"
