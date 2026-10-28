@@ -73,7 +73,10 @@ from local_operator.supplements.listing import directory_listing
 #: which are baked into the stored records.
 #: 5: assistant directory listings (``supplements.listing``) are admitted as mentions; the bump
 #: is what makes an existing session's cached ledger rescan and gain them on its next read.
-SCAN_SCHEMA: Final = 5
+#: 6: ``bash_effects`` substitutes ``$NAME``s assigned literally earlier in the same command and
+#: resolves Python writes through ``sys.argv[N]``, so ``cp a "$D/b.pdf"`` and ``python -c ...``
+#: can now name their files; the bump rescans cached ledgers.
+SCAN_SCHEMA: Final = 6
 
 #: ``origin`` vocabulary, strongest evidence first. A file seen under several origins keeps the
 #: strongest (``write`` then a later ``bash > same`` is still "written"), so the filter chips are
