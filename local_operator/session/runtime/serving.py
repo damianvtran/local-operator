@@ -1147,6 +1147,15 @@ class ServingSessionHandle(SessionHandle):
         # completed duplicates are recognized from transcript-backed history.
         self._prompt_commands: dict[str, _PromptCommand] = {}
         self._prompt_drain_task: asyncio.Task[None] | None = None
+        # STEER ADMISSION IS SERIALIZED, and the reason is ordering rather than
+        # exclusion. A steer is admitted through an awaited durable write (the
+        # successor spool — see ``steer``), so without this lock two corrections
+        # submitted together (``asyncio.gather``, or two clients in the same
+        # tick) could reach ``Session.steer`` in the order their spool writes
+        # finished rather than the order they arrived. The queue's own order is
+        # a pinned property (``test_distinct_concurrent_steers_keep_fifo_order``),
+        # and an ``asyncio.Lock`` hands its waiters the slot in arrival order.
+        self._steer_admission_lock = asyncio.Lock()
         # Prompt and steer share one identity namespace. In particular, an idle
         # projection may race a turn start and transfer the rejected prompt's
         # identity to steer rather than admitting the same producer twice.
@@ -3023,6 +3032,28 @@ class ServingSessionHandle(SessionHandle):
         if source == SOURCE_USER:
             return SPOOL_RECEIPT_PROMPT
         return SPOOL_RECEIPT_WAKE if wake else SPOOL_RECEIPT_NOTE
+
+    async def _forget_spooled_owner_row(self, command_id: str) -> None:
+        """Drop the spooled copy of an owner message that is now durable elsewhere.
+
+        The undo of :meth:`_spool_for_successor` for the one caller that must not
+        leave a copy behind: a steer this runtime went on to accept, whose row a
+        successor would otherwise deliver a second time. Best-effort by contract —
+        a removal lost to a crash is covered by the successor's own dedupe
+        (``has_admitted_command``, see ``process._run_owner_prompt``), and this
+        runs on an admission path where a bookkeeping failure must not turn an
+        accepted message into an error.
+        """
+        directory = self._session_directory()
+        if directory is None or not command_id:
+            return
+        from local_operator.session.runtime.inbox import remove_owner_row
+        from local_operator.wakes.spooled import await_spool_write
+
+        try:
+            await await_spool_write(remove_owner_row, directory, command_id)
+        except Exception:  # noqa: BLE001 — a stale spool row is deduped at replay
+            logger.warning("could not drop the spooled copy of %s", command_id, exc_info=True)
 
     def may_refresh(self) -> str:
         """Why this runtime must NOT retire for a newer build right now, or
@@ -5052,8 +5083,58 @@ class ServingSessionHandle(SessionHandle):
 
                 self._command_reservations.reject(command_id)
                 raise DocumentCarriageUnsupported()
+        # ONE STEER AT A TIME, in arrival order: the durable spool write below
+        # is awaited, so without this lock two corrections submitted together
+        # could reach the queue in the order their writes finished rather than
+        # the order they arrived. See ``_steer_admission_lock``.
+        async with self._steer_admission_lock:
+            return await self._admit_steer(
+                text,
+                blocks,
+                command_id=command_id,
+                input_mode=input_mode,
+                input_path=input_path,
+                audio_blocks=audio_blocks_decoded,
+                document_blocks=document_blocks_decoded,
+                harness_injected=harness_injected,
+            )
+
+    async def _admit_steer(
+        self,
+        text: str,
+        blocks: list["ImageContent"],
+        *,
+        command_id: str,
+        input_mode: str | None,
+        input_path: str | None,
+        audio_blocks: list["AudioContent"],
+        document_blocks: list[Any],
+        harness_injected: bool,
+    ) -> str:
+        """The admission half of :meth:`steer`, once its blocks are decoded.
+
+        Split out so the ORDER of admission is the order of arrival: the caller
+        holds ``_steer_admission_lock`` across this whole body, and everything
+        here — the reserve, the durable spool write, the queue insert and the
+        echoed row — is one step for ordering purposes.
+        """
         if not self._command_reservations.reserve(command_id, kind="steer"):
             return "already admitted"
+        # ATTACHMENTS — IMAGES, A RECORDING, AND NOW DOCUMENTS — ARE THE ONE
+        # THING THE VEHICLE CANNOT CARRY and take the refusal, exactly as an
+        # attachment-carrying prompt does (see that arm for why an inbox row
+        # cannot hold them). Checked on the DECODED blocks, which is the fact: a
+        # block the wire sniffer dropped on the way in is not being carried
+        # anywhere, so accepting the correction without it is honest.
+        #
+        # ONE CHECK FOR BOTH ARMS, because both now spool: the window below did
+        # this from the start, and the normal path below it joins the same
+        # vehicle (see that block). A steer with an attachment has no durable
+        # home either way, and accepting one would be the silent loss this seam
+        # exists to end.
+        if blocks or audio_blocks or document_blocks:
+            self._command_reservations.reject(command_id)
+            raise self._retiring_refusal()
         # THE UPDATE WINDOW, and a steer is the one admission that cannot simply
         # wait: ``Session.steer`` queues against a TURN, and this runtime is idle
         # by construction (the window only opens when ``may_refresh`` reports
@@ -5062,20 +5143,7 @@ class ServingSessionHandle(SessionHandle):
         # then dispose it. It is the owner's own words, so it takes the spool and
         # the owner's receipt: the successor runs it, at the head of the turn the
         # prompt above it opens.
-        #
-        # ATTACHMENTS — IMAGES, A RECORDING, AND NOW DOCUMENTS — ARE THE ONE
-        # THING THE VEHICLE CANNOT CARRY and take the refusal, exactly as an
-        # attachment-carrying prompt does (see that arm for why an inbox row
-        # cannot hold them). Checked on the RAW image/audio arguments rather
-        # than on the decoded blocks because the decision has to happen before
-        # the attach, and a non-empty ``images`` or ``audio`` is the same fact
-        # one decode earlier; a resolved document block is the only form the
-        # fact takes, because resolving it is what raises the refusal a
-        # missing digest owes.
         if self._updating:
-            if images or audio or document_blocks_decoded:
-                self._command_reservations.reject(command_id)
-                raise self._retiring_refusal()
             try:
                 receipt = await self._spool_for_successor(
                     text,
@@ -5092,6 +5160,41 @@ class ServingSessionHandle(SessionHandle):
                 # refusal's reject keeps below.
                 self._command_reservations.reject(command_id)
             return receipt
+        # THE UPDATE WINDOW WAS THE ONLY SPOOLING STEER; EVERY ACCEPTED STEER NOW
+        # TAKES THE SPOOL. The steering queue is in memory, and the transcript row
+        # that makes a steer durable is only written at the next tool boundary
+        # (``Session._drain_steering``) — so a runtime replaced before that boundary
+        # took an ACKED message with it, leaving the producer a 200, the session no
+        # row, and nobody an error (operator report, 2026-10-28: two command ids
+        # from session ``1cfce255afc3`` appeared nowhere but a frontend
+        # checkpoint). The spool is the one channel that survives the handover, and
+        # the window's arm above already treats it as the answer to exactly this
+        # question — so it is written BEFORE the queue is touched and before
+        # "steering queued" can be returned. A crash after the ack then leaves a row
+        # the successor replays (``process._run_owner_prompt``), exactly once,
+        # keyed on the command id that is also the transcript's
+        # ``producer_command_id``.
+        #
+        # IT INSURES THE QUEUE, IT DOES NOT REPLACE IT: the live turn still gets the
+        # correction through ``Session.steer``, and the drain removes the spool
+        # copy once the row it wrote is durable, so normal operation leaves nothing
+        # for a successor to deliver twice.
+        try:
+            await self._spool_for_successor(
+                text,
+                mode="mailbox",
+                wake=True,
+                sender={},
+                source=SOURCE_USER,
+                command_id=command_id,
+                harness_injected=harness_injected,
+            )
+        except Exception:
+            # Nowhere durable to put the message, so it is refused rather than
+            # queued — and the producer identity stays retryable, which is what
+            # lets the same id be admitted once the spool can be written.
+            self._command_reservations.reject(command_id)
+            raise
         # Images ride the steer too. Producer identity follows the queued user
         # row so a reconnect cannot inject the same correction twice.
         fields: dict[str, Any] = {}
@@ -5112,12 +5215,12 @@ class ServingSessionHandle(SessionHandle):
         # row, and a session that predates the keyword gets none rather than a
         # keyword it would drop.
         if "audio" in parameters:
-            fields["audio"] = audio_blocks_decoded
+            fields["audio"] = audio_blocks
         # Documents ride the correction's keyword, probed like the rest; the
         # reservation path above already refused a session without it when
         # documents were present.
         if "documents" in parameters:
-            fields["documents"] = document_blocks_decoded
+            fields["documents"] = document_blocks
         # The structural stamp rides the steer for the same reason it rides a
         # prompt: a MID-TURN delivery is one of the two ways a spooled owner
         # prompt replays (``process._run_owner_prompt``'s steer fallback), and
@@ -5131,6 +5234,9 @@ class ServingSessionHandle(SessionHandle):
         except Exception:
             # No queue insertion means no durable acceptance exists; the same
             # producer identity must remain retryable after this terminal reject.
+            # The spool copy goes with the rejection: replaying it would deliver a
+            # message the producer was just told failed.
+            await self._forget_spooled_owner_row(command_id)
             self._command_reservations.reject(command_id)
             raise
         self._command_reservations.accept(command_id)

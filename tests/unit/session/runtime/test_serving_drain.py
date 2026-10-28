@@ -108,6 +108,11 @@ class DrainHost:
     # (design round 4, D10).
     _retiring_refusal = ServingSessionHandle._retiring_refusal
     _spool_for_successor = ServingSessionHandle._spool_for_successor
+    # The undo the steer door runs when the session refuses a queued message:
+    # bound so a refused steer takes its own exception rather than an
+    # AttributeError from this partial double.
+    _forget_spooled_owner_row = ServingSessionHandle._forget_spooled_owner_row
+    _session_directory = ServingSessionHandle._session_directory
     receive_peer_message = ServingSessionHandle.receive_peer_message
     _note_deliberate_stop = ServingSessionHandle._note_deliberate_stop
     _check_loop_thread = lambda self: None  # noqa: E731 — the real one only asserts
@@ -135,6 +140,9 @@ class DrainHost:
         # not hide a missing production attribute behind a defaulting getter.
         self._projection = SessionProjection(session_id="drain-fixture", pid=0)
         self._fold = SimpleNamespace(note_peer_message=lambda *_a, **_k: None)
+        # The steer door's arrival-order mutex, owned by the production
+        # ``__init__`` and read by the real ``steer`` these hosts borrow.
+        self._steer_admission_lock = asyncio.Lock()
 
     def may_refresh(self) -> str:
         return "busy" if self._busy else ""
@@ -960,6 +968,9 @@ class PromptHost(DrainHost):
 
     prompt = ServingSessionHandle.prompt
     steer = ServingSessionHandle.steer
+    # The admission half the steer door now delegates to, so the borrow above
+    # runs the production body rather than failing on a missing attribute.
+    _admit_steer = ServingSessionHandle._admit_steer
     is_busy = ServingSessionHandle.is_busy
     # The admitted path's own queue drain, bound for the same reason the latch is: a
     # release that let a prompt through the refusal check but stalled in a re-implemented
@@ -1226,13 +1237,19 @@ async def test_an_attached_viewer_never_decides_whether_a_drain_may_exit(tmp_pat
 
 @pytest.mark.asyncio
 async def test_a_steer_during_the_drain_is_still_admitted(tmp_path: Path) -> None:
-    """Pinned: the spool must not have widened into the steering path.
+    """Pinned: the spool must not DEFER a steer away from the live turn.
 
     A steer is the correction of a turn that is ALREADY running, so it is not a
     new turn and the drain's latch has no business refusing it (measured A4 on
     ``origin/main``). This cell exists so the admission rewrite above cannot
     quietly route steering through the spool and cost the user their correction
     until the successor boots.
+
+    IT NOW ALSO CARRIES THE SPOOL, which is the durability half rather than a
+    deferral: the correction is delivered HERE, and the same row is held for a
+    successor in case this runtime is replaced before its next tool boundary.
+    The copy is dropped when the drain that writes the transcript row runs
+    (``Session._drain_steering``), so a successor cannot deliver it twice.
     """
     host, session = _prompt_host(tmp_path)
     assert host.begin_drain("runtime-retired", "declined 3x") is True
@@ -1241,7 +1258,12 @@ async def test_a_steer_during_the_drain_is_still_admitted(tmp_path: Path) -> Non
 
     assert detail == "steering queued", detail
     assert session.steered == ["actually, the other way"], "the session never saw it"
-    assert peek_inbox(session.transcript.directory) == [], "a steer is not deferred"
+    held = peek_inbox(session.transcript.directory)
+    assert [row.text for row in held] == [
+        "actually, the other way"
+    ], "the correction was not held for a successor"
+    assert held[0].source == SOURCE_USER, held[0]
+    assert held[0].wake is True, held[0]
 
 
 # -- the promise a spooled row carries, and who keeps it -------------------------
