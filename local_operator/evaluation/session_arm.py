@@ -305,7 +305,9 @@ def render_prompt_header(
     ``remote_platform`` (from :func:`remote_platform_of`) adds the guest's OS,
     and is omitted when unknown. Every header ends with the shared
     ``OBSERVATION_MARKER_GUIDE``: the arm renders observations through the reply
-    arm's builder, so it shows the same markers and owes the same explanation.
+    arm's builder, so the markers it DOES render are the same ones -- and the
+    guide names a few an episode never renders, which is why it is shared text
+    rather than a per-arm list (see the constant's own note).
     The header is rendered ONCE per episode (the first prompt), so it never
     changes inside an episode's cached prefix.
     """

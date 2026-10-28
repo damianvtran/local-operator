@@ -175,11 +175,33 @@ UNCHANGED_FRAMES_NOTE = (
 #: byte: it sits in that arm's cached system prompt, pinned by digest in
 #: ``test_compact_action_binding``, and rewording it would make every reply-arm
 #: run after the change incomparable with the ones before. So edit it only as a
-#: deliberate prompt change for BOTH arms. It names only markers either arm can
-#: actually show; the two compaction markers come from the harness's shared
-#: compaction, which a session runs too. Its one generic "screenshot-only
-#: benchmark" phrase names no benchmark, so the session header's no-benchmark
-#: vocabulary rule is checked on the header's OWN text, with this guide removed.
+#: deliberate prompt change for BOTH arms.
+#:
+#: WHICH ARM SHOWS WHICH MARKER. The text is SHARED, not universal: every marker
+#: it names is real on at least one arm, and a reader must not assume each one
+#: reaches every arm. The split, checked in code and against the sealed corpus:
+#:
+#: * ``(unchanged)``, ``(no textual state)`` and the byte-identical notice are
+#:   rendered by ``_ContextBuilder``, which BOTH arms use -- these are the three
+#:   an episode session actually shows.
+#: * ``[screenshot omitted ...]`` is the reply arm's (``STALE_FRAME_NOTICE``).
+#:   The session side emits it only from ``prune_stale_frames_in_place``, which
+#:   needs a ``browser`` tool result the episode inventory does not carry, or
+#:   from the compaction-prune pass, gated on ``keep_recent_frames is not
+#:   None`` -- ``None`` by default for an ordinary session, and the reply arm's
+#:   client is what overrides it.
+#: * ``<previous-context-summary>`` is the reply arm's too: only
+#:   ``render_compaction_marker``'s ``context-full`` branch writes it, and an
+#:   episode resolves to ``snapcompact``, whose archive is ``[User]`` /
+#:   ``[Assistant]``-tagged text.
+#:
+#: Two inert sentences on an episode are the price of byte-identity with the
+#: reply arm's pinned prompt, and deleting them is NOT the fix: the shared
+#: explanation is worth more than two lines that arm never rendered, and this is
+#: the one place both arms' vocabulary is stated. Its one generic
+#: "screenshot-only benchmark" phrase names no benchmark, so the session
+#: header's no-benchmark vocabulary rule is checked on the header's OWN text,
+#: with this guide removed.
 OBSERVATION_MARKER_GUIDE = f"""\
 "{UNCHANGED_OBSERVATION}" means the observation's TEXT repeats the
 previous one's; "{NO_TEXTUAL_STATE}" means the adapter published no text for
