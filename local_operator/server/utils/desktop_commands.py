@@ -10,7 +10,11 @@ from typing import Any
 from urllib.parse import quote
 
 from local_operator.i18n.resolve import resolve_language
-from local_operator.slash_commands import SLASH_COMMANDS, command_argument_words, describe
+from local_operator.slash_commands import (
+    SLASH_COMMANDS,
+    command_argument_words,
+    describe,
+)
 from local_operator.tui.autocomplete import SlashCommand
 
 # These are execution handlers, not a copy of the catalogue. A new registry row

@@ -254,7 +254,8 @@ def test_the_catalogue_speaks_the_language_each_request_resolved(monkeypatch):
                 "/v1/desktop/commands", headers={"Authorization": "Bearer [redacted]"}
             )
             assert response.status_code == 200
-            return {row["name"]: row["description"] for row in response.json()["result"]["commands"]}
+            body = response.json()["result"]["commands"]
+            return {row["name"]: row["description"] for row in body}
 
         monkeypatch.setenv("LOP_LANG", "fr")
         french_rows = described()
