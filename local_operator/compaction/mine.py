@@ -65,10 +65,12 @@ __all__ = [
     "ASK_ITEM_CHARS",
     "DECISION_ITEM_CHARS",
     "CARRY_TAGS",
+    "INJECTED_HEADER",
     "LOCATOR_PATTERN",
     "Carry",
     "carry_digest_lines",
     "carry_is_empty",
+    "is_role_header",
     "merge_carry",
     "mine_carry",
     "parse_carry",
@@ -115,7 +117,8 @@ CARRY_ASK_ITEMS = 60
 CARRY_DECISION_ITEMS = 40
 
 #: Per-item truncation: an ask is carried as its own substance, not the whole
-#: pasted blob that followed it.
+#: pasted blob that followed it. Without this bound one long paste evicts every
+#: other item from the carry under CARRY_CHAR_BUDGET (review round 5, M2).
 ASK_ITEM_CHARS = 240
 DECISION_ITEM_CHARS = 220
 
@@ -154,10 +157,44 @@ _DECISION_CUE = re.compile(
     re.IGNORECASE,
 )
 
-#: Serialized role headers written by ``snapcompact.serialize_for_snapcompact``.
+#: Header ``serialize_for_snapcompact`` writes for a user-role message the
+#: renderer minted from a harness aside (stamped ``harness_injected``): peer,
+#: hub/subagent, job result, wake, monitor and session-state deliveries. They are
+#: user ``Message``s by the time they are serialized, so provenance is the only
+#: thing that separates them from the operator's words — see the serializer.
+INJECTED_HEADER = "[Injected]"
+
+#: Serialized role headers written by ``snapcompact.serialize_for_snapcompact``
+#: and ``api.serialize_conversation``. Matched as a line PREFIX, not a whole
+#: line: both serializers emit ``[Assistant tool calls] bash(...)`` with the
+#: rendered calls on the SAME line. The earlier ``...\]$`` anchor never matched
+#: that form, so the role stayed ``user`` after an operator turn and every tool
+#: call (with its multi-line arguments) was mined as an operator ask — measured
+#: on the live store, only 22% of captured ``ask`` rows matched operator text.
+#: ``(?!\S)`` (header ends at whitespace or end of line) keeps a prose line that
+#: merely begins ``[User]x`` from switching role.
+#:
+#: ONLY the exact names the harness writes switch role. A generic
+#: ``[lowercase-word]`` rule was tried and refused: an operator turn that pastes
+#: ``[error] cannot find module foo`` or opens ``[urgent] …`` lost the rest of its
+#: words to it (review round 1, M1). Injected text is attributed by its provenance
+#: stamp instead (``[Injected]``), never guessed from its wording.
 _ROLE_HEADER = re.compile(
-    r"^\[(User|Assistant|Assistant tool calls|Tool result:.*|Tool ERROR:.*)\]$"
+    r"^\[(User|Injected|Assistant|Assistant tool calls|Tool result:[^\]]*|Tool ERROR:[^\]]*)\]"
+    r"(?!\S)"
 )
+
+
+def is_role_header(line: str) -> bool:
+    """True when ``line`` opens with one of the serializers' exact role headers.
+
+    Shared with ``memory_capture``'s debris filter so a memory candidate that IS
+    a serialized transcript line (``[Assistant tool calls] bash(...)``) is refused
+    by the same grammar that attributes roles here; two copies would drift
+    exactly the way the anchor did.
+    """
+    return bool(_ROLE_HEADER.match(line.strip()))
+
 
 #: Longest prefix of any single line the locator scan examines. A tool result
 #: is already truncated to 2,000 chars by the serializer and a user paste can be
@@ -220,6 +257,22 @@ def _dedupe(values: list[str]) -> list[str]:
     return out
 
 
+def _clip_item(text: str, limit: int) -> str:
+    """Bound a carry item at a word boundary, marking the omitted tail.
+
+    Tagged digest rows are skipped when re-mined, so this clip cannot create a
+    continuation ask; the ellipsis distinguishes a shortened item from a
+    page-wrap fragment. The result is always at most ``limit`` characters,
+    including the ellipsis and the unbroken-string fallback.
+    """
+    if len(text) <= limit:
+        return text
+    end = text.rfind(" ", 0, limit - 1)
+    if end < limit // 2:
+        end = limit - 1
+    return text[:end].rstrip() + "…"
+
+
 def mine_carry(text: str) -> Carry:
     """Extract the tiered candidate material from one serialized block.
 
@@ -232,7 +285,10 @@ def mine_carry(text: str) -> Carry:
     asks: list[str] = []
     decisions: list[str] = []
 
-    role = "assistant"
+    # Unknown until the first header: the dropped span begins wherever the
+    # archive's head edge ends, usually mid-way through a tool result, and
+    # defaulting to ``assistant`` mined that JSON as decisions (QA round 3, Q12).
+    role = "other"
     in_carry = False
     for raw in text.splitlines():
         header = _ROLE_HEADER.match(raw.strip())
@@ -241,12 +297,26 @@ def mine_carry(text: str) -> Carry:
             # Tool blocks are their own role: a tool ERROR line reading "do not
             # delete …" is an error message, not an assistant decision, and
             # mining it as one wrote a commitment the assistant never made
-            # (review round 1, NIT 9).
-            role = (
-                "user" if title == "User" else ("tool" if title.startswith("Tool") else "assistant")
-            )
+            # (review round 1, NIT 9). ``Assistant tool calls`` is the tool role
+            # too: its same-line remainder is a rendered call, never a decision.
+            if title == "User":
+                role = "user"
+            elif title == "Injected":
+                # Harness-delivered text: identifiers only, never an ask or a
+                # decision the operator or the assistant made.
+                role = "other"
+            elif title.startswith("Tool") or title == "Assistant tool calls":
+                role = "tool"
+            else:
+                role = "assistant"
             in_carry = False  # a role header always ends a carried section
-            continue
+            remainder = raw.strip()[header.end() :].strip()
+            if not remainder:
+                continue
+            # The same-line remainder (the rendered tool calls) still carries
+            # identifiers — a path in ``read(path=...)`` is a real anchor — so it
+            # falls through to the scan under the role just set.
+            raw = remainder
         line = raw.strip()
         if not line:
             continue
@@ -289,9 +359,9 @@ def mine_carry(text: str) -> Carry:
         if role == "user":
             collapsed = " ".join(line.split())
             if collapsed:
-                asks.append(collapsed[:ASK_ITEM_CHARS])
+                asks.append(_clip_item(collapsed, ASK_ITEM_CHARS))
         elif role == "assistant" and _DECISION_CUE.search(line):
-            decisions.append(" ".join(line.split())[:DECISION_ITEM_CHARS])
+            decisions.append(_clip_item(" ".join(line.split()), DECISION_ITEM_CHARS))
 
     # Identifiers in FIRST-SEEN order, not by frequency: merge keeps the newest
     # rows of every tier uniformly (see ``merge_carry``), and a frequency ranking

@@ -622,7 +622,10 @@ def test_an_arbitrary_aggregator_model_keeps_the_unknown_sentinels(provider: str
     """
     info = get_model_info(provider, "some-vendor/never-heard-of-it")
     assert info.context_window == -1
-    assert info.supports_images is False
+    # ``None`` is the image half of the same "unknown": ``False`` would be a
+    # denial nothing stated, which is what stripped a vision model's screenshots
+    # (see ``tests/unit/session/test_image_capability_unknown.py``).
+    assert info.supports_images is None
 
 
 # -- provider-QUALIFIED ids resolve as their bare id -------------------------
@@ -707,7 +710,7 @@ def test_an_aggregator_vendor_namespace_is_never_stripped(provider: str) -> None
 
     assert direct.context_window == 1_000_000
     assert vendor.context_window == -1, "the aggregator placeholder, not DeepSeek's row"
-    assert vendor.supports_images is False
+    assert vendor.supports_images is None, "the placeholder states no capability"
     assert vendor is not direct
 
     # The route id also has to travel WHOLE to the wire: the reseller bills and

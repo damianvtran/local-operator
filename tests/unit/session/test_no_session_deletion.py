@@ -89,6 +89,15 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Rolls back only the network-request-*.body files the same read created.",
     ),
+    # The bridge connector's LaunchAgent, in ~/Library/LaunchAgents. The path
+    # comes from ``launchd.plist_path_for(LABEL)`` -- a fixed label plus
+    # ``Path.home()`` -- so it is never a session directory or a transcript, and
+    # the unlink is how an opt-out removes the user's own plist (D2a).
+    (
+        "local_operator/team_bridge/connector/install.py::_remove",
+        "<path>.unlink",
+        "Unlinks the LaunchAgent plist at the fixed per-user label path, never a session path.",
+    ),
     # Dedicated credential-root cache, never a transcript path: path_for hashes
     # the opaque session id under account-affinity/<auth-db namespace>/*.json.
     # replace takes only a sibling mkstemp REGULAR FILE; cleanup unlinks only
@@ -1741,13 +1750,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # never the child directory or its transcript. The two snapshot unlinks
     # cover the empty mkstemp index before read-tree and that same index on exit.
     (
-        "local_operator/harness/wip_checkpoint.py::WipCheckpointer._write",
+        "local_operator/harness/wip_checkpoint.py::WipCheckpointer._write_payload",
         "os.replace",
         "Sibling mkstemp FILE -> fixed subagent-wip-<job>.v1.json sidecar in the CHILD's "
         "own transcript directory; cannot name a session directory or transcript file.",
     ),
     (
-        "local_operator/harness/wip_checkpoint.py::WipCheckpointer._write",
+        "local_operator/harness/wip_checkpoint.py::WipCheckpointer._write_payload",
         "os.unlink",
         "Only the sibling mkstemp FILE created for that fixed sidecar write; "
         "cannot name a session directory or transcript file.",
@@ -3678,6 +3687,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/tools/memory_tools.py::_run",
         "<path>.move",
         "MemoryStore.move relocates a fact between scopes; the receiver is a store, not a path",
+    ),
+    (
+        "local_operator/memory_triage.py::apply",
+        "<path>.move",
+        "MemoryStore.move relocates global facts to their source session's bank; the "
+        "receiver is a store, not a path. Its only filesystem effect is the existing "
+        "atomic FILE rewrite of that session's memory-session.jsonl (MemoryStore._export); "
+        "it never removes or renames a directory",
     ),
     # -- the TUI's sidebar grouping toggle: config-root view state ------------
     # `write_tag_groups` writes `<config>/sidebar-tags.json`, a FIXED path

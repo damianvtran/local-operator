@@ -2273,6 +2273,8 @@ class PoisonedThenFine:
     #: what this class covers is the session actually recovering, which is the
     #: part that was broken.
     refusal = "Could not process image"
+    #: Overridable for the same reason: OpenRouter's modality refusal is a 404.
+    status = 400
 
     def __init__(self) -> None:
         self.requests: list[ChatRequest] = []
@@ -2283,10 +2285,11 @@ class PoisonedThenFine:
         self.calls += 1
         first = self.calls == 1
         refusal = self.refusal
+        status = self.status
 
         async def gen():
             if first:
-                raise ProviderError(400, refusal)
+                raise ProviderError(status, refusal)
             yield StreamTextDelta(delta="ok")
             yield StreamEndEvent(stop_reason="endTurn")
 
@@ -2387,6 +2390,113 @@ async def test_the_many_image_dimension_refusal_also_unbricks_the_session(tmp_pa
     await session.prompt("try again")
     assert stream.calls == 2
     assert _image_blocks(stream.requests[1]) == 0, "the session is still sending the bad image"
+    await session.dispose()
+
+
+_MODALITY_REFUSALS = [
+    pytest.param(404, "No endpoints found that support image input", id="openrouter-404"),
+    pytest.param(
+        422,
+        "Failed to deserialize the JSON body into the target type: messages[0]: "
+        "unknown variant `image_url`, expected `text`",
+        id="deepseek-422",
+    ),
+    pytest.param(
+        400,
+        "Invalid content type. image_url is only supported by certain models.",
+        id="openai-compat-400",
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status, refusal", _MODALITY_REFUSALS)
+async def test_a_text_only_model_refusing_images_unbricks_the_session(tmp_path, status, refusal):
+    """PR #3071 M1/Q1: a model nothing described is now sent images, so a
+    text-only endpoint behind one answers with a MODALITY refusal. The session
+    must recognise it the way it recognises a bad block: the discovering turn
+    fails (as the block-refusal path does — no in-turn retry), the sticky strip
+    engages, the user is told once, and every later turn succeeds without the
+    image. Before the markers, every turn failed and re-sent the image."""
+
+    class Refusing(PoisonedThenFine):
+        pass
+
+    Refusing.status = status
+    Refusing.refusal = refusal
+    stream = Refusing()
+    session = make_session(tmp_path, stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+    await session.seed_history(
+        [
+            Message(
+                role="user", content=[TextContent(text="look at this"), ImageContent(data="Zm9v")]
+            )
+        ]
+    )
+
+    await session.prompt("one")
+    assert _image_blocks(stream.requests[0]) == 1
+    assert session._images_rejected, "the modality refusal was not recognised"
+
+    await session.prompt("two")
+    await session.prompt("three")
+    assert stream.calls == 3, "a later turn failed again"
+    assert [_image_blocks(request) for request in stream.requests[1:]] == [0, 0]
+    rejected = [
+        event
+        for event in events
+        if isinstance(event, NoticeEvent) and event.code == "tui.notices.image_rejected_history"
+    ]
+    assert len(rejected) == 1, "the strip must be announced exactly once"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_modality_strip_lifts_on_a_switch_to_another_model(tmp_path):
+    """The refusal is about the MODEL, not the block, so its strip is scoped
+    like the count strip: a switch onto a vision model sees the images again
+    instead of staying blind for the rest of the session."""
+
+    class Refusing(PoisonedThenFine):
+        status = 404
+        refusal = "No endpoints found that support image input"
+
+    stream = Refusing()
+    session = make_session(tmp_path, stream)
+    await session.seed_history(
+        [
+            Message(
+                role="user", content=[TextContent(text="look at this"), ImageContent(data="Zm9v")]
+            )
+        ]
+    )
+    await session.prompt("one")
+    assert session._images_rejected
+
+    session.set_model(ModelSpec(provider="test", model_id="vision", context_window=100_000))
+    await session.prompt("two")
+    assert _image_blocks(stream.requests[-1]) == 1, "the switch did not lift the model-scoped strip"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_block_refusal_strip_survives_a_switch(tmp_path):
+    """Control for the test above: a POISONED block stays stripped on any model."""
+    stream = PoisonedThenFine()
+    session = make_session(tmp_path, stream)
+    await session.seed_history(
+        [
+            Message(
+                role="user", content=[TextContent(text="look at this"), ImageContent(data="Zm9v")]
+            )
+        ]
+    )
+    await session.prompt("one")
+    session.set_model(ModelSpec(provider="test", model_id="vision", context_window=100_000))
+    await session.prompt("two")
+    assert _image_blocks(stream.requests[-1]) == 0
     await session.dispose()
 
 

@@ -130,11 +130,9 @@ def test_install_renders_own_label_to_temp_only(tmp_path) -> None:
     assert install_mod.SYSTEMD_UNIT.endswith(".service")
     task = install_mod.render_task_xml(config_dir)
     assert install_mod.TASK_NAME in task and "<LogonTrigger>" in task
-    # The real install target is named but NEVER written by rendering. The
-    # target MAY exist from a real install on an operator machine — the
-    # property is that THIS code never creates or touches it: existence is
-    # unchanged across a render, and the module exposes no install/bootstrap
-    # execution path at all (render-only by API shape, not by machine state).
+    # Rendering is not installation: the real target MAY exist from an
+    # install, but a render to a temp dir must not change it. The lifecycle is
+    # deliberately the separate, guarded ``sync_connector_service`` API.
     assert install_mod.plist_path().name == "com.local-operator.bridge-connector.plist"
     existed_before = install_mod.plist_path().exists()
     install_mod.write_plist(config_dir, tmp_path / "rendered-again")

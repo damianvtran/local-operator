@@ -547,7 +547,14 @@ def _screener_sees_images(config_dir: Path) -> bool:
     selection = resolve_default_selection(config_dir)
     if selection is None:
         return False
-    return bool(getattr(selection.spec, "supports_images", False))
+    # A STATED capability only. ``build_model_spec`` defaults an undescribed
+    # model's ``supports_images`` to True (right for a chat session, which can
+    # recover from a refusal), so the bare flag is no longer "known to see
+    # images" — and this gate fails closed (PR #3071 review m2).
+    spec = selection.spec
+    return bool(getattr(spec, "supports_images", False)) and bool(
+        getattr(spec, "supports_images_stated", True)
+    )
 
 
 async def _screen_images(

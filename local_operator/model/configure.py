@@ -932,6 +932,10 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # to fall back to) rather than as a live default anywhere.
     max_output = 0
     supports_images = True
+    # Recorded beside the default rather than folded into it: ``True`` above is
+    # the right thing to SEND an undescribed model, not a fact about it. See
+    # ``ModelSpec.supports_images_stated`` for the decisions that need the fact.
+    supports_images_stated = False
     # The mirror of ``supports_images`` with the OPPOSITE default, and the
     # asymmetry is deliberate (see ``ModelSpec.supports_audio_input``): a wrong
     # ``True`` spends a paid turn the model refuses, so only a stated capability
@@ -950,6 +954,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
             max_output = info.max_tokens
         if info.supports_images is not None:
             supports_images = info.supports_images
+            supports_images_stated = True
         stated_audio = getattr(info, "supports_audio_input", None)
         if stated_audio is not None:
             supports_audio_input = bool(stated_audio)
@@ -1268,6 +1273,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
             else True
         ),
         supports_images=supports_images,
+        supports_images_stated=supports_images_stated,
         supports_audio_input=supports_audio_input,
         supports_prompt_cache=supports_cache,
         supports_responses_api=supports_responses_api,
@@ -2670,6 +2676,24 @@ def _resolve_model_info_body(provider: str, model_id: str, _base: Path | None) -
                 )
             )
         )
+    if info.supports_images is None or not _has_real_window(info):
+        # Every source was silent on something the session acts on, so it will
+        # run on the placeholder's defaults for it. Logged per UNCACHED
+        # resolution — a degraded answer is memoised only briefly
+        # (``DEGRADED_MEMO_TTL_S``), so a cold start may log it a few times; at
+        # INFO that is cheap, and silence was the defect: an OSWorld
+        # session ran a vision model as text-only for its whole life on a cold
+        # listing cache and nothing in its log said the metadata was a stand-in
+        # (PR #3071). A log line, not a user notice — the defaults are usually
+        # right, and the provider's own refusal is what the user needs to see.
+        logger.info(
+            "%s/%s: no metadata source described this model (image input %s, "
+            "context window %s); using placeholder defaults",
+            canonical,
+            model_id,
+            "unknown" if info.supports_images is None else "stated",
+            "unknown" if not _has_real_window(info) else "known",
+        )
     return info
 
 
@@ -2823,6 +2847,74 @@ _paint_refreshing: set[tuple[str, str]] = set()
 #: background refresh), so a cold process paints registry rows until the first
 #: full resolve lands, which the background refresh schedules on the first miss.
 _paint_memo: dict[tuple[str, str, int], ModelInfo] = {}
+
+
+def warm_model_info(provider: str, model_id: str) -> ModelInfo | None:
+    """The memoised metadata row a live switch may build from inline, or None.
+
+    WHY. A live ``/model`` builds its spec on the session loop's critical path,
+    and the serving handle used to send EVERY build to the default executor
+    (``asyncio.to_thread``) because a cold build can run discovery's synchronous
+    HTTP legs. On a busy manager that executor is shared with every lane's
+    blocking work, and the switch queued behind it: measured with
+    ``scripts/bench_model_switch.py --condition busy`` (12 lanes, a 1,000-child
+    roster), the build STARTED up to 750 ms after the handler asked for it, for
+    a body that takes well under 1 ms once the memo holds the model.
+
+    WHY A ROW AND NOT A BOOLEAN (review round 2, R2-1). This used to be a
+    ``model_spec_is_warm`` predicate, and the caller then ran
+    ``build_model_spec(provider, model_id)``, which resolves AGAIN through the
+    ``lru_cache`` — a different cache keyed differently (by ``base``, capped at
+    64 entries) from the ``_paint_memo`` the predicate read. The two disagreed
+    in reproducible ways (a base-scoped ``configure_model`` resolve; LRU
+    eviction past 64 keys), and each disagreement ran the cold body INLINE on
+    the loop. Returning the row and passing it as ``build_model_spec(...,
+    info=row)`` means the inline build performs no lookup at all, so "warm" and
+    "IO-free" are the same fact by construction rather than by two caches
+    happening to agree.
+
+    ``None`` (build off-loop, which resolves normally) whenever the answer could
+    involve IO or the row could be stale:
+
+    * ``openai``/``meta-muse`` resolve through ``_catalogue_credential`` on
+      every call (a credential-store read that keys the memo), so they never
+      have a warm row here;
+    * local runtimes resolve through their own endpoint-scoped path;
+    * a key that DEGRADED is re-resolved once its short TTL expires
+      (``_memo_attempt``), so a model with a degraded marker under ANY
+      base/scope in this bucket is never warm;
+    * otherwise the row is what the full resolver answered for this exact key
+      in the CURRENT TTL bucket — ``_paint_memo`` is written only by
+      :func:`resolve_model_info`, after the cached body ran.
+
+    Canonicalised exactly as :func:`build_model_spec` does before it resolves,
+    so the row is the one the build would have resolved. A deep copy, the same
+    contract :func:`resolve_model_info` keeps: the memo row is shared.
+    """
+    from local_operator.providers.local import LOCAL_PROVIDER_IDS
+
+    try:
+        bare = _hosting_qualified_bare_id(provider, model_id)
+        name = bare if bare is not None else model_id
+        canonical = "test" if provider.strip().lower() == "noop" else provider.strip().lower()
+        if canonical in ("openai", "meta-muse") or canonical in LOCAL_PROVIDER_IDS:
+            return None
+        bucket = int(time.time() // DEFAULT_TTL_S)
+        # ANY degraded marker for this model in this bucket refuses the row,
+        # whatever its scope and base (review round 3, R3-1). ``_paint_memo``
+        # is keyed WITHOUT base, but every session start resolves with
+        # ``base=config_dir`` (``configure_model``), so a degraded start marks
+        # the config_dir-scoped key while writing the shared row; checking only
+        # the ``base=None`` key served that 128k/no-cap row to every switch for
+        # the rest of the day. An EXPIRED marker still refuses: it is popped
+        # only by the re-resolve in ``_memo_attempt``, which rewrites the row,
+        # so until then the row is still the degraded answer.
+        if any(key[:3] == (canonical, name, bucket) for key in list(_degraded_until)):
+            return None
+        info = _paint_memo.get((canonical, name, bucket))
+        return None if info is None else info.model_copy(deep=True)
+    except Exception:  # noqa: BLE001 — "not warm" is always a safe answer
+        return None
 
 
 def resolve_model_info_paint(provider: str, model_id: str) -> tuple[ModelInfo, bool]:
@@ -3350,6 +3442,9 @@ def context_spec_for_access(
             value = getattr(info, field, None)
             if value is not None:
                 update[field] = value
+        if getattr(info, "supports_images", None) is not None:
+            # The account's own statement replaces whatever the spec defaulted.
+            update["supports_images_stated"] = True
         return spec.model_copy(update=update)
     return spec.model_copy(
         update={

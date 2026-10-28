@@ -503,8 +503,8 @@ unchanged. The design it implements lives in the UI repository
   is how a second window joins the run instead of starting a rival. Busy rather than
   merely resident: what a second run would race is a write, so a settled run frees
   the flight.
-- **A bounded inventory, by name AND by op.** The run's declaration names `agent`
-  and `team` only (no `team_delete`, no shell, no file tools, no network), and
+- **A bounded inventory, by name AND by op.** The run's declaration names `agent`,
+  `team` and `skill` only (no `team_delete`, no shell, no file tools, no network), and
   `Session.set_tool_inventory(..., ops=...)` narrows each declared tool's own `op`
   values: `agent reset` and `agent sync` are dropped from the advertised enum and
   refused before dispatch, because they are ops of the `agent` tool rather than
@@ -516,6 +516,29 @@ unchanged. The design it implements lives in the UI repository
   not the frozen prefix and not the operator's custom instructions.
 - Gated by `features.agents_config` — its own key, because an older backend
   answers the unknown field with a 422 (``Input`` is ``extra="forbid"``).
+- **Skills (`features.agents_config_skills`).** `skill` is an opt-in tool
+  (`tools/skill_tool.py`: `list`/`show`/`create`/`update`/`edit`, read tier like
+  `agent`/`team`), absent from `DEFAULT_TOOL_NAMES` so no other session builds it;
+  `apply_config_run_shape` merges it in after the declaration. It writes only
+  `<config_dir>/skills` through `server/utils/desktop_skill_writes` (the
+  `skill_write` routes' module). Every result fits the loop's replay bound
+  (`harness/replay_bound.py`, 8 KiB): `show` pages a file by lines and `list`
+  pages its rows, each saying where the next page starts. No write is built from
+  text the model never received: `edit` makes exact `old_text` -> `new_text`
+  replacements (unique match counting overlapping occurrences, all-or-nothing),
+  and `update` replaces or removes whole only files short enough to show in one
+  page (it also adds files; every file it does not name is kept). The session's
+  credential mask is the second lossy view: `update` refuses to replace a file
+  whose masked view differs from its bytes, and every write refuses text that
+  adds the `[redacted]` marker (judged with the session's own `redact`). The fingerprint CAS is checked before the
+  change is built and again under the storage lock. `create` refuses a name a
+  built-in/external/project skill already has (Copy to my skills stays the
+  operator's click). Built-in, external, project, bundle-form and unpulled-link
+  skills are read-only; a hub-linked edit leaves the baseline untouched. No
+  delete, publish or pull. The target skill reaches the run as text only, like
+  agents and teams. Its own key because an older core has `agents_config` but no
+  `skill` tool; the renderer also needs `skill_library`. The renderer's run-activity
+  projection reads an op it does not know (`edit`) as a write once it landed.
 
 Deliberately out of scope in v1: any conversational DELETE (no desktop op and no
 page control deletes a profile or a team today), an undo, a model picker, and a

@@ -58,6 +58,9 @@ pytestmark = pytest.mark.asyncio
 
 TOKEN = "test-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
+#: Bound at IMPORT time: the `api` fixture swaps `tb_client.TeamBridgeClient` for
+#: the fake, and a composed test needs the class this module shipped.
+_REAL_TEAM_BRIDGE_CLIENT = tb_client.TeamBridgeClient
 
 
 # --- the tripwire: no REAL wire object may be built inside these cells (R-2) --
@@ -530,7 +533,8 @@ class FakeClient:
         account_id: str,
         *,
         decision: str,
-        consent_version: str,
+        consent_version: str | None = None,
+        endpoint_id: str | None = None,
         tenant_id=None,
         access=None,
         expected_account_id=None,
@@ -541,7 +545,24 @@ class FakeClient:
             decision,
             consent_version,
         )
+        FakeClient.behavior["last_consent_endpoint"] = endpoint_id
         return self._answer("conversation_consent")
+
+    async def owned_agent_invitations(
+        self,
+        *,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ):
+        FakeClient.behavior["last_invitations"] = {
+            "expected_account_id": expected_account_id,
+            "tenant_id": tenant_id,
+            "limit": limit,
+            "cursor": cursor,
+        }
+        return self._answer("owned_agent_invitations")
 
     async def conversation_join(
         self, conversation_id: str, *, tenant_id=None, access=None, expected_account_id=None
@@ -849,6 +870,49 @@ async def test_status_composes_state_local_config_consent_and_the_screening_rece
     assert result["screening"] == {"required": True}
     assert result["error"] is None
     assert discipline.boundaries == ["app_start"]
+
+
+async def test_status_never_claims_a_receiver_that_is_not_installed(api):
+    """D2a: ``connector`` says what the SERVICE is, and fails closed here.
+
+    This suite's store is a scratch root, which is exactly the shape the
+    per-user LaunchAgent must never serve (and on a non-macOS runner there is
+    no launchd at all), so the answer is the refusal code rather than a state.
+    A status read that reported ``installed``/``loaded`` for a store nothing
+    supervises is how "on but deaf" stays invisible.
+    """
+
+    client, _root, _discipline = api
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    assert result["connector"] in {"isolated", "unsupported"}, result["connector"]
+
+
+async def test_status_asks_launchd_off_the_event_loop(api, monkeypatch):
+    """R1-3: the status route's launchctl probe must not run on the loop.
+
+    ``connector_state`` runs ``launchctl print`` (15 s timeout), so the route
+    hands it to a worker thread. Asserted on the THREAD the probe observes,
+    which is the mechanism itself rather than a timing.
+    """
+
+    import threading
+
+    from local_operator.team_bridge.connector import install
+
+    client, root, _discipline = api
+    seen: list[threading.Thread] = []
+
+    def spy(config_dir):
+        seen.append(threading.current_thread())
+        return install.STATE_MISSING
+
+    monkeypatch.setattr(install, "connector_state", spy)
+    response = await client.get("/v1/desktop/team-bridge/status")
+    assert response.status_code == 200
+    assert response.json()["result"]["connector"] == install.STATE_MISSING
+    assert (
+        seen and seen[0] is not threading.main_thread()
+    ), "the launchctl probe ran on the event loop"
 
 
 async def test_status_reports_signed_out_as_a_state_not_an_error(api, monkeypatch):
@@ -3410,3 +3474,474 @@ async def test_an_active_settings_write_without_a_cos_sends_no_name(api):
 
     assert response.status_code == 200
     assert FakeClient.behavior["last_put_kwargs"]["agent_name"] is None
+
+
+# -- owner agent consent: withdraw + owned invitations (agent-server #227) ------
+
+CONSENT = "/v1/desktop/team-bridge/conversations/bcv_abc12345/members/acc_1/consent"
+INVITATIONS = "/v1/desktop/team-bridge/agents/owned/invitations"
+#: What the ROUTE sets. The `api` fixture mounts the router alone, so these cells
+#: see it verbatim; the running core's `managed_desktop_boundary` rewrites every
+#: `/v1/desktop/` answer to plain `no-store` (pre-existing, app-wide), and that
+#: SERVED value is pinned separately by
+#: `test_an_old_hub_through_the_mounted_boundary_is_409_outdated_hub_on_both_arms`.
+ROUTE_SET_CACHE_CONTROL = desktop_team_bridge.OWNER_INVITATIONS_CACHE_CONTROL
+
+
+async def test_withdraw_needs_no_consent_version_and_forwards_the_endpoint_pin(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_consent"] = {"member": {"state": "left"}}
+    response = await client.post(
+        CONSENT, json={"decision": "withdraw", "endpoint_id": "bep_1", "tenant_id": "tnt_1"}
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_consent"] == ("bcv_abc12345", "acc_1", "withdraw", None)
+    assert FakeClient.behavior["last_consent_endpoint"] == "bep_1"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Leaving is not consenting: a version on withdraw is refused, not dropped.
+        {"decision": "withdraw", "consent_version": "bridge_agent_participation_v1"},
+        # The two answers to an invitation still need the served version.
+        {"decision": "accept"},
+        {"decision": "decline"},
+        {"decision": "remove"},
+        {"decision": "withdraw", "endpoint_id": ""},
+    ],
+)
+async def test_consent_version_is_validated_per_decision_before_any_io(api, body):
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.post(CONSENT, json=body)
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls, "a refused decision reached the transport"
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "details"),
+    [
+        (409, "invalid_transition", {"rule": "not_invited"}),
+        (409, "invalid_transition", {"rule": "not_active"}),
+        (400, "invalid_request", {"field": "endpoint_id", "rule": "ambiguous"}),
+        (409, "outdated_hub", {"hub_status": 400, "hub_code": "invalid_request"}),
+    ],
+)
+async def test_consent_refusals_pass_through_untouched(api, status, code, details):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_consent"] = BridgeRefusal(
+        code, "refused", http_status=status, details=details
+    )
+    response = await client.post(CONSENT, json={"decision": "withdraw"})
+    assert response.status_code == status
+    assert response.json()["detail"] == {"code": code, "message": "refused", "details": details}
+
+
+def _invitation(**over: Any) -> dict[str, Any]:
+    """One served invitation row, in the hub's own field names."""
+
+    row = {
+        "conversation_id": "bcv_abc12345",
+        "tenant_id": "tnt_1",
+        "kind": "channel",
+        "name": "opaque name",
+        "visibility": "private",
+        "status": "open",
+        "created_by": "acc_human",
+        "created_by_label": "Ana",
+        "endpoint_id": "bep_1",
+        "agent_label": "Aida",
+        "invited_at": "2026-10-01T10:00:00Z",
+        "last_message_at": "2026-10-02T11:00:00Z",
+    }
+    row.update(over)
+    return row
+
+
+async def test_owned_invitations_pass_through_with_no_store_and_the_opaque_cursor(api):
+    client, _root, _d = api
+    page = {
+        "invitations": [_invitation()],
+        "next_cursor": "opaque+/=",
+        "has_more": True,
+    }
+    FakeClient.behavior["owned_agent_invitations"] = page
+    response = await client.get(
+        INVITATIONS,
+        params={
+            "expected_account_id": "acc_1",
+            "tenant_id": "tnt_1",
+            "limit": "20",
+            "cursor": "opaque+/=",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == ROUTE_SET_CACHE_CONTROL
+    assert response.json()["result"] == page
+    assert FakeClient.behavior["last_invitations"] == {
+        "expected_account_id": "acc_1",
+        "tenant_id": "tnt_1",
+        "limit": 20,
+        "cursor": "opaque+/=",
+    }
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        # The hub's "metadata only" guarantee is the hub's, so a page carrying a
+        # field this build cannot classify (a body, a preview, a member list) is
+        # refused rather than forwarded to the renderer (review R1-1).
+        {"invitations": [_invitation(body={"text": "secret"})], "has_more": False},
+        {"invitations": [_invitation()], "has_more": False, "counts": {}},
+        {
+            "invitations": [{k: v for k, v in _invitation().items() if k != "endpoint_id"}],
+            "has_more": False,
+        },
+        {"invitations": [_invitation(invited_at=0)], "has_more": False},
+        {"invitations": [], "has_more": "no"},
+        {"invitations": {}, "has_more": False},
+        {"invitations": [], "has_more": False, "next_cursor": "x" * 513},
+        [],
+    ],
+)
+async def test_a_page_this_build_cannot_read_is_malformed_page(api, page):
+    client, _root, _d = api
+    FakeClient.behavior["owned_agent_invitations"] = page
+    response = await client.get(INVITATIONS, params={"expected_account_id": "acc_1"})
+    assert response.status_code == 502, response.text
+    assert response.json()["detail"]["code"] == "malformed_page"
+    assert response.headers["cache-control"] == ROUTE_SET_CACHE_CONTROL
+
+
+@pytest.mark.parametrize("tenant", ["../tnt_1", "tnt_1!", "TNT_1", "x" * 200])
+async def test_a_malformed_tenant_is_refused_on_this_family_s_own_grammar(api, tenant):
+    """A tenant outside the accepted grammar never becomes a hub round trip (R1-2)."""
+
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.get(
+        INVITATIONS, params={"expected_account_id": "acc_1", "tenant_id": tenant}
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.calls == calls, "a refused tenant reached the transport"
+
+
+async def test_a_tenant_this_machine_did_not_enroll_with_is_invalid_tenant(api):
+    """The inbox's cross-check, over the READ-ONLY owner accessor (review R1-2)."""
+
+    from local_operator.team_bridge.store import OwnerReceipt, OwnerSnapshot, Store
+
+    client, root, _d = api
+    Store(root).commit_enrollment(
+        OwnerSnapshot(
+            credential_id=1,
+            account_id="acc_1",
+            tenant_id="tnt_enrolled",
+            endpoint_id="bep_1",
+            canonical_base_url="https://api.radienthq.com/v1",
+            enrollment_generation=1,
+        ),
+        OwnerReceipt("bridge_consent_v1", "ref-1"),
+    )
+    calls = FakeClient.calls
+    foreign = await client.get(
+        INVITATIONS, params={"expected_account_id": "acc_1", "tenant_id": "tnt_other"}
+    )
+    assert foreign.status_code == 422, foreign.text
+    assert foreign.json()["detail"]["code"] == "invalid_tenant"
+    assert FakeClient.calls == calls
+
+    # The enrolled org itself passes the cross-check.
+    FakeClient.behavior["owned_agent_invitations"] = {"invitations": [], "has_more": False}
+    ok = await client.get(
+        INVITATIONS, params={"expected_account_id": "acc_1", "tenant_id": "tnt_enrolled"}
+    )
+    assert ok.status_code == 200, ok.text
+
+
+async def test_an_enrolled_machine_requires_the_tenant_rather_than_letting_the_hub_pick(api):
+    """Omitted, the hub would answer for the account's FIRST membership (R2-2).
+
+    That need not be the enrolled org, so the route refuses before any I/O
+    instead of defaulting: a default could name an org the signed-in account
+    is not a member of. Naming the enrolled org still answers.
+    """
+
+    client, root, _d = api
+    _enroll(root)
+    calls = FakeClient.calls
+    omitted = await client.get(INVITATIONS, params={"expected_account_id": "acc_1"})
+    assert omitted.status_code == 422, omitted.text
+    assert omitted.json()["detail"]["code"] == "invalid_request"
+    assert omitted.headers["cache-control"] == ROUTE_SET_CACHE_CONTROL
+    assert FakeClient.calls == calls, "an omitted tenant reached the transport"
+
+    FakeClient.behavior["owned_agent_invitations"] = {"invitations": [], "has_more": False}
+    named = await client.get(
+        INVITATIONS, params={"expected_account_id": "acc_1", "tenant_id": _owner().tenant_id}
+    )
+    assert named.status_code == 200, named.text
+    assert FakeClient.behavior["last_invitations"]["tenant_id"] == _owner().tenant_id
+
+
+async def test_an_unenrolled_machine_is_not_refused_by_the_cross_check(api):
+    """No committed owner: nothing to compare against, so the hub answers.
+
+    Requiring an enrollment would make the invitation list unreadable exactly for
+    an owner who has not committed yet -- the person the list exists for.
+    """
+
+    client, _root, _d = api
+    FakeClient.behavior["owned_agent_invitations"] = {"invitations": [], "has_more": False}
+    response = await client.get(
+        INVITATIONS, params={"expected_account_id": "acc_1", "tenant_id": "tnt_1"}
+    )
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.parametrize(
+    ("limit", "code"),
+    [
+        ("0", "bad_limit"),
+        ("101", "bad_limit"),
+        ("07", "bad_limit"),
+        ("+20", "bad_limit"),
+        ("1_0", "bad_limit"),
+        ("ten", "bad_limit"),
+        # Unicode digits pass `str.isdigit()`: "²" then crashed `int()` into a
+        # 500 and "٣" was forwarded as 3 (R2-1). ASCII only.
+        ("²", "bad_limit"),
+        ("٣", "bad_limit"),
+        ("١٢", "bad_limit"),
+        # An empty value is refused by the query-wide guard before the limit arm.
+        ("", "invalid_request"),
+    ],
+)
+async def test_limit_is_canonical_digits_inside_the_inbox_window(api, limit, code):
+    """The value validated is the value sent, and the window is the inbox's (R1-4)."""
+
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.get(
+        INVITATIONS, params={"expected_account_id": "acc_1", "limit": limit}
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == code
+    assert FakeClient.calls == calls
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "",  # the captured-owner receipt is required
+        "?tenant_id=tnt_1",
+        "?expected_account_id=acc_1&endpoint_id=bep_1",  # no endpoint parameter
+        "?expected_account_id=acc_1&scope=account",
+        "?expected_account_id=acc_1&expected_account_id=acc_2",
+        "?expected_account_id=../x",
+    ],
+)
+async def test_owned_invitations_refuse_an_open_query_before_any_io(api, query):
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.get(f"{INVITATIONS}{query}")
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_request"
+    assert response.headers["cache-control"] == ROUTE_SET_CACHE_CONTROL
+    assert FakeClient.calls == calls, "a refused query reached the transport"
+
+
+async def test_owned_invitations_refusals_carry_no_store_and_outdated_hub_passes(api):
+    client, _root, _d = api
+    FakeClient.behavior["owned_agent_invitations"] = BridgeRefusal(
+        "outdated_hub", "update", http_status=409, details={"hub_status": 404}
+    )
+    response = await client.get(INVITATIONS, params={"expected_account_id": "acc_1"})
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "outdated_hub"
+    assert response.headers["cache-control"] == ROUTE_SET_CACHE_CONTROL
+
+
+def test_owner_invitations_capability_is_advertised():
+    from local_operator.server.features import static_feature_flags
+
+    assert static_feature_flags()["team_bridge_owner_invitations"] == 1
+
+
+class _CredentialStore:
+    """The credential seam the REAL client resolves through (test_client's shape)."""
+
+    class Row:
+        def __init__(self) -> None:
+            self.id = 1
+            self.data = {"access": "token-1", "account_id": "acc_1"}
+            self.provider = "radient"
+            self.credential_type = "oauth"
+
+    def __init__(self) -> None:
+        self.rows = [self.Row()]
+
+    def list_credentials(self, provider=None, include_disabled=False):
+        return [r for r in self.rows if provider is None or r.provider == provider]
+
+    def get_credential(self, credential_id: int):
+        return next((r for r in self.rows if r.id == credential_id), None)
+
+    async def ensure_oauth_fresh_or_raise(self, credential_id: int, *, force: bool = False):
+        row = self.get_credential(credential_id)
+        return dict(row.data) if row is not None else None
+
+
+async def test_the_composed_seam_an_old_hub_becomes_an_update_prompt_not_a_retry(
+    api, monkeypatch: pytest.MonkeyPatch
+):
+    """Fake hub bytes -> the REAL client's reclassification -> the route's answer.
+
+    Each half was pinned separately (review R1-6); this drives the seam a renderer
+    actually consumes: an uncoded 404 on the invitations path must arrive as a 409
+    `outdated_hub` carrying no-store, not as a 404 the UI would render as "gone".
+    """
+
+    import httpx as httpx_mod
+
+    client, _root, _d = api
+    seen: list[httpx_mod.Request] = []
+
+    def handler(request: httpx_mod.Request) -> httpx_mod.Response:
+        seen.append(request)
+        return httpx_mod.Response(404, json={"message": "Not Found"})
+
+    monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
+
+    # The cell DECLARES its real client: a scripted fake cannot prove the
+    # reclassification the client performs. The tripwire bomb sits on the CLASS
+    # (the fixture arms it before the fake replaces the module attribute), so the
+    # allowance is aimed at the class, restored in `finally`. MockTransport is the
+    # only transport, so no socket is opened and the httpx/subprocess arms stay
+    # armed throughout.
+    saved_init = _REAL_TEAM_BRIDGE_CLIENT.__init__
+    _REAL_TEAM_BRIDGE_CLIENT.__init__ = _REAL_CLIENT_INIT
+    try:
+        wire = _REAL_TEAM_BRIDGE_CLIENT(
+            None,
+            base_url="https://hub.example/v1",
+            store=_CredentialStore(),
+            transport=httpx_mod.MockTransport(handler),
+        )
+    finally:
+        _REAL_TEAM_BRIDGE_CLIENT.__init__ = saved_init
+    monkeypatch.setattr(desktop_team_bridge, "_conversation_client", lambda cm: wire)
+
+    response = await client.get(INVITATIONS, params={"expected_account_id": "acc_1"})
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "outdated_hub"
+    assert detail["details"] == {"hub_status": 404, "hub_code": "bridge_error"}
+    assert response.headers["cache-control"] == ROUTE_SET_CACHE_CONTROL
+    assert [r.url.path for r in seen] == ["/v1/messaging/agents/owned/invitations"]
+
+
+async def test_an_old_hub_through_the_mounted_boundary_is_409_outdated_hub_on_both_arms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """QA r1 item 1: the old-hub answer as the RUNNING core serves it.
+
+    QA's daemon runs against the old hub answered `conversation_not_found` and
+    an invitation row. A pre-#227 hub can produce neither: its `consent()`
+    refuses `withdraw` on the decision check BEFORE any conversation lookup, and
+    it serves no invitations route. Those answers came from a #227 hub, so the
+    daemon was still addressing one (a rig artefact). Reproduced end to end
+    (the core's real app + a loopback hub answering the pre-#227 bytes), both
+    arms answer this 409 on every repeat and every call reaches the hub, so the
+    core neither caches nor re-routes. This cell pins that seam with
+    the app-wide `managed_desktop_boundary` middleware mounted, which the `api`
+    fixture omits: the hub bytes are agent-server `c082e1b0^1`'s -- the coded
+    `decision`/`unknown_value` refusal of `withdraw`, and echo's uncoded router
+    404 for the invitations path.
+
+    It also pins the SERVED Cache-Control (QA r1 Q1): the middleware rewrites
+    every `/v1/desktop/` answer to `no-store`, so the route's own
+    `private, no-store` is what a router-only app sees, never what ships.
+    """
+
+    import httpx as httpx_mod
+
+    from local_operator.server.app import managed_desktop_boundary
+
+    seen: list[str] = []
+
+    def handler(request: httpx_mod.Request) -> httpx_mod.Response:
+        seen.append(f"{request.method} {request.url.path}")
+        if request.url.path.endswith("/consent"):
+            return httpx_mod.Response(
+                400,
+                json={
+                    "error": "invalid request",
+                    "code": "invalid_request",
+                    "details": {"field": "decision", "rule": "unknown_value"},
+                },
+            )
+        return httpx_mod.Response(404, json={"message": "Not Found"})
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / ".local-operator"))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
+    monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
+    # The real client over MockTransport, built under the same tripwire allowance
+    # as the composed-seam cell above: no socket is opened.
+    saved_init = _REAL_TEAM_BRIDGE_CLIENT.__init__
+    _REAL_TEAM_BRIDGE_CLIENT.__init__ = _REAL_CLIENT_INIT
+    try:
+        wire = _REAL_TEAM_BRIDGE_CLIENT(
+            None,
+            base_url="https://hub.example/v1",
+            store=_CredentialStore(),
+            transport=httpx_mod.MockTransport(handler),
+        )
+    finally:
+        _REAL_TEAM_BRIDGE_CLIENT.__init__ = saved_init
+    monkeypatch.setattr(desktop_team_bridge, "_conversation_client", lambda cm: wire)
+
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(tmp_path / ".local-operator")
+    app.include_router(desktop_team_bridge.router)
+    app.middleware("http")(managed_desktop_boundary)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://localhost", headers=AUTH
+    ) as client:
+        for _ in range(2):  # a repeat must be the same answer, not a cached one
+            withdraw = await client.post(
+                CONSENT,
+                json={
+                    "decision": "withdraw",
+                    "expected_account_id": "acc_1",
+                    "tenant_id": "tnt_1",
+                },
+            )
+            assert withdraw.status_code == 409, withdraw.text
+            assert withdraw.json()["detail"]["code"] == "outdated_hub"
+            assert withdraw.json()["detail"]["details"] == {
+                "hub_status": 400,
+                "hub_code": "invalid_request",
+            }
+
+            page = await client.get(INVITATIONS, params={"expected_account_id": "acc_1"})
+            assert page.status_code == 409, page.text
+            assert page.json()["detail"]["code"] == "outdated_hub"
+            assert page.json()["detail"]["details"] == {
+                "hub_status": 404,
+                "hub_code": "bridge_error",
+            }
+            for answer in (withdraw, page):
+                assert answer.headers["cache-control"] == "no-store"
+    assert (
+        seen
+        == [
+            "POST /v1/messaging/conversations/bcv_abc12345/members/acc_1/consent",
+            "GET /v1/messaging/agents/owned/invitations",
+        ]
+        * 2
+    )

@@ -96,6 +96,16 @@ PreservedTurn = dict[str, "str | int"]
 #: instead of inferring it from what it currently looks like.
 RENDERED_INJECTION_KEY = "harness_injected"
 
+#: ``provider_payload`` key beside :data:`RENDERED_INJECTION_KEY` on the ONE
+#: injected row whose body carries the operator's own words: a queued ask's
+#: answer (``ask_response``). Its value is the LIST of operator-typed answer
+#: values, taken from the row's structured ``answers`` by the renderer (never
+#: re-parsed from the report, whose text also holds the model's prompts and
+#: harness sentences — review round 3, M1). The snapcompact serializer emits
+#: exactly these values under ``[User]`` so the carry keeps them as operator asks
+#: while the envelope stays injected (review round 2 m1, QA Q8).
+OPERATOR_ANSWER_KEY = "operator_answer"
+
 #: Id of the synthetic turn that reports an elision. Stable rather than
 #: count-suffixed: the count is carried STRUCTURALLY beside the block (see
 #: :class:`CappedPreservedTurns` and the ``preserved_turns_dropped`` payload

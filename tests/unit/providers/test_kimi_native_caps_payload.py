@@ -58,16 +58,25 @@ def _kimi_spec() -> ModelSpec:
 
     ``k3.1-pro`` has no registry twin — it is a DYNAMIC row — so the fallback
     is the same :data:`unknown_model_info` the catalogue path supplies for an
-    unshipped id (``supports_images=False``, no ladder). That matters for the
-    assertion below: with a permissive hand-built fallback the image assertion
-    would pass even on the pre-fix tree, because ``build_model_spec`` defaults
-    an unstated capability to ``True``. With the real fallback, a parse that
-    reads nothing leaves ``supports_images`` at ``False`` — the defect.
+    unshipped id (no ladder, and ``supports_images=None`` — "unknown", which
+    ``build_model_spec`` resolves to ``True``). So the image half of the parse
+    is asserted on :func:`_kimi_info` and ``supports_images_stated``, which
+    still distinguish "the listing said image" from "nothing was read".
+    """
+    return build_model_spec("kimi", "k3.1-pro", _kimi_info())
+
+
+def _kimi_info():
+    """The [redacted] ``ModelInfo`` for the listed row, before the spec default.
+
+    Asserted on directly (review n1): ``build_model_spec`` turns an unstated
+    image capability into ``True``, so only this layer — and the spec's
+    ``supports_images_stated`` — can tell a parse that read the listing's
+    ``image`` modality from one that read nothing.
     """
     row = discovery._row_from_openai_entry(_KIMI_LISTING_ENTRY, "kimi")
     assert row is not None
-    info = info_from_discovered_model("kimi", "k3.1-pro", row, unknown_model_info)
-    return build_model_spec("kimi", "k3.1-pro", info)
+    return info_from_discovered_model("kimi", "k3.1-pro", row, unknown_model_info)
 
 
 def _body(spec: ModelSpec) -> dict[str, object]:
@@ -93,7 +102,11 @@ def test_a_listed_kimi_row_reaches_the_spec_with_its_ladder_and_images() -> None
     spec = _kimi_spec()
 
     assert spec.reasoning_efforts == ("low", "high", "max")
+    # The parse itself: the listing STATED image input, so the [redacted] info
+    # says True (not the unknown ``None``) and the spec marks it as stated.
+    assert _kimi_info().supports_images is True
     assert spec.supports_images is True
+    assert spec.supports_images_stated is True
     assert spec.reasoning is True
     # Auto: the listing's ``default_effort`` is deliberately not seeded (see
     # ``discovery._row_from_openai_entry`` — the vendor doc says ``max``, the
@@ -122,8 +135,8 @@ def test_the_image_part_survives_body_construction() -> None:
 
     Kept as a chain assertion for the wire shape the body builder emits
     (a real ``image_url`` data URI, not a bare text part); the capability GATE
-    is pinned by ``_kimi_spec``'s spec assertion above, which uses the real
-    ``unknown_model_info`` fallback and fails pre-fix.
+    is pinned by ``_kimi_spec``'s spec assertion above and by
+    ``tests/unit/session/test_image_capability_unknown.py``.
     """
     body = _body(_kimi_spec())
 

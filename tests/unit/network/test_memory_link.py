@@ -875,3 +875,192 @@ def test_status_bounds_a_300_char_peer_name(tmp_path):
     assert long_name not in human
     assert "…" in " ".join(block)
     assert all(len(line) <= 80 for line in block)
+
+
+def test_peer_without_item_512_receives_a_withheld_skip_not_a_gap_refusal(devices, monkeypatch):
+    """Slice A1 over a REAL link: a fact over the old 256-wire-token cap is withheld
+    from a peer that did not advertise ``memory-item-512``, as a content-free skip.
+    The push succeeds (no permanent sequence gap) and the other facts land."""
+    from local_operator.compaction.tokens import count_text_tokens
+    from local_operator.memory import LEGACY_ITEM_WIRE_TOKENS, _dump
+
+    a, b = linked(devices, monkeypatch)
+    sender = bank(a)
+    sender.put("global", {"title": "Elara", "body": "Elara lives in Dunedin"})
+    big = sender.put("global", {"title": "Mira", "body": "Mira likes long coastal walks " * 50})
+    sender.put("global", {"title": "Kai", "body": "Kai lives in Nelson"})
+    assert count_text_tokens(_dump(sender.show("global", big["id"])["fact"])) > (
+        LEGACY_ITEM_WIRE_TOKENS
+    )
+    link = a._ensure_link(b.identity.device_id)
+    assert link is not None and wire.MEMORY_ITEM_512 in link.capabilities
+    monkeypatch.setattr(
+        link, "capabilities", tuple(c for c in link.capabilities if c != wire.MEMORY_ITEM_512)
+    )
+    result = memory.push_to_peer(a, b.identity.device_id)
+    # Owed, not synced: a distinct non-healthy code with a pending count (review M1).
+    assert result["code"] == "withheld_pending" and result["pending"] == 1, result
+    assert result["code"] not in memory.HEALTHY_PEER_CODES
+    receiving = bank(b)
+    assert receiving.search("Elara", "global") and receiving.search("Kai", "global")
+    assert not receiving.search("coastal walks", "global")
+    # A later write still flows: the skip advanced the cursor, no gap remains.
+    sender.put("global", {"title": "Ana", "body": "Ana lives in Napier"})
+    again = memory.push_to_peer(a, b.identity.device_id)
+    assert again["code"] == "withheld_pending", again
+    assert receiving.search("Napier", "global")
+    # `lop memory status` names the peer as not syncing, with the lop-update remedy.
+    from local_operator.memory_cli import render_human, run
+
+    text, failed = run("status", config=a.root, identity=MemoryIdentity("memory-session"))
+    human = render_human(text, failed)
+    assert "withheld_pending" in human and "lop-update" in human, human
+    print("M1 before upgrade:", result, again)
+
+    # The peer updates: it now advertises memory-item-512. The single-revision
+    # fact that was skipped is redelivered and the peer is in sync again.
+    monkeypatch.undo()
+    link = a._ensure_link(b.identity.device_id)
+    assert link is not None and wire.MEMORY_ITEM_512 in link.capabilities
+    upgraded = memory.push_to_peer(a, b.identity.device_id)
+    assert receiving.search("coastal walks", "global"), upgraded
+    assert upgraded["code"] in ("in_sync", "catching_up") and upgraded["pending"] == 0, upgraded
+    settled = memory.push_to_peer(a, b.identity.device_id)
+    assert settled["code"] == "in_sync" and settled["ok"], settled
+    assert memory.legacy_pending(memory._store(a.root), b.identity.device_id) == {
+        "ids": [],
+        "overflow": False,
+    }
+    print("M1 after upgrade:", upgraded, settled)
+
+
+def _legacy_link(a: Any, b: Any) -> Any:
+    link = a._ensure_link(b.identity.device_id)
+    assert link is not None and wire.MEMORY_ITEM_512 in link.capabilities
+    return link
+
+
+def _without_item_512(link: Any) -> tuple[str, ...]:
+    return tuple(c for c in link.capabilities if c != wire.MEMORY_ITEM_512)
+
+
+def _converges(a: Any, b: Any, needle: str, pushes: int = 4) -> list[dict[str, Any]]:
+    """Push until in_sync (bounded); every result is returned for the assertion text."""
+    results = []
+    for _ in range(pushes):
+        results.append(memory.push_to_peer(a, b.identity.device_id))
+        if results[-1]["code"] == "in_sync" and bank(b).search(needle, "global"):
+            break
+    return results
+
+
+def test_m4_a_generation_change_before_the_upgrade_does_not_wedge_sync(devices, monkeypatch):
+    """Review round 2 M4, repro 1: the stream generation moved after the legacy push
+    (gap fill / another peer's re-baseline), so the upgraded peer's cursor is empty and
+    the pending op is NOT behind it. Redelivering it was refused on every push and
+    stalled every scope; it must instead fall to the ordinary (full) resend."""
+    a, b = linked(devices, monkeypatch)
+    sender = bank(a)
+    sender.put("global", {"title": "Mira", "body": "Mira likes long coastal walks " * 50})
+    link = _legacy_link(a, b)
+    with pytest.MonkeyPatch.context() as legacy:
+        legacy.setattr(link, "capabilities", _without_item_512(link))
+        first = memory.push_to_peer(a, b.identity.device_id)
+    assert first["code"] == "withheld_pending" and first["pending"] == 1, first
+    with sender.connection() as db:
+        row = db.execute("SELECT value FROM meta WHERE key='stream-generation'").fetchone()
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES ('stream-generation',?)",
+            (str(int(row[0]) + 1 if row else 1),),
+        )
+        db.commit()
+    sender.put("global", {"title": "Ana", "body": "Ana lives in Napier"})
+    results = _converges(a, b, "coastal walks")
+    print("M4 repro 1:", first, results)
+    assert all(r["code"] != "bad_memory" for r in results), results
+    assert bank(b).search("coastal walks", "global") and bank(b).search("Napier", "global")
+    assert results[-1]["code"] == "in_sync" and results[-1]["pending"] == 0, results
+
+
+def test_m4_a_failed_legacy_push_does_not_wedge_sync_after_upgrade(devices, monkeypatch):
+    """Review round 2 M4, repro 2: the id is recorded BEFORE the push that would
+    advance the cursor past it; when that push fails, the id is ahead of the cursor."""
+    a, b = linked(devices, monkeypatch)
+    sender = bank(a)
+    sender.put("global", {"title": "Mira", "body": "Mira likes long coastal walks " * 50})
+    link = _legacy_link(a, b)
+    real = link.request
+
+    def refuse_push(frame: dict[str, Any], timeout: float = 30) -> Any:
+        if frame.get("phase") == "push":
+            return {"op": "error", "ok": False, "code": "bad_memory", "message": "transient"}
+        return real(frame, timeout=timeout)
+
+    with pytest.MonkeyPatch.context() as legacy:
+        legacy.setattr(link, "capabilities", _without_item_512(link))
+        legacy.setattr(link, "request", refuse_push)
+        refused = memory.push_to_peer(a, b.identity.device_id)
+    assert refused["ok"] is False, refused
+    assert memory.legacy_pending(memory._store(a.root), b.identity.device_id)["ids"]
+    results = _converges(a, b, "coastal walks")
+    print("M4 repro 2:", refused, results)
+    assert all(r["code"] != "bad_memory" for r in results), results
+    assert bank(b).search("coastal walks", "global")
+    assert results[-1]["code"] == "in_sync" and results[-1]["pending"] == 0, results
+
+
+def test_a_refused_redelivery_falls_back_to_a_resend_instead_of_retrying(devices, monkeypatch):
+    """No single redelivered op may wedge the stream: a refusal drops it from the owed
+    list and re-baselines, and the ordinary resend delivers it."""
+    a, b = linked(devices, monkeypatch)
+    sender = bank(a)
+    sender.put("global", {"title": "Mira", "body": "Mira likes long coastal walks " * 50})
+    link = _legacy_link(a, b)
+    with pytest.MonkeyPatch.context() as legacy:
+        legacy.setattr(link, "capabilities", _without_item_512(link))
+        assert memory.push_to_peer(a, b.identity.device_id)["code"] == "withheld_pending"
+    original = memory.receive
+    refusals = []
+
+    def refuse_redelivery(server, peer, payload, scopes, origins):  # noqa: ANN001
+        # EVERY redelivery is refused (a peer-side rule that will never accept
+        # it): a sender that retries the same op wedges forever.
+        if payload.get("redeliver"):
+            refusals.append(1)
+            raise MemoryError("synthetic redelivery refusal")
+        return original(server, peer, payload, scopes, origins)
+
+    monkeypatch.setattr(memory, "receive", refuse_redelivery)
+    results = _converges(a, b, "coastal walks", pushes=5)
+    print("refused redelivery:", results)
+    assert len(refusals) == 1 and results[0]["code"] == "bad_memory", results
+    # Review round 3 m1: the refusal receipt says the peer is still owed (re-baseline).
+    assert results[0]["pending"] == "overflow", results
+    assert bank(b).search("coastal walks", "global")
+    assert results[-1]["code"] == "in_sync", results
+
+
+def test_a_redelivery_with_no_answer_keeps_the_ops_owed_and_reports_them(devices, monkeypatch):
+    """Review round 3 m1: the no-answer return carries ``pending`` like the others,
+    and nothing is dropped (nothing was refused), so a later push still delivers."""
+    a, b = linked(devices, monkeypatch)
+    sender = bank(a)
+    sender.put("global", {"title": "Mira", "body": "Mira likes long coastal walks " * 50})
+    link = _legacy_link(a, b)
+    with pytest.MonkeyPatch.context() as legacy:
+        legacy.setattr(link, "capabilities", _without_item_512(link))
+        assert memory.push_to_peer(a, b.identity.device_id)["code"] == "withheld_pending"
+    real = link.request
+
+    def drop_redelivery(frame: dict[str, Any], timeout: float = 30) -> Any:
+        if frame.get("phase") == "push" and (frame.get("payload") or {}).get("redeliver"):
+            return None
+        return real(frame, timeout=timeout)
+
+    with pytest.MonkeyPatch.context() as gone:
+        gone.setattr(link, "request", drop_redelivery)
+        lost = memory.push_to_peer(a, b.identity.device_id)
+    assert lost["code"] == "push_failed" and lost["pending"] == 1, lost
+    results = _converges(a, b, "coastal walks")
+    assert bank(b).search("coastal walks", "global")
+    assert results[-1]["code"] == "in_sync" and results[-1]["pending"] == 0, results

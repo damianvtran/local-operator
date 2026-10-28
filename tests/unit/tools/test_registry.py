@@ -329,25 +329,30 @@ def test_the_newest_appends_stay_last_in_both_tables() -> None:
     claude.ai artifact data store, createIf-gated on a stored anthropic OAuth
     grant) appended after that — and ``notify`` (the operator's inbox,
     createIf-gated on the session's inbox door) is the newest append and now
-    ends both tables."""
+    ends the DEFAULT table. The configuration run's opt-in ``skill`` is the
+    newest BUILDER append and ends ``TOOL_BUILDERS`` only: it is absent from
+    ``DEFAULT_TOOL_NAMES`` on purpose (see ``test_skill_is_opt_in_only``), so
+    the builder table's tail is the default tail plus ``skill``."""
+    assert list(TOOL_BUILDERS)[-1] == "skill"
+    builders = list(TOOL_BUILDERS)[:-1]
     assert DEFAULT_TOOL_NAMES[-1] == "notify"
-    assert list(TOOL_BUILDERS)[-1] == "notify"
+    assert builders[-1] == "notify"
     assert DEFAULT_TOOL_NAMES[-2] == "artifact_data"
-    assert list(TOOL_BUILDERS)[-2] == "artifact_data"
+    assert builders[-2] == "artifact_data"
     assert DEFAULT_TOOL_NAMES[-3] == "tags"
-    assert list(TOOL_BUILDERS)[-3] == "tags"
+    assert builders[-3] == "tags"
     assert DEFAULT_TOOL_NAMES[-5:-3] == ["generate_voiceover", "generate_sound_effect"]
-    assert list(TOOL_BUILDERS)[-5:-3] == ["generate_voiceover", "generate_sound_effect"]
+    assert builders[-5:-3] == ["generate_voiceover", "generate_sound_effect"]
     assert DEFAULT_TOOL_NAMES[-6] == "bridge"
-    assert list(TOOL_BUILDERS)[-6] == "bridge"
+    assert builders[-6] == "bridge"
     assert DEFAULT_TOOL_NAMES[-7] == "setting"
-    assert list(TOOL_BUILDERS)[-7] == "setting"
+    assert builders[-7] == "setting"
     assert DEFAULT_TOOL_NAMES[-8] == "video_status"
-    assert list(TOOL_BUILDERS)[-8] == "video_status"
+    assert builders[-8] == "video_status"
     assert DEFAULT_TOOL_NAMES[-9] == "generate_video"
-    assert list(TOOL_BUILDERS)[-9] == "generate_video"
+    assert builders[-9] == "generate_video"
     assert DEFAULT_TOOL_NAMES[-10] == "no_reply"
-    assert list(TOOL_BUILDERS)[-10] == "no_reply"
+    assert builders[-10] == "no_reply"
 
 
 def _invalid_enum_nodes(node: Any) -> list[str]:
@@ -502,9 +507,43 @@ def test_enabled_empty_list_gives_no_tools() -> None:
     assert create_tools(ToolContext(cwd="."), []) == []
 
 
+#: Builders that are in the table but deliberately NOT default: a host that
+#: declares one builds it (``Session._merge_capability_tools``); no other session
+#: does. Each entry is a reviewed decision, so the set is spelled out here.
+OPT_IN_ONLY_TOOLS = {"skill"}
+
+
 def test_default_names_cover_builder_table() -> None:
-    """The default surface is the whole table today; drift is deliberate."""
-    assert set(DEFAULT_TOOL_NAMES) == set(TOOL_BUILDERS)
+    """The default surface is the whole table minus the named opt-in builders;
+    drift is deliberate."""
+    assert set(DEFAULT_TOOL_NAMES) == set(TOOL_BUILDERS) - OPT_IN_ONLY_TOOLS
+    assert not OPT_IN_ONLY_TOOLS & set(DEFAULT_TOOL_NAMES)
+
+
+def test_skill_is_opt_in_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The configuration run's ``skill`` tool never enters an ordinary session.
+
+    The ordinary surface is what the prompt cache keys on, so this compares the
+    WHOLE default tools array (names, order, schemas) with and without the
+    ``skill`` builder in the table: adding it must not move a single byte. Built
+    from a context that WOULD satisfy the skill factory (a profile root), so the
+    absence is the default list's doing, not the factory's createIf.
+    """
+    import json
+
+    context = _engine_context()
+    context.memory_config_dir = "/nonexistent-profile-root"
+    assert TOOL_BUILDERS["skill"](context) is not None, "the factory itself must build"
+
+    def wire(tools: list[Any]) -> str:
+        return json.dumps(
+            [[tool.name, tool.description, tool.parameters] for tool in tools], sort_keys=False
+        )
+
+    assert "skill" not in [tool.name for tool in create_tools(context)]
+    with_skill = wire(create_tools(context))
+    monkeypatch.delitem(TOOL_BUILDERS, "skill")
+    assert with_skill == wire(create_tools(context))
 
 
 def test_the_console_tool_is_absent_without_the_app(monkeypatch) -> None:

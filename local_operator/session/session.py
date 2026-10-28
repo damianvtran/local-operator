@@ -581,6 +581,10 @@ _FRONTEND_JOBS_FLOOR_S = 0.05
 _FRONTEND_JOBS_MAX_SHARE = 0.25
 _FRONTEND_JOBS_CEILING_S = 1.0
 
+#: Floor between two disk reads of the channel-spend pending sidecar on the
+#: frontend refresh path (see ``Session.pending_channel_records``).
+_CHANNEL_PENDING_MIN_S = 1.0
+
 
 def _frontend_jobs_delay(last_cost_s: float) -> float:
     """How long to wait before the next job-roster tick, given the last one's cost.
@@ -6073,6 +6077,7 @@ class Session:
         # (and, done at the top of this file, cyclic).
         from local_operator.providers.failover import (
             is_image_count_rejection,
+            is_image_modality_rejection,
             is_image_rejection,
         )
 
@@ -6083,7 +6088,13 @@ class Session:
         # strip is still what lets the next turn succeed, but it is
         # provider-scoped like the size strip, so ``set_model`` to a provider
         # with a higher limit lifts it (agent review round 2, R2-m2).
-        count_only = is_image_count_rejection(error)
+        #
+        # A MODALITY refusal ("No endpoints found that support image input")
+        # poisons no block either: it says the MODEL takes no images, which is
+        # how a text-only model nothing described is discovered now that an
+        # undescribed model is sent images (PR #3071, M1). Same lifetime for the
+        # same reason — a switch onto a vision model must see the images again.
+        count_only = is_image_count_rejection(error) or is_image_modality_rejection(error)
         if self._images_rejected:
             # Already stripping, so there is nothing more to do to the render —
             # but a GENUINE refusal permanently downgrades the strip's scope.
@@ -7115,7 +7126,7 @@ class Session:
                 if callable(withdraw):
                     withdraw()
                 self._journal_knobs_if_selection_changed(previous, model, previous_choice)
-                self.refresh_frontend_state()
+                self._refresh_frontend_model_selection()
                 # The label moved even though the pair did not (the pin came
                 # off), so the baked tier descriptions are stale for the same
                 # reason they are on a genuine switch — see the call on that
@@ -7152,7 +7163,7 @@ class Session:
                 if refreshed is not None:
                     self._active_fallback = refreshed
             self._journal_knobs_if_selection_changed(previous, model, previous_choice)
-            self.refresh_frontend_state()
+            self._refresh_frontend_model_selection()
             return
         # A genuine model change is a SELECTION, and selections outlive the
         # process: journal it so `--resume` comes back on this model instead
@@ -7217,7 +7228,7 @@ class Session:
         # turn (see journal_model_switch). No ``reason``: the head already reads
         # "now running as X (was Y)", so a "Reason: model switched" line would
         # only repeat it. ``reason`` is reserved for failover causes (R3).
-        self.refresh_frontend_state()
+        self._refresh_frontend_model_selection()
         # The tier tools bake the session's model label into their schema text
         # at BUILD time (``describe_effort_tiers``), while a sentinel tier
         # resolves to ``self.model`` at LAUNCH. Without this the two drift the
@@ -13242,7 +13253,7 @@ class Session:
         """
         self._on_mcp_startup_settled = sink
 
-    def refresh_tools(self, tools: Sequence[AgentTool]) -> bool:
+    def refresh_tools(self, tools: Sequence[AgentTool], *, republish: bool = True) -> bool:
         """Replace the full tool inventory mid-session.
 
         THE committed hook for MCP ``set_on_tools_changed`` (orchestrator
@@ -13269,11 +13280,16 @@ class Session:
         whole point: MCP tools are discovered lazily, so filtering only the
         construction-time builtins would leave the declaration unenforced on
         exactly the surface an embedder declares it for.
+
+        ``republish=False`` skips the canonical frontend refresh for a caller
+        that publishes its own (``_rebuild_effort_tier_tools``, a model edge):
+        that refresh rescans the whole roster and reads nothing from the tool
+        list, so on a switch it was pure cost on the session loop.
         """
         self._tools = self._filter_declared(tools)
         self._context.tools = self._tools
         self._refresh_tool_roster()
-        if hasattr(self, "_frontend_state_store"):
+        if republish and hasattr(self, "_frontend_state_store"):
             self.refresh_frontend_state()
         return self._published_tools is None
 
@@ -14729,6 +14745,9 @@ class Session:
         """
         store = getattr(self, "_frontend_state_store", None)
         publish = getattr(store, "refresh_spend_channels", None) if store is not None else None
+        # A money edge reads the sidecar fresh; only the per-tick refresh path
+        # is throttled (see ``pending_channel_records``).
+        self._channel_pending_cache = None
         if callable(publish):
             try:
                 publish(self)
@@ -14752,19 +14771,85 @@ class Session:
         one — a lost marker degrades to "nothing pending", never a broken
         publish.
         """
-        try:
-            directory = getattr(self._transcript, "directory", None)
-            if directory is None:
+        # THROTTLED DISK READ. This runs from every jobs tick and every
+        # per-event frontend refresh ON THE SESSION LOOP; even the common
+        # no-sidecar answer is an ``isfile`` syscall, and returning from any
+        # syscall costs the loop a GIL re-acquire behind every busy lane
+        # (measured ~0.5-0.75 s of sampled loop stall per 40 s on a 12-lane
+        # manager). The sidecar is written by ANOTHER process (the voice
+        # routes, ``server/utils/voice_spend.py``) on human timescales, so the
+        # raw entries are re-read at most once per ``_CHANNEL_PENDING_MIN_S``;
+        # the fold exclusion below still runs every call, so a marker the fold
+        # has absorbed retires immediately.
+        # A throttled answer arms ONE trailing re-read at the end of the floor
+        # (``_schedule_channel_pending_recheck``) so a marker written just after
+        # a read still reaches the band within the floor when the session goes
+        # quiet, rather than at the next unrelated tick (review round 1, R1-2).
+        now = time.monotonic()
+        cached = getattr(self, "_channel_pending_cache", None)
+        if cached is not None and now - cached[0] < _CHANNEL_PENDING_MIN_S:
+            entries = cached[1]
+            self._schedule_channel_pending_recheck(_CHANNEL_PENDING_MIN_S - (now - cached[0]))
+        else:
+            try:
+                directory = getattr(self._transcript, "directory", None)
+                if directory is None:
+                    return []
+                entries = read_pending_records(directory)
+            except Exception:  # noqa: BLE001 — a marker read must never break a publish
+                logger.debug("channel pending read failed", exc_info=True)
                 return []
-            entries = read_pending_records(directory)
-        except Exception:  # noqa: BLE001 — a marker read must never break a publish
-            logger.debug("channel pending read failed", exc_info=True)
-            return []
+            self._channel_pending_cache = (now, entries)
         return [
             entry
             for entry in entries
             if not self.channels.has(str(entry.get("record_id", "") or ""))
         ]
+
+    def _schedule_channel_pending_recheck(self, delay: float) -> None:
+        """Arm one trailing sidecar re-read ``delay`` from now; coalesced."""
+        if getattr(self, "_channel_pending_recheck_scheduled", False):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop (a synchronous caller or test host): the next tick re-reads.
+            return
+        self._channel_pending_recheck_scheduled = True
+        # WEAKLY: a pending timer is a loop-owned strong edge, and a disposed
+        # session must stay collectable for up to a floor after its last tick
+        # (``test_launch_subagent``'s retention cells pin that). A collected
+        # session has no band to publish to, so the re-check simply lapses.
+        ref = weakref.ref(self)
+
+        def fire() -> None:
+            session = ref()
+            if session is not None:
+                session._flush_channel_pending_recheck()
+
+        loop.call_later(max(delay, 0.0), fire)
+
+    def _flush_channel_pending_recheck(self) -> None:
+        """Re-read the sidecar; publish the spend band only if it changed.
+
+        Publishing only on a difference keeps the trailing edge free when
+        nothing moved — the common case, a burst of ticks over an unchanged
+        (usually absent) sidecar — so the throttle's saving is kept.
+        """
+        self._channel_pending_recheck_scheduled = False
+        before = getattr(self, "_channel_pending_cache", None)
+        self._channel_pending_cache = None
+        self.pending_channel_records()
+        after = getattr(self, "_channel_pending_cache", None)
+        if before is not None and after is not None and before[1] == after[1]:
+            return
+        store = getattr(self, "_frontend_state_store", None)
+        publish = getattr(store, "refresh_spend_channels", None) if store is not None else None
+        if callable(publish):
+            try:
+                publish(self)
+            except Exception:  # noqa: BLE001 — a publish must never break the loop
+                logger.debug("trailing channel spend publish failed", exc_info=True)
 
     def rebuild_channels_if_needed(self) -> None:
         """The adopt seam for channel history: the legacy backfill.
@@ -17163,6 +17248,21 @@ class Session:
         store = getattr(self, "_frontend_state_store", None)
         if store is not None:
             store.refresh_from_session(self)
+
+    def _refresh_frontend_model_selection(self) -> None:
+        """Publish a model/effort switch to the canonical frontend state, in O(1).
+
+        ``set_model``'s publish. It used to be :meth:`refresh_frontend_state`,
+        whose full rescan rebuilds every job row: on a long manager with a large
+        roster that made a switch's cost on the session loop grow with the
+        roster, and the desktop's 20 s request deadline expired on exactly those
+        sessions. Only the selection fields move on a switch; the scheduled
+        roster/jobs refreshes keep the rest current. Same guard as the full
+        refresh: the store does not exist yet during construction.
+        """
+        store = getattr(self, "_frontend_state_store", None)
+        if store is not None:
+            store.refresh_model_selection(self)
 
     def refresh_frontend_usage(self) -> None:
         """Refresh restored usage without scanning transcript/jobs/tool schemas.
@@ -25567,6 +25667,14 @@ class Session:
         explicit = getattr(settings, "strategy", "auto")
         if explicit in ("context-full", "snapcompact", "off"):
             return str(explicit)
+        if self._images_rejected:
+            # The provider has refused images in this session, so every frame
+            # an image archive produced would be stripped on the way out and
+            # the archived turns would reach the model as nothing at all.
+            # context-full keeps them as a text summary (PR #3071 review m1).
+            # Read live rather than latched: a provider-scoped strip lifts on a
+            # switch, and the next compaction may then use frames again.
+            return "context-full"
         try:
             from local_operator.compaction import thresholds as _thresholds
 
@@ -25621,9 +25729,16 @@ class Session:
                 # and tokenized for the model that will actually receive the
                 # replay, which during a fallback is the fallback.
                 effective = self.effective_model
+                # Lift the leading rendered marker OUT of the span. Snapcompact
+                # already folds that same archive through previous_text below;
+                # serializing the marker as [User] also mined its hard-wrapped
+                # replay pages as fresh operator asks (QA round 5, Q16). This is
+                # the snapcompact half of the lift-XOR-keep rule used below for
+                # context-full, and by compaction.pass_ for both strategies.
+                _, archive_span = compaction_api.split_leading_marker(to_summarize)
                 archive = await asyncio.to_thread(
                     snapcompact.compact_to_archive,
-                    to_summarize,
+                    archive_span,
                     effective.provider,
                     effective.model_id,
                     self._previous_archive_text(),
@@ -30684,7 +30799,14 @@ class Session:
             return
         if not rebuilt:
             return
-        self.refresh_tools([rebuilt.get(tool.name, tool) for tool in self._tools])
+        # ``republish=False``: nothing in the canonical frontend state is
+        # derived from the tool list (``refresh_from_session`` never reads it),
+        # so the full republish ``refresh_tools`` runs by default would publish
+        # nothing new. On a model switch it was the second roster-sized pass a
+        # single ``/model`` paid on the session loop (see
+        # ``FrontendStateStore.refresh_model_selection``); ``set_model``
+        # publishes the selection itself.
+        self.refresh_tools([rebuilt.get(tool.name, tool) for tool in self._tools], republish=False)
 
     def _on_configured_model_changed(
         self, values: Mapping[str, Any], *, local: bool, changed: frozenset[str]

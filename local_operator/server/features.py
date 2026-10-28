@@ -410,6 +410,17 @@ def static_feature_flags() -> dict[str, Any]:
         # in this runtime: feature branches must adopt the same guard before
         # advertising their mutations alongside this capability.
         "team_bridge_conversation_owner_guard": 1,
+        # The owner's agent-invitation surface over agent-server #227: the
+        # `GET /v1/desktop/team-bridge/agents/owned/invitations` read (metadata
+        # only, receipt required, `private, no-store`) and `decision=withdraw`
+        # (no consent_version) plus an optional `endpoint_id` pin on the
+        # consent route. Its own key by the `radient_org` rule: a renderer that
+        # does not see it neither mounts the invitations list nor offers
+        # "Remove my agent", because a build without this key would 404 the
+        # read and 422 the decision. It promises the RUNTIME only; a hub that
+        # predates #227 answers either with 409 `outdated_hub`, which the
+        # renderer shows as "the server needs an update" rather than probing.
+        "team_bridge_owner_invitations": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key
@@ -627,6 +638,15 @@ def static_feature_flags() -> dict[str, Any]:
         # and are deliberately not re-declared here: a client requires the
         # conjunction, it does not get a second spelling of the same fact.
         "agents_config": 1,
+        # The configuration run can also revise the operator's OWN skills: its
+        # declaration names the opt-in `skill` tool (list/show/create/update,
+        # through the same write path as `skill_write`). ITS OWN KEY for the
+        # reason `agents_config` states: an older backend has `agents_config`
+        # but builds no `skill` tool, so a run there would answer "I can't edit
+        # skills" -- the Skills tab must not mount its composer against it.
+        # The renderer requires it together with `agents_config` and
+        # `skill_library` (its settle diff reads the skills list).
+        "agents_config_skills": 1,
         # Durable conversation pins: the `pinned` flag on every catalogue
         # row, and POST /v1/desktop/sessions/{id}/pin.
         #
@@ -961,6 +981,16 @@ def static_feature_flags() -> dict[str, Any]:
         # `1` is the feature's first contract revision; new row fields are additive and do not
         # bump it.
         "session_files": 1,
+        # THE USER-ATTACHMENT INVENTORY: `GET /v1/desktop/sessions/{id}/user-attachments`,
+        # every document and picture the PERSON attached to the conversation, scanned from the
+        # whole journal (`session/user_attachments.py`). Its OWN key rather than a bump of
+        # `session_files`: that index is the agent's OUTPUT and its key promises nothing about
+        # inputs, so a backend with `session_files` but not this route must be recognisable.
+        # ADDITIVE: an older renderer never calls it. ABSENT MEANS the canvas builds its
+        # Attachments section from the history rows it has loaded and must not call the route
+        # (it would 404) - nor present that partial list as complete.
+        # `1` is the first contract revision; item fields are additive and do not bump it.
+        "session_attachments": 1,
         # The global, cross-conversation Library: list/detail/metadata/tags/
         # content. Its OWN key rather than a bump of `session_files`: the
         # surfaces (desktop sidebar, TUI /library, phone web, Expo) are new

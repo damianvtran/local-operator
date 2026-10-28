@@ -175,6 +175,7 @@ from local_operator.model.naming import model_label as model_label_forms
 from local_operator.paths import config_dir
 from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
 from local_operator.session import subagent_ledger as ledger
+from local_operator.session.coalescing_writer import EVIDENCE_WRITER
 
 
 class SubagentModelUnavailable(RuntimeError):
@@ -1914,12 +1915,20 @@ def _note_checkpoint_cause(directory: Path, job_id: str, cause: str) -> None:
     import json
 
     path = directory / f"subagent-wip-{job_id}.v1.json"
-    try:
-        payload = json.loads(path.read_text())
-        payload["death_cause"] = cause
-        ledger._staged_write(path, payload)
-    except (OSError, ValueError, TypeError):
-        pass
+    # Under the evidence writer's ``exclusive`` (review round 1, R1-3): this is
+    # a read-modify-write of the receipt ``WipCheckpointer.note_step`` rewrites
+    # WHOLE from the writer thread. A late relayed step still queued would land
+    # after this and drop ``death_cause`` — the classification restart-resume
+    # reads. ``exclusive`` drops that queued step (settle has already happened,
+    # so it is stale) and waits out one mid-write, so the read below sees the
+    # final bytes and nothing overwrites them afterwards.
+    with EVIDENCE_WRITER.exclusive(path):
+        try:
+            payload = json.loads(path.read_text())
+            payload["death_cause"] = cause
+            ledger._staged_write(path, payload)
+        except (OSError, ValueError, TypeError):
+            pass
 
 
 def _resume_context(directory: Path, facts: Mapping[str, Any] | None = None) -> str:
