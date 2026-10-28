@@ -14485,13 +14485,21 @@ LABEL_TEMPLATE = "{brand} [network relay] port={port}"
 #: ``uninstall`` and an incident stop are deliberate, and must stay down.
 #:
 #: So the unit says ``Restart=always`` and names this status as the one it
-#: honours. A deliberate path marks the stop FIRST (:func:`mark_deliberate_stop`)
-#: and the relay, on its way out, exits with this status only when that marker
-#: is fresh (:func:`_exit_status`). Everything else — a signal nobody asked
-#: for, a crash, an unhandled exception — is restarted. A ``systemctl stop``
-#: is never restarted whatever the status (systemd does not restart a unit it
-#: was told to stop), so the status matters only for an exit systemd did not
-#: initiate.
+#: honours. Everything a person did not ask for — a stray signal, a crash, an
+#: unhandled exception — is restarted.
+#:
+#: WHAT THE STATUS IS FOR, stated narrowly (agent review round 1, m2): every
+#: product stop on Linux today is SYSTEMD-INITIATED (``lop network stop`` runs
+#: ``systemctl stop``, uninstall runs ``disable --now``), and systemd never
+#: restarts a unit it was told to stop, whatever the exit status — so those
+#: verbs stay down with or without this status. The marker + 75 covers the
+#: OUT-OF-BAND case: a deliberate stop that reaches the relay as a plain
+#: SIGTERM rather than through the manager (a future incident path, an
+#: operator's own tooling). Such a path marks the stop FIRST
+#: (:func:`mark_deliberate_stop`) and the relay, on its way out, exits with
+#: this status only when that marker is fresh (:func:`_exit_status`). The
+#: product verbs mark too, so the exit they cause is labelled the same way
+#: whichever route delivered the signal.
 #:
 #: THE VALUE: 75 is ``EX_TEMPFAIL`` in sysexits.h — outside the 0/1/2 a Python
 #: process uses (2 is argparse's usage error and this unit's "cannot start"
@@ -14596,6 +14604,49 @@ def deliberate_stop_marker_path(root: Path | None = None) -> Path:
     return (Path(root) if root is not None else config_dir()) / "run" / DELIBERATE_STOP_MARKER
 
 
+def _unit_config_root() -> Path | None:
+    """The config root the INSTALLED unit pins (``Environment=LOCAL_OPERATOR_CONFIG_DIR``).
+
+    THE MARKER MUST LAND WHERE THE SUPERVISED RELAY READS IT (agent review round
+    1, m4). The relay reads ``<its config>/run``, and its config is the one
+    :func:`render_systemd` pinned into the unit — not whatever override the
+    process running the stop verb happens to carry. Read from the unit file the
+    same way :func:`_service_port` reads ``--port``; ``None`` when the platform
+    has no such unit or the line cannot be read, and the caller then writes no
+    marker at all rather than one in a root no supervised relay reads.
+    """
+    try:
+        if not (sys.platform.startswith("linux") and systemd_path().exists()):
+            return None
+        text = systemd_path().read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    # The line is written by ``supervisors.quoted`` (``\\``, ``\"`` and ``%%``
+    # escaped inside one pair of quotes), so it is decoded by inverting exactly
+    # that, never by a looser guess that would misread a path with a quote or a
+    # percent sign in it.
+    found = re.search(
+        rf'^Environment="{re.escape(CONFIG_DIR_ENV)}=((?:[^"\\]|\\.)*)"\s*$', text, re.M
+    )
+    if not found:
+        return None
+    value = re.sub(r"\\(.)", r"\1", found.group(1)).replace("%%", "%")
+    return Path(value) if value else None
+
+
+def _mark_unit_stop(reason: str) -> bool:
+    """Mark a product stop verb's stop in the UNIT's root; ``False`` if none.
+
+    Linux only: on macOS the marker is never consulted (:func:`_exit_status`
+    answers 0 there), so writing one would be dead state.
+    """
+    root = _unit_config_root()
+    if root is None:
+        return False
+    mark_deliberate_stop(reason, root)
+    return True
+
+
 def mark_deliberate_stop(reason: str, root: Path | None = None) -> None:
     """Record that the NEXT relay exit was asked for, before asking for it.
 
@@ -14607,9 +14658,9 @@ def mark_deliberate_stop(reason: str, root: Path | None = None) -> None:
     whatever the status), it only loses the guarantee for a non-systemd signal.
     """
     path = deliberate_stop_marker_path(root)
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
         tmp.write_text(
             json.dumps({"reason": str(reason), "at": time.time(), "by_pid": os.getpid()}),
             encoding="utf-8",
@@ -14617,6 +14668,11 @@ def mark_deliberate_stop(reason: str, root: Path | None = None) -> None:
         os.replace(tmp, path)
     except OSError:
         logger.debug("relay: could not write the stop marker %s", path, exc_info=True)
+        # Never leave this writer's own staging file behind in run/ (review n1).
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def clear_deliberate_stop(root: Path | None = None) -> None:
@@ -15267,7 +15323,7 @@ def uninstall(
             if supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT):
                 # A DELIBERATE STOP: marked before the signal, so the exit it
                 # causes reads as asked-for (DELIBERATE_STOP_EXIT_STATUS).
-                mark_deliberate_stop("uninstall")
+                _mark_unit_stop("uninstall")
                 supervisors.systemctl_user("disable", "--now", SYSTEMD_UNIT)
                 systemd_path().unlink(missing_ok=True)
                 supervisors.systemctl_user("daemon-reload")
@@ -15952,12 +16008,15 @@ def _supervised_action(
     refused = guard(action)
     if refused is not None:
         return refused
+    marked = False
     if action == "stop":
-        # THE OPERATOR'S STOP VERB (`lop network stop`) IS DELIBERATE, on both
-        # platforms: marked before the arm signals, so the relay exits with
-        # DELIBERATE_STOP_EXIT_STATUS and the unit's Restart=always leaves it
-        # down. After the guard, so a redirected HOME writes nothing.
-        mark_deliberate_stop("lop network stop")
+        # THE OPERATOR'S STOP VERB (`lop network stop`) IS DELIBERATE: marked
+        # before the arm signals, so the exit reads as asked-for whichever route
+        # delivers it (see DELIBERATE_STOP_EXIT_STATUS for what that buys). Linux
+        # only — a no-op on macOS, where the marker is never read — and in the
+        # UNIT's config root (_unit_config_root). After the guard, so a
+        # redirected HOME writes nothing.
+        marked = _mark_unit_stop("lop network stop")
     port = _service_port()
     before = _supervision_state(port)
     replaced: list[dict[str, Any]] = []
@@ -15975,6 +16034,12 @@ def _supervised_action(
             replaced.append({**holder, "outcome": outcome})
     result = arm(action)
     if not result.get("ok"):
+        if marked:
+            # THE STOP DID NOT HAPPEN (review m1: e.g. `systemctl --user stop`
+            # could not reach the bus), so the relay is still running and its
+            # next exit is NOT asked-for. Left in place, the marker would keep a
+            # genuine crash inside its TTL down instead of restarting it.
+            clear_deliberate_stop(_unit_config_root())
         return _service_failure(action, port, result, replaced=replaced)
     verdict = _verify_service_action(action, before)
     if not verdict.get("ok"):

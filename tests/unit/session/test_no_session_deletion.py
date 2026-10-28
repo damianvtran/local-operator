@@ -543,6 +543,31 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "server does not leave a lease behind and does not delete a live "
         "sibling's",
     ),
+    # The relay's deliberate-stop marker (`network/relay.py`, #3069): one FILE,
+    # `<config>/run/relay-stop-requested.json`, beside the relay's own run/peers
+    # records. Written before a stop verb signals the unit, consumed by the relay
+    # as it exits (so its exit status says whether the stop was asked for). Each
+    # call below reaches only that file or its writer's own staging file -- file
+    # operations, never a directory removal, never anything under sessions/.
+    (
+        "local_operator/network/relay.py::mark_deliberate_stop",
+        "os.replace",
+        "Atomic replacement of the stop-marker FILE <config>/run/relay-stop-requested.json "
+        "from its own pid-named staging file; never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/network/relay.py::mark_deliberate_stop",
+        "<path>.unlink",
+        "Removes only its own `relay-stop-requested.json.<pid>.tmp` staging FILE in "
+        "<config>/run after a failed write or replace",
+    ),
+    (
+        "local_operator/network/relay.py::clear_deliberate_stop",
+        "<path>.unlink",
+        "Consumes the stop-marker FILE <config>/run/relay-stop-requested.json (at relay "
+        "start, at exit, and after a stop that did not happen); never a directory and "
+        "never under sessions/",
+    ),
     # The local surface keys' per-boot generation counter
     # (`local_operator/server/utils/local_tokens.py`): one FILE at
     # `<config>/run/serve/generation`, beside the serve records the registry

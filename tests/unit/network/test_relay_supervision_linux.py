@@ -1848,6 +1848,18 @@ def test_macos_never_returns_the_status_launchd_would_relaunch(
     assert relay._exit_status(tmp_path) == 0  # noqa: SLF001
 
 
+def _write_unit_pinning(home: Path, config: Path) -> Path:
+    """An installed relay unit whose pinned config root is ``config``."""
+    unit = _unit(home)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(
+        "[Service]\nExecStart=/x/python3 -m local_operator.network.relay --port 4097\n"
+        f"Environment={supervisors.quoted(f'{relay.CONFIG_DIR_ENV}={config}')}\n",
+        encoding="utf-8",
+    )
+    return unit
+
+
 def test_the_stop_verb_marks_the_stop_before_the_arm_signals(
     linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1855,9 +1867,7 @@ def test_the_stop_verb_marks_the_stop_before_the_arm_signals(
     config = tmp_path / "cfg"
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
     monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
-    unit = _unit(linux_host)
-    unit.parent.mkdir(parents=True, exist_ok=True)
-    unit.write_text("(unit)\n", encoding="utf-8")
+    _write_unit_pinning(linux_host, config)
     seen: list[tuple[tuple[str, ...], bool]] = []
 
     def _record(*args: str, **kwargs: Any) -> Any:
@@ -1902,9 +1912,7 @@ def test_uninstall_marks_the_stop_before_disable_now(
     config = tmp_path / "cfg"
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
     monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
-    unit = _unit(linux_host)
-    unit.parent.mkdir(parents=True, exist_ok=True)
-    unit.write_text("(unit)\n", encoding="utf-8")
+    _write_unit_pinning(linux_host, config)
     seen: list[tuple[tuple[str, ...], bool]] = []
 
     def _record(*args: str, **kwargs: Any) -> Any:
@@ -1979,3 +1987,87 @@ def test_refresh_unit_migrates_an_on_failure_unit_to_the_self_heal(
     assert written == relay.render_systemd()
     assert "Restart=always\n" in written and "KillMode=process\n" in written
     assert outcome.kind == "current", outcome
+
+
+def test_a_failed_stop_clears_its_marker_so_a_later_crash_restarts(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review m1: ``systemctl stop`` failed (e.g. no user bus), so the relay still
+    runs and its next exit is NOT asked-for. A marker left behind would keep a
+    genuine crash inside the TTL down instead of restarting it."""
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    _write_unit_pinning(linux_host, config)
+    marked_during: list[bool] = []
+
+    def _no_bus(*args: str, **kwargs: Any) -> Any:
+        marked_during.append(relay.deliberate_stop_requested(config))
+        return SimpleNamespace(returncode=1, stdout="", stderr="Failed to connect to bus")
+
+    monkeypatch.setattr(supervisors, "systemctl_user", _no_bus)
+    _pin_supervision(monkeypatch, managed=_Script(1000), record=None, answering=True)
+    monkeypatch.setattr(relay.sys, "platform", "linux")
+
+    assert relay.service_action("stop")["ok"] is False
+    assert marked_during and marked_during[0] is True, "marked before the arm ran"
+    assert not relay.deliberate_stop_marker_path(config).exists()
+    assert relay._exit_status(config) == 0  # noqa: SLF001 — the crash is restarted
+
+
+def test_the_stop_marker_lands_in_the_root_the_unit_pins(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review m4: a stop run under a DIFFERENT config override still marks the
+    root the supervised relay reads, never its own."""
+    unit_root = tmp_path / 'unit root %with "quote"'
+    other = tmp_path / "other"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(other))
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    _write_unit_pinning(linux_host, unit_root)
+    monkeypatch.setattr(
+        supervisors,
+        "systemctl_user",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    _pin_supervision(monkeypatch, managed=_Script(1000, None), record=None, answering=False)
+
+    assert relay.service_action("stop")["ok"] is True
+    assert relay.deliberate_stop_requested(unit_root)
+    assert not relay.deliberate_stop_marker_path(other).exists()
+
+
+def test_a_unit_without_a_pinned_root_writes_no_marker(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No pinned root is no supervised relay to address: no stray marker."""
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text("(unit)\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisors,
+        "systemctl_user",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    _pin_supervision(monkeypatch, managed=_Script(1000, None), record=None, answering=False)
+
+    assert relay.service_action("stop")["ok"] is True
+    assert not relay.deliberate_stop_marker_path(config).exists()
+
+
+def test_a_failed_marker_write_leaves_no_staging_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review n1: the writer's own ``.tmp`` never outlives a failed replace."""
+
+    def _refuse(src: Any, dst: Any) -> None:
+        raise OSError("read-only")
+
+    monkeypatch.setattr(relay.os, "replace", _refuse)
+    relay.mark_deliberate_stop("lop network stop", tmp_path)
+
+    run = relay.deliberate_stop_marker_path(tmp_path).parent
+    assert sorted(path.name for path in run.iterdir()) == []
