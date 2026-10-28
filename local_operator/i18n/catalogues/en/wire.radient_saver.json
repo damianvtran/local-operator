@@ -1,0 +1,19 @@
+{
+  "wire.radient_saver.section.title": "Radient Saver (beta)",
+  "wire.radient_saver.section.description": "Shortens the conversation history your agent re-sends on every turn. Saver never sends your AI provider's credentials to Radient. Changes apply from the next turn.",
+  "wire.radient_saver.mode.label": "Radient Saver (beta)",
+  "wire.radient_saver.mode.help": "Beta. Sends the part of your conversation history that is ready to be shortened to Radient, which shortens it and keeps none of its content. Saver never sends your AI provider's credentials to Radient. Each charge comes from your Radient credits and needs a Radient sign-in with a positive balance. LOP_RADIENT_SAVER overrides this setting.",
+  "wire.radient_saver.mode.choice.off.label": "off",
+  "wire.radient_saver.mode.choice.off.description": "never sends history to Radient (the default)",
+  "wire.radient_saver.mode.choice.opt_in.label": "opt in",
+  "wire.radient_saver.mode.choice.opt_in.description": "available, but off until a session turns it on",
+  "wire.radient_saver.mode.choice.auto.label": "auto",
+  "wire.radient_saver.mode.choice.auto.description": "on for every session while you are signed in with credit",
+  "wire.radient_saver.notice.unavailable": "Radient Saver is unavailable right now, so this turn sends your full history. Nothing else is affected.",
+  "wire.radient_saver.notice.rejected": "Radient Saver returned a response that failed its safety checks, so it was discarded and this turn sends your full history.",
+  "wire.radient_saver.notice.signed_out": "Radient Saver is paused for this session because you are not signed in to Radient. Run /login radient to use it.",
+  "wire.radient_saver.notice.no_credit": "Radient Saver is paused for this session because your Radient balance is empty. Add credit at console.radienthq.com to use it.",
+  "wire.radient_saver.notice.rate_limited": "Radient Saver is busy, so your full history is sent until it accepts requests again.",
+  "wire.radient_saver.notice.disabled": "Radient Saver is not available with this configuration, so your full history is sent.",
+  "wire.radient_saver.notice.oversize": "One message in this conversation is too large for Radient Saver, so it stays unshortened. Saver keeps working on the rest of the conversation."
+}

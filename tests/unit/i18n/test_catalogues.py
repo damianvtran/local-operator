@@ -77,6 +77,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         # The OpenRouter host-speed settings row (English-only, own namespace so
         # the audited wire.settings hash is untouched).
         "wire.host_speed",
+        # Radient Saver's settings row and fail-open notices (own namespace so the
+        # audited wire.settings hash is untouched).
+        "wire.radient_saver",
         # Populated by the console-capacity slice (this PR), the same way the
         # extraction slices added wire.settings/wire.errors.*/wire.exec.
         "wire.console",

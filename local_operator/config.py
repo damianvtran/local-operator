@@ -987,6 +987,16 @@ DEFAULT_CONFIG = Config(
                 "inherit": [],
                 "exclude": [],
             },
+            # Radient Saver (beta): ``off`` (the default — nothing is uploaded),
+            # ``opt_in`` or ``auto``. ``LOP_RADIENT_SAVER`` overrides it per
+            # process. The one reader is ``saver.gate.configured_mode``; the
+            # contract's "later flip" to ``auto`` is this value and the registry
+            # row's default together, and a test pins the two.
+            "radient": {
+                "saver": {
+                    "mode": "off",
+                },
+            },
         },
     }
 )

@@ -67,6 +67,7 @@ from local_operator.i18n.keys import wire_aida_cadence as _ac
 from local_operator.i18n.keys import wire_console as _cs
 from local_operator.i18n.keys import wire_host_speed as _hs
 from local_operator.i18n.keys import wire_memory as _mm
+from local_operator.i18n.keys import wire_radient_saver as _rsv
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.keys import wire_settings_account_policy as _ap
 from local_operator.i18n.keys import wire_settings_hub_defaults as _hd
@@ -140,6 +141,14 @@ except Exception:  # pragma: no cover - missing optional copy degrades to its co
 # ``wire.settings`` source hash the translated locales are pinned to.
 try:
     _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.host_speed"))
+except Exception:  # pragma: no cover - missing optional copy degrades to its code
+    pass
+
+# Radient Saver's section and row carry their copy in their own namespace for the
+# same reason as ``wire.host_speed``: the section is new, so adding it must not
+# move the ``wire.settings`` source hash the translated locales are pinned to.
+try:
+    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.radient_saver"))
 except Exception:  # pragma: no cover - missing optional copy degrades to its code
     pass
 
@@ -629,6 +638,15 @@ SECTIONS: tuple[Section, ...] = (
         _t(_ws.classification_title()),
         Scope.NEW_SESSIONS,
         _t(_ws.classification_description()),
+    ),
+    # LIVE: ``SessionStreamFn`` re-reads ``radient.saver.mode`` from the rebound
+    # settings mapping on every conversation turn (``saver.gate.configured_mode``),
+    # so switching it off stops the next upload without a ``/new``.
+    Section(
+        "radient_saver",
+        _t(_rsv.section_title()),
+        Scope.LIVE,
+        _t(_rsv.section_description()),
     ),
     Section(
         "supplements",
@@ -3622,6 +3640,38 @@ SETTINGS: tuple[Setting, ...] = (
         help=_t(_ws.classification_model_help()),
         empty_unsets=True,
         gated_by="classification.auto",
+    ),
+    # Radient Saver's gate (contract §1, §9). OFF by default: nothing uploads
+    # until the operator chooses ``opt_in`` or ``auto``. The default here and in
+    # ``config.DEFAULT_CONFIG`` is the "later flip" the contract describes — one
+    # value, pinned to ``saver.gate.DEFAULT_MODE`` by a test so the three cannot
+    # drift. ``LOP_RADIENT_SAVER`` overrides it per process (the ``LOP_ASK_GATE``
+    # precedent), which the help names.
+    Setting(
+        key="radient.saver.mode",
+        path=("radient", "saver", "mode"),
+        section="radient_saver",
+        label=_t(_rsv.mode_label()),
+        kind=Kind.ENUM,
+        default="off",
+        help=_t(_rsv.mode_help()),
+        choices=(
+            Choice(
+                "off",
+                _t(_rsv.mode_choice_off_label()),
+                _t(_rsv.mode_choice_off_description()),
+            ),
+            Choice(
+                "opt_in",
+                _t(_rsv.mode_choice_opt_in_label()),
+                _t(_rsv.mode_choice_opt_in_description()),
+            ),
+            Choice(
+                "auto",
+                _t(_rsv.mode_choice_auto_label()),
+                _t(_rsv.mode_choice_auto_description()),
+            ),
+        ),
     ),
     Setting(
         key="classification.timeoutMs",
