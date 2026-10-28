@@ -726,6 +726,9 @@ _CLONE_GUARD_FIELDS = frozenset(
         # selects a marker TTL, never message bytes, so an armed one-turn secret
         # stays in the one body it was approved for.
         "cache_role",
+        # Same policy input, same stamper: "this conversation already had a
+        # long-streaming turn" picks the marker TTL and nothing else.
+        "cache_after_long_call",
     }
 )
 #: Model fields that same decoration may set: the per-turn effort fit.
@@ -4451,6 +4454,14 @@ class ChatRequest(BaseModel):
     #: outside a session stream) derives the role from ``purpose`` alone, as a
     #: top-level conversation. Transport policy, never wire content.
     cache_role: str | None = Field(default=None, exclude=True, repr=False)
+    #: This conversation has already had a turn that ran at least
+    #: ``anthropic_cache_ttl.SUBAGENT_LONG_CALL_1H_THRESHOLD_S`` from request
+    #: start to stream end. Stamped by ``SessionStreamFn`` from its own
+    #: per-instance history (a fork starts clean), read only by the cache-TTL
+    #: policy, which moves such a subagent to 1h because its next request
+    #: would otherwise find the 5m prefix expired. Transport policy, never
+    #: wire content.
+    cache_after_long_call: bool = Field(default=False, exclude=True, repr=False)
     #: This call's output has NOT been shown to anyone yet, so a failed attempt
     #: may be discarded and retried whole.
     #:
@@ -4860,7 +4871,11 @@ class StreamStartEvent(BaseModel):
     #: ``ChatRequest.cache_diagnostics``). ``None`` = not diagnosed (another
     #: provider, the conversation's first request, or the feature latched off).
     #: Otherwise ``"unchanged"`` (compared, no divergence: a cache miss on such
-    #: a call is TTL expiry, not a prefix break), ``"pending"`` (the comparison
+    #: a call is TTL expiry, not a prefix break; measure the gap that explains
+    #: it from the previous request's START, not its end — the TTL is
+    #: refreshed when a request starts, so a call that streams for over five
+    #: minutes expires its own prefix, and an end-to-start gap under five
+    #: minutes does not rule expiry out), ``"pending"`` (the comparison
     #: had not finished when the response started), or the API's own
     #: ``cache_miss_reason.type`` (``system_changed``, ``tools_changed``,
     #: ``messages_changed``, ``model_changed``, ``previous_message_not_found``,

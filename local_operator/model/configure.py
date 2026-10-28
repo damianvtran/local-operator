@@ -3980,6 +3980,22 @@ class SessionStreamFn:
         # edited instruction file rewrote the prefix (PR #2984 QA Q1). A
         # transcript FORK ignores the rows it copied and starts at ``None``.
         self._cache_diagnostics_previous_id: str | None = None
+        # The credential that served the response ``_cache_diagnostics_previous_id``
+        # names. Anthropic keeps diagnostics fingerprints per account, so after
+        # a mid-session switch to another credential the old id cannot be found
+        # and every such call recorded ``previous_message_not_found`` instead of
+        # the ``baseline`` it really is. ``None`` = unknown (no chain yet, or a
+        # chain seeded from the transcript), which never triggers a reset.
+        self._cache_diagnostics_credential_id: int | None = None
+        # Whether one of this conversation's turns already ran for at least
+        # ``SUBAGENT_LONG_CALL_1H_THRESHOLD_S`` (request start to stream end).
+        # Stamped on every later request as ``ChatRequest.cache_after_long_call``
+        # so the cache-TTL policy can move a subagent to 1h: the 5m TTL is
+        # refreshed at request START, so a call that streams past five minutes
+        # expires its own prefix, and long calls cluster within a session (see
+        # the constant). Instance state, so a fork starts clean: a child's
+        # workload says nothing about its parent's.
+        self._had_long_call = False
         # -- Opt-in request observation (local_operator.session.request_observation).
         #
         # ``_observation_root`` is a reference to the ROOT stream of this fork
@@ -6954,6 +6970,7 @@ class SessionStreamFn:
                     request.purpose if not request.isolated else "isolated",
                     delegated=bool(getattr(self, "_parent_session_id", None)),
                 ),
+                "cache_after_long_call": self._had_long_call,
                 "preparation_ms": request.preparation_ms
                 + (time.perf_counter() - preparation_started) * 1000,
             }
@@ -7114,6 +7131,29 @@ class SessionStreamFn:
             )
         if request.purpose == "turn" and not request.same_route_retry:
             await self.preflight_usage(request.model)
+        current_credential_id = (
+            self._auth_store.session_credential_id(request.model.provider, self._session_id)
+            if request.cache_diagnostics_previous_id is not None
+            and self._cache_diagnostics_credential_id is not None
+            else None
+        )
+        if (
+            current_credential_id is not None
+            and current_credential_id != self._cache_diagnostics_credential_id
+        ):
+            # Checked AFTER the preflight, which is what may have moved the
+            # session to another account. The previous response lives in the
+            # old account's fingerprint store, so comparing against it can only
+            # answer ``previous_message_not_found``; restart the chain so this
+            # call records ``baseline``, which is what it is.
+            #
+            # An UNSET sticky (``None``: a released pin, a rotation that cleared
+            # it) is "unknown", not "switched": the next resolve usually lands
+            # on the same account, and dropping a live chain there loses a real
+            # comparison, so only a known different credential resets it.
+            self._cache_diagnostics_previous_id = None
+            self._cache_diagnostics_credential_id = None
+            request = request.model_copy(update={"cache_diagnostics_previous_id": None})
         # The binding boundary (``_note_serving_binding``): after the preflight
         # above has settled and pinned the session's credential, note it for the
         # recorder. Outside the purpose gate on purpose — a helper's request is
@@ -7152,6 +7192,12 @@ class SessionStreamFn:
                 # entry, and the worst case is a benign
                 # ``previous_message_not_found`` on the next turn.
                 self._cache_diagnostics_previous_id = event.response_id
+                # The resolve that served this response re-pinned the session
+                # to its credential, so the sticky names the account holding
+                # the fingerprint (read once per diagnosed response).
+                self._cache_diagnostics_credential_id = self._auth_store.session_credential_id(
+                    request.model.provider, self._session_id
+                )
             if (
                 request.cache_diagnostics
                 and usage is not None
@@ -7490,6 +7536,27 @@ class SessionStreamFn:
                 )
                 cut.estimated_usage = final_usage
             duration_ms = (time.monotonic() - started_at) * 1000
+            # Lazy, like this file's other ``anthropic_cache_ttl`` reads: a
+            # module-dict lookup once per request, never per delta.
+            from local_operator.providers.anthropic_cache_ttl import (
+                SUBAGENT_LONG_CALL_1H_THRESHOLD_S,
+            )
+
+            if (
+                ok
+                and request.purpose == "turn"
+                and not request.isolated
+                and duration_ms >= SUBAGENT_LONG_CALL_1H_THRESHOLD_S * 1000
+            ):
+                # Request start to stream end, the clock the ledger records, and
+                # the one that matters: the 5m TTL was refreshed at the start, so
+                # this is how long the prefix has already been ageing. Completed
+                # turns only; the policy reads it for subagents alone. The span
+                # also covers failed failover attempts and their backoff before
+                # the serving one; that is accepted because it can only arm
+                # early (paying the 1h premium, never losing a cache), and the
+                # prefix's write already started ageing at the first attempt.
+                self._had_long_call = True
             self._record_usage(
                 request,
                 component_chars,
