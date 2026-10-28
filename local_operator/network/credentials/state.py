@@ -265,7 +265,7 @@ class PlacementState:
     def cooldowns(
         self,
         key: str,
-        model_id: str = "",
+        model_id: str | None = "",
         *,
         owner_device: str,
         now: float | None = None,
@@ -280,6 +280,13 @@ class PlacementState:
         The scope test is ``auth_store.block_scope_gates`` — the predicate the
         local store's ``is_blocked_for_model`` applies — so an account-wide
         cooldown gates every model and a ``model:<family>`` one only that family.
+
+        ``model_id=None`` SKIPS THE SCOPE TEST, and only a reader with no model in
+        hand may pass it: ``lop network credentials`` lists a key, not a request,
+        so it must show a ``model:<family>`` rest too — with ``""`` the shared
+        predicate gates only account-wide rows and a family-scoped rest would read
+        as nothing at all. A routing caller always has a model and keeps ``""``
+        semantics.
         """
         from local_operator.providers.auth_store import block_scope_gates
 
@@ -290,7 +297,7 @@ class PlacementState:
             if row_key == key
             and row_owner == owner_device
             and float(row.get("until") or 0.0) > stamp
-            and block_scope_gates(str(row.get("block_scope") or ""), model_id)
+            and (model_id is None or block_scope_gates(str(row.get("block_scope") or ""), model_id))
         ]
         return sorted(live, key=lambda row: float(row["until"]))
 

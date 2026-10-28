@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -1503,9 +1504,135 @@ def test_the_credentials_listing_names_the_owner_and_who_may_borrow(
     assert network_cli.main(args) == 0
     out = capsys.readouterr().out
     assert "owner: damian-mbp (damian@example.test)" in out
-    assert "borrowed: owner_offline" in out
+    assert "borrow: owner_offline" in out
     # The owner's own row is not a share, and this device is the reader.
     assert "shared with" not in out.split("owner:")[1].split("\n")[0]
+
+
+def _borrow_listing_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, now: float
+) -> tuple[Path, str]:
+    """A borrower with one key per borrow state the listing must tell apart.
+
+    Mesh-lane report item 6: the listing printed a ``borrowed:`` line only for a
+    LIVE refusal, so an ``active`` older than its 30 s TTL, a key never asked for and
+    a key this device is not even a holder of all read the same. ``now`` back-dates
+    the state file so the expired-``active`` case is the real one, not a fresh grant.
+    """
+    from local_operator.network.credentials.state import PlacementState
+    from local_operator.network.identity import mint
+
+    root = tmp_path / "borrower"
+    root.mkdir()
+    _point_config_at(monkeypatch, root)
+    identity = mint(root, name="borrower-laptop")
+    me = identity.device_id
+    document = placement_mod.PlacementDocument(NETWORK, root=root, written_by=OWNER)
+    for key in ("anthropic", "datadog", "openai", "secret:SLACK", "xai", "zhipu"):
+        document.declare(
+            key,
+            owner_device=OWNER,
+            # A hostile owner name: the escape must not reach the terminal.
+            owner_device_name="damian-mbp\x1b[2J",
+            provider=key,
+            by=OWNER,
+        )
+    for key in ("anthropic", "datadog", "openai", "xai", "zhipu"):
+        document.grant(key, me, scope="session", by=OWNER)
+    document.save()
+    state = PlacementState(NETWORK, root=root)
+    # borrowed ten minutes ago: ``active`` has long expired, ``last_grant_at`` stays.
+    state.note_grant("openai", "g-1", owner_device=OWNER)
+    state._observations["openai"]["observed_at"] = now - 600  # noqa: SLF001
+    state._observations["openai"]["last_grant_at"] = now - 600  # noqa: SLF001
+    # borrowed five seconds ago: still live.
+    state.note_grant("xai", "g-2", owner_device=OWNER)
+    state._observations["xai"]["observed_at"] = now - 5  # noqa: SLF001
+    state._observations["xai"]["last_grant_at"] = now - 5  # noqa: SLF001
+    # resting (#3066 Q6): an active grant AND a family-scoped rest. The rest wins.
+    state.note_grant("anthropic", "g-3", owner_device=OWNER)
+    state.cool_down(
+        "anthropic",
+        owner_device=OWNER,
+        credential_id=7,
+        block_scope="model:fable",
+        until=now + 1800,
+        label="ops@example.test\x1b]0;x\x07",
+    )
+    # A rest recorded against a PREVIOUS owner: it names a row in another store.
+    state.cool_down("zhipu", owner_device=OTHER, credential_id=3, block_scope="", until=now + 1800)
+    state.observe("datadog", "interactive_required", owner_device=OWNER, retry_after_ms=300_000)
+    state.save()
+    return root, me
+
+
+def test_the_credentials_listing_shows_every_borrow_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.network import cli as network_cli
+
+    now = time.time()
+    _borrow_listing_fixture(tmp_path, monkeypatch, now=now)
+    args = _parser().parse_args(["network", "credentials"])
+    assert network_cli.main(args) == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out, "a peer-supplied label reached the terminal raw"
+    # One block per credential: its ``  <name>`` row plus the indented lines under it.
+    blocks: dict[str, str] = {}
+    current = ""
+    for line in out.splitlines():
+        if line.startswith("  ") and not line.startswith("   "):
+            current = line.split()[0]
+            blocks[current] = line
+        elif current and line.startswith("      "):
+            blocks[current] += "\n" + line
+        else:
+            current = ""
+    assert "borrow: idle (last grant 10m ago)" in blocks["openai"], out
+    # Seconds, never "just now": the age is the CLI ladder. Matched by shape so a slow
+    # runner a second late is not a failure.
+    assert re.search(r"borrow: active \(last grant [0-9]+s ago\)", blocks["xai"]), out
+    until = time.strftime("%H:%M", time.localtime(now + 1800))
+    assert (
+        f"borrow: resting until {until} (rate-limited: ops@example.test)" in blocks["anthropic"]
+    ), out
+    assert "borrow: sign-in needed on damian-mbp" in blocks["datadog"], out
+    assert "borrow: not shared with this device" in blocks["secret:SLACK"], out
+    # The previous owner's rest is not this owner's: zhipu was simply never borrowed.
+    assert "borrow: never borrowed" in blocks["zhipu"], out
+
+
+def test_the_credentials_json_adds_borrow_without_changing_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--json`` is additive: ``observation`` keeps its old meaning for scripts."""
+    from local_operator.network import cli as network_cli
+
+    now = time.time()
+    _borrow_listing_fixture(tmp_path, monkeypatch, now=now)
+    args = _parser().parse_args(["network", "credentials", "--json"])
+    assert network_cli.main(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {row["credential_name"]: row for row in payload["networks"][0]["credentials"]}
+    assert rows["openai"]["observation"] == "not_asked"
+    assert "observation" not in rows["secret:SLACK"]
+    assert rows["anthropic"]["observation"] == "active"
+    states = {name: row["borrow"]["state"] for name, row in rows.items()}
+    assert states == {
+        "anthropic": "resting",
+        "datadog": "sign_in_needed",
+        "openai": "idle",
+        "secret:SLACK": "not_shared",
+        "xai": "active",
+        "zhipu": "never_borrowed",
+    }
+    assert rows["openai"]["borrow"]["last_grant_at"] == pytest.approx(now - 600)
+    assert rows["anthropic"]["borrow"]["resting_until"] == pytest.approx(now + 1800)
+    assert rows["anthropic"]["borrow"]["resting_labels"] == ["ops@example.test\x1b]0;x\x07"]
+    # No field the tool digest would scrub, so the agent reads the same facts.
+    for row in rows.values():
+        for name in row["borrow"]:
+            assert not any(m in name for m in ("secret", "token", "password", "key")), name
 
 
 #: ``10**400`` is the shape the first helper missed (review round 4, R4-M1): ``json``

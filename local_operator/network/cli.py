@@ -1748,6 +1748,104 @@ def _apply_capability_change(
     return change, "locally (relay not running)"
 
 
+def _peer_label(text: str) -> str:
+    """A peer-authored name or account label made safe for ONE terminal line.
+
+    Owner names, identity labels and a rest's account label are written by another
+    device (the placement document's owner, the grant's identity), so they go through
+    the product's one terminal stripper and collapse whitespace: a label must not
+    repaint the listing or forge a second row.
+    """
+    from local_operator.ansi import strip_control_sequences
+
+    return " ".join(strip_control_sequences(str(text)).split())
+
+
+def _borrow_view(
+    state: Any, key: str, *, owner_device: str, holder: bool, now: float | None = None
+) -> dict[str, Any]:
+    """This device's borrow state for one key it does not own, as ``--json`` carries it.
+
+    WHY THIS IS DERIVED HERE AND NOT READ FROM ``observation``: ``active`` is stored
+    with a 30 s TTL (``state.DEFAULT_OBSERVATION_TTL_MS``) and an expired row reads as
+    nothing, so a key borrowed a minute ago listed exactly like one never borrowed
+    and like one this device may not borrow at all (mesh-lane report item 6). The
+    persisted ``last_grant_at`` and the borrower's own cooldowns (#3066) outlive that
+    TTL and are the facts the operator was missing; both come from the state file
+    the listing already loaded, so the listing still never dials and never reads a
+    store. No value is in reach here: the state file has no field for one.
+
+    ``state`` vocabulary, first match wins: ``not_shared`` (this device is not a
+    holder), ``sign_in_needed`` (live ``interactive_required``), ``resting`` (a live
+    borrower-side cooldown — #3066 Q6, which otherwise read ``active`` through an
+    all-resting window), ``refused`` (any other live refusal, its token in
+    ``refusal``), ``active`` (a live grant), ``idle`` (a grant that is no longer
+    live), ``never_borrowed``. Additive to the row: ``observation`` is unchanged for
+    scripts that read it. Field names avoid the tool digest's scrub markers
+    (``network/tool.py`` ``_SECRET_KEY_MARKERS``) so the digest cannot eat them.
+    """
+    if not holder:
+        return {"state": "not_shared", "last_grant_at": None}
+    stamp = time.time() if now is None else now
+    status = state.status(key, now=stamp)
+    last = state.last_grant_at(key)
+    view: dict[str, Any] = {"state": "never_borrowed", "last_grant_at": last}
+    # ``model_id=None``: a listing has no model in hand, so a ``model:<family>`` rest
+    # must count too. Owner-scoped (#3066 M2): a rest recorded against a previous
+    # owner names a row id in THAT owner's store and means nothing here.
+    rests = state.cooldowns(key, None, owner_device=owner_device, now=stamp)
+    if status == "interactive_required":
+        view["state"] = "sign_in_needed"
+    elif rests:
+        view["state"] = "resting"
+        # The earliest end: that is when this device next asks the owner for the key.
+        view["resting_until"] = float(rests[0]["until"])
+        view["resting_labels"] = [str(r["label"]) for r in rests if r.get("label")]
+    elif status and status != "active":
+        view["state"] = "refused"
+        view["refusal"] = status
+    elif status == "active":
+        view["state"] = "active"
+    elif last:
+        view["state"] = "idle"
+    return view
+
+
+def _borrow_words(view: Mapping[str, Any], owner: str, *, now: float | None = None) -> str:
+    """The human register of :func:`_borrow_view` — one segment after ``borrow:``.
+
+    ``owner`` arrives already sanitised (the row's own owner column). The rest's
+    clock reads ``HH:MM`` local, the convention ``sync_segment`` uses: a rest is
+    capped at an hour (``MAX_CREDENTIAL_BLOCK_MS``), so a date never adds anything.
+    The age is the CLI's single-unit ``45s/12m/3h/2d`` ladder, NOT the resume list's
+    "just now": ``idle`` begins 30 s after a grant, and "idle (last grant just now)"
+    contradicts itself exactly where the operator is checking whether a borrow took.
+    """
+    from local_operator.wakes.display import format_age
+
+    stamp = time.time() if now is None else now
+    last = view.get("last_grant_at")
+    grant = f"last grant {format_age(max(0.0, stamp - float(last)))} ago" if last else ""
+    state = view.get("state")
+    if state == "not_shared":
+        return "not shared with this device"
+    if state == "sign_in_needed":
+        return f"sign-in needed on {owner}"
+    if state == "resting":
+        until = time.strftime("%H:%M", time.localtime(float(view["resting_until"])))
+        labels = ", ".join(
+            dict.fromkeys(_peer_label(text) for text in view.get("resting_labels") or [])
+        )
+        why = f"rate-limited: {labels}" if labels else "rate-limited"
+        tail = f"; {grant}" if grant else ""
+        return f"resting until {until} ({why}){tail}"
+    if state == "refused":
+        return f"{view.get('refusal')} ({grant})" if grant else str(view.get("refusal"))
+    if state in ("active", "idle"):
+        return f"{state} ({grant})" if grant else str(state)
+    return "never borrowed"
+
+
 def _cmd_credentials(args: argparse.Namespace) -> int:
     """``lop network credentials [--json]``: who owns what, and what this device borrows.
 
@@ -1816,8 +1914,13 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                     for h in entry.holders
                 ],
             }
-            if not row["owned_here"] and entry.is_holder(self_device):
-                row["observation"] = state.status(key) or "not_asked"
+            if not row["owned_here"]:
+                holder = entry.is_holder(self_device)
+                if holder:
+                    row["observation"] = state.status(key) or "not_asked"
+                row["borrow"] = _borrow_view(
+                    state, key, owner_device=entry.owner_device, holder=holder
+                )
             if row["owned_here"]:
                 # THE OWNER'S OWN VIEW OF EACH HOLDER'S COPY (S3; design §5.2): one
                 # segment per member row — ``synced (gen 7)`` / ``stale (gen 6 of
@@ -1848,9 +1951,10 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 owner = (
                     "this device"
                     if row["owned_here"]
-                    else (row["owner_device_name"] or row["owner_device"])
+                    else _peer_label(row["owner_device_name"] or row["owner_device"])
                 )
-                who = f" ({row['identity_label']})" if row["identity_label"] else ""
+                label = _peer_label(row["identity_label"] or "")
+                who = f" ({label})" if label else ""
                 lines.append(
                     f"  {row['credential_name']:<14} {row['kind']:<15} owner: {owner}{who}"
                 )
@@ -1867,8 +1971,8 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                         f"      shared with {holder['name'] or holder['device']} "
                         f"({holder['scope']}){sync_tail}"
                     )
-                if row.get("observation") and row["observation"] not in ("active", "not_asked"):
-                    lines.append(f"      borrowed: {row['observation']}")
+                if row.get("borrow"):
+                    lines.append(f"      borrow: {_borrow_words(row['borrow'], owner)}")
         networks.append(
             {
                 "network_id": document.network_id,
