@@ -717,3 +717,24 @@ async def test_missing_promisor_blob_is_not_called_uncommitted(tmp_path):
     assert body["code"] == "public_copy_blob_unavailable"
     assert body["reason"] == "object_missing_locally"
     assert "not committed" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_home_root_call_without_repo_root_points_at_the_option(tmp_path):
+    """U2: the first place a home-root session fails names the option that exists for it."""
+    result = await execute_read_public_copy(
+        "x", {"path": UI_CATALOGUE}, context=_context(tmp_path, tmp_path)
+    )
+    body = _refusal_body(result)
+    assert result.text.startswith("refused: the workspace is not a git checkout")
+    assert body["code"] == "public_copy_workspace_not_a_checkout"
+    assert body["fix"] == "pass repo_root"
+    assert body["accepted_repositories"]
+    # an explicit root that is not a checkout keeps the plain sentence (no hint loop)
+    plain = await execute_read_public_copy(
+        "x",
+        {"path": UI_CATALOGUE, "repo_root": str(tmp_path)},
+        context=_context(tmp_path, tmp_path),
+    )
+    assert plain.text.startswith("refused: the workspace is not a git checkout")
+    assert "\n" not in plain.text
