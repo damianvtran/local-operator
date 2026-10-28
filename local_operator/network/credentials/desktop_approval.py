@@ -56,7 +56,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Mapping
 
-from local_operator.network import approvals
+from local_operator.network import approval_ops, approvals
 from local_operator.network.credentials import finite_share, inheritance
 from local_operator.network.types import MeshRefusal
 from local_operator.network.wire import canonical_json
@@ -81,13 +81,121 @@ ASSURANCE_FILE_ONLY = "file_only"
 #:   NOT a host-wide rule. The CLI ``lop network approvals approve`` verb is deliberately
 #:   unchanged (operator, ask a-b815, recommended option: desktop only). Loosening it is a
 #:   one-line change here and a new operator decision.
-FILE_ONLY_SIGNING: Mapping[str, bool] = {
-    finite_share.OP: True,
-    inheritance.OP: False,
-}
+#:
+#: Since S4a-core each decision lives on its op's registration (``file_only_signing`` in
+#: :func:`_register_credential_ops` below) and this table is DERIVED from the registry, so
+#: a new typed op cannot be signable without its own explicit row.
+_FILE_ONLY_FINITE_SHARE = True
+_FILE_ONLY_INHERITANCE = False
 
-#: The disclosure modules by operation; their ``disclosure``/``apply`` are the CLI's own.
-_MODULES: Mapping[str, Any] = {finite_share.OP: finite_share, inheritance.OP: inheritance}
+
+def _finite_expected(record: Mapping[str, Any]) -> dict[str, Any]:
+    # Unreachable for a record ``operation()`` typed; refused rather than asserted so an
+    # optimised (-O) interpreter cannot turn a lookup bug into a KeyError mid-apply.
+    data = finite_share.intent(dict(record))
+    if data is None:
+        raise _refuse("credential_operation_mismatch", "Unknown approval operation.")
+    return {
+        name: data[name]
+        for name in ("owner_device", "network_id", "recipient_device", "key", "scope")
+    }
+
+
+def _inheritance_expected(record: Mapping[str, Any]) -> dict[str, Any]:
+    data = inheritance.intent(dict(record))
+    if data is None:
+        raise _refuse("credential_operation_mismatch", "Unknown approval operation.")
+    parsed = inheritance._parse(dict(record))
+    return {
+        "owner_device": data["owner_device"],
+        "network_id": data["network_id"],
+        "recipient_device": data["recipient_device"],
+        "provider": parsed["provider"],
+        "account": parsed["account"],
+        "org": parsed["org"],
+    }
+
+
+class _CredentialOp:
+    """A credential module (``finite_share`` / ``inheritance``) as an :class:`ApprovalOp`.
+
+    A thin adapter: ``intent``/``disclosure``/``apply`` are the module's own functions (the
+    ones the CLI calls), so the desktop and the terminal cannot disclose or apply
+    differently. Credential ops ride ``device_onboard`` storage and stay CLI-approvable:
+    ``lop network approvals approve`` prints their full disclosure before signing
+    (operator decision a-b815).
+    """
+
+    kind = approvals.KIND_DEVICE_ONBOARD
+    cli_approvable = True
+
+    def __init__(
+        self,
+        module: Any,
+        *,
+        file_only_signing: bool,
+        expected: Any,
+        generic_refusal: Any,
+    ) -> None:
+        self.op: str = module.OP
+        self.file_only_signing = file_only_signing
+        self._module = module
+        self._expected = expected
+        self._generic_refusal = generic_refusal
+
+    def intent(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        return self._module.intent(record)
+
+    def disclosure(self, record: dict[str, Any]) -> dict[str, Any]:
+        return self._module.disclosure(record)
+
+    def expected(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        return self._expected(record)
+
+    def apply(self, approval_id: str, expected: dict[str, Any], root: Path) -> Any:
+        return self._module.apply(approval_id, expected, root)
+
+    def generic_refusal(self, record: Mapping[str, Any], approval_id: str) -> MeshRefusal | None:
+        return self._generic_refusal(record, approval_id)
+
+
+def _register_credential_ops() -> None:
+    # ORDER IS PRECEDENCE in the generic check, and matches the literal guards it replaced:
+    # the inheritance guard ran before the finite one.
+    approval_ops.register(
+        _CredentialOp(
+            inheritance,
+            file_only_signing=_FILE_ONLY_INHERITANCE,
+            expected=_inheritance_expected,
+            generic_refusal=approval_ops.inheritance_generic_refusal,
+        )
+    )
+    approval_ops.register(
+        _CredentialOp(
+            finite_share,
+            file_only_signing=_FILE_ONLY_FINITE_SHARE,
+            expected=_finite_expected,
+            generic_refusal=approval_ops.finite_generic_refusal,
+        )
+    )
+    approval_ops.register_family(_CREDENTIAL_PREFIX, approval_ops.credential_unsupported)
+
+
+#: Every ``credential_*`` ``what`` key belongs to this module, registered or not.
+_CREDENTIAL_PREFIX = "credential_"
+
+_register_credential_ops()
+
+FILE_ONLY_SIGNING: Mapping[str, bool] = approval_ops.file_only_signing()
+
+
+def _op(op: str) -> approval_ops.ApprovalOp:
+    """The registered op for a name ``operation()`` already resolved (never ``None``)."""
+    found = approval_ops.get(op)
+    if found is None:  # pragma: no cover - operation() only returns registered names
+        raise _refuse("credential_operation_mismatch", "Unknown approval operation.")
+    return found
+
 
 #: ABUSE BOUND: at most this many credential sign ATTEMPTS per window per daemon. A human
 #: approving cards one at a time never comes near it; a script looping on the route does.
@@ -121,11 +229,19 @@ def operation(record: Mapping[str, Any]) -> str | None:
     what = record.get("what")
     if not isinstance(what, dict):
         return None
-    ops = [key for key in what if isinstance(key, str) and key.startswith("credential_")]
+    # Candidate keys: every registered op plus every key of the credential family, so an
+    # unknown ``credential_*`` op still refuses rather than reading as "not typed".
+    names = {operation.op for operation in approval_ops.registered()}
+    ops = [
+        key
+        for key in what
+        if isinstance(key, str) and (key in names or key.startswith(_CREDENTIAL_PREFIX))
+    ]
     if not ops:
         return None
-    if len(ops) == 1 and ops[0] in _MODULES and set(what) == {ops[0], "anchor"}:
-        if _MODULES[ops[0]].intent(dict(record)) is not None:
+    found = approval_ops.get(ops[0]) if len(ops) == 1 else None
+    if found is not None and set(what) == {ops[0], "anchor"}:
+        if found.intent(dict(record)) is not None:
             return ops[0]
     if finite_share.OP in what:
         raise _refuse(
@@ -269,7 +385,7 @@ def row_fields(record: Mapping[str, Any]) -> dict[str, Any] | None:
         "unproven_human": level == ASSURANCE_FILE_ONLY,
     }
     try:
-        facts = _MODULES[op].disclosure(dict(record))
+        facts = _op(op).disclosure(dict(record))
     except MeshRefusal as exc:
         block.update(signable_here=False, refusal=exc.code)
         return block
@@ -345,7 +461,7 @@ def _validated(
             "credential_request_changed",
             "This card changed since it was reviewed. Nothing was approved; review it again.",
         )
-    facts = _MODULES[op].disclosure(dict(record))
+    facts = _op(op).disclosure(dict(record))
     if disclosure_digest_ != disclosure_digest(facts):
         raise _refuse(
             "credential_disclosure_changed",
@@ -568,21 +684,7 @@ def _approve_locked(
 
 def _expected(op: str, record: Mapping[str, Any]) -> dict[str, Any]:
     """The apply ``expected`` block, from the SIGNED record (the card, not a command line)."""
-    data = _MODULES[op].intent(dict(record))
-    if op == finite_share.OP:
-        return {
-            name: data[name]
-            for name in ("owner_device", "network_id", "recipient_device", "key", "scope")
-        }
-    parsed = inheritance._parse(dict(record))
-    return {
-        "owner_device": data["owner_device"],
-        "network_id": data["network_id"],
-        "recipient_device": data["recipient_device"],
-        "provider": parsed["provider"],
-        "account": parsed["account"],
-        "org": parsed["org"],
-    }
+    return _op(op).expected(record)
 
 
 def apply(
@@ -650,7 +752,7 @@ def _apply_checked(
     # The apply's own result (placement entry / provisioned row) stays server-side: the UI
     # needs the record's state, and the disclosure already names what was granted.
     try:
-        _MODULES[op].apply(approval_id, _expected(op, record), root)
+        _op(op).apply(approval_id, _expected(op, record), root)
     except MeshRefusal as exc:
         from local_operator.network.credentials import approval_copy
 

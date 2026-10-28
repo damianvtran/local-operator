@@ -316,17 +316,13 @@ async def approve_network_enrollment(
     return reply(await _local(request, work))
 
 
-@router.post(
-    "/v1/desktop/approvals/{approval_id}/approve-credential", response_model=CRUDResponse[Any]
-)
-async def approve_credential(
-    request: Request, approval_id: str, body: CredentialApprovalAcknowledgment
-):
-    """Sign ONE reviewed credential card, then apply it; answer each phase.
+async def _approve_operation(request: Request, approval_id: str, body: Any) -> Any:
+    """THE ONE typed sign-then-apply handler behind ``/approve-operation`` and its alias.
 
     Every refusal before the signature is a 409 with its code (nothing happened). Once
     signed, an apply refusal is reported as ``applied: {ok: false, code}`` beside
-    ``signed: {ok: true}`` -- the decision stands and ``apply-credential`` retries it.
+    ``signed: {ok: true}`` -- the decision stands and ``apply-operation`` retries it. Both
+    paths call this so their responses cannot drift (pinned by the parity tests).
     """
     from local_operator.network.credentials import desktop_approval
 
@@ -342,13 +338,8 @@ async def approve_credential(
     return reply(await _local(request, work))
 
 
-@router.post(
-    "/v1/desktop/approvals/{approval_id}/apply-credential", response_model=CRUDResponse[Any]
-)
-async def apply_credential(
-    request: Request, approval_id: str, body: CredentialApprovalAcknowledgment
-):
-    """Apply an already-signed credential card (the "signed, not applied" retry)."""
+async def _apply_operation(request: Request, approval_id: str, body: Any) -> Any:
+    """THE ONE typed apply (the "signed, not applied" retry) behind both apply paths."""
     from local_operator.network.credentials import desktop_approval
 
     def work():
@@ -361,3 +352,36 @@ async def apply_credential(
         )
 
     return reply(await _local(request, work))
+
+
+@router.post(
+    "/v1/desktop/approvals/{approval_id}/approve-credential", response_model=CRUDResponse[Any]
+)
+async def approve_credential(
+    request: Request, approval_id: str, body: CredentialApprovalAcknowledgment
+):
+    """ALIAS of ``/approve-operation`` (``server.routes.desktop_credentials``) for shipped
+    desktop builds (``credential_approvals``).
+
+    Kept with its ``Literal`` body model, so an op that is not a credential op is a 422 here
+    exactly as before; the handler is the same function. THE ONE INTENDED DIFFERENCE from
+    ``/approve-operation`` (QA round 1, Q1): an unregistered ``operation`` is rejected by
+    validation here (422), but passes the open ``OperationApprovalAcknowledgment`` there and
+    the engine refuses it (409 ``credential_operation_mismatch``). Either way nothing signs;
+    every registered op answers identically on both families.
+    """
+    return await _approve_operation(request, approval_id, body)
+
+
+@router.post(
+    "/v1/desktop/approvals/{approval_id}/apply-credential", response_model=CRUDResponse[Any]
+)
+async def apply_credential(
+    request: Request, approval_id: str, body: CredentialApprovalAcknowledgment
+):
+    """ALIAS of ``/apply-operation`` for shipped desktop builds.
+
+    Same 422-here / 409-there difference for an unregistered ``operation`` as
+    :func:`approve_credential`.
+    """
+    return await _apply_operation(request, approval_id, body)
