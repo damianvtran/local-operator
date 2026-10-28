@@ -170,3 +170,21 @@ class CredentialApprovalAcknowledgment(BaseModel):
     operation: Literal["credential_finite_share", "credential_inheritance"]
     request_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     disclosure_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class OperationApprovalAcknowledgment(BaseModel):
+    """The op-generic twin of :class:`CredentialApprovalAcknowledgment`.
+
+    WHY A SECOND MODEL. ``/approve-operation`` and ``/apply-operation`` front the approval
+    op registry (``network.approval_ops``), so the operation is any registered op name
+    rather than the credential ``Literal``; the engine refuses an unregistered one with
+    ``credential_operation_mismatch`` (409) before any signer call. The field is spelled
+    ``operation`` -- not ``op`` -- so one body is valid on both route families and the
+    parity tests can post it unchanged. Same strictness: closed, strict, both digests
+    pinned to ``sha256:<64 hex>``.
+    """
+
+    model_config = {"extra": "forbid", "strict": True}
+    operation: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    request_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    disclosure_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
