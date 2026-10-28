@@ -2058,3 +2058,68 @@ def test_a_raise_anywhere_in_the_serve_move_keeps_the_install_done(
     }, detail
     rows = _member_audit_rows(server_a, "update_completed")
     assert rows and rows[-1]["detail"].get("serve") == "unknown", rows
+
+
+def _stuck_record():
+    """A second serve record: alive, not serving its address (``wedged``)."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        pid=99,
+        version="0.91.1",
+        source_ref="",
+        instance_id="inst-wedged",
+        reloadable=False,
+        rolling_reload_contract="",
+        host="127.0.0.1",
+        port=8978,
+        prefix="",
+    )
+
+
+def test_a_stuck_daemon_decides_the_remedy_over_a_stale_restart(
+    devices: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """Review round 2 on #3093, m5, failing first: a restart cannot move a stuck serve.
+
+    TWO daemons at once: one live on the old build that takes the signal and never
+    republishes (``stale``), and one alive but not serving its address (``wedged``).
+    ``stale`` still wins the STATE — something is behind the install — but the
+    REMEDY must be status's own ``lop services reclaim <pid>`` for the stuck pid,
+    because that is the daemon a restart cannot move. The no-stamp arm is the same
+    gate the other way round: with no build to compare against, a stuck daemon
+    reads ``unknown`` with the same reclaim, never the restart.
+    """
+    from local_operator import services
+
+    server_a, server_b, state = _done_member(devices, monkeypatch)
+    fleet = _serve_fleet(monkeypatch, state, answers=False)
+    stuck = _stuck_record()
+    serving = services.ServeDaemonReport(
+        record=fleet.record, state="live", probe=services.AddressProbe(services.SERVING)
+    )
+    wedged = services.ServeDaemonReport(
+        record=stuck, state="wedged", probe=services.AddressProbe(services.DEAF, "x")
+    )
+    monkeypatch.setattr(services, "live_serve_daemons", fleet.scan)
+    monkeypatch.setattr(services, "serve_daemon_reports", lambda: [serving, wedged])
+
+    detail = meshupdate.update_peer(server_b, server_a.identity.device_id)
+
+    assert detail["state"] == "done", detail
+    serve = detail["serve"]
+    assert serve["state"] == "stale", serve
+    assert serve["stuck"] == [{"pid": 99, "verdict": "wedged"}], serve
+    assert serve["remedy"] == "lop services reclaim 99", serve
+    assert "lop services reclaim 99" in detail["message"], detail
+    assert "lop services restart" not in serve["remedy"]
+    row = _member_audit_rows(server_a, "update_completed")[-1]["detail"]
+    assert row.get("serve_remedy") == "lop services reclaim 99", row
+
+    # The no-stamp arm: nothing to compare against, so the daemon cannot be judged
+    # stale, but it is still stuck and the remedy is still the reclaim.
+    monkeypatch.setattr(services, "_current_stamp", lambda: None)
+    monkeypatch.setattr(services, "live_serve_daemons", lambda: [])
+    fact = meshupdate.move_serve()
+    assert fact["state"] == "unknown", fact
+    assert fact["remedy"] == "lop services reclaim 99", fact

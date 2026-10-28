@@ -930,9 +930,12 @@ def _move_serve(budget: float | None) -> dict[str, Any]:
     fact: dict[str, Any] = {"state": state, "moved": moved, "stale": stale}
     if stuck:
         fact["stuck"] = stuck
-    if state == "unknown" and stuck and stale_records is not None:
-        # Status's own remedy for a daemon that is not serving its address: a
-        # restart cannot move it (the stage reported it "cannot be asked to move").
+        # THE STUCK DAEMON DECIDES THE REMEDY, whatever the stale set says (review
+        # round 2 on #3093, m5). A restart cannot move a daemon that is alive but
+        # not serving its address — the stage reports it "cannot be asked to move"
+        # — so naming `restart` for a pool that contains one sends the operator to
+        # a command that will not fix it, while `lop services status` prints this
+        # very `reclaim` on the row above. Stale-only pools keep the restart.
         fact["remedy"] = f"lop services reclaim {stuck[0]['pid']}"
     elif state in ("stale", "unknown"):
         fact["remedy"] = SERVE_REMEDY
@@ -1381,10 +1384,17 @@ def _execute_validated(
     #
     # THE TAIL IS NOW serve -> sweep -> re-engage, ONE BUDGET (review m2). Serve
     # takes at most `services.RELOAD_WAIT_S` (45 s) of it, first, so on an
-    # install that lands near the deadline the runtimes get what is left. That
-    # is a deliberate order, not a partition: the total still fits the slow-op
-    # deadline by construction, a sweep short of time degrades to its notes, and
-    # a per-phase reservation would be a budget design of its own (deferred).
+    # install that lands near the deadline the runtimes get what is left. That is
+    # a deliberate order, not a partition: the stage's wait is clamped to the tail,
+    # a sweep short of time degrades to its notes, and a per-phase reservation
+    # would be a budget design of its own (deferred).
+    #
+    # WHAT THE BUDGET DOES NOT COVER (review round 2 on #3093, n3): `move_serve`
+    # also probes each serve daemon's address afterwards, and those probes are NOT
+    # charged to `tail_budget` — a bounded per-daemon cost (the identity probe's
+    # own timeout, ~1 s each), not a share of the deadline. "Fits by construction"
+    # holds for the STAGE's wait only, so the receipt can land a second or two
+    # later than the arithmetic above suggests.
     serve = move_serve(budget=tail_budget)
     _audit_member(
         server,
