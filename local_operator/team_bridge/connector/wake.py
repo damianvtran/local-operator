@@ -520,13 +520,12 @@ async def ack_read(
     *,
     config_dir: Path,
     access: Any,
-    envelope_digest: str | None = None,
-    recheck_confirmed: bool = False,
+    identity_digest: str | None = None,
 ) -> Any:
     """SEAM: record + send ONE ack with the EXACT screening tuple (H2 path).
 
-    ``envelope_digest`` binds the recorded intent to the envelope the verdict
-    was made for (review M7); the owner's generation is stamped by the store.
+    ``identity_digest`` (:func:`verdict_identity`) binds the recorded intent
+    to the message it was made for; the store stamps the owner's generation.
     """
 
     from local_operator.team_bridge import pull as _pull
@@ -538,8 +537,7 @@ async def ack_read(
         receipt,
         config_dir=config_dir,
         access=access,
-        envelope_digest=envelope_digest,
-        recheck_confirmed=recheck_confirmed,
+        identity_digest=identity_digest,
     )
 
 
@@ -548,73 +546,85 @@ RECORDED_HOLD = "hold"
 RECORDED_VERDICT = "verdict"
 RECORDED_SCREEN = "screen"
 
+#: Version tag of :func:`verdict_identity`. A stored binding without it is
+#: unknown (never "another message") and is read as bound.
+_IDENTITY_TAG = "id1:"
+
+
+def verdict_identity(item: Any) -> str:
+    """The IMMUTABLE identity a recorded read verdict is bound to.
+
+    WHY ONLY THESE FIELDS (PR #3063 review r7 M8): the binding exists so a
+    verdict is never handed off for a DIFFERENT message, and nothing else.
+    Message id, conversation (thread) id, the sender's endpoint id and the
+    body hash cannot change under one message id at the hub. Everything
+    presentational — the sender's display name (served live from the
+    account, ``BridgeSenderView.Name``), organization label, role — CAN
+    change while the device is off, and binding to it (round 6 bound the
+    full screening envelope digest) turned a member renaming their account
+    into a re-screen the write-once ledgers can only refuse: the message was
+    never delivered and the model was billed on every retry. The screening
+    CACHE still keys on the full envelope (a display change must miss the
+    cache, A6); that is a different question — "may this verdict be REUSED
+    for another message" — from this one.
+    """
+
+    message = item.get("message") if isinstance(item, Mapping) else None
+    message = message if isinstance(message, Mapping) else {}
+    thread = item.get("thread") if isinstance(item, Mapping) else None
+    thread = thread if isinstance(thread, Mapping) else {}
+    sender = item.get("sender") if isinstance(item, Mapping) else None
+    sender = sender if isinstance(sender, Mapping) else {}
+    payload = json.dumps(
+        [
+            str(message.get("id") or ""),
+            str(message.get("thread_id") or thread.get("id") or ""),
+            str(sender.get("endpoint_id") or ""),
+            str(message.get("body_hash") or ""),
+        ],
+        separators=(",", ":"),
+    )
+    return _IDENTITY_TAG + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
 
 def recorded_read_verdict(
     owner: Any, message_id: str, item: Any, *, config_dir: Path
 ) -> tuple[str, Any]:
-    """The verdict this connector already RECORDED for this message, if usable.
+    """The verdict already RECORDED for this message, if there is one.
 
     Returns ``(RECORDED_VERDICT, receipt)`` to hand off on a recorded decision
     with no model call, ``(RECORDED_HOLD, code)`` to hold, or
-    ``(RECORDED_SCREEN, None)`` when there is no usable record and screening
-    decides afresh. Pure local reads, except that a stale PENDING intent is
-    superseded (below). No hub I/O: the ACK is the spine's ordinary step.
+    ``(RECORDED_SCREEN, None)`` when no verdict exists and screening decides.
+    Pure local reads; it never deletes or rewrites a record.
 
-    THE INVARIANT (PR #3063 reviews M6/M7/m14): **a recorded read verdict
-    replaces the model's DECISION and nothing that is about authority or
-    identity**. Measured against a fresh screen, the recorded path runs, in
-    this order:
+    NEVER DISCARD A VERDICT THE HUB OR THE LEDGER ALREADY HOLDS (PR #3063
+    review r7 M8). The hub's ack ledger is WRITE-ONCE per message
+    (agent-server ``bridge_ack_service.go``: ``unread -> read`` records the
+    verdict; a repeat is a 200 no-op only when it AGREES, a 409
+    ``invalid_transition`` otherwise), and so is the local receipt ledger.
+    A second verdict can therefore never be accepted: re-screening a message
+    that already has one can only end in a conflict nobody clears. So:
 
-    1. the local producer fence (the caller, before this function);
-    2. ``screening.validate_envelope`` on the re-fetched item — the same
-       envelope gate step 3 of a fresh screen runs, same hold codes;
-    3. the BINDING: the record was made by THIS enrollment generation for
-       THIS envelope (body hash, and the envelope digest — sender, display,
-       organization, type, request). It lives on the record itself (the
-       ack intent's ``creator_generation``/``envelope_digest``, or the
-       message's own receipt), so a cache-served message, which has no
-       receipt of its own, is covered (review M7);
-    4. the hub's CURRENT authority and the owner pin
-       (:func:`recorded_verdict_authority`: ``verified_status_capture`` plus
-       the cycle's post-await ``resolve_owner`` identity check);
-    5. everything after a screen, unchanged: S-20 body hash, FENCES #1–#4,
-       the request envelope (for a request, after re-attesting the proof's
-       epoch only when the live policy is IDENTICAL to the one it proves —
-       ``Store.reattest_receipt_epoch``, QA r4 O3), and the ACK through
-       ``ack_read`` — which replays
-       a pending intent with its STORED tuple and ref, and for a confirmed one
-       re-asks the hub (a same-state repeat), because the hub re-checks the
-       sender's standing and any pair deny on EVERY ack (agent-server
-       ``bridge_ack_service.go``); a revoked sender is a visible hold.
+    * a ``read`` intent, pending (the hub may have applied it and the reply
+      been lost) or confirmed, for this body → hand off on ITS tuple, under
+      ANY generation and ANY model or template. The pending one is replayed
+      with its stored tuple and ref, which the hub answers as an agreeing
+      repeat if it already applied it;
+    * the message's own committed ``allow`` receipt (decided, not yet sent)
+      → hand off on it, unless it was made by another enrollment generation:
+      the hub was never told, so a new owner's own screen is still possible
+      and is the honest decision;
+    * nothing recorded → screen.
 
-    WHAT IT OMITS, AND WHY THAT IS SAFE: the steps that PRODUCE a verdict —
-    default-model selection, policy publication, the template-floor and
-    policy-row match, the fingerprint cache, the breaker, the runner and the
-    write-once receipt commit. Their only output is a verdict tuple, which
-    the record already is; re-running them under a changed model or template
-    can only mint a second tuple the write-once ledger and the hub refuse
-    (reviews M3/M4). The hub still validates the tuple's template and prompt
-    version on the ACK.
+    What a recorded verdict replaces is the MODEL DECISION only. Every gate
+    about authority, identity and standing runs in :func:`pre_handoff_gate`
+    and the ACK, on every path alike, after this returns.
 
-    WHICH RECORD: the message's ``read`` intent (sent, or cut short during
-    the POST), else its own committed ``allow`` receipt (decided, not yet
-    sent — a stop before the ACK). A ``conflict`` intent or a different body
-    is left to screening's own reconcile, unchanged.
-
-    A STALE PENDING INTENT IS CLEARABLE (review M7): a pending intent whose
-    binding fails (a re-login since, or a changed envelope) is not this
-    owner's decision, and screening's step 5 would hold it ``ack_recovery``
-    forever. It is superseded — the pending row is removed — and the message
-    screened afresh; its new intent gets a fresh ref. That is safe at the
-    hub, whose idempotency is its state machine, not the ref: an agreeing
-    repeat is a 200 no-op and a disagreeing one a 409 the ledger records as a
-    visible ``conflict`` hold. A stale CONFIRMED intent is never removed (it
-    is a fact about the hub): the message is screened afresh, and a re-screen
-    that reaches the SAME tuple re-binds the intent to this generation in
-    place. One that reaches a DIFFERENT tuple (a re-login AND a model change
-    while down) is refused by the write-once ledger and held visibly
-    (``ack_refused:intent_conflict``) — the hub already holds the old read
-    and keeps it, so that message needs the owner, never a silent loss.
+    The binding checked here is :func:`verdict_identity` — immutable fields
+    only. A stored identity that names a different message is a visible
+    ``verdict_identity_mismatch`` hold (an anomaly for the owner, never a
+    re-screen). A different BODY is left to screening, which holds it
+    ``body_hash_mismatch`` without spending.
     """
 
     from local_operator.team_bridge import pull as _pull
@@ -628,63 +638,76 @@ def recorded_read_verdict(
     except StoreRefused as refusal:
         return RECORDED_HOLD, f"ack_recovery:{refusal.code}"[:64]
     if recorded is not None:
-        state = str(recorded.get("state") or "")
         stored = recorded.get("receipt")
-        if stored is None:
-            # No tuple to carry (a pre-screening row): screening's own
-            # ``ack_recovery`` hold stays the honest answer.
+        if stored is None or str(recorded.get("state") or "") not in (
+            _pull.ACK_CONFIRMED,
+            _pull.ACK_PENDING,
+        ):
+            # No tuple to carry (a pre-screening row), or a ``conflict`` the
+            # hub already answered: screening's own reconcile decides.
             return RECORDED_SCREEN, None
-        if state not in (_pull.ACK_CONFIRMED, _pull.ACK_PENDING):
-            return RECORDED_SCREEN, None
-        generation = recorded.get("creator_generation")
-        digest = recorded.get("envelope_digest")
+        identity = recorded.get("identity_digest")
     elif own_receipt is not None and own_receipt.get("verdict") == "allow":
-        state, stored = "", own_receipt
         generation = own_receipt.get("creator_generation")
-        digest = own_receipt.get("envelope_digest")
+        if generation is not None and int(generation) != int(owner.enrollment_generation):
+            return RECORDED_SCREEN, None
+        stored, identity = own_receipt, None
     else:
         return RECORDED_SCREEN, None
-    # Gate 2: the envelope, exactly as a fresh screen's step 3.
+    # The envelope gate, exactly as a fresh screen's step 3.
     envelope, bad_code = validate_envelope(owner, item)
     if envelope is None:
         return RECORDED_HOLD, bad_code or "envelope_malformed"
     if stored.get("body_sha256") != envelope.body_sha256:
         return RECORDED_SCREEN, None
-    # Gate 3: the binding. NULL is a pre-upgrade intent: unknown, treated as
-    # this generation and envelope — exactly how every intent was used before.
-    bound = (generation is None or int(generation) == int(owner.enrollment_generation)) and (
-        digest is None or str(digest) == envelope.envelope_digest
-    )
-    if bound:
-        return RECORDED_VERDICT, stored
-    if state == _pull.ACK_PENDING:
-        try:
-            store.supersede_pending_intent(owner, message_id, "read")
-        except StoreRefused as refusal:
-            return RECORDED_HOLD, f"ack_recovery:{refusal.code}"[:64]
-    return RECORDED_SCREEN, None
+    if (
+        isinstance(identity, str)
+        and identity.startswith(_IDENTITY_TAG)
+        and identity != verdict_identity(item)
+    ):
+        return RECORDED_HOLD, "verdict_identity_mismatch"
+    return RECORDED_VERDICT, stored
 
 
-async def recorded_verdict_authority(owner: Any, *, config_dir: Path, auth_store: Any) -> str:
-    """Gate 4 of the recorded-verdict invariant; ``""`` when it passes.
+async def pre_handoff_gate(
+    store: Any, owner: Any, access: Any, settings: Any, *, config_dir: Path, auth_store: Any
+) -> str:
+    """THE ONE CHOKE POINT before a message's read ACK and hand-off; ``""`` passes.
 
-    The SAME authority gate a fresh screen runs before any model call
-    (``scheduler.verified_status_capture`` over the production sealed status
-    fetcher): messaging available, organization eligible, endpoint active,
-    consent current for the served version, generation live across the read;
-    then the cycle's OWNER PIN (the owner captured before the await must
-    still be the live, resolved owner). A refusal is a ``policy_stale`` hold —
-    the same typed hold ``screen_item`` now gives a fresh screen's refusal
-    (review n7) — and a local sign-in/identity refusal is classified exactly
-    as ``screen_item`` classifies it; hub-side failures propagate to the
-    loop's backoff, as they do there. No model call, no policy publication.
+    WHY ONE FUNCTION (PR #3063 review r7 M9): every round of this PR that
+    gated one branch — the recorded verdict, the re-drive, the confirmed
+    replay — left another branch that reached the session without it. Every
+    path through :func:`handle_message_available` (fresh screen, cache hit,
+    recorded verdict, a ``retry_due_holds`` re-drive, an ordinary retry
+    pass) now passes HERE, after its verdict exists and BEFORE any ACK I/O
+    (review m13), whichever branch produced the verdict. It runs, in order:
+
+    1. the local producer fence (bridge on, owner live, consent, designation);
+    2. the hub's CURRENT authority (``scheduler.verified_status_capture``
+       over the production sealed status fetcher: messaging available,
+       organization eligible, endpoint active, consent current for the
+       served version, enrollment generation live across the read);
+    3. the OWNER PIN: the owner captured before the await is still the live,
+       resolved owner.
+
+    The sender's standing (revocation, pair deny) is the hub's own per-ACK
+    check, so it is enforced by the ACK that follows — and ``pull.ack``
+    always reaches the hub, a CONFIRMED intent included (a same-state repeat
+    with the stored tuple), so a revocation while the device was off is a
+    visible hold on every path.
+
+    A refusal is a ``policy_stale`` hold, the code a fresh screen's refusal
+    gets; a local sign-in/identity refusal is classified the same way, and
+    hub-side failures propagate to the loop's backoff. No model call.
     """
 
     from local_operator.team_bridge import scheduler as _scheduler
     from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
-    from local_operator.team_bridge.store import Store, StoreRefused
+    from local_operator.team_bridge.store import StoreRefused
 
-    store = Store(config_dir)
+    fence_code = _producer_fence(store, owner, access, settings)
+    if fence_code:
+        return fence_code
     try:
         await _scheduler.verified_status_capture(
             store=store,
@@ -713,22 +736,6 @@ async def recorded_verdict_authority(owner: Any, *, config_dir: Path, auth_store
             raise
         return "policy_stale"
     return ""
-
-
-def _envelope_digest(owner: Any, item: Any) -> str | None:
-    """The screening envelope digest of ``item`` (``None`` if it does not validate).
-
-    The SAME digest the fingerprint cache keys on (sender, display, org, type,
-    request, images), recorded on the ack intent so a later hand-off on this
-    verdict can prove it is still about this envelope (review M7). A spine
-    that reached the ACK already validated the envelope, so ``None`` is only
-    ever an unreachable, fail-safe "unbound" (read as unknown).
-    """
-
-    from local_operator.team_bridge.screening import validate_envelope
-
-    envelope, _code = validate_envelope(owner, item)
-    return envelope.envelope_digest if envelope is not None else None
 
 
 def _confirmed_screen_result(stored: Mapping[str, Any]) -> Any:
@@ -911,25 +918,12 @@ async def handle_message_available(
         item = await fetch_item(
             owner, message_id, config_dir=config_dir, access=access, auth_store=auth_store
         )
-        # FENCE before the recovery ACK I/O (review m8): the replay below is
-        # an ACK like FENCE #2's, sent after two network round trips, and a
-        # bridge switched off during them must stop it the same way.
-        fence_code = _producer_fence(store, owner, access, settings)
-        if fence_code:
-            return {"action": "hold", "message_id": message_id, "code": fence_code}
         decision, recorded = recorded_read_verdict(owner, message_id, item, config_dir=config_dir)
         if decision == RECORDED_HOLD:
             return {"action": "hold", "message_id": message_id, "code": recorded}
         if decision == RECORDED_VERDICT:
-            # THE INVARIANT (see ``recorded_read_verdict``): the recorded
-            # verdict replaces only the model's decision. The hub's current
-            # authority comes next — BEFORE any ACK I/O (review m13) — then
-            # everything after a screen as usual, the ACK included.
-            authority_code = await recorded_verdict_authority(
-                owner, config_dir=config_dir, auth_store=auth_store
-            )
-            if authority_code:
-                return {"action": "hold", "message_id": message_id, "code": authority_code}
+            # The recorded verdict replaces the MODEL DECISION only; the
+            # gates run below, in ``pre_handoff_gate``, as for any verdict.
             result = _confirmed_screen_result(recorded)
         else:
             result = await screen_item(
@@ -1086,10 +1080,13 @@ async def handle_message_available(
                 # otherwise back off into the same deterministic refusal).
                 logger.warning("bridge: locator refused by its own carriage", exc_info=True)
                 return {"action": "hold", "message_id": message_id, "code": "bridge_meta_invalid"}
-        # FENCE #2 before the ACK I/O.
-        fence_code = _producer_fence(store, owner, access, settings)
-        if fence_code:
-            return {"action": "hold", "message_id": message_id, "code": fence_code}
+        # THE CHOKE POINT (review r7 M9): FENCE #2 plus the hub's current
+        # authority, before the ACK I/O, for EVERY verdict source alike.
+        gate_code = await pre_handoff_gate(
+            store, owner, access, settings, config_dir=config_dir, auth_store=auth_store
+        )
+        if gate_code:
+            return {"action": "hold", "message_id": message_id, "code": gate_code}
         try:
             ack = await ack_read(
                 owner,
@@ -1098,11 +1095,7 @@ async def handle_message_available(
                 receipt,
                 config_dir=config_dir,
                 access=access,
-                envelope_digest=_envelope_digest(owner, item),
-                # A hand-off on a RECORDED verdict re-asks the hub even for a
-                # confirmed intent: its per-ack sender check is the one gate a
-                # revocation while the device was down can reach.
-                recheck_confirmed=decision == RECORDED_VERDICT,
+                identity_digest=verdict_identity(item),
             )
         except BridgeRefusal as refusal:
             # The hub re-checks the SENDER on every ack — membership, endpoint,

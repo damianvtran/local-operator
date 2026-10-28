@@ -593,6 +593,10 @@ def _wire_spine(monkeypatch, tmp_path, *, disposition="deliver", body=None):
     # These cases model an ENGAGED designated session; F8's unused-session
     # gate has its own cases below.
     monkeypatch.setattr(wake_mod, "engagement_hold", lambda designation, config_dir: "")
+    # Every hand-off passes ``pre_handoff_gate`` (PR #3063 review r7 M9),
+    # which asks the hub for its CURRENT status whatever produced the verdict:
+    # the rig answers a lawful one. A case that withdraws it re-patches.
+    _hub_status(monkeypatch, OWNER)
     _enable_bridge(tmp_path)  # S-8a: the fence reads the DISK config
     return record, body
 
@@ -1663,13 +1667,16 @@ def test_a_recorded_verdict_still_passes_the_hubs_current_authority(
     assert store.screening_hold(owner, "bmsg_1") is None
 
 
-def test_a_verdict_confirmed_before_a_relogin_is_not_handed_off_after_it(
+def test_a_verdict_confirmed_before_a_relogin_is_carried_through_the_gate(
     tmp_path, monkeypatch
 ) -> None:
-    """PR #3063 review M6, the re-login variant: ``owner_key`` survives a
-    same-account re-login, so the recorded intent is still found, but the
-    verdict was made for the OLD enrollment generation. Gate 2 refuses it and
-    the message is screened afresh under the new generation, then delivered
+    """PR #3063 review M6's re-login variant, under review r7 M8's rule:
+    ``owner_key`` survives a same-account re-login, so the recorded intent is
+    still found. The hub already HOLDS that read verdict, and its ack ledger
+    is write-once per message, so a re-screen under the new generation can
+    only mint a second verdict the hub refuses. The verdict is carried — no
+    model call — through ``pre_handoff_gate`` under the NEW generation (its
+    authority, its owner pin, the hub's per-ack sender check), then delivered
     exactly once. Totals at the end, across leases."""
 
     clock, store, owner, record, wire, access, screens, _hub = (
@@ -1692,7 +1699,7 @@ def test_a_verdict_confirmed_before_a_relogin_is_not_handed_off_after_it(
     for _ in range(4):
         _iterate(relogged, tmp_path, access)
         clock.now += _ACROSS_A_LEASE_S
-    assert screens == [1, 2]  # the old verdict was not reused under gen 2
+    assert screens == [1]  # the hub-held verdict is carried, never re-made
     assert len(record["delivered"]) == 1
     assert store.screening_hold(relogged, "bmsg_1") is None
 
@@ -2694,20 +2701,37 @@ def test_a_held_message_is_redriven_on_the_next_pass_once_the_owner_messages_the
 
 
 class _MatrixHub:
-    """The hub's ack endpoint, per agent-server ``bridge_ack_service.go``:
-    the counterpart's standing is re-checked on EVERY ack, repeats included
-    (a revoked sender answers 403 ``recipient_unavailable``); a same-state
-    repeat with an agreeing verdict is a 200 no-op; a disagreeing one is 409
-    ``invalid_transition``. Idempotency is the state machine, not the ref."""
+    """The hub's ack endpoint, in one of two MODES.
+
+    ``server`` mirrors agent-server ``bridge_ack_service.go`` (read at
+    ``782aefeb``): the counterpart's standing is re-checked on EVERY ack,
+    repeats included (a revoked sender answers 403 ``recipient_unavailable``);
+    ``unread -> read`` records the verdict write-once; a same-state repeat is
+    a 200 no-op when its verdict AGREES with the record (or carries none) and
+    a 409 ``invalid_transition`` when it disagrees. ``client_ref`` is "carried
+    for nothing" there: idempotency is the state machine and the verdict.
+
+    ``strict_ref`` is the older, STRICTER fake: it additionally 409s a repeat
+    whose ``client_ref`` differs from the first one, even with an agreeing
+    verdict. Production never does this; it is kept so a cell can show its
+    outcome does not depend on the hub tolerating a fresh ref.
+
+    ``stop_in_post`` / ``apply_then_lose`` model the two halves of a stop
+    during the POST: the hub never saw it, or it APPLIED the read and the
+    response was lost (QA/review r7 ``pending_applied``)."""
 
     base_url = OWNER.canonical_base_url
 
-    def __init__(self) -> None:
+    def __init__(self, mode: str = "server") -> None:
+        assert mode in ("server", "strict_ref")
+        self.mode = mode
         self.reads: dict[str, tuple[Any, ...]] = {}
+        self.refs: dict[str, str] = {}
         self.applied: list[str] = []
         self.conflicts = 0
         self.revoked = False
         self.stop_in_post = False
+        self.apply_then_lose = False
 
     @staticmethod
     def _tuple(screening: Any) -> tuple[Any, ...]:
@@ -2734,23 +2758,34 @@ class _MatrixHub:
         if self.revoked:
             raise BridgeRefusal("recipient_unavailable", "counterpart", http_status=403)
         attached = self._tuple(kwargs["screening"])
+        ref = str(kwargs.get("client_ref") or "")
         stored = self.reads.get(message_id)
         if stored is None:
             self.reads[message_id] = attached
+            self.refs[message_id] = ref
             self.applied.append(message_id)
-        elif stored != attached:
+        elif stored != attached or (self.mode == "strict_ref" and ref != self.refs[message_id]):
             self.conflicts += 1
             raise BridgeRefusal("invalid_transition", "disagreeing repeat", http_status=409)
+        if self.apply_then_lose:
+            # APPLIED, then the response is lost to a stop.
+            self.apply_then_lose = False
+            raise asyncio.CancelledError
         return {"delivery": {"state": kwargs["state"], "state_at": "t"}}
 
 
 _MATRIX_SOURCES = ("fresh", "cache_hit")
-_MATRIX_INTENTS = ("none", "pending", "confirmed")
+_MATRIX_INTENTS = ("none", "pending", "pending_applied", "confirmed")
 _MATRIX_CHANGES = ("none", "model", "relogin", "status_withdrawn", "sender_revoked")
+#: Round 7 (review r7 M8/M9): compound changes and the one transition a real
+#: member makes after the fact — renaming their account, which changes the
+#: served ``sender.name`` (the hub serves it from the account).
+_MATRIX_COMPOUND = ("rename", "rename+model", "relogin+revoked", "rename+revoked")
+_MATRIX_HUB_MODES = ("server", "strict_ref")
 _MATRIX_STOPS = ("cancel", "kill")
 #: Changes the hub or the owner's policy REFUSES: the message must sit in a
 #: visible hold while the refusal stands, and clear once it is lifted.
-_REFUSING = ("status_withdrawn", "sender_revoked")
+_REFUSING = ("status_withdrawn", "sender_revoked", "relogin+revoked", "rename+revoked")
 
 
 def _matrix_config(tmp_path: Path, model: str) -> None:
@@ -2774,13 +2809,22 @@ def _expected_model_calls(source: str, intent: str, change: str) -> int:
     was never told, so there is no decision to carry and re-screening under
     the new model is harmless."""
 
-    rescreen = change == "relogin" or (
-        source == "cache_hit" and intent == "none" and change == "model"
+    # A re-login re-screens only where the hub holds no verdict yet (r7 M8):
+    # a recorded intent, pending or confirmed, is the hub's write-once
+    # decision and is carried, never re-made.
+    relogin = "relogin" in change and intent == "none"
+    # The fingerprint cache keys on the FULL envelope, display name included
+    # (A6), so a rename misses it exactly like a model change does; with no
+    # record and nothing at the hub, that re-screen is the only honest path.
+    model_miss = (
+        source == "cache_hit" and intent == "none" and ("model" in change or "rename" in change)
     )
-    return 1 + (1 if rescreen else 0)
+    return 1 + (1 if relogin or model_miss else 0)
 
 
-def _run_recovery_cell(tmp_path, monkeypatch, source, intent, change, stop) -> dict[str, Any]:
+def _run_recovery_cell(
+    tmp_path, monkeypatch, source, intent, change, stop, hub_mode="server"
+) -> dict[str, Any]:
     from local_operator.team_bridge import model_boundary as boundary_mod
 
     clock = _FakeClock()
@@ -2790,11 +2834,12 @@ def _run_recovery_cell(tmp_path, monkeypatch, source, intent, change, stop) -> d
     record, body = _wire_spine(monkeypatch, tmp_path)
     _matrix_config(tmp_path, "gpt-5.4")
     monkeypatch.setattr(pull_mod, "events", _quiet_events)
-    hub = _MatrixHub()
+    hub = _MatrixHub(hub_mode)
     monkeypatch.setattr(pull_mod, "_client_for", lambda config_dir, client: hub)
     monkeypatch.setattr(wake_mod, "ack_read", _PRODUCTION_ACK_READ)
     monkeypatch.setattr(wake_mod, "screen_item", _PRODUCTION_SCREEN_ITEM)
     status = _hub_status(monkeypatch, owner)
+    sender = {"name": "Org Member"}
     access = OAuthAccess(
         access_token="tok",
         credential_id=owner.credential_id,
@@ -2805,6 +2850,7 @@ def _run_recovery_cell(tmp_path, monkeypatch, source, intent, change, stop) -> d
     async def fetch(owner_, message_id, *, config_dir, access, auth_store):
         item = _item(body)
         item["message"]["id"] = message_id
+        item["sender"]["name"] = sender["name"]  # the hub serves it from the account
         return item
 
     monkeypatch.setattr(wake_mod, "fetch_item", fetch)
@@ -2846,6 +2892,8 @@ def _run_recovery_cell(tmp_path, monkeypatch, source, intent, change, stop) -> d
         monkeypatch.setattr(wake_mod, "ack_read", stopped_before_the_ack)
     elif intent == "pending":
         hub.stop_in_post = True
+    elif intent == "pending_applied":
+        hub.apply_then_lose = True
     else:
 
         async def stopped_at_the_handoff(*args: Any, **kwargs: Any) -> str:
@@ -2873,28 +2921,18 @@ def _run_recovery_cell(tmp_path, monkeypatch, source, intent, change, stop) -> d
     monkeypatch.setattr(wake_mod, "ack_read", _PRODUCTION_ACK_READ)
     monkeypatch.setattr(wake_mod, "deliver_wake", delivered_fake)
     recorded = store.recorded_intent(owner, "bmsg_1", "read")
-    expected_state = {"none": None, "pending": "pending", "confirmed": "confirmed"}[intent]
+    expected_state = {
+        "none": None,
+        "pending": "pending",
+        "pending_applied": "pending",
+        "confirmed": "confirmed",
+    }[intent]
     assert (recorded or {}).get("state") == expected_state
+    assert hub.applied.count("bmsg_1") == (1 if intent in ("pending_applied", "confirmed") else 0)
 
-    # -- while the device is down ------------------------------------------
-    if change == "model":
-        _matrix_config(tmp_path, "gpt-5.4-mini")  # a ``lop`` update moved the default
-    elif change == "relogin":
-        owner = OwnerSnapshot(
-            credential_id=owner.credential_id,
-            account_id=owner.account_id,
-            tenant_id=owner.tenant_id,
-            endpoint_id=owner.endpoint_id,
-            canonical_base_url=owner.canonical_base_url,
-            enrollment_generation=store.invalidate(owner),
-        )
-        store.record_feed_batch(
-            owner, feed_seq(9), ["message_available:message_id=bmsg_1"], resync_required=False
-        )
-    elif change == "status_withdrawn":
-        status["available"] = False
-    elif change == "sender_revoked":
-        hub.revoked = True
+    # -- while the device is down (a compound change applies each part) ----
+    for part in change.split("+"):
+        owner = _apply_matrix_change(part, store, owner, status, hub, sender, tmp_path)
 
     out: dict[str, Any] = {}
     drive(owner)
@@ -2917,20 +2955,75 @@ def _run_recovery_cell(tmp_path, monkeypatch, source, intent, change, stop) -> d
     return out
 
 
-@pytest.mark.parametrize("stop", _MATRIX_STOPS)
-@pytest.mark.parametrize("change", _MATRIX_CHANGES)
-@pytest.mark.parametrize("intent", _MATRIX_INTENTS)
-@pytest.mark.parametrize("source", _MATRIX_SOURCES)
-def test_stop_restart_recovery_matrix(tmp_path, monkeypatch, source, intent, change, stop) -> None:
+def _apply_matrix_change(part, store, owner, status, hub, sender, tmp_path) -> OwnerSnapshot:
+    """One change while the device is down; returns the (possibly new) owner."""
+
+    if part == "none":
+        return owner
+    if part == "rename":
+        sender["name"] = "Org Member (renamed)"
+        return owner
+    if part == "model":
+        _matrix_config(tmp_path, "gpt-5.4-mini")  # a ``lop`` update moved the default
+        return owner
+    if part == "relogin":
+        owner = OwnerSnapshot(
+            credential_id=owner.credential_id,
+            account_id=owner.account_id,
+            tenant_id=owner.tenant_id,
+            endpoint_id=owner.endpoint_id,
+            canonical_base_url=owner.canonical_base_url,
+            enrollment_generation=store.invalidate(owner),
+        )
+        store.record_feed_batch(
+            owner, feed_seq(9), ["message_available:message_id=bmsg_1"], resync_required=False
+        )
+        return owner
+    if part == "status_withdrawn":
+        status["available"] = False
+        return owner
+    if part == "revoked" or part == "sender_revoked":
+        hub.revoked = True
+        return owner
+    raise AssertionError(part)
+
+
+def _matrix_cases() -> list[Any]:
+    """The base cross-product on the server-faithful hub, plus the r7 rows:
+    the compound changes on every source/intent, and the decisive M8 cells
+    re-run on the stricter ``strict_ref`` hub."""
+
+    cases = [
+        (source, intent, change, stop, "server")
+        for source in _MATRIX_SOURCES
+        for intent in _MATRIX_INTENTS
+        for change in _MATRIX_CHANGES + _MATRIX_COMPOUND
+        for stop in _MATRIX_STOPS
+    ]
+    cases += [
+        (source, intent, change, stop, "strict_ref")
+        for source in _MATRIX_SOURCES
+        for intent in ("pending", "pending_applied", "confirmed")
+        for change in ("none", "model", "rename", "rename+model")
+        for stop in _MATRIX_STOPS
+    ]
+    return [pytest.param(*case, id="-".join(case)) for case in cases]
+
+
+@pytest.mark.parametrize("source,intent,change,stop,hub_mode", _matrix_cases())
+def test_stop_restart_recovery_matrix(
+    tmp_path, monkeypatch, source, intent, change, stop, hub_mode
+) -> None:
     """Every (screening source x intent at stop x change while down x stop
     kind) cell ends with exactly ONE delivery, ONE read applied at the hub,
     no conflicting ACK, no leftover hold or ref, and only the model calls the
     change genuinely requires; a refusing change first holds VISIBLY with zero
     deliveries, then clears once lifted."""
 
-    out = _run_recovery_cell(tmp_path, monkeypatch, source, intent, change, stop)
+    out = _run_recovery_cell(tmp_path, monkeypatch, source, intent, change, stop, hub_mode)
     # One greppable line per cell: the remediation's before/after table.
-    print(f"MATRIX {source}/{intent}/{change}/{stop} {json.dumps(out, sort_keys=True)}")
+    cell = f"{source}/{intent}/{change}/{stop}/{hub_mode}"
+    print(f"MATRIX {cell} {json.dumps(out, sort_keys=True)}")
     if change in _REFUSING:
         assert (out["refused_deliveries"], out["refused_hold"] is not None) == (0, True), out
     assert out["deliveries"] == 1, out

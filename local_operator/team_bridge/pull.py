@@ -332,19 +332,21 @@ async def ack(
     access: OAuthAccess | None,
     client_ref: str | None = None,
     client: WireClient | None = None,
-    envelope_digest: str | None = None,
-    recheck_confirmed: bool = False,
+    identity_digest: str | None = None,
 ) -> AckOutcome:
     """Record the intent, then make ONE ack request with the EXACT tuple.
 
-    ``envelope_digest`` binds the intent to the envelope the verdict was made
-    for (with the owner's enrollment generation, which the store stamps), so a
-    later hand-off on this recorded verdict can prove it is still the same
-    decision (PR #3063 review M7). It never travels to the hub.
+    ``identity_digest`` binds the intent to the message it was made for (with
+    the owner's enrollment generation, which the store stamps), so a later
+    hand-off on this recorded verdict proves it is about the same message
+    (PR #3063 reviews M7, r7 M8). It never travels to the hub.
 
-    ``recheck_confirmed`` is for a hand-off on a RECORDED verdict only: an
-    intent the hub already confirmed is re-sent as a same-state repeat (see
-    :func:`flush_ack`) so the hub's per-ack sender check runs again.
+    An intent the hub already CONFIRMED is re-sent as a same-state repeat
+    (see :func:`_recheck_confirmed`), ALWAYS — keyed on the intent's state,
+    never on which branch of the caller produced the verdict (review r7 M9):
+    a confirmed intent here means the message is being re-driven, and the
+    hub's per-ack sender check is the only place a revocation while the
+    device was off is enforced.
 
     The intent is durable BEFORE dispatch; :func:`flush_ack` maps outcomes
     without ever overwriting the write-once verdict: a definite 409 refusal
@@ -363,7 +365,7 @@ async def ack(
     # key, which the hub answers as a replay.
     ref = client_ref or store.intent_client_ref(owner, message_id, target) or str(uuid.uuid4())
     intent_id = store.record_ack_intent(
-        owner, message_id, target, receipt, ref, envelope_digest=envelope_digest
+        owner, message_id, target, receipt, ref, identity_digest=identity_digest
     )
     return await flush_ack(
         owner,
@@ -371,7 +373,7 @@ async def ack(
         config_dir=config_dir,
         access=access,
         client=client,
-        recheck_confirmed=recheck_confirmed,
+        recheck_confirmed=True,
     )
 
 

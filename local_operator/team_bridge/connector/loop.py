@@ -520,10 +520,19 @@ async def retry_due_holds(
                 # The row's code is what the owner sees (F8): a message first
                 # held ``open_chief_of_staff`` and then held for a NEW reason
                 # once the owner messaged the session must not keep telling
-                # them to message it. One conditional UPDATE: nothing is
-                # resurrected, and the row keeps its ``created_at`` (m9).
-                store.advance_hold_retry(
-                    owner, message_id, retry_at=_time.time() + gap, hold_code=new_code or None
+                # them to message it. The row keeps its ``created_at`` (m9).
+                #
+                # An UPSERT, the same writer the ordinary ref path uses — not
+                # a conditional UPDATE (PR #3063 r7 matrix,
+                # ``cache_hit/none/rename+revoked/kill``): a re-drive that
+                # re-screens commits a receipt, and the receipt commit DELETES
+                # this message's hold row; the ACK the hub then refuses (a
+                # sender revoked while the device was off) came back as a hold
+                # with no row left to update, and the message was never
+                # retried. The spine said "hold" THIS pass, so writing the row
+                # can never resurrect a delivered message.
+                store.persist_hold(
+                    owner, message_id, new_code or "hold", retry_at=_time.time() + gap
                 )
             except StoreRefused:
                 pass  # fenced owner: the next live pass owns the row

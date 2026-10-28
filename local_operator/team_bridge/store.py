@@ -3109,7 +3109,7 @@ class Store:
         receipt: ScreeningReceipt | None,
         client_ref: str,
         *,
-        envelope_digest: str | None = None,
+        identity_digest: str | None = None,
     ) -> str:
         """Write-once ack intent, recorded BEFORE any dispatch.
 
@@ -3168,16 +3168,16 @@ class Store:
                     # decision that just re-made it. The tuple and the ref the
                     # hub knows are untouched.
                     conn.execute(
-                        "UPDATE ack_intents SET creator_generation = ?, envelope_digest = "
-                        "COALESCE(?, envelope_digest) WHERE intent_id = ?",
-                        (owner.enrollment_generation, envelope_digest, existing["intent_id"]),
+                        "UPDATE ack_intents SET creator_generation = ?, identity_digest = "
+                        "COALESCE(?, identity_digest) WHERE intent_id = ?",
+                        (owner.enrollment_generation, identity_digest, existing["intent_id"]),
                     )
                     return str(existing["intent_id"])
                 raise StoreRefused("intent_conflict", "write-once intent tuple differs")
             conn.execute(
                 "INSERT INTO ack_intents (intent_id, owner_key, message_id, target, client_ref, "
                 "verdict, model, prompt_version, template_sha256, body_sha256, categories, "
-                "state, created_at, creator_generation, envelope_digest) "
+                "state, created_at, creator_generation, identity_digest) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     intent_id,
@@ -3194,7 +3194,7 @@ class Store:
                     ACK_PENDING,
                     time.time(),
                     owner.enrollment_generation,
-                    envelope_digest,
+                    identity_digest,
                 ),
             )
             return intent_id
@@ -3203,25 +3203,29 @@ class Store:
     def _ensure_intent_binding_columns(conn: sqlite3.Connection) -> None:
         """Add the verdict's BINDING columns to an ``ack_intents`` that predates them.
 
-        WHY ON THE INTENT (PR #3063 review M7): the connector hands a message
-        off on a recorded read verdict without screening again, and it may do
-        that only for the decision THIS enrollment generation made about THIS
-        envelope. The intent is the one row every recorded verdict has — a
-        message served from the screening cache has no receipt of its own —
-        so the binding lives here, written in the same transaction as the
-        tuple, before any ACK is sent.
+        WHY ON THE INTENT (PR #3063 reviews M7, r7 M8): the connector hands a
+        message off on a recorded read verdict without screening again, and
+        the binding proves the verdict is about THIS message: an IMMUTABLE
+        identity digest (``connector.wake.verdict_identity`` — message,
+        thread, sender endpoint, body hash; never display fields, which the
+        hub may change while the device is off). The intent is the one row
+        every recorded verdict has — a message served from the screening
+        cache has no receipt of its own — so the binding lives here, written
+        in the same transaction as the tuple, before any ACK is sent.
+        ``creator_generation`` is informational: the hub's ledger is
+        write-once per message, so a verdict it holds outlives a re-login.
 
         ADDITIVE AND NULLABLE, so no schema stamp moves and an older binary
         never names them. A pre-upgrade row reads NULL: "binding unknown",
-        which the connector treats as the current generation and envelope —
-        exactly how it treated every intent before.
+        which the connector treats as bound — exactly how it treated every
+        intent before.
         """
 
         columns = {row[1] for row in conn.execute("PRAGMA table_info(ack_intents)")}
         if "creator_generation" not in columns:
             conn.execute("ALTER TABLE ack_intents ADD COLUMN creator_generation INTEGER")
-        if "envelope_digest" not in columns:
-            conn.execute("ALTER TABLE ack_intents ADD COLUMN envelope_digest TEXT")
+        if "identity_digest" not in columns:
+            conn.execute("ALTER TABLE ack_intents ADD COLUMN identity_digest TEXT")
 
     @staticmethod
     def _intent_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -3252,7 +3256,7 @@ class Store:
             "creator_generation": (
                 row["creator_generation"] if "creator_generation" in row.keys() else None
             ),
-            "envelope_digest": row["envelope_digest"] if "envelope_digest" in row.keys() else None,
+            "identity_digest": row["identity_digest"] if "identity_digest" in row.keys() else None,
         }
 
     def ack_intent(self, owner: OwnerSnapshot, intent_id: str) -> dict[str, Any] | None:
@@ -3337,37 +3341,6 @@ class Store:
                 (_owner_key(owner), message_id, target),
             ).fetchone()
             return None if row is None else self._intent_dict(row)
-
-    def supersede_pending_intent(self, owner: OwnerSnapshot, message_id: str, target: str) -> bool:
-        """Remove a STILL-PENDING intent whose binding no longer holds (review M7).
-
-        The connector calls this only for a pending ``read`` intent made by
-        another enrollment generation, or for another envelope: not this
-        owner's decision, and screening's step 5 would otherwise hold the
-        message ``ack_recovery`` forever. Removing it lets the message be
-        screened afresh; the fresh intent carries a fresh ref.
-
-        WHY THAT IS SAFE AT THE HUB: the hub's ack idempotency is its delivery
-        state machine, not the ref (agent-server ``bridge_ack_service.go``).
-        If the old POST did land, an agreeing new tuple is a 200 same-state
-        no-op, and a disagreeing one a 409 the ledger records as a visible
-        ``conflict`` — never a second "read" and never a silent pass.
-
-        CONDITIONAL on ``state = 'pending'``, inside the write lock: a
-        confirmed or conflict intent is a fact about the hub and is never
-        removed. Live-owner fenced. Returns whether a row was removed.
-        """
-
-        with self._connect() as conn:
-            self._init(conn)
-            self._begin_write(conn)
-            self._require_live(conn, owner)
-            removed = conn.execute(
-                "DELETE FROM ack_intents WHERE owner_key = ? AND message_id = ? "
-                "AND target = ? AND state = ?",
-                (_owner_key(owner), message_id, target, ACK_PENDING),
-            )
-            return bool(removed.rowcount)
 
     def find_pending_intent(
         self, owner: OwnerSnapshot, message_id: str, target: str
