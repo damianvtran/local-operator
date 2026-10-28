@@ -344,9 +344,8 @@ window.measureRelay = function(win) {
       spend_text_right: rightOfInk(spend),
       spend_box_right: spend && spend.getBoundingClientRect().width
         ? +(box.right - spend.getBoundingClientRect().right).toFixed(1) : null,
-      /* PRESENT means RENDERED. A `[@media(max-height:480px)]:hidden` control is
-         still in the DOM with a zero box, and a DOM-presence check called that
-         "present" on a short viewport where no user could see or tap it. */
+      /* PRESENT means RENDERED. A short-layout `hidden` control is still in
+         the DOM with a zero box; DOM presence alone would claim it is tappable. */
       model_present: Boolean(model && model.getBoundingClientRect().width > 0),
       model_text: model && model.getBoundingClientRect().width > 0
         ? (model.innerText || "").trim() || null : null,

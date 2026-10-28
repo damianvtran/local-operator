@@ -517,11 +517,19 @@ export function PendingCard({
 
 				{optionCount > 0 ? (
 					<div className="flex flex-col gap-2">
-						{pending.options.map((opt) => (
+						{pending.options.map((opt, index) => (
 							<button
 								key={opt.label}
 								type="button"
 								disabled={inert}
+								/* THE FIRST OPTION IS THIS CARD'S REST TARGET (review R3-1).
+								   An ask that offers options has no pinned answer row, so
+								   without a mark the above-composer slot had nothing to rest
+								   on and an overflowing slot stayed on the question's head,
+								   every option below the fold. The first option's bottom on
+								   the slot's edge shows where the choice starts, with the
+								   question just above it. */
+								data-slot-rest={index === 0 ? "" : undefined}
 								onClick={() => answerAsk(opt.label)}
 								/* Accent-tinted left edge + elevated fill so an option
 								   reads as a tap target, not a static label or a text
@@ -562,7 +570,7 @@ export function PendingCard({
 			    app-wide `lo-scroll` idiom and was ruled acceptable, and a gutter
 			    would cost 4px of line length on every card at 360px. */}
 			{/* `data-slot-rest` marks the row that ANSWERS the request (Approve/Deny,
-			    or the ask's answer field and Send): the above-composer slot rests
+			    the ask's answer field and Send, or an ask's first option): the above-composer slot rests
 			    on it when it is too short to show the card whole (design D6 =
 			    review R2-1). A behaviour handle, like `data-testid` below. */}
 			{pending.kind === "approval" ? (
