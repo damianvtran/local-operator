@@ -275,17 +275,44 @@ def test_no_bearer_means_no_handoff() -> None:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="the exec-time environment is a POSIX read")
-@pytest.mark.parametrize("optimize", ["-O", "-OO"])
-def test_an_optimized_launch_leaves_no_bearer_in_the_exec_time_environment(
-    tmp_path: Path, optimize: str
+@pytest.mark.parametrize(
+    ("label", "leading", "as_script"),
+    [
+        # The shapes an argv-based "is this our launch" question got wrong, each
+        # of which left the bearer in the daemon's exec-time block (#3022 code
+        # review rounds 5 and 6). The decision is now made from what is running,
+        # so none of these can move it.
+        #
+        # ``-S`` and ``-IO`` are deliberately absent HERE and live in
+        # ``test_procname`` as predicate facts: neither can be measured against a
+        # running daemon. ``-S`` skips site-packages, so the app cannot import its
+        # dependencies at all (a real ``lop -S`` is equally dead), and ``-I`` both
+        # ignores ``PYTHONPATH`` and stops ``-m`` from putting the working directory
+        # on the path, so a local run would exercise whatever the environment has
+        # installed rather than this tree.
+        ("-O", ["-O"], False),
+        ("-OO", ["-OO"], False),
+        ("-Ou", ["-Ou"], False),
+        ("-q", ["-q"], False),
+        ("-b", ["-b"], False),
+        ("-Es", ["-Es"], False),
+        ("-sP", ["-sP"], False),
+        ("-uO", ["-uO"], False),
+        ("-R", ["-R"], False),
+        ("-mlocal_operator.cli", [], False),  # attached -m, substituted below
+        ("-sP console script", ["-sP"], True),
+        ("console script", [], True),
+    ],
+)
+def test_a_recognised_launch_leaves_no_bearer_in_the_exec_time_environment(
+    tmp_path: Path, label: str, leading: list[str], as_script: bool
 ) -> None:
-    """The real ``-O -m local_operator.cli serve`` shape, measured on the daemon.
+    """Each real launch shape, measured on a REAL daemon the way a model child could.
 
-    ``procname.is_own_launch`` decides whether ``adopt_spawn_bearer`` re-execs, and an
-    unknown leading option answers "not our launch" -- so ``-O`` used to leave the
-    bearer in the daemon's exec-time block for its whole life, which ``ps eww`` shows
-    (#3022 code review round 5, MAJOR). This starts a REAL daemon the way an operator
-    would and reads it the way a model child would: ``ps eww`` on the pid.
+    ``procname.is_own_launch`` decides whether ``adopt_spawn_bearer`` re-execs, and
+    the answer comes from ``__main__`` now -- the module for a ``-m`` launch, the
+    script for a console one -- so interpreter flags cannot defeat it. This starts
+    the launch an operator would and reads it with ``ps eww``.
     """
 
     import socket
@@ -299,12 +326,27 @@ def test_an_optimized_launch_leaves_no_bearer_in_the_exec_time_environment(
     port = port_probe.getsockname()[1]
     port_probe.close()
 
+    root = Path(__file__).resolve().parents[3]
     home = tmp_path / "home"
     config = tmp_path / "config"
     home.mkdir()
     config.mkdir()
-    token = "synthetic-optimized-launch-" + "q" * 16
-    root = Path(__file__).resolve().parents[3]
+    token = "[redacted]" + "q" * 16
+
+    if as_script:
+        # The console-script shape without depending on an installed entry point:
+        # ``__main__`` is a script FILE named ``lop``, which is exactly what
+        # ``bin/lop`` is to the interpreter.
+        entry = tmp_path / "lop"
+        entry.write_text(
+            "import sys\n\nfrom local_operator.cli import main\n\nsys.exit(main())\n"
+        )
+        target = [str(entry)]
+    elif leading == [] and label.startswith("-m"):
+        target = ["-mlocal_operator.cli"]
+    else:
+        target = [*leading, "-m", "local_operator.cli"]
+
     env = {
         "HOME": str(home),
         "LOCAL_OPERATOR_CONFIG_DIR": str(config),
@@ -316,22 +358,15 @@ def test_an_optimized_launch_leaves_no_bearer_in_the_exec_time_environment(
     log = tmp_path / "serve.log"
     with log.open("wb") as sink:
         process = subprocess.Popen(
-            [
-                sys.executable,
-                optimize,
-                "-m",
-                "local_operator.cli",
-                "serve",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(port),
-            ],
+            [sys.executable, *target, "serve", "--host", "127.0.0.1", "--port", str(port)],
             env=env,
             stdout=sink,
             stderr=subprocess.STDOUT,
-            cwd=str(tmp_path),
+            # ``-Es`` ignores every PYTHON* variable, so the package has to resolve
+            # from the working directory for that shape: ``-m`` prepends it.
+            cwd=str(root),
         )
+    started = process.pid
     try:
         deadline = time.monotonic() + 90
         healthy = False
@@ -344,15 +379,13 @@ def test_an_optimized_launch_leaves_no_bearer_in_the_exec_time_environment(
                     break
             except (urllib.error.URLError, OSError):
                 time.sleep(0.5)
-        assert healthy, log.read_text()[-4000:]
+        assert healthy, f"[{label}] " + log.read_text()[-4000:]
 
-        # ``ps eww <pid>`` is what a model's bash child can run; ``-p`` on the pid we
-        # spawned also proves the re-exec kept it (an exec, not a new process).
         listing = subprocess.run(
-            ["ps", "eww", "-p", str(process.pid)], capture_output=True, text=True, timeout=30
+            ["ps", "eww", "-p", str(started)], capture_output=True, text=True, timeout=30
         ).stdout
-        assert token not in listing, "the bearer is in the daemon's exec-time environment"
-        assert process.poll() is None, "the re-exec must keep the pid"
+        assert token not in listing, f"[{label}] the bearer is in the exec-time environment"
+        assert process.poll() is None, f"[{label}] the re-exec must keep the pid"
 
         def status(headers: dict[str, str]) -> int:
             request = urllib.request.Request(
@@ -367,6 +400,7 @@ def test_an_optimized_launch_leaves_no_bearer_in_the_exec_time_environment(
         assert status({"Authorization": f"Bearer {token}"}) == 200
         assert status({}) == 401
     finally:
+        assert process.pid == started, "an exec must not hand the pid to another process"
         process.terminate()
         try:
             process.wait(timeout=20)

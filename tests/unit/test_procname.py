@@ -23,11 +23,13 @@ without planting links on the machine running the suite.
 
 from __future__ import annotations
 
+import importlib.machinery
 import os
 import shutil
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 from typing import Any
 
@@ -765,67 +767,97 @@ class TestFallbackLadder:
         assert called == [], "a non-launcher process must never exec itself"
 
     @pytest.mark.parametrize(
-        ("orig_argv", "expected"),
+        ("spec_name", "main_file", "expected"),
         [
-            (["python", "/x/bin/lop", "--resume", "a"], True),
-            (["python", "/x/bin/lo"], True),
-            (["python", "/x/bin/local-operator", "serve"], True),
-            (["python", "-m", "local_operator.cli"], True),
-            (["python", "-m", "local_operator"], True),
-            (["python", "-m", "pytest", "tests/unit"], False),
-            (["python", "-c", "import local_operator.cli"], False),
-            (["python"], False),
-            (["python", "/x/bin/some-other-tool"], False),
-            # LEADING INTERPRETER OPTIONS ARE NOT THE PROGRAM. The first row is
-            # OUR OWN reload successor — the argv `server/reload.py` execs when
-            # it replaces a serving daemon (live pid 1343: `python3.14`, ppid 1,
-            # `--listener-fd`) — and the second is a spawn of ours that answered
-            # False before this change. The desktop app is NOT in this list and
-            # must not be added: it launches its backend as `-c …` and probes
-            # with the same string, which is the row two lines below that has to
-            # stay False (review round 1, R-6).
-            (["python", "-P", "-m", "local_operator.cli", "serve"], True),
-            (["python", "-P", "-m", "local_operator.cli", "serve", "--port", "1"], True),
-            (["python", "-u", "-m", "local_operator.tools.eval_worker"], True),
-            (["python", "-P", "-u", "-E", "-s", "-I", "-B", "-m", "local_operator"], True),
-            (["python", "-X", "dev", "-m", "local_operator.cli"], True),
-            (["python", "-Xdev", "-m", "local_operator.cli"], True),
-            (["python", "-W", "ignore", "-m", "local_operator.cli"], True),
-            (["python", "-Wignore", "-m", "local_operator.cli"], True),
-            (["python", "--check-hash-based-pycs=always", "-m", "local_operator.cli"], True),
-            (["python", "-P", "/x/bin/lop"], True),
-            # Optimized launches are launches of this product too. Without these
-            # rows the daemon declines the bearer re-exec and ``ps eww`` keeps
-            # showing the value (#3022 code review round 5, MAJOR).
-            (["python", "-O", "-m", "local_operator.cli", "serve"], True),
-            (["python", "-OO", "-m", "local_operator.cli", "serve"], True),
-            (["python", "-P", "-O", "-m", "local_operator"], True),
-            (["python", "-O", "/x/bin/lop"], True),
-            # ANY submodule of the package, not just the two spellings the old
-            # test listed: a spawn of our own module is a launch of this
-            # product, which is why the eval worker and the runtime's own
-            # module are in this list.
-            (["python", "-m", "local_operator.tools.eval_worker"], True),
-            (["python", "-m", "local_operator.session.runtime.process"], True),
-            # ... and the two directions that must NOT move. The `-c` refusal is
-            # a contract with the desktop app, not an oversight: its identity
-            # probe is the same `-c` string asking for `sys.executable`, and a
-            # branded answer makes the app refuse its own backend.
-            (["python", "-P", "-c", "from local_operator.cli import main; main()"], False),
-            (["python", "-P", "-u", "-c", "import local_operator.cli"], False),
-            (["python", "-ccode"], False),
-            (["python", "-P", "-m", "pytest", "tests/unit"], False),
-            (["python", "-P", "-m"], False),
-            (["python", "-P"], False),
-            (["python", "-Q", "-m", "local_operator.cli"], False),
-            # Bounded at the dot: a similarly-named distribution is not ours.
-            (["python", "-m", "local_operators.cli"], False),
-            (["python", "-m", "local_operator_x"], False),
+            # A ``-m`` launch: ``__main__.__spec__`` names the module, whatever the
+            # interpreter flags were.
+            ("local_operator.cli", None, True),
+            ("local_operator", None, True),
+            ("local_operator.tools.eval_worker", None, True),
+            ("local_operator.session.runtime.process", None, True),
+            # A console script: ``__main__`` IS the script file.
+            (None, "/x/bin/lop", True),
+            (None, "/x/bin/lo", True),
+            (None, "/x/bin/local-operator", True),
+            # ... and the refusals that keep the guard honest. pytest, an
+            # embedder and ``-c`` have no spec and no ``__file__``; a foreign
+            # script or module is a different program; the prefix test is
+            # bounded at the dot.
+            ("pytest", None, False),
+            (None, "/x/bin/pytest", False),
+            ("pip", None, False),
+            ("local_operators.cli", None, False),
+            ("local_operator_x", None, False),
+            (None, "/x/bin/some-other-tool", False),
+            (None, None, False),
         ],
     )
-    def test_launch_detection(self, monkeypatch, orig_argv, expected):
-        monkeypatch.setattr(sys, "orig_argv", orig_argv)
+    def test_launch_detection(self, monkeypatch, spec_name, main_file, expected):
+        _fake_main(monkeypatch, spec_name=spec_name, file=main_file)
         assert procname.is_own_launch() is expected
+
+    @pytest.mark.parametrize(
+        "orig_argv",
+        [
+            ["python", "-m", "local_operator.cli", "serve"],
+            ["python", "-P", "-m", "local_operator.cli", "serve", "--port", "1"],
+            ["python", "-O", "-m", "local_operator.cli", "serve"],
+            ["python", "-OO", "-m", "local_operator.cli", "serve"],
+            # The shapes an argv parse got wrong (#3022 code review round 6):
+            # bundled flags, flags with an attached value, and an attached -m.
+            ["python", "-Ou", "-m", "local_operator.cli", "serve"],
+            ["python", "-q", "-m", "local_operator.cli", "serve"],
+            ["python", "-b", "-m", "local_operator.cli", "serve"],
+            ["python", "-Es", "-m", "local_operator.cli", "serve"],
+            ["python", "-sP", "-m", "local_operator.cli", "serve"],
+            ["python", "-uO", "-m", "local_operator.cli", "serve"],
+            ["python", "-IO", "-m", "local_operator.cli", "serve"],
+            ["python", "-R", "-m", "local_operator.cli", "serve"],
+            ["python", "-S", "-m", "local_operator.cli", "serve"],
+            ["python", "-mlocal_operator.cli", "serve"],
+            ["python", "-X", "dev", "-m", "local_operator.cli"],
+            ["python", "--check-hash-based-pycs=always", "-m", "local_operator.cli"],
+            ["python", "-sP", "/x/bin/lop", "serve"],
+            ["/Applications/Local Operator.app/Contents/MacOS/Local Operator", "serve"],
+        ],
+    )
+    def test_interpreter_flags_cannot_defeat_launch_detection(self, monkeypatch, orig_argv):
+        """The decision is about what is RUNNING, so the flag grammar cannot move it.
+
+        Every one of these is a real launch of the product, and four of them
+        (``-Ou``, ``-Es``, ``-sP``, ``-mlocal_operator.cli``) answered "not our
+        launch" while the decision came from ``sys.orig_argv`` -- which, for the
+        bearer channel, meant the daemon kept the desktop bearer in its exec-time
+        environment for its whole life.
+        """
+
+        _fake_main(monkeypatch, spec_name="local_operator.cli", file=None)
+        monkeypatch.setattr(sys, "orig_argv", orig_argv)
+        assert procname.is_own_launch() is True
+
+    @pytest.mark.parametrize(
+        ("orig_argv", "spec_name", "main_file"),
+        [
+            # Foreign programs stay refused however the line is spelled.
+            (["python", "-O", "/x/foreign.py", "serve"], None, "/x/foreign.py"),
+            (["python", "/x/bin/some-other-tool"], None, "/x/bin/some-other-tool"),
+            (["python", "-m", "pip", "install", "x"], "pip", None),
+            (["python", "-m", "local_operators.cli"], "local_operators.cli", None),
+            (["python", "-m", "local_operator_x"], "local_operator_x", None),
+            # ``-c`` is a contract with the desktop app, not an oversight: no spec,
+            # no ``__file__``, so it answers False and the app's own identity probe
+            # keeps working.
+            (["python", "-P", "-c", "from local_operator.cli import main; main()"], None, None),
+            (["python", "-ccode"], None, None),
+            (["python"], None, None),
+        ],
+    )
+    def test_foreign_launches_stay_refused(self, monkeypatch, orig_argv, spec_name, main_file):
+        """The guard's direction: a false positive replaces the caller's process."""
+
+        _fake_main(monkeypatch, spec_name=spec_name, file=main_file)
+        monkeypatch.setattr(sys, "orig_argv", orig_argv)
+        assert procname.is_own_launch() is False
 
     def test_reexec_is_suppressed_once_branded(self, monkeypatch, branded):
         """Already running through the link => no second exec. No loop.
@@ -845,13 +877,16 @@ class TestFallbackLadder:
         So every other reason to return None is neutralised first, and the
         preconditions are asserted rather than assumed: a REAL planted link
         (a `tmp_path` fake makes `ensure_branded_interpreter()` fail on a fake
-        prefix, which is a second independent way to pass vacuously) and an
-        `orig_argv` that `is_own_launch()` accepts. The guard is then the only
-        thing left that can produce None.
+        prefix, which is a second independent way to pass vacuously) and a
+        `__main__` naming a launcher script that `is_own_launch()` accepts. The
+        guard is then the only thing left that can produce None.
         """
         link = branded  # the real planted link, not a fake
         monkeypatch.setattr(sys, "executable", str(link))
         monkeypatch.setattr(sys, "orig_argv", [str(link), "/x/.venv/bin/lop", "serve"])
+        # The launch shape is what the guard reads now, so the script name lives
+        # in ``__main__``; ``orig_argv`` stays realistic for the exec line.
+        _fake_main(monkeypatch, spec_name=None, file="/x/.venv/bin/lop")
 
         # Preconditions: without these the assertion below is vacuous.
         assert procname.is_own_launch() is True
@@ -2656,3 +2691,20 @@ def test_the_cli_brand_gate_skips_the_short_lived_exec_paths(monkeypatch) -> Non
     assert len(run(subcommand=None)) == 1
     # Subcommands outside the brand set are untouched, background or not.
     assert run(subcommand="sessions", background=False) == []
+
+
+def _fake_main(monkeypatch: pytest.MonkeyPatch, *, spec_name: str | None, file: str | None) -> None:
+    """Make ``__main__`` look like the launch shape under test.
+
+    ``is_own_launch`` asks what is RUNNING rather than parsing ``sys.orig_argv``
+    (#3022 code review round 6), so these tests describe the module instead of the
+    command line: a ``-m`` launch carries a spec name, a console script carries
+    ``__file__``, and ``-c``/a REPL carries neither.
+    """
+
+    module = types.ModuleType("__main__")
+    if spec_name is not None:
+        module.__spec__ = importlib.machinery.ModuleSpec(spec_name, loader=None)
+    if file is not None:
+        module.__file__ = file
+    monkeypatch.setitem(sys.modules, "__main__", module)

@@ -1620,116 +1620,62 @@ def should_reexec() -> Path | None:
 #: `[project.scripts]` defines both; `lop` is the launcher the operator uses.
 _LAUNCHER_NAMES = frozenset({"lop", "lo", "local-operator"})
 
-#: Interpreter options that may legitimately precede the program on the
-#: command line. Deliberately EXACTLY these: each is either measured on a real
-#: launch of this product (``-P``, what every spawn site of ours passes) or is
-#: an option an operator or an app can plausibly add to a ``lop`` line. An
-#: option not listed here answers "not our launch", which only costs a name —
-#: see :func:`is_own_launch` for why that direction is the safe one.
-#:
-#: ``-O``/``-OO`` are here because they are the one leading option an operator is
-#: most likely to add and the one that silently cost the desktop plane its
-#: exposure guarantee: ``python -O -m local_operator.cli serve`` answers "not our
-#: launch" without them, so ``adopt_spawn_bearer`` declined the pipe re-exec and
-#: the bearer stayed in that daemon's exec-time block for its whole life
-#: (``ps eww`` showed it once; #3022 code review round 5, MAJOR).
-_LEADING_OPTION_FLAGS = frozenset({"-P", "-u", "-E", "-s", "-I", "-B", "-O", "-OO"})
-
-#: The same, for options that take a SEPARATE value (``-X dev``, ``-W ignore``):
-#: the token after one of these is its value, not the program.
-_OPTION_WITH_VALUE_FLAGS = frozenset({"-X", "-W"})
-
-#: Long options that can precede the program, always with an attached ``=``.
-_LONG_OPTION_PREFIXES = ("--check-hash-based-pycs",)
-
 
 def is_own_launch() -> bool:
-    """True only when this process was started as the ``lop`` command itself.
+    """True only when this process is really a launch of this product.
 
     THE GUARD THAT KEEPS A RE-EXEC FROM EATING ITS CALLER. ``cli.main()`` is not
     only an entry point: the test suite calls it in-process (``assert main()
     == 7``), and so can any embedder. An unguarded re-exec there does not
-    "rename the process" — it REPLACES the running pytest with a fresh
+    "rename the process" -- it REPLACES the running pytest with a fresh
     interpreter, which silently truncated a 98-test file at 57% with exit 0.
     Reproduced before this guard existed.
 
-    ``sys.orig_argv[1]`` is the script the interpreter was pointed at, which for
-    a real launch is the generated console script (``…/bin/lop``). Under
-    pytest, an embedder, or ``python -c`` it is something else entirely, so the
-    process correctly declines to replace itself. ``-m local_operator.cli`` is
-    also accepted: that is a documented way to launch the app.
+    IT ASKS WHAT IS RUNNING, NOT WHAT THE COMMAND LINE LOOKS LIKE. The answer comes
+    from ``__main__``: a ``-m`` launch has ``__main__.__spec__.name`` set to the
+    module (``local_operator.cli``, ``session.runtime.process``, the eval worker --
+    every module this product spawns is inside the package), and a console script
+    has ``__main__.__file__`` naming the script (``bin/lop``). Reading the command
+    line instead was a losing game: it has to re-derive CPython's flag grammar, and
+    every flag it did not know (``-O``, ``-Ou``, ``-q``, ``-b``, ``-Es``, ``-sP``,
+    an attached ``-mlocal_operator.cli``) answered "not our launch" -- which for
+    ``server.desktop.adopt_spawn_bearer`` means no pipe re-exec, so the daemon kept
+    the desktop bearer in its exec-time block for its whole life (#3022 code review
+    rounds 5 and 6). Interpreter flags cannot change what ``__main__`` is, and the
+    re-exec rebuilds its argv verbatim from ``sys.orig_argv``, so nothing here needs
+    to understand them.
 
-    **LEADING INTERPRETER OPTIONS ARE SKIPPED, because they are not the
-    program.** ``python3 -P -m local_operator.cli serve …`` is a real launch —
-    it is the shape ``server/reload.py`` execs as a reload successor, and the
-    shape a ``lop serve`` daemon has after one (measured live on the operator's
-    machine: pid 1343, ``python3.14``, ppid 1, ``--listener-fd``). Reading
-    ``orig_argv[1]`` directly answered False for every one of those, so the
-    successor never branded itself and the daemon stayed a bare ``python3.x``
-    row for its whole life. The options that may legitimately precede the
-    program are skipped one by one — the ones that take a SEPARATE value
-    (``-X dev``, ``-W ignore``) skip their value too — and an UNKNOWN option
-    still answers False, which is the safe direction: it can delay a name, but
-    it can never re-exec something that is not a launch of this product.
-    **THE ``-c`` LAUNCHER SHAPE IS A DELIBERATE NON-GOAL — do not "fix" it by
-    accepting it.** The desktop app (``~/local-operator-ui``,
-    ``src/main/backend/owned-serve-launch.ts``) starts its managed backend as
-    ``python3 -c "from local_operator.cli import main; main()" serve --port <n>``
-    and then verifies that the process it spawned is the one serving by asking
-    the SAME ``-c`` string to report its own ``sys.executable``; a mismatch
-    raises "its base interpreter … is not the serving process" and the app
-    refuses to start its backend. A re-exec through the branded hardlink makes
-    ``sys.executable`` become ``<prefix>/bin/Local Operator``, so every one of
-    those probes would fail and the desktop app would be dead on every machine.
-    The measurement on the operator's machine is a live unbranded row
-    (``python3.14 -c …``, parent ``/Applications/Local Operator.app``), and
-    that row is the CORRECT outcome of this guard, not a gap in it.
+    THE ``-c`` SHAPE IS A DELIBERATE NON-GOAL. The desktop app
+    (``~/local-operator-ui``, ``src/main/backend/owned-serve-launch.ts``) starts its
+    managed backend as ``python3 -c "from local_operator.cli import main; main()"
+    serve --port <n>`` and then verifies that the process it spawned is the one
+    serving by asking the SAME ``-c`` string to report its own ``sys.executable``; a
+    mismatch raises "its base interpreter ... is not the serving process" and the
+    app refuses to start its backend. A re-exec through the branded hardlink makes
+    ``sys.executable`` become ``<prefix>/bin/Local Operator``, so every one of those
+    probes would fail and the desktop app would be dead on every machine. A ``-c``
+    process has no ``__main__.__file__`` and no spec, so it answers False here --
+    the bearer channel handles that app shape itself
+    (``server.desktop._DESKTOP_SERVE_PROGRAM``), which is branding, not this guard.
+
+    Anything else -- pytest, an embedder, ``-m pip``, a foreign script, a REPL --
+    answers False, and the direction that matters: a false negative costs a name or
+    one re-exec, a false positive replaces a caller's process.
     """
     try:
-        argv = sys.orig_argv
-        index = 1
-        while index < len(argv):
-            first = argv[index]
-            if first.startswith("-c"):
-                # The ``-c`` shape, and it stays a non-goal even when options
-                # precede it: see the paragraph above. ``startswith`` rather
-                # than equality because CPython accepts ``-ccode`` too, and a
-                # missed ``-c`` is the app-compat break this refuses.
-                return False
-            if first == "-m":
-                if index + 1 >= len(argv):
-                    return False
-                module = argv[index + 1]
-                # The package, or ANY submodule of it. `-m local_operator.x`
-                # is a launch of this product by construction, and the modules
-                # the product spawns itself are all in that set
-                # (`local_operator.cli`, `local_operator.session.runtime
-                # .process`, `local_operator.tools.eval_worker`,
-                # `local_operator.secrets.brokerd`, the wake supervisor, the
-                # tunnel service, the browser bridge). The prefix test is
-                # bounded at a dot, so a similarly-named distribution
-                # (`local_operators`) cannot slip in; a sibling module that is
-                # NOT ours would have to be literally inside this package.
-                return module == "local_operator" or module.startswith("local_operator.")
-            if first in _OPTION_WITH_VALUE_FLAGS:
-                index += 2  # the option AND its separate value
-                continue
-            if first in _LEADING_OPTION_FLAGS:
-                index += 1
-                continue
-            if first.startswith(("-X", "-W")) or first.startswith(_LONG_OPTION_PREFIXES):
-                # Attached spelling (``-Xdev``, ``-Wignore``,
-                # ``--check-hash-based-pycs=always``). The detached spellings
-                # are handled above; a long option given AS ``name value`` is
-                # not something CPython accepts, so it is not skipped here
-                # either.
-                index += 1
-                continue
-            if first.startswith("-"):
-                return False  # an option we do not know: never a launcher
-            return os.path.basename(first) in _LAUNCHER_NAMES
-        return False  # options and nothing else: a bare REPL, not a launch
-    except Exception:  # noqa: BLE001
+        main = sys.modules.get("__main__")
+        spec = getattr(main, "__spec__", None)
+        name = getattr(spec, "name", None) if spec is not None else None
+        if name:
+            # Bounded at the dot: a similarly-named distribution
+            # (``local_operators``) cannot pass, and neither can a sibling module
+            # that is not inside this package.
+            return name == "local_operator" or name.startswith("local_operator.")
+        filename = getattr(main, "__file__", None)
+        if not filename:
+            return False
+        return os.path.basename(filename) in _LAUNCHER_NAMES
+    except Exception:  # noqa: BLE001 - a guard that raises must answer "no"
         return False
 
 
