@@ -407,7 +407,7 @@ class DesktopNotificationsPatch(_NotificationTargets):
         if self.reconcile_ids is not None and self.op == "preview":
             # The body recount returns before reconciliation is read, so the ids
             # would be silently dropped; a recount mints no receipt either.
-            raise ValueError("reconcile_ids requires a receipt-backed target")
+            raise ValueError("reconcile_ids is not accepted on a recount")
         if self.excluded_ids is not None and self.selection_token is None:
             raise ValueError("excluded_ids requires selection_token")
         if self.selection_token is not None or self.operation_token is not None:

@@ -529,12 +529,16 @@ def test_unbindable_receipt_watermark_is_422_not_500(client, tmp_path):
 
 
 def test_relay_does_not_advertise_desktop_only_selection(monkeypatch):
-    """Review F1: the relay answers ``preview`` with a legacy first page."""
+    """Review F1 / #3105 R2-F1: the relay answers ``preview`` with a legacy first
+    page, so neither the selection key nor its ask-read extension may appear in
+    the relay's map while the desktop map keeps both."""
     from local_operator.mobile import daemon as daemon_module
     from local_operator.server.features import static_feature_flags
 
     monkeypatch.setattr(daemon_module, "_FEATURE_FLAGS_MEMO", None)
-    assert static_feature_flags()["notification_bulk_selection"] == 1
+    desktop = static_feature_flags()
     flags = daemon_module._feature_flags()
-    assert "notification_bulk_selection" not in flags
+    for key in ("notification_bulk_selection", "notification_bulk_ask_read"):
+        assert desktop[key] == 1
+        assert key not in flags
     assert flags["notification_contract"] == 1
