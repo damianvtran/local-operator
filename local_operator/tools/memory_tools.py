@@ -435,13 +435,13 @@ def build_memory_tool():
     return AgentTool(
         name="memory",
         label="Memory",
-        # Kept to ~60 tokens: it sits in every session's cached prefix. The scope
-        # rule leads because the default is the routing decision the model makes.
+        # Kept to ~35 tokens: it sits in every session's cached prefix and the
+        # start-context budget (scripts/bench_context_budget.py) has no headroom for
+        # more. The scope rule leads because the default is the routing decision the
+        # model makes; "never work state" is enforced by scope_fit, not by prose.
         description=(
-            "Store/recall memory. Default scope=session: this conversation's goals, "
-            "decisions, constraints. scope=global ONLY for durable personal facts — "
-            "names, contacts, preferences, environment — never work state. "
-            "Secrets: use secret; NAMEs only."
+            "Default scope=session (this conversation's work); scope=global ONLY for "
+            "durable personal facts (names, contacts, preferences). Secrets: use secret."
         ),
         parameters={
             "type": "object",

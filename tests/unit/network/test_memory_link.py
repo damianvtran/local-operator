@@ -1034,5 +1034,33 @@ def test_a_refused_redelivery_falls_back_to_a_resend_instead_of_retrying(devices
     results = _converges(a, b, "coastal walks", pushes=5)
     print("refused redelivery:", results)
     assert len(refusals) == 1 and results[0]["code"] == "bad_memory", results
+    # Review round 3 m1: the refusal receipt says the peer is still owed (re-baseline).
+    assert results[0]["pending"] == "overflow", results
     assert bank(b).search("coastal walks", "global")
     assert results[-1]["code"] == "in_sync", results
+
+
+def test_a_redelivery_with_no_answer_keeps_the_ops_owed_and_reports_them(devices, monkeypatch):
+    """Review round 3 m1: the no-answer return carries ``pending`` like the others,
+    and nothing is dropped (nothing was refused), so a later push still delivers."""
+    a, b = linked(devices, monkeypatch)
+    sender = bank(a)
+    sender.put("global", {"title": "Mira", "body": "Mira likes long coastal walks " * 50})
+    link = _legacy_link(a, b)
+    with pytest.MonkeyPatch.context() as legacy:
+        legacy.setattr(link, "capabilities", _without_item_512(link))
+        assert memory.push_to_peer(a, b.identity.device_id)["code"] == "withheld_pending"
+    real = link.request
+
+    def drop_redelivery(frame: dict[str, Any], timeout: float = 30) -> Any:
+        if frame.get("phase") == "push" and (frame.get("payload") or {}).get("redeliver"):
+            return None
+        return real(frame, timeout=timeout)
+
+    with pytest.MonkeyPatch.context() as gone:
+        gone.setattr(link, "request", drop_redelivery)
+        lost = memory.push_to_peer(a, b.identity.device_id)
+    assert lost["code"] == "push_failed" and lost["pending"] == 1, lost
+    results = _converges(a, b, "coastal walks")
+    assert bank(b).search("coastal walks", "global")
+    assert results[-1]["code"] == "in_sync" and results[-1]["pending"] == 0, results

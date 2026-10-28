@@ -620,12 +620,21 @@ def _push_to_peer(server: Any, device_id: str) -> dict[str, Any]:
                     "code": _peer_code(answer.get("code"), "refused"),
                     "message": _peer_message(answer.get("message")),
                     "batches": batches,
+                    # Same shape as every other receipt from this phase, so the
+                    # owed state survives into `lop memory status --json`.
+                    "pending": _owed({"ids": remaining, "overflow": True}),
                 }
             if not isinstance(answer, dict):
                 # No answer (the peer went away mid-push): nothing was refused, and
                 # every remaining op is still behind its cursor, so keep them owed.
                 _save_legacy_pending(memory, device_id, remaining, False)
-                return {"ok": False, "code": "push_failed", "message": "", "batches": batches}
+                return {
+                    "ok": False,
+                    "code": "push_failed",
+                    "message": "",
+                    "batches": batches,
+                    "pending": _owed({"ids": remaining, "overflow": False}),
+                }
             remaining = remaining[len(chunk) :]
             batches += 1
         _save_legacy_pending(memory, device_id, remaining, False)
