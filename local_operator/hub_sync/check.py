@@ -154,8 +154,59 @@ def _status_of(error: BaseException) -> int | None:
     return getattr(error, "status_code", None)
 
 
+#: Transport failures by the phrase a person can act on, most specific first (a
+#: ``ConnectTimeout`` is both a ``Timeout`` and a ``ConnectionError`` in
+#: ``requests``, and an ``SSLError`` is a ``ConnectionError``). Matched by class
+#: NAME across the cause chain so this module needs neither ``requests`` nor
+#: ``httpx`` -- the agent, team and skill fetchers use different transports.
+_TRANSPORT_PHRASES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("ConnectTimeout",), "the connection timed out"),
+    (("ReadTimeout", "ReadTimeoutError"), "the hub did not answer in time"),
+    (("Timeout", "TimeoutException", "PoolTimeout", "WriteTimeout"), "the request timed out"),
+    (("SSLError",), "the secure connection failed"),
+    (("ProxyError",), "the proxy refused the connection"),
+    (
+        ("ConnectionError", "ConnectError", "NetworkError", "RemoteProtocolError"),
+        "the connection failed",
+    ),
+)
+
+
+def _cause_chain(error: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    current: BaseException | None = error
+    while current is not None and current not in chain and len(chain) < 8:
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def _transport_phrase(error: BaseException) -> tuple[str, str] | None:
+    """``(phrase, exception class)`` for a request that never got a response."""
+
+    for exc in _cause_chain(error):
+        names = {cls.__name__ for cls in type(exc).__mro__}
+        for candidates, phrase in _TRANSPORT_PHRASES:
+            if names.intersection(candidates):
+                return phrase, type(exc).__name__
+    return None
+
+
 def _failure_reason(error: BaseException) -> tuple[str, str]:
-    """``(error_class, sentence)`` for a failed fetch (credentials are scrubbed upstream)."""
+    """``(error_class, sentence)`` for a failed fetch (credentials are scrubbed upstream).
+
+    THE SENTENCE MUST SAY WHY. The clients raise ``APIError`` from a
+    ``RequestException`` and, when the request got NO response (a timeout, a
+    refused or reset connection), keep only their generic fallback -- "Could not
+    pull the team from the Radient Agent Hub" -- with ``status_code=None``. That
+    exact sentence is what an org team link stored (radientdev, 2026-10-28)
+    while the same GET answered 200 on every later read: the transport cause
+    lived only in ``__cause__``, which nothing read or logged, so neither the
+    sidebar nor the operator could tell a blip from a broken link. This reads
+    the cause chain and names it, and states the HTTP status plus the hub's own
+    message when there WAS a response. The class name goes to the log, never
+    the raw transport text (it carries URLs and pool internals, not prose).
+    """
 
     status = _status_of(error)
     text = str(error)
@@ -164,6 +215,18 @@ def _failure_reason(error: BaseException) -> tuple[str, str]:
             "hub-item-missing",
             "the hub no longer lists this item, or this account cannot see it",
         )
+    if isinstance(status, int):
+        logger.warning("hub fetch refused: HTTP %s (%s)", status, type(error).__name__)
+        # ``text`` is the hub's designed ``error`` string, or the client's
+        # fallback already suffixed "(HTTP n)"; do not say the status twice.
+        reason = text if f"HTTP {status}" in text else f"HTTP {status}: {text}"
+        return "hub-error", f"the hub refused the request ({reason[:200]})"
+    transport = _transport_phrase(error)
+    if transport is not None:
+        phrase, cause = transport
+        logger.warning("hub fetch got no response: %s (%s)", phrase, cause)
+        return "hub-error", f"could not reach the hub: {phrase} ({text[:160]})"
+    logger.warning("hub fetch failed: %s", type(error).__name__)
     return "hub-error", f"could not reach the hub: {text[:200]}"
 
 
