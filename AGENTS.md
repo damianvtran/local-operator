@@ -1407,9 +1407,23 @@ a release to ~29 MB:
   scripts take wheels, and the Dockerfile builds from the tree.
 
 `scripts/check_dist_size.py` is the guard: a wheel over **18 MiB** fails, over
-16 MiB warns, and `--wheels-only` fails `pypi-publish` if anything but wheels is
-about to upload. A red budget means find what grew; do not move the line
-without re-reading the script's docstring.
+16 MiB warns. `--wheels-only` runs on both artifacts `pypi-publish` downloads
+(in `release-build` and `keyagent-macos`); the publisher itself runs no repo
+code and only shell-checks for exactly two wheels. PR CI (`ci.yml`,
+`release-gate.yml`) passes `--budget-mib 17.5`: its wheel lacks the phone
+bundle and key-agent helper (~0.37 MiB), so the plain 18 MiB line would first
+go red in the release's `keyagent-macos` job, after the tag exists.
+
+**Growth, measured.** The pure wheel grew 12.62 MiB (0.65.0, 10-01) to
+19.07 MiB (0.90.18, 10-27) unslimmed: ~0.25 MiB/day, ~0.18 MiB/day slim. The
+0.91.0 slim wheel with the bundle is 14.41 MiB. At that rate the 16 MiB warning
+arrives in ~9 days and the 17.5 MiB PR line in ~3 weeks. **When the warning
+fires:** compare the wheel's member list and sizes against the last release
+(`unzip -l`) to find what grew; a large non-`.py` asset or a vendored file is
+the usual cause and the fix is to drop or move it. If it is genuine code
+growth, plan the next cut before the PR line is reached (docstrings are not a
+candidate: they are runtime help text), and raise the budgets only together
+with a retention change, after re-reading the script's docstring.
 
 **Retention is the operator's decision.** Suggested policy: keep every release
 from the last ~30 days and the last patch of every minor. Deleting a PyPI

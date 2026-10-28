@@ -116,16 +116,23 @@ def slim_module(name: str, data: bytes) -> bytes:
         # `utf-8-sig` round-trips its BOM through decode/encode, so the file's first
         # bytes are preserved along with everything else.
         source = data.decode(encoding)
-        slimmed = strip_comments(source)
-        before = ast.dump(ast.parse(source, filename=name), include_attributes=True)
-        after = ast.dump(ast.parse(slimmed, filename=name), include_attributes=True)
+        out = strip_comments(source).encode(encoding)
+        # BOTH SIDES ARE PARSED FROM BYTES, and the "after" side from the exact bytes
+        # that get written: the compiler then does its own PEP 263/BOM detection, so a
+        # lost or altered coding cookie, or an encode round trip that changed a byte,
+        # fails here instead of at import time on a user's machine. Parsing the decoded
+        # text would skip that path entirely (str input ignores the cookie).
+        before = ast.dump(ast.parse(data, filename=name), include_attributes=True)
+        after = ast.dump(ast.parse(out, filename=name), include_attributes=True)
     except (SyntaxError, tokenize.TokenError, UnicodeError, ValueError) as exc:
         raise SlimError(f"{name}: cannot be tokenized/parsed: {exc}") from exc
     if before != after:
         raise SlimError(f"{name}: the stripped module's AST differs from the original")
-    if source.count("\n") != slimmed.count("\n"):
+    # Byte-level count is exact: PEP 263 encodings are ASCII-compatible, so b"\n" is
+    # the newline in every encoding tokenize accepts.
+    if data.count(b"\n") != out.count(b"\n"):
         raise SlimError(f"{name}: the stripped module's line count differs")
-    return slimmed.encode(encoding)
+    return out
 
 
 def _record_row(path: str, data: bytes) -> tuple[str, str, str]:
@@ -179,6 +186,10 @@ def slim_wheel(wheel: Path) -> tuple[int, int]:
             out.external_attr = source_record.external_attr
             out.compress_type = zipfile.ZIP_DEFLATED
             dst.writestr(out, record)
+        # mkstemp creates 0600 and os.replace keeps the temp file's mode, so without
+        # this a slimmed wheel would be owner-only (measured: -rw------- after vs
+        # -rw-r--r-- before). Keep the source wheel's permission bits.
+        os.chmod(tmp, wheel.stat().st_mode & 0o777)
         os.replace(tmp, wheel)
     finally:
         tmp.unlink(missing_ok=True)

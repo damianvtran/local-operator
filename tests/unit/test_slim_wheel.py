@@ -100,7 +100,9 @@ def test_line_numbers_survive_so_tracebacks_point_at_the_same_line(tmp_path: Pat
         exec(compile(source, str(path), "exec"), namespace)
         with pytest.raises(RuntimeError) as caught:
             namespace["boom"]()
-        return traceback.extract_tb(caught.value.__traceback__)[-1].lineno
+        lineno = traceback.extract_tb(caught.value.__traceback__)[-1].lineno
+        assert lineno is not None
+        return lineno
 
     original = raise_line(MODULE, "orig.py")
     assert original == 12
@@ -147,6 +149,33 @@ def test_slims_the_wheel_in_place_with_a_valid_record(tmp_path: Path) -> None:
     SLIM["slim_wheel"](wheel)
     assert _read(wheel) == members
     assert not list(tmp_path.glob(".slim-*")), "the temporary wheel was left behind"
+
+
+def test_the_slimmed_wheel_keeps_the_source_wheels_permissions(tmp_path: Path) -> None:
+    """``mkstemp`` creates 0600 and ``os.replace`` keeps it; the slimmer must not."""
+    wheel = _build_wheel(tmp_path, {"demo/__init__.py": MODULE.encode()})
+    wheel.chmod(0o644)
+    SLIM["slim_wheel"](wheel)
+    assert wheel.stat().st_mode & 0o777 == 0o644
+
+
+def test_verification_parses_the_written_bytes_so_a_lost_cookie_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The check covers the shipped bytes: dropping a PEP 263 cookie is caught.
+
+    The text-level AST is unchanged when a ``# coding: latin-1`` line is blanked, but the
+    written latin-1 bytes are no longer valid UTF-8 — which only parsing the bytes sees.
+    """
+    data = "# coding: latin-1\ns = 'caf\xe9'\n".encode("latin-1")
+    assert SLIM["slim_module"]("demo/m.py", data) == data
+    monkeypatch.setitem(
+        SLIM["slim_module"].__globals__,
+        "strip_comments",
+        lambda source: source.replace("# coding: latin-1", ""),
+    )
+    with pytest.raises(SLIM["SlimError"], match="demo/m.py"):
+        SLIM["slim_module"]("demo/m.py", data)
 
 
 def test_unparseable_module_fails_closed_and_leaves_the_wheel_untouched(
@@ -206,6 +235,21 @@ def test_size_guard_fails_over_budget(tmp_path: Path, capsys: pytest.CaptureFixt
     _sized(tmp_path / "a-1.0-py3-none-any.whl", SIZE["BUDGET"] + 1)
     assert SIZE["main"]([str(tmp_path)]) == 1
     assert "over the 18 MiB budget" in capsys.readouterr().err
+
+
+def test_a_tighter_budget_fails_what_the_release_budget_passes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """PR CI's ``--budget-mib 17.5`` goes red before the release's 18 MiB would."""
+    _sized(tmp_path / "a-1.0-py3-none-any.whl", int(17.75 * SIZE["MIB"]))
+    assert SIZE["main"]([str(tmp_path)]) == 0
+    assert SIZE["main"](["--budget-mib", "17.5", str(tmp_path)]) == 1
+    assert "over the 17.5 MiB budget" in capsys.readouterr().err
+
+
+def test_the_budget_flag_cannot_raise_the_line(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        SIZE["main"](["--budget-mib", "19", str(tmp_path)])
 
 
 def test_size_guard_fails_on_an_empty_directory(tmp_path: Path) -> None:

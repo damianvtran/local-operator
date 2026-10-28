@@ -916,12 +916,14 @@ Report it as a behavioural false positive with the evidence attached:
   anything else using the same names.
 
 Nothing has to be invented for that last item: PyPI publishes a SHA-256 for
-every uploaded file and exposes it through its JSON API.
+every uploaded file and exposes it through its JSON API. PyPI carries the two
+wheels only; the sdist (`local_operator-<version>.tar.gz`) is an asset on the
+GitHub Release for the same tag, whose page lists its SHA-256 as well.
 
 ```console
 $ curl -s https://pypi.org/pypi/local-operator/json | python3 -c 'import json,sys; d=json.load(sys.stdin); v=d["info"]["version"]; [print(f["filename"], f["digests"]["sha256"]) for f in d["releases"][v]]'
-local_operator-<version>-py3-none-any.whl <sha256>
-local_operator-<version>.tar.gz            <sha256>
+local_operator-<version>-py3-none-any.whl                   <sha256>
+local_operator-<version>-py3-none-macosx_11_0_universal2.whl <sha256>
 ```
 
 ### After a quarantine has already deleted an install

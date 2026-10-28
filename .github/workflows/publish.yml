@@ -635,9 +635,12 @@ jobs:
           # The same per-wheel budget as the pure wheel (PyPI's project cap; see
           # scripts/check_dist_size.py). This wheel is the slim pure wheel plus the
           # helper bundle, so it is the one that crosses the line first.
+          # --wheels-only here and in release-build, not in pypi-publish: these are
+          # the two artifacts the publisher downloads, and the publisher runs no
+          # repository code (see the note on its steps).
           mkdir -p "$RUNNER_TEMP/macos-dist"
           cp "$MACOS_WHEEL" "$RUNNER_TEMP/macos-dist/"
-          python3 scripts/check_dist_size.py "$RUNNER_TEMP/macos-dist"
+          python3 scripts/check_dist_size.py --wheels-only "$RUNNER_TEMP/macos-dist"
 
       - name: Upload the macOS distribution
         uses: actions/upload-artifact@v7
@@ -721,15 +724,12 @@ jobs:
       name: pypi
 
     steps:
-      # Only for scripts/check_dist_size.py below. Same immutable event SHA as
-      # every other job, and first, so the downloads land in a settled workspace.
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-
-      - name: Verify immutable source commit
-        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-
+      # NO CHECKOUT AND NO REPOSITORY CODE IN THIS JOB, on purpose: it is the only
+      # one holding `id-token: write` and the `pypi` environment, and PyPA advises
+      # keeping the trusted-publishing job to download + upload
+      # (pypa/gh-action-pypi-publish#237). The budget and wheels-only checks run
+      # upstream on the same artifacts (release-build, keyagent-macos); the shell
+      # check below re-asserts the final shape with nothing but coreutils.
       - name: Retrieve release distributions
         uses: actions/download-artifact@v8
         with:
@@ -742,18 +742,20 @@ jobs:
           name: release-dists-macos
           path: dist/
 
-      # The last gate before an irreversible upload: exactly what PyPI will store,
-      # each wheel within budget and NO sdist — it lives on the GitHub Release
-      # (`sdist-release`), off the 10 GB project quota.
-      - name: Assert the upload is wheels only, within budget
+      # The last gate before an irreversible upload: exactly what PyPI will store
+      # is two wheels (pure + macOS) and NO sdist — it lives on the GitHub Release
+      # (`sdist-release`), off the 10 GB project quota. Any non-dotfile that is not
+      # a wheel fails, not only *.tar.gz, matching check_dist_size.py --wheels-only.
+      - name: Assert the upload is exactly two wheels
         run: |
           set -euo pipefail
           ls -l dist/
-          python3 scripts/check_dist_size.py --wheels-only dist/ || {
-            echo "::error::refusing to upload: see the errors above"
+          others="$(find dist -maxdepth 1 -type f ! -name '.*' ! -name '*.whl')"
+          if [ -n "$others" ]; then
+            echo "::error::refusing to upload non-wheel files to PyPI: $others"
             exit 1
-          }
-          test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 2 || {
+          fi
+          test "$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 2 || {
             echo "::error::expected exactly two wheels (pure + macOS) in dist/"
             exit 1
           }
