@@ -39,7 +39,7 @@ import time
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import httpx
 import pytest
@@ -604,6 +604,68 @@ class TestBridgeDiscipline:
         reply = await bridge.call({"actions": [{"kind": "warp", "x": 1, "y": 2}]})
         assert reply["is_error"] is True
         assert "rejection_class" in reply["details"]
+
+    #: The 2026-10-28 session-arm refusals (osworld-21 s20a/sc-m22), replayed
+    #: through the bridge body the MCP tool calls. Each is still REFUSED, and
+    #: the text it returns is the shared hint builder's repair for it.
+    _MEASURED_REFUSALS: ClassVar[list[tuple[dict[str, Any], str, str]]] = [
+        (
+            {"kind": "key", "keys": ["e", "c", "h", "o", " ", "A"]},
+            "field-invalid",
+            '{"kind": "type", "text": "echo A"}',
+        ),
+        ({"kind": "key", "keys": ["cat"]}, "unknown-key", '{"kind": "type", "text": "cat"}'),
+        ({"kind": "key", "keys": ["ctrl+t"]}, "unknown-key", '"keys": ["ctrl", "t"]'),
+        (
+            {"kind": "key", "keys": ["Page_Up", "Page_Up"]},
+            "field-invalid",
+            'each {"kind": "key", "keys": ["pageup"]}',
+        ),
+        (
+            {"kind": "scroll", "frame_id": "frame-0", "x": 1, "y": 1, "delta_y": 0},
+            "field-invalid",
+            "delta_y > 0 scrolls up and < 0 scrolls down",
+        ),
+    ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("action", "class_key", "repair"), _MEASURED_REFUSALS)
+    async def test_measured_refusals_carry_the_shared_repair(
+        self, tmp_path: Path, action: dict[str, Any], class_key: str, repair: str
+    ) -> None:
+        bridge = _bridge(tmp_path)
+        reply = await bridge.call({"actions": [action]})
+        assert reply["is_error"] is True
+        assert reply["details"]["rejection_class"] == class_key
+        assert repair in reply["content"][0].text
+        assert bridge.steps == 0
+
+    @pytest.mark.asyncio
+    async def test_a_finish_behind_a_wait_is_refused_not_accepted(self, tmp_path: Path) -> None:
+        """Both measured cases were a step-0 placeholder followed by real work."""
+
+        bridge = _bridge(tmp_path)
+        reply = await bridge.call(
+            {
+                "actions": [
+                    {"kind": "wait", "duration_ms": 500},
+                    {"kind": "finish", "status": "infeasible", "reason": "placeholder"},
+                ]
+            }
+        )
+        assert reply["is_error"] is True
+        assert "send the finish alone" in reply["content"][0].text
+        assert bridge.end_requested is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("text", ["\n", " "])
+    async def test_a_whitespace_type_runs(self, tmp_path: Path, text: str) -> None:
+        bridge = _bridge(tmp_path)
+        reply = await bridge.call(
+            {"actions": [{"kind": "type", "text": text}, {"kind": "wait", "duration_ms": 50}]}
+        )
+        assert reply["is_error"] is False
+        assert bridge.steps == 1
 
     @pytest.mark.asyncio
     async def test_a_missing_pending_observation_is_refused(self, tmp_path: Path) -> None:
