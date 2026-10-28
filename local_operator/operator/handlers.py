@@ -839,6 +839,29 @@ def _status() -> int:
         backend_field = "(none — an operator key is staged; the install step has not run yet)"
     print(f"private-half backend   : {backend_field}")
     print(f"presence per signature : {report['presence_enforced_by_os']}")
+    # THE SWITCH, STATED WHERE AN OPERATOR WILL READ IT. The admission rule is
+    # landed but dormant until a host runs the confirm flow, and a dormant switch
+    # that is only discoverable from the source is a claim the product did not make.
+    # Two sentences, because the two states ask different things of a reader: an
+    # unflipped host is told that a paired phone is honoured WITHOUT being listed
+    # (this install's real behaviour), and a flipped one is told what listing now
+    # buys it. `admission` rather than "pairing", deliberately: pairing is the code
+    # the phone types, this is the computer's own confirmation of the phone.
+    # ``.get`` rather than ``[...]`` on BOTH of these: the report is built here, but
+    # it is also stubbed by tests and read by callers that pass a partial dict (the
+    # key-status helpers do), and a status command that CRASHES on a missing field
+    # is worse than one that prints the conservative answer. The default is the safe
+    # direction — "not enabled" never claims a boundary this host does not apply.
+    if report.get("device_admission", False):
+        print(
+            "phone admission        : enforced — a phone must be confirmed on this "
+            "computer (listed in its anchor) before its certificate counts"
+        )
+    else:
+        print(
+            "phone admission        : NOT ENFORCED YET — a paired phone is honoured "
+            "without being confirmed on this computer"
+        )
     print(f"spawn-capable guarantee: {report['capability_guarantee']}")
 
     # THE KEY AGENT'S FAULT STANDS BESIDE THE AUTHORITY REASON, NEVER IN PLACE OF IT
@@ -928,19 +951,40 @@ def _print_paired_devices() -> None:
     listings: the revocation clears the certificate, so `paired` cannot hold one, and
     nothing printed the anchor-only revocations — which left the id the remedy names
     unreadable anywhere but a receipt from an earlier day.
+
+    UNDER ENFORCEMENT EACH PHONE SAYS WHETHER THE COMPUTER HAS CONFIRMED IT. A phone
+    whose certificate this machine holds but whose id the anchor does not list is
+    refused by the runtime, and without this the listing above would name it as a
+    phone that can act — the one reading a human would take from a line of ids. The
+    marker appears only on hosts that enforce, because on a host that does not, an
+    unlisted phone IS admitted and calling it "not confirmed" would describe a
+    boundary the host does not apply.
     """
     from local_operator.operator.devices import (
         AUTHORISE_COMMAND,
         list_devices,
         revoked_ids,
     )
+    from local_operator.operator.trust import load_anchor, open_device_ids
 
     paired = list_devices(config_dir())
     revoked = revoked_ids(config_dir())
+    report = operator_authority_report()
+    enforcing = bool(report.get("device_admission", False))
+    listed: list[Any] = []
+    if enforcing:
+        loaded = load_anchor()
+        if loaded.usable and loaded.anchor is not None:
+            listed = open_device_ids(loaded.anchor)
     if paired:
         print(f"paired devices         : {len(paired)}")
         for device in paired:
-            print(f"  - {device.device_id}  {device.name or '(unnamed)'}")
+            # Under enforcement a phone this computer holds a certificate for but does
+            # not list is REFUSED by the runtime, so the row has to say so — otherwise
+            # a line of ids reads as a list of phones that can act.
+            admitted = not enforcing or device.device_id in listed
+            pending = "" if admitted else "  (not confirmed on this computer)"
+            print(f"  - {device.device_id}  {device.name or '(unnamed)'}{pending}")
     if revoked:
         print(f"revoked devices        : {len(revoked)}")
         for device_id in revoked:

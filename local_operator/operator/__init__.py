@@ -62,6 +62,7 @@ from local_operator.operator.trust import (
     AnchorCache,
     AnchorLoad,
     OperatorAnchor,
+    admission_enforced,
     anchor_bytes,
     anchor_dir,
     anchor_path,
@@ -178,6 +179,14 @@ def operator_authority_report(*, uid: int | str | None = None) -> dict[str, Any]
     on a host where its memory is readable. Keeping it visible here — rather than
     deleting it — is deliberate: a host can be ``operator-presence`` AND have a
     weak capability boundary, and a reader deserves both facts.
+
+    ``device_admission`` REPORTS THE SWITCH rather than the level. Whether a paired
+    phone counts only when the anchor LISTS it is independent of which key kind
+    this machine has: the rule is landed but DORMANT on every anchor written before
+    it, and this field exists so the reporting surfaces can say that plainly
+    instead of letting the runtime's silence read as a boundary it does not yet
+    have. ``False`` here means "a device certificate is still admitted without
+    being listed" — the host's own truth, not an error.
     """
     level, loaded = authority_level_load(uid=uid)
     return {
@@ -189,6 +198,7 @@ def operator_authority_report(*, uid: int | str | None = None) -> dict[str, Any]
         "backend": loaded.anchor.backend if loaded.anchor else "",
         "presence": bool(loaded.anchor and loaded.anchor.presence),
         "key_id": loaded.anchor.key_id if loaded.anchor else "",
+        "device_admission": bool(loaded.anchor and admission_enforced(loaded.anchor)),
         "capability_guarantee": operator_cap_guarantee(),
         "presence_enforced_by_os": bool(
             loaded.anchor and is_presence_backend(loaded.anchor.backend)

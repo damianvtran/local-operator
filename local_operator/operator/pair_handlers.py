@@ -294,6 +294,22 @@ def describe_devices(args: argparse.Namespace) -> int:
     paired = devices.list_devices(root)
     pending = devices.list_pending(root)
 
+    # THE SWITCH, STATED ON THE VERB THAT LISTS PHONES. Landing the admission rule
+    # DORMANT is honest only where the product says so: on a host whose anchor carries
+    # no marker, a device certificate is still admitted WITHOUT being listed, and a
+    # bare table of ids reads as a list of confirmed phones. Read once here so every
+    # row below is judged by the same answer, including the `state` column.
+    from local_operator.operator.trust import (
+        admission_enforced,
+        load_anchor,
+        open_device_ids,
+    )
+
+    loaded = load_anchor()
+    usable_anchor = loaded.anchor if loaded.usable else None
+    enforcing = bool(usable_anchor is not None and admission_enforced(usable_anchor))
+    anchor_listed = set(open_device_ids(usable_anchor)) if usable_anchor else set()
+
     if revoke:
         if not _stage_anchor_revocation(root, revoke, revoked=True):
             print(
@@ -503,9 +519,32 @@ def describe_devices(args: argparse.Namespace) -> int:
                     "--print-only and it writes the statement and takes that step itself."
                 )
 
+    if paired:
+        if enforcing:
+            print(
+                "phone admission        : enforced — a phone counts only if this "
+                "computer lists it"
+            )
+        else:
+            print(
+                "phone admission        : NOT ENFORCED YET — a paired phone is "
+                "honoured without being confirmed on this computer"
+            )
     for device in paired:
         expires = time.strftime("%Y-%m-%d", time.localtime(device.not_after))
-        state = "revoked" if _anchor_revokes(root, device.device_id) else "active"
+        # THREE STATES RATHER THAN TWO, because the runtime now asks three questions of
+        # a stored certificate: revoked, "listed and admitted", and "good certificate
+        # this computer has not confirmed" — which on an enforcing host is REFUSED. A
+        # row that said `active` for the third state would be the one reading a human
+        # takes from this listing ("my phone can act") and it would be wrong. On a host
+        # that does not enforce, the same certificate IS admitted, so the label follows
+        # the host's rule rather than the device's wishes — see the preamble above.
+        if _anchor_revokes(root, device.device_id):
+            state = "revoked"
+        elif enforcing and device.device_id not in anchor_listed:
+            state = "unconfirmed"
+        else:
+            state = "active"
         print(
             f"  {device.device_id}  {device.name or '(unnamed)':<20} "
             f"{state:<8} expires {expires}  scopes {','.join(device.scope)}"

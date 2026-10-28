@@ -63,6 +63,19 @@ from local_operator.paths import config_dir
 #: can be refused by an old runtime instead of misread.
 ANCHOR_VERSION = 1
 
+#: The ``admission`` value that means "a device's certificate counts only if the
+#: anchor LISTS it". Spelled as a positive string rather than a boolean because it
+#: is a POLICY NAME: the file records which rule this host was set up under, and a
+#: future rule (a per-approval gesture, a Windows Hello key) is a new value rather
+#: than a second boolean whose interaction with the first has to be reasoned about.
+#:
+#: ONLY THE ROOT WRITE SETS IT. The confirm flow is the one writer, and it writes
+#: it in the same privileged step that lists the phones the human kept — so an
+#: agent that can write its own anchor (file-only hosts) still cannot turn
+#: enforcement ON for itself, and one that can read the file key cannot turn it
+#: OFF, because turning it off needs the same root write.
+ADMISSION_LISTED = "listed"
+
 #: Where the anchor lives. A CONSTANT per platform, deliberately not a function
 #: of anything the gated subject can influence.
 _ANCHOR_ROOTS = {
@@ -295,9 +308,22 @@ class OperatorAnchor:
     label: str = ""
     created_at: int = 0
     devices: tuple[dict[str, Any], ...] = ()
+    #: ``""`` (the default) means this host has NOT adopted the admission rule and
+    #: every device the certificate check accepts stays accepted — exactly the
+    #: behaviour of every anchor written before this field existed. ``"listed"``
+    #: means the runtime additionally requires the anchor to name the device (see
+    #: :func:`device_is_admitted`).
+    #:
+    #: DORMANT BY DEFAULT, ON PURPOSE. Turning the rule on for every host in the
+    #: build that introduced it would de-admit every phone already paired on a
+    #: file-only host — they are not listed, because nothing ever listed them — and
+    #: send those humans through a re-pair to restore access they never lost. The
+    #: switch is therefore written by the one flow that also lists the phones the
+    #: human keeps (the confirm card), and until a host runs it nothing here moves.
+    admission: str = ""
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        body: dict[str, Any] = {
             "v": ANCHOR_VERSION,
             "key_id": self.key_id,
             "alg": "ES256",
@@ -308,6 +334,16 @@ class OperatorAnchor:
             "created_at": self.created_at,
             "devices": list(self.devices),
         }
+        # EMITTED ONLY WHEN SET, and that is a compatibility requirement rather
+        # than tidiness: ``anchor_bytes`` is what ``statement_digest`` hashes, and
+        # every live approval card pins that digest in its provenance trio. Always
+        # emitting ``"admission": ""`` would change the bytes of every anchor in
+        # existence and make every card filed before this build refuse with
+        # ``approval_anchor_mismatch``. An anchor with no marker must serialise to
+        # the SAME bytes it did before this field existed.
+        if self.admission:
+            body["admission"] = self.admission
+        return body
 
     @classmethod
     def from_json(cls, body: Any) -> OperatorAnchor | None:
@@ -374,6 +410,16 @@ class OperatorAnchor:
             return None, ""
         backend = body.get("backend")
         presence = body.get("presence")
+        # AN ABSENT ``admission`` KEY IS THE NORMAL CASE, not a malformation: every
+        # anchor written before this field existed lacks it, and those hosts must
+        # keep parsing (and keep behaving as they do today). A present but
+        # non-string value is likewise read as "no marker" rather than refused: the
+        # field is a policy NAME, and a runtime that refuses the whole anchor over
+        # one it does not recognise would take operator authority away from a host
+        # whose key is perfectly good. Under-enforcement is reported instead
+        # (``lop operator status`` says admission is not enforced), so an
+        # unrecognised value is visible rather than silently claimed as active.
+        admission = body.get("admission")
         return (
             cls(
                 key_id=key_id,
@@ -385,6 +431,7 @@ class OperatorAnchor:
                     int(body["created_at"]) if isinstance(body.get("created_at"), int) else 0
                 ),
                 devices=tuple(devices),
+                admission=admission if isinstance(admission, str) else "",
             ),
             "",
         )
@@ -1317,6 +1364,73 @@ def revoked_device_ids(anchor: OperatorAnchor) -> list[Any]:
 def open_device_ids(anchor: OperatorAnchor) -> list[Any]:
     """The anchor's listed, NOT revoked device ids, raw (see :func:`revoked_device_ids`)."""
     return [e.get("device_id") for e in anchor.devices if not e.get("revoked")]
+
+
+def admission_enforced(anchor: OperatorAnchor) -> bool:
+    """Whether this host's anchor adopted the ADMISSION rule (see ``OperatorAnchor.admission``).
+
+    ONE reading of the field, so a status line and the runtime cannot disagree
+    about whether listing is being required — a report that says "enforced" beside
+    a runtime that is not looking at the list is worse than the dormant state it
+    claims to have left.
+    """
+    return anchor.admission == ADMISSION_LISTED
+
+
+def device_is_admitted(anchor: OperatorAnchor, device_id: str, spki: bytes) -> bool:
+    """Whether the anchor ADMITS this device — not merely fails to revoke it.
+
+    THE ONE PREDICATE THE THREE CALLERS SHARE (the runtime's certificate point,
+    both arms of it, and the relay's command path). Revocation was the only
+    question a certificate had to answer, so an operator-signed certificate naming
+    a phone this host had never been told about was accepted — which is the whole
+    gap the two-lock pairing design closes: the six-digit code proves WHICH phone
+    is asking, and the computer's own admin gesture is what proves a PERSON
+    admitted it.
+
+    THREE CONDITIONS, each of which a caller cannot add or drop without this
+    function changing:
+
+    * **not revoked** — today's rule, unchanged at every level. A revoked device is
+      refused whether or not the host lists devices.
+    * **the id IS the key's id** (``device_id == key_id_for(spki)``).
+      ``verify_device_cert`` checks the domain, the operator signature and the
+      expiry, and ``read_device_cert`` takes ``device_id`` from the body AS GIVEN,
+      so a statement naming an admitted id while carrying a different key verifies
+      — measured in the S4a spike: signed with the file key, it verified, and the
+      id did not derive from the ``spki`` it carried. A list keyed on the id alone
+      would therefore be satisfied by a forged statement; the binding is what makes
+      the id mean the key that will actually sign the frames. It refuses nothing
+      legitimate: ``devices.new_device_id`` IS this same derivation and it is the
+      only way a certificate's id is ever chosen (``lop pair`` mints through it),
+      so only a hand-forged statement can fail the check.
+    * **the anchor lists it**, unless this host does not need a list. TWO exemptions,
+      both facts written by a root-owned step rather than by anything the gated uid
+      can reach: ``presence`` (a backend that costs a human gesture per signature —
+      the signature IS the confirmation, so asking for a second touch buys no
+      security) and a MISSING marker (the dormant switch, below).
+
+    THE DORMANT SWITCH IS THE MIGRATION, and it is honest only because it is
+    reported: hosts whose anchor carries no ``admission`` marker behave EXACTLY as
+    they do today, including anchors written before this field existed (which
+    serialise to identical bytes, so no pinned ``statement_digest`` moves). A phone
+    paired before the upgrade therefore stays admitted after it with no re-pair.
+    What that costs is stated where the operator reads it — ``lop operator status``
+    says admission is not enforced yet on such a host — rather than being implied to
+    be a boundary this slice does not yet deliver.
+
+    ``presence: true`` with an UNLISTED device is admitted BY DESIGN (see above):
+    the presence backends are the ones whose signature already costs a gesture.
+    """
+    if device_is_revoked(anchor, device_id):
+        return False
+    if not spki or device_id != key_id_for(spki):
+        return False
+    if anchor.presence:
+        return True
+    if not admission_enforced(anchor):
+        return True
+    return device_id in open_device_ids(anchor)
 
 
 def is_presence_backend(backend: str) -> bool:
