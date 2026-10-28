@@ -8203,7 +8203,9 @@ async def test_a_config_run_writes_agents_and_teams_to_the_account(
     )
     try:
         assert session._transcript.directory == run_dir
-        assert {tool.name for tool in session._tools} == {"agent", "team"}
+        # ``skill`` is the run's third declared tool (#3055); it writes through the
+        # skill storage, not the registries this test is about.
+        assert {tool.name for tool in session._tools} == {"agent", "team", "skill"}
         # Every call runs before anything is asserted, so a regression reports
         # all four outcomes at once (on the defect: the updates refused for want
         # of a consent seam, the creates filed "in this conversation").
