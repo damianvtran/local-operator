@@ -75,6 +75,15 @@ CAPTURE_TTL_S = 14 * 86400
 #: The stamp is what stops a below-threshold store being re-probed every tick.
 PASS_INTERVAL_S = 6 * 3600
 
+#: Spacing between two HEAVY attempts (expiry or a plan), written BEFORE the
+#: work starts (QA round 2, Q5). The 6 h stamp is written when a pass ends, so a
+#: pass killed mid-plan — a viewer quitting `lop` within seconds, a headless
+#: errand runtime retiring after its 3 s grace — left no trace and every next
+#: start re-paid the ~200 MB plan without ever converging. One hour matches the
+#: supervisor's tick, so the supervisor (which cannot be cut off this way) still
+#: picks the work up on its next read of the gate.
+ATTEMPT_BACKOFF_S = 3600
+
 #: Compaction thresholds (design B1). Any one fires the plan.
 RECLAIMABLE_OPS_THRESHOLD = 5000
 PAGE_CAP_FRACTION = 0.5
@@ -103,14 +112,14 @@ VACUUM_MIN_FREE_BYTES = 1024 * 1024 * 1024
 CAPTURE_AUTHOR = "deterministic-capture"
 LOCK_NAME = ".compact.lock"
 STAMP_NAME = ".compact.stamp"
+ATTEMPT_NAME = ".compact.attempt"
 
 #: Captured candidates whose deadline has passed. ``expires_at`` when stamped,
 #: else the legacy deadline derived from the row's own time (see module doc).
-#: ``current`` holds only ``heads[0]``; ``forget_many(capture_reason=...)``
-#: re-checks EVERY head inside its transaction and skips a conflicted entity.
 #: ``source.session = owner`` mirrors ``memory.unreviewed_capture``: a capture
-#: moved into another session is deliberate and must not be re-selected (and
-#: then skipped) on every pass.
+#: moved into another session is deliberate. No LIMIT here: ``current`` holds
+#: only ``heads[0]``, so :func:`_expirable` filters (this host's sessions, one
+#: head) BEFORE a row takes a slot in :data:`EXPIRE_LIMIT`.
 _EXPIRED_SQL = (
     "SELECT entity_id, owner, op_id FROM current "
     "WHERE scope='session' "
@@ -119,7 +128,7 @@ _EXPIRED_SQL = (
     "AND json_extract(fact,'$.status')='candidate' "
     "AND coalesce(json_extract(fact,'$.expires_at'), "
     "coalesce(json_extract(fact,'$.source_time'), json_extract(fact,'$.created_at')) + ?) <= ? "
-    "ORDER BY owner, entity_id LIMIT ?"
+    "ORDER BY owner, entity_id"
 )
 
 _background: threading.Thread | None = None
@@ -200,6 +209,21 @@ def forget_session_captures(config_dir: Path, session_id: str) -> int:
     )
 
 
+def _note_attempt(root: Path, now: float) -> None:
+    """Record that heavy work is starting, before it starts (see ATTEMPT_BACKOFF_S)."""
+    try:
+        (root / ATTEMPT_NAME).write_text(f"{now}\n", encoding="utf-8")
+    except OSError:
+        logger.debug("memory maintenance attempt stamp not written", exc_info=True)
+
+
+def _last_attempt(root: Path) -> float:
+    try:
+        return float((root / ATTEMPT_NAME).read_text().strip() or 0)
+    except (OSError, ValueError):
+        return 0.0
+
+
 def _last_pass(db: sqlite3.Connection, root: Path) -> float:
     try:
         row = db.execute("SELECT max(at) FROM journal_prune").fetchone()
@@ -274,15 +298,46 @@ def _vacuum_allowed(store: Any) -> tuple[bool, int]:
     return free >= max(VACUUM_MIN_FREE_BYTES, 2 * size), free
 
 
+def _expirable(store: Any, db: sqlite3.Connection, now: float) -> list[tuple[str, str, str]]:
+    """Expired captures THIS host may tombstone, at most :data:`EXPIRE_LIMIT`.
+
+    ONLY SESSIONS WHOSE DIRECTORY IS ON THIS HOST (review round 2, M3-r2).
+    ``expires_at`` replicates with the fact, so without this every peer that
+    syncs session scope would expire the same capture on the same deadline,
+    racing the capturing host. The host holding the session directory is the
+    one that captures, resumes and deletes it, so it alone decides; peers
+    receive its tombstone. A session moved here brings its directory, and with
+    it the decision.
+
+    ONE HEAD ONLY, checked here before the row takes a slot (QA round 2, Q6):
+    a conflicted capture is never forgotten (``forget_many`` re-checks inside
+    its transaction), so selecting it would only cost every pass one slot of the
+    cap for as long as the conflict stands.
+    """
+    local: dict[str, bool] = {}
+    out: list[tuple[str, str, str]] = []
+    for entity, owner, op_id in db.execute(_EXPIRED_SQL, (CAPTURE_AUTHOR, CAPTURE_TTL_S, now)):
+        if owner not in local:
+            local[owner] = store._session_directory(owner, db) is not None
+        if not local[owner]:
+            continue
+        ops = store._ops(db, entity)
+        if any(op["kind"] == "tombstone" for op in ops) or len(store._heads(ops)) != 1:
+            continue
+        out.append((entity, owner, op_id))
+        if len(out) >= EXPIRE_LIMIT:
+            break
+    return out
+
+
 def _run(config_dir: Path, now: float, deadline: float, report: dict[str, Any]) -> None:
     from local_operator.memory import MemoryIdentity, MemoryStore
 
     store = MemoryStore(config_dir, MemoryIdentity())
     with store._reader() as db:
-        expired = [
-            tuple(row)
-            for row in db.execute(_EXPIRED_SQL, (CAPTURE_AUTHOR, CAPTURE_TTL_S, now, EXPIRE_LIMIT))
-        ]
+        expired = _expirable(store, db, now)
+    if expired:
+        _note_attempt(store.root, now)
     started = time.monotonic()
     budget = min(deadline, started + EXPIRE_BUDGET_S)
     report["expired"] = _forget(config_dir, expired, budget, "expired") if expired else 0
@@ -295,6 +350,7 @@ def _run(config_dir: Path, now: float, deadline: float, report: dict[str, Any]) 
         # threshold an hour from now is not made to wait out a 6 h interval.
         report["status"] = "idle"
         return
+    _note_attempt(store.root, now)
     plan = store.journal_plan()
     if not (plan["ops"]["dropped"] or plan["storage"]["freelist_pages"]):
         return
@@ -315,7 +371,8 @@ def run_pass(
 
     The report's ``status`` is one of ``disabled``, ``absent``, ``unsupported``
     (no ``fcntl``), ``busy`` (another process holds the pass), ``not-due``
-    (inside the 6 h interval), ``idle`` (due, below every threshold, nothing
+    (inside the 6 h interval), ``backoff`` (a heavy attempt began within
+    :data:`ATTEMPT_BACKOFF_S` and was cut off), ``idle`` (due, below every threshold, nothing
     expired), ``ran``, ``timeout`` or ``failed``.
     """
     from local_operator.memory_capture import policy
@@ -354,6 +411,14 @@ def run_pass(
             if clock - last < PASS_INTERVAL_S:
                 report["status"] = "not-due"
                 report["last_pass"] = last
+                return
+            attempted = _last_attempt(root)
+            if clock - attempted < ATTEMPT_BACKOFF_S:
+                # A heavy attempt started recently and never finished (it would
+                # have written the 6 h stamp): its host was cut off. Back off
+                # rather than re-pay the plan on every start.
+                report["status"] = "backoff"
+                report["last_attempt"] = attempted
                 return
             try:
                 _run(config_dir, clock, started + timeout, report)

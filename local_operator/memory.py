@@ -45,13 +45,6 @@ SESSION_EXPORT_NAME = "memory-session.jsonl"
 #: captured it; any deliberate act on it (an edit through ``put``, a move) makes
 #: it a deliberate fact, and deliberate facts never auto-expire (decision D2).
 CAPTURE_AUTHOR = "deterministic-capture"
-#: ``meta`` key prefix recording that a capture entity was tombstoned BY EXPIRY,
-#: valued with the tombstone's op id. Capture reads it to re-admit the same text
-#: under a fresh, chained entity (a resumed session must be able to re-learn what
-#: merely went stale), while an entity forgotten any other way — by a person or
-#: an agent — carries no mark and stays forgotten. Local by design: tombstones
-#: have no reason field on the wire, and capture runs on the host of the session.
-CAPTURE_EXPIRED_KEY = "capture-expired:"
 SCOPES = ("global", "session", "team", "agent")
 DEFAULT_EXCLUDED_DEVICES: tuple[str, ...] = ()
 # One protocol definition shared by publication, execution and pre-journal retention.
@@ -778,6 +771,36 @@ def unreviewed_capture(fact: dict[str, Any] | None, owner: str) -> bool:
         fact.get("status") == "candidate"
         and source.get("author") == CAPTURE_AUTHOR
         and source.get("session") == owner
+    )
+
+
+def expiry_tombstone_id(entity: str, parent: str, origin: str) -> str:
+    """The op id an EXPIRY tombstone carries: derived, so any host can recognise it.
+
+    WHY THE ID AND NOT A FIELD OR A LOCAL MARK. Capture must tell "this text went
+    stale" (re-learnable when the session resumes) from "a person or an agent
+    forgot this" (final), and the tombstone reaches other hosts by sync. The op
+    schema is closed (``validate_op`` refuses unknown keys, so a ``reason`` field
+    would be refused by every peer still on the old schema), the tombstone redacts
+    its parents' bodies so the forgotten fact cannot be inspected, and a local
+    ``meta`` mark does not replicate (review round 2, M3-r2: a peer's expiry
+    arrived unmarked and locked the text out for good). The op id is free-form
+    (one safe segment, as capture's own sha256 op ids already are), so a hash of
+    ``(entity, parent, origin)`` is wire-compatible and self-proving. A deliberate
+    forget mints a UUID (:func:`_id`) and can never match. The origin is part of
+    the hash so two hosts that both expire one revision cannot mint the same id
+    with different content, which ``apply_ops`` would refuse as identity reuse.
+    """
+    return hashlib.sha256(f"capture-expired|{entity}|{parent}|{origin}".encode()).hexdigest()
+
+
+def is_expiry_tombstone(op: dict[str, Any]) -> bool:
+    """Whether ``op`` is a tombstone the capture-expiry path wrote (any host)."""
+    return (
+        op.get("kind") == "tombstone"
+        and len(op.get("parents") or []) == 1
+        and op.get("op_id")
+        == expiry_tombstone_id(op["entity_id"], op["parents"][0], op["origin_device"])
     )
 
 
@@ -1928,8 +1951,9 @@ class MemoryStore:
         any entity that is not, inside this transaction, ONE head that is an
         :func:`unreviewed_capture`: a tombstone ends the whole entity, so a concurrent deliberate
         revision (a peer's correction beside a local capture refresh) must never be closed by an
-        automatic pass — the same all-heads rule compaction keeps. ``expired`` also marks the entity
-        (:data:`CAPTURE_EXPIRED_KEY`) so capture may re-learn the text later.
+        automatic pass — the same all-heads rule compaction keeps. ``expired`` mints the tombstone's
+        id with :func:`expiry_tombstone_id`, which is how capture on ANY host recognises the text
+        as re-learnable later.
         """
         if capture_reason not in (None, "expired", "session-deleted"):
             raise MemoryError("Unknown capture forget reason.")
@@ -1995,7 +2019,11 @@ class MemoryStore:
                     clock = max(clock + 1, int(time.time() * 1000))
                     op = {
                         "v": 1,
-                        "op_id": _id(),
+                        "op_id": (
+                            expiry_tombstone_id(entity, expected[entity], origin)
+                            if capture_reason == "expired"
+                            else _id()
+                        ),
                         "entity_id": entity,
                         "origin_device": origin,
                         "seq": seq,
@@ -2013,11 +2041,6 @@ class MemoryStore:
                         (op["op_id"], entity, origin, seq, scope, owner, op["kind"], _dump(op)),
                     )
                     db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
-                    if capture_reason == "expired":
-                        db.execute(
-                            "INSERT OR REPLACE INTO meta VALUES (?,?)",
-                            (CAPTURE_EXPIRED_KEY + entity, op["op_id"]),
-                        )
                     row = db.execute(
                         "SELECT tokens FROM current WHERE entity_id=?", (entity,)
                     ).fetchone()

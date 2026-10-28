@@ -25,13 +25,13 @@ from typing import Any, Callable, Iterable, Iterator, NamedTuple
 
 from local_operator.memory import (
     CAPTURE_AUTHOR,
-    CAPTURE_EXPIRED_KEY,
     MAX_REVISIONS,
     MAX_TOMBSTONES,
     MemoryError,
     MemoryStore,
     _dump,
     guard,
+    is_expiry_tombstone,
     validate_fact,
     validate_op,
 )
@@ -1582,22 +1582,23 @@ def persist(
             # compactions filling the ACTIVE bank; each committed marker still has
             # a distinct idempotent causal op.
             ops = store._ops(db, entity)
-            # A capture entity that EXPIRED (and only that: the expiry pass marks
-            # it, see ``CAPTURE_EXPIRED_KEY``) is re-admitted under a chained,
-            # still-deterministic entity ``sha256(entity|expiry tombstone)``, so a
-            # session resumed after its captures went stale can re-learn the same
-            # text, and two passes over it still land on one entity. A tombstone
-            # with no mark — a person or an agent forgot it — keeps the text out.
+            # A capture entity that EXPIRED — every tombstone on it is an expiry
+            # tombstone (``is_expiry_tombstone``), recognisable from synced data
+            # whichever host wrote it — is re-admitted under a chained, still
+            # deterministic entity ``sha256(entity|expiry tombstone)``, so a
+            # session resumed after its captures went stale re-learns the same
+            # text, and two passes over it land on one entity. Any other
+            # tombstone (a person or an agent forgot it) keeps the text out. The
+            # lowest op id picks the link when two hosts both expired it.
             # Bounded: each link needs a 14-day expiry of the previous one. State
             # chains need none of this: ``_state_entity`` already rolls a
             # forgotten generation to a fresh one.
-            while entity not in chains and any(op["kind"] == "tombstone" for op in ops):
-                expired = db.execute(
-                    "SELECT value FROM meta WHERE key=?", (CAPTURE_EXPIRED_KEY + entity,)
-                ).fetchone()
-                if expired is None:
+            while entity not in chains:
+                tombstones = [op for op in ops if op["kind"] == "tombstone"]
+                if not tombstones or not all(is_expiry_tombstone(op) for op in tombstones):
                     break
-                entity = hashlib.sha256((entity + "|" + str(expired[0])).encode()).hexdigest()
+                link = min(op["op_id"] for op in tombstones)
+                entity = hashlib.sha256((entity + "|" + link).encode()).hexdigest()
                 ops = store._ops(db, entity)
             operation_id = hashlib.sha256((entity + "|" + marker_id).encode()).hexdigest()
             if any(op["kind"] == "tombstone" for op in ops):

@@ -601,3 +601,130 @@ def test_lop_memory_status_does_not_start_a_maintenance_pass(
     configure_parser(parser)
     execute(parser.parse_args(["status"]), config=tmp_path)
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Review round 2: M3-r2 (a peer's expiry) and Q5 (attempt backoff)
+# ---------------------------------------------------------------------------
+
+
+def _sync(source: MemoryStore, target: MemoryStore, exclude: str) -> None:
+    """Apply every op ``source`` holds from origins other than ``exclude`` (the
+    target's own) to ``target``, in seq order. The pass mints the store's origin
+    itself, so the source's origin is read from its rows, not assumed."""
+    db = sqlite3.connect(source.path)
+    try:
+        rows = db.execute(
+            "SELECT origin, data FROM ops WHERE origin!=? ORDER BY origin, seq", (exclude,)
+        ).fetchall()
+    finally:
+        db.close()
+    ops = [json.loads(data) for _, data in rows]
+    target.apply_ops(ops, origins={origin for origin, _ in rows})
+
+
+def _two_hosts(tmp_path: Path, *, b_has_session_dir: bool) -> tuple[MemoryStore, MemoryStore]:
+    session = "a" * 12
+    host_a = _store(tmp_path / "a", session)
+    host_b = MemoryStore(
+        tmp_path / "b",
+        MemoryIdentity(session),
+        tmp_path / "b" / "sessions" / session,
+        origin="device-b",
+    )
+    old = time.time() - 15 * DAY
+    _capture(host_a, "m1", "Standing goal of the long lane", old)
+    if b_has_session_dir:
+        (tmp_path / "b" / "sessions" / session).mkdir(parents=True)
+    _sync(host_a, host_b, exclude="none")
+    assert "Standing goal of the long lane" in _facts(tmp_path / "b")
+    return host_a, host_b
+
+
+def test_a_peers_expiry_syncs_back_and_the_capturing_host_can_recapture(tmp_path: Path) -> None:
+    """M3-r2: B (which also holds the session) expires; A applies B's tombstone and
+    must still be able to re-learn the text when the session resumes."""
+    host_a, host_b = _two_hosts(tmp_path, b_has_session_dir=True)
+    assert mm.run_pass(tmp_path / "b")["expired"] == 1
+    _sync(host_b, host_a, exclude="device-a")
+    assert _facts(tmp_path / "a") == {}
+
+    now = time.time()
+    _capture(host_a, "m2", "Standing goal of the long lane", now)
+    assert set(_facts(tmp_path / "a")) == {"Standing goal of the long lane"}
+    assert _store(tmp_path / "a").search("Standing goal long lane")
+    # No local mark exists any more: the recognition comes from the synced op.
+    db = sqlite3.connect(host_a.path)
+    try:
+        assert (
+            db.execute("SELECT count(*) FROM meta WHERE key LIKE 'capture-expired:%'").fetchone()[0]
+            == 0
+        )
+    finally:
+        db.close()
+
+
+def test_a_peer_never_expires_a_session_whose_directory_it_does_not_hold(tmp_path: Path) -> None:
+    """M3-r2: only the host holding the session directory decides its expiry."""
+    _two_hosts(tmp_path, b_has_session_dir=False)
+    report = mm.run_pass(tmp_path / "b")
+    assert report["expired"] == 0
+    assert "Standing goal of the long lane" in _facts(tmp_path / "b")
+    # ...while the owning host does expire it.
+    assert mm.run_pass(tmp_path / "a")["expired"] == 1
+
+
+def test_a_synced_deliberate_forget_still_keeps_the_text_out(tmp_path: Path) -> None:
+    """M3-r2 control: a peer's EXPLICIT forget arriving by sync stays final."""
+    host_a, host_b = _two_hosts(tmp_path, b_has_session_dir=True)
+    db = sqlite3.connect(host_b.path)
+    entity, version = db.execute("SELECT entity_id, op_id FROM current").fetchone()
+    db.close()
+    host_b.put("session", {}, entity=entity, expected_version=version, forget=True)
+    _sync(host_b, host_a, exclude="device-a")
+    _capture(host_a, "m2", "Standing goal of the long lane", time.time())
+    assert _facts(tmp_path / "a") == {}
+
+
+def test_a_cut_off_heavy_attempt_backs_off_instead_of_restarting(
+    tmp_path: Path, low_threshold: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q5: the attempt is stamped BEFORE the plan, so a host killed mid-plan does
+    not re-pay it on every start; after the backoff the work resumes."""
+    store = _store(tmp_path)
+    _churn(store)
+
+    def killed(*_a: Any, **_k: Any) -> Any:
+        raise KeyboardInterrupt  # stands in for the interpreter exiting mid-plan
+
+    monkeypatch.setattr(MemoryStore, "journal_plan", killed)
+    with pytest.raises(KeyboardInterrupt):
+        mm._run(tmp_path, time.time(), time.monotonic() + 60, {"status": "ran"})
+    monkeypatch.undo()
+    monkeypatch.setattr(mm, "RECLAIMABLE_OPS_THRESHOLD", 3)
+    assert mm.run_pass(tmp_path)["status"] == "backoff"
+    assert _prunes(tmp_path) == []
+    later = time.time() + mm.ATTEMPT_BACKOFF_S + 1
+    assert mm.run_pass(tmp_path, now=later)["status"] == "ran"
+    assert [reason for _, reason in _prunes(tmp_path)] == ["auto"]
+
+
+def test_a_conflicted_capture_does_not_take_a_slot_in_the_expiry_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q6: with a cap of 1, the conflicted entity is skipped at selection and the
+    clean capture behind it is expired in the same pass."""
+    monkeypatch.setattr(mm, "EXPIRE_LIMIT", 1)
+    store = _store(tmp_path)
+    old = time.time() - 20 * DAY
+    _capture(store, "m1", "AAA conflicted capture text", old)
+    _capture(store, "m1b", "ZZZ clean capture text", old)
+    db = sqlite3.connect(store.path)
+    rows = {json.loads(f)["body"]: e for e, f in db.execute("SELECT entity_id, fact FROM current")}
+    db.close()
+    with store.connection() as db:
+        first = store._ops(db, rows["AAA conflicted capture text"])[0]
+    _capture(store, "m2", "AAA conflicted capture text", old + 1)
+    _peer_correction(store, rows["AAA conflicted capture text"], first)
+    assert mm.run_pass(tmp_path)["expired"] == 1
+    assert "ZZZ clean capture text" not in _facts(tmp_path)
