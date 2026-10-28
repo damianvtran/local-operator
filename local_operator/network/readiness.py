@@ -43,6 +43,7 @@ import socket
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, NamedTuple, Protocol, Sequence
 
 from local_operator.network import wire
@@ -76,6 +77,13 @@ CAPABILITY_TOOLING = "tooling"
 #: offloaded sessions without the kernel OOM killer reaching its mesh relay
 #: (2026-10-21: a 2 GB, swapless cloud-node-1 OOM-killed its own relay).
 CAPABILITY_RESILIENCE = "resilience"
+#: (i) the serve daemon: is the ``lop serve`` process that hosts remote sessions
+#: on the build the install names, and does a service unit supervise it? Added
+#: 2026-10-28: on lop-remote-node-2 a ``lop serve`` daemon served 0.90.1 while
+#: the install was 0.90.18, from inside an SSH login's ``session-*.scope``, and
+#: this report named only the RELAY's build — the relay is not the process that
+#: runs the sessions. ``lop services status`` knew; ``ready`` did not.
+CAPABILITY_SERVE_DAEMON = "serve_daemon"
 
 #: The class a readiness row carries (F8 ruling, 2026-10-04). "The device is
 #: onboarded" and "the equipment on it is set up" are DIFFERENT questions:
@@ -112,6 +120,10 @@ NON_GATING_EQUIPMENT: frozenset[str] = frozenset(
         # remedy, and the admission gate (``memory_guard.admission_check``) is
         # its point of use.
         CAPABILITY_RESILIENCE,
+        # A stale or unsupervised serve daemon is a device that IS onboarded and
+        # will run work — on the wrong build, or until the next reboot. Warn with
+        # the remedy; the update/restart path is its point of use.
+        CAPABILITY_SERVE_DAEMON,
     }
 )
 
@@ -129,6 +141,7 @@ PEER_SIDE_CHECKS: tuple[str, ...] = (
     CAPABILITY_MODEL_CREDENTIAL,
     CAPABILITY_TOOLING,
     CAPABILITY_RESILIENCE,
+    CAPABILITY_SERVE_DAEMON,
 )
 
 #: Failure codes. OK rows carry no code; a code is a machine token for a
@@ -156,6 +169,10 @@ CODE_NOT_ON_PATH = "not_on_path"
 CODE_NOT_AUTHENTICATED = "not_authenticated"
 #: Resilience (2026-10-21): under :data:`RESILIENCE_MIN_RAM_MB` of RAM and no swap.
 CODE_LOW_MEMORY = "low_memory"
+#: Serve daemon (2026-10-28): its build differs from the install's, or nothing
+#: but a login session holds it (Linux: a ``session-*.scope``, not a unit).
+CODE_SERVE_STALE = "serve_stale"
+CODE_UNSUPERVISED = "unsupervised"
 
 #: Rows read from the peer's own state carry ``source: "peer"``; rows about a
 #: fact that could not be established carry ``"unknown"``. ``"local"`` is kept
@@ -1297,6 +1314,9 @@ def collect_peer_facts(
         "tooling": tooling_fact(home),
         "operator": operator_fact(),
         "memory": memory_fact(),
+        # ADDITIVE ON THE WIRE: a viewer built before this key ignores it, and a
+        # viewer reading a peer built before it renders ``unknown`` — never ok.
+        "serve_daemons": serve_daemons_fact(root),
     }
 
 
@@ -1385,6 +1405,318 @@ def resilience_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) ->
         source=SOURCE_PEER,
         observed={"total_mb": total, "swap_total_mb": swap},
     )
+
+
+# ---------------------------------------------------------------------------
+# (i) The serve daemon: current, and supervised?
+# ---------------------------------------------------------------------------
+#
+# WHY THIS ROW EXISTS (2026-10-28, lop-remote-node-2): the process that HOSTS
+# offloaded sessions on a node is its ``lop serve`` daemon, not its relay. The
+# build row reads the relay's handshake stamp, so a node whose relay was on
+# 0.90.18 read "same build" while its serve daemon — started by hand from an SSH
+# shell weeks earlier — still served 0.90.1. ``lop services status`` named it
+# STALE; ``ready`` and ``peers`` did not. The same daemon lived in the SSH
+# login's ``session-2122.scope``: no unit held it, so nothing would restart it.
+#
+# THE FACT IS THE RECORD, read through the same two helpers ``lop services``
+# uses (``serve_registry.scan`` for the records, ``services._current_stamp`` for
+# the install, ``services._serves_current_build`` for the comparison), so the
+# two surfaces cannot disagree about which daemon is stale.
+
+
+def _cgroup_of(pid: int) -> str | None:
+    """``pid``'s unified (v2) or systemd-named (v1) cgroup path, or ``None``.
+
+    Linux only, read-only, never raises: a missing ``/proc`` entry or another
+    platform is "not known", which the row renders as such — never as
+    supervised.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        text = Path(f"/proc/{int(pid)}/cgroup").read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+    fallback: str | None = None
+    for line in text.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        if parts[0] == "0" and parts[1] == "":
+            return _bounded(parts[2], 300)
+        if parts[1] == "name=systemd":
+            fallback = _bounded(parts[2], 300)
+    return fallback
+
+
+#: A login session's scope, as logind names it: ``session-<id>.scope``.
+_LOGIN_SCOPE_RE = re.compile(r"^session-[A-Za-z0-9_.-]+\.scope$")
+
+
+def serve_supervision(cgroup: str | None) -> tuple[str, str]:
+    """What holds a process, read from its cgroup path: ``(kind, segment)``.
+
+    ``kind`` is ``unit`` (a ``*.service`` — something restarts it),
+    ``login_session`` (a logind ``session-*.scope`` — an SSH or console login,
+    which nothing restarts) or ``unknown``. The INNERMOST ``.service``/``.scope``
+    segment decides, because a user service sits under ``user@<uid>.service``
+    and a session scope under ``user-<uid>.slice``: the outer segments name the
+    manager, not the holder.
+    """
+    if not cgroup:
+        return ("unknown", "")
+    for segment in reversed([part for part in cgroup.split("/") if part]):
+        if segment.endswith(".service"):
+            return ("unit", segment)
+        if segment.endswith(".scope"):
+            return ("login_session" if _LOGIN_SCOPE_RE.match(segment) else "unknown", segment)
+    return ("unknown", "")
+
+
+def serve_daemons_fact(root: Path) -> dict[str, Any]:
+    """Every live ``lop serve`` daemon recorded under ``root``, plus the install.
+
+    READER MODE (``reap=False``): the readiness path must not be the reason a
+    record moves, the module's ``test_reads_create_nothing`` discipline. A
+    ``stale`` record (its pid is gone) hosts nothing and is left out; ``live``
+    and ``wedged`` are both processes that exist and both carry their state.
+    Names and versions only — the record's ``claim_key``/``access_token`` are
+    never copied.
+    """
+    from local_operator import services
+    from local_operator.server import registry as serve_registry
+
+    daemons: list[dict[str, Any]] = []
+    try:
+        scanned = serve_registry.scan(root, reap=False)
+    except Exception:  # noqa: BLE001 — an unreadable namespace is "no daemons known"
+        scanned = []
+    for record, state in scanned:
+        if state == "stale":
+            continue
+        daemons.append(
+            {
+                "pid": int(record.pid),
+                "state": state,
+                "version": _bounded(record.version or "", 40),
+                "source_ref": _bounded(record.source_ref or "", 80),
+                "install_kind": _bounded(record.install_kind or "", 20),
+                "prefix": _safe_text(record.prefix or "", limit=300),
+                "reloadable": bool(getattr(record, "reloadable", False)),
+                "cgroup": _cgroup_of(record.pid),
+            }
+        )
+    daemons.sort(key=lambda daemon: daemon["pid"])
+    # The install is read only when there is a daemon to compare against it: a
+    # device that never ran `lop serve` pays nothing for this check.
+    install = services._current_stamp() if daemons else None  # noqa: SLF001
+    return {
+        "platform": sys.platform,
+        "install": (
+            None
+            if install is None
+            else {
+                "version": _bounded(install.version or "", 40),
+                "source_ref": _bounded(install.source_ref or "", 80),
+            }
+        ),
+        "daemons": daemons,
+    }
+
+
+def serve_daemon_row(
+    member: Any,
+    facts: Mapping[str, Any],
+    *,
+    peer_label: str,
+    source: str = SOURCE_PEER,
+) -> dict[str, Any]:
+    """(i) Is the ``lop serve`` daemon on ``peer_label`` current and supervised?
+
+    Three verdicts, all non-gating (``NON_GATING_EQUIPMENT``): STALE (its build
+    differs from the install's; ``lop services restart`` reloads it in place,
+    which is what fixed lop-remote-node-2), UNSUPERVISED (Linux: only a login
+    session's scope holds it), and ok. A peer whose answer predates this check,
+    or an install that cannot be read, is ``unknown`` — never a false ok.
+    """
+    from local_operator import services
+
+    fact = facts.get("serve_daemons")
+    if not isinstance(fact, Mapping):
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_SERVE_DAEMON,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                "the peer's answer did not carry its serve daemons (it predates this "
+                "check), so whether they are current is not known"
+            ),
+            source=SOURCE_UNKNOWN,
+        )
+    daemons = [entry for entry in fact.get("daemons") or () if isinstance(entry, Mapping)]
+    if not daemons:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_SERVE_DAEMON,
+            ok=True,
+            detail=f"no `lop serve` daemon is running on {peer_label}",
+            source=source,
+        )
+    install = fact.get("install")
+    stamp = (
+        SimpleNamespace(
+            version=str(install.get("version") or ""),
+            source_ref=str(install.get("source_ref") or ""),
+        )
+        if isinstance(install, Mapping) and install.get("version")
+        else None
+    )
+    linux = str(fact.get("platform") or "").startswith("linux")
+    stale: list[str] = []
+    unsupervised: list[str] = []
+    unknown: list[str] = []
+    fine: list[str] = []
+    movable = True
+    observed: list[dict[str, Any]] = []
+    for entry in daemons:
+        record = SimpleNamespace(
+            version=str(entry.get("version") or ""),
+            source_ref=str(entry.get("source_ref") or ""),
+        )
+        pid = entry.get("pid")
+        label = services._record_label(record)  # noqa: SLF001 — services' own spelling
+        who = f"the `lop serve` daemon on {peer_label} (pid {pid})"
+        kind, holder = serve_supervision(entry.get("cgroup")) if linux else ("n/a", "")
+        is_current = stamp is not None and services._serves_current_build(  # noqa: SLF001
+            record, stamp
+        )
+        observed.append(
+            {
+                "pid": pid,
+                "serving": label,
+                "install": "" if stamp is None else services._record_label(stamp),  # noqa: SLF001
+                "supervision": kind,
+                "holder": holder,
+            }
+        )
+        if stamp is None:
+            unknown.append(
+                f"{who} runs {label}, and the install's build could not be read, so "
+                "whether it is current is not known"
+            )
+        elif not is_current:
+            movable = movable and bool(entry.get("reloadable"))
+            stale.append(
+                f"{who} runs {label} but the install is "
+                f"{services._record_label(stamp)}: "  # noqa: SLF001
+                "the remote sessions it hosts run that other build"
+            )
+        if kind == "login_session":
+            unsupervised.append(f"pid {pid} in {holder}")
+        elif kind == "unknown" and linux:
+            unknown.append(
+                f"{who} runs in {entry.get('cgroup') or 'an unreadable cgroup'}, which this "
+                "check cannot place as a service unit or a login session"
+            )
+        if stamp is not None and is_current and kind in ("unit", "n/a"):
+            fine.append(
+                f"{who} runs the installed build ({label})"
+                + (f" under {holder}" if kind == "unit" else "")
+            )
+    held: list[str] = []
+    if unsupervised:
+        # ONE SENTENCE FOR EVERY DAEMON A LOGIN HOLDS: the consequence is the same
+        # for each, and the first render repeated it per pid (the rig's two
+        # daemons in one scope read as one sentence twice).
+        one = len(unsupervised) == 1
+        subject = (
+            f"the `lop serve` daemon on {peer_label} ({unsupervised[0]}) is"
+            if one
+            else f"the `lop serve` daemons on {peer_label} ({', '.join(unsupervised)}) are"
+        )
+        it, they, hosts = ("it", "it", "hosts") if one else ("them", "they", "host")
+        held.append(
+            # "A LOGOUT CAN", not "a logout does": measured on lop-remote-node-2,
+            # logind's default KillUserProcesses=no left the stale daemon alive in
+            # a session already `closing`. A reboot always ends it.
+            f"{subject} held only by a login session, not a service unit: nothing "
+            f"restarts {it}, so a reboot ends {it} and every remote session {they} {hosts}, "
+            "and a logout can too"
+        )
+    if not (stale or held or unknown):
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_SERVE_DAEMON,
+            ok=True,
+            detail="; ".join(fine),
+            source=source,
+            observed={"daemons": observed},
+        )
+    remedies: list[str] = []
+    if stale:
+        remedies.append(
+            f"on {peer_label}, run `lop services restart`: it reloads the daemon in place "
+            "onto the installed build"
+            if movable
+            else f"on {peer_label}, restart `lop serve` by hand: this daemon cannot reload "
+            "itself in place"
+        )
+    if unsupervised:
+        # NAMED, NOT PRESCRIBED: no `lop serve` service unit ships yet, and a
+        # hand-written unit would be a second supervisor the update path does not
+        # know about. The follow-up is the unit; until it lands the honest remedy
+        # is the check an operator can actually run.
+        remedies.append(
+            "a `lop serve` service unit is a planned follow-up and does not exist yet; "
+            f"until it ships, re-check {peer_label} after any reboot or logout and start "
+            "`lop serve` again if it is gone"
+        )
+    # The code names the first fix a reader can act on now: the in-place reload
+    # runs today, the supervision gap waits on the follow-up, and "not known"
+    # comes last.
+    code = CODE_SERVE_STALE if stale else CODE_UNSUPERVISED if unsupervised else CODE_UNKNOWN
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_SERVE_DAEMON,
+        ok=False,
+        code=code,
+        detail="; ".join(stale + held + unknown),
+        remedies=remedies,
+        source=source,
+        observed={"daemons": observed},
+    )
+
+
+#: How THIS device is named in its own serve-daemon row.
+THIS_DEVICE_LABEL = "this device"
+
+
+def local_serve_daemon_rows(root: Path, *, device_id: str = "") -> list[dict[str, Any]]:
+    """This device's own serve-daemon row, or nothing when no daemon is recorded.
+
+    The local half of the check (the brief's "local doctor/readiness surface"):
+    ``ready`` run ON a node is exactly where its operator looks, and the peer
+    rows only ever describe OTHER members. Empty when nothing is recorded so a
+    device that never ran ``lop serve`` keeps its report byte-for-byte.
+    """
+    fact = serve_daemons_fact(root)
+    if not fact.get("daemons"):
+        return []
+    member = SimpleNamespace(device_id=device_id, name=THIS_DEVICE_LABEL)
+    return [
+        serve_daemon_row(
+            member,
+            {"serve_daemons": fact},
+            peer_label=THIS_DEVICE_LABEL,
+            source=SOURCE_LOCAL,
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1873,7 +2205,14 @@ def git_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[s
                 "separate question this report does not cover yet; GitHub push "
                 "through the mesh is brokered when that device has a GitHub "
                 "credential configured — its gh CLI login, a GITHUB_TOKEN-class "
-                "token, or the stronger GitHub App; the network guide has the ladder)"
+                "token, or the stronger GitHub App; the network guide has the ladder). "
+                # BY DESIGN, SAID WHERE IT IS ASKED (2026-10-28): an operator who
+                # SSHed into a node and found `git push` unauthenticated read it as
+                # a broken credential. The brokered credential is handed to the
+                # sessions the product launches, never to an interactive shell, so
+                # the shell's refusal is the design, not a fault.
+                f"An SSH shell on {peer_label} has no GitHub access by design: only "
+                "sessions Local Operator launches there get the brokered credential"
             ),
             source=SOURCE_PEER,
         )
@@ -3981,6 +4320,7 @@ def _peer_checks(
         selected_row.update(row)
     rows.append(tooling_row(member, facts, peer_label=peer_label))
     rows.append(resilience_row(member, facts, peer_label=peer_label))
+    rows.append(serve_daemon_row(member, facts, peer_label=peer_label))
     rows.extend(mcp_credential_rows(member, facts, viewer=viewer, peer_label=peer_label))
     return rows
 
@@ -4063,6 +4403,16 @@ def compose(
                 )
     finally:
         viewer.close()
+    if not device_id:
+        # THIS DEVICE'S OWN SERVE DAEMON, beside its peers' (2026-10-28): `ready`
+        # run ON a node is where that node's operator looks. Left out of a
+        # `--peer` report, which asked about another device.
+        checks.extend(
+            local_serve_daemon_rows(
+                server.root,
+                device_id=server.identity.device_id if server.identity else "",
+            )
+        )
     return {
         "checks": checks,
         "identity_present": not identity_missing,

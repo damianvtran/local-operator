@@ -364,6 +364,7 @@ def test_repository_row_is_inserted_after_git_identity_only() -> None:
         readiness.CAPABILITY_MODEL_CREDENTIAL,
         readiness.CAPABILITY_TOOLING,
         readiness.CAPABILITY_RESILIENCE,
+        readiness.CAPABILITY_SERVE_DAEMON,
     )
 
 
@@ -3042,3 +3043,236 @@ def test_compose_names_the_running_build_where_one_can_be_read(
 
 def test_wire_capability_is_the_constant(monkeypatch: pytest.MonkeyPatch) -> None:
     assert wire.PEER_READINESS_V1 in wire.LINK_CAPABILITIES
+
+
+# ---------------------------------------------------------------------------
+# (i) The serve daemon: is the process hosting remote sessions current and
+# supervised? (2026-10-28, lop-remote-node-2: `lop serve` served 0.90.1 while
+# the install was 0.90.18, inside an SSH login's session scope, and `ready`
+# reported only the relay's build.)
+# ---------------------------------------------------------------------------
+
+_LOGIN_SCOPE = "/user.slice/user-1000.slice/session-2122.scope"
+_SERVE_UNIT = "/user.slice/user-1000.slice/user@1000.service/app.slice/lop-serve.service"
+
+
+def _serve_fact(
+    *,
+    version: str = "0.90.18",
+    source_ref: str = "",
+    cgroup: str | None = _SERVE_UNIT,
+    platform: str = "linux",
+    install: dict[str, str] | None = None,
+    reloadable: bool = True,
+) -> dict[str, Any]:
+    return {
+        "platform": platform,
+        "install": install if install is not None else {"version": "0.90.18", "source_ref": ""},
+        "daemons": [
+            {
+                "pid": 537864,
+                "state": "live",
+                "version": version,
+                "source_ref": source_ref,
+                "install_kind": "uv-tool",
+                "prefix": "/home/x/.local/share/lop/generations/g/tools/local-operator",
+                "reloadable": reloadable,
+                "cgroup": cgroup,
+            }
+        ],
+    }
+
+
+def test_serve_daemon_row_flags_a_stale_daemon_with_the_in_place_reload() -> None:
+    row = readiness.serve_daemon_row(
+        _member(), _facts(serve_daemons=_serve_fact(version="0.90.1")), peer_label="node-2"
+    )
+    assert row["ok"] is False
+    assert row["capability"] == readiness.CAPABILITY_SERVE_DAEMON
+    assert row["code"] == readiness.CODE_SERVE_STALE
+    assert "runs 0.90.1" in row["detail"] and "0.90.18" in row["detail"]
+    assert any("`lop services restart`" in remedy for remedy in row["remedies"])
+    # Equipment that warns, never the reason onboarding fails.
+    assert readiness.row_state(row) == readiness.ROW_STATE_WARN
+    assert readiness.onboarding_failures([row]) == []
+
+
+def test_serve_daemon_row_counts_a_same_version_rebuild_as_stale() -> None:
+    """Both halves, like ``services._serves_current_build``: lop-update rebuilds
+    keep the version and move only the ref."""
+    row = readiness.serve_daemon_row(
+        _member(),
+        _facts(
+            serve_daemons=_serve_fact(
+                source_ref="aaaaaaa", install={"version": "0.90.18", "source_ref": "bbbbbbb"}
+            )
+        ),
+        peer_label="node-2",
+    )
+    assert row["code"] == readiness.CODE_SERVE_STALE
+
+
+def test_serve_daemon_row_flags_a_login_scope_as_unsupervised() -> None:
+    row = readiness.serve_daemon_row(
+        _member(), _facts(serve_daemons=_serve_fact(cgroup=_LOGIN_SCOPE)), peer_label="node-2"
+    )
+    assert row["ok"] is False
+    assert row["code"] == readiness.CODE_UNSUPERVISED
+    assert "session-2122.scope" in row["detail"]
+    assert "reboot" in row["detail"] and "every remote session it hosts" in row["detail"]
+    assert any("service unit" in remedy for remedy in row["remedies"])
+    assert readiness.row_state(row) == readiness.ROW_STATE_WARN
+
+
+def test_serve_daemon_row_names_both_when_stale_and_unsupervised() -> None:
+    """The node's actual state: the code leads with the fix that runs now."""
+    row = readiness.serve_daemon_row(
+        _member(),
+        _facts(serve_daemons=_serve_fact(version="0.90.1", cgroup=_LOGIN_SCOPE)),
+        peer_label="node-2",
+    )
+    assert row["code"] == readiness.CODE_SERVE_STALE
+    assert "0.90.1" in row["detail"] and "session-2122.scope" in row["detail"]
+    assert len(row["remedies"]) == 2
+
+
+def test_serve_daemon_row_is_ok_under_a_unit_on_the_installed_build() -> None:
+    row = readiness.serve_daemon_row(
+        _member(), _facts(serve_daemons=_serve_fact()), peer_label="node-2"
+    )
+    assert row["ok"] is True, row
+    assert "lop-serve.service" in row["detail"]
+    assert "code" not in row
+
+
+def test_serve_daemon_row_does_not_read_cgroups_off_linux() -> None:
+    row = readiness.serve_daemon_row(
+        _member(),
+        _facts(serve_daemons=_serve_fact(cgroup=None, platform="darwin")),
+        peer_label="mac",
+    )
+    assert row["ok"] is True, row
+
+
+def test_serve_daemon_row_from_an_old_peer_is_unknown_never_ok() -> None:
+    row = readiness.serve_daemon_row(_member(), _facts(), peer_label="node-2")
+    assert row["ok"] is False
+    assert row["code"] == readiness.CODE_UNKNOWN
+    assert row["source"] == readiness.SOURCE_UNKNOWN
+
+
+def test_serve_daemon_row_without_an_install_to_compare_is_unknown() -> None:
+    fact = _serve_fact()
+    fact["install"] = None
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    assert row["ok"] is False
+    assert row["code"] == readiness.CODE_UNKNOWN
+
+
+def test_serve_supervision_reads_the_innermost_unit_or_scope() -> None:
+    assert readiness.serve_supervision(_LOGIN_SCOPE) == ("login_session", "session-2122.scope")
+    assert readiness.serve_supervision(_SERVE_UNIT) == ("unit", "lop-serve.service")
+    assert readiness.serve_supervision("/system.slice/lop.service/sub") == (
+        "unit",
+        "lop.service",
+    )
+    assert readiness.serve_supervision("/user.slice/run-r1.scope")[0] == "unknown"
+    assert readiness.serve_supervision(None)[0] == "unknown"
+
+
+def test_serve_daemons_fact_reads_records_and_creates_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    from local_operator.server import registry as serve_registry
+
+    root = tmp_path / "root"
+    root.mkdir()
+    # A fresh root: the read must not bring run/serve into being.
+    empty = readiness.serve_daemons_fact(root)
+    assert empty["daemons"] == []
+    assert list(root.iterdir()) == []
+
+    record = serve_registry.ServeRecord(
+        pid=os.getpid(),
+        host="127.0.0.1",
+        port=8977,
+        instance_id="i",
+        version="0.90.1",
+        source_ref="",
+        prefix="/p",
+        install_kind="uv-tool",
+        desktop=False,
+        reloadable=True,
+    )
+    serve_registry.publish(record, root)
+    monkeypatch.setattr(readiness, "_cgroup_of", lambda pid: _LOGIN_SCOPE)
+    before = sorted(str(path) for path in root.rglob("*"))
+    fact = readiness.serve_daemons_fact(root)
+    assert sorted(str(path) for path in root.rglob("*")) == before
+    [daemon] = fact["daemons"]
+    assert daemon["pid"] == os.getpid()
+    assert daemon["version"] == "0.90.1"
+    assert daemon["cgroup"] == _LOGIN_SCOPE
+    assert daemon["reloadable"] is True
+
+
+def test_collect_peer_facts_carries_serve_daemons(tmp_path: Path) -> None:
+    facts = readiness.collect_peer_facts(tmp_path, home=tmp_path)
+    assert isinstance(facts["serve_daemons"], dict)
+    assert facts["serve_daemons"]["daemons"] == []
+
+
+def test_local_serve_daemon_rows_only_when_a_daemon_is_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert readiness.local_serve_daemon_rows(tmp_path, device_id=VIEWER) == []
+    monkeypatch.setattr(readiness, "serve_daemons_fact", lambda root: _serve_fact(version="0.90.1"))
+    [row] = readiness.local_serve_daemon_rows(tmp_path, device_id=VIEWER)
+    assert row["device_name"] == "this device"
+    assert row["source"] == readiness.SOURCE_LOCAL
+    assert row["code"] == readiness.CODE_SERVE_STALE
+
+
+def test_git_row_says_an_ssh_shell_has_no_github_access_by_design() -> None:
+    row = readiness.git_row(
+        _member(),
+        _facts(git={"user_name": "D", "user_email": "d@e.test"}),
+        peer_label="cloud-node-1",
+    )
+    assert "An SSH shell on cloud-node-1 has no GitHub access by design" in row["detail"]
+    assert "only sessions Local Operator launches there" in row["detail"]
+
+
+def test_compose_reports_this_devices_serve_daemon_unless_a_peer_was_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.network import identity, relay
+
+    root = tmp_path / "root-serve"
+    root.mkdir(parents=True)
+    ident = identity.mint(root, name="node-2")
+    server = relay.RelayServer(
+        identity=ident, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    monkeypatch.setattr(
+        readiness, "serve_daemons_fact", lambda root: _serve_fact(cgroup=_LOGIN_SCOPE)
+    )
+    [row] = readiness.compose(server)["checks"]
+    assert row["capability"] == readiness.CAPABILITY_SERVE_DAEMON
+    assert row["code"] == readiness.CODE_UNSUPERVISED
+    assert row["device_id"] == ident.device_id
+    rendered = readiness.render_check_lines([row])
+    assert rendered[0].startswith("warn readiness serve_daemon this device: ")
+    assert rendered[0].endswith(f"— {readiness.NON_GATING_NOTE}")
+
+
+def test_serve_daemon_row_names_every_login_held_daemon_in_one_sentence() -> None:
+    fact = _serve_fact(cgroup=_LOGIN_SCOPE)
+    fact["daemons"].append(dict(fact["daemons"][0], pid=600001))
+    row = readiness.serve_daemon_row(_member(), _facts(serve_daemons=fact), peer_label="node-2")
+    assert row["code"] == readiness.CODE_UNSUPERVISED
+    assert row["detail"].count("held only by a login session") == 1
+    assert "pid 537864 in session-2122.scope, pid 600001 in session-2122.scope" in row["detail"]
+    assert "a reboot ends them and every remote session they host" in row["detail"]

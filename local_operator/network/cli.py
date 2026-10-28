@@ -8477,6 +8477,14 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
                         source=readiness_mod.SOURCE_UNKNOWN,
                     )
                 )
+    if not wanted:
+        # THIS DEVICE'S SERVE DAEMON NEEDS NO RELAY (2026-10-28): it is read from
+        # this root's own records, so the fallback reports it exactly as the
+        # relay's composer does — a node whose relay is down still says that its
+        # `lop serve` is stale or held only by a login session.
+        from local_operator.paths import config_dir
+
+        checks.extend(readiness_mod.local_serve_daemon_rows(config_dir()))
     return {
         "checks": checks,
         "identity_present": identity_file.exists(),
