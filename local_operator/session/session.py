@@ -10466,7 +10466,10 @@ class Session:
         append-only, and a retried prompt must not land twice. ``seen`` covers
         what the index cannot — two rows of one batch with the same id, where
         the first steer is still queued and has therefore not reached the index
-        yet (agent review round 1, R3).
+        yet (agent review round 1, R3). ``_steer_is_live_queued`` covers the
+        other live case: the steer this very row was spooled from is still on
+        the queue (an idle steer opens its own turn and meets its own row here),
+        and steering it again would double-deliver one message.
         """
         command_id = str(getattr(line, "command_id", "") or "")
         if command_id and command_id in seen:
@@ -10474,6 +10477,15 @@ class Session:
             return
         if command_id and self.has_admitted_command(command_id):
             logger.info("spooled prompt already in the transcript; not steering it twice")
+            return
+        if command_id and self._steer_is_live_queued(command_id):
+            # THE SAME MESSAGE, ALREADY OWED BY THIS PROCESS. ``has_admitted_command``
+            # only answers once the row is durable, and a queued steer is not
+            # durable until its next boundary drain — so without this check an
+            # idle steer that opened its own turn found its own just-spooled row
+            # here and was steered a SECOND time: two queue entries with one id,
+            # two ``MessageStartEvent``s, the text twice in the model request.
+            logger.info("spooled prompt is already on the steering queue; not steering it twice")
             return
         self.steer(
             line.text,
@@ -10487,6 +10499,25 @@ class Session:
         # 2, MINOR-2).
         if command_id:
             seen.add(command_id)
+
+    def _steer_is_live_queued(self, command_id: str) -> bool:
+        """Whether a steer with this producer id is already owed by this process.
+
+        The first-turn drain's duplicate gate, checked BEFORE ``Session.steer``
+        would queue the spooled row again. ``_steering_producers`` is where the
+        handle keeps the producer id of an admitted steer, and the queue itself
+        carries the id as the message id for the callers that supply one without
+        a producer entry. ``queued_steering`` drains and rebuilds in one
+        synchronous step, so this reads the live order without disturbing it.
+        """
+        if not command_id:
+            return False
+        if command_id in self._steering_producers.values():
+            return True
+        return any(
+            str(getattr(message, "id", "") or "") == command_id
+            for message in self.queued_steering()
+        )
 
     async def receive_peer_message(
         self,
@@ -22586,18 +22617,67 @@ class Session:
             logger.warning("deferred job delivery failed", exc_info=True)
 
     async def _reject_steering(self, command_id: str, reason: str) -> None:
-        """Terminally reject one accepted-but-undurable producer steer."""
+        """Terminally reject one accepted producer steer that reached no row.
+
+        THE NOTICE IS GATED ON THE SPOOL, and that is the half the durability
+        seam added. ``serving.ServingSessionHandle.steer`` now spools every
+        accepted steer before it acknowledges, so a steer rejected here — at
+        disposal, or by a failed journal append — is still HELD for the next
+        runtime (``process._run_owner_prompt`` replays it). Telling the user it
+        "was not saved" would then be false, and it is exactly the sentence this
+        change exists to retire. A steer that is in no spool (the TUI's own
+        handle, or a producer older than that seam) keeps the notice, which is
+        the honest answer for it.
+        """
         for handler in list(self._steering_rejection_handlers):
             try:
                 handler(command_id, reason)
             except Exception:  # noqa: BLE001 - one handler cannot hide rejection from others
                 logger.exception("steering rejection handler failed")
-        await self._emit(
-            _notice(_nt.steering_not_saved(command_id=command_id, reason=reason), kind="info")
-        )
+        if not await self._steer_is_spooled(command_id):
+            await self._emit(
+                _notice(_nt.steering_not_saved(command_id=command_id, reason=reason), kind="info")
+            )
         # Mobile projections optimistically count accepted steers. Rejection is
         # another terminal exit from that queue, even though it was not delivered.
         await self._emit(SteeringDeliveredEvent(count=1))
+
+    async def _steer_is_spooled(self, command_id: str) -> bool:
+        """Whether the successor spool still holds this owner message."""
+        directory = getattr(self._transcript, "directory", None)
+        if not command_id or directory is None:
+            return False
+        from local_operator.session.runtime.inbox import holds_owner_row
+        from local_operator.wakes.spooled import await_spool_write
+
+        try:
+            return bool(await await_spool_write(holds_owner_row, Path(directory), command_id))
+        except Exception:  # noqa: BLE001 - an unreadable spool reads as "not held"
+            logger.warning("could not read the spool for %s", command_id, exc_info=True)
+            return False
+
+    async def _forget_spooled_steer(self, command_id: str) -> None:
+        """Drop the successor-spooled copy of a steer this turn has just persisted.
+
+        The serving handle spools every accepted steer before it acknowledges
+        (``serving.ServingSessionHandle.steer``), because the steering queue dies
+        with the process. Once the row is in the transcript the spool copy is a
+        duplicate, and a successor that drained it would deliver the same message
+        twice — so it is removed here, at the one place that knows the append
+        succeeded. Never fatal: a removal lost to a crash is covered by the
+        successor's own dedupe (``has_admitted_command``, see
+        ``process._run_owner_prompt``), and bookkeeping must not fail the turn.
+        """
+        directory = getattr(self._transcript, "directory", None)
+        if not command_id or directory is None:
+            return
+        from local_operator.session.runtime.inbox import remove_owner_row
+        from local_operator.wakes.spooled import await_spool_write
+
+        try:
+            await await_spool_write(remove_owner_row, Path(directory), command_id)
+        except Exception:  # noqa: BLE001 - a stale spool row is deduped at replay
+            logger.warning("could not drop the spooled copy of steer %s", command_id, exc_info=True)
 
     async def _drain_steering(self) -> list[AgentMessage]:
         """Consume the steering queue. Steering messages are real injected
@@ -22657,6 +22737,10 @@ class Session:
                 # replayed history. Constant-time check on the transcript's id
                 # set, so the ordinary steer pays effectively nothing.
                 self._steering_producers.pop(queued_id, None)
+                if producer_command_id is not None:
+                    # Durable already, so any spooled copy is a duplicate — the
+                    # same rule the append path below applies.
+                    await self._forget_spooled_steer(producer_command_id)
                 messages.append(message)
                 continue
             try:
@@ -22672,6 +22756,9 @@ class Session:
                 continue
             finally:
                 self._steering_producers.pop(queued_id, None)
+            if producer_command_id is not None:
+                # The row is durable, so the successor's copy is a duplicate now.
+                await self._forget_spooled_steer(producer_command_id)
             # THE STEER DOOR'S AUDIO FORK, at the same point the prompt door
             # forks: strictly after THIS drain's own append made the row
             # durable (see ``_fork_audio_sidecars`` — a record for a row the
