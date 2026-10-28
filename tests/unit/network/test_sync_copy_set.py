@@ -338,6 +338,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "which sign-in this device must recover, beside the placement document, "
         "never an entry of a session directory and never copied to a peer",
     ),
+    "local_operator/network/credentials/desktop_approval.py": (
+        1,
+        "``_CREDENTIAL_PREFIX`` ('credential_'): the approval-op registry's record-key "
+        "prefix that claims every ``credential_*`` ``what`` key for this module's family "
+        "refusal. An in-memory dispatch key, not a filename or directory: nothing on "
+        "disk is named by it, so it is not a session-directory entry",
+    ),
     # ---- the transcript compression pass's STORE-LEVEL names ----
     "local_operator/session/compression.py": (
         2,
