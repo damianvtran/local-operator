@@ -1103,11 +1103,15 @@ def test_detach_words_mark_a_command_detached_and_nothing_else_does(word):
 @pytest.mark.parametrize("prefix", ["nohup ", "disown; "])
 def test_explicit_detach_is_spared(tmp_path, monkeypatch, _kill_pids, prefix):
     # `disown` goes after the job; the others prefix it. Any of the three words
-    # marks the line detached.
+    # marks the line detached. The trailing short sleep keeps the group LEADER
+    # alive across the settle probe: with a leader that exits immediately, a
+    # loaded host can see the group briefly empty and settle unregisters it (a
+    # pre-existing race, observed once in three xdist runs), which would test
+    # nothing rather than test the spare.
     cmd = (
-        "sleep 4245 >/dev/null 2>&1 & echo pid=$!; disown"
+        "sleep 4245 >/dev/null 2>&1 & echo pid=$!; disown; sleep 0.3"
         if prefix == "disown; "
-        else f"{prefix}sleep 4245 >/dev/null 2>&1 & echo pid=$!"
+        else f"{prefix}sleep 4245 >/dev/null 2>&1 & echo pid=$!; sleep 0.3"
     )
     pid = _bash_bg(cmd, "sess-a", tmp_path, monkeypatch)
     _kill_pids.append(pid)
@@ -1168,7 +1172,12 @@ def test_ps_failure_kills_nothing_and_keeps_the_line(tmp_path, monkeypatch, _kil
     def _boom(*_a, **_k):
         raise OSError("ps unavailable")
 
+    # BOTH identity probes unreadable: the contract under test is "nothing can
+    # establish the group is ours -> kill nothing, keep the line". Patching only
+    # `ps` would now be answered by the fork-free listing, which is the point of
+    # the fix, so the ambiguity has to be total to test the ambiguous branch.
     monkeypatch.setattr(group_reaper.subprocess, "run", _boom)
+    monkeypatch.setattr(group_reaper, "_group_pids_fork_free", lambda _pgid: None)
     assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 0
     monkeypatch.undo()
     assert _pid_alive(pid)
@@ -1232,7 +1241,13 @@ def test_recycled_pgid_line_of_another_session_never_inherits_survivors(tmp_path
         group_reaper.settle_group(pgid, config_dir=tmp_path)
 
         by_session = {e["session_id"]: e for e in _ledger_entries(tmp_path)}
-        assert [s["pid"] for s in by_session["sess-b"]["survivors"]] == [live.pid]
+        # MEMBERSHIP, not an exact list: a group may legitimately hold more than
+        # one member (a shell that forked rather than exec'd, a worker), and the
+        # property under test is which session's line carries which survivor.
+        assert live.pid in {s["pid"] for s in by_session["sess-b"]["survivors"]}
+        # The regression: A's stale line must NOT have been stamped with B's
+        # survivor (that is what let A's dispose kill B's group).
+        assert live.pid not in {s["pid"] for s in by_session["sess-a"]["survivors"]}
         assert [s["pid"] for s in by_session["sess-a"]["survivors"]] == [dead.pid]
 
         assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 0
@@ -1242,3 +1257,22 @@ def test_recycled_pgid_line_of_another_session_never_inherits_survivors(tmp_path
     finally:
         _reap_group(pgid)
         live.wait(timeout=2)
+
+
+def test_settle_records_survivors_even_when_the_token_read_fails(tmp_path, monkeypatch, _kill_pids):
+    """CI regression: a slow/unreadable ``ps`` must not lose the survivor record.
+
+    Membership comes from the fork-free listing; only the start token costs a
+    ``ps``. The old full-table snapshot timed out under four-worker load (measured
+    ``TimeoutExpired`` on 3/9 settles) and left the line with no members at all,
+    which then read as "leader gone, group dead" and was dropped without a kill.
+    A token-less survivor is still a proof of ownership, so the reap ends it.
+    """
+    monkeypatch.setattr(group_reaper, "_start_tokens", lambda _pids: {})
+    pid = _bash_bg("sleep 4321 >/dev/null 2>&1 & echo pid=$!", "sess-a", tmp_path, monkeypatch)
+    _kill_pids.append(pid)
+    (entry,) = _ledger_entries(tmp_path)
+    recorded = {s["pid"]: s["start"] for s in entry["survivors"]}
+    assert pid in recorded and recorded[pid] == ""  # recorded, token unavailable
+    assert group_reaper.reap_session_groups("sess-a", config_dir=tmp_path) == 1
+    assert _wait_dead(pid)

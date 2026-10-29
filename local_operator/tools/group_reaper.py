@@ -567,21 +567,64 @@ def _parse_ps_rows(stdout: str, *, fields: int) -> list[list[str]]:
     return rows
 
 
-def _group_survivors(pgid: int) -> list[dict[str, object]] | None:
-    """Snapshot ``[{pid, start}]`` of every process now in group ``pgid``.
+def _group_pids_fork_free(pgid: int) -> list[int] | None:
+    """Members of ``pgid`` by a kernel read with NO fork, or ``None`` = unknown.
 
-    ONE ``ps -axo pid=,pgid=,lstart=`` filtered by pgid. ``None`` when ``ps``
-    could not answer. Only called on the rare path where a group outlived its
-    leader; the hot path never forks (see :func:`settle_group`).
+    ``ps -axo`` measured 0.42-13.6 s on this fleet and its 5 s bound turned the
+    settle snapshot into ``None`` under ordinary four-worker test load — measured
+    here as ``TimeoutExpired`` on 3 of 9 settles, which is exactly how a survivor
+    line lost its members and then read as "leader gone, group dead". The kernel
+    listing answers in microseconds and needs no fork at all
+    (``proc_listpids(PROC_PGRP_ONLY)`` / a ``/proc`` scan, see
+    :func:`local_operator.mobile.resources.direct_group_pids`). ``[]`` is an
+    ANSWER (group empty) and ``None`` is not one — callers must not conflate them.
+
+    Imported lazily: this module is on the bash hot path and must not drag the
+    mobile package into every session boot.
     """
-    completed = _run_ps(["ps", "-axo", "pid=,pgid=,lstart="])
-    if completed is None or (completed.returncode != 0 and not completed.stdout):
+    try:
+        from local_operator.mobile.resources import direct_group_pids
+    except Exception:  # noqa: BLE001 — an unimportable listing is "unknown"
         return None
-    found: list[dict[str, object]] = []
-    for pid_s, pgid_s, start in _parse_ps_rows(completed.stdout, fields=2):
-        if pgid_s == str(pgid) and pid_s.isdigit() and pid_s != str(os.getpid()):
-            found.append({"pid": int(pid_s), "start": start})
-    return found[:_MAX_SURVIVORS]
+    try:
+        return direct_group_pids(pgid)
+    except Exception:  # noqa: BLE001 — unknown never kills
+        return None
+
+
+def _start_tokens(pids: list[int]) -> dict[int, str]:
+    """Start tokens for ``pids`` from ONE bounded ``ps -p``; empty when unreadable.
+
+    Tokens are a best-effort EXTRA on top of the fork-free pid listing, so a
+    failed read degrades to pid-only survivors rather than to no survivors at all
+    (see :func:`_survivor_verdict` for what each form proves).
+    """
+    if not pids:
+        return {}
+    completed = _run_ps(["ps", "-o", "pid=,lstart=", "-p", ",".join(str(p) for p in pids)])
+    if completed is None or (completed.returncode != 0 and not completed.stdout):
+        return {}
+    rows = _parse_ps_rows(completed.stdout, fields=1)
+    return {int(pid_s): token for pid_s, token in rows if pid_s.isdigit()}
+
+
+def _group_survivors(pgid: int) -> list[dict[str, object]] | None:
+    """Snapshot ``[{pid, start}]`` of the processes now in group ``pgid``.
+
+    Membership comes from the fork-free kernel listing; the start tokens are one
+    bounded ``ps -p`` over just those pids, and a survivor whose token could not
+    be read is still recorded (``start: ""``). ``None`` when even the membership
+    is unknowable. Only called on the rare path where a group outlived its
+    leader; a clean exit never reaches it.
+    """
+    pids = _group_pids_fork_free(pgid)
+    if pids is None:
+        return None
+    mine = [pid for pid in pids if pid != os.getpid()][:_MAX_SURVIVORS]
+    if not mine:
+        return []
+    tokens = _start_tokens(mine)
+    return [{"pid": pid, "start": tokens.get(pid, "")} for pid in mine]
 
 
 def _annotate_entry(path: Path, pgid: int, updates: dict[str, object]) -> None:
@@ -644,12 +687,18 @@ def settle_group(
 
     HOT PATH IS FORK-FREE: ``killpg(pgid, 0)`` answers "any member left?" with a
     syscall. Nothing left (the overwhelmingly common case) -> unregister exactly
-    as before. Members left -> one ``ps`` snapshot records ``survivors`` so the
-    ownership check can later prove the group is the original one (see
-    :func:`_survivor_verdict`) and the line stays. If the snapshot itself is
-    unreadable the line is kept without survivors: the leader-based check then
-    reads it as dead and kills nothing — the pre-existing outcome, never a
-    wrong kill.
+    as before. Members left -> the group's members are snapshotted into
+    ``survivors`` so the ownership check can later prove the group is the
+    original one (see :func:`_survivor_verdict`) and the line stays.
+
+    The snapshot's MEMBERSHIP comes from the fork-free kernel listing, never from
+    ``ps``: ``ps`` measured 0.42-13.6 s here and its 5 s bound was producing
+    ``None`` snapshots under four-worker test load, which silently left lines
+    with no members recorded. Start tokens are the one ``ps -p`` left on this
+    path and are optional (a survivor with no token is still recorded). An
+    unreadable membership keeps the line with no survivors — and
+    :func:`_leader_verdict` still proves a survivor group ours from the dead
+    creator pid plus live members, so nothing leaks.
     """
     if not _REAPING_IS_SUPPORTED:
         return
@@ -658,8 +707,11 @@ def settle_group(
         return
     survivors = _group_survivors(pgid)
     if survivors is not None and not survivors:
-        # Died between the probe and the snapshot.
-        unregister_group(pgid, config_dir=config_dir, owner_pid=owner_pid)
+        # The listing says the group is empty although the probe just saw a
+        # member: a race, or an unreliable read. Re-probe rather than trusting
+        # one answer — trusting it here is what deleted a live group's record.
+        if not _group_has_members(pgid):
+            unregister_group(pgid, config_dir=config_dir, owner_pid=owner_pid)
         return
     resolved = _resolve_config_dir(config_dir)
     pid = os.getpid() if owner_pid is None else owner_pid
@@ -1129,47 +1181,71 @@ def _entry_survivors(entry: dict[str, object]) -> list[tuple[int, str]]:
     out: list[tuple[int, str]] = []
     if isinstance(raw, list):
         for item in raw:
-            if (
-                isinstance(item, dict)
-                and isinstance(item.get("pid"), int)
-                and isinstance(item.get("start"), str)
-                and item["start"]
-            ):
-                out.append((item["pid"], item["start"]))
+            if isinstance(item, dict) and isinstance(item.get("pid"), int):
+                start = item.get("start")
+                out.append((item["pid"], start if isinstance(start, str) else ""))
     return out
 
 
 def _survivor_verdict(pgid: int, survivors: list[tuple[int, str]]) -> bool | None:
     """Is group ``pgid`` still the ORIGINAL group? ``None`` when unknowable.
 
-    True iff at least one RECORDED ``(pid, start)`` member is alive, still in
-    ``pgid``, with the same start token. WHY this is sufficient: the kernel
-    cannot hand a pgid to a new group while any member of the old one lives, and
-    a recycled member PID would carry a different start token. So one recorded
-    member still inside the group proves nobody else owns that pgid, which the
-    leader-based check cannot say once the leader has exited. No recorded member
-    matching means the group we saw is gone (the pgid may now be anyone's) ->
-    ``False``, kill nothing. ``ps`` unreadable -> ``None``, kill nothing.
+    True iff at least one RECORDED member is alive, still in ``pgid``, and either
+    has no recorded start token or one that matches. WHY this is sufficient: the
+    kernel cannot hand a pgid to a new group while any member of the old one
+    lives, and a recycled member PID would carry a different start token. So one
+    recorded member still inside the group proves nobody else owns that pgid,
+    which the leader-based check cannot say once the leader has exited.
+
+    Membership is read FORK-FREE first (``ps`` has measured 0.42-13.6 s here, and
+    its timeout is what emptied this record in the first place); a recorded start
+    token is verified by one bounded ``ps -p``. ``ps`` unreadable for a
+    token-bearing record leaves it unverifiable: if no recorded pid is in the
+    group at all -> ``False``; otherwise ``None`` (ambiguous -> kill nothing, keep
+    the line). No recorded member present means the group we saw is gone (the
+    pgid may now be anyone's) -> ``False``.
     """
-    pids = ",".join(str(pid) for pid, _ in survivors)
-    completed = _run_ps(["ps", "-o", "pid=,pgid=,lstart=", "-p", pids])
-    if completed is None:
-        return None
-    recorded = dict(survivors)
-    for pid_s, pgid_s, start in _parse_ps_rows(completed.stdout, fields=2):
-        if pid_s.isdigit() and pgid_s == str(pgid) and recorded.get(int(pid_s)) == start:
-            return True
-    # ps exiting non-zero with NO rows is its "none of these pids exist".
-    return False
+    members = _group_pids_fork_free(pgid)
+    if members is None:
+        # No fork-free listing on this host: fall back to the table read, and an
+        # unreadable table stays AMBIGUOUS rather than becoming "not ours".
+        completed = _run_ps(
+            ["ps", "-o", "pid=,pgid=,lstart=", "-p", ",".join(str(pid) for pid, _ in survivors)]
+        )
+        if completed is None:
+            return None
+        recorded = dict(survivors)
+        for pid_s, pgid_s, start in _parse_ps_rows(completed.stdout, fields=2):
+            if pid_s.isdigit() and pgid_s == str(pgid) and recorded.get(int(pid_s)) == start:
+                return True
+        return False
+    present = [(pid, start) for pid, start in survivors if pid in members]
+    if not present:
+        return False  # none of the recorded members is left in the group
+    if any(not start for _, start in present):
+        # A recorded pid still in the group IS the proof; its token was only ever
+        # an extra check on pid reuse, unavailable when the settle-time ps failed.
+        return True
+    tokens = _start_tokens([pid for pid, _ in present])
+    if not tokens:
+        return None  # recorded tokens exist but cannot be verified -> ambiguous
+    return any(tokens.get(pid) == start for pid, start in present)
 
 
 def _leader_verdict(entry: dict[str, object]) -> bool | None:
-    """The original leader-based gate: is the group's LEADER still our leader?"""
+    """The leader-based gate: is the group's CREATOR pid still our leader?"""
     pgid = entry.get("pgid")
     if not isinstance(pgid, int) or pgid <= 0:
         return False
     if not _process_alive(pgid):
-        return False  # leader gone: group already dead, nothing to kill
+        # The creator pid is gone. A group's id is always the pid of the process
+        # that created it, and the kernel frees that id only once the group is
+        # EMPTY, so a pgid whose creator pid is gone cannot belong to a later
+        # group: members still present mean the leader exited first
+        # (``server & echo $!``) and the group is the original one. No members ->
+        # the group is gone. The pre-survivor code read a dead leader as "group
+        # already dead" and leaked such a group for hours.
+        return _group_has_members(pgid)
     current_leader = _owner_start_token(pgid)
     if current_leader is None:
         # Alive but the leader's identity is unreadable -> ambiguous -> do NOT
