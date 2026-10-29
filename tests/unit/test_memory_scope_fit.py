@@ -207,6 +207,9 @@ PERSONAL_PROSE: tuple[str, ...] = (
     # Review round 2, m-1's third sentence: `against` is not the report shape, so this
     # personal training report stores.
     "task progress against the marathon milestones is on track",
+    # Review round 3, r3-1: `for` was one arm of the report shape and refused this
+    # personal statement, so the arm was dropped. It stores.
+    "my task progress for the 10k plan is fine",
     # --- review round 2, m-1: plan nouns that are also personal vocabulary -----
     "sprint training",
     "marathon milestones",
@@ -258,15 +261,15 @@ WORK_SHAPES: tuple[tuple[str, str], ...] = (
 # "`_TASK_PROGRESS` keys off the literal phrase `task progress` only"). They are
 # personal prose, so they are listed and asserted REFUSED rather than dropped: the cost
 # is visible here, and reversing the decision is a test change, not an excavation.
-DOCUMENTED_PHRASE_COST: tuple[str, ...] = (
-    # A report SHAPE, even about a kitchen: `task progress on …` reads as a status line,
-    # and the shape (not the subject) is what the arm tests.
-    "Task progress on the kitchen renovation is slow.",
-    # Review round 2, m-1 measured these as false positives from the noun list. Two of
-    # them are `task progress on …` REPORTS, so the report shape refuses them; the
-    # third (`against`) is not the shape at all and stores — see PERSONAL_PROSE.
-    "Task progress on this week's sprint training is good.",
-    "task progress on the wedding deliverables: rings bought",
+#: Every arm of the report shape (`:`, `is`, `was`, `on`), plus two personal subjects.
+#: A report is a status line whatever it is about, so these refuse while the mentions in
+#: `PERSONAL_PROSE` store — `test_a_non_report_mention_of_the_phrase_stores` is the page.
+TASK_PROGRESS_REPORTS: tuple[tuple[str, str], ...] = (
+    ("task progress: shipped the first slice", ":"),
+    ("task progress is good on the proxy work", "is"),
+    ("task progress was slow on the kitchen renovation", "was"),
+    ("Task progress on this week's sprint training is good.", "on"),
+    ("task progress on the wedding deliverables: rings bought", "on"),
 )
 
 
@@ -284,17 +287,32 @@ def test_work_shapes_are_refused_and_named(text, shape):
     assert shape in str(exc.value)
 
 
-@pytest.mark.parametrize("text", DOCUMENTED_PHRASE_COST)
-def test_the_cost_of_a_literal_phrase_is_pinned(text):
-    """Reports the guard refuses even when the subject is personal.
+@pytest.mark.parametrize("text,arm", TASK_PROGRESS_REPORTS)
+def test_each_task_progress_arm_refuses(text, arm):
+    """One arm of the report shape per case: `:`, `is`, `was`, `on` (review r3-1).
 
-    `task progress on …` is a status line whatever it is about, so a kitchen renovation
-    report is refused and the writer rephrases — while the operator's prohibition list
-    in `PERSONAL_PROSE` stores. That pair is the whole boundary.
+    `for` was tried and dropped: it refused `my task progress for the 10k plan is fine`.
+    Every remaining arm is pinned here so the enumeration in the guide and the docstring
+    cannot drift from the code without a failure.
     """
+    assert arm in (":", "is", "was", "on")
     with pytest.raises(MemoryError) as exc:
         scope_fit("global", {"title": "x", "body": text, "tags": [], "aliases": [], "subject": ""})
     assert "task-progress" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "my task progress for the 10k plan is fine",  # the dropped `for` arm
+        "task progress, release status, transient approvals",  # prohibition list
+        "task progress against the marathon milestones is on track",  # not the shape
+    ],
+)
+def test_a_non_report_mention_of_the_phrase_stores(tmp_path, text):
+    """A mention is not a report. This is the other half of the r3-1 boundary."""
+    store = _store(tmp_path)
+    assert store.put("global", {"title": "Note", "body": text, "tags": []})["scope"] == "global"
 
 
 def test_the_bias_is_store_the_fact(tmp_path):
@@ -303,9 +321,9 @@ def test_the_bias_is_store_the_fact(tmp_path):
     The numbers are deliberately exact: adding a sentence to either tuple without
     deciding which way it should fall is the mistake this catches.
     """
-    assert len(PERSONAL_PROSE) == 45
+    assert len(PERSONAL_PROSE) == 46
     assert len(WORK_SHAPES) == 16
-    assert len(DOCUMENTED_PHRASE_COST) == 3
+    assert len(TASK_PROGRESS_REPORTS) == 5
     store = _store(tmp_path)
     for index, text in enumerate(PERSONAL_PROSE):
         stored = store.put("global", {"title": f"note {index}", "body": text, "tags": []})

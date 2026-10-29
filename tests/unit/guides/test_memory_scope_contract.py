@@ -7,6 +7,8 @@ of the Markdown. These are guidance contracts, not proof a model obeys them;
 normal-tool fresh-agent scope-selection pilots remain a separate acceptance gate.
 """
 
+import pytest
+
 
 def _memory_guide() -> str:
     # Resolve on demand just as read(guide://memory) does. Keeping this import
@@ -96,8 +98,8 @@ def test_the_boundaries_round_3_settled_are_documented() -> None:
 
     The guide must not promise a verb as work context (`push`, `squash` are English),
     must not claim a `ticket` HOLD is refused when only `branch` is, and must state the
-    two bounds a reader would otherwise only find in a PR thread: a line-OPENING
-    personal number, and the literal `task progress` phrase.
+    two bounds a reader would otherwise only find in a PR thread: a line whose FIRST
+    token is a bare personal number, and the `task progress` report shape.
     """
     body = _memory_guide()
 
@@ -107,8 +109,7 @@ def test_the_boundaries_round_3_settled_are_documented() -> None:
     assert "on a branch with a review state" in body
     assert "`task progress` on a named workstream" not in body
     assert "a `task progress` report" in body
-    assert "a personal identifier that OPENS a line" in body
-    assert "write it mid-sentence" in body
+    assert "a line whose FIRST token is a bare" in body
 
 
 def test_the_task_progress_report_shape_is_documented() -> None:
@@ -124,3 +125,23 @@ def test_the_task_progress_report_shape_is_documented() -> None:
     assert "only a `task progress` REPORT is" in body
     assert "is not a report and stores" in body
     assert "the literal phrase `task progress` is refused" not in body
+
+
+def test_the_line_opening_bound_is_stated_as_it_behaves() -> None:
+    """QA round 3, QA3-1: the arm keys on the FIRST token, not on "a line".
+
+    `Flight PR102 Manila to Sydney …` stores because the line opens with a word; only a
+    bare `PR102 Manila …` refuses. The guide said the first form was refused, which is
+    the one direction that would make a writer rephrase a fact that never needed it.
+    """
+    guide = _memory_guide()
+    assert "a line whose FIRST token is a bare" in guide
+    assert "while the same number inside a sentence or behind a leading word" in guide
+
+    from local_operator.memory import MemoryError, scope_fit
+
+    refused = {"title": "x", "body": "PR102 Manila to Sydney departs 22:40", "tags": []}
+    accepted = {"title": "x", "body": "Flight PR102 Manila to Sydney departs 22:40", "tags": []}
+    with pytest.raises(MemoryError):
+        scope_fit("global", dict(refused, aliases=[], subject=""))
+    scope_fit("global", dict(accepted, aliases=[], subject=""))  # must not raise

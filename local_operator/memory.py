@@ -337,13 +337,17 @@ def _fold(text: str) -> str:
 # one exists, from the live global bank's personal rows), and each arm below was
 # measured against that bank.
 #
-# THE BIAS IN DOUBT IS "STORE THE FACT". A work note that slips into global is caught
-# later by `lop memory triage`, which lists it and can move it; a personal fact that a
-# shape rule refuses is silent data loss. So when a candidate arm needs a new word to
-# catch one more work row, the answer is usually no: the cost of a missed work note is
-# a triage entry, and the cost of a false refusal is the fact. That is why `push`,
-# `squash`, `check`, `ticket`, `issue`, `sprint`, `milestone` and `deliverable` are not
-# work context anywhere below — each was measured refusing ordinary prose.
+# THE BIAS IN DOUBT IS "STORE THE FACT", and the asymmetry is NOT covered by a safety
+# net: `lop memory triage` decides with the same `fact_markers` this guard uses (see
+# `memory_triage`), so it cannot surface a note the guard let through. A slip is
+# therefore found only by a human reading `lop memory show`, and the remedy is a manual
+# `lop memory move` or a re-worded note. A personal fact a shape rule refuses, by
+# contrast, is silent data loss — the writer is told to rephrase and the fact is gone if
+# they do not. Both sides are expensive; the refusal is the irreversible one, so when a
+# candidate arm needs a new English word to catch one more work row, the answer is
+# usually no. That is why `push`, `squash`, `check`, `ticket`, `issue`, `sprint`,
+# `milestone` and `deliverable` are not work context anywhere below — each was measured
+# refusing ordinary prose.
 #
 #: Nouns that are work vocabulary in ANY sentence: nobody keeps a "PR", a "release"
 #: or a "deploy" in the ordinary-prose sense. The label is what a refusal reports.
@@ -446,9 +450,11 @@ _SESSION_TODO = re.compile(r"\bsession todos?\b", re.I)
 # What is left is the REPORT shape, never the bare phrase: the operator's own stored
 # boundaries preference reads `… not task progress, release status, transient approvals
 # …`, a prohibition list rather than a report, and refusing it is the silent data loss
-# this guard exists to prevent (live row 01a141b9). A colon, or `is`/`was`/`on`/`for`
-# after the phrase, is what makes it a status line.
-_TASK_PROGRESS = re.compile(r"\btask progress\b\s*(?::|\bis\b|\bwas\b|\bon\b|\bfor\b)", re.I)
+# this guard exists to prevent (live row 01a141b9). The arms are exactly a colon or
+# `is`/`was`/`on` after the phrase — those four, no more. `for` was tried and dropped
+# (review round 3, r3-1): `my task progress for the 10k plan is fine` is a personal
+# statement, so the arm is enumerated, not guessed, and each arm has a test.
+_TASK_PROGRESS = re.compile(r"\btask progress\b\s*(?::|\bis\b|\bwas\b|\bon\b)", re.I)
 _REMAINING_WORK = re.compile(r"\bremaining work\b", re.I)
 
 
@@ -583,7 +589,8 @@ def scope_fit(scope: str, fact: dict[str, Any]) -> None:
     A bounded SHAPE rule, not a classifier. It refuses, and NAMES, a tracker ref
     (``PR #12``, ``!1234``, a line that OPENS with ``PR3078``), a named commit, a
     CI/merge/release status verb, a ``next step``/``next action`` phrase carrying work
-    context, a ``session todo`` line, a ``task progress`` report (`task progress:`, `… on …`), a
+    context, a ``session todo`` line, a ``task progress`` report (``task progress:``,
+    ``task progress on …``, ``task progress is …``), a
     work-context ``HOLD``, a session self-reference, a goal statement and a dated work
     log — see :data:`_WORK_SHAPES`. Global is for durable personal facts, contacts,
     preferences, environment; work state belongs in a session bank.

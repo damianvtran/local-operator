@@ -46,20 +46,21 @@ any `!N` (GitLab work syntax), a `commit`/`sha`/`head` hex, a line OPENING with
 `PR1234`/`MR1234` (a list marker or numbering before it is fine), a CI status verb, a
 merge/release verb, a `next step`/`next action` carrying an unambiguous work token — a
 tracker ref, `PR`/`MR`/`commit`/`CI`/`pipeline`/`worktree`/`rebase`/`deploy`/`rollout`,
-or a tool name (`mcp__…`) — a `task progress` report (`task progress:`, `task progress
-on …`, `task progress is …`), `session todo`, a `HOLD` on a
-PR/release/lane/merge/CI/deploy (or on a branch with a review state), a 12-hex session
-ID, a line opening as a goal statement (`Session goal (…):`), or an ISO date near
-PR/MR/merged/release/QA/review/round/lane/worktree/CI/gate/vX.Y.Z is refused, naming
-the shape that matched. It is a bounded locator filter, not a classifier — prose work
-text with no locator, a hyphenated key like `LOH-13`, or a personal reference number
-(`Flight PR102`, `policy PR90021`) still passes, and it is not a guarantee that a model
-will always choose the right scope. Two boundaries are stated rather than implied: a
-personal identifier that OPENS a line (`Flight PR102` at the start of one) is read as a
-branch or reference tag, so write it mid-sentence; and only a `task progress` REPORT is
-work — a preference that merely lists the phrase (`… not task progress, release status
-…`) is not a report and stores. A `Session todo:` line is refused: write the reminder
-itself, without the session framing, and it stores in global.
+or a tool name (`mcp__…`) — a `task progress` report (the phrase followed by `:`, `is`,
+`was` or `on`), `session todo`, a `HOLD` on a PR/release/lane/merge/CI/deploy (or on a
+branch with a review state), a 12-hex session ID, a line opening as a goal statement
+(`Session goal (…):`), or an ISO date near PR/MR/merged/release/QA/review/round/lane/
+worktree/CI/gate/vX.Y.Z is refused, naming the shape that matched. It is a bounded
+locator filter, not a classifier — prose work text with no locator, a hyphenated key
+like `LOH-13`, or a personal reference number (`Flight PR102`, `policy PR90021`) still
+passes, and it is not a guarantee that a model will always choose the right scope. Two
+boundaries are stated rather than implied: a line whose FIRST token is a bare
+`PR#####`/`MR#####` reference reads as a branch or status tag and is refused (`PR102
+Manila to Sydney`), while the same number inside a sentence or behind a leading word
+(`Flight PR102 Manila to Sydney`) stores; and only a `task progress` REPORT is work — a
+preference that merely lists the phrase (`… not task progress, release status …`) is
+not a report and stores. A `Session todo:` line is refused: write the reminder itself,
+without the session framing, and it stores in global.
 
 Work state and checkpoints use `memory://session`; intentionally shared work uses
 `memory://team`, and persistent profile knowledge uses `memory://agent` when authorized.
