@@ -64,6 +64,11 @@ async def _boot(pilot, app: OperatorApp) -> None:
             return
 
 
+# Idle ticks a prompt wait may spend before it gives up. A deadlock guard, not a
+# timing assumption: every measured caller settles in a handful of ticks.
+_WAIT_PROMPT_TICKS = 200
+
+
 async def _wait_prompt(pilot, app: OperatorApp) -> None:
     """Settle until the in-flight gate's question is mounted AND its focus is decided.
 
@@ -83,9 +88,17 @@ async def _wait_prompt(pilot, app: OperatorApp) -> None:
 
     So wait for the two things the next step actually depends on:
 
-    1. ``is_mounted`` on every card: Textual sets it only after ``on_mount``
-       has returned, so the card's focus decision has been made and, if it
-       chose to take focus, its request is already on the app's queue.
+    1. A card ARRIVED and every card on screen is mounted. Textual sets
+       ``is_mounted`` only after ``on_mount`` has returned, so such a card's
+       focus decision has been made and, if it chose to take focus, its
+       request is already on the app's queue. The arrival test is against the
+       count seen on entry, not a bare "some card is mounted": answered cards
+       leave ``#prompt-host`` through a DEFERRED ``card.remove()`` and can sit
+       there beside the next question, so a retained card must not be able to
+       satisfy the wait while the card this gate just raised is still about to
+       mount and steal focus. Every caller measured so far enters with no card
+       on screen, where the two tests coincide; the comparison is there for the
+       day they stop coinciding.
     2. A barrier posted to that same queue afterwards. The queue is FIFO, so
        when the barrier runs the card's queued focus change has been applied.
 
@@ -94,20 +107,34 @@ async def _wait_prompt(pilot, app: OperatorApp) -> None:
     (``AskPickerScreen.on_mount``), so "card focused" would be the wrong
     condition for callers that set those up; "mount's focus request settled"
     is correct for all of them.
+
+    It also deliberately does not target one card by identity. The callers
+    drive ``app.query(ApprovalPrompt).first()``, so with a retained card
+    present "the newest card" and "the card the caller presses into" are not
+    the same widget; "every card present is settled" is true for both.
+
+    An expired ceiling RETURNS rather than raising, on purpose: the callers
+    assert what they need next (a card to press into, a gate that stays
+    parked) and those assertions name the failure better than a generic
+    timeout here. An expiry therefore means the app never raised the card at
+    all — read the caller's failure as the symptom, not this return.
     """
-    for _ in range(200):
+    before = len(app.query(ApprovalPrompt))
+    for _ in range(_WAIT_PROMPT_TICKS):
         await pilot.pause()
         cards = app.query(ApprovalPrompt)
-        if cards and all(card.is_mounted for card in cards):
+        if len(cards) > before and all(card.is_mounted for card in cards):
             break
     else:
+        # Gave up: no card arrived, or one arrived and never finished mounting.
         return
     settled = asyncio.Event()
     app.call_later(settled.set)
-    for _ in range(200):
+    for _ in range(_WAIT_PROMPT_TICKS):
         await pilot.pause()
         if settled.is_set():
             return
+    # Gave up: the barrier never drained, so the app's queue is wedged.
 
 
 async def _settle(pilot, ticks: int = 6) -> None:
