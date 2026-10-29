@@ -89,3 +89,23 @@ def test_scope_fit_shapes_and_the_session_todo_remedy_are_documented() -> None:
     assert "A `Session todo:` line is refused too" in body
     assert "write the reminder itself, without the session framing" in body
     assert "or `stated` (deliberate)" not in body
+
+
+def test_the_boundaries_round_3_settled_are_documented() -> None:
+    """Review round 2 M-1/m-1/n-2 and QA round 2 QA2-1/QA2-2.
+
+    The guide must not promise a verb as work context (`push`, `squash` are English),
+    must not claim a `ticket` HOLD is refused when only `branch` is, and must state the
+    two bounds a reader would otherwise only find in a PR thread: a line-OPENING
+    personal number, and the literal `task progress` phrase.
+    """
+    body = _memory_guide()
+
+    assert "a work verb (`rebase`, `squash`, …)" not in body
+    assert "unambiguous work token" in body
+    assert "or ticket with a review state" not in body
+    assert "on a branch with a review state" in body
+    assert "`task progress` on a named workstream" not in body
+    assert "the phrase `task progress`" in body
+    assert "a personal identifier that OPENS a line" in body
+    assert "write it mid-sentence" in body

@@ -335,7 +335,15 @@ def _fold(text: str) -> str:
 # state — `tickets` is a box office, `issues` a medical file, `branches` a storm's
 # damage. Every boundary has a negative test drawn from ordinary prose (and, where
 # one exists, from the live global bank's personal rows), and each arm below was
-# measured against that bank: none of them match.
+# measured against that bank.
+#
+# THE BIAS IN DOUBT IS "STORE THE FACT". A work note that slips into global is caught
+# later by `lop memory triage`, which lists it and can move it; a personal fact that a
+# shape rule refuses is silent data loss. So when a candidate arm needs a new word to
+# catch one more work row, the answer is usually no: the cost of a missed work note is
+# a triage entry, and the cost of a false refusal is the fact. That is why `push`,
+# `squash`, `check`, `ticket`, `issue`, `sprint`, `milestone` and `deliverable` are not
+# work context anywhere below — each was measured refusing ordinary prose.
 #
 #: Nouns that are work vocabulary in ANY sentence: nobody keeps a "PR", a "release"
 #: or a "deploy" in the ordinary-prose sense. The label is what a refusal reports.
@@ -348,21 +356,27 @@ _WORK_NOUN_PARTS: tuple[tuple[str, str], ...] = (
     ("deploy", r"deploys?"),
     ("rollout", r"rollouts?"),
     ("pipeline", r"pipelines?"),
+    ("worktree", r"worktrees?"),
     ("lane", r"lanes?"),
-    ("sprint", r"sprints?"),
-    ("backlog", r"backlogs?"),
-    ("milestone", r"milestones?"),
 )
 _WORK_NOUN = "|".join(part for _, part in _WORK_NOUN_PARTS)
 #: A person-level noun that is a work subject only beside a review state: `branch` is
 #: also a tree's, and QA round 1 (Q-1) is why the singular must stay matchable while
 #: `Heavy snow can hold the branches down` must not be.
 _BRANCH_NOUN = r"branch(?:es)?"
-#: Verbs only a code lane uses. `next step: rebase the branch` is work text; `the next
-#: step is to check the branches for damage after the storm` is not.
-_WORK_VERB = (
-    r"rebase[sd]?|squash(?:ed)?|merged?|merge[sd]?|deploy(?:ed|s)?|cherry-?pick(?:ed)?|"
-    r"push(?:ed)?"
+#: Unambiguous work context: no ordinary-English meaning, so one of these next to a
+#: `next step`/`next action` phrase IS work text. There is deliberately NO verb list
+#: here. `push`, `squash`, `merge`, `deploy` and `cherry-pick` are English verbs —
+#: `push the pram`, `squash the tomatoes`, `cherry-pick the ripe fruit`, `merge the
+#: two jars of jam` — and two review rounds proved the point by refusing exactly that
+#: prose (review round 2, M-1; QA round 2, QA2-1). A word list cannot tell work from
+#: cooking, so the dimension is gone rather than widened again. `rebase`, `worktree`,
+#: `pipeline` and `mcp__…` are safe because no personal sentence uses them.
+_WORK_TOKEN = (
+    r"\b(?:prs?|(?-i:MRs?)|commits?|sha|ci|pipelines?|worktrees?|rebase[sd]?|deploys?|"
+    r"rollouts?)\b"
+    r"|\bmcp__\w+\b"
+    r"|(?<![\w#])#\d{1,6}\b"
 )
 #: A review state, the one cue that makes a person-level noun a work subject.
 _REVIEW_STATE = r"pending|review|reviewed|awaiting|blocked|approved|checks"
@@ -382,9 +396,12 @@ _WORK_REF = re.compile(
     # identifiers are written: `PR` is Philippine Airlines' IATA code (`Flight PR102
     # Manila to Sydney`), and policy, medical-record and bay numbers are written the
     # same way (review round 1, B-1). The row this arm exists for opens with it:
-    # `PR3078 R1 remediation: all source edits done`. A mid-sentence `PR3078` is
-    # therefore NOT a marker — the documented bound of a shape rule.
-    r"|^[ \t]*(?-i:PR|MR)\d{3,6}\b",
+    # `PR3078 R1 remediation: all source edits done`, including the list form an agent
+    # writes a note in (`- PR3078 …`, `1. PR3078 …`). A mid-sentence `PR3078` is
+    # therefore NOT a marker, and a personal identifier that OPENS a line
+    # (`PR1234 is the bay I use`) IS refused — the cost of keying on position, stated
+    # in the guide as well as here so it is not only in a PR thread.
+    r"|^[ \t]*(?:[-*+][ \t]+|\d+[.)][ \t]+)?(?-i:PR|MR)\d{3,6}\b",
     re.I | re.M,
 )
 # A named commit needs a LETTER in the hash: `commit 5000000` is ordinary prose, an
@@ -407,17 +424,13 @@ _MERGE_STATUS = re.compile(
 )
 _RELEASE_CUT = re.compile(r"\b(?:cut|land|ship|tag)\b[^.\n]{0,20}\b(?:(?:the )?release|v\d)", re.I)
 # `next action` needs the SAME work context as `next step`, never standing alone (QA
-# round 1, M-1: `next step is to fold in the flour` is personal prose). The context is
-# a work noun, an MCP tool identifier (`mcp__cloudflare_whoami` — a tool call is
-# execution state for the session that made it), or a work VERB, which is what makes
-# `next step: rebase the branch` work text while `the next step is to check the
-# branches for damage` stays a chore.
+# round 1, M-1: `next step is to fold in the flour` is personal prose), and that
+# context must be a token with no ordinary-English meaning — see `_WORK_TOKEN`. The
+# REVERSE order (`the release lane next step is the merge`) keeps the work-noun set:
+# there the noun is the locator and `next step` only confirms it, and no ordinary
+# sentence puts a household noun in front of that phrase.
 _NEXT_STEP = re.compile(
-    r"\bnext (?:step|lane|action)\b[^.\n]{0,40}\b(?:"
-    + _WORK_NOUN
-    + r"|\w+__\w+|"
-    + _WORK_VERB
-    + r")\b"
+    r"\bnext (?:step|lane|action)\b[^.\n]{0,40}(?:" + _WORK_TOKEN + r")"
     r"|\b(?:the )?(?:" + _WORK_NOUN + r")\b[^.\n]{0,24}\bnext (?:step|lane)\b",
     re.I,
 )
@@ -428,15 +441,13 @@ _NEXT_STEP = re.compile(
 # `scope_fit` now points the writer at the fact itself without the prefix.
 _SESSION_TODO = re.compile(r"\bsession todos?\b", re.I)
 # The live row that motivated the plan/progress widening reads `task progress on this
-# workstream`. The bare noun `workstream` is NOT a marker (review round 1, M-1:
-# `Our workstreams at the charity are fundraising, events and grants` is a personal
-# fact), so the phrase needs a work subject beside it, the way every other arm needs
-# its locator.
-_TASK_PROGRESS = re.compile(
-    r"\btask progress\b[^.\n]{0,40}"
-    r"\b(?:workstreams?|sprints?|backlogs?|milestones?|lanes?|deliverables?)\b",
-    re.I,
-)
+# workstream`, and `task progress` alone is the shape: it is engineering-status
+# vocabulary in a way `workstream`, `sprint`, `milestone`, `lane` and `deliverable`
+# are not (review round 2, m-1: `sprint training`, `marathon milestones` and `wedding
+# deliverables` are ordinary prose). The cost is stated in the PR thread rather than
+# hidden: a personal note that says "not task progress" is refused too, and the writer
+# rephrases.
+_TASK_PROGRESS = re.compile(r"\btask progress\b", re.I)
 _REMAINING_WORK = re.compile(r"\bremaining work\b", re.I)
 
 

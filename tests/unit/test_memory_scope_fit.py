@@ -140,55 +140,165 @@ def test_personal_words_that_look_workish_store(tmp_path, text):
     assert store.put("global", {"title": "Note", "body": text, "tags": []})["scope"] == "global"
 
 
-@pytest.mark.parametrize(
-    "text,shape",
-    [
-        # Live global-bank evidence (2026-10-29): five work-shaped writes reached
-        # `global` from agents that believed they were storing durable facts, each
-        # through ONE missing shape. These are the real texts, so a regression that
-        # reopens any of them fails here. The refusal must NAME the shape it matched,
-        # never a coarse bucket (QA round 1, Q-4).
-        (
-            "Saver releases so far: agent-server #233 live (image 20db00fc), #234 live",
-            "tracker-ref",
-        ),
-        ("PR3078 R1 remediation: all source edits done (validate, chain, client)", "tracker-ref"),
-        ("Session todo: query Cloudflare MCP for radienthq.com zone id + ruleset", "session-todo"),
-        (
-            "cloudflare-zone-lookup: next action is mcp__cloudflare_whoami then search zones",
-            "next-step",
-        ),
-        (
-            "Do not use memory recall for task progress on this workstream; project record",
-            "task-progress",
-        ),
-    ],
+# ---------------------------------------------------------------------------
+# The two directions, enumerated and COUNTED.
+#
+# The bias in doubt is STORE THE FACT (see the code comment above `_WORK_TOKEN`): a
+# work note that reaches global is caught later by `lop memory triage`, which lists it
+# and can move it; a personal fact a shape rule refuses is silent data loss. So every
+# false positive from review/QA rounds 1-2 is an accepted case here, every work shape
+# is a refused case with the name it reports, and `test_the_bias_is_store_the_fact`
+# pins BOTH lengths — a future widening cannot quietly invert the bias.
+# ---------------------------------------------------------------------------
+PERSONAL_PROSE: tuple[str, ...] = (
+    # --- the live bank's own personal rows ------------------------------------
+    "never force a shared tool's lock (uv cache prune --force while other lanes "
+    "hold the uv cache lock) - report the blocker instead",
+    "UI i18n PRs consolidate under one owner; shared-catalogue merge order: 1052 actions union.",
+    "assertion = Google ID token (RS256, aud=GOOGLE_VAULT_CLIENT_ID, iss accounts.google.com).",
+    "L4 remaining TODO: drawer tabs Asks|Updates|All (D9), transcript flag line "
+    "+ in-view auto-read.",
+    "never delete or move ~/worktrees/sdk-pr2 (717M).",
+    "I fitted MR16 LED bulbs in the kitchen downlights.",
+    "The next action is to renew the passport before March.",
+    "Session notes: the todo list for the trip is on the fridge.",
+    # --- review round 1, B-1: personal reference numbers ----------------------
+    # `PR` is Philippine Airlines' IATA code; policy, medical-record, bay and
+    # membership numbers take the same letter+digits form.
+    "Flight PR102 Manila to Sydney departs 22:40, seat 14A.",
+    "Boarding pass PR1842 - terminal 2, gate 14.",
+    "Insurance policy PR90021 renews 1 June, premium by direct debit.",
+    "Medical record MR204567 at St Vincent's (Dr Okafor).",
+    "I park in bay PR1234 at the office garage.",
+    "My gym membership number is MR98765.",
+    "The passport application (PR4431) is with the consulate.",
+    # The documented bound of the unspaced arm: only a LINE-OPENING ref is a marker.
+    "The build I mentioned is covered in PR3078.",
+    # --- review round 1, M-1: bare plan topics ---------------------------------
+    "Our workstreams at the charity are fundraising, events and grants.",
+    "I run three workstreams at the school: reading, sports and music.",
+    # --- QA round 1, Q-1/Q-2: person-level nouns -------------------------------
+    "Heavy snow can hold the branches down until it melts.",
+    "The next step is to check the branches for damage after the storm.",
+    "Please hold my tickets at the box office until Friday.",
+    "There is a HOLD on the concert tickets until payday.",
+    "The next step is to collect the tickets from the box office.",
+    "next action: book a ticket for the concert on Friday",
+    "next action: book tickets for the concert on Friday",
+    "Parking tickets: #4412 and #4413 are both paid.",
+    "My medical issues are listed in file #7.",
+    "The HOA has a hold on all issues of the newsletter until the AGM.",
+    # --- review round 2, M-1 / QA round 2, QA2-1: ordinary English verbs ------
+    # `push`, `squash` and `cherry-pick` are cooking, prams and fruit.
+    "Next step: push the button to confirm the transfer.",
+    "The next step is to push the pram to the corner shop.",
+    "next step: squash the tomatoes into the passata",
+    "Next step: squash the booking for the court on Tuesday.",
+    "The next step is to cherry-pick the ripe fruit for the jam.",
+    "next step: push the trolley round to the checkout",
+    "Next action: squash the aphids on the roses.",
+    # --- review round 2, m-1: plan nouns that are also personal vocabulary -----
+    "sprint training",
+    "marathon milestones",
+    "wedding deliverables",
+    # --- QA round 2, QA2-2: a ticket HOLD is a box office, not a review state ---
+    "There is a HOLD pending review on the concert ticket.",
+    "The box office has a hold pending their review of my tickets.",
+    # --- QA round 1's own passing controls -----------------------------------
+    "next action: call the plumber",
+    "dentist appointment on Thursday at 3pm",
 )
-def test_live_missed_work_shapes_are_refused(text, shape):
-    """The five shapes that reached the live global bank are refused, by name."""
+
+WORK_SHAPES: tuple[tuple[str, str], ...] = (
+    # The five live global-bank rows, verbatim from the real store. Each was written
+    # by an agent that believed it was storing a durable fact; each refusal must also
+    # NAME the shape, never a coarse bucket (QA round 1, Q-4).
+    ("Saver releases so far: agent-server #233 live (image 20db00fc), #234 live", "tracker-ref"),
+    ("PR3078 R1 remediation: all source edits done (validate, chain, client)", "tracker-ref"),
+    # Review round 2, n-1: the list form an agent writes a session note in.
+    ("- PR3078 R1 remediation: done", "tracker-ref"),
+    ("1. PR3078 R1 remediation: done", "tracker-ref"),
+    ("Session todo: query Cloudflare MCP for radienthq.com zone id", "session-todo"),
+    (
+        "cloudflare-zone-lookup: next action is mcp__cloudflare_whoami then search zones",
+        "next-step",
+    ),
+    (
+        "Do not use memory recall for task progress on this workstream; project record",
+        "task-progress",
+    ),
+    # Operator decision on QA round 1, Q-3: session narration never belongs in global,
+    # even for an errand, and the refusal says how to keep the fact.
+    ("Session todo: dentist", "session-todo"),
+    # Review/QA round 1: the singular work shapes that must keep refusing.
+    ("HOLD pending review on the branch", "hold-branch"),
+    ("next step: rebase the branch", "next-step"),
+    ("the release lane next step is the merge", "next-step"),
+    ("next step: cut the release and tag v1.2.3", "release-cut"),
+    ("Merge PR #2463 after CI goes green", "tracker-ref"),
+    ("the PR was merged", "merge-status"),
+    # The DOCUMENTED line-opening bound (guide + `_WORK_REF` comment): a personal
+    # identifier that opens a line has the shape of a status line, so it is refused and
+    # the writer rephrases. Pinned so the bound cannot drift silently either way.
+    ("PR1234 is the bay I use at the office garage.", "tracker-ref"),
+    ("MR204567 at St Vincent's (Dr Okafor).", "tracker-ref"),
+)
+
+# Sentences that a literal-phrase rule refuses BY OPERATOR DECISION (round 3, item 2:
+# "`_TASK_PROGRESS` keys off the literal phrase `task progress` only"). They are
+# personal prose, so they are listed and asserted REFUSED rather than dropped: the cost
+# is visible here, and reversing the decision is a test change, not an excavation.
+DOCUMENTED_PHRASE_COST: tuple[str, ...] = (
+    "Global memory is not task progress, release status, transient approvals, "
+    "debug logs or session resumption.",
+    "Task progress on the kitchen renovation is slow.",
+    # Review round 2, m-1 measured these three as false positives from the noun list;
+    # the phrase rule refuses them too, and that is the accepted cost of keying on
+    # `task progress` alone (the bare nouns above store).
+    "Task progress on this week's sprint training is good.",
+    "task progress against the marathon milestones is on track",
+    "task progress on the wedding deliverables: rings bought",
+)
+
+
+@pytest.mark.parametrize("text", PERSONAL_PROSE)
+def test_personal_prose_still_stores(tmp_path, text):
+    """Every one of these is a durable personal fact and must reach the global bank."""
+    store = _store(tmp_path)
+    assert store.put("global", {"title": "Note", "body": text, "tags": []})["scope"] == "global"
+
+
+@pytest.mark.parametrize("text,shape", WORK_SHAPES)
+def test_work_shapes_are_refused_and_named(text, shape):
     with pytest.raises(MemoryError) as exc:
         scope_fit("global", {"title": "x", "body": text, "tags": [], "aliases": [], "subject": ""})
     assert shape in str(exc.value)
 
 
-# The shapes Q-1 and the operator's Q-3 decision keep refusing. `HOLD ... branch` and
-# `next step: rebase the branch` were refused on the base and a `branches?`
-# pluralisation silently dropped the singular (QA round 1, Q-1), so they are pinned
-# here rather than left to the tracker arm, which never covered them.
-@pytest.mark.parametrize(
-    "text,shape",
-    [
-        ("HOLD pending review on the branch", "hold-branch"),
-        ("next step: rebase the branch", "next-step"),
-        # The operator's decision on QA Q-3: a global fact must never carry
-        # session-narration framing, so the phrase stays refused even for an errand.
-        ("Session todo: dentist", "session-todo"),
-    ],
-)
-def test_shapes_that_stay_refused(text, shape):
+@pytest.mark.parametrize("text", DOCUMENTED_PHRASE_COST)
+def test_the_cost_of_a_literal_phrase_is_pinned(text):
+    """The one class round 3 chose to refuse: prose that contains `task progress`."""
     with pytest.raises(MemoryError) as exc:
         scope_fit("global", {"title": "x", "body": text, "tags": [], "aliases": [], "subject": ""})
-    assert shape in str(exc.value)
+    assert "task-progress" in str(exc.value)
+
+
+def test_the_bias_is_store_the_fact(tmp_path):
+    """Both directions, counted. A widening that inverts the bias fails HERE.
+
+    The numbers are deliberately exact: adding a sentence to either tuple without
+    deciding which way it should fall is the mistake this catches.
+    """
+    assert len(PERSONAL_PROSE) == 42
+    assert len(WORK_SHAPES) == 16
+    assert len(DOCUMENTED_PHRASE_COST) == 5
+    store = _store(tmp_path)
+    for index, text in enumerate(PERSONAL_PROSE):
+        stored = store.put("global", {"title": f"note {index}", "body": text, "tags": []})
+        assert stored["scope"] == "global", text
+    for text, _shape in WORK_SHAPES:
+        with pytest.raises(MemoryError):
+            store.put("global", {"title": "work", "body": text, "tags": []})
 
 
 def test_session_todo_refusal_is_actionable_and_the_fact_itself_stores(tmp_path):
@@ -213,76 +323,6 @@ def test_session_todo_refusal_is_actionable_and_the_fact_itself_stores(tmp_path)
         "global", {"title": "Cloudflare zone", "body": "query the zone id", "tags": []}
     )
     assert stored["scope"] == "global"
-
-
-# Negative controls, one class per arm, drawn from ordinary prose and — where the live
-# bank has one — from its REAL personal rows (contacts, preferences, environment).
-# Round 1 bound each widening: the unspaced ref needs the shape a status line has, the
-# plan/progress phrase needs a work subject, and the person-level nouns (`tickets`,
-# `issues`, `branches`) are work only beside a work verb or a review state.
-@pytest.mark.parametrize(
-    "text",
-    [
-        # Live-bank personal rows: `lanes` in a stored disk-reclaim rule (why `lane`
-        # stayed singular in the HOLD arm), and `task progress` / `release status`
-        # inside the operator's own boundaries note (why the plan arm needs a subject).
-        "never force a shared tool's lock (uv cache prune --force while other lanes "
-        "hold the uv cache lock) - report the blocker instead",
-        "Global memory is only for durable user/personal facts, preferences, contacts "
-        "and environment-not task progress, release status, transient approvals, "
-        "debug logs or session resumption.",
-        # Plural `PRs` with no tracker ref beside it, from the live bank.
-        "UI i18n PRs consolidate under one owner; shared-catalogue merge "
-        "order: 1052 actions union.",
-        # Two uppercase letters + three digits that are NOT a tracker ref (a JWT alg).
-        "assertion = Google ID token (RS256, aud=GOOGLE_VAULT_CLIENT_ID, "
-        "iss accounts.google.com).",
-        # A bare TODO and a lane label: `session todo` is the phrase, not `todo`.
-        "L4 remaining TODO: drawer tabs Asks|Updates|All (D9), transcript flag line "
-        "+ in-view auto-read.",
-        # A hyphenated key ending in `pr` + one digit: not an unspaced PR ref.
-        "never delete or move ~/worktrees/sdk-pr2 (717M).",
-        # Review B-1: `PR`/`MR` + digits is also how personal reference numbers are
-        # written — `PR` is Philippine Airlines' IATA code, and policy, medical-record,
-        # parking-bay and membership numbers take the same form. Each was ACCEPTED on
-        # the base and must stay accepted.
-        "Flight PR102 Manila to Sydney departs 22:40, seat 14A.",
-        "Boarding pass PR1842 - terminal 2, gate 14.",
-        "Insurance policy PR90021 renews 1 June, premium by direct debit.",
-        "Medical record MR204567 at St Vincent's (Dr Okafor).",
-        "I park in bay PR1234 at the office garage.",
-        "My gym membership number is MR98765.",
-        "The passport application (PR4431) is with the consulate.",
-        # The documented bound of the unspaced arm: only a LINE-START ref is a marker.
-        "The build I mentioned is covered in PR3078.",
-        # Review M-1: a bare plan topic is a noun, not a shape.
-        "Our workstreams at the charity are fundraising, events and grants.",
-        "I run three workstreams at the school: reading, sports and music.",
-        # QA Q-1/Q-2: person-level nouns without work context. Six of these were
-        # refused on the head this round fixes and accepted on the base.
-        "Heavy snow can hold the branches down until it melts.",
-        "The next step is to check the branches for damage after the storm.",
-        "Please hold my tickets at the box office until Friday.",
-        "There is a HOLD on the concert tickets until payday.",
-        "The next step is to collect the tickets from the box office.",
-        "next action: book a ticket for the concert on Friday",
-        "next action: book tickets for the concert on Friday",
-        "Parking tickets: #4412 and #4413 are both paid.",
-        "My medical issues are listed in file #7.",
-        "The HOA has a hold on all issues of the newsletter until the AGM.",
-        # Rust/JSON spec only, and the 2-digit product-code class the arm excludes.
-        "I fitted MR16 LED bulbs in the kitchen downlights.",
-        # QA round 1's own passing controls, kept so they cannot regress.
-        "next action: call the plumber",
-        "The next action is to renew the passport before March.",
-        "Session notes: the todo list for the trip is on the fridge.",
-        "dentist appointment on Thursday at 3pm",
-    ],
-)
-def test_personal_prose_still_stores(tmp_path, text):
-    """Every one of these is a durable personal fact and must reach the global bank."""
-    store = _store(tmp_path)
-    assert store.put("global", {"title": "Note", "body": text, "tags": []})["scope"] == "global"
 
 
 @pytest.mark.parametrize(
