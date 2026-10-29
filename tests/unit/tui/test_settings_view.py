@@ -3109,10 +3109,7 @@ async def test_paging_lands_on_the_true_end_of_the_list() -> None:
             presses = sum(1 for row in view._rows if row.kind == "header") + 2
             for _ in range(presses):
                 await pilot.press("pagedown")
-                await pilot.pause()
-                if view._selected == previous:
-                    break
-                previous = view._selected
+            await pilot.pause()
 
             last = view._selectable()[-1]
             assert view._selected == last, (
@@ -3126,10 +3123,7 @@ async def test_paging_lands_on_the_true_end_of_the_list() -> None:
             # And back: `pageup` reaches the first row the same way.
             for _ in range(presses):
                 await pilot.press("pageup")
-                await pilot.pause()
-                if view._selected == previous:
-                    break
-                previous = view._selected
+            await pilot.pause()
             assert view._selected == view._selectable()[0]
 
 

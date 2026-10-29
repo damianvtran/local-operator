@@ -120,9 +120,9 @@ async def test_a_take_binds_to_the_user_message_start_whose_id_is_its_request_id
             await release_tail.wait()
         return await original_compact(self)
 
-    def observed_flush(self: Any) -> None:
+    async def observed_flush(self: Any) -> None:
         flush_queue_sizes.append(self._steering_queue.qsize())
-        original_flush(self)
+        await original_flush(self)
 
     monkeypatch.setattr(session_module.Session, "_maybe_compact", held_compact)
     monkeypatch.setattr(session_module.Session, "_flush_parked_deliveries", observed_flush)
