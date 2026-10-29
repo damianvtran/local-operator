@@ -729,12 +729,17 @@ def render_binding_notice_repeat(text: str, *, seen: int, accounts: int = 1) -> 
     the rest of this module already uses for one account on one owner
     (``_login_phrase``, and the remedy ``lop login <provider>``), so the marker
     names the thing the operator has two of rather than introducing a second word
-    for it. It is also 2 cells shorter than "accounts", which is what keeps the
-    marker on the sentence's own line: at 100 columns this sentence is 76 cells and
-    a notice row offers ~90, so the earlier ``×20 · 2 accounts`` (16 cells) wrapped
-    its last word onto a line of its own — measured in the round-1 after-frame —
-    while ``×20 · 2 logins`` (14) fits. The wordier "alternating between 2 logins"
-    would cost 29 and wrap regardless.
+    for it. It is 2 cells shorter than "accounts".
+
+    AND IT DOES NOT FIT ON ONE LINE AT 100 COLUMNS — measured, not assumed. The
+    longest flood sentence (``[session credential] This session is now using the
+    <provider> login on <device>.``, 77 cells) plus ``  ×20 · 2 logins`` (16) needs
+    93 cells; the notice's text area at 100x30 is ~91, so the last word still
+    strands on its own line, exactly as ``×20 · 2 accounts`` did. Sentences about
+    two cells shorter do fit. This is recorded rather than fixed because the
+    wording is a design decision (round 2, D3): the candidates that would fit change
+    the copy again (drop the separator, or drop the unit and lose the fact D1
+    exists to disclose).
 
     It lives HERE, beside the sentence it annotates, because this module is the
     credential copy home; the fold in ``tui/session_presentation.py`` calls it
