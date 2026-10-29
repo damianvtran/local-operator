@@ -72,14 +72,22 @@ forgets it.
 | Desktop operation | Receipt location | Capability |
 | --- | --- | --- |
 | GET conversations/{id}/messages/{message}/replies | Query | `team_bridge_threads` |
-| POST conversations/{id}/messages with `thread_root_id` (reply) | JSON object (optional, as above) | `team_bridge_threads` |
+| POST conversations/{id}/messages with `thread_root_id` (reply) | JSON object | `team_bridge_threads` |
 | PUT conversations/{id}/messages/{message}/reactions/{emoji} | JSON object | `team_bridge_reactions` |
 | DELETE conversations/{id}/messages/{message}/reactions/{emoji} | Query | `team_bridge_reactions` |
 
 An absent, blank, repeated or malformed `expected_account_id` or `tenant_id`
-on the replies read or either reaction route is refused (422) before any
-messaging-service request; a mismatched owner is `409 account_mismatch`, also
-with no request. A new renderer still sends the receipt on threaded sends.
+on the replies read, a threaded send, or either reaction route is refused (422)
+before any messaging-service request; a mismatched owner is `409 account_mismatch`,
+also with no request. An ordinary top-level send (no `thread_root_id`) keeps the
+legacy optional receipt under `team_bridge_conversation_owner_guard`.
+
+One adjacent route is deliberately NOT covered by either key, and callers must
+not assume otherwise: `GET conversations/{id}/messages/{message}/body` is the
+agent-classification body fetch (body + binding hash), it predates this work,
+and it takes no owner receipt. No renderer op reaches it (the desktop contract
+has no `team_bridge.messages.body`), so it feeds no human thread surface today;
+closing it is follow-up work, not part of this promise.
 
 ## Validation boundaries
 

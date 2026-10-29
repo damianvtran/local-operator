@@ -440,17 +440,19 @@ def static_feature_flags() -> dict[str, Any]:
         # is REQUIRED rather than optional.
         "team_bridge_conversation_owner_guard": 1,
         # THREADS: `GET .../conversations/{id}/messages/{message_id}/replies`
-        # (read one thread) plus `thread_root_id` on the guarded send above.
-        # The replies read REQUIRES the captured-owner receipt
-        # (`expected_account_id` + explicit `tenant_id`), compared atomically
-        # against the exact dispatch bearer, and answers `409 account_mismatch`
-        # when the machine has since signed in as someone else: a thread read
-        # (or a delayed retry of one) started as account A can never answer B's
-        # thread. The UI held threads closed until this guard existed
-        # (`TEAM_BRIDGE_THREADS_SHIPPED_IN_THIS_BUILD`, the #1304 cache/retry
-        # isolation defects), so this key PROMISES the guard, not only the
-        # route: never advertise it on a build whose replies read accepts a
-        # receipt-less call. `test_conversation_owner_guard.py` pins that pair.
+        # (read one thread) plus `thread_root_id` on the send above. BOTH halves
+        # REQUIRE the captured-owner receipt (`expected_account_id` + explicit
+        # `tenant_id`), compared atomically against the exact dispatch bearer,
+        # and both answer `409 account_mismatch` when the machine has since
+        # signed in as someone else: a thread read (or a delayed retry of one)
+        # started as account A can never answer B's thread, and a reply composed
+        # as A is never posted as B. The UI held threads closed until this guard
+        # existed (`TEAM_BRIDGE_THREADS_SHIPPED_IN_THIS_BUILD`, the #1304
+        # cache/retry isolation defects), so this key PROMISES the guard, not
+        # only the route: never advertise it on a build whose replies read or
+        # threaded send accepts a receipt-less call. An ordinary top-level send
+        # keeps the legacy optional receipt under the owner-guard key above.
+        # `test_conversation_owner_guard.py` pins the pair.
         # Its own key by the `radient_org` rule: a renderer that does not see it
         # mounts no thread affordance and sends no thread request.
         "team_bridge_threads": 1,

@@ -1622,6 +1622,22 @@ class ConversationSendIn(ConversationOwnerIn):
         _validate_attachment_ids(self.attachment_ids)
         if not self.body and not self.attachment_ids:
             raise ValueError("a message needs body or attachment_ids")
+        # A THREADED send (``thread_root_id`` present) REQUIRES the captured-owner
+        # receipt, because it is a thread MUTATION and ``team_bridge_threads``
+        # promises the guard on the thread surface, the same promise the replies
+        # read keeps: a reply composed as account A and sent after a login
+        # switch must not post as B, and a pre-fix client must not be able to
+        # mutate through this route at all. An ordinary top-level send keeps the
+        # legacy optional receipt (``team_bridge_conversation_owner_guard``) so
+        # an older renderer keeps working. No shipped renderer ever sent a reply
+        # (the desktop UI held threads closed), so requiring it here breaks no
+        # working caller; round-1 review R1 found this path still dispatched
+        # receipt-less after an account switch.
+        if self.thread_root_id is not None:
+            if self.expected_account_id is None or not self.expected_account_id.strip():
+                raise ValueError("a threaded reply needs expected_account_id")
+            if self.tenant_id is None or not self.tenant_id.strip():
+                raise ValueError("a threaded reply needs an explicit tenant_id")
         return self
 
 

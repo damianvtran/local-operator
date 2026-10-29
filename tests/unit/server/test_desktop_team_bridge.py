@@ -3324,9 +3324,18 @@ async def test_conversation_reactions_refuse_agent_impersonation_and_oversized_i
 async def test_conversation_send_forwards_a_thread_root(api):
     client, _root, _d = api
     FakeClient.behavior["conversation_send"] = {"id": "bcmsg_2", "seq": 2}
+    # A threaded reply REQUIRES the captured-owner receipt (`team_bridge_threads`
+    # covers the mutation half too — round-1 review R1), so the forwarding case
+    # carries one; an ordinary send still omits it, as the case below pins.
     response = await client.post(
         "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
-        json={"client_ref": "ref-2", "body": "on it", "thread_root_id": "bcmsg_root0001"},
+        json={
+            "client_ref": "ref-2",
+            "body": "on it",
+            "thread_root_id": "bcmsg_root0001",
+            "tenant_id": "org_other",
+            "expected_account_id": "acc_a",
+        },
     )
     assert response.status_code == 200, response.text
     assert FakeClient.behavior["last_send_thread_root_id"] == "bcmsg_root0001"
