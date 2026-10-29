@@ -18651,6 +18651,7 @@ def _peek_search(
     read (a compaction between the two reads, reported as the miss it is).
     """
 
+    from local_operator.harness.comms import is_peek_step_entry
     from local_operator.session import compression
     from local_operator.session.transcript import (
         TranscriptEntry,
@@ -18686,15 +18687,25 @@ def _peek_search(
                     break
                 scanned += len(raw) + 1
                 text = raw.decode("utf-8", errors="replace")
+                # A REFUSED ROW CANNOT MATCH (QA round 1, Q1). The step filter is
+                # what keeps the account label out of a peek — and testing the raw
+                # JSON first made the FILTER itself an oracle: a query for a
+                # substring of a label this surface will never print answered
+                # yes/no, and 513 of those rebuilt an email. So the row is parsed
+                # and gated BEFORE the needle is tested, and a refused row can
+                # neither match nor become an anchor. The cost is one parse per
+                # row already inside the byte budget, which is the same decode
+                # this loop was doing anyway.
+                entry = TranscriptEntry.from_json(text)
+                if entry is None or not is_peek_step_entry(entry):
+                    continue
                 if pattern is None:
                     found = needle in text
                 else:
                     found = pattern.search(text) is not None
                 if found:
-                    entry = TranscriptEntry.from_json(text)
-                    if entry is not None:
-                        hit_id = entry.id
-                        break
+                    hit_id = entry.id
+                    break
             if hit_id or budget_stop:
                 break
     if not hit_id:

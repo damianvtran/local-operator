@@ -731,17 +731,19 @@ def render_binding_notice_repeat(text: str, *, seen: int, accounts: int = 1) -> 
     names the thing the operator has two of rather than introducing a second word
     for it. It is 2 cells shorter than "accounts".
 
-    AND THE MARKER NEVER SPLITS, EVEN WHEN THE LINE IS FULL (design round 3, D4).
-    The notice's wrapper is ``wrap_cells``, which breaks on the ASCII SPACE only,
-    so the two spaces before ``×`` are the marker's one legal break point and
+    AND THE MARKER MOVES WHOLE, NEVER IN PIECES (design round 3, D4). The
+    notice's wrapper is ``wrap_cells``, which breaks on the ASCII SPACE only, so
+    the two spaces before ``×`` are the marker's one legal break point and
     everything after it is NBSP-joined — the same trick, and the same reason, as
     ``SendFailureNotice._SEND_AGAIN_CONTROLS`` in ``tui/session_presentation.py``.
     So the marker either stays inline or moves under the sentence WHOLE: at 100
-    columns the 77-cell flood sentence leaves room for ``×20 · 2`` but not for
-    ``logins`` (measured in the round-2 frame), and with NBSP that row now reads
-    ``… on my-mac.  ×20 · 2`` / ``logins`` as an unbroken unit on the second line
-    rather than a fragment stranded mid-marker. A longer device name moves the
-    whole marker down instead, which the round-3 frame shows.
+    columns a 77-cell flood sentence reads ``… on my-mac.`` / ``×20 · 2 logins``,
+    and a longer device name (``damians-macbook-pro``) reads the same way — the
+    marker whole on the second line either way, which both round-3 frames show.
+    The one bound: this holds while the notice's text area is at least as wide as
+    the marker itself (14 cells), because below that ``wrap_cells`` has no choice
+    but to break a token that no longer fits (design review round 3, NIT-1).
+
     It lives HERE, beside the sentence it annotates, because this module is the
     credential copy home; the fold in ``tui/session_presentation.py`` calls it
     rather than spelling a marker of its own.

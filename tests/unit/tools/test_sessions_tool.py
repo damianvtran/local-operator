@@ -1540,6 +1540,70 @@ async def test_peek_search_budget_is_a_depth_and_moves_with_the_needle(
 
 
 @pytest.mark.asyncio
+async def test_peek_search_cannot_use_a_refused_row_as_an_oracle(root: Path) -> None:
+    """A query can neither print nor MATCH a row the peek refuses (QA r1, Q1).
+
+    The step filter is what keeps the account label out of a peek. Testing the
+    raw JSON of every row BEFORE that filter made the filter itself observable:
+    a query for a substring of a label this surface never prints still answered
+    yes/no, and QA rebuilt a whole email in 513 of them on `b6759d3be`. So a
+    refused row may neither match nor become an anchor — and the second half of
+    this cell proves the walk still finds a row it is allowed to show, which is
+    what stops the fix from being "search nothing".
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage, Message
+    from local_operator.session.transcript import Transcript
+
+    label = "qa.alpha.operator@example.test"
+    session_id = "eeee77778888"
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "created_at.json").write_text("1700000000.0", encoding="utf-8")
+    journal = Transcript(directory)
+    await journal.append_message(Message.user("an ordinary row about widgets"))
+    await journal.append_message(
+        CustomMessage(
+            custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": f"[session credential] This session is now using {label} on qa-node.",
+                "provider": "stub",
+                "owner_device": "d_local",
+                "credential_id": 125,
+            },
+        ),
+        preserve_mtime=True,
+    )
+    await journal.append_message(Message.user("another ordinary row"))
+    write_session_title(directory, "oracle case", user_set=False, past_names=[])
+
+    # A substring of the label the peek refuses to print: this must be a MISS.
+    oracle = await _peek(root, {"op": "peek", "session": session_id, "query": "qa.alpha.operator"})
+    assert not oracle.is_error, oracle.text
+    assert oracle.text.startswith("no match for 'qa.alpha.operator'"), oracle.text
+    assert (oracle.details or {})["steps_shown"] == 0
+    assert label not in oracle.text and label not in json.dumps(oracle.details or {})
+    # ...and it is not an anchor either, so the refusal cannot be walked around
+    # one id at a time: the id the row really has finds no window of its own.
+    refused_ids = [
+        entry.id
+        for entry in journal.entries()
+        if (entry.payload or {}).get("custom_type") == SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    ]
+    assert len(refused_ids) == 1
+    around = await _peek(root, {"op": "peek", "session": session_id, "around_id": refused_ids[0]})
+    assert not around.is_error, around.text
+    assert label not in around.text and label not in json.dumps(around.details or {})
+
+    # The control half: a row the peek MAY show is still found, and named.
+    hit = await _peek(root, {"op": "peek", "session": session_id, "query": "about widgets"})
+    assert not hit.is_error, hit.text
+    assert (hit.details or {})["mode"] == "search"
+    assert "about widgets" in hit.text and "← match" in hit.text
+
+
+@pytest.mark.asyncio
 async def test_peek_digest_shape_and_counts(root: Path) -> None:
     """§8.3: counts per kind, the newest ask/reply, the tool tail, ≤10 lines."""
     rows = [
