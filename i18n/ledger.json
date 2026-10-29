@@ -9386,6 +9386,54 @@
       },
       "status": "passed",
       "note": "w2 es backfill: 17 keys; independent audit w2a1 passed (committed evidence i18n/audits/evidence/es/cli.wake_help/w2a1/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.shell",
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 2ff662d60afd)",
+        "model": "radient/auto (provider-quota fallback chain from anthropic/claude-opus-5-5; this copy was authored under radient/auto)",
+        "date": "2026-10-29"
+      },
+      "status": "pending_audit",
+      "note": "Translated from the current en bytes at origin/main c01d0ae56d1 (en hash read through the repo's catalogues.catalogue_sha256, never hand-computed; derived artifacts come from scripts/i18n/generate.py). Target vi catalogue SHA-256 95a280514f37c64adcc7265aaeb7501e638879c497bd95a80cfc7dea84eacbf7. Independent i18n-auditor has NOT run: this row deliberately does not pass, so the carried-namespace gate keeps vi out of shipped.json until an independent audit adds its own auditor fields at these bytes. Translator wrote no auditor field. Terminology per glossary §2 and style-guides/vi.md: phiên (session), lượng sử dụng (usage), chuyển tiếp (relay), không gian làm việc reserved for workspace (unused here), mô hình (model), thư mục làm việc (working directory), hạn mức (quota/allowance, matching shipped vi wire.settings copy), tín dụng (credits, matching shipped vi wire.radient_saver copy), nhà cung cấp (provider), định tuyến tài khoản (account routing). Plural arms are other-only per the vi style guide; unit noun keys carry the noun alone with no # form. placeholder parity and ICU argument tuples verified against en with the repo parser; NFC precomposed throughout."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.session",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 2ff662d60afd)",
+        "model": "radient/auto (provider-quota fallback chain from anthropic/claude-opus-5-5; this copy was authored under radient/auto)",
+        "date": "2026-10-29"
+      },
+      "status": "pending_audit",
+      "note": "Translated from the current en bytes at origin/main c01d0ae56d1 (en hash read through the repo's catalogues.catalogue_sha256, never hand-computed; derived artifacts come from scripts/i18n/generate.py). Target vi catalogue SHA-256 85ae31504ebf7a8482a9b5aef39909fe94163a4512d84580188713db9c0cdfb3. Independent i18n-auditor has NOT run: this row deliberately does not pass, so the carried-namespace gate keeps vi out of shipped.json until an independent audit adds its own auditor fields at these bytes. Translator wrote no auditor field. Terminology per glossary §2 and style-guides/vi.md: phiên (session), lượng sử dụng (usage), chuyển tiếp (relay), không gian làm việc reserved for workspace (unused here), mô hình (model), thư mục làm việc (working directory), hạn mức (quota/allowance, matching shipped vi wire.settings copy), tín dụng (credits, matching shipped vi wire.radient_saver copy), nhà cung cấp (provider), định tuyến tài khoản (account routing). Plural arms are other-only per the vi style guide; unit noun keys carry the noun alone with no # form. placeholder parity and ICU argument tuples verified against en with the repo parser; NFC precomposed throughout."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.account_policy",
+      "source_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 2ff662d60afd)",
+        "model": "radient/auto (provider-quota fallback chain from anthropic/claude-opus-5-5; this copy was authored under radient/auto)",
+        "date": "2026-10-29"
+      },
+      "status": "pending_audit",
+      "note": "Translated from the current en bytes at origin/main c01d0ae56d1 (en hash read through the repo's catalogues.catalogue_sha256, never hand-computed; derived artifacts come from scripts/i18n/generate.py). Target vi catalogue SHA-256 6c17a6dc79a7b7fb83be655e85fd7cbbafea10f44118c63f9270a3fed05795fc. Independent i18n-auditor has NOT run: this row deliberately does not pass, so the carried-namespace gate keeps vi out of shipped.json until an independent audit adds its own auditor fields at these bytes. Translator wrote no auditor field. Terminology per glossary §2 and style-guides/vi.md: phiên (session), lượng sử dụng (usage), chuyển tiếp (relay), không gian làm việc reserved for workspace (unused here), mô hình (model), thư mục làm việc (working directory), hạn mức (quota/allowance, matching shipped vi wire.settings copy), tín dụng (credits, matching shipped vi wire.radient_saver copy), nhà cung cấp (provider), định tuyến tài khoản (account routing). Plural arms are other-only per the vi style guide; unit noun keys carry the noun alone with no # form. placeholder parity and ICU argument tuples verified against en with the repo parser; NFC precomposed throughout."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.library",
+      "source_sha256": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 2ff662d60afd)",
+        "model": "radient/auto (provider-quota fallback chain from anthropic/claude-opus-5-5; this copy was authored under radient/auto)",
+        "date": "2026-10-29"
+      },
+      "status": "pending_audit",
+      "note": "Translated from the current en bytes at origin/main c01d0ae56d1 (en hash read through the repo's catalogues.catalogue_sha256, never hand-computed; derived artifacts come from scripts/i18n/generate.py). Target vi catalogue SHA-256 3841bfe2c60bcf0496d5f57ad237dfc71ee92bf396fdd4ed4a296655e1ab7c85. Independent i18n-auditor has NOT run: this row deliberately does not pass, so the carried-namespace gate keeps vi out of shipped.json until an independent audit adds its own auditor fields at these bytes. Translator wrote no auditor field. Terminology per glossary §2 and style-guides/vi.md: phiên (session), lượng sử dụng (usage), chuyển tiếp (relay), không gian làm việc reserved for workspace (unused here), mô hình (model), thư mục làm việc (working directory), hạn mức (quota/allowance, matching shipped vi wire.settings copy), tín dụng (credits, matching shipped vi wire.radient_saver copy), nhà cung cấp (provider), định tuyến tài khoản (account routing). Plural arms are other-only per the vi style guide; unit noun keys carry the noun alone with no # form. placeholder parity and ICU argument tuples verified against en with the repo parser; NFC precomposed throughout."
     }
   ]
 }
