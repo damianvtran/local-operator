@@ -19,6 +19,8 @@ So these fixtures come in pairs, deliberately:
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from local_operator.saver.canonical import canonical_bytes, digest
@@ -31,7 +33,7 @@ from local_operator.saver.validate import (
 )
 
 
-def _payload(rows: list[dict], text: str, *, first: bool = True) -> dict:
+def _payload(rows: list[dict[str, Any]], text: str, *, first: bool = True) -> dict[str, Any]:
     return {
         "contract": "saver-v1",
         "advanced": len(rows),
@@ -48,7 +50,7 @@ def _payload(rows: list[dict], text: str, *, first: bool = True) -> dict:
     }
 
 
-def _bulk_rows() -> list[dict]:
+def _bulk_rows() -> list[dict[str, Any]]:
     """A span large enough that the reference reducer actually packs an epoch."""
     return [
         {
@@ -64,7 +66,7 @@ def _bulk_rows() -> list[dict]:
     ]
 
 
-def _reference_epoch(rows: list[dict]) -> str:
+def _reference_epoch(rows: list[dict[str, Any]]) -> str:
     """The reference reducer's own bytes for these rows, or skip."""
     reference = pytest.importorskip(
         "radient_context_reduction.saver", reason="reference reducer not on PYTHONPATH"
@@ -246,7 +248,7 @@ async def test_a_compatibility_rejection_never_pauses_the_process() -> None:
 # --- round 3 findings (R3-1, R3-2, R3-3, S-15) ------------------------------
 
 
-def _reject(source_rows: list[dict], record: str) -> None:
+def _reject(source_rows: list[dict[str, Any]], record: str) -> None:
     with pytest.raises(SaverRejected):
         check_provenance(HEADER + "\n" + record, source_rows)
 

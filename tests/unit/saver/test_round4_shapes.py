@@ -10,12 +10,14 @@ a short prefix or suffix is a cut at all.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from local_operator.saver.validate import HEADER, SaverRejected, check_provenance
 
 
-def _span(first: str, lines: int = 6) -> list[dict]:
+def _span(first: str, lines: int = 6) -> list[dict[str, Any]]:
     """One real source row plus filler, so the epoch has something to delete."""
     return [{"role": "user", "content": [{"type": "text", "text": first}]}] + [
         {"role": "user", "content": [{"type": "text", "text": f"filler line {n}"}]}
@@ -23,7 +25,7 @@ def _span(first: str, lines: int = 6) -> list[dict]:
     ]
 
 
-def _reject(rows: list[dict], record: str) -> None:
+def _reject(rows: list[dict[str, Any]], record: str) -> None:
     with pytest.raises(SaverRejected):
         check_provenance(HEADER + "\n" + record, rows)
 

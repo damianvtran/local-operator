@@ -8,6 +8,8 @@ retaining a real repeated substring that was actually present in the source.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from local_operator.saver.canonical import canonical_bytes, digest
@@ -123,7 +125,7 @@ def test_identifier_pool_is_not_a_second_word_membership_escape_hatch() -> None:
 PROSE = "the deployment finished and the log line says everything is fine " * 12
 
 
-def _pool_span(source: str, lines: int = 6) -> list[dict]:
+def _pool_span(source: str, lines: int = 6) -> list[dict[str, Any]]:
     """One real source row plus filler, so an epoch can reduce something."""
     return [{"role": "user", "content": [{"type": "text", "text": source}]}] + [
         {"role": "user", "content": [{"type": "text", "text": f"filler line {n}"}]}
@@ -148,7 +150,7 @@ def test_s17_a_pool_line_may_not_cost_more_than_its_span() -> None:
     """
     from local_operator.saver.validate import check_provenance
 
-    words = ("alpha bravo charlie delta echo foxtrot golf hotel india juliett kilo lima " * 5)
+    words = "alpha bravo charlie delta echo foxtrot golf hotel india juliett kilo lima " * 5
     rows = _pool_span(words.strip())
     record = "user: [radient:ids mentioned in this part] " + " ".join(
         ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"] * 12
@@ -162,9 +164,9 @@ def test_s17_a_pool_line_may_not_cost_more_than_its_span() -> None:
     tokenizer = pytest.importorskip(
         "radient_context_reduction.tokenize", reason="ratio attestation only"
     )
-    assert tokenizer.token_count_text(record) > tokenizer.token_count_text(words), (
-        "fixture must amplify: it is the 1.35x shape, not a rounding difference"
-    )
+    assert tokenizer.token_count_text(record) > tokenizer.token_count_text(
+        words
+    ), "fixture must amplify: it is the 1.35x shape, not a rounding difference"
 
 
 def test_a_pool_line_may_not_buy_more_characters_than_the_span_deletes() -> None:
@@ -203,9 +205,11 @@ def test_a_pool_line_may_not_buy_more_characters_than_the_span_deletes() -> None
 
 def _blob() -> str:
     """One long path identifier, the shape the round-5 blocker repeated."""
-    return "/Users/damian/local-operator/.worktrees/saver-lo1/" + "/".join(
-        f"segment_{n:04d}" for n in range(190)
-    ) + "/module.py"
+    return (
+        "/Users/damian/local-operator/.worktrees/saver-lo1/"
+        + "/".join(f"segment_{n:04d}" for n in range(190))
+        + "/module.py"
+    )
 
 
 @pytest.mark.parametrize("rows_count", [200, 400, 1000, 4000])
@@ -250,9 +254,9 @@ def _ruler_ready() -> None:
     """
     from local_operator.compaction import tokens as estimator
 
-    assert estimator._get_encoding() is not None, (
-        "the token comparison needs the client estimator; install the tokenizer extra"
-    )
+    assert (
+        estimator._get_encoding() is not None
+    ), "the token comparison needs the client estimator; install the tokenizer extra"
 
 
 def test_an_epoch_that_costs_more_than_its_span_is_refused() -> None:
@@ -268,9 +272,7 @@ def test_an_epoch_that_costs_more_than_its_span_is_refused() -> None:
     _ruler_ready()
     rows = [
         {"role": "user", "content": [{"type": "text", "text": "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}]}
-    ] + [
-        {"role": "user", "content": [{"type": "text", "text": f"row {n}"}]} for n in range(39)
-    ]
+    ] + [{"role": "user", "content": [{"type": "text", "text": f"row {n}"}]} for n in range(39)]
     record = "user: " + "\nuser: ".join(["BCDEFGHIJKLMNOPQRSTUVWX"] * 39)
     with pytest.raises(SaverRejected, match="provenance"):
         check_provenance(HEADER + "\n" + record, rows)
@@ -285,9 +287,7 @@ def test_an_epoch_cheaper_than_its_span_is_accepted() -> None:
         {"role": "user", "content": [{"type": "text", "text": "the deployment finished " * 40}]},
         {"role": "user", "content": [{"type": "text", "text": "src/app/views.py"}]},
     ] + [{"role": "user", "content": [{"type": "text", "text": f"row {n}"}]} for n in range(9)]
-    check_provenance(
-        HEADER + "\nuser: the deployment finished " + "\nuser: src/app/views.py", rows
-    )
+    check_provenance(HEADER + "\nuser: the deployment finished " + "\nuser: src/app/views.py", rows)
 
 
 def test_the_identifier_pool_is_a_disclosure_line_and_is_accepted() -> None:
@@ -305,8 +305,7 @@ def test_the_identifier_pool_is_a_disclosure_line_and_is_accepted() -> None:
         "see https://example.com/a/b"
     )
     check_provenance(
-        HEADER
-        + "\nuser: [radient:ids mentioned in this part] "
+        HEADER + "\nuser: [radient:ids mentioned in this part] "
         "src/app/views.py ConnectionError https://example.com/a/b",
         rows,
     )
@@ -325,9 +324,7 @@ def test_a_pool_only_epoch_over_a_one_line_span_is_still_a_reduction() -> None:
     rows = [
         {"role": "user", "content": [{"type": "text", "text": PROSE + "\nsrc/app/views.py raised"}]}
     ]
-    check_provenance(
-        HEADER + "\nuser: [radient:ids mentioned in this part] src/app/views.py", rows
-    )
+    check_provenance(HEADER + "\nuser: [radient:ids mentioned in this part] src/app/views.py", rows)
 
 
 def test_a_pool_payload_past_the_reducers_own_cap_is_refused() -> None:
@@ -369,8 +366,7 @@ def test_a_harness_state_preview_must_be_the_preview_of_its_record() -> None:
     check_provenance(HEADER + "\n" + honest, rows)
     with pytest.raises(SaverRejected, match="provenance"):
         check_provenance(
-            HEADER
-            + "\nuser: [radient:harness state omitted, 62 chars]"
+            HEADER + "\nuser: [radient:harness state omitted, 62 chars]"
             " [session-state] ## Invented heading",
             rows,
         )

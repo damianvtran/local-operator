@@ -4060,6 +4060,8 @@ class SessionStreamFn:
         # credential-shape floor and records no spend.
         self._saver_chain: Any | None = None
         self._saver_availability_read: Any | None = None
+        #: One local sign-in check per session for the `opt_in` notice.
+        self._saver_signed_out_checked = False
         self._saver_redaction: Any | None = None
         self._saver_spend: Callable[[Any], None] | None = None
         self._notice_handler: Callable[[str, str], Awaitable[None] | None] | None = None
@@ -5322,17 +5324,25 @@ class SessionStreamFn:
 
     async def _saver_splice(self, request: ChatRequest) -> ChatRequest:
         from local_operator.saver.gate import (
+            Availability,
             configured_mode,
             resolve_saver,
             start_availability_read,
         )
 
         mode = configured_mode(self._settings)
-        # ``opt_in`` cannot resolve ON in LO1 (no session choice is wired, §9
-        # step 2 is LO2), so neither it nor ``off`` ever reads the balance: no
-        # Radient call with the user's bearer for a session that cannot use it
-        # (R-1).
-        if mode != "auto":
+        if mode == "off":
+            return request
+        # NO BALANCE READ FOR A MODE THAT CANNOT TURN ON (R-1, S-22). The read
+        # sends the user's Radient bearer, so it is only worth making when a
+        # signed-in account with credit WOULD resolve on. Asking the resolver
+        # that question with a best-case answer keeps this in step with the
+        # gate instead of duplicating it: in LO1 `auto` is refused
+        # (`auto_unavailable`) and `opt_in` has no session choice wired, so
+        # neither reaches the network.
+        if not resolve_saver(self._settings, Availability(True, True)).on:
+            if mode == "opt_in":
+                await self._saver_signed_out_notice()
             return request
         # The availability read is NEVER awaited on the turn (R-1/S-4/Q1): it
         # runs in the background under its own total deadline, and until it
@@ -5351,6 +5361,32 @@ class SessionStreamFn:
             self._saver_availability_read = None
             chain.needs_availability_refresh = False
         return spliced
+
+    async def _saver_signed_out_notice(self) -> None:
+        """Tell an `opt_in` user once per session that Saver needs a sign-in.
+
+        Without a chain nothing else can say it (QA round 7, Q-R7-4): the
+        chain's own signed-out notice only fires from a Radient answer, and
+        this path never calls Radient. The check is LOCAL — whether exactly one
+        Radient login is stored (`tunnels.api.credential_id`, the same rule the
+        availability read uses) — so no request and no bearer leave the
+        machine. Run off the loop because the credential store is a file.
+        """
+        if self._saver_signed_out_checked:
+            return
+        self._saver_signed_out_checked = True
+        from local_operator.saver.chain import NOTICE_SIGNED_OUT, notice_message
+        from local_operator.tunnels.api import credential_id
+
+        try:
+            await asyncio.to_thread(credential_id, None)
+            return
+        except Exception:  # noqa: BLE001 — no single Radient login: signed out
+            pass
+        try:
+            await self._saver_notice(notice_message(NOTICE_SIGNED_OUT))
+        except Exception as exc:  # noqa: BLE001 — a notice must never fail the turn
+            logger.debug("saver: signed-out notice failed (%s)", type(exc).__name__)
 
     def _ensure_saver_chain(self) -> Any:
         chain = self._saver_chain

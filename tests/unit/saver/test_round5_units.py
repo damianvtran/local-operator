@@ -13,12 +13,14 @@ line, and the defect is exactly the one rule.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from local_operator.saver.validate import HEADER, SaverRejected, check_provenance
 
 
-def _rows(first: str, lines: int = 6) -> list[dict]:
+def _rows(first: str, lines: int = 6) -> list[dict[str, Any]]:
     """One real source row plus enough filler that the line budget cannot fire."""
     return [{"role": "user", "content": [{"type": "text", "text": first}]}] + [
         {"role": "user", "content": [{"type": "text", "text": f"filler line {n}"}]}
@@ -26,14 +28,14 @@ def _rows(first: str, lines: int = 6) -> list[dict]:
     ]
 
 
-def _accept(rows: list[dict], record: str) -> None:
+def _accept(rows: list[dict[str, Any]], record: str) -> None:
     """The epoch must be ACCEPTED: a guard that refuses everything is no guard."""
     from local_operator.saver.validate import check_provenance
 
     check_provenance(HEADER + "\n" + record, rows)
 
 
-def _reject(rows: list[dict], record: str) -> None:
+def _reject(rows: list[dict[str, Any]], record: str) -> None:
     with pytest.raises(SaverRejected):
         check_provenance(HEADER + "\n" + record, rows)
 
@@ -155,7 +157,7 @@ def test_two_records_may_not_share_one_source_occurrence() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _call_rows(name: str, arguments: str, result: str) -> list[dict]:
+def _call_rows(name: str, arguments: str, result: str) -> list[dict[str, Any]]:
     """An assistant call and its tool result, plus filler for the line budget."""
     return [
         {
@@ -207,16 +209,19 @@ def test_a_call_summary_is_the_cleaned_argument_rendering() -> None:
 
 
 def test_the_rendered_alias_buys_no_line_or_character_budget() -> None:
-    """The cleaned rendering is an ALIAS for matching, not more source.
+    """The cleaned rendering TAKES the canonical form's place (S-21).
 
-    Without excluding it, every dict-argument call would count its arguments
-    twice toward the span's line and character totals, loosening the line
-    budget and the pool's deleted-character budget by the size of the alias.
+    Round 8 appended it and excluded it from the counts; round 7's security
+    review measured that a third matchable copy of the arguments let the
+    structural rules admit three emitted copies. It now replaces the plain
+    canonical line, so the record holds and counts the same number of lines
+    it did before the alias existed: raw arguments, one canonical rendering.
     """
     from local_operator.saver.provenance import source_records
 
     arguments = '{"code": "x = 1\\n", "timeout": 90}'
     records, _, _ = source_records(_call_rows("eval", arguments, "ok")[:1])
     call = records["call"][0]
-    assert call.lines == len(call.text.split("\n")) - 1
-    assert call.chars < len(call.text)
+    assert call.text.split("\n") == ["eval", arguments, '{"code":"x = 1","timeout":90}']
+    assert call.lines == 3
+    assert call.chars == len(call.text)

@@ -5964,6 +5964,20 @@ def read_setting(manager: "ConfigManager", setting: Setting) -> Any:
         return json.dumps(raw, default=str)
     if setting.kind is Kind.BOOL and isinstance(setting.default, bool):
         return strict_bool(raw, setting.default)
+    if (
+        setting.key == "radient.saver.mode"
+        and isinstance(raw, str)
+        and raw.strip().lower() == "auto"
+    ):
+        # A stored legacy `auto` READS as what it resolves to (S-22): in LO1 the
+        # gate refuses it (`auto_unavailable`), and serving `auto` beside a
+        # choice list that no longer offers it shows a UI a current value it
+        # cannot render. Normalised on READ only, like `strict_bool` above —
+        # the user's config file is never rewritten, so the value they wrote
+        # keeps resolving off with its reason, and the release that makes
+        # `auto` reachable sees it unchanged. No state note: that would be new
+        # user-facing copy, which needs every locale and an audited ledger row.
+        return "off"
     return raw
 
 

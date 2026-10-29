@@ -146,10 +146,9 @@ class _Source:
     lines: int
     chars: int
     merged_with: str = ""
-
-    @property
-    def block_types(self) -> frozenset[str]:
-        return frozenset()
+    #: A field, not a property: `_Rec` narrows it to the row's own block types,
+    #: and a same-name property on the base made that an incompatible override.
+    block_types: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -158,7 +157,12 @@ class _Rec(_Source):
 
     name: str = ""
     plain_forms: int = 0
-    block_types: frozenset[str] = frozenset()
+    #: An attachment's own byte count: the ceiling for the receipt's size slot.
+    media_bytes: int = 0
+    #: The verbs a read-only group summary may name for THIS call, derived the
+    #: way the reducer derives them (`reduce_v2.call`): the tool name for a
+    #: read tool, else the first word of the shell command after `cd DIR &&`.
+    verbs: frozenset[str] = frozenset()
     #: The record's canonical SEGMENTS: its lines, each split at the punctuation
     #: the reducer paraphrases around. Derived from ``text`` alone, so every
     #: segment is a piece of the row's own bytes and nothing is invented.
@@ -167,6 +171,17 @@ class _Rec(_Source):
     def __post_init__(self) -> None:
         if not self.segments and self.text:
             object.__setattr__(self, "segments", _segments(self.text))
+
+
+def _media_bytes(content: Any) -> int:
+    """Total declared bytes of a row's image_ref blocks (bools are not ints)."""
+    total = 0
+    for block in content if isinstance(content, list) else []:
+        if isinstance(block, dict) and block.get("type") == "image_ref":
+            size = block.get("bytes")
+            if isinstance(size, int) and not isinstance(size, bool) and size > 0:
+                total += size
+    return total
 
 
 def _texts(content: Any) -> list[str]:
@@ -251,13 +266,19 @@ def source_records(
             status_prefix = f"exit {status[1]} " if status and status[1] != "0" else ""
             # The reducer's own rendering is `exit N <body>` with the scaffold
             # lines dropped, which is neither the raw text nor a prefix of it.
-            text = text + "\n" + status_prefix + (body or "(no output)")
+            # ORDER MATTERS: the reducer emits the status piece (`exit -9`)
+            # BEFORE the body's own lines, and the in-order line cursor spends
+            # whatever line it matches first. With the rendering last, the
+            # status piece consumed it and the body piece had nothing left
+            # (QA round 7, R7-B). The rendering leads, the raw text follows.
+            text = status_prefix + (body or "(no output)") + "\n" + text
             rec = _Rec(
                 text=text,
                 identity=identity,
                 lines=_count_lines(text),
                 chars=len(text),
                 block_types=types,
+                media_bytes=_media_bytes(row.get("content")),
             )
             records["error" if failed else "result"].append(rec)
             call_position = calls.get(str(row.get("tool_call_id", "")))
@@ -272,8 +293,12 @@ def source_records(
                     lines=call.lines + rec.lines,
                     chars=call.chars + rec.chars,
                     name=call.name,
+                    verbs=call.verbs,
                     plain_forms=call.plain_forms,
-                    block_types=call.block_types,
+                    # The result's media travels with it when it is merged
+                    # onto the call line (`call read: … [radient:image …]`).
+                    block_types=call.block_types | rec.block_types,
+                    media_bytes=call.media_bytes + rec.media_bytes,
                     merged_with=identity,
                 )
         else:
@@ -295,7 +320,20 @@ def source_records(
                 elif block.get("type") == "image_ref":
                     # A media block travels as a fixed receipt; the slot text
                     # is validated against the row's own media digest instead.
-                    add("user", "", kinds=frozenset({"image_ref"}))
+                    # Its SIZE slot prints the attachment's own byte count
+                    # (`_bytes(size)`), so that count — not the empty text — is
+                    # what bounds it: with `chars=0` every receipt over 8 bytes
+                    # failed `_check_slots`' size ceiling (QA round 7, R7-C).
+                    records["user"].append(
+                        _Rec(
+                            text="",
+                            identity=f"{identity}:{len(records['user'])}",
+                            lines=0,
+                            chars=0,
+                            block_types=frozenset({"image_ref"}),
+                            media_bytes=_media_bytes([block]),
+                        )
+                    )
         for call in row.get("tool_calls") or []:
             function = call.get("function") or {}
             name = re.sub(r"[^A-Za-z0-9_.:-]", "_", str(function.get("name") or "tool"))[:64]
@@ -307,16 +345,11 @@ def source_records(
             # The tool NAME is source too: a grouped read-only summary names
             # the command (`[radient:1 read-only commands, all ok: read]`).
             text = normalise(name) + "\n" + normalise(raw)
-            alias_lines = alias_chars = 0
             try:
                 args = json.loads(raw)
             except (ValueError, TypeError):
                 args = None
             if isinstance(args, dict):
-                # The reducer renders arguments as canonical JSON with secret
-                # keys redacted; the canonical form is the source too, so a
-                # dropped `i` key is just deleted bytes.
-                text = text + "\n" + normalise(canonical_bytes(args).decode())
                 # `_call_summary`'s own rendering, byte for byte: `i`/`intent`
                 # dropped and every string value passed through `clean` BEFORE
                 # canonicalisation. `clean` rstrips each line, so a value ending
@@ -333,14 +366,16 @@ def source_records(
                     if key not in ("i", "intent")
                 }
                 alias = normalise(canonical_bytes(rendered).decode())
-                if alias not in text:
-                    # An ALIAS for matching, not more source: it is excluded
-                    # from the record's line and character counts below, so
-                    # the line budget and the pool's deleted-character budget
-                    # stay what the row really holds.
-                    text = text + "\n" + alias
-                    alias_lines += _count_lines(alias)
-                    alias_chars += len(alias) + 1
+                # ONE canonical slot, not two (S-21): the reducer's cleaned
+                # rendering REPLACES the plain canonical form instead of being
+                # appended beside it. A third matchable copy of the arguments
+                # let the structural rules alone admit three emitted copies
+                # (2.664x with the ruler disabled), so the cl100k comparison was
+                # the only cost bound. Where cleaning changes nothing the two
+                # are the same line anyway.
+                # It takes the canonical form's place, so it is counted
+                # exactly as that line was: no budget moves either way.
+                text = text + "\n" + alias
                 command = args.get("command")
                 if name in _SHELL_NAMES and isinstance(command, str):
                     cleaned = normalise(command)
@@ -358,14 +393,44 @@ def source_records(
                 _Rec(
                     text=text,
                     identity=f"call:{row_number}:{len(records['call'])}",
-                    lines=_count_lines(text) - alias_lines,
-                    chars=len(text) - alias_chars,
+                    lines=_count_lines(text),
+                    chars=len(text),
                     name=name,
+                    verbs=_read_verbs(name, args if isinstance(args, dict) else None),
                 )
             )
     return dict(records), parts, _media_digests(span)
 
 
+def _read_verbs(name: str, args: dict[str, Any] | None) -> frozenset[str]:
+    """The group-summary verbs this call can stand for, mirroring the reducer.
+
+    `reduce_v2.call` names a read tool by its tool name and a read-only shell
+    command by the first word of its first segment once `cd DIR &&` is
+    stripped. Matching the summary's verb as a SUBSTRING of the record's text
+    let `sed` claim a call whose grep output said `Raised`, stealing the record
+    the next line needed (QA round 7, R7-A). Equality with the derived verb
+    claims only calls the reducer could have grouped under it; the shell
+    segment split is not ported because only the first word is ever named.
+    """
+    if name in _READ_TOOLS:
+        return frozenset({name})
+    if args is None or name not in _SHELL_NAMES:
+        return frozenset()
+    command = args.get("command")
+    if not isinstance(command, str):
+        return frozenset()
+    body = normalise(command)
+    cd = _CD.match(body)
+    if cd:
+        body = body[cd.end() :]
+    body = re.sub(r"^(?:timeout \d+\s+|env\s+)", "", body.lstrip())
+    words = body.split(None, 1)
+    return frozenset({words[0]}) if words else frozenset()
+
+
+#: The tool names the reducer groups as reads by name (`reduce_v2.call`).
+_READ_TOOLS = frozenset({"read", "grep", "glob", "read_public_copy"})
 _SHELL_NAMES = frozenset({"bash", "shell", "exec", "run", "terminal"})
 _CD = re.compile(r"^\s*cd\s+((?:\"[^\"]+\"|'[^']+'|[^\s;&|]+))\s*(?:&&|;)\s*")
 _EXIT = re.compile(r"^exit code: (-?\d+)$", re.M)
@@ -378,6 +443,54 @@ def _media_digests(span: Sequence[dict[str, Any]]) -> set[str]:
     for row in span:
         for blob in (json.dumps(row, ensure_ascii=False, sort_keys=True),):
             out.add(hashlib.sha256(blob.encode()).hexdigest()[:12])
+        # `media_receipt` prints `sha256[:12]` of the image_ref the CLIENT
+        # wrote — the attachment's own digest, not a hash of the row — so
+        # that is the value an honest receipt carries. It is the span's own
+        # data, so admitting it lets no other digest through.
+        content = row.get("content")
+        for block in content if isinstance(content, list) else []:
+            if isinstance(block, dict) and isinstance(block.get("sha256"), str):
+                digest = block["sha256"]
+                if re.fullmatch(r"[0-9a-f]{12,64}", digest):
+                    out.add(digest[:12])
+    return out
+
+
+def _media_slots(span: Sequence[dict[str, Any]]) -> set[str]:
+    """The non-digest slot values a media receipt may print for this span.
+
+    `reduce_v2.media_receipt` writes the image_ref's own `mime`, `{w}x{h}` and
+    `_bytes(size)` (`1.1 kB`) into the receipt. None of those is text of the
+    record the receipt sits in — a `read` call's arguments name a path, not a
+    mime — so the slot check refused every image receipt even once the digest
+    passed (QA round 7, R7-C). Each value is DERIVED from the span's own
+    image_ref fields, exactly as the reducer formats them, so a receipt can
+    still name nothing the client did not send.
+    """
+    out: set[str] = set()
+    for row in span:
+        content = row.get("content")
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict) or not isinstance(block.get("sha256"), str):
+                continue
+            mime = block.get("mime")
+            if isinstance(mime, str):
+                out.add(mime)
+            width, height = block.get("width"), block.get("height")
+            if isinstance(width, int) and isinstance(height, int):
+                out.add(f"{width}x{height}")
+            size = block.get("bytes")
+            if isinstance(size, int) and not isinstance(size, bool) and size > 0:
+                rendered = (
+                    f"{size} B"
+                    if size < 1000
+                    else (
+                        f"{size / 1000:.1f} kB"
+                        if size < 1_000_000
+                        else f"{size / 1_000_000:.1f} MB"
+                    )
+                )
+                out.update(rendered.split())
     return out
 
 
@@ -708,11 +821,24 @@ def _slot_tokens(text: str) -> list[str]:
         token = raw.strip("(),;.:—-×\"'")
         if not token or token in _TEMPLATE_WORDS:
             continue
+        # `sha256=<hex>` / `url=<url>` are one whitespace token in a media
+        # receipt (`reduce_v2.media_receipt`), but the KEY is template grammar
+        # and the VALUE is the slot: unsplit, a digest never reached the hex
+        # arm and every image receipt was refused (QA round 7, R7-C).
+        key, sep, value = token.partition("=")
+        if sep and key in _SLOT_KEYS:
+            token = value
         for part in token.split("\u00d7"):
             part = part.strip("(),;.:—-")
             if part and part not in _TEMPLATE_WORDS:
                 out.append(part)
     return out
+
+
+#: `reduce_v2._bytes()` units, written as their own token after the number.
+_UNIT_SCALE = {"B": 1, "kB": 1000, "MB": 1_000_000}
+#: Receipt keys whose `=` value is the slot (`reduce_v2.media_receipt`).
+_SLOT_KEYS = frozenset({"sha256", "url"})
 
 
 def _note_tokens(text: str) -> list[str]:
@@ -746,7 +872,7 @@ def _check_slots(
     """Every free slot must be source-derived, and bounded by the source."""
     from local_operator.saver.validate import SaverRejected
 
-    bound = max(record.chars, record.lines * 4, 8)
+    bound = max(record.chars, record.lines * 4, record.media_bytes, 8)
     for kind, text in elements:
         if kind == "note":
             # A note is a disclosure line, never content: its number must be a
@@ -767,22 +893,27 @@ def _check_slots(
         # record cannot bound; the span can, and no honest marker can claim more
         # text than the span holds.
         ceiling = span_bound if _DEDUPE.match(text) else bound
-        for token in _slot_tokens(text):
+        tokens = _slot_tokens(text)
+        for position, token in enumerate(tokens):
             if _NUMBER.fullmatch(token):
                 # `11.2k` is a size; compare its magnitude, never the literal.
                 # `_size()` rounds to one decimal, so a size may exceed the
                 # record it describes by the rounding step; a count may not.
-                if (
-                    float(token.rstrip("k")) * (1000 if token.endswith("k") else 1)
-                    > ceiling * 1.05 + 64
-                ):
+                # A media receipt writes its unit as the NEXT token
+                # (`_bytes()`: `18.4 kB`, `2.1 MB`), so the magnitude has to
+                # read it: without it `18.4 kB` was compared as 18 and any
+                # forged size passed the ceiling (the mutation row for the
+                # attachment's byte ceiling stayed green until this).
+                unit = tokens[position + 1] if position + 1 < len(tokens) else ""
+                scale = _UNIT_SCALE.get(unit, 1000 if token.endswith("k") else 1)
+                if float(token.rstrip("k")) * scale > ceiling * 1.05 + 64:
                     raise SaverRejected("provenance")
                 continue
             if _HEX12.fullmatch(token):
                 if token in media or token in derived or token in record.text:
                     continue
                 raise SaverRejected("provenance")
-            if token in record.block_types:
+            if token in record.block_types or token in media:
                 continue
             if scans[0] <= 0:
                 raise SaverRejected("busy")
@@ -1016,45 +1147,45 @@ def _without_ellipsis(line: str) -> str:
 def _map_fragments(out: Sequence[str], record: _Rec) -> bool:
     """THE INVARIANT, implemented exactly: order, distinctness, real deletion.
 
-    A fragment must be a contiguous piece of ONE source line and need not touch
-the line's edges: the reducer's own cuts land mid-line (an archive head is the
-first ~160 characters of a block, so it starts and ends wherever the character
-count falls), and the replay measured whole/prefix/suffix-only matching
-refusing every honest archive record. What keeps that from becoming the
-re-segmentation primitive is the LINE cursor: a source line answers at most one
-emitted line, so a line cannot be shredded into pieces of itself.
+        A fragment must be a contiguous piece of ONE source line and need not touch
+    the line's edges: the reducer's own cuts land mid-line (an archive head is the
+    first ~160 characters of a block, so it starts and ends wherever the character
+    count falls), and the replay measured whole/prefix/suffix-only matching
+    refusing every honest archive record. What keeps that from becoming the
+    re-segmentation primitive is the LINE cursor: a source line answers at most one
+    emitted line, so a line cannot be shredded into pieces of itself.
 
-    For a record whose source lines are ``src[0..n-1]`` and whose emitted
-    content lines are ``out[0..m-1]``, in order::
+        For a record whose source lines are ``src[0..n-1]`` and whose emitted
+        content lines are ``out[0..m-1]``, in order::
 
-        cursor = 0
-        for line in out:
-            found = -1
-            for j in range(cursor, n):
-                S = src[j]
-                if line == S or (len(line) >= MIN_CUT
-                                 and (S.startswith(line) or S.endswith(line))):
-                    found = j
-                    break
-            if found < 0:
+            cursor = 0
+            for line in out:
+                found = -1
+                for j in range(cursor, n):
+                    S = src[j]
+                    if line == S or (len(line) >= MIN_CUT
+                                     and (S.startswith(line) or S.endswith(line))):
+                        found = j
+                        break
+                if found < 0:
+                    reject
+                cursor = found + 1
+            if m >= n:
                 reject
-            cursor = found + 1
-        if m >= n:
-            reject
 
-    THREE PROPERTIES, and each one is doing distinct work:
-    - ``cursor`` only moves forward, so emitted lines are IN ORDER;
-    - ``cursor = found + 1`` means a matched source line is never reconsidered,
-      so each source line is spent at most once — DISTINCTNESS. Deleting that
-      one line is what let round 4 accept `abcabc` as `bc` + `ab` (9.2x tokens);
-    - ``m < n`` means the record really deleted something, so the epoch is a
-      reduction rather than a re-rendering.
+        THREE PROPERTIES, and each one is doing distinct work:
+        - ``cursor`` only moves forward, so emitted lines are IN ORDER;
+        - ``cursor = found + 1`` means a matched source line is never reconsidered,
+          so each source line is spent at most once — DISTINCTNESS. Deleting that
+          one line is what let round 4 accept `abcabc` as `bc` + `ab` (9.2x tokens);
+        - ``m < n`` means the record really deleted something, so the epoch is a
+          reduction rather than a re-rendering.
 
-    ``MIN_CUT`` only decides whether a very short prefix or suffix counts as a
-    cut: one character never does, because a single-character piece is the
-    re-segmentation primitive itself. Distinctness — not the cut length — is what
-    refuses the reviewer's `abcabc` -> `bc` + `ab` case, and the mutation matrix
-    in the PR comment shows that deleting `cursor = found + 1` flips it.
+        ``MIN_CUT`` only decides whether a very short prefix or suffix counts as a
+        cut: one character never does, because a single-character piece is the
+        re-segmentation primitive itself. Distinctness — not the cut length — is what
+        refuses the reviewer's `abcabc` -> `bc` + `ab` case, and the mutation matrix
+        in the PR comment shows that deleting `cursor = found + 1` flips it.
     """
     source = record.text
     if not source.strip():
@@ -1100,6 +1231,7 @@ emitted line, so a line cannot be shredded into pieces of itself.
                 variants.append(reading)
         bare = variants[-1] if len(variants) > 1 else ""
         found = -1
+        taken = 0
         for variant in variants:
             for line_index in range(index, len(offsets)):
                 text, at = offsets[line_index]
@@ -1190,24 +1322,26 @@ def _ruler_tokens(text: str) -> int:
 
 
 def estimator_available() -> bool:
-    """Can this client count tokens exactly?
+    """Can this client count tokens exactly, right now?
 
-    The gate for the upload path: R6-3 measured "charge, then refuse". Adoption
-    is all-or-nothing per response and the spend is recorded before validation,
-    so an epoch refused for want of a ruler bills the user for an upload it
-    could never accept. `chain._apply` asks this BEFORE it projects, uploads or
-    charges anything, which is what makes "no tokenizer ⇒ Saver unavailable"
-    mean unavailable rather than "upload, get charged, refuse".
+    The gate for the upload path. Adoption is all-or-nothing per response and
+    the spend is recorded before validation, so an epoch refused for want of a
+    ruler bills the user for an upload it could never accept. `chain._apply`
+    asks this BEFORE it projects, uploads or charges anything.
 
-    Deliberately cheap: it tests that the `tokenizer` extra is importable and
-    never triggers a load, so it can run on the turn path. The per-epoch
-    comparison still refuses (`_ruler_tokens`) when the encoding exists as a
-    module but cannot be fetched — one upload per process in that state, which
-    the backoff then bounds.
+    It asks for the LOADED ENCODING, not for the package: with tiktoken
+    installed but cl100k unable to load (an offline first use), a
+    `find_spec` gate said yes, every due prefetch uploaded and was charged, and
+    the per-epoch ruler then refused it — measured at one charge per 60 s
+    back-off per session, 17 in 19 turns with the back-off at zero (QA round 7,
+    Q-R7-2). `_get_encoding` is the same call the ruler makes: it loads once,
+    caches the result, and while a failed load is backing off it returns
+    `None` without blocking (a retry never runs on the caller's thread), so it
+    is safe on the turn path.
     """
-    import importlib.util
+    from local_operator.compaction import tokens as estimator
 
-    return importlib.util.find_spec("tiktoken") is not None
+    return estimator._get_encoding() is not None
 
 
 def _check_line_budget(emitted: int, span_lines: int) -> None:
@@ -1301,6 +1435,7 @@ def check_records(
     from local_operator.saver.validate import SaverRejected, parse_records
 
     records_by_role, parts, media = source_records(span)
+    media = media | _media_slots(span)
     derived = _derived_digests(parts)
     pool = _Pool(parts)
     cursors: dict[str, int] = defaultdict(int)
@@ -1325,7 +1460,7 @@ def check_records(
         disclosures.extend(pools)
         emitted += len(pieces)
         content_chars += sum(len(piece) for piece in pieces)
-        units.append((label, elements, pieces, pools, previews))
+        units.append((label, body, elements, pieces, pools, previews))
     _check_line_budget(emitted, span_lines)
     # NON-AMPLIFICATION: the comparison the invariant actually needs, and the
     # only one that can bound cost. Both sides are RENDERED TEXT — the epoch's
@@ -1347,7 +1482,7 @@ def check_records(
     pool.char_budget = max(span_chars - content_chars, 0)
     for payload in disclosures:
         _check_pool(payload, pool)
-    for label, elements, pieces, pools, previews in units:
+    for label, body, elements, pieces, pools, previews in units:
         if deadline is not None and time.monotonic() > deadline:
             raise SaverRejected("busy")
         kind, name = _label_parts(label)
@@ -1466,7 +1601,7 @@ def _consume_group(
     for verb in verbs:
         for position in range(cursors["call"], len(candidates)):
             candidate = candidates[position]
-            if candidate.identity in consumed or verb not in candidate.text:
+            if candidate.identity in consumed or verb not in candidate.verbs:
                 continue
             consumed.add(candidate.identity)
             furthest = max(furthest, position + 1)
@@ -1476,6 +1611,6 @@ def _consume_group(
             # individually, so a verb that no unconsumed call carries is still
             # admissible when SOME source call carries it: the invention
             # channel is closed by the verb having to exist in the span.
-            if not any(verb in candidate.text for candidate in candidates):
+            if not any(verb in candidate.verbs for candidate in candidates):
                 raise SaverRejected("provenance")
     cursors["call"] = furthest

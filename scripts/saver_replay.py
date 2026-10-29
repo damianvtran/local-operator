@@ -39,6 +39,15 @@ from local_operator.saver.projection import saver_projection, verbatim_wire
 from local_operator.saver.validate import SaverRejected, validate_response
 
 
+def _arguments(value: Any) -> dict[str, Any]:
+    """A snapshot's tool arguments as a dict; anything else is no arguments.
+
+    `messages_from_blocks` reads untyped JSON, so `isinstance` at the call site
+    left the value `str | Unknown | dict` to pyright. Narrowed here instead.
+    """
+    return value if isinstance(value, dict) else {}
+
+
 def messages_from_blocks(body: dict[str, Any]) -> list[Message]:
     """Anthropic-shaped request -> lop rows, the way a session would hold them."""
     out: list[Message] = []
@@ -73,7 +82,7 @@ def messages_from_blocks(body: dict[str, Any]) -> list[Message]:
             ToolCall(
                 id=str(b.get("id") or ""),
                 name=str(b.get("name") or "tool"),
-                arguments=b.get("input") if isinstance(b.get("input"), dict) else {},
+                arguments=_arguments(b.get("input")),
             )
             for b in uses
         ]
@@ -119,8 +128,12 @@ def main() -> int:
     parser.add_argument("--list", action="store_true", help="print each epoch's verdict and digest")
     args = parser.parse_args()
 
-    from radient_context_reduction.saver import SaverConfig, prepare
-    from radient_context_reduction.tokenize import token_count_text
+    # Out of tree by design (see the module docstring): the client repo does not
+    # depend on the reference reducer, so pyright cannot resolve these. One line
+    # each with a bare ignore: isort moves a bracketed code onto the imported
+    # name, where pyright stops applying it.
+    from radient_context_reduction.saver import SaverConfig, prepare  # type: ignore
+    from radient_context_reduction.tokenize import token_count_text  # type: ignore
 
     files = sorted(args.snapshots.glob("*.json"))
     if not files:
