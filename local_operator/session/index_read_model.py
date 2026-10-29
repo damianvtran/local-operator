@@ -883,7 +883,12 @@ def _sweep_orphans(root: str | Path, directory: Path, sid: str, limit: int = 64)
                 continue
             for child in Path(entry.path).iterdir():
                 child.unlink(missing_ok=True)
-            Path(entry.path).rmdir()
+            # The directory itself is LEFT IN PLACE. Removing it would make this
+            # cache module a directory remover, and the store's guard
+            # (tests/unit/session/test_no_session_deletion.py) treats that shape as
+            # a session-deletion surface wherever it appears — an empty directory of
+            # a few hundred bytes is not worth an allow-list exception on that
+            # guard, and the next publication for that session reuses the path.
         except OSError:
             continue
 

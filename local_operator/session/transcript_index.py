@@ -1062,6 +1062,7 @@ def write_index(
     index: TranscriptIndex,
     *,
     expected_publication: tuple[int, int, int] | None = None,
+    previous: tuple[tuple[int, int, int], dict[str, Any]] | None = None,
 ) -> None:
     """Persist the index atomically (unique temp + replace), best-effort.
 
@@ -1079,6 +1080,13 @@ def write_index(
 
     ``expected_publication`` is compare-and-publish for a delayed writer: it
     republishes only the document it actually read.
+
+    ``previous`` is the document the CALLER already parsed, WITH the identity it
+    was parsed from (``patch_naming`` reads it to build its merge). Handing it in
+    removes a second full JSON decode of an index that is routinely tens of MB —
+    the round-3 M3 cost — and it is safe only because the identity is re-checked
+    under the lock: if the file moved since that parse, the document is re-read, so
+    the merge can never run on a stale view (which is the round-1 R4 defect).
 
     A FAILURE TO REPLACE IS REPORTED, NEVER SWALLOWED. A previous round fsynced a
     read-only descriptor and then swallowed the ``OSError`` in a trailing
@@ -1106,7 +1114,9 @@ def write_index(
                     if not _sig_matches(index.sig, _journal_path(config_dir, session_id).stat()):
                         return
                 else:
-                    latest = _read_raw(config_dir, session_id)
+                    latest = _previous_if_current(previous, path) or _read_raw(
+                        config_dir, session_id
+                    )
                     if latest is not None:
                         merged = preserved_naming(latest, {c.id for c in index.checkpoints})
                         live = {c.id for c in index.checkpoints if c.kind == KIND_USER}
@@ -1156,6 +1166,27 @@ def write_index(
         index_read_model.collect(config_dir, session_id, index_read_model.token_for(index))
     except OSError:
         pass
+
+
+def _previous_if_current(
+    previous: tuple[tuple[int, int, int], dict[str, Any]] | None, path: Path
+) -> dict[str, Any] | None:
+    """The caller's parsed document, but only if the file has not moved since.
+
+    One ``stat`` under the lock is what makes reusing a parse sound: the same
+    identity means the bytes are the ones the caller read, so the merge sees the
+    truth; any motion falls back to a fresh read.
+    """
+    if previous is None:
+        return None
+    identity, document = previous
+    try:
+        current = path.stat()
+    except OSError:
+        return None
+    if (current.st_ino, current.st_size, current.st_mtime_ns) != identity:
+        return None
+    return document
 
 
 def _document(index: TranscriptIndex) -> dict[str, Any]:
@@ -1358,7 +1389,14 @@ def patch_naming(config_dir: str | Path, session_id: str, items: dict[str, Any])
         merged["prompt_version"] = NAMING_PROMPT_VERSION
         merged["items"] = merged_items
         index.naming = merged
-        write_index(config_dir, session_id, index)
+        # Hand the parse over WITH its identity: write_index would otherwise decode
+        # this same document again under the lock (round-3 M3), and the identity
+        # check there keeps a concurrent patch from being merged over stale bytes.
+        receipt = raw.get("_publication_identity")
+        if isinstance(receipt, tuple) and len(receipt) == 3:
+            write_index(config_dir, session_id, index, previous=(receipt, raw))
+        else:
+            write_index(config_dir, session_id, index)
         return True
     if raw is not None:
         # A document exists but is unreadable or another version's: leave it to

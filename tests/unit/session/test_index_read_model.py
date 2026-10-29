@@ -661,6 +661,29 @@ def test_a_failed_replace_keeps_the_previous_document_and_reports(publication, m
     assert any(record.levelname == "ERROR" for record in caplog.records)
 
 
+def test_a_stale_parse_is_not_merged_over_a_newer_patch(publication):
+    """The reuse must be identity-checked, or a patch disappears (round-1 R4 class).
+
+    ``patch_naming`` hands its parsed document to ``write_index`` to save a full
+    decode (round-3 M3). If the file moved between that parse and the lock, the
+    handed-over document is stale and the merge must fall back to a fresh read.
+    """
+    root, _ = publication
+    stale_raw = ti._read_raw(root, SID)
+    assert stale_raw is not None
+    receipt = stale_raw.get("_publication_identity")
+    assert isinstance(receipt, tuple)
+    # A patch lands AFTER the parse: the document now names a user the stale copy
+    # does not know about.
+    assert ti.patch_naming(root, SID, {"u2": {"name": "Later", "summary": "s"}})
+    parsed = ti.read_index(root, SID)
+    assert parsed is not None
+    parsed.naming = {"prompt_version": 1, "items": {}}
+    ti.write_index(root, SID, parsed, previous=(receipt, stale_raw))
+    written = json.loads(ti.index_path(root, SID).read_text())
+    assert written["naming"]["items"]["u2"]["name"] == "Later", "a stale parse dropped a patch"
+
+
 def test_collection_keeps_the_referenced_token(publication):
     """Round-2 defect: `collect` was handed a dict member where it wanted a token."""
     root, index = publication
@@ -699,7 +722,11 @@ def test_read_models_of_deleted_sessions_are_reclaimed(publication):
     os.utime(stale, (old, old))
     os.utime(orphan, (old, old))
     ti.write_index(root, SID, index)
-    assert not orphan.exists()
+    # The FILES go; the empty directory stays. Removing it would make this cache
+    # module a directory remover, which the store's guard treats as a
+    # session-deletion surface wherever it appears.
+    assert not list(orphan.glob("*.sqlite"))
+    assert not list(orphan.glob("*.json"))
 
 
 def test_publication_survives_a_platform_without_fcntl(publication, monkeypatch):
