@@ -170,9 +170,11 @@ _HOLD_HOTKEY_DETAIL = "Global shortcut for the desktop app — set it in the app
 
 #: Recording is delivered only to the focused desktop main window, not globally.
 #: Keep this distinct from Quick Send's genuinely global registration.
-_RECORDING_HOTKEY_DETAIL = (
-    "Desktop window shortcut — press keys the terminal can send, or set it in the app."
-)
+#: 60 cells, down from 81: the old sentence clipped at 80x24 and at 100x30 it
+#: crowded both the key path and the off-default riders out of the row. The
+#: constraint it must still carry is twofold — it records speech-to-text, and
+#: it is a shortcut for the focused desktop window, not a global registration.
+_RECORDING_HOTKEY_DETAIL = "Desktop speech-to-text shortcut — set it here or in the app."
 
 #: The `enter` refusal on such a row. The affordance must not ARM — a
 #: listening frame whose every completion the validator refuses reads as a
@@ -4539,10 +4541,10 @@ class SettingsView(Vertical):
         # round 1, D1): 8.62:1 dark / 7.18:1 light, where `faint` is 1.97:1
         # dark and `dim` 3.77:1 light. Every other row keeps the established
         # faint/dim ladder; this is the H1 surface's own ink, not a token
-        # change. Resolved LAZILY: the bridge rows are its only consumers, and
-        # an unconditional resolve here would add one semantic_color lookup to
-        # EVERY detail paint — exactly the per-paint cost the repaint guards
-        # bound.
+        # change. Resolved LAZILY: the bridge rows and the recording row are its
+        # only consumers, and an unconditional resolve here would add one
+        # semantic_color lookup to EVERY detail paint — exactly the per-paint
+        # cost the repaint guards bound.
         bridge_ink: Style | None = None
 
         def _bridge_ink() -> Style:
@@ -4771,6 +4773,17 @@ class SettingsView(Vertical):
                 else Style(color=theme_mod.semantic_color("dim"))
             )
             bridge_row = row.setting.section == bridge_availability.BRIDGE_SECTION
+            # THE RECORDING ROW SHARES THE BRIDGE ROWS' INK, for their measured
+            # reason: painted `faint` (#4a4539 on #14110c) its required sentence
+            # measures 1.97:1 dark / 2.08:1 light, under the 4.5:1 normal-text
+            # floor, and at >=120 cols it is the rung that survives beside the
+            # clause and key — so the low-contrast ink landed on exactly the
+            # copy no other text on the row can imply. Only the help part's ink
+            # moves; the shed ladder's rung ORDER is untouched.
+            recording_row = (
+                row.setting.hotkey_scope == "desktop"
+                and row.setting.key == "keymap.start_recording"
+            )
             if bridge_row:
                 # The `default: —` clause shares the line with the H1
                 # explanation when both fit, so it rides the same accessible
@@ -4791,7 +4804,7 @@ class SettingsView(Vertical):
                     if keymap_mod.capturable_in_terminal(row.setting.key)
                     else _HOLD_HOTKEY_DETAIL
                 )
-                if row.setting.key == "keymap.start_recording":
+                if recording_row:
                     help_text = _RECORDING_HOTKEY_DETAIL
             # THE SHED LADDER, one rule for every row (design round 3, D12):
             # the key path sheds first; the state clause is never shed while
@@ -4826,7 +4839,7 @@ class SettingsView(Vertical):
             # dark / 7.18:1 light — where `faint` measures 1.97:1 dark and
             # 2.08:1 light, both under the 4.5:1 normal-text floor. Scoped to
             # these rows only.
-            help_style = _bridge_ink() if bridge_row else faint
+            help_style = _bridge_ink() if (bridge_row or recording_row) else faint
             help_part = (help_text, help_style, False)
             # THE HELP ALONE TAKES `dim`, NOT `faint` (design round 2, D5). The
             # rule is stated eight lines up for the state clause — a clause that

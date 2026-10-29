@@ -838,9 +838,12 @@ def validate_desktop_key(value: Any, *, action_id: str | None = None) -> str | N
         action_id == "keymap.start_recording"
         and reason == "a global shortcut needs a modifier — it would otherwise fire while you type"
     ):
-        return (
-            "a desktop window shortcut needs a modifier — " "it would otherwise fire while you type"
-        )
+        # 76 cells, down from 83: the desktop row's refusal is painted inside
+        # the detail band, and the old wording ran past a 100-column band — the
+        # one clause that must survive truncation (WHY it refuses) was the part
+        # that got clipped. "Desktop shortcut" still distinguishes this scope
+        # from the global wording below, which is unchanged.
+        return "a desktop shortcut needs a modifier — it would otherwise fire while you type"
     return reason
 
 

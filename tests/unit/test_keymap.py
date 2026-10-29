@@ -541,7 +541,7 @@ def test_start_recording_ships_the_desktop_action_row() -> None:
     assert action.default not in keymap.DESKTOP_RESERVED_COMBOS
     assert keymap.capturable_in_terminal(action.id) is True
     assert keymap.validate_desktop_key("n", action_id=action.id) == (
-        "a desktop window shortcut needs a modifier — " "it would otherwise fire while you type"
+        "a desktop shortcut needs a modifier — it would otherwise fire while you type"
     )
     assert keymap.validate_desktop_key("n", action_id="keymap.quick_send") == (
         "a global shortcut needs a modifier — it would otherwise fire while you type"

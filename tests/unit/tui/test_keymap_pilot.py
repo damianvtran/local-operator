@@ -359,7 +359,7 @@ async def test_a_desktop_row_captures_and_validates_by_its_own_rules(
         await pilot.pause()
         if action_id == "keymap.start_recording":
             assert view._detail_text.plain.startswith(
-                "Desktop window shortcut — press keys the terminal can send, or set it in the app."
+                "Desktop speech-to-text shortcut — set it here or in the app."
             )
         else:
             assert "Global shortcut for the desktop app" in view._detail_text.plain
@@ -387,6 +387,54 @@ async def test_a_desktop_row_captures_and_validates_by_its_own_rules(
 
         setting = settings_io.BY_KEY[action_id]
         assert settings_io.read_setting(ConfigManager(tmp_path), setting) == "ctrl+alt+space"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("width", [100, 200])
+async def test_the_recording_sentence_is_never_painted_faint(width: int) -> None:
+    """The recording row's required sentence is never painted `faint`.
+
+    At >=120 cols the shed ladder keeps the help beside the clause and the key
+    path, and there it used to take the `faint` rung: #4a4539 on #14110c
+    measures 1.97:1 dark / 2.08:1 light, both under the 4.5:1 normal-text
+    floor — and that sentence cannot be inferred from anything else on the row.
+    Both ends are asserted: at 200 cols the sentence rides the help-beside-key
+    rung and must resolve `muted`; at 100 cols it already does, and the width
+    where it drops to the help-alone `dim` rung is a later reordering's
+    problem, not a silent return to `faint`.
+    """
+    from rich.color import Color as RichColor
+
+    from local_operator.tui import theme as theme_mod
+    from local_operator.tui.widgets.settings_view import _RECORDING_HOTKEY_DETAIL
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(width, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        _select(view, "keymap.start_recording")
+        await pilot.pause()
+
+        plain = view._detail_text.plain
+        # SENTENCE FIRST on a desktop row, and never clipped: the whole string
+        # is 60 cells, so even the narrow band holds it.
+        assert plain.startswith(_RECORDING_HOTKEY_DETAIL), plain
+
+        faint = RichColor.parse(str(theme_mod.semantic_color("faint")))
+        muted = RichColor.parse(str(theme_mod.semantic_color("muted")))
+        sentence = next(span for span in view._detail_text.spans if span.start == 0)
+        assert getattr(sentence.style, "color", None) == muted, view._detail_text.spans
+        # No span OVERLAPPING the sentence may carry `faint`: the sentence is
+        # spans[0] today, and this still holds if a later change splits it.
+        sentence_end = len(_RECORDING_HOTKEY_DETAIL)
+        for span in view._detail_text.spans:
+            if span.start >= sentence_end or span.end <= 0:
+                continue
+            assert (
+                getattr(span.style, "color", None) != faint
+            ), f"the required sentence carries faint ink: {span}"
 
 
 @pytest.mark.asyncio
