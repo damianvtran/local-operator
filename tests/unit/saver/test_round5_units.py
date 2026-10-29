@@ -146,3 +146,77 @@ def test_two_records_may_not_share_one_source_occurrence() -> None:
     the budget is satisfied (two content lines against seven).
     """
     _reject(_rows("genuine consent"), "user: genuine consent\nuser: genuine consent")
+
+
+# ---------------------------------------------------------------------------
+# Round 8: the reducer's own renderings, measured on the committed replay. Each
+# refused ONE epoch per response, and adoption is all-or-nothing per response,
+# so each cost several of the replay's twenty responses outright.
+# ---------------------------------------------------------------------------
+
+
+def _call_rows(name: str, arguments: str, result: str) -> list[dict]:
+    """An assistant call and its tool result, plus filler for the line budget."""
+    return [
+        {
+            "role": "assistant",
+            "content": [],
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": [{"type": "text", "text": result}]},
+    ] + [
+        {"role": "user", "content": [{"type": "text", "text": f"filler line {n} " + _PAD}]}
+        for n in range(6)
+    ]
+
+
+def test_a_space_before_an_element_is_source_text() -> None:
+    """A run cut mid-line by a note or ellipsis keeps its trailing space.
+
+    `normalise` rstrips each LINE, and a run ending in front of `…` or a note
+    ends mid-line, so the strip deleted a space the reducer really kept:
+    `'flex', …(7)` came out `'flex',…(7)`, which is in no source line. That
+    refused the strong-error continuation the reducer writes under
+    `[radient:ok N lines]`, and with it two of the replay's responses.
+    """
+    error = "AssertionError: [redacted] [ 'order-last', 'flex', …(7) ] to include 'basis-0'"
+    rows = _call_rows("bash", '{"command": "pytest tests/unit -q"}', "ran\n" + error)
+    _accept(rows, "call bash: pytest tests/unit -q [radient:ok 2 lines]\n\t" + error)
+
+
+def test_a_call_summary_is_the_cleaned_argument_rendering() -> None:
+    """`_call_summary` cleans every value BEFORE canonicalising, byte for byte.
+
+    `clean` rstrips each line, so a code cell ending in a newline (`...\\nr\\n`)
+    renders as `...\\nr"`, which the raw argument text and its plain canonical
+    form both lack. That one character refused every eval call of that shape
+    and four of the replay's twenty responses with it.
+    """
+    arguments = (
+        '{"code": "\\nr = run(\\"grey\\", \\"320x700\\")\\nr\\n", '
+        '"i": "retaking", "timeout": 90}'
+    )
+    rows = _call_rows("eval", arguments, "line one\nline two\nline three")
+    _accept(rows, 'call eval: {"code":"\\nr = run(\\"grey\\", \\"320x700\\")\\nr","timeout":90}')
+
+
+def test_the_rendered_alias_buys_no_line_or_character_budget() -> None:
+    """The cleaned rendering is an ALIAS for matching, not more source.
+
+    Without excluding it, every dict-argument call would count its arguments
+    twice toward the span's line and character totals, loosening the line
+    budget and the pool's deleted-character budget by the size of the alias.
+    """
+    from local_operator.saver.provenance import source_records
+
+    arguments = '{"code": "x = 1\\n", "timeout": 90}'
+    records, _, _ = source_records(_call_rows("eval", arguments, "ok")[:1])
+    call = records["call"][0]
+    assert call.lines == len(call.text.split("\n")) - 1
+    assert call.chars < len(call.text)

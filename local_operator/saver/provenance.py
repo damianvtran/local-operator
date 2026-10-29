@@ -307,6 +307,7 @@ def source_records(
             # The tool NAME is source too: a grouped read-only summary names
             # the command (`[radient:1 read-only commands, all ok: read]`).
             text = normalise(name) + "\n" + normalise(raw)
+            alias_lines = alias_chars = 0
             try:
                 args = json.loads(raw)
             except (ValueError, TypeError):
@@ -316,6 +317,30 @@ def source_records(
                 # keys redacted; the canonical form is the source too, so a
                 # dropped `i` key is just deleted bytes.
                 text = text + "\n" + normalise(canonical_bytes(args).decode())
+                # `_call_summary`'s own rendering, byte for byte: `i`/`intent`
+                # dropped and every string value passed through `clean` BEFORE
+                # canonicalisation. `clean` rstrips each line, so a value ending
+                # in a newline (`"…\nr\n"`, every eval cell) loses it, and the
+                # canonical line above no longer holds the reducer's `\nr"`. That
+                # one character refused an honest eval call and voided four of
+                # the replay's twenty responses. It is a deterministic function
+                # of the row's own arguments, so it admits the reducer's
+                # rendering and nothing else; long values the reducer replaces
+                # with a `[N chars]` note are still matched by the note path.
+                rendered = {
+                    key: normalise(value) if isinstance(value, str) else value
+                    for key, value in args.items()
+                    if key not in ("i", "intent")
+                }
+                alias = normalise(canonical_bytes(rendered).decode())
+                if alias not in text:
+                    # An ALIAS for matching, not more source: it is excluded
+                    # from the record's line and character counts below, so
+                    # the line budget and the pool's deleted-character budget
+                    # stay what the row really holds.
+                    text = text + "\n" + alias
+                    alias_lines += _count_lines(alias)
+                    alias_chars += len(alias) + 1
                 command = args.get("command")
                 if name in _SHELL_NAMES and isinstance(command, str):
                     cleaned = normalise(command)
@@ -333,8 +358,8 @@ def source_records(
                 _Rec(
                     text=text,
                     identity=f"call:{row_number}:{len(records['call'])}",
-                    lines=_count_lines(text),
-                    chars=len(text),
+                    lines=_count_lines(text) - alias_lines,
+                    chars=len(text) - alias_chars,
                     name=name,
                 )
             )
@@ -648,7 +673,16 @@ def _elements(body: str) -> list[_Element]:
         if start > cursor:
             # Runs are compared in the ONE normalisation, so a quoted marker
             # spelling the source carried matches the source's own spelling.
-            elements.append(("run", normalise(body[cursor:start])))
+            # A run cut by an element ends MID-LINE, not at a line end, and
+            # `normalise` rstrips every line: the space before an ellipsis or a
+            # note (`'flex', …(7)`, `AssertionError: [redacted]`) is source text
+            # the reducer kept, and dropping it here made an honest strong-error
+            # line unmatchable — one refused epoch that voided six of the
+            # replay's twenty responses. Restoring it re-adds only characters the
+            # body really carries, so it admits nothing the source lacks.
+            raw = body[cursor:start]
+            tail = raw[len(raw.rstrip(" \t")) :] if not raw.endswith("\n") else ""
+            elements.append(("run", normalise(raw) + tail))
         elements.append((kind, body[start:end]))
         cursor = end
     if cursor < len(body):
