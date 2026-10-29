@@ -13,15 +13,31 @@ root = Path.cwd()
 base = '9495f8a6c3bf2b5438ef5c33d7274cf519435dda'
 old = json.loads(subprocess.check_output(['git','show',base+':i18n/ledger.json']))['entries']
 new = json.loads((root/'i18n/ledger.json').read_text())['entries']
-assert len(new)==len(old)+24
-changed=0
-for a,b in zip(old,new):
-    assert {k:v for k,v in a.items() if k!='note'}=={k:v for k,v in b.items() if k!='note'}
-    assert b['note'].startswith(a['note'])
-    changed += a['note']!=b['note']
-assert changed==24
+# Merge-stable: other PRs append their own ledger rows, and a text merge may place
+# them BEFORE rows that existed at the audited base (observed: main's relay.asks rows
+# landed ahead of the base's last five ur rows), so neither total length, row index
+# nor "the last 24" is a stable handle. Instead: (1) every base row must reappear, in
+# order, as a subsequence of the current ledger with every non-note field identical and
+# its note only ever extended; (2) the 24 rows this PR appends are pinned by CONTENT -
+# the entries not matched by (1) whose note cites their le28r2 evidence bundle.
+nf=lambda e:{k:v for k,v in e.items() if k!='note'}
+j=0;matched=set();changed=0
+for a in old:
+    while j<len(new) and not (nf(new[j])==nf(a) and new[j]['note'].startswith(a['note']) and j not in matched):
+        j+=1
+    assert j<len(new),('base row lost or altered',a['locale'],a['namespace'])
+    matched.add(j); changed += new[j]['note']!=a['note']; j+=1
+assert len(matched)==len(old) and changed==24,(len(matched),changed)
+fresh=[e for i,e in enumerate(new) if i not in matched]
+tail=[e for e in fresh if 'audits/evidence/%s/%s/le28r2/' % (e['locale'],e['namespace']) in e['note']]
+rows={(r['locale'],r['namespace']):r for r in tail}
+assert len(tail)==len(rows)==24, (len(tail),len(rows))
+assert all(r['status'] in ('passed','blocked') for r in tail)
 sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
-rows={ (r['locale'],r['namespace']):r for r in new[-24:]}
+tail=[e for e in new[len(old):] if 'audits/evidence/%s/%s/le28r2/' % (e['locale'],e['namespace']) in e['note']]
+rows={(r['locale'],r['namespace']):r for r in tail}
+assert len(tail)==len(rows)==24, (len(tail),len(rows))
+assert all(r['status'] in ('passed','blocked') for r in tail)
 records=sorted((root/'i18n/audits/evidence').glob('*/*/le28r2/record.json'))
 assert len(records)==len(rows)==24
 files=0;inputs=0;counts={};routed=0;remediated=0;resolved_majors=0;majors_raised=0;majors_unresolved=0
@@ -62,6 +78,11 @@ for path in records:
         rr=json.loads((rem/'route-receipt.json').read_text())
         blob=subprocess.check_output(['git','show',rr['recomputed_from_commit']+':'+rr['path']])
         assert hashlib.sha256(json.dumps(json.loads(blob),ensure_ascii=False,indent=1).encode()).hexdigest()==rr['sha256']
+        # Post-review corrections (if any) must describe the bytes actually committed.
+        pr=rf.get('post_review_delta')
+        if pr:
+            cat=root/d['input_paths']['target']
+            assert pr['catalogue_sha256_after']==rf['target_sha256']==sha(cat),(str(rem),'post-review catalogue hash')
         remediated+=len(rf['findings'])
         resolved_majors+=sum(x['severity_raised'] in ('blocker','major') and x['resolved'] for x in rf['findings'])
     else:
@@ -71,4 +92,4 @@ for path in records:
 # byte-only control, no mutation of tracked evidence).
 p=records[0].parent/'report.md'
 assert hashlib.sha256(p.read_bytes()+b'\nCORRUPTION-CONTROL\n').hexdigest()!=sha(p)
-print(json.dumps({'result':'PASS','pairs':24,'original_rows_preserved':len(old),'historical_notes_appended':changed,'current_rows_appended':24,'companions_verified':files,'input_hashes_verified':inputs,'semantic_verdicts':counts,'majors_raised_before_remediation':majors_raised,'majors_resolved_by_remediation':resolved_majors,'unresolved_after_remediation':majors_unresolved,'remediated_findings_verified':remediated,'routed_file_receipts':routed,'pairs_with_context_refusal':24,'byte_corruption_negative_control':'detected','scope':'Integrity/history only; no sanctioned-reader or native/rendered certification.'},indent=2))
+print(json.dumps({'result':'PASS','pairs':24,'original_rows_preserved':len(old),'ledger_entries_total':len(new),'historical_notes_appended':changed,'current_rows_appended':24,'companions_verified':files,'input_hashes_verified':inputs,'semantic_verdicts':counts,'majors_raised_before_remediation':majors_raised,'majors_resolved_by_remediation':resolved_majors,'unresolved_after_remediation':majors_unresolved,'remediated_findings_verified':remediated,'routed_file_receipts':routed,'pairs_with_context_refusal':24,'byte_corruption_negative_control':'detected','scope':'Integrity/history only; no sanctioned-reader or native/rendered certification.'},indent=2))

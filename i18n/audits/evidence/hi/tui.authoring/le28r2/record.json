@@ -5,6 +5,8 @@
   "namespace": "tui.authoring",
   "audit_date": "2026-10-28",
   "packaged_at_utc": "2026-10-28T17:37:44.006279+00:00",
+  "repackaged_at_utc": "2026-10-29T02:39:11Z",
+  "repackaged_note": "packaged_at_utc is the first packaging time (2026-10-28 17:37Z) and is kept as-is. The record was repackaged after it embedded the routed-read receipts (2026-10-28T23:46Z-2026-10-29T00:05Z) and the remediation block for 4d38a1d4b8e; repackaged_at_utc is the time of that final edit for PR #3123 review round 1 (F2), not a back-dated freeze point.",
   "key_count": 49,
   "auditor": {
     "agent": "translation-reviewer (lopdev)",

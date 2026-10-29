@@ -5,6 +5,8 @@
   "namespace": "wire.settings",
   "audit_date": "2026-10-28",
   "packaged_at_utc": "2026-10-28T17:37:44.006279+00:00",
+  "repackaged_at_utc": "2026-10-29T02:39:11Z",
+  "repackaged_note": "packaged_at_utc is the first packaging time (2026-10-28 17:37Z) and is kept as-is. The record was repackaged after it embedded the routed-read receipts (2026-10-28T23:46Z-2026-10-29T00:05Z) and the remediation block for 4d38a1d4b8e; repackaged_at_utc is the time of that final edit for PR #3123 review round 1 (F2), not a back-dated freeze point.",
   "key_count": 820,
   "auditor": {
     "agent": "audit-ru-wire-settings (independent reviewer)",
@@ -113,6 +115,13 @@
     ],
     "verdict": "PASS",
     "target_sha256_before": "f282f919845af17f0ee837083ee9e452796573c3af0d2b37580b775d3a0f963d",
-    "target_sha256_after": "5185479b62b911f6db52d90e20356c0b002704738553bba44f7d90caf79d37e1"
+    "target_sha256_after": "9156360167e72197d97bfb8caeaa0c7e2795b03d0dceeb7195d24b8f9d1f40bd",
+    "target_sha256_after_original_remediation_4d38a1d4b8e": "5185479b62b911f6db52d90e20356c0b002704738553bba44f7d90caf79d37e1",
+    "post_review_correction": {
+      "commit": "bd47fce698d3d498c503f047216e4e442f7d0d67",
+      "key": "wire.settings.librarian_enabled.help",
+      "change": "«её» → «его» (PR #3123 review round 1, F1)",
+      "record": "i18n/audits/evidence/ru/wire.settings/le28r2-remed/findings.json#post_review_delta"
+    }
   }
 }
