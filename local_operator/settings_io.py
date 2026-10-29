@@ -110,11 +110,14 @@ logger = logging.getLogger(__name__)
 # Registry copy: rendered through the i18n runtime
 # ---------------------------------------------------------------------------
 #
-# Only the carried `wire.settings` namespace follows the active locale. The
-# English-only children stay English: keeping them separate preserves the audited
-# wire.settings source hashes, and looking them up in a translated tree would
-# silently change that boundary if a child catalogue appeared later.
-_ENGLISH_SETTINGS_NAMESPACES = (
+#: Child namespaces rendered beside `wire.settings`. They exist as separate
+#: namespaces so a new section never moves the audited `wire.settings` source
+#: hash the carried locales are pinned to — the SPLIT is what preserves those
+#: hashes, not a locale pin. Every one of them ships its own translated
+#: catalogues, so all seven follow the active locale exactly as `wire.settings`
+#: does; pinning them to `en` left seven English islands on a Spanish page
+#: (QA round 1, Q1) while buying nothing the namespace split did not already buy.
+_CHILD_SETTINGS_NAMESPACES = (
     "wire.settings.account_policy",
     "wire.settings.hub_defaults",
     "wire.aida_cadence",
@@ -125,23 +128,33 @@ _ENGLISH_SETTINGS_NAMESPACES = (
 )
 
 
-@functools.lru_cache(maxsize=64)
+@functools.lru_cache(maxsize=256)
+def _namespace_sources(root: str, namespace: str, locale: str) -> dict[str, str]:
+    """One catalogue FILE per process generation; empty when absent/invalid.
+
+    Keyed by the file rather than by the merged registry map, so a locale move
+    reads each file once and the English fallback shares the English children
+    with every locale. Caching only the merged map re-read all seven children on
+    each move towards a new locale — the same files, again (QA round 1, Q3).
+    """
+    try:
+        return _catalogues.load_catalogue(locale, namespace)
+    except Exception:  # pragma: no cover - a broken wheel still paints codes
+        return {}
+
+
+@functools.lru_cache(maxsize=32)
 def _sources(root: str, namespace: str, locale: str) -> dict[str, str]:
-    """One read per catalogue root, namespace and locale; never per message.
+    """The merged namespace map for one locale, composed from the file cache.
 
     The registry materialises ~740 strings at import, so resolving each through
-    `messages.render` would put ~740 file parses on the CLI import path. Cache
-    the merged namespace map instead: one read for carried settings per locale,
-    one per English-only child, shared by every row.
+    `messages.render` would put ~740 file parses on the CLI import path. One
+    merged map per (root, locale), built from `_namespace_sources`, is what
+    every row reads.
     """
     sources: dict[str, str] = {}
-    for name in (namespace, *_ENGLISH_SETTINGS_NAMESPACES):
-        try:
-            # The child pin is explicit, not fallback: only wire.settings moves.
-            child_locale = locale if name == namespace else "en"
-            sources.update(_catalogues.load_catalogue(child_locale, name))
-        except Exception:  # pragma: no cover - a broken wheel still paints codes
-            pass
+    for name in (namespace, *_CHILD_SETTINGS_NAMESPACES):
+        sources.update(_namespace_sources(root, name, locale))
     return sources
 
 

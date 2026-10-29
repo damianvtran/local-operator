@@ -2713,10 +2713,35 @@ class TestRegistryLocaleResolution:
         monkeypatch.setattr(text, "_active_locale", "es")
         assert settings_io._t(ws.model_title()) == "Model"
         (root / "en" / "wire.settings.json").unlink()
+        # Both layers: the file cache outlives the merged map by design.
+        settings_io._namespace_sources.cache_clear()
         settings_io._sources.cache_clear()
         assert settings_io._t(ws.model_title()) == ws.model_title().code
 
-    def test_english_only_children_never_resolve_a_translated_namespace(
+    def test_child_namespaces_resolve_in_the_active_locale(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The seven children are separate for hashing, not for language.
+
+        QA round 1, Q1: pinning them to English left seven English islands on a
+        Spanish page even though each child ships a Spanish catalogue. The
+        namespace SPLIT is what preserves the audited `wire.settings` source
+        hash, so the children follow the active locale like any other copy.
+        """
+        message = ap.label()
+        spanish = json.loads(
+            Path("local_operator/i18n/catalogues/es/wire.settings.account_policy.json").read_text(
+                encoding="utf-8"
+            )
+        )[message.code]
+        monkeypatch.setattr(text, "_active_locale", "es")
+        assert settings_io._t(message) == spanish
+        english = settings_io._namespace_sources(
+            str(catalogues.catalogue_root()), "wire.settings.account_policy", "en"
+        )[message.code]
+        assert spanish != english
+
+    def test_a_child_missing_from_the_locale_falls_back_to_english(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         message = ap.label()
@@ -2725,21 +2750,26 @@ class TestRegistryLocaleResolution:
         ]
         root = tmp_path / "catalogues"
         (root / "es").mkdir(parents=True)
-        (root / "es" / "wire.settings.account_policy.json").write_text(
-            json.dumps({message.code: "NO DEBE APARECER"}), encoding="utf-8"
-        )
         (root / "en").mkdir()
         (root / "en" / "wire.settings.account_policy.json").write_text(
             json.dumps({message.code: english}), encoding="utf-8"
         )
+        # Present in es for the CARRIED namespace, absent for the child: the
+        # child's own key must come from English, not from its code.
+        (root / "es" / "wire.settings.json").write_text(
+            json.dumps({ws.model_title().code: "Modelo"}), encoding="utf-8"
+        )
         monkeypatch.setattr(catalogues, "_CATALOGUES", root)
+        settings_io._namespace_sources.cache_clear()
+        settings_io._sources.cache_clear()
         monkeypatch.setattr(text, "_active_locale", "es")
         assert settings_io._t(message) == english
-        assert settings_io._sources.cache_info().currsize >= 1
+        assert settings_io._t(ws.model_title()) == "Modelo"
 
     def test_registry_copy_costs_one_read_per_namespace_per_locale(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        settings_io._namespace_sources.cache_clear()
         settings_io._sources.cache_clear()
         reads: list[tuple[str, str]] = []
         real_load = settings_io._catalogues.load_catalogue
@@ -2751,14 +2781,27 @@ class TestRegistryLocaleResolution:
         monkeypatch.setattr(settings_io._catalogues, "load_catalogue", counted)
         monkeypatch.setattr(text, "_active_locale", "es")
         settings_io._refresh_registry_copy()
-        expected = {
-            ("es", "wire.settings"),
-            *(("en", namespace) for namespace in settings_io._ENGLISH_SETTINGS_NAMESPACES),
-        }
-        assert len(reads) == len(expected)
-        assert set(reads) == expected
+        # ~800 messages, and each (locale, namespace) FILE read at most once: a
+        # read-per-message would put hundreds of parses on this path.
+        assert len(reads) == len(set(reads)), f"a catalogue was read twice: {reads}"
+        assert len(reads) <= 2 * (1 + len(settings_io._CHILD_SETTINGS_NAMESPACES))
+        assert ("es", "wire.settings") in reads
+        # A repeat refresh is served entirely from the cache.
+        reads.clear()
         settings_io._refresh_registry_copy()
-        assert len(reads) == len(expected), "cached copy must not re-read on every message"
+        assert reads == [], f"a repeat refresh re-read {reads}"
+        # A move to another locale reads THAT locale's files, and returning to
+        # es costs nothing: children are keyed by file, so they are shared
+        # rather than re-read per move (QA round 1, Q3).
+        reads.clear()
+        monkeypatch.setattr(text, "_active_locale", "fr")
+        settings_io._refresh_registry_copy()
+        assert any(locale == "fr" for locale, _ in reads)
+        assert len(reads) == len(set(reads))
+        reads.clear()
+        monkeypatch.setattr(text, "_active_locale", "es")
+        settings_io._refresh_registry_copy()
+        assert reads == [], f"returning to a cached locale re-read {reads}"
 
     def test_a_render_failure_degrades_to_the_message_code(
         self, monkeypatch: pytest.MonkeyPatch
