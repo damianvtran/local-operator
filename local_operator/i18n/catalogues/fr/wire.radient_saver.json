@@ -2,7 +2,7 @@
   "wire.radient_saver.section.title": "Radient Saver (bêta)",
   "wire.radient_saver.section.description": "Raccourcit l’historique de conversation que votre agent renvoie à chaque tour. Saver n’envoie jamais à Radient les identifiants de votre fournisseur d’IA. Les modifications s’appliquent dès le tour suivant.",
   "wire.radient_saver.mode.label": "Radient Saver (bêta)",
-  "wire.radient_saver.mode.help": "Bêta. Envoie à Radient la partie de votre historique de conversation prête à être raccourcie ; Radient la raccourcit sans rien en conserver. Saver n’envoie jamais à Radient les identifiants de votre fournisseur d’IA. Chaque montant facturé est déduit de vos crédits Radient, ce qui nécessite une connexion à Radient avec un solde positif. LOP_RADIENT_SAVER prime sur ce paramètre.",
+  "wire.radient_saver.mode.help": "Bêta. Envoie à Radient la partie de votre historique de conversation prête à être raccourcie ; Radient la raccourcit sans rien en conserver. Saver n’envoie jamais à Radient les identifiants de votre fournisseur d’IA. Chaque montant facturé correspond aux tokens que Saver retire et est déduit de vos crédits Radient ; il exige donc une connexion à Radient avec un solde positif. Votre facture auprès de votre fournisseur d’IA reste inchangée. LOP_RADIENT_SAVER prime sur ce paramètre.",
   "wire.radient_saver.mode.choice.off.label": "désactivé",
   "wire.radient_saver.mode.choice.off.description": "n’envoie jamais l’historique à Radient (par défaut)",
   "wire.radient_saver.mode.choice.opt_in.label": "sur demande",

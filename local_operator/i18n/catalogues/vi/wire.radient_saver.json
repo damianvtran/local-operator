@@ -2,7 +2,7 @@
   "wire.radient_saver.section.title": "Radient Saver (beta)",
   "wire.radient_saver.section.description": "Rút gọn lịch sử cuộc trò chuyện mà tác nhân của bạn gửi lại ở mỗi lượt. Saver không bao giờ gửi thông tin xác thực nhà cung cấp AI của bạn tới Radient. Thay đổi có hiệu lực từ lượt kế tiếp.",
   "wire.radient_saver.mode.label": "Radient Saver (beta)",
-  "wire.radient_saver.mode.help": "Bản beta. Gửi tới Radient phần lịch sử cuộc trò chuyện đã sẵn sàng để rút gọn; Radient rút gọn phần đó và không giữ lại bất kỳ nội dung nào. Saver không bao giờ gửi thông tin xác thực nhà cung cấp AI của bạn tới Radient. Mỗi khoản phí được trừ vào tín dụng Radient của bạn và cần đăng nhập Radient bằng tài khoản có số dư lớn hơn 0. LOP_RADIENT_SAVER ghi đè cài đặt này.",
+  "wire.radient_saver.mode.help": "Bản beta. Gửi tới Radient phần lịch sử cuộc trò chuyện đã sẵn sàng để rút gọn; Radient rút gọn phần đó và không giữ lại bất kỳ nội dung nào. Saver không bao giờ gửi thông tin xác thực nhà cung cấp AI của bạn tới Radient. Mỗi khoản phí ứng với số token mà Saver loại bỏ và được trừ vào tín dụng Radient của bạn, nên cần đăng nhập Radient bằng tài khoản có số dư lớn hơn 0. Hóa đơn từ nhà cung cấp AI của bạn không thay đổi. LOP_RADIENT_SAVER ghi đè cài đặt này.",
   "wire.radient_saver.mode.choice.off.label": "tắt",
   "wire.radient_saver.mode.choice.off.description": "không bao giờ gửi lịch sử tới Radient (mặc định)",
   "wire.radient_saver.mode.choice.opt_in.label": "chọn bật",

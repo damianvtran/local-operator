@@ -2,7 +2,7 @@
   "wire.radient_saver.section.title": "Radient Saver (beta)",
   "wire.radient_saver.section.description": "Shortens the conversation history your agent re-sends on every turn. Saver never sends your AI provider's credentials to Radient. Changes apply from the next turn.",
   "wire.radient_saver.mode.label": "Radient Saver (beta)",
-  "wire.radient_saver.mode.help": "Beta. Sends the part of your conversation history that is ready to be shortened to Radient, which shortens it and keeps none of its content. Saver never sends your AI provider's credentials to Radient. Each charge comes from your Radient credits and needs a Radient sign-in with a positive balance. LOP_RADIENT_SAVER overrides this setting.",
+  "wire.radient_saver.mode.help": "Beta. Sends the part of your conversation history that is ready to be shortened to Radient, which shortens it and keeps none of its content. Saver never sends your AI provider's credentials to Radient. Each charge covers the tokens Saver removes and comes out of your Radient credits, so it needs a Radient sign-in with a positive balance. Your bill from your AI provider is unchanged. LOP_RADIENT_SAVER overrides this setting.",
   "wire.radient_saver.mode.choice.off.label": "off",
   "wire.radient_saver.mode.choice.off.description": "never sends history to Radient (the default)",
   "wire.radient_saver.mode.choice.opt_in.label": "opt in",

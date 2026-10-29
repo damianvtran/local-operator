@@ -2,7 +2,7 @@
   "wire.radient_saver.section.title": "Radient Saver (beta)",
   "wire.radient_saver.section.description": "Acorta el historial de la conversación que tu agente vuelve a enviar en cada turno. Saver nunca envía a Radient las credenciales de tu proveedor de IA. Los cambios se aplican a partir del siguiente turno.",
   "wire.radient_saver.mode.label": "Radient Saver (beta)",
-  "wire.radient_saver.mode.help": "Beta. Envía a Radient la parte del historial de la conversación que ya se puede acortar; Radient la acorta y no conserva nada de su contenido. Saver nunca envía a Radient las credenciales de tu proveedor de IA. Cada cargo se descuenta de tus créditos de Radient y requiere haber iniciado sesión en Radient con saldo positivo. LOP_RADIENT_SAVER tiene prioridad sobre este ajuste.",
+  "wire.radient_saver.mode.help": "Beta. Envía a Radient la parte del historial de la conversación que ya se puede acortar; Radient la acorta y no conserva nada de su contenido. Saver nunca envía a Radient las credenciales de tu proveedor de IA. Cada cargo corresponde a los tokens que Saver elimina y se descuenta de tus créditos de Radient, así que requiere haber iniciado sesión en Radient con saldo positivo. La factura de tu proveedor de IA no cambia. LOP_RADIENT_SAVER tiene prioridad sobre este ajuste.",
   "wire.radient_saver.mode.choice.off.label": "desactivado",
   "wire.radient_saver.mode.choice.off.description": "nunca envía el historial a Radient (predeterminado)",
   "wire.radient_saver.mode.choice.opt_in.label": "por sesión",
