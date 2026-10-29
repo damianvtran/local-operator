@@ -10,11 +10,17 @@ cell_len of every value and flags values wider than 56 / 58 / 96 / 98 cells (the
 inner widths a lost report cited for 60x24 / 100x24). cell_len of one string is
 NOT a rendered-frame fit proof: it ignores label columns, wrapping and the app.
 """
-import json, sys
+import json
+import sys
 from pathlib import Path
+
 root = Path(sys.argv[1]).resolve(); sys.path.insert(0, str(root))
-from local_operator.i18n import catalogues as C, runtime as R, format as F
 from rich.cells import cell_len
+
+from local_operator.i18n import catalogues as C
+from local_operator.i18n import format as F
+from local_operator.i18n import runtime as R
+
 LOC = ["es","fr","ru","vi","hi"]
 COUNTS = [0,1,2,3,4,5,11,21,22,25,1000000,1500000]
 out = {"renders": {}, "widths": {}}

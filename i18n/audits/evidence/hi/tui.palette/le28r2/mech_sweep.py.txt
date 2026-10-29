@@ -13,13 +13,20 @@ maxCells (rich cell_len) where the en sidecar records one, locale typography
 (identical to en) values, and glossary-term presence leads.
 It PRODUCES LEADS and numbers; the semantic judgement is the auditor's.
 """
-import json, re, sys, unicodedata, hashlib
+import hashlib
+import json
+import re
+import sys
+import unicodedata
 from pathlib import Path
+
 root = Path(sys.argv[1]).resolve(); out = Path(sys.argv[2]); out.mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, str(root))
-from local_operator.i18n import catalogues as C, runtime as R
-from scripts.i18n import check as K
 from rich.cells import cell_len
+
+from local_operator.i18n import catalogues as C
+from local_operator.i18n import runtime as R
+from scripts.i18n import check as K
 
 NS = ["tui.transcript", "tui.authoring", "tui.team_authoring", "tui.palette", "wire.settings"]
 LOC = ["es", "fr", "ru", "vi", "hi"]
