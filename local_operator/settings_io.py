@@ -170,6 +170,9 @@ except Exception:  # pragma: no cover - missing optional copy degrades to its co
 # a new section beside translated ones must not move their audited sources.
 try:
     _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.voice"))
+except Exception:  # pragma: no cover - missing optional copy degrades to its code
+    pass
+
 # The Hub defaults rows read their copy from their own English-only child: the
 # switch they describe governs BOTH agent and skill links, and that correction
 # must not move the already-audited ``wire.settings`` source hash the carried
