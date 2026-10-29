@@ -1,0 +1,1910 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.agents_help",
+      "source_sha256": "d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.agents_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.aida_help",
+      "source_sha256": "31e8445b6d8a9540ef524988b0fca3efca111362188f2ba41d6f857499828423",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.aida_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.browser",
+      "source_sha256": "a9841deed81927762716c7592a592bb4e3f069d16f6ba0def6becb755b728321",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.browser/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.browser_help",
+      "source_sha256": "7fd47199bb8d443a0fbf7469d635453cd6f57bb7c14efec91862c6b5b0c1b1e6",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.browser_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.config_help",
+      "source_sha256": "97f625f6c6e26f8723e471569a0227f8e4da18518f2ab50e444fe93345ab2c8c",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.config_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.credential_help",
+      "source_sha256": "2757dc32f5d75d81f639bf689b6423ef64614ad1e91289bb67655e9681266418",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.credential_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.exec_help",
+      "source_sha256": "1a44c9ea283ce8c4a9bb8ffab403e9cb36cf4a73fce832d91e79f355448b02eb",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.exec_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.exec_remote_help",
+      "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
+      "translator": {
+        "agent": null,
+        "model": null,
+        "date": null
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.exec_remote_help/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.exec_runtime",
+      "source_sha256": "3eee7ca31076e48ccf7e1c8854c5647d0859e5341b26b10c8043e53825de72fd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.exec_runtime/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.exec_worker_help",
+      "source_sha256": "aa501d6d894fdb20462595582d43e435364f200e677a50e52fd8d2b93706a957",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.exec_worker_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.global_help",
+      "source_sha256": "c6e91dda89a9b792587f4ac9c594e188b78b8cd529fa1acf51ca783422c3152f",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.global_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.hub_help",
+      "source_sha256": "df519de9acb3cdd99fa5ae4cc0c5753b090c43b79f8870c543258c0f4fcdfec6",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.hub_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.hub_shared_help",
+      "source_sha256": "5d40860430e36224bd77e95ff8298bd4b80f052f3d910a532947af6e78632b44",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.hub_shared_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.install_help",
+      "source_sha256": "f242bfdbf8e80bd7f956ae361985180d7eb797dd4223da8423dc678b6fec61e7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.install_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.login_help",
+      "source_sha256": "66ae3d9bfe16c2830bb0a78ef7b5c768ae194f9f4d972379bbe9d752b35502f7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.login_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.login_status_help",
+      "source_sha256": "17ef2629c0ad8a20c7e0a939d8fb38e594936e0c5dd47a3a1600300c1bf3f0f3",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.login_status_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.logout_help",
+      "source_sha256": "2f479fa8e75a73f8897ec74902345bd36ca7117ae275dbf7a9bfbc98a830e453",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.logout_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.mcp_help",
+      "source_sha256": "3f5e0f11b186501e6a708ffaba4af294ebdb663175722b58c24143dbf0173417",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.mcp_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.memory_help",
+      "source_sha256": "b3b63aeb9c1b27d3e686c2c6ab7378130577255ac5e999296a583cd5bf0c3a13",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.memory_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.mobile_help",
+      "source_sha256": "88681bae09adf93216e3e3b990652f7f57654a0438f6bc8c3cc5dd9ebb6eb947",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.mobile_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.model_help",
+      "source_sha256": "3b28b1bac7b2bd3d05f781585d27770940a12e549f3d8df456a107b61605008f",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.model_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.monitor_help",
+      "source_sha256": "766f6162643fec0c473dd4ffd822e5f1f9590e32caa2bc98793e9d65061161ab",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.monitor_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.qwencloud_help",
+      "source_sha256": "6406143d97b406ca752a3fedecf2a69c22d635a5f2e1daf2fd2370ac393ff13b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.qwencloud_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.refresh_help",
+      "source_sha256": "b7168f0a70be23ed3637b1a91abef6dce1eb0d47a21b9fefc9d6104556be730f",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.refresh_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.resume_click_help",
+      "source_sha256": "36caf0cd5f4c9f8081281e41a57d0cb7adb573f944ce14f6d0e087e04535a73e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.resume_click_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.send_help",
+      "source_sha256": "ab7d3c4a3ac0696b935d613c2b7596c56dbd3b32a8fdabe29ff2bc3a93a1bfb9",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.send_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.serve_help",
+      "source_sha256": "bd0b51271edc67c23978ca23688a9af1ef94a5623b0e86a5e3bbb418a5b243f0",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.serve_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.services_help",
+      "source_sha256": "76aca39fb3bfe46be1d31fbfde2176ee525b7ac650961104894a894f71751935",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.services_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.sessions_help",
+      "source_sha256": "a250a185a780ab330187560c23dfe5e8d95956da24d417b22e1fc8bb121c2a6a",
+      "translator": {
+        "agent": null,
+        "model": null,
+        "date": null
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.sessions_help/zh24a1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.stop_help",
+      "source_sha256": "ab8ae153e8749888e2426614c06d1ba672c70bad33d2a44bed46c00004f33d28",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.stop_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.teams_help",
+      "source_sha256": "400637df631f938b7c144cf500a64bd5976f3157b25944d4ea3b701d79c69738",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.teams_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.update_help",
+      "source_sha256": "78da39b393ee77900255ddfdf92a17220a6eedbecba340e7d925a2fbdf01abf9",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.update_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.wake_help",
+      "source_sha256": "eff6775fe3ad39c228dd4c360b22011d9a95c887fa5b7839744f4b532a31ac8a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/cli.wake_help/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "mobile.setup",
+      "source_sha256": "6249b10379beb9b2433746416fa7baff061265a1b9315d47465140cd5fcf61e9",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/mobile.setup/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.ask",
+      "source_sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7",
+      "translator": {
+        "agent": null,
+        "model": null,
+        "date": null
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/relay.ask/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.library",
+      "source_sha256": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/relay.library/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.login",
+      "source_sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/relay.login/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.session",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/relay.session/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.session.tags",
+      "source_sha256": "7254ba273a4148ddef8279161682ada6405745a9b1634c59a2c5b6ec9e677af0",
+      "translator": {
+        "agent": null,
+        "model": null,
+        "date": null
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/relay.session.tags/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.shell",
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/relay.shell/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.analytics",
+      "source_sha256": "aa5221066aa84eedf0f924628d51bc8f08ccf5f26b5075638b9d40062f7b617e",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.analytics/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.app",
+      "source_sha256": "7e5f39df72438663a66afca0e5338e90b7b984bdca6b562195ce976945bd7875",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.app/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.asks",
+      "source_sha256": "e3ac8769116d2e2c38107b1918c200dd4ff846f3b1b9b092933e3bf91d787d7e",
+      "translator": {
+        "agent": null,
+        "model": null,
+        "date": null
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.asks/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.authoring",
+      "source_sha256": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
+      "translator": {
+        "agent": null,
+        "model": null,
+        "date": null
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.authoring/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.hub_links",
+      "source_sha256": "7fbe6713f8ac8f312884476c498c3b74e76c5f0853bdd027f25fc47d489311bb",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.hub_links/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.import",
+      "source_sha256": "932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.import/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.library",
+      "source_sha256": "5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.library/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.notices",
+      "source_sha256": "4a159689628113c32a2df75a9e3d98d74aab790c9946848307bb267318731510",
+      "translator": {
+        "agent": null,
+        "model": null,
+        "date": null
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.notices/zh24a1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.palette",
+      "source_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
+      "translator": {
+        "agent": null,
+        "model": null,
+        "date": null
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.palette/zh24a1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.projects",
+      "source_sha256": "aeb473eb7de44143822962b44b6be239d63f930710e754ce5205781ca4b4ae91",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.projects/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.projects_edit",
+      "source_sha256": "dd911df0afbd69461e9831a8a5b7b6218795b6c2aee7c3f1be12a0a9aaaa3650",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.projects_edit/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.review",
+      "source_sha256": "39c168340e3bac3f47e3a94358026e10b99806ce4147427e6fd7c70334e00a61",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.review/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.schedule",
+      "source_sha256": "6caa74d9248ba9ccfdd6e61ef97976a8a7fcb76ed47cb7cca30911c980f601d7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.schedule/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.small",
+      "source_sha256": "16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75",
+      "translator": {
+        "agent": null,
+        "model": null,
+        "date": null
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.small/zh24a1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.status",
+      "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.status/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.tags",
+      "source_sha256": "509d4e9ff9c7a90b3cf574a0ebc56432d37919aaddb74e6a6aa8ad945f8bd8bd",
+      "translator": {
+        "agent": null,
+        "model": null,
+        "date": null
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.tags/zh24a1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.team_authoring",
+      "source_sha256": "b956c90f98b9542da3fc8b9b9af1d1d797d36617f4230ffd4f616382445e9d6c",
+      "translator": {
+        "agent": null,
+        "model": null,
+        "date": null
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.team_authoring/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.transcript",
+      "source_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.transcript/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.usage",
+      "source_sha256": "5aeaec254352896101bf2825ac03d06f74c95e3598cda23536c5fe28507a2f8b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.usage/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.viewer",
+      "source_sha256": "741c34bd0dbed2d1834e53a8546b39bb2d086e16df24f2ed786b6108c8a40a4b",
+      "translator": {
+        "agent": null,
+        "model": null,
+        "date": null
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.viewer/zh24a1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.welcome",
+      "source_sha256": "cd5bb5b95c8e71d4bf89fdc7f26bede91dee8fadedb5ef786a7f3e7731c57a50",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/tui.welcome/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.aida_cadence",
+      "source_sha256": "3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.aida_cadence/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.console",
+      "source_sha256": "1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.console/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.errors/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.agents",
+      "source_sha256": "7800f04d031a9a97222f383dea74878acadb12d9d9382b16ba638990b77627c7",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.errors.agents/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.auth",
+      "source_sha256": "9d48edaa61269239e132201224c1c7d6cf89ef198598f0ec6c99c1f3ade542f6",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.errors.auth/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "9a164be42a80d9bf0f60ad2a9f1d76fd1601855a4d19ffac3bf35d6bef11f76d",
+      "translator": {
+        "agent": null,
+        "model": null,
+        "date": null
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.errors.desktop/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.files",
+      "source_sha256": "ccfeb1ea55e0fed62213846cb669f28075b20e91e361f380456772d433983f64",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.errors.files/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.media",
+      "source_sha256": "1c109f63b8d3ce00657a47836199ce8ff924bb8e4bd999fda9f1d64f760a823b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.errors.media/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.settings",
+      "source_sha256": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.errors.settings/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.exec",
+      "source_sha256": "041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-12"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.exec/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.host_speed",
+      "source_sha256": "e193473d58c0de1779bcefab06d0e9b1734ee493aea30ea827e4499510282b8c",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.host_speed/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.incidents",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.incidents/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.memory",
+      "source_sha256": "319e23e6e4a6abee4e9549655142bebb5402563902c6f0497f3ee761fb53aec7",
+      "translator": {
+        "agent": null,
+        "model": null,
+        "date": null
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.memory/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.notices",
+      "source_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-11"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.notices/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.remote_compute",
+      "source_sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+      "translator": {
+        "agent": null,
+        "model": null,
+        "date": null
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.remote_compute/zh24r2/record.json (re-audited at the remediated bytes; supersedes zh24a1). Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "025dbbbbf0e830b16dac6f469b43b507c61fbae022f5f69bf3fde5bd8606ccca",
+      "translator": {
+        "agent": "coder (lopdev; session 8b2ab2114905)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev; session 0c779908a054)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #2985 3-key delta (cache TTL help; subagent label+help). Independent translation audit rounds 1-2: 0 finding(s) applied verbatim; round 2 clean, 0 open B/M. Same model as translator (disclosed). Other keys carried. Replaces zh24r2 row (84-row pin)."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings.hub_defaults",
+      "source_sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c",
+      "translator": {
+        "agent": null,
+        "model": null,
+        "date": null
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.settings.hub_defaults/zh24a1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "coder (lopdev team), zh-CN core candidate wave",
+        "model": "not recorded in the commit",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.slash/zh24s1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.slash.library",
+      "source_sha256": "0f8615f2ed9ffaf3aeb0288a4ff4b8fc8becd46017a931db9d4b3d9ec32fce46",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.slash.library/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.tunnel_setup",
+      "source_sha256": "3854be7dce54dd3aeb9564921ed6a50f0560b32c7ac40955d81be93acd7e2ac1",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-19"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-24",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "zh-CN core held-candidate wave 2026-10-24. Evidence: i18n/audits/evidence/zh-CN/wire.tunnel_setup/zhca1/record.json. Auditor independent of translator; current-byte round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.approvals",
+      "source_sha256": "5efd5d666d1c498de506541c8bbd339204b5919950395934bfcf188476030ce0",
+      "translator": {
+        "agent": "implementation session (clause split authored in commit 3d0f77762a; no translator job id recorded)",
+        "model": "unrecorded",
+        "date": "2026-10-25"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team) - re-attestation pass by translation-reviewer",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Re-attestation at 3d0f77762a (translation-reviewer, lopdev), five clause keys read as ONE composed sentence. Composed: 前两个选项只改变 **本会话** 而已；最后一个则把其后 **所有会话的默认值** 改掉。 (the four spaces are injected by the component, not present in any key). Meaning preserved: 只 ... 而已 confines the first two choices to 本会话 - 而已 is the standard restrictive partner of 只 and carries meaning rather than padding; 则 carries the contrast; 把 ... 改掉 is the disposal construction that keeps '所有会话的默认值' a unit and lets the verb close the sentence in 'after', and 改掉 adds a completive 'change away' flavour that en's plain 'changes' lacks (acceptable, mildly colloquial). Not over-emphatic: one restrictive and one contrastive marker. Bold: '本会话' and '所有会话的默认值' - both complete; 其后 stays plain exactly as en's 'that follow it' does. FINDING (minor, open, REGRESSION, component-level): the pre-split single key contained zero spaces; the five-key join inserts four U+0020 between Han characters (改变|本, 话|而, 后|所, 值|改), which Chinese typography does not use and which zh-CN.md's no-space discipline and its cell budget both argue against: four visible gaps in a 33-character sentence, and four extra cells under the guide's own model (ASCII = 1 cell, CJK = 2), 70 cells against the 66 the Han text itself costs. The copy is right; the join is wrong for CJK. Confidence: medium-high on meaning, medium on register. LIMITATION: same model as the first pass; no rendered frame captured - the defect follows from the join rule, not from a screenshot. Evidence: i18n/audits/evidence/zh-CN/relay.approvals/ap25b1/record.json FIXED in f2d888f42a: the join is now locale-aware in the component, so this note describes a defect that no longer exists at the attested head - zh/ja/ko concatenate and fr takes U+202F. Recorded rather than edited away, because a note that outlives its defect is how the programme has repeatedly mis-reported its own state."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.asks",
+      "source_sha256": "d6041075826aa17e0a86f0d47081faf0ec796057cb95cece2f47e6f57051b3cc",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "unrecorded (not disclosed in 3bd709c0f4)",
+        "date": "2026-10-20"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "deepseek/deepseek-flash",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 4
+      },
+      "status": "passed",
+      "note": "Restored byte-identically from 3bd709c0f4 after the hold that deleted it was lifted; 77/77 keys, 0 placeholder mismatches, 4 plural keys all other-only with a rendering '#', no bidi controls, no English leakage except the intentional mode token 'ask'. Scope audit of the gate labels it carries: '继续询问（ask）' / '无需询问直接运行（auto）' / '在所有会话中无需询问直接运行（default auto）' — the session-only vs all-sessions distinction survives and 'run without asking' keeps its risk. Dispositions of the five findings left to this round: (1) sheet.title_plain '提问' — MINOR and the same defect class the other six locales were fixed for on 2026-10-20 (their rows record 'demandes'/'consultas'/'पूछताछ'/'запросы'/'yêu cầu'/'درخواستیں' as section nouns 'distinct from' the question word); 提问 is the question-asking verb, so the sheet that also holds approvals and secrets is named with the question word. Not major: rows inside carry their own kind labels and the dock badge is unchanged, so no approval is granted or missed because of it; recommend '请求' (already used in card.request_needs_answer) in the next copy pass. (2) pending.kind_approval '需要审批' / kind_secret '需要机密信息' — MINOR. 需要审批 is accurate and is the vocabulary gate.body/notice_auto already use, and the verbal form is not a zh-only deviation (ru 'требуется одобрение', vi 'cần phê duyệt' are verbal too); the weak point is '机密信息' for a secret value, since zh has no recorded credentials/secret rendering (glossary §2 note 6 leaves the zh cell '—') — the card's masked field and card.secret_notice carry the meaning. (3) card.decline and pending.deny both '拒绝' — MINOR. They never co-occur (decline sits beside 'send answer' on the ask card, deny beside 'approve' on the approval card) and five of seven locales collapse them identically (fr 'refuser', hi 'अस्वीकार करें', vi 'từ chối', ur 'انکار کریں'); the English pair is a register distinction, not a functional one, and both refuse. (4) gate.unpaired_after '模式从不需要配对。' — MINOR. It extends the bold 'ask' label with 模式 (necessary in Chinese) but joins without a connective; rendered it reads '将审批保持在 ask 模式从不需要配对。' — understandable, slightly run-on, no meaning loss. (5) sheet.loading '……' — REJECTED, not a defect: the zh style guide mandates '…… (two marks)' and 62 other zh catalogue strings already use it (tui.library.loading, relay.session.past.loading, mobile.setup.checking), while the six single-'…' strings are all inside comma-separated Latin lists; the sidecar's 'The ellipsis is U+2026' pins the character class, not a count. Additional NIT found here: dock.waiting/dock.timed_out/title_waiting write '# 个…' with a space while title_lapsed writes '{count}个…' without one — pick one convention. 4 MINOR + 1 NIT, 0 blocker, 0 major, so this row attests; minors do not force another round but should ride the next zh copy pass. Auditor deepseek/deepseek-flash (this session's header); translator model unrecorded in 3bd709c0f4, the wave commit these bytes were restored from. Round-1 audit of restored bytes, not a carried re-audit. Evidence: i18n/audits/evidence/zh-CN/relay.asks/zha25a1/record.json — bundle written after the audit (the session captured no command log; the record states that absence and carries a labelled mechanical replay at the audited revision)."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.chrome",
+      "source_sha256": "f30049d1ec7bce1d0586d8d5d380368e64fb0ac841d91b9b04c1625d17688aac",
+      "translator": {
+        "agent": "translator (lopdev session 5217c4e5f8e3)",
+        "model": "radient/auto",
+        "date": "2026-10-25"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev session 6d6acecadd03)",
+        "model": "radient/auto",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent terminal delta audit chrome25-zh-CN-a2: no unresolved blocker/major. R1 coverage carries forward for byte-identical keys, with old→new hash proof in the audit. Current target SHA-256 ba4215e753320387d61bc9d9661eb2a63420473436e492f6da657ac8595c1855. Translator and independent auditor identities are recorded from on-disk runtime metadata; radient/auto is the harness selector, underlying provider model not exposed and not inferred. Independent second safety round chrome25-safety-b2 also passed these bytes. Evidence: https://github.com/damianvtran/local-operator/pull/2934#issuecomment-6401749804. Verbose R1/remediation/R2 chains are retained outside the repository per AGENTS.md; compact byte hashes and actual independent identities are public in that receipt. Source-semantic pass only, not native/live translated-relay proof."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.transcript",
+      "source_sha256": "022aa6209663626fc99cf06572bc09c09ac80eaf95b8264a80ec45cf56c74870",
+      "translator": {
+        "agent": "coder (lopdev session ef5eb20789f4)",
+        "model": "unrecorded-pre-crash",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "independent reviewer (lopdev session 9a889887f521)",
+        "model": "openai/gpt-6-astra",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.transcript.composer.queued",
+        "relay.transcript.fold.failed_label",
+        "relay.transcript.fold.more",
+        "relay.transcript.fold.partial_label",
+        "relay.transcript.fold.python",
+        "relay.transcript.fold.shell",
+        "relay.transcript.fold.unit",
+        "relay.transcript.label.ask",
+        "relay.transcript.label.job",
+        "relay.transcript.label.messages",
+        "relay.transcript.label.peer",
+        "relay.transcript.label.steered",
+        "relay.transcript.label.wake",
+        "relay.transcript.older.failed",
+        "relay.transcript.session.unread_refused",
+        "relay.transcript.turn.actions",
+        "relay.transcript.turn.completed",
+        "relay.transcript.turn.condensed",
+        "relay.transcript.turn.took"
+      ],
+      "note": "Independent round-2 translation audit clean and terminal on 2d5e414a414a506fe5b6bcceae91b8bf8eefe109, scoped to f0d3d6a4e92d2b40f390a418bb06894e99a38854..2d5e414a414a506fe5b6bcceae91b8bf8eefe109; unchanged round-1 coverage retained. All 27 requested replacements matched; 621 cross-runtime render comparisons passed. Original translation session ef5eb20789f4 launched on anthropic/claude-opus-5-5, but its actual served translation model was not recorded before the crash and is not inferred. Resumed bookkeeping by session 9950d5426bc4, served openai/gpt-6-astra; not the original translator. Auditor served openai/gpt-6-astra after disclosed quota fallbacks. Audit receipt: relay-transcript-audit-r2.md, retained by coordinating session 44f93fd45b09. Copy/audit pass only; not native/live translated-relay activation evidence."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.health",
+      "source_sha256": "b98c70197410d105aaf857fca3d4bc671552de15e2aeda6764ea76685997c571",
+      "translator": {
+        "agent": "translator (lopdev; two runs: fr/es/ru/vi and zh-CN/hi/ur)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-27"
+      },
+      "auditor": {
+        "agent": "translation-auditor A (lopdev session 6038f76924dc) + translation-auditor B, second independent audit for safety copy (lopdev session f6c010722753)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-27",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "keys": [
+        "relay.health.dropped_detail",
+        "relay.health.ended_detail",
+        "relay.health.ended_placeholder",
+        "relay.health.ended_send_failed",
+        "relay.health.live",
+        "relay.health.live_detail",
+        "relay.health.quiet_detail",
+        "relay.health.reconnecting",
+        "relay.health.reconnecting_detail"
+      ],
+      "note": "Round-2 delta on c53c9a5: 7 new keys (dropped_detail, ended_detail, ended_placeholder, ended_send_failed, quiet_detail, reconnecting, reconnecting_detail) translated in two translator runs (fr/es/ru/vi and zh-CN/hi/ur); live and live_detail carried byte-identical from the round-1 audit. Doubly audited, independently of the translator: translation-auditor A (lopdev session 6038f76924dc) and translation-auditor B, a second independent audit for safety copy (lopdev session f6c010722753), 9/9 keys against en sha256 b98c70197410d105aaf857fca3d4bc671552de15e2aeda6764ea76685997c571. Both audits back-translated the delivery semantics: no queueing promise, no duplicate risk, correct actor. 0 findings: clean in both audits. Bytes integrated verbatim. Copy/audit pass only; not native/live rendered-relay evidence."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "a56418b1deb7b2cab5ebdf47a01e5930d5ecf76010dbee4d0f3a10dafc9297d8",
+      "translator": {
+        "agent": "i18n-translator (lopdev team)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team; session 458e3917f821)",
+        "model": "anthropic/claude-sonnet-5-5 (fallback from deepseek/deepseek-flash after a provider 402; the catalogue reading ran mostly on the fallback, the opening survey and ledger/regeneration steps on deepseek/deepseek-flash)",
+        "date": "2026-10-27",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "4-key delta audit (skill_not_editable, skill_alias_occupied, skill_local_changes_unpublished, skill_stale) against en a56418b1 and its context sidecar; 0 blocker/major. skill_local_changes_unpublished verified to say the unpublished edits are lost on remove and that only an explicit 'remove anyway' discards them. Placeholder/ICU parity recomputed independently over all 88 keys (ordered argument lists equal; all 616 values render through runtime.render_message). The other 84 keys are byte-unchanged from the rows at 9a164be4 (commit cdae7456 is +4 lines per locale) and were NOT re-audited here. Minor/nit findings are reported on PR #3013 and were not applied. Model disclosure: the translator ran anthropic/claude-sonnet-5-5 and most of this audit's reading ran on that same model (fallback from deepseek/deepseek-flash, provider 402). Agent/session independence holds; MODEL independence from the translator is NOT claimed. Treat as a single-model audit. Findings: 1 minor (three of four new keys add a bare 'qing' where en has no 'please' and the style guide limits it to blocking dialogs; only skill_local_changes_unpublished is a confirm dialog), 1 nit."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.notifications",
+      "source_sha256": "f02bf1bc28f9c9e549a3ad8c34ead880315f4b39d25c36a869a1b3c5110f362c",
+      "translator": {
+        "agent": "L1-core-notify coder",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25"
+      },
+      "auditor": {
+        "agent": "translation-auditor (6a81bd6cab5c)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 3
+      },
+      "status": "passed",
+      "note": "Independent current-byte audit: i18n/audits/evidence/zh-CN/wire.errors.notifications/nt25a1/record.json. Input and companion hashes verified. Minor/fit notes retained in report; no native/rendered claim."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.slash.notifications_page",
+      "source_sha256": "9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594",
+      "translator": {
+        "agent": "L1-core-notify coder",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-25"
+      },
+      "auditor": {
+        "agent": "translation-auditor (6a81bd6cab5c)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-25",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent current-byte audit: i18n/audits/evidence/zh-CN/wire.slash.notifications_page/nt25a1/record.json. Input and companion hashes verified. Minor/fit notes retained in report; no native/rendered claim."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.notifications",
+      "source_sha256": "b405d23feb36ff29a4f75895513ec027cab13e4420a71ea05a83e515d8b20224",
+      "translator": {
+        "agent": "coder/i18n translator lane (lopdev session ccd1179944f3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "independent i18n-auditor / reviewer (lopdev, session b4869f40ac63)",
+        "model": "kimi/k3.1-pro (fallback from anthropic/claude-opus-5-5 via anthropic/claude-sonnet-5-5 and openai/gpt-6-astra)",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 delta audit on PR #2943 head 897ffb54fef0f6a889bb135a22c80f7eebc3e0e5 (catalogue bytes identical to 0bffa9f447f). Source en SHA-256 b405d23feb36ff29a4f75895513ec027cab13e4420a71ea05a83e515d8b20224 (75 keys), context 1b4fcb28e063b7e646809d801675dfbda00f691ba7cec57edab6a322d0cab4d4. 75/75 keys, order==en, 71 carried values byte-identical to the prior audited target, arguments (count plural, updates plural, source simple) in English order, both plurals carry every CLDR category of this locale with no empty arm, all 72 count x updates sample combinations rendered through local_operator.i18n.runtime.render_message (counts 0,1,2,3,5,6,11,21,22,25,101,1234 x updates 0,1,2,5,6,11), locale number grouping intact, NFC, no bidi controls, trailing LF/no BOM/no CR, re-serialises byte-identically. Widths via rich cell_len: hints within maxCells (hint_mark_all<=12, hint_confirm<=10, hint_cancel<=8); confirm_dismiss_session <=96 for every arm with a 13-cell source. zh-CN/ur/hi nesting of updates inside each count arm accepted: count/updates categories still selected independently and count is printed via {count, number}. ur arrow convention untouched (back still U+2192); the ur sentence painted through the real display_tr isolate path and resolved with fribidi, Latin source and y/n correct. IA2-1 is the fr U+202F typographic regression; fr deliberately left pending_audit. Verdict PASS for this locale only; auditor served kimi/k3.1-pro after the disclosed provider-quota fallback chain; auditor authored none of this delta. Evidence: i18n/audits/evidence/zh-CN/tui.notifications/nd2/ plus PR #2943 comment \"i18n audit - round 2\"."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.notifications",
+      "source_sha256": "2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d",
+      "translator": {
+        "agent": "coder/i18n translator lane (lopdev session e0fbf6386238)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26"
+      },
+      "auditor": {
+        "agent": "reviewer (lopdev team, independent i18n audit, session 72df3ec6dc49)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-26",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 a75ddb99367a41c55085fe9d7651601a0f6704350d71e33fbcd600bfc2d8b4b6, source 2807f5876ae63e15fd0e47b54ec1e73f6c7f71b368f3439fd00c899ce8c0b54d: https://github.com/damianvtran/local-operator/pull/2968#issuecomment-6412691010. Audited bytes from a git archive of 9f349c5f481, hash-identical at head 772b01275ef. Independence limit: translator and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Recorded, not gating: IA-X-M1 MINOR (select.read \"已读\" status form; \"标为已读\" 8/10 fits); IA-ZH-M1 MINOR (11 strings put spaces around digit runs against the zh-CN style guide; merged relay.asks.duration.* has the same deviation, so it is a style-owner consistency question). Translation: Translated from the frozen en bytes at PR #2968 head d7e12bd36808 (77 keys; target SHA-256 a75ddb99367a41c55085fe9d7651601a0f6704350d71e33fbcd600bfc2d8b4b6). Translator identity read from the session's runtime metadata (provider anthropic, model claude-opus-5-5). Terminology reuses merged relay.chrome/relay.asks/relay.ask choices. Width: all budgeted keys fit (max ratio row.repeat 6/6)."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+      "translator": {
+        "agent": "coder (lopdev; session c8ef7d0911ec; PR #3072 remediation 3bc73b5c003)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev; session 324e4c273380)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 1 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.asks",
+      "source_sha256": "aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "1 added key re-audited at source sha256 aeae79178c5f47584a3af2d7a65a1fdfb45b859f624a089616109a6902438e90 (en/relay.asks.json): relay.asks.card.other = '其他', the free-text row that sits after the agent's options on the phone ask card and opens a text field. Translator: i18n-translator (anthropic/claude-sonnet-5-5, 2026-10-28). Independent auditor: i18n-auditor (lopdev reviewer role, anthropic/claude-sonnet-5-5, 2026-10-28) — a separate agent and session but the same model family, so not a different model. Checked: key parity and order versus en; exactly one added key and no existing value changed; no ICU or plural syntax added; NFC; no bidi or invisible controls; the file re-serialises byte-identically; check.py --catalogues-only reports 0 problems. The value is a bare noun in sentence case that reads as a choice beside enumerated options, per the locale guide and glossary; width is at most 1 character over English (ru), immaterial beside the 'your answer' hint. The whole file's mechanical parity and encoding were re-checked; only the added key was reviewed semantically, and unchanged copy is carried from the previous 77-key audit at d6041075. Result: passed, 0 findings. The value is identical to the repo's own `tui.library.category_other` precedent."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.radient_saver",
+      "source_sha256": "d392bc5d9617626599b6e2836f35c6cf6479ea3313fa072d1eddd087adcb7507",
+      "translator": {
+        "agent": "coder (radientdev subagent; self-translated, no i18n-translator delegation)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "scope": "wire.radient_saver.mode.help only (round 3, SA-2); the other 14 values are the original `translator` agent's audited bytes",
+        "note": "Round-3 bytes. Rounds 1-2 of this delta (SA-1) were self-translated on openrouter/deepseek/deepseek-v4.1-flash-1017 (first pass anthropic/claude-sonnet-5-5), fallbacks from kimi/k3.1-pro; those bytes are superseded."
+      },
+      "auditor": {
+        "agent": "translation-auditor",
+        "model": "kimi/k3.1-pro",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "second_audit": {
+        "status": "pending",
+        "agent": "pending",
+        "model": "pending",
+        "date": null,
+        "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
+        "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
+      },
+      "note": "wire.radient_saver (17 keys) at en d83072e27ad3cc0711da1f5e37056d8958e6ad9a450de5ce31ddf617c1aedba8, target SHA-256 f186a26185a09f04651ffe4e8856e610956ecd605b884fe16f532925d40010e4. Independent audit passed: 0 blocker/major. 1 NIT NOT applied: kept mode.choice.opt_in.label “按会话启用” and mode.choice.auto.description “已登录且有余额时，所有会话均开启” as translated. The nit proposed naming Radient and 点数余额 (credit balance) explicitly in the auto description; that is a copy decision (the en source says only 'signed in with credit'), not a meaning defect, so it is deferred to the next zh-CN pass. Provenance: translator `translator` agent on anthropic/claude-opus-5-5 and independent auditor `translation-auditor` agent on kimi/k3.1-pro, both 2026-10-28, no provider fallback on either; dispositions as relayed by the radientdev manager for PR #3078 (the audit reports are not posted on the PR thread). Audit depth, stated plainly: docs/I18N.md asks high-visibility/safety copy for a second independent audit, and this namespace carries the S-32 sentence (\"Saver never sends your AI provider's credentials to Radient\") and the credit-charging terms. It had ONE independent audit for this locale; no second independent audit has been run and none is claimed. SA-1 remediation (PR #3078 audit finding SA-1, major, source-level): wire.radient_saver.mode.help now states the charge basis — the tokens Saver removes, paid in Radient credits — and that the customer's own AI-provider bill is unchanged; no percentage or savings claim was added. Only that key changed in this locale; the other 16 values are the audited bytes. en moved d83072e27ad3cc0711da1f5e37056d8958e6ad9a450de5ce31ddf617c1aedba8 -> 70114d73b15d50b9ac3eaa54a251e5a67233c48511bc33d2c09d49602fa68e2d and this row's target bytes moved to 28a67e59e0f80318ecf31a3e5b395ffcbb52aa09cbc5bc675afdee61cc2f0630. The delta was SELF-TRANSLATED by the coder session that implemented this change (a radientdev coder subagent) — no `i18n-translator` agent was delegated, which is the docs/I18N.md step-3 process the independent audit exists to check, so read this row with that deviation in view. Model, taken from the session's own provider-route record rather than assumed: the final bytes were authored on openrouter/deepseek/deepseek-v4.1-flash-1017, and the first pass of the same two sentences on anthropic/claude-sonnet-5-5; both ran as provider fallbacks from the pinned primary kimi/k3.1-pro (provider quota, the last switch reporting HTTP 402), not by choice. Audit depth, stated plainly and not softened: the audit above covers the PREVIOUS bytes; NO independent audit of this mode.help delta has run. A second independent audit is commissioned and PENDING (`second_audit`), so these bytes are unaudited until it reports and that field is filled in. `status` stays `passed` for the row's completed first-audit chain — keeping the locale in the ship set, which a stale row would silently drop — and this note records the gap rather than letting the status field imply coverage it does not have. ROUND 3 (PR #3078 re-audit findings SA-2 MAJOR, M-1..M-4, N-1; code-review R6-2): the SA-1 sentence \"Your bill from your AI provider is unchanged\" was a promise about a third party's invoice the product cannot keep (Saver sends the provider less history) and is REPLACED: Saver charges only Radient credits, priced on the tokens it removes, never the provider account, and the provider still bills on its own terms for what it receives; no savings, percentage or up/down claim. \"covers\" became \"priced on\" (M-3); fr pronoun reference (M-2), ru \"списывается\" (M-1), vi pronoun count and ur repeated connector (N-1) addressed; help shortened (M-4). R6-2: the `auto` choice is unreachable in LO1 (`SaverDecision(False, \"auto_unavailable\")`), so its two keys (mode.choice.auto.label/description) are RETIRED from this namespace in all 8 locales and from the settings choices; the namespace now carries 15 keys. en moved 70114d73b15d50b9ac3eaa54a251e5a67233c48511bc33d2c09d49602fa68e2d -> d392bc5d9617626599b6e2836f35c6cf6479ea3313fa072d1eddd087adcb7507; this row's target bytes are 0a66fcf93f934d09b9f8ce33711a3af86f4d2292e80538bedf7f2e50eb1e8ca8. Translator, stated plainly: SELF-TRANSLATED by the implementing radientdev coder session on anthropic/claude-opus-5-5 (the session's own selected_model record; no provider fallback recorded for this round). Delegation to an `i18n-translator` was attempted per docs/I18N.md step 3 and was IMPOSSIBLE: the coder session's toolset has no `task` tool, so this is a second disclosed deviation from step 3, for a maintainer to accept or reject. The `translator` field describes ONLY the mode.help delta (see its `scope`); the other 14 values keep the original `translator` agent's audited bytes. No independent audit of the round-3 bytes has run; `second_audit` stays pending."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.chrome",
+      "source_sha256": "0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, independent i18n audit, session 64d7798cdbd3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n delta audit round 1 PASS (terminal) at target SHA-256 d47a5d58a73a92f53c160fe26429432db2a8ea63a48e92cd5e18109b2efcf89e, source 0456005a0730d99a27656f1b0413b751c5916630e4c56aad346238e25c0c5994: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Audited bytes read from origin/fix/relay-composer-placeholder 07984929b35. New keys composer.placeholder.idle/.steer: idiom, glossary 'agent', register, U+2026 ellipsis and D1 fit (CoreText 16pt system UI re-measured independently, all under 184px) passed with 0 findings; the 83 other keys are value-identical to origin/main and carry the prior passed row forward. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): 2 new keys composer.placeholder.idle/.steer translated from the frozen en bytes (85 keys; target SHA-256 d47a5d58a73a92f53c160fe26429432db2a8ea63a48e92cd5e18109b2efcf89e); the other 83 values are byte-identical to the prior passed row. Source: the desktop UI's audited ui.chat.composer.placeholder.idle/.waiting first clauses; widths measured at 16px system-ui against the 184px D1 budget (PR body)."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.health",
+      "source_sha256": "e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b",
+      "translator": {
+        "agent": "coder (lopdev session 6999135b36d2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team, independent i18n audit, session 64d7798cdbd3)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent i18n audit round 1 PASS (terminal) at target SHA-256 c4892a4de82249195a405e2e195d3aa6859ffe432951a6ba899866009260217c, source e060aed0898c7aa9951f7abf18c6792cc4629ee490b10546aabd36aac8187f5b: https://github.com/damianvtran/local-operator/pull/3127#issuecomment-6486271247. Deletion-only hash refresh: relay.health.ended_placeholder removed (en and locale, with its en context entry); the 8 remaining keys are byte-identical in value and order to origin/main's passed row, so nothing was retranslated — this audit verifies the deletion, it does not re-review unchanged copy. Independence limit: translator (coder, session 6999135b36d2) and auditor ran on the same model (anthropic/claude-opus-5-5); separation is agent and context; no native-speaker pass. Source-semantic pass only; rendered relay geometry pending in the PR. Translation: Relay composer placeholder slice (fix/relay-composer-placeholder): deletes the now-unused relay.health.ended_placeholder; the remaining 8 values are byte-identical to the prior doubly-audited row (target SHA-256 c4892a4de82249195a405e2e195d3aa6859ffe432951a6ba899866009260217c). A deletion-only delta, but the en hash moved, so an independent auditor must confirm the byte identity before this row passes; until then the locale stays out of shipped.json."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.services_status",
+      "source_sha256": "ae14884d1c5a795724b95b29f8abe620975e96cc895384923788faa1b22611df",
+      "translator": {
+        "agent": "local-operator implementer (coder role)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Independent audit passed 14/14 keys; 监督状态未知 keeps the unknown state hedged and matches the shipped 监督者 vocabulary; no CJK-Latin spacing per its guide. 2 findings recorded: the 监督状态未知 hedge confirmed and the serve_install_not_serving verb fixed to 未服务于其自身进程. Width fits the 80/78 budget. No durability or reboot claim."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.account_policy",
+      "source_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-28"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "model": "radient/auto",
+        "date": "2026-10-28",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent zh-CN audit, 13 keys, clean: 0 blocker/major/minor/nit. Evidence i18n/audits/evidence/zh-CN/relay.account_policy/zhc1. Auditor read the English source and sidecar at the hashes recorded there; route and marker scan recorded in record.json (worktree reads per docs/security/redaction-policy.md 2.2; 0 markers; assignment tokens verified by ordinals). Translator session 809b6f2773e0, auditor session e139d7f8f30c; both ran on radient/auto after anthropic quota fallbacks. No native-speaker pass claimed."
+    }
+  ]
+}

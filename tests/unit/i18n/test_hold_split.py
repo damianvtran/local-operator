@@ -66,8 +66,11 @@ def _assert_latest_row_is_fresh_and_earlier_rows_superseded(rows: list[dict[str,
             )
 
 
-def test_active_ledger_carries_the_released_chinese_candidate() -> None:
-    ledger = json.loads((REPO / "i18n" / "ledger.json").read_bytes())["entries"]
+def test_active_ledger_carries_the_released_chinese_candidate(i18n_generate) -> None:
+    # Read through the generator's loader: per-locale shards are authoritative
+    # (the aggregate is a generated mirror), and the rows are identical either
+    # way — test_ledger_shards pins that parity.
+    ledger = i18n_generate._ledger_entries()
     chinese = [entry for entry in ledger if entry["locale"] == "zh-CN"]
     # The disposition was taken because every namespace the locale CARRIES has
     # a passed audit at the CURRENT en bytes; a row for a namespace with no
@@ -244,6 +247,7 @@ def test_a_held_locale_is_excluded_even_with_every_row_passed(
         )
     monkeypatch.setattr(catalogues, "_CATALOGUES", root)
     monkeypatch.setattr(i18n_generate, "LEDGER", tmp_path / "ledger.json")
+    monkeypatch.setattr(i18n_generate, "LEDGER_SHARDS", tmp_path / "ledger")
     en_sha = catalogues.catalogue_sha256("en", "wire.exec")
     i18n_generate.LEDGER.write_text(
         json.dumps(

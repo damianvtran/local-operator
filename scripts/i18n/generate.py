@@ -11,9 +11,15 @@ WHAT THIS OWNS (all of it generated, all of it committed):
 * ``local_operator/mobile/web/src/i18n/keys.gen.ts`` — type-only wire/relay
   key map and two-overload translator contract from the same ICU parser;
 * ``local_operator/i18n/data/shipped.json`` — the shipped-locale set computed
-  from ``i18n/ledger.json`` (§6: a locale ships iff every namespace has a
+  from the audit ledger (§6: a locale ships iff every namespace has a
   ledger entry that passed against the CURRENT en source hash). ``en`` is
   always shipped.
+* ``i18n/ledger.json`` — the legacy aggregate ledger, mirrored from the
+  per-locale shards under ``i18n/ledger/<locale>.json`` (the authoritative
+  source since 2026-10-29: one shared array made every locale PR conflict
+  with every other). Append audit rows to your locale's shard, then
+  regenerate; ``--check`` fails if the aggregate and shards disagree, so a
+  stale aggregate cannot silently win.
 
 WHY A DRIFT CHECK. These are generated-but-committed, so a hand edit or a
 catalogue change without regeneration would ship tables that disagree with the
@@ -53,6 +59,49 @@ EMITTER = REPO / "scripts" / "i18n" / "emit.mjs"
 DATA_DIR = REPO / "local_operator" / "i18n" / "data"
 KEYS_DIR = REPO / "local_operator" / "i18n" / "keys"
 LEDGER = REPO / "i18n" / "ledger.json"
+LEDGER_SHARDS = REPO / "i18n" / "ledger"
+
+
+def _ledger_entries() -> list[dict[str, Any]]:
+    """The authoritative audit rows: per-locale shards, aggregate fallback.
+
+    Shards win whenever ``i18n/ledger/`` holds any ``*.json``; the aggregate
+    is read only for trees that predate sharding (fixture roots, old
+    checkouts). Within each shard, file order is preserved and per-locale
+    last-wins is applied downstream exactly as the aggregate's array order
+    did — the migration is order-preserving per locale, so eligibility
+    semantics cannot move. Cross-locale order never mattered: the shipped
+    computation keys on ``(locale, namespace)`` and iterates SUPPORTED_LOCALES.
+    """
+    shard_paths = sorted(LEDGER_SHARDS.glob("*.json")) if LEDGER_SHARDS.is_dir() else []
+    if shard_paths:
+        entries: list[dict[str, Any]] = []
+        for path in shard_paths:
+            shard = _read_json(path)
+            rows = shard.get("entries", []) if isinstance(shard, dict) else []
+            entries.extend(row for row in rows if isinstance(row, dict))
+        return entries
+    if not LEDGER.is_file():
+        return []
+    ledger = _read_json(LEDGER)
+    return [row for row in ledger.get("entries", []) if isinstance(row, dict)] if isinstance(ledger, dict) else []
+
+
+def _render_aggregate() -> str:
+    """The legacy aggregate, re-rendered from shards for compatibility.
+
+    Sorted by locale (then each shard's own row order): a deterministic,
+    reviewable mirror. No consumer reads it for eligibility anymore —
+    ``_ledger_entries`` prefers the shards — so its ordering is free to be
+    canonical rather than historical. ``schema`` is carried over from the
+    pre-migration aggregate so existing readers keep working.
+    """
+    payload: dict[str, Any] = {"schema": 1, "entries": _ledger_entries()}
+    if LEDGER.is_file():
+        legacy = _read_json(LEDGER)
+        if isinstance(legacy, dict) and "schema" in legacy:
+            payload["schema"] = legacy["schema"]
+    return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
 
 #: Security disposition is independent of per-carried-namespace audit passes.
 #: A held locale cannot be made eligible by omitting its file or ledger row and
@@ -333,10 +382,9 @@ def _shipped_locales() -> list[str]:
     generated set es/fr → en only).
     """
     shipped: set[str] = {"en"}
-    if not LEDGER.is_file():
+    entries = _ledger_entries()
+    if not entries:
         return [loc for loc in SUPPORTED_LOCALES if loc in shipped]
-    ledger = _read_json(LEDGER)
-    entries = ledger.get("entries", []) if isinstance(ledger, dict) else []
     by_locale: dict[str, dict[str, dict[str, Any]]] = {}
     for entry in entries:
         if not isinstance(entry, dict):
@@ -470,6 +518,12 @@ def _planned_files(emitted: Path) -> dict[Path, str]:
         DATA_DIR / "formats.json": (emitted / "formats.json").read_text(encoding="utf-8"),
         DATA_DIR / "shipped.json": _render_shipped(),
     }
+    # The aggregate is a generated mirror of the shards whenever shards exist;
+    # planning it here makes `--check` fail when a contributor edits only one
+    # of the two, so a stale aggregate cannot silently disagree with the
+    # authoritative shards.
+    if LEDGER_SHARDS.is_dir() and any(LEDGER_SHARDS.glob("*.json")):
+        planned[LEDGER] = _render_aggregate()
     en_dir = catalogues.catalogue_root() / "en"
     modules: list[str] = []
     relay_types: dict[str, dict[str, str]] = {}
