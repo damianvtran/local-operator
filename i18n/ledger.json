@@ -9386,6 +9386,54 @@
       },
       "status": "passed",
       "note": "w2 es backfill: 17 keys; independent audit w2a1 passed (committed evidence i18n/audits/evidence/es/cli.wake_help/w2a1/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.shell",
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 9d615b8ca066, job a013605d94ac)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-29"
+      },
+      "status": "pending_audit",
+      "note": "Translated from the CURRENT en bytes (44/44 keys, no extras, no omissions) with no independent audit yet; status is pending_audit, not passed, and the auditor replaces this row rather than inheriting it. ICU held byte-exactly: the usage amounts stay `{value, number}` (no number->plural upgrade), the unit nouns carry one/many/other with `de` in `many` and never `#`, and the exact-numeric-million `de` is supplied exactly once by the unit noun. es agreement call recorded here: `remaining`/`used` are invariable leading labels (\"restante:\", \"usado:\") so 1 credit/token/request never produces a wrong plural adjective or verb, and `row`/`row_family` use an em dash where en uses a colon so a labelled amount does not render a double colon. Terminology: allowance = cuota (anchored on the existing es wire.settings \"cuota restante\"), usage = uso (relay.chrome), spend = gasto (relay.chrome \"Gasto y contexto\"), request = petición, window = periodo."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.session",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 9d615b8ca066, job a013605d94ac)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-29"
+      },
+      "status": "pending_audit",
+      "note": "Translated from the CURRENT en bytes (17/17 keys) with no independent audit yet; status is pending_audit, and the auditor replaces this row. Lowercase fragment register follows the en sidecar's 'preserve casing' instruction; tú address per the es guide (\"empieza\", \"envía\"). Anchored on shipped es relay.chrome: conversaciones, nueva sesión, sesiones anteriores, carpetas de trabajo. TUI and Local Operator stay untranslated per glossary §1."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.account_policy",
+      "source_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 9d615b8ca066, job a013605d94ac)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-29"
+      },
+      "status": "pending_audit",
+      "note": "Translated from the CURRENT en bytes (13/13 keys) with no independent audit yet; status is pending_audit, and the auditor replaces this row. account routing = enrutamiento de cuentas, anchored on the existing audited es wire.settings.account_policy error copy; policy = política (\"Política de cuentas\"); settings = ajustes. `error` states only that the change could not be confirmed and never asserts the write failed, while `rejected` does assert it was not saved — the known-failed/unknown-status split the sidecar names. \"this computer\" reads \"esta máquina\" because ordenador (Spain) and computadora (LatAm) are both region-marked and the es guide requires neutral Spanish; \"máquina\" is already the es corpus's word for it (wire.settings \"en esta máquina\"). relay = relé per glossary §2."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.library",
+      "source_sha256": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 9d615b8ca066, job a013605d94ac)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-29"
+      },
+      "status": "pending_audit",
+      "note": "Translated from the CURRENT en bytes (1/1 key) with no independent audit yet; status is pending_audit, and the auditor replaces this row. asset = recurso, anchored on the shipped es wire.slash.library (\"Biblioteca global de recursos\"); one/many/other with the RAE exact-million `de` arm, 0 is `other` per the es guide."
     }
   ]
 }
