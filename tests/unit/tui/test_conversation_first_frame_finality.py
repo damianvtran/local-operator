@@ -338,14 +338,20 @@ def test_last_known_never_shows_live_authority() -> None:
     assert "working" not in row
 
 
-def _journal_with_checkpoint(directory: Path, state_session_id: str, *, title: str) -> None:
+def _journal_with_checkpoint(
+    directory: Path, state_session_id: str, *, title: str, model: Any = "default"
+) -> None:
     import json
 
     directory.mkdir(parents=True)
     state = FrontendSessionState(
         session_id=state_session_id,
         epoch="old-epoch",
-        selected_model=FrontendModelSpec(provider="test", model_id="model"),
+        selected_model=(
+            FrontendModelSpec(provider="test", model_id="model")
+            if model == "default"
+            else model
+        ),
         conversation_title=title,
         streaming=True,
         cumulative_parent_cost=1.25,
@@ -915,20 +921,20 @@ def test_the_caption_survives_an_empty_right_group() -> None:
 
 @pytest.mark.asyncio
 async def test_a_warm_reopen_lays_its_parked_view_out_before_the_reveal() -> None:
-    """Q1 (round 3): the parked view must be measured BEFORE it is shown.
+    """A warm reopen must be measured BEFORE it is shown (ordering, not Q1's cause).
 
-    A warm reopen has its rows retained and nothing pending, so
-    `_prefill_resume_before_reveal` takes its early return — and it used to
-    return without laying the parked view out at all. Textual carries
-    `_layout_required` no further than the idle hook, so the first painted frame
-    could be composed against stale arrangement and the next pass corrected it:
-    every rendered line moved down one row inside an untouched viewport, 38 of 41
-    lines and ~545k pixels, intermittently (4 of 6 bench runs at 160x48; the
-    80-column cell stayed clean because it paints fewer rows per pass).
+    `_prefill_resume_before_reveal` returns early whenever nothing is pending,
+    and that path used to return without laying the parked view out at all.
+    Textual carries `_layout_required` no further than the idle hook, so a first
+    frame composed on that path could be painted against stale arrangement and
+    corrected by the next pass.
 
-    Asserts the ORDERING rather than a pixel: the settle runs while the parked
-    view is still hidden, and the height it reads is the settled height. Fails if
-    that early return stops settling — the producer re-enabled.
+    WHAT THIS IS NOT. QA round 3 re-diagnosed the intermittent warm-`eligible`
+    shift: base moved 0/10, both round-2 heads 2/10, and in every moving run the
+    ONLY change was row 38 (the error notice) going from one row to two. So the
+    shift was the notice's height, not an unmeasured reveal, and this test does
+    not claim otherwise — it pins the ordering because a reveal before layout is
+    wrong on its own merits, and it fails if that settle call is removed.
     """
     home = SidebarRemote("home-session")
     target = _planned_conversation("parked-session", 8, todos=2)
@@ -977,3 +983,49 @@ async def test_a_warm_reopen_lays_its_parked_view_out_before_the_reveal() -> Non
         calls[-1][1],
         settled,
     )
+
+
+@pytest.mark.asyncio
+async def test_a_checkpoint_with_a_null_model_still_opens(tmp_path: Path) -> None:
+    """Q4 (round 3): a journal whose checkpoint never recorded a selection opens.
+
+    The last checkpoint carried `selected_model: None`; copying that through the
+    whitelist made `AttachedSession.model` raise, and `_model_spec` reads it with
+    `getattr(..., None)`, which does not swallow an exception raised inside a
+    property — so the adopt died and the conversation stayed display-only
+    ("Could not open conversation", 10/10 on both round-2 heads, base fine).
+
+    Fails on the previous head: the property raise escapes `_model_spec`.
+    """
+    from local_operator.session.attached import AttachedSession
+    from local_operator.tui.app import _has_model_identity, _model_spec, _read_stored_frontend_state
+
+    directory = tmp_path / "config" / "sessions" / "null-model-session"
+    _journal_with_checkpoint(directory, "null-model-session", title="No model", model=None)
+
+    async def no_takeover() -> None:
+        raise RuntimeError("a test facade never takes over")
+
+    facade = await AttachedSession.saved_preview(
+        "null-model-session",
+        config_dir=tmp_path / "config",
+        cwd=str(tmp_path),
+        takeover_factory=no_takeover,
+    )
+    stored = _read_stored_frontend_state(directory, "null-model-session")
+    assert stored is not None and stored.selected_model is None, "fixture must carry a NULL model"
+    facade.install_saved_facts(stored)
+
+    # The crash site: no exception, and no invented model either. The install
+    # lands the same EMPTY placeholder `saved_preview` uses, so the reader sees
+    # "no model" rather than a raise or a fabricated selection.
+    spec = _model_spec(facade)
+    assert spec is not None, "the adopt's own reader must not raise or return None"
+    assert not (spec.provider or spec.model_id), spec
+    assert _has_model_identity(facade.frontend_state) is False, (
+        "a journal with no model must read as no model, so the band keeps the "
+        "whole-row connecting sentence"
+    )
+    # And the facts themselves are still carried: the null model is the only
+    # thing that was absent.
+    assert facade.frontend_state.conversation_title == "No model"

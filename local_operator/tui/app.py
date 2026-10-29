@@ -63724,12 +63724,17 @@ def _has_model_identity(state: Any) -> bool:
     (that is what the band paints) and fall back to the selected spec, the same
     order `_effective_spec` uses.
     """
-    spec = getattr(state, "effective_model", None) or getattr(state, "selected_model", None)
-    if spec is None:
-        return False
-    return bool(
-        str(getattr(spec, "provider", "") or "") or str(getattr(spec, "model_id", "") or "")
-    )
+    # EITHER spec may name the model, and an EMPTY placeholder must not veto the
+    # other: the saved-facts install lands the empty `FrontendModelSpec` for a
+    # field the journal left null (QA round 3, Q4), and a journal can hold a
+    # selection while `effective_model` was never filled. Read both.
+    for name in ("effective_model", "selected_model"):
+        spec = getattr(state, name, None)
+        if spec is None:
+            continue
+        if str(getattr(spec, "provider", "") or "") or str(getattr(spec, "model_id", "") or ""):
+            return True
+    return False
 
 
 def _read_stored_frontend_state(directory: Path, session_id: str) -> Any | None:

@@ -1168,6 +1168,25 @@ def _saved_facts_only(state: Any, session_id: str) -> dict[str, Any]:
             # never restored, which is the whole point of them.
             continue
         update[name] = field.get_default(call_default_factory=True)
+    # A STORED `None` MODEL IS ABSENT, NOT A VALUE (QA round 3, Q4). A journal
+    # whose last checkpoint never recorded a selection carries
+    # `selected_model: None`, and copying that through made the facade's `model`
+    # property raise `owner has no selected model spec` — `_model_spec` reads it
+    # with `getattr(..., None)`, which does not swallow an exception raised
+    # INSIDE a property, so the adopt died and the conversation never left
+    # display-only ("Could not open conversation", 10/10 runs). The empty
+    # `FrontendModelSpec` is the same placeholder `saved_preview` installs and the
+    # same shape `_has_model_identity` reads as "no model", so the band keeps the
+    # honest whole-row connecting sentence instead of a last-known row with no
+    # model in it.
+    from local_operator.session.frontend_state import FrontendModelSpec
+
+    # ONLY the selection, and only when it is null. `effective_model` is left
+    # exactly as the journal wrote it: it is a DERIVED field, and filling it with
+    # an empty placeholder made the band lose a model the row does hold (the
+    # grouped fixture caught that as a first-vs-settled difference).
+    if getattr(state, "selected_model", None) is None:
+        update["selected_model"] = FrontendModelSpec(provider="", model_id="")
     update["jobs"] = [
         job
         for job in getattr(state, "jobs", [])
