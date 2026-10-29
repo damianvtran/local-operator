@@ -2,8 +2,10 @@
   "result": "PASS",
   "pairs": 24,
   "original_rows_preserved": 401,
-  "historical_notes_appended": 24,
-  "current_rows_appended": 24,
+  "ledger_entries_total": 408,
+  "historical_notes_appended": 33,
+  "rows_refreshed_in_place": 24,
+  "rows_appended_by_this_pr": 0,
   "companions_verified": 345,
   "input_hashes_verified": 120,
   "semantic_verdicts": {

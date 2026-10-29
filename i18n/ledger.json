@@ -258,14 +258,16 @@
         "date": "2026-10-16"
       },
       "auditor": {
-        "agent": "i18n-auditor",
-        "model": "radient/auto",
-        "date": "2026-10-16",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": 0
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Fresh INDEPENDENT audit of the CARRIED content against the new en source (13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba): 17/17 keys with en key-set parity, argument tuples (name+kind) and order parity, and complete CLDR plural categories per locale; the one changed key (tui.transcript.group.actions, ICU singular noun) was verified to render correctly at count 1 in this locale, and none of the locale's own bytes were touched by this branch. Verdict passed, findings 0. Two accepted dispositions: MINOR - es/fr 'many' omits the 'de' preposition vs the guide example, documented as a deviation on the en sidecar; NIT - the guide-example mismatch is guide-side only. Re-attestation of carried translations: no retranslation, no locale byte moved; this row supersedes the prior passed row for the same (locale, namespace) and records the audit that earned the new source hash."
+      "note": "Fresh INDEPENDENT audit of the CARRIED content against the new en source (13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba): 17/17 keys with en key-set parity, argument tuples (name+kind) and order parity, and complete CLDR plural categories per locale; the one changed key (tui.transcript.group.actions, ICU singular noun) was verified to render correctly at count 1 in this locale, and none of the locale's own bytes were touched by this branch. Verdict passed, findings 0. Two accepted dispositions: MINOR - es/fr 'many' omits the 'de' preposition vs the guide example, documented as a deviation on the en sidecar; NIT - the guide-example mismatch is guide-side only. Re-attestation of carried translations: no retranslation, no locale byte moved; this row supersedes the prior passed row for the same (locale, namespace) and records the audit that earned the new source hash. | 2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/es/tui.transcript/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "es",
@@ -372,14 +374,16 @@
         "date": "2026-10-18"
       },
       "auditor": {
-        "agent": "reviewer (independent i18n-auditor, session e88ccd60c58b)",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-22",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": 11
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-22 LOH-9 S4 promote delta (eight keys: promote_usage, promote_plan, promote_replace_plan, promote_mixed_plan, promote_receipt_created, promote_receipt_replaced, promote_receipt_keeps, promote_failed; the earlier promote_receipt key was split into created/replaced/keeps and removed; translated in-slice). An independent i18n audit (reviewer lane, session e88ccd60c58b, 2026-10-22) reported 11 findings (1 blocker, 1 major, 4 minors, 5 nits); Independent re-audit at ae290d74ab (patch-identical at rebased head e6ca5424c3): all 11 findings verified fixed against the committed bytes; six-locale set restored (generate.py --check: 88 artifacts byte-identical; shipped_locales() = en, fr, es, ru, vi, hi); key/placeholder parity, past-tense receipts and destructive-first plans hold in all five locales; 0 unresolved. Key/ICU parity is machine-checked by scripts/i18n/check.py. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/es/tui.authoring/le28r2/record.json. Verdict FINDINGS; 0 unresolved blocker/major; prior rendered geometry unverifiable."
+      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-22 LOH-9 S4 promote delta (eight keys: promote_usage, promote_plan, promote_replace_plan, promote_mixed_plan, promote_receipt_created, promote_receipt_replaced, promote_receipt_keeps, promote_failed; the earlier promote_receipt key was split into created/replaced/keeps and removed; translated in-slice). An independent i18n audit (reviewer lane, session e88ccd60c58b, 2026-10-22) reported 11 findings (1 blocker, 1 major, 4 minors, 5 nits); Independent re-audit at ae290d74ab (patch-identical at rebased head e6ca5424c3): all 11 findings verified fixed against the committed bytes; six-locale set restored (generate.py --check: 88 artifacts byte-identical; shipped_locales() = en, fr, es, ru, vi, hi); key/placeholder parity, past-tense receipts and destructive-first plans hold in all five locales; 0 unresolved. Key/ICU parity is machine-checked by scripts/i18n/check.py. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/es/tui.authoring/le28r2/record.json. Verdict FINDINGS; 0 unresolved blocker/major; prior rendered geometry unverifiable. | 2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/es/tui.authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "es",
@@ -391,14 +395,16 @@
         "date": "2026-10-18"
       },
       "auditor": {
-        "agent": "reviewer (i18n-auditor), session 2c6f8e92a731",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": []
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off. | 2026-10-22 LOH-9 S4 one-key delta (tui.team_authoring.promote_hint, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/es/tui.team_authoring/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable."
+      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off. | 2026-10-22 LOH-9 S4 one-key delta (tui.team_authoring.promote_hint, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/es/tui.team_authoring/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable. | 2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/es/tui.team_authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "es",
@@ -581,14 +587,16 @@
         "date": "2026-10-23"
       },
       "auditor": {
-        "agent": "translation-auditor",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-23",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": 0
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Independent audit passed: 7 keys, 0 findings. Audited target sha256 864ba429feea9305a2a672ae57b71ebbf22a54ee92881276cd4d24f80493f106. Report: sessions/7bc94e70c275/scratchpad/audit-es.json. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/es/tui.palette/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable."
+      "note": "Independent audit passed: 7 keys, 0 findings. Audited target sha256 864ba429feea9305a2a672ae57b71ebbf22a54ee92881276cd4d24f80493f106. Report: sessions/7bc94e70c275/scratchpad/audit-es.json. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/es/tui.palette/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable. | 2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/es/tui.palette/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "es",
@@ -923,14 +931,16 @@
         "date": "2026-10-16"
       },
       "auditor": {
-        "agent": "i18n-auditor",
-        "model": "radient/auto",
-        "date": "2026-10-16",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": 0
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Fresh INDEPENDENT audit of the CARRIED content against the new en source (13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba): 17/17 keys with en key-set parity, argument tuples (name+kind) and order parity, and complete CLDR plural categories per locale; the one changed key (tui.transcript.group.actions, ICU singular noun) was verified to render correctly at count 1 in this locale, and none of the locale's own bytes were touched by this branch. Verdict passed, findings 0. Two accepted dispositions: MINOR - es/fr 'many' omits the 'de' preposition vs the guide example, documented as a deviation on the en sidecar; NIT - the guide-example mismatch is guide-side only. Re-attestation of carried translations: no retranslation, no locale byte moved; this row supersedes the prior passed row for the same (locale, namespace) and records the audit that earned the new source hash."
+      "note": "Fresh INDEPENDENT audit of the CARRIED content against the new en source (13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba): 17/17 keys with en key-set parity, argument tuples (name+kind) and order parity, and complete CLDR plural categories per locale; the one changed key (tui.transcript.group.actions, ICU singular noun) was verified to render correctly at count 1 in this locale, and none of the locale's own bytes were touched by this branch. Verdict passed, findings 0. Two accepted dispositions: MINOR - es/fr 'many' omits the 'de' preposition vs the guide example, documented as a deviation on the en sidecar; NIT - the guide-example mismatch is guide-side only. Re-attestation of carried translations: no retranslation, no locale byte moved; this row supersedes the prior passed row for the same (locale, namespace) and records the audit that earned the new source hash. | 2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/fr/tui.transcript/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "fr",
@@ -1645,14 +1655,16 @@
         "date": "2026-10-18"
       },
       "auditor": {
-        "agent": "reviewer (independent i18n-auditor, session e88ccd60c58b)",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-22",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": 11
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-22 LOH-9 S4 promote delta (eight keys: promote_usage, promote_plan, promote_replace_plan, promote_mixed_plan, promote_receipt_created, promote_receipt_replaced, promote_receipt_keeps, promote_failed; the earlier promote_receipt key was split into created/replaced/keeps and removed; translated in-slice). An independent i18n audit (reviewer lane, session e88ccd60c58b, 2026-10-22) reported 11 findings (1 blocker, 1 major, 4 minors, 5 nits); Independent re-audit at ae290d74ab (patch-identical at rebased head e6ca5424c3): all 11 findings verified fixed against the committed bytes; six-locale set restored (generate.py --check: 88 artifacts byte-identical; shipped_locales() = en, fr, es, ru, vi, hi); key/placeholder parity, past-tense receipts and destructive-first plans hold in all five locales; 0 unresolved. Key/ICU parity is machine-checked by scripts/i18n/check.py. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/fr/tui.authoring/le28r2/record.json. Verdict FINDINGS; 0 unresolved blocker/major; prior rendered geometry unverifiable."
+      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-22 LOH-9 S4 promote delta (eight keys: promote_usage, promote_plan, promote_replace_plan, promote_mixed_plan, promote_receipt_created, promote_receipt_replaced, promote_receipt_keeps, promote_failed; the earlier promote_receipt key was split into created/replaced/keeps and removed; translated in-slice). An independent i18n audit (reviewer lane, session e88ccd60c58b, 2026-10-22) reported 11 findings (1 blocker, 1 major, 4 minors, 5 nits); Independent re-audit at ae290d74ab (patch-identical at rebased head e6ca5424c3): all 11 findings verified fixed against the committed bytes; six-locale set restored (generate.py --check: 88 artifacts byte-identical; shipped_locales() = en, fr, es, ru, vi, hi); key/placeholder parity, past-tense receipts and destructive-first plans hold in all five locales; 0 unresolved. Key/ICU parity is machine-checked by scripts/i18n/check.py. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/fr/tui.authoring/le28r2/record.json. Verdict FINDINGS; 0 unresolved blocker/major; prior rendered geometry unverifiable. | 2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/fr/tui.authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "fr",
@@ -1664,14 +1676,16 @@
         "date": "2026-10-18"
       },
       "auditor": {
-        "agent": "reviewer (i18n-auditor), session 2c6f8e92a731",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": []
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off. | 2026-10-22 LOH-9 S4 one-key delta (tui.team_authoring.promote_hint, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/fr/tui.team_authoring/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable."
+      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off. | 2026-10-22 LOH-9 S4 one-key delta (tui.team_authoring.promote_hint, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/fr/tui.team_authoring/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable. | 2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/fr/tui.team_authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "fr",
@@ -1873,14 +1887,16 @@
         "date": "2026-10-23"
       },
       "auditor": {
-        "agent": "translation-auditor",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-23",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": 1
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Independent audit passed: 7 keys, 1 non-gating MINOR. The placeholder's opener 'Trouver' fits the 48-cell budget; 'Rechercher' measures 51 and was refused as width-driven, not an idiom defect, so no fix was required (auditor accepted). Audited target sha256 857229201f88ffe91c5103aa1acf7e0ac058136b1d5abe1c546e4489af37698a. Report: sessions/b64104d39368/scratchpad/audit-fr.json. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/fr/tui.palette/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable."
+      "note": "Independent audit passed: 7 keys, 1 non-gating MINOR. The placeholder's opener 'Trouver' fits the 48-cell budget; 'Rechercher' measures 51 and was refused as width-driven, not an idiom defect, so no fix was required (auditor accepted). Audited target sha256 857229201f88ffe91c5103aa1acf7e0ac058136b1d5abe1c546e4489af37698a. Report: sessions/b64104d39368/scratchpad/audit-fr.json. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/fr/tui.palette/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable. | 2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/fr/tui.palette/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "fr",
@@ -2215,14 +2231,16 @@
         "date": "2026-10-16"
       },
       "auditor": {
-        "agent": "i18n-auditor",
-        "model": "radient/auto",
-        "date": "2026-10-16",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": 0
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Fresh INDEPENDENT audit of the CARRIED content against the new en source (13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba): 17/17 keys with en key-set parity, argument tuples (name+kind) and order parity, and complete CLDR plural categories per locale; the one changed key (tui.transcript.group.actions, ICU singular noun) was verified to render correctly at count 1 in this locale, and none of the locale's own bytes were touched by this branch. Verdict passed, findings 0. Two accepted dispositions: MINOR - es/fr 'many' omits the 'de' preposition vs the guide example, documented as a deviation on the en sidecar; NIT - the guide-example mismatch is guide-side only. Re-attestation of carried translations: no retranslation, no locale byte moved; this row supersedes the prior passed row for the same (locale, namespace) and records the audit that earned the new source hash."
+      "note": "Fresh INDEPENDENT audit of the CARRIED content against the new en source (13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba): 17/17 keys with en key-set parity, argument tuples (name+kind) and order parity, and complete CLDR plural categories per locale; the one changed key (tui.transcript.group.actions, ICU singular noun) was verified to render correctly at count 1 in this locale, and none of the locale's own bytes were touched by this branch. Verdict passed, findings 0. Two accepted dispositions: MINOR - es/fr 'many' omits the 'de' preposition vs the guide example, documented as a deviation on the en sidecar; NIT - the guide-example mismatch is guide-side only. Re-attestation of carried translations: no retranslation, no locale byte moved; this row supersedes the prior passed row for the same (locale, namespace) and records the audit that earned the new source hash. | 2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/ru/tui.transcript/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "ru",
@@ -2329,14 +2347,16 @@
         "date": "2026-10-18"
       },
       "auditor": {
-        "agent": "reviewer (independent i18n-auditor, session e88ccd60c58b)",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-22",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": 11
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-22 LOH-9 S4 promote delta (eight keys: promote_usage, promote_plan, promote_replace_plan, promote_mixed_plan, promote_receipt_created, promote_receipt_replaced, promote_receipt_keeps, promote_failed; the earlier promote_receipt key was split into created/replaced/keeps and removed; translated in-slice). An independent i18n audit (reviewer lane, session e88ccd60c58b, 2026-10-22) reported 11 findings (1 blocker, 1 major, 4 minors, 5 nits); Independent re-audit at ae290d74ab (patch-identical at rebased head e6ca5424c3): all 11 findings verified fixed against the committed bytes; six-locale set restored (generate.py --check: 88 artifacts byte-identical; shipped_locales() = en, fr, es, ru, vi, hi); key/placeholder parity, past-tense receipts and destructive-first plans hold in all five locales; 0 unresolved. Key/ICU parity is machine-checked by scripts/i18n/check.py. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/ru/tui.authoring/le28r2/record.json. Verdict FINDINGS; 0 unresolved blocker/major; prior rendered geometry unverifiable."
+      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-22 LOH-9 S4 promote delta (eight keys: promote_usage, promote_plan, promote_replace_plan, promote_mixed_plan, promote_receipt_created, promote_receipt_replaced, promote_receipt_keeps, promote_failed; the earlier promote_receipt key was split into created/replaced/keeps and removed; translated in-slice). An independent i18n audit (reviewer lane, session e88ccd60c58b, 2026-10-22) reported 11 findings (1 blocker, 1 major, 4 minors, 5 nits); Independent re-audit at ae290d74ab (patch-identical at rebased head e6ca5424c3): all 11 findings verified fixed against the committed bytes; six-locale set restored (generate.py --check: 88 artifacts byte-identical; shipped_locales() = en, fr, es, ru, vi, hi); key/placeholder parity, past-tense receipts and destructive-first plans hold in all five locales; 0 unresolved. Key/ICU parity is machine-checked by scripts/i18n/check.py. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/ru/tui.authoring/le28r2/record.json. Verdict FINDINGS; 0 unresolved blocker/major; prior rendered geometry unverifiable. | 2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/ru/tui.authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "ru",
@@ -2348,14 +2368,16 @@
         "date": "2026-10-18"
       },
       "auditor": {
-        "agent": "reviewer (i18n-auditor), session 2c6f8e92a731",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": []
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off. | 2026-10-22 LOH-9 S4 one-key delta (tui.team_authoring.promote_hint, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/ru/tui.team_authoring/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable."
+      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off. | 2026-10-22 LOH-9 S4 one-key delta (tui.team_authoring.promote_hint, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/ru/tui.team_authoring/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable. | 2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/ru/tui.team_authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "ru",
@@ -2538,14 +2560,16 @@
         "date": "2026-10-23"
       },
       "auditor": {
-        "agent": "translation-auditor",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-23",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": 0
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Independent audit passed: 7 keys, 0 findings. 'ИИ-команда' was accepted for the team tag because bare 'команда' collides with the command tag; the auditor confirmed the qualifier reads naturally. Audited target sha256 89c5ac0531dea466527687785ec121414cb6d23e374f65bd8514b6ee184b3ae8. Report: sessions/f7d512c641f3/scratchpad/audit-ru.json. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/ru/tui.palette/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable."
+      "note": "Independent audit passed: 7 keys, 0 findings. 'ИИ-команда' was accepted for the team tag because bare 'команда' collides with the command tag; the auditor confirmed the qualifier reads naturally. Audited target sha256 89c5ac0531dea466527687785ec121414cb6d23e374f65bd8514b6ee184b3ae8. Report: sessions/f7d512c641f3/scratchpad/audit-ru.json. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/ru/tui.palette/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable. | 2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/ru/tui.palette/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "ru",
@@ -2880,14 +2904,16 @@
         "date": "2026-10-16"
       },
       "auditor": {
-        "agent": "i18n-auditor",
-        "model": "radient/auto",
-        "date": "2026-10-16",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": 0
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Fresh INDEPENDENT audit of the CARRIED content against the new en source (13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba): 17/17 keys with en key-set parity, argument tuples (name+kind) and order parity, and complete CLDR plural categories per locale; the one changed key (tui.transcript.group.actions, ICU singular noun) was verified to render correctly at count 1 in this locale, and none of the locale's own bytes were touched by this branch. Verdict passed, findings 0. Two accepted dispositions: MINOR - es/fr 'many' omits the 'de' preposition vs the guide example, documented as a deviation on the en sidecar; NIT - the guide-example mismatch is guide-side only. Re-attestation of carried translations: no retranslation, no locale byte moved; this row supersedes the prior passed row for the same (locale, namespace) and records the audit that earned the new source hash."
+      "note": "Fresh INDEPENDENT audit of the CARRIED content against the new en source (13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba): 17/17 keys with en key-set parity, argument tuples (name+kind) and order parity, and complete CLDR plural categories per locale; the one changed key (tui.transcript.group.actions, ICU singular noun) was verified to render correctly at count 1 in this locale, and none of the locale's own bytes were touched by this branch. Verdict passed, findings 0. Two accepted dispositions: MINOR - es/fr 'many' omits the 'de' preposition vs the guide example, documented as a deviation on the en sidecar; NIT - the guide-example mismatch is guide-side only. Re-attestation of carried translations: no retranslation, no locale byte moved; this row supersedes the prior passed row for the same (locale, namespace) and records the audit that earned the new source hash. | 2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/vi/tui.transcript/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "vi",
@@ -2994,14 +3020,16 @@
         "date": "2026-10-18"
       },
       "auditor": {
-        "agent": "reviewer (independent i18n-auditor, session e88ccd60c58b)",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-22",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": 11
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. MINOR A1 fixed by translator in 6fc3652677: inherit choice now keeps the literal config token per vi style-guide lines 82-86; final runtime notice delta rechecked in real form at both widths. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-22 LOH-9 S4 promote delta (eight keys: promote_usage, promote_plan, promote_replace_plan, promote_mixed_plan, promote_receipt_created, promote_receipt_replaced, promote_receipt_keeps, promote_failed; the earlier promote_receipt key was split into created/replaced/keeps and removed; translated in-slice). An independent i18n audit (reviewer lane, session e88ccd60c58b, 2026-10-22) reported 11 findings (1 blocker, 1 major, 4 minors, 5 nits); Independent re-audit at ae290d74ab (patch-identical at rebased head e6ca5424c3): all 11 findings verified fixed against the committed bytes; six-locale set restored (generate.py --check: 88 artifacts byte-identical; shipped_locales() = en, fr, es, ru, vi, hi); key/placeholder parity, past-tense receipts and destructive-first plans hold in all five locales; 0 unresolved. Key/ICU parity is machine-checked by scripts/i18n/check.py. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/vi/tui.authoring/le28r2/record.json. Verdict FINDINGS; 0 unresolved blocker/major; prior rendered geometry unverifiable."
+      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. MINOR A1 fixed by translator in 6fc3652677: inherit choice now keeps the literal config token per vi style-guide lines 82-86; final runtime notice delta rechecked in real form at both widths. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-22 LOH-9 S4 promote delta (eight keys: promote_usage, promote_plan, promote_replace_plan, promote_mixed_plan, promote_receipt_created, promote_receipt_replaced, promote_receipt_keeps, promote_failed; the earlier promote_receipt key was split into created/replaced/keeps and removed; translated in-slice). An independent i18n audit (reviewer lane, session e88ccd60c58b, 2026-10-22) reported 11 findings (1 blocker, 1 major, 4 minors, 5 nits); Independent re-audit at ae290d74ab (patch-identical at rebased head e6ca5424c3): all 11 findings verified fixed against the committed bytes; six-locale set restored (generate.py --check: 88 artifacts byte-identical; shipped_locales() = en, fr, es, ru, vi, hi); key/placeholder parity, past-tense receipts and destructive-first plans hold in all five locales; 0 unresolved. Key/ICU parity is machine-checked by scripts/i18n/check.py. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/vi/tui.authoring/le28r2/record.json. Verdict FINDINGS; 0 unresolved blocker/major; prior rendered geometry unverifiable. | 2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/vi/tui.authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "vi",
@@ -3013,14 +3041,16 @@
         "date": "2026-10-18"
       },
       "auditor": {
-        "agent": "reviewer (i18n-auditor), session 2c6f8e92a731",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": []
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off. | 2026-10-22 LOH-9 S4 one-key delta (tui.team_authoring.promote_hint, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/vi/tui.team_authoring/le28r2/record.json. Verdict FINDINGS; 0 unresolved blocker/major; prior rendered geometry unverifiable."
+      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off. | 2026-10-22 LOH-9 S4 one-key delta (tui.team_authoring.promote_hint, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/vi/tui.team_authoring/le28r2/record.json. Verdict FINDINGS; 0 unresolved blocker/major; prior rendered geometry unverifiable. | 2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/vi/tui.team_authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "vi",
@@ -3203,14 +3233,16 @@
         "date": "2026-10-23"
       },
       "auditor": {
-        "agent": "translation-auditor",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-23",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": 0
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Independent audit passed: 7 keys, 0 findings. Audited target sha256 33e3917430cf3308ea04580d6fa31ace996a45f490d53d75082e9b27b8abb3af. Report: sessions/d71bc18a7798/scratchpad/audit-vi.json. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/vi/tui.palette/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable."
+      "note": "Independent audit passed: 7 keys, 0 findings. Audited target sha256 33e3917430cf3308ea04580d6fa31ace996a45f490d53d75082e9b27b8abb3af. Report: sessions/d71bc18a7798/scratchpad/audit-vi.json. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/vi/tui.palette/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable. | 2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/vi/tui.palette/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "vi",
@@ -3659,14 +3691,16 @@
         "date": "2026-10-18"
       },
       "auditor": {
-        "agent": "reviewer (independent i18n-auditor, session e88ccd60c58b)",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-22",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": 11
+        "findings": 2,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. Devanagari shaping artifact isolated to cell-grid SVG reprojection by same-frame raw Rich SVG/rsvg control; semantic and Textual-cell fit passed, native-terminal shaping not claimed. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-22 LOH-9 S4 promote delta (eight keys: promote_usage, promote_plan, promote_replace_plan, promote_mixed_plan, promote_receipt_created, promote_receipt_replaced, promote_receipt_keeps, promote_failed; the earlier promote_receipt key was split into created/replaced/keeps and removed; translated in-slice). An independent i18n audit (reviewer lane, session e88ccd60c58b, 2026-10-22) reported 11 findings (1 blocker, 1 major, 4 minors, 5 nits); Independent re-audit at ae290d74ab (patch-identical at rebased head e6ca5424c3): all 11 findings verified fixed against the committed bytes; six-locale set restored (generate.py --check: 88 artifacts byte-identical; shipped_locales() = en, fr, es, ru, vi, hi); key/placeholder parity, past-tense receipts and destructive-first plans hold in all five locales; 0 unresolved. Key/ICU parity is machine-checked by scripts/i18n/check.py. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/hi/tui.authoring/le28r2/record.json. Verdict FINDINGS; 0 unresolved blocker/major; prior rendered geometry unverifiable."
+      "note": "Terminal independent audit: all 40 keys reviewed against English, glossary and locale guide; exact key/simple-placeholder parity, validation/refusal meaning, y/n direction and command grammar pass. Real OperatorApp candidate preview at 60x24 and 100x24: fields inner 58/98, hints inner 56/96 cells; fixed labels/cycles fit, hints one row, read-only receipt wraps safely. Pending-locale preview used an isolated in-memory eligibility override only, never shipped code. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session fef2c7321a9a scratchpad/audit/audit-report.md and geometry-report.json. No unresolved findings. Devanagari shaping artifact isolated to cell-grid SVG reprojection by same-frame raw Rich SVG/rsvg control; semantic and Textual-cell fit passed, native-terminal shaping not claimed. | 2026-10-20 LOH-9 S2 one-key delta (tui.authoring.scope_conversation, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-22 LOH-9 S4 promote delta (eight keys: promote_usage, promote_plan, promote_replace_plan, promote_mixed_plan, promote_receipt_created, promote_receipt_replaced, promote_receipt_keeps, promote_failed; the earlier promote_receipt key was split into created/replaced/keeps and removed; translated in-slice). An independent i18n audit (reviewer lane, session e88ccd60c58b, 2026-10-22) reported 11 findings (1 blocker, 1 major, 4 minors, 5 nits); Independent re-audit at ae290d74ab (patch-identical at rebased head e6ca5424c3): all 11 findings verified fixed against the committed bytes; six-locale set restored (generate.py --check: 88 artifacts byte-identical; shipped_locales() = en, fr, es, ru, vi, hi); key/placeholder parity, past-tense receipts and destructive-first plans hold in all five locales; 0 unresolved. Key/ICU parity is machine-checked by scripts/i18n/check.py. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/hi/tui.authoring/le28r2/record.json. Verdict FINDINGS; 0 unresolved blocker/major; prior rendered geometry unverifiable. | 2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/hi/tui.authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "hi",
@@ -3678,14 +3712,16 @@
         "date": "2026-10-18"
       },
       "auditor": {
-        "agent": "reviewer (i18n-auditor), session 2c6f8e92a731",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": []
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off. | 2026-10-22 LOH-9 S4 one-key delta (tui.team_authoring.promote_hint, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/hi/tui.team_authoring/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable."
+      "note": "Terminal independent LLM semantic audit: all 35 keys reviewed against English source/context, glossary and locale guides; exact key and simple-placeholder parity, punctuation, validation meanings and literal command/member grammar pass. No ICU plural/select messages occur. Real styled OperatorApp candidate previews at 60x24 and 100x24: labels 57/97 cells available; hints 56/96 wrap without clipping; pinned legend and discard question fit. Namespace command footer is 50 cells; combined legacy listing prose wraps safely in real transcript captures. Top/settled frame pairs are pixel-identical. Pending-locale preview used only an isolated in-memory shipped-eligibility override, not a production policy change. Vietnamese NFC and backend token policy checked; no inherit/tier/effort keys occur in this namespace. Actual auditor model openai/gpt-6.1-sol after anthropic/claude-sonnet-5-5 quota fallback; auditor did not translate or implement. Evidence: session 2c6f8e92a731 scratchpad/audit/preview.py, preview.log, geometry-report.json, reviewed-inputs.json, rendered montages and audit-report.md. No unresolved translation findings. This pass is not whole-feature design/QA or native terminal/font sign-off. | 2026-10-22 LOH-9 S4 one-key delta (tui.team_authoring.promote_hint, translated in-slice): key/ICU parity checked by scripts/i18n/check.py; no independent linguistic audit of this delta — disclosed on the PR. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/hi/tui.team_authoring/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable. | 2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/hi/tui.team_authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "hi",
@@ -3868,14 +3904,16 @@
         "date": "2026-10-23"
       },
       "auditor": {
-        "agent": "translation-auditor",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-23",
+        "agent": "translation-reviewer (lopdev) / bc5209588225",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
+        "date": "2026-10-28",
         "result": "passed",
-        "findings": 0
+        "findings": 0,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "Independent audit passed: 7 keys, 0 findings. Audited target sha256 1103bd85cc6bce50ae5fa1754639046135fac188088df2c23c3ecb29fd9ed854. Report: sessions/e8351da7b481/scratchpad/audit-hi.json. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/hi/tui.palette/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable."
+      "note": "Independent audit passed: 7 keys, 0 findings. Audited target sha256 1103bd85cc6bce50ae5fa1754639046135fac188088df2c23c3ecb29fd9ed854. Report: sessions/e8351da7b481/scratchpad/audit-hi.json. | 2026-10-28: lost-evidence re-audit supersedes this historical claim; original provenance/hash retained. Current-byte record: i18n/audits/evidence/hi/tui.palette/le28r2/record.json. Verdict PASS; 0 unresolved blocker/major; prior rendered geometry unverifiable. | 2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/hi/tui.palette/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "hi",
@@ -7626,14 +7664,16 @@
         "date": "2026-10-28"
       },
       "auditor": {
-        "agent": "translation-auditor (lopdev; session 324e4c273380)",
-        "model": "anthropic/claude-opus-5-5",
+        "agent": "audit-fr-wire-settings (independent reviewer) / 1a8ae30848b9",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
         "date": "2026-10-28",
         "result": "passed",
-        "findings": 1
+        "findings": 5,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 1 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried."
+      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 1 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried. | 2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/fr/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only. | 2026-10-28 remediation 4d38a1d4b8e applies the 2 adjudicated correction(s) for this locale; delta re-audit le28r2-remed: PASS, 0 unresolved B/M. Record: i18n/audits/evidence/fr/wire.settings/le28r2-remed/findings.json."
     },
     {
       "locale": "es",
@@ -7645,14 +7685,16 @@
         "date": "2026-10-28"
       },
       "auditor": {
-        "agent": "translation-auditor (lopdev; session 324e4c273380)",
-        "model": "anthropic/claude-opus-5-5",
+        "agent": "audit-es-wire-settings (independent reviewer) / aa5ed662a068",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
         "date": "2026-10-28",
         "result": "passed",
-        "findings": 0
+        "findings": 5,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 0 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried."
+      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 0 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried. | 2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/es/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
     },
     {
       "locale": "zh-CN",
@@ -7683,14 +7725,16 @@
         "date": "2026-10-28"
       },
       "auditor": {
-        "agent": "translation-auditor (lopdev; session 324e4c273380)",
-        "model": "anthropic/claude-opus-5-5",
+        "agent": "audit-ru-wire-settings (independent reviewer) / 65c6fbd8893a",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
         "date": "2026-10-28",
         "result": "passed",
-        "findings": 2
+        "findings": 7,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 2 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried."
+      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 2 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried. | 2026-10-28 fresh independent current-byte audit; FINDINGS, 4 B/M. Record: i18n/audits/evidence/ru/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only. | 2026-10-28 remediation 4d38a1d4b8e applies the 4 adjudicated correction(s) for this locale; delta re-audit le28r2-remed: PASS, 0 unresolved B/M. Record: i18n/audits/evidence/ru/wire.settings/le28r2-remed/findings.json. | 2026-10-29 review-round-1 F1: bd47fce698d changes one word in librarian_enabled.help («её сессия» → «его сессия»; the Librarian is masculine in the sibling keys); ru wire.settings.json sha256 5185479b62b9… → 9156360167e72197d97bfb8caeaa0c7e2795b03d0dceeb7195d24b8f9d1f40bd; independent delta re-audit (translation-reviewer, anthropic/claude-sonnet-5-5, no fallback; job 772c338410e1): PASS, 0 findings; routed receipt compared by eye, not by byte diff."
     },
     {
       "locale": "vi",
@@ -7702,14 +7746,16 @@
         "date": "2026-10-28"
       },
       "auditor": {
-        "agent": "translation-auditor (lopdev; session 324e4c273380)",
-        "model": "anthropic/claude-opus-5-5",
+        "agent": "audit-vi-wire-settings (independent reviewer) / 270888f1305d",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
         "date": "2026-10-28",
         "result": "passed",
-        "findings": 1
+        "findings": 6,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 1 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried."
+      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 1 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried. | 2026-10-28 fresh independent current-byte audit; FINDINGS, 3 B/M. Record: i18n/audits/evidence/vi/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only. | 2026-10-28 remediation 4d38a1d4b8e applies the 3 adjudicated correction(s) for this locale; delta re-audit le28r2-remed: PASS, 0 unresolved B/M. Record: i18n/audits/evidence/vi/wire.settings/le28r2-remed/findings.json."
     },
     {
       "locale": "ur",
@@ -7740,14 +7786,16 @@
         "date": "2026-10-28"
       },
       "auditor": {
-        "agent": "translation-auditor (lopdev; session 324e4c273380)",
-        "model": "anthropic/claude-opus-5-5",
+        "agent": "audit-hi-wire-settings (independent reviewer) / a4374e8bfa88",
+        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
         "date": "2026-10-28",
         "result": "passed",
-        "findings": 1
+        "findings": 4,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
       },
       "status": "passed",
-      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 1 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried."
+      "note": "PR #3072 2-key delta (1h cache-TTL help x2; main 0 = global no-1h switch, subagent key = size gate only). Independent translation audit round 1: 1 minor/nit finding(s) applied verbatim; 0 B/M. Same model as translator (disclosed). Other keys carried. | 2026-10-28 fresh independent current-byte audit; FINDINGS, 1 B/M. Record: i18n/audits/evidence/hi/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only. | 2026-10-28 remediation 4d38a1d4b8e applies the 2 adjudicated correction(s) for this locale; delta re-audit le28r2-remed: PASS, 0 unresolved B/M. Record: i18n/audits/evidence/hi/wire.settings/le28r2-remed/findings.json."
     },
     {
       "locale": "fr",
@@ -7977,510 +8025,6 @@
       },
       "status": "passed",
       "note": "Two independent Urdu relay audits over translator session 905e702c8399's bytes; neither auditor is the translator and neither edited the tree. Round 1 (base 9dc317f4, all 109 keys): session 49a2149e4f78 (openrouter/moonshotai/kimi-k3.1-pro) raised UR-RELAY-R1-001 MAJOR on relay.shell.usage.as_of \u2014 \u062a\u06a9 reads as until/expiry for an 'as of' cached-at timestamp; the second independent high-visibility audit (session a017851a0ea0, openrouter/moonshotai/kimi-k3.1-pro) read all 109 keys clean. Round 2 on remediation ea2f92e0 (rebased for this integration): 49a2149e4f78 (radient/auto) re-read relay.shell 44/44 and a017851a0ea0 (radient/auto) read the one changed value in depth and proved the other 108 byte-identical; both CLEAN. The fix to \u06a9\u06d2 \u0645\u0637\u0627\u0628\u0642 was verified; no unresolved BLOCKER/MAJOR/MINOR/NIT. This row: relay.login 4 keys on the separate SSR auth gate \u2014 round 1 clean; round 2 byte-identical and unaffected by the SPA shell delta. Rendered RTL/bidi isolation, Arabic shaping, font fallback and narrow-width layout were not exercised in either round; no screenshot or native design approval is claimed, and this row records the independent translation audit, not a rendered sign-off."
-    },
-    {
-      "locale": "es",
-      "namespace": "tui.transcript",
-      "source_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
-      "translator": {
-        "agent": "i18n-translator",
-        "model": "radient/auto",
-        "date": "2026-10-16"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 0,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/es/tui.transcript/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "fr",
-      "namespace": "tui.transcript",
-      "source_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
-      "translator": {
-        "agent": "i18n-translator",
-        "model": "radient/auto",
-        "date": "2026-10-16"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 0,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/fr/tui.transcript/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "ru",
-      "namespace": "tui.transcript",
-      "source_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
-      "translator": {
-        "agent": "i18n-translator",
-        "model": "radient/auto",
-        "date": "2026-10-16"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 0,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/ru/tui.transcript/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "vi",
-      "namespace": "tui.transcript",
-      "source_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
-      "translator": {
-        "agent": "i18n-translator",
-        "model": "radient/auto",
-        "date": "2026-10-16"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 0,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/vi/tui.transcript/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "es",
-      "namespace": "tui.authoring",
-      "source_sha256": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
-      "translator": {
-        "agent": "coder (i18n-translator)",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 1,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/es/tui.authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "fr",
-      "namespace": "tui.authoring",
-      "source_sha256": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
-      "translator": {
-        "agent": "coder (i18n-translator)",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 1,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/fr/tui.authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "ru",
-      "namespace": "tui.authoring",
-      "source_sha256": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
-      "translator": {
-        "agent": "coder (i18n-translator)",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 1,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/ru/tui.authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "vi",
-      "namespace": "tui.authoring",
-      "source_sha256": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
-      "translator": {
-        "agent": "coder (i18n-translator)",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 1,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/vi/tui.authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "hi",
-      "namespace": "tui.authoring",
-      "source_sha256": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
-      "translator": {
-        "agent": "coder (i18n-translator)",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 2,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/hi/tui.authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "es",
-      "namespace": "tui.team_authoring",
-      "source_sha256": "b956c90f98b9542da3fc8b9b9af1d1d797d36617f4230ffd4f616382445e9d6c",
-      "translator": {
-        "agent": "coder (i18n-translator)",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 0,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/es/tui.team_authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "fr",
-      "namespace": "tui.team_authoring",
-      "source_sha256": "b956c90f98b9542da3fc8b9b9af1d1d797d36617f4230ffd4f616382445e9d6c",
-      "translator": {
-        "agent": "coder (i18n-translator)",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 0,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/fr/tui.team_authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "ru",
-      "namespace": "tui.team_authoring",
-      "source_sha256": "b956c90f98b9542da3fc8b9b9af1d1d797d36617f4230ffd4f616382445e9d6c",
-      "translator": {
-        "agent": "coder (i18n-translator)",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 0,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/ru/tui.team_authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "vi",
-      "namespace": "tui.team_authoring",
-      "source_sha256": "b956c90f98b9542da3fc8b9b9af1d1d797d36617f4230ffd4f616382445e9d6c",
-      "translator": {
-        "agent": "coder (i18n-translator)",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 1,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/vi/tui.team_authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "hi",
-      "namespace": "tui.team_authoring",
-      "source_sha256": "b956c90f98b9542da3fc8b9b9af1d1d797d36617f4230ffd4f616382445e9d6c",
-      "translator": {
-        "agent": "coder (i18n-translator)",
-        "model": "openai/gpt-6.1-sol",
-        "date": "2026-10-18"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 0,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/hi/tui.team_authoring/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "es",
-      "namespace": "tui.palette",
-      "source_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
-      "translator": {
-        "agent": "translator",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-23"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 0,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/es/tui.palette/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "fr",
-      "namespace": "tui.palette",
-      "source_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
-      "translator": {
-        "agent": "translator",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-23"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 0,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/fr/tui.palette/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "ru",
-      "namespace": "tui.palette",
-      "source_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
-      "translator": {
-        "agent": "translator",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-23"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 0,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/ru/tui.palette/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "vi",
-      "namespace": "tui.palette",
-      "source_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
-      "translator": {
-        "agent": "translator",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-23"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 0,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/vi/tui.palette/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "hi",
-      "namespace": "tui.palette",
-      "source_sha256": "e3bf15fd1036f7e4aeed39dbc3800e0dd1e6736f0e0ad211cac6d6f0ada9a95f",
-      "translator": {
-        "agent": "translator",
-        "model": "deepseek/deepseek-flash",
-        "date": "2026-10-23"
-      },
-      "auditor": {
-        "agent": "translation-reviewer (lopdev) / bc5209588225",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 0,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; PASS, 0 B/M. Record: i18n/audits/evidence/hi/tui.palette/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "es",
-      "namespace": "wire.settings",
-      "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
-      "translator": {
-        "agent": "coder (lopdev; session c8ef7d0911ec; PR #3072 remediation 3bc73b5c003)",
-        "model": "anthropic/claude-opus-5-5",
-        "date": "2026-10-28"
-      },
-      "auditor": {
-        "agent": "audit-es-wire-settings (independent reviewer) / aa5ed662a068",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 5,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/es/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
-    },
-    {
-      "locale": "fr",
-      "namespace": "wire.settings",
-      "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
-      "translator": {
-        "agent": "coder (lopdev; session c8ef7d0911ec; PR #3072 remediation 3bc73b5c003)",
-        "model": "anthropic/claude-opus-5-5",
-        "date": "2026-10-28"
-      },
-      "auditor": {
-        "agent": "audit-fr-wire-settings (independent reviewer) / 1a8ae30848b9",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 5,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/fr/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only. | 2026-10-28 remediation 4d38a1d4b8e applies the 2 adjudicated correction(s) for this locale; delta re-audit le28r2-remed: PASS, 0 unresolved B/M. Record: i18n/audits/evidence/fr/wire.settings/le28r2-remed/findings.json."
-    },
-    {
-      "locale": "ru",
-      "namespace": "wire.settings",
-      "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
-      "translator": {
-        "agent": "coder (lopdev; session c8ef7d0911ec; PR #3072 remediation 3bc73b5c003)",
-        "model": "anthropic/claude-opus-5-5",
-        "date": "2026-10-28"
-      },
-      "auditor": {
-        "agent": "audit-ru-wire-settings (independent reviewer) / 65c6fbd8893a",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 7,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 4 B/M. Record: i18n/audits/evidence/ru/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only. | 2026-10-28 remediation 4d38a1d4b8e applies the 4 adjudicated correction(s) for this locale; delta re-audit le28r2-remed: PASS, 0 unresolved B/M. Record: i18n/audits/evidence/ru/wire.settings/le28r2-remed/findings.json. | 2026-10-29 review-round-1 F1: bd47fce698d changes one word in librarian_enabled.help («её сессия» → «его сессия»; the Librarian is masculine in the sibling keys); ru wire.settings.json sha256 5185479b62b9… → 9156360167e72197d97bfb8caeaa0c7e2795b03d0dceeb7195d24b8f9d1f40bd; independent delta re-audit (translation-reviewer, anthropic/claude-sonnet-5-5, no fallback; job 772c338410e1): PASS, 0 findings; routed receipt compared by eye, not by byte diff."
-    },
-    {
-      "locale": "vi",
-      "namespace": "wire.settings",
-      "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
-      "translator": {
-        "agent": "coder (lopdev; session c8ef7d0911ec; PR #3072 remediation 3bc73b5c003)",
-        "model": "anthropic/claude-opus-5-5",
-        "date": "2026-10-28"
-      },
-      "auditor": {
-        "agent": "audit-vi-wire-settings (independent reviewer) / 270888f1305d",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 6,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 3 B/M. Record: i18n/audits/evidence/vi/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only. | 2026-10-28 remediation 4d38a1d4b8e applies the 3 adjudicated correction(s) for this locale; delta re-audit le28r2-remed: PASS, 0 unresolved B/M. Record: i18n/audits/evidence/vi/wire.settings/le28r2-remed/findings.json."
-    },
-    {
-      "locale": "hi",
-      "namespace": "wire.settings",
-      "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
-      "translator": {
-        "agent": "coder (lopdev; session c8ef7d0911ec; PR #3072 remediation 3bc73b5c003)",
-        "model": "anthropic/claude-opus-5-5",
-        "date": "2026-10-28"
-      },
-      "auditor": {
-        "agent": "audit-hi-wire-settings (independent reviewer) / a4374e8bfa88",
-        "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 4,
-        "unresolved_blocker_major": 0,
-        "read_route_verified": false
-      },
-      "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 1 B/M. Record: i18n/audits/evidence/hi/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only. | 2026-10-28 remediation 4d38a1d4b8e applies the 2 adjudicated correction(s) for this locale; delta re-audit le28r2-remed: PASS, 0 unresolved B/M. Record: i18n/audits/evidence/hi/wire.settings/le28r2-remed/findings.json."
     }
   ]
 }
