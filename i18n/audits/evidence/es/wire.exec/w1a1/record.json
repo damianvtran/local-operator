@@ -1,0 +1,118 @@
+{
+ "schema": 1,
+ "audit_id": "w1a1",
+ "audit_round": 1,
+ "locale": "es",
+ "namespace": "wire.exec",
+ "audit_date": "2026-10-29",
+ "audited_revision": "efcfbe812609cbf228c01f11a1fb622f3555b487",
+ "audited_revision_note": "The es catalogue is UNTRACKED at this revision (`git status --porcelain` -> `?? <path>`), so HEAD cannot pin the audited bytes; input_hashes.target.sha256 is the exact on-disk hash and run-checks.sh re-hashes it.",
+ "key_count": {
+  "en": 17,
+  "target": 17,
+  "context": 0
+ },
+ "verdict": "passed",
+ "result": "passed — 0 blocker, 0 major, 0 minor, 2 nit",
+ "verdict_reason": "All 17 keys were read against the source, and the three the coordinator singled out hold up. exec_epilog keeps its block structure exactly: the title, five command lines that are byte-identical to the English, one blank line at the same index, then prose that rewrapped from 15 to 19 lines without changing meaning. The three behavioural promises survive without weakening or strengthening: approval_advisory keeps 'any call that needs approval WILL be denied', all four remedies and their exact flag names; goal_only_sets_objective keeps 'sets the objective but does not start work' and the TUI /goal contrast; clear_goal_needs_start keeps 'adjusts a run, it does not start one'. All 15 distinct --flags and the SESSION_ID/JOB_ID/TUI/TTY/NAME[,NAME]/tool_approval_mode tokens are byte-identical; the only token difference is the emphasis word 'SETS' -> 'FIJA', which is the correct translation of an all-caps emphasis, not a lost token. The coordinator's '0 structural problems' is confirmed and the newline delta (20 vs 24) is rewrap, not structure.",
+ "auditor": {
+  "agent": "translation-auditor (lopdev team)",
+  "session_or_instance": "4e01ec3a1b46",
+  "model": "radient/auto (self-reported)",
+  "model_note": "Session header names anthropic/claude-sonnet-5-5 as primary; three provider-failure switches fired on quota HTTP 429 (openai/gpt-6-astra, kimi/k3.1-pro, then radient/auto). This namespace was judged under radient/auto — a disclosed fallback.",
+  "date": "2026-10-29",
+  "independence": "I authored none of this copy and repaired none of it. Every es value here was written by a different translator agent. Findings are derived from the en source, the en sidecar, the es bytes and the renderer source at the audited revision. I edited no catalogue, sidecar, ledger, allowance or generated file; my only writes are this evidence directory."
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/wire.exec.json",
+   "revision": "efcfbe812609cbf228c01f11a1fb622f3555b487",
+   "sha256": "041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/es/wire.exec.json",
+   "tracked": false,
+   "sha256": "6f9df86c94723eb655c0deed39d298e073c2b7f120c961ac794a0ce435af96e8"
+  },
+  "context": {
+   "path": null,
+   "sha256": null,
+   "note": "No en context sidecar exists (`ls` -> No such file or directory); no role, tone or maxCells contract exists for these 17 keys."
+  }
+ },
+ "display_side_risk": "none observed — no value in the audited files displays as a redaction marker (grep 'redacted' found no match), so no sanctioned read_public_copy call was required. For the record: the sanctioned reader refuses *.context.json sidecars, so a masked sidecar note could not be recovered through it.",
+ "source_side_risks": [
+  "This namespace has NO en context sidecar at the audited revision, so I judged register and width with no role/tone/maxCells contract. The 72-cell help budget that the settings sidecars declare has no counterpart here even though several strings are help-text shaped (exec_help, approval_advisory).",
+  "The display side is clean: no value in either file rendered as a redaction marker."
+ ],
+ "findings": [
+  {
+   "id": "es-w1-C01",
+   "severity": "nit",
+   "status": "open",
+   "keys": [
+    "wire.exec.waiting_on_you"
+   ],
+   "detail": "en 'Waiting on you? lop sessions shows what a run needs' -> es '¿Algo te espera? lop sessions muestra lo que necesita una ejecución'. The subject flips: English says the run is waiting on the reader, Spanish says something awaits the reader. It lands on the same behaviour (a supervised run parked on a gate) and is printed to stderr, so no width budget is involved; the wording is merely less pointed than the English.",
+   "remediation": "'¿Te está esperando? lop sessions muestra lo que necesita una ejecución' (70 cells)."
+  },
+  {
+   "id": "es-w1-C02",
+   "severity": "nit",
+   "status": "open",
+   "keys": [
+    "wire.exec.exec_epilog",
+    "wire.exec.approval_advisory"
+   ],
+   "detail": "The same --tools promise is phrased two ways in one namespace: 'limita el alcance de esta ejecución a esas herramientas' (approval_advisory) and 'limita a qué puede llegar la ejecución' (exec_epilog). The second is a calque of 'bounds what the run can reach' and reads as translated; both keep the promise (excluded tools are unreachable), so this is style.",
+   "remediation": "Use 'limita el alcance de la ejecución a esas herramientas' in both."
+  }
+ ],
+ "artifacts": [
+  "record.json",
+  "report.md",
+  "audit.log",
+  "parity.py.txt",
+  "run-checks.sh",
+  "tokens.py.txt",
+  "epilog.py.txt"
+ ],
+ "check_output": [
+  {
+   "cmd": "git rev-parse HEAD",
+   "result": "efcfbe812609cbf228c01f11a1fb622f3555b487"
+  },
+  {
+   "cmd": "git status --porcelain -- local_operator/i18n/catalogues/es/wire.exec.json",
+   "result": "?? (untracked)"
+  },
+  {
+   "cmd": "sha256sum en / es / context",
+   "result": "see input_hashes"
+  },
+  {
+   "cmd": "python3 parity.py.txt wire.exec",
+   "result": "key sets equal; placeholders identical in order; no code spans; no ICU; no illegal es plural category"
+  },
+  {
+   "cmd": "python3 labels.py.txt <ns>",
+   "result": "see audit.log"
+  },
+  {
+   "cmd": "python3 tokens.py.txt wire.exec",
+   "result": "17 keys compared, 15 flags identical, 1 CAPS diff = SETS->FIJA (translated emphasis)"
+  },
+  {
+   "cmd": "python3 epilog.py.txt",
+   "result": "5/5 command lines byte-identical; one blank line at index 7 in both; prose 15->19 lines"
+  },
+  {
+   "cmd": "grep -rn waiting_on_you",
+   "result": "exec_mode.py:838 prints it to stderr under --control; not a tip slot, so the guide's 59-cell tip pool does not apply"
+  }
+ ],
+ "limitations": [
+  "No native-speaker judgement is part of this audit: the auditor is an LLM and claims no native review.",
+  "No rendered frame was captured (host under load; heavy runs forbidden). Width verdicts derive from renderer source quoted in audit.log, not from screenshots."
+ ]
+}

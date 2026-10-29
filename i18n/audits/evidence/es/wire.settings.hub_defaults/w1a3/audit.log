@@ -1,0 +1,156 @@
+AUDIT LOG — es / wire.settings.hub_defaults / w1a3 (round 2)
+============================================================
+
+Every command below was run in /Users/damian/lo-i18n-es and the output shown is the real
+captured output, not a reconstruction.
+
+=== provenance and the renderer's constraints ===
+$ grep -n "^_ROW_INDENT\|^_VALUE_COLUMN\|^_MARKER_WIDTH\|^_LABEL_BUDGET" local_operator/tui/widgets/settings_view.py
+396:_ROW_INDENT = 2
+400:_VALUE_COLUMN = 34
+426:_MARKER_WIDTH = 2
+434:_LABEL_BUDGET = _VALUE_COLUMN - _ROW_INDENT - _MARKER_WIDTH - 1
+$ sed -n "4018,4021p" local_operator/tui/widgets/settings_view.py
+# Fit registry source first; projection controls must never be sliced.
+        label = _paint(
+            truncate_cells(setting.label, _LABEL_BUDGET),
+            source_locale="en",
+$ grep -n "bridge_row = row.setting.section\|base_rungs = \[\[help_part, key_part\], None\]\|A ..None.. rung is the WRAP slot\|lines = _wrap_cells(help_text\|text.append(truncate_cells(rendered.plain, width)\|return max(total - 2, 24)" local_operator/tui/widgets/settings_view.py
+4767:            bridge_row = row.setting.section == bridge_availability.BRIDGE_SECTION
+4837:            #: A ``None`` rung is the WRAP slot (bridge rows only): render the
+4881:                base_rungs = [[help_part, key_part], None]
+4910:                    lines = _wrap_cells(help_text, width, max_lines=2)
+4937:                    text.append(truncate_cells(rendered.plain, width), style=rung[0][1])
+5203:        return max(total - 2, 24)
+5225:        return max(total - 2, 24)
+$ sed -n "4833,4840p" local_operator/tui/widgets/settings_view.py
+# that has no other half.
+            help_alone_part = (help_text, Style(color=theme_mod.semantic_color("dim")), False)
+            clause_part = (clause, clause_style, False)
+            key_part = (key_suffix.strip(), key_style, True)
+            #: A ``None`` rung is the WRAP slot (bridge rows only): render the
+            #: explanation across the band's two rows when one cannot hold it.
+            base_rungs: list[list[tuple[str, Style, bool]] | None] = []
+            if row.setting.hotkey_scope == "desktop":
+$ sed -n "5116,5136p" local_operator/settings_io.py
+# `_consumer_defaults()` in tests/unit/test_settings_io.py imports the real
+    # constants from ``local_operator/hub_sync/settings.py`` to pin they cannot
+    # drift. Every path is a genuinely NESTED tuple, read back through
+    # ``ConfigManager.get_nested_value`` — NOT ``get_config_value`` on the dotted
+    # string, which looks up a literal top-level key and would read nothing.
+    # Help strings are budgeted to <=72 cells (the detail line at 100 columns).
+    Setting(
+        key="hub.auto_update.agents",
+        path=("hub", "auto_update", "agents"),
+        section="hub",
+        label=_t(_hd.agents_label()),
+        kind=Kind.BOOL,
+        default=True,
+        choices=_bool_choices(
+            _t(_hd.agents_on_description()),
+            _t(_hd.agents_off_description()),
+        ),
+        help=_t(_hd.agents_help()),
+    ),
+    Setting(
+        key="hub.auto_update.teams",
+$ sed -n "5137,5146p" local_operator/settings_io.py
+path=("hub", "auto_update", "teams"),
+        section="hub",
+        label=_t(_ws.hub_auto_update_teams_label()),
+        kind=Kind.BOOL,
+        default=True,
+        choices=_bool_choices(
+            _t(_ws.hub_auto_update_teams_choice_true_description()),
+            _t(_ws.hub_auto_update_teams_choice_false_description()),
+        ),
+        help=_t(_ws.hub_auto_update_teams_help()),
+$ grep -rn "_hd\." --include=*.py local_operator/
+local_operator/settings_io.py:5126:        label=_t(_hd.agents_label()),
+local_operator/settings_io.py:5130:            _t(_hd.agents_on_description()),
+local_operator/settings_io.py:5131:            _t(_hd.agents_off_description()),
+local_operator/settings_io.py:5133:        help=_t(_hd.agents_help()),
+
+=== mechanical checks and width measurements ===
+$ python3 $LOCAL_OPERATOR_SCRATCHPAD/audit_es_w1a3.py wire.settings.hub_defaults
+# namespace wire.settings.hub_defaults
+# en  local_operator/i18n/catalogues/en/wire.settings.hub_defaults.json  sha256 8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c
+# es  local_operator/i18n/catalogues/es/wire.settings.hub_defaults.json  sha256 5fa0cb23293c4697789c9ec2ee3b41aa30caea97e809d9f601d14f9ba3b6861f
+# ctx local_operator/i18n/catalogues/en/wire.settings.hub_defaults.context.json  sha256 a337e7394f3856476044f9accdb8daeb7a864a9a8ecfe0c579ec97ec646712ba
+
+PARITY en=9 es=9 identical_key_sets=True
+PARITY missing_in_target=[] extra_in_target=[]
+
+PER-KEY MECHANICAL CHECKS (failures only)
+  failures=0
+
+WIDTH: every .label measured with the renderer's own truncate_cells(., 29)
+  wire.settings.hub_defaults.agents.label: 29 cells -> 'Autoactualizar agentes/habil.'  [no-op (fits)]  (en 29)
+  wire.settings.hub_defaults.teams.label: 28 cells -> 'Suscribir vínculos de equipo'  [no-op (fits)]  (en 24)
+
+WIDTH: help/description/note strings against declared budget and the detail band
+  wire.settings.hub_defaults.agents.help: es 113, en 69, declared maxCells=72 -> OVER DECLARED BUDGET
+      detail band: 98 cells at 100 cols, 78 at 80 cols
+      truncates at 100 cols -> 'Desactivado pausa las actualizaciones de todos los vínculos de agentes/habilidades; activado susc…'
+      truncates at 80 cols  -> 'Desactivado pausa las actualizaciones de todos los vínculos de agentes/habili…'
+      fits whole only on a terminal of >= 115 columns
+  wire.settings.hub_defaults.agents.off.description: es 73, en 43, declared maxCells=None -> no declared budget
+      detail band: 98 cells at 100 cols, 78 at 80 cols
+  wire.settings.hub_defaults.agents.on.description: es 50, en 35, declared maxCells=None -> no declared budget
+      detail band: 98 cells at 100 cols, 78 at 80 cols
+  wire.settings.hub_defaults.model_default.note: es 107, en 81, declared maxCells=None -> no declared budget
+      detail band: 98 cells at 100 cols, 78 at 80 cols
+      truncates at 100 cols -> 'Los merges del hub usan tu modelo predeterminado actual. La antigua anulación del modelo del hub…'
+      truncates at 80 cols  -> 'Los merges del hub usan tu modelo predeterminado actual. La antigua anulación…'
+      fits whole only on a terminal of >= 109 columns
+  wire.settings.hub_defaults.teams.help: es 94, en 67, declared maxCells=72 -> OVER DECLARED BUDGET
+      detail band: 98 cells at 100 cols, 78 at 80 cols
+      truncates at 80 cols  -> 'Predeterminado para nuevos vínculos de equipo; los existentes conservan sus p…'
+  wire.settings.hub_defaults.teams.off.description: es 69, en 41, declared maxCells=None -> no declared budget
+      detail band: 98 cells at 100 cols, 78 at 80 cols
+  wire.settings.hub_defaults.teams.on.description: es 35, en 24, declared maxCells=None -> no declared budget
+      detail band: 98 cells at 100 cols, 78 at 80 cols
+
+=== negative controls ===
+$ # negative controls — the same checker, pointed at deliberately broken bytes
+$ AUDIT_DATA_ROOT=<scratch control tree> python3 audit_es_w1a3.py wire.exec
+PER-KEY MECHANICAL CHECKS (failures only)
+  FAIL wire.exec.approval_advisory: machine literal lost '--yolo'
+  FAIL wire.exec.error_preflight: placeholder ['{error}'] -> []
+  FAIL wire.exec.exec_epilog: newline count 20 -> 24
+  FAIL wire.exec.session_pointer: placeholder ['{session_id}', '{session_id}'] -> ['{session}', '{session}']; em/en dash 1/0 -> 0/0
+  failures=4
+
+$ AUDIT_DATA_ROOT=<scratch control tree> python3 audit_es_w1a3.py wire.console
+WIDTH: every .label measured with the renderer's own truncate_cells(., 29)
+  wire.console.max_live.label: 39 cells -> 'Máximo de terminales activas…'  [CLIPS -> 'Máximo de terminales activas…']  (en 21)
+  wire.console.max_owner.label: 37 cells -> 'Terminales de agente por con…'  [CLIPS -> 'Terminales de agente por con…']  (en 32)
+  wire.console.user_reserved.label: 32 cells -> 'Ranuras de terminales de usu…'  [CLIPS -> 'Ranuras de terminales de usu…']  (en 33)
+
+$ AUDIT_DATA_ROOT=<scratch control tree> python3 audit_es_w1a3.py wire.settings.hub_defaults
+  wire.settings.hub_defaults.agents.help: es 146, en 69, declared maxCells=72 -> OVER DECLARED BUDGET
+      detail band: 98 cells at 100 cols, 78 at 80 cols
+      truncates at 100 cols -> 'Desactivado pausa las actualizaciones de TODOS los vínculos de agentes y habilidades del hub; act…'
+      truncates at 80 cols  -> 'Desactivado pausa las actualizaciones de TODOS los vínculos de agentes y habi…'
+
+CONTROL VERDICT: placeholder dropped / placeholder renamed / machine literal renamed / em dash -> hyphen
+                 / label over the 29-cell budget / declared maxCells breached: ALL DETECTED.
+CONTROL LIMIT: the exec_epilog newline counter also fires on the REAL data (en 20 -> es 24); that
+               difference was judged a legitimate reflow by reading the geometry, not by trusting
+               the counter (the geometry evidence in the wire.exec log). A counter firing is a prompt to look,
+               not a finding.
+
+=== judgement notes ===
+The round-2 briefing's wrap-rung premise was tested at 4767 / 4837 / 4881 / 4910 / 4937 and is
+bridge-only. The hub rows never wrap; the floor is a marked truncation. Round 1's reading of this
+surface was correct and is still correct on the final bytes.
+
+Source-side, derived here: 5 of the 9 keys have no live consumer. settings_io.py imports the key
+module once (line 72) and calls only agents_* (5126, 5130, 5131, 5133). The teams row takes its
+label, choices and help from wire.settings.hub_auto_update_teams_* (5137-5143). teams.* and
+model_default.note are catalogue entries no surface renders today, so round 1's teams.label width
+fix was cosmetic. Not a defect in the Spanish copy.
+
+=== writes performed by this audit ===
+Only this directory: record.json, report.md, audit.log. No catalogue, sidecar, ledger, allowance or
+generated file was edited and no git command was run.

@@ -8189,6 +8189,37 @@ def build_app(daemon: MobileDaemon):
         )
         return JSONResponse({"ok": True, "device_id": device_id})
 
+    async def api_pair_request(request: Request) -> Response:
+        """File a typed phone pairing request; never decide or apply one.
+
+        The imported filer reaches only ``approvals.create_request``. There is no
+        approve, deny, signer, or apply route here: the person on the desktop must
+        enter the SAS through the typed engine, whose persistent three-strike burn
+        and ``pair_code_required`` decision guard remain the only approval path.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
+        from local_operator.mobile import pair_requests
+        from local_operator.paths import config_dir
+
+        try:
+            record = await pair_requests.file_request(body, config_dir())
+        except MeshRefusal as exc:
+            status = 422
+            if exc.code == "pair_filing_rate_limited":
+                status = 429
+            elif exc.code == "pair_request_pending":
+                status = 409
+            return JSONResponse({"error": str(exc), "code": exc.code}, status_code=status)
+        return JSONResponse(record, status_code=201 if "approval_id" in record else 200)
+
     async def api_pair_status(request: Request) -> Response:
         """Whether the operator has approved a claimed code yet.
 
@@ -9972,6 +10003,7 @@ def build_app(daemon: MobileDaemon):
             methods=["POST"],
         ),
         Route("/api/pair", api_pair, methods=["POST"]),
+        Route("/api/pair/request", api_pair_request, methods=["POST"]),
         Route("/api/pair/{device_id:str}", api_pair_status),
         Route("/api/asks", api_asks),
         # The inbox (docs/design/notifications-inbox.md §5.4): the reel, one

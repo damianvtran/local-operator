@@ -1090,6 +1090,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "shape is an lstat-confirmed non-directory, and the caller only plans "
         "files whose shape+size+age passed",
     ),
+    #
+    # Two FILE unlinks, both named by the function that owns the sidecars' paths:
+    # the per-session scan cache and the spool write lock. Neither path can be a
+    # session directory — the first comes from `session_files.ledger.cache_path`
+    # (`<config>/cache/session_files/<id>.json`) and the second from
+    # `spooled.lock_name` (`<config>/wakes/spooled/.<id>.lock`) — and both are
+    # written OUTSIDE the session directory by the modules that own them. The
+    # call runs only after `_bounded_rmtree` has already removed THIS session's
+    # directory, and it is keyed by that session's id: a sidecar whose session
+    # directory still exists is never touched.
+    (
+        "local_operator/session/cleanup.py::_drop_session_sidecars",
+        "<path>.unlink",
+        "Unlinks the removed session's own file-scan cache entry and spool lock — "
+        "regular files named by the owning modules' path helpers, never a directory, "
+        "and only for a session whose directory this removal just deleted",
+        2,
+    ),
     # -- transcript compression ----------------------------------------------
     # The compression pass RENAMES nothing and REMOVES nothing but the two files
     # it owns, and both call sites are one function each so the argument can be

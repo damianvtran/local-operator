@@ -1,0 +1,4 @@
+{
+  "wire.host_speed.retire_below_tps.label": "retirar host lento (tok/s)",
+  "wire.host_speed.retire_below_tps.help": "Experimental, desactivado por defecto: la evidencia proviene de un solo modelo y una sola ejecución. Un umbral positivo deja de fijar un host tras tres respuestas largas por debajo de esta tasa de tokens de salida por segundo, sin contar el tiempo que tarda el consumidor local. 0 borra las exclusiones por velocidad en la siguiente petición; las exclusiones por fallo de caché se mantienen. Cambiar de host puede iniciar una caché de prompts en frío."
+}

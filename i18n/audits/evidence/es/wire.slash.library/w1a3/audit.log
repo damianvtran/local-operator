@@ -1,0 +1,72 @@
+AUDIT LOG — es / wire.slash.library / w1a3 (round 2)
+============================================================
+
+Every command below was run in /Users/damian/lo-i18n-es and the output shown is the real
+captured output, not a reconstruction.
+
+=== provenance and the renderer's constraints ===
+$ grep -n "^_ROW_INDENT\|^_VALUE_COLUMN\|^_MARKER_WIDTH\|^_LABEL_BUDGET" local_operator/tui/widgets/settings_view.py
+396:_ROW_INDENT = 2
+400:_VALUE_COLUMN = 34
+426:_MARKER_WIDTH = 2
+434:_LABEL_BUDGET = _VALUE_COLUMN - _ROW_INDENT - _MARKER_WIDTH - 1
+$ sed -n "4018,4021p" local_operator/tui/widgets/settings_view.py
+# Fit registry source first; projection controls must never be sliced.
+        label = _paint(
+            truncate_cells(setting.label, _LABEL_BUDGET),
+            source_locale="en",
+
+=== mechanical checks and width measurements ===
+$ python3 $LOCAL_OPERATOR_SCRATCHPAD/audit_es_w1a3.py wire.slash.library
+# namespace wire.slash.library
+# en  local_operator/i18n/catalogues/en/wire.slash.library.json  sha256 0f8615f2ed9ffaf3aeb0288a4ff4b8fc8becd46017a931db9d4b3d9ec32fce46
+# es  local_operator/i18n/catalogues/es/wire.slash.library.json  sha256 f6cc726978641736096351eb2f4bc7d754ce848cc6b3b93d8f5523cecaf47875
+# ctx local_operator/i18n/catalogues/en/wire.slash.library.context.json  ABSENT (no sidecar in the source tree)
+
+PARITY en=2 es=2 identical_key_sets=True
+PARITY missing_in_target=[] extra_in_target=[]
+
+PER-KEY MECHANICAL CHECKS (failures only)
+  failures=0
+
+WIDTH: every .label measured with the renderer's own truncate_cells(., 29)
+
+WIDTH: help/description/note strings against declared budget and the detail band
+  wire.slash.library.help: es 40, en 31, declared maxCells=None -> no declared budget
+      detail band: 98 cells at 100 cols, 78 at 80 cols
+
+=== negative controls ===
+$ # negative controls — the same checker, pointed at deliberately broken bytes
+$ AUDIT_DATA_ROOT=<scratch control tree> python3 audit_es_w1a3.py wire.exec
+PER-KEY MECHANICAL CHECKS (failures only)
+  FAIL wire.exec.approval_advisory: machine literal lost '--yolo'
+  FAIL wire.exec.error_preflight: placeholder ['{error}'] -> []
+  FAIL wire.exec.exec_epilog: newline count 20 -> 24
+  FAIL wire.exec.session_pointer: placeholder ['{session_id}', '{session_id}'] -> ['{session}', '{session}']; em/en dash 1/0 -> 0/0
+  failures=4
+
+$ AUDIT_DATA_ROOT=<scratch control tree> python3 audit_es_w1a3.py wire.console
+WIDTH: every .label measured with the renderer's own truncate_cells(., 29)
+  wire.console.max_live.label: 39 cells -> 'Máximo de terminales activas…'  [CLIPS -> 'Máximo de terminales activas…']  (en 21)
+  wire.console.max_owner.label: 37 cells -> 'Terminales de agente por con…'  [CLIPS -> 'Terminales de agente por con…']  (en 32)
+  wire.console.user_reserved.label: 32 cells -> 'Ranuras de terminales de usu…'  [CLIPS -> 'Ranuras de terminales de usu…']  (en 33)
+
+$ AUDIT_DATA_ROOT=<scratch control tree> python3 audit_es_w1a3.py wire.settings.hub_defaults
+  wire.settings.hub_defaults.agents.help: es 146, en 69, declared maxCells=72 -> OVER DECLARED BUDGET
+      detail band: 98 cells at 100 cols, 78 at 80 cols
+      truncates at 100 cols -> 'Desactivado pausa las actualizaciones de TODOS los vínculos de agentes y habilidades del hub; act…'
+      truncates at 80 cols  -> 'Desactivado pausa las actualizaciones de TODOS los vínculos de agentes y habi…'
+
+CONTROL VERDICT: placeholder dropped / placeholder renamed / machine literal renamed / em dash -> hyphen
+                 / label over the 29-cell budget / declared maxCells breached: ALL DETECTED.
+CONTROL LIMIT: the exec_epilog newline counter also fires on the REAL data (en 20 -> es 24); that
+               difference was judged a legitimate reflow by reading the geometry, not by trusting
+               the counter (the geometry evidence in the wire.exec log). A counter firing is a prompt to look,
+               not a finding.
+
+=== judgement notes ===
+(none beyond the report)
+
+=== writes performed by this audit ===
+Only this directory: record.json, report.md, audit.log. No catalogue, sidecar, ledger, allowance or
+generated file was edited and no git command was run.

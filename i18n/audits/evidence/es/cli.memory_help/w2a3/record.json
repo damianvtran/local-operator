@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "audit_id": "w2a3",
+  "audit_round": 1,
+  "locale": "es",
+  "namespace": "cli.memory_help",
+  "audit_date": "2026-10-29",
+  "audited_revision": "088699bfea0fc33d6b2f0748037dd7e89d85627d",
+  "audited_revision_note": "The es catalogue local_operator/i18n/catalogues/es/cli.memory_help.json is UNTRACKED at 088699bfea0fc33d6b2f0748037dd7e89d85627d (batched git status --porcelain reports '??'), so this audit binds the exact on-disk sha256 960c7b4d0bcf09293a67ecefda892bde07ea4659c513ea28eed95251fc536cf7, not a committed target blob. English source and sidecar are tracked at that revision.",
+  "key_count": {
+    "en": 1,
+    "target": 1,
+    "context": 1
+  },
+  "verdict": "passed",
+  "result": "clean",
+  "verdict_reason": "Read all 1 keys. No semantic, register, glossary, machine-syntax or width defect found. All parser-derived machine checks pass and every behavioural promise not named in a finding survives.",
+  "finding_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "auditor": {
+    "agent": "translation-auditor (lopdev team delegation es-w2-auditor-c)",
+    "session_or_instance": "session 422494cdb264",
+    "model": "kimi/k3.1-pro",
+    "model_note": "SELF-REPORTED from this session model-switch notices, not independently observable. The turn opened on anthropic/claude-sonnet-5-5; provider-failure quota HTTP 429 notices switched to openai/gpt-6-astra and then kimi/k3.1-pro before substantive audit work. The audit was performed under kimi/k3.1-pro; no pinned primary-model completion is claimed.",
+    "model_switch_note": "Fallback disclosed; no role, tools or default profile was changed.",
+    "date": "2026-10-29",
+    "independence": "I authored none of this copy and did not repair it. I edited no catalogue, sidecar, ledger, allowance or generated file and ran no git write command. Only the requested evidence directories were written."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.memory_help.json",
+      "revision": "088699bfea0fc33d6b2f0748037dd7e89d85627d",
+      "sha256": "b3b63aeb9c1b27d3e686c2c6ab7378130577255ac5e999296a583cd5bf0c3a13"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/cli.memory_help.json",
+      "sha256": "960c7b4d0bcf09293a67ecefda892bde07ea4659c513ea28eed95251fc536cf7",
+      "tracked": false,
+      "note": "untracked; sha256 binds the on-disk bytes"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.memory_help.context.json",
+      "sha256": "a87adc833d805ce45a031730c0ab13f9a875778aecc6d02c9163917387f33309"
+    }
+  },
+  "style_inputs": {
+    "style_guide": {
+      "path": "i18n/style-guides/es.md",
+      "sha256": "f2495debdf1615e75d83181107355e9853f2df858c5d3b797d97965a6718de44"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+    }
+  },
+  "findings": [],
+  "display_side_note": "No value displayed as a redaction marker. The requested lop exec/read_public_copy probe was run in this worktree and refused the untracked target because it is not committed at HEAD; the reader also refuses context sidecars. No workaround was used.",
+  "check_output": {
+    "commands": [
+      "git rev-parse HEAD; git branch --show-current; git status --short -- <catalogue inputs>",
+      "python3 $LOCAL_OPERATOR_SCRATCHPAD/audit_es_w2a3.py",
+      "lop exec --run-in /Users/damian/lo-i18n-es <requested read_public_copy probe>",
+      "targeted grep/read over runtime.py, cli.py, mobile/install.py, update.py and the tracked es catalogue"
+    ],
+    "failures": "None in the final checker: 129 keys, 21 namespaces, zero mechanical failures. Earlier detector iterations flagged prose substrings and harmless added backticks; the final source-token-preservation check was corrected and rerun, not reported as catalogue failure.",
+    "negative_controls": "Synthetic in-memory controls detect a translated select label, renamed ICU argument, dropped %(default)s and non-Spanish few plural category. No repository file was modified for these controls.",
+    "select_render": null,
+    "printf_verbatim": null,
+    "plurals": "Zero plural arguments in the complete 129-key auditor-C scope; no few/zero/two category was introduced.",
+    "width": "Zero maxCells declarations across all 129 context entries. Expansion was measured for review (23 strings at ratio >=1.35); this is not evidence of clipping, and no rendered-fit claim is made.",
+    "namespace_output": "NAMESPACE cli.memory_help\n  keys en=1 es=1 context=1 identical_key_sets=True\n  sha256 en=b3b63aeb9c1b27d3e686c2c6ab7378130577255ac5e999296a583cd5bf0c3a13\n  sha256 es=960c7b4d0bcf09293a67ecefda892bde07ea4659c513ea28eed95251fc536cf7\n  sha256 context=a87adc833d805ce45a031730c0ab13f9a875778aecc6d02c9163917387f33309\n  target_status=??\n  declared_maxCells=[]\n  mechanical_failures=[]"
+  }
+}

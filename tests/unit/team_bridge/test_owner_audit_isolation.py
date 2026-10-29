@@ -33,7 +33,9 @@ import httpx
 import pytest
 
 import local_operator
+from local_operator.aida import state as aida_state
 from local_operator.harness.types import ToolContext
+from local_operator.team_bridge import authority as authority_mod
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge import host as host_mod
 from local_operator.team_bridge.client import TeamBridgeClient
@@ -176,6 +178,10 @@ OP_ARGS: dict[str, dict[str, Any]] = {
     "channel_history": {"channel_id": CID, "limit": 5},
     "react": {"channel_id": CID, "message_id": ROOT, "emoji": "👍"},
     "channel_thread": {"channel_id": CID, "thread_root_id": ROOT},
+    "directory": {"limit": 5},
+    "dm": {"account_id": "acc_b", "target": "agent", "body": "hi"},
+    "shared_conversations": {"limit": 5},
+    "shared_history": {"channel_id": CID, "limit": 5},
 }
 
 
@@ -198,14 +204,29 @@ def _hub_answer(request: httpx.Request) -> httpx.Response:
     """Plausible hub answers so each op runs to completion where it can."""
 
     path = request.url.path
-    if path.endswith("/replies"):
-        result: Any = {"root": {"id": ROOT, "seq": 1}, "replies": [], "has_more": False}
+    if path.endswith("/directory"):
+        result: Any = {
+            "members": [
+                {
+                    "account_id": "acc_b",
+                    "display_label": "Teammate",
+                    "role": "member",
+                    "bridge_enabled": True,
+                    "bridge_state": "active",
+                    "agent": {"endpoint_id": "bep_b", "name": "CoS", "state": "active"},
+                }
+            ],
+        }
+    elif path.endswith("/replies"):
+        result = {"root": {"id": ROOT, "seq": 1}, "replies": [], "has_more": False}
     elif path.endswith("/messages") and request.method == "GET":
         result = {"messages": [], "has_more": False}
     elif path.endswith("/conversations") and request.method == "GET":
         result = {"conversations": [], "has_more": False}
     elif path.endswith("/conversations"):
         result = {"id": CID, "kind": "channel", "member_count": 1}
+    elif path.endswith("/messages") and request.method == "POST":
+        result = {"id": "bcmsg_new0001", "seq": 2}
     else:
         result = {"message": {"id": "bcmsg_new0001", "seq": 2}}
     return httpx.Response(200, json={"msg": "ok", "result": result})
@@ -221,6 +242,10 @@ def _gates_open(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
     monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
+    monkeypatch.setattr(authority_mod, "authority_fence", lambda runtime: None)
+    # The outbound fence is the relaxed sibling (designation excluded) that the
+    # collaboration ops use; it is fenced open here for the same reason.
+    monkeypatch.setattr(authority_mod, "outbound_authority_fence", lambda runtime: None)
     monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
 
 
@@ -230,6 +255,8 @@ def test_every_op_is_driven() -> None:
 
 @pytest.mark.asyncio
 async def test_no_bridge_tool_op_reaches_the_owner_audit(tmp_path: Path) -> None:
+    # Shared reads require the actual durable CoS, not a task-session label.
+    aida_state.write_state(tmp_path, {"session_id": "sess_1"})
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -259,7 +286,16 @@ async def test_no_bridge_tool_op_reaches_the_owner_audit(tmp_path: Path) -> None
     tool = build_bridge_tool(ToolContext(bridge_runtime=runtime))
     assert tool is not None
 
+    new_ops = {"directory", "dm", "shared_conversations", "shared_history"}
     for op, args in OP_ARGS.items():
+        # New ops must complete, not merely avoid the audit by failing before
+        # dispatch. Keep the legacy pair-lane exception policy unchanged.
+        if op in new_ops:
+            before = len(requests)
+            result = await execute_bridge(runtime, {"op": op, **args})
+            assert result["ok"] is True, (op, result)
+            assert len(requests) > before, op
+            continue
         try:
             await execute_bridge(runtime, {"op": op, **args})
         except Exception:  # noqa: BLE001 — an op failing locally is not a reach
@@ -279,6 +315,25 @@ async def test_no_bridge_tool_op_reaches_the_owner_audit(tmp_path: Path) -> None
         if r.method == "GET" and r.url.path == f"/v1/messaging/conversations/{CID}/messages"
     ]
     assert history and all(r.url.params.get("endpoint_id") == "bep_1" for r in history)
+    assert "/v1/messaging/directory" in paths
+    shared = [r for r in requests if "/cos-read/" in r.url.path]
+    assert {r.url.path for r in shared} == {
+        "/v1/messaging/cos-read/conversations",
+        f"/v1/messaging/conversations/{CID}/cos-read/messages",
+    }
+    assert all(r.method == "GET" for r in shared)
+    assert all(r.url.params.get("actor_endpoint_id") == "bep_1" for r in shared)
+    assert all(r.url.params.get("tenant_id") == TENANT for r in shared)
+    dm_creates = [
+        json.loads(r.content)
+        for r in requests
+        if r.method == "POST"
+        and r.url.path == "/v1/messaging/conversations"
+        and json.loads(r.content).get("kind") == "dm"
+    ]
+    assert len(dm_creates) == 1
+    assert dm_creates[0]["actor_endpoint_id"] == "bep_1"
+    assert dm_creates[0]["origin_session_id"] == "sess_1"
 
 
 def test_the_tripwire_fires_on_an_audit_method(tmp_path: Path) -> None:

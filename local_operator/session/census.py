@@ -71,6 +71,7 @@ from typing import Any, Callable
 from local_operator.session.cleanup import (
     CLEANUP_LOG_NAME,
     CONTENTS_MAX_ENTRIES,
+    REMOVAL_FAILED_POLICY,
     measure_session_dir,
 )
 from local_operator.session.retention import SESSIONS_DIRNAME
@@ -109,8 +110,11 @@ UNACCOUNTED_CONTENT_POLICY = "unaccounted-content-removal"
 #: content row (``delegated_scratchpad``) or a ``hold-release`` says nothing
 #: about the directory, so neither clears a vanished session; and the census's
 #: own rows are explicitly excluded so a re-scan cannot use its own report as
-#: the explanation.
-_NON_REMOVAL_POLICIES = frozenset({"delegated_scratchpad", "hold-release"})
+#: the explanation. ``removal-failed`` is the row ``remove_session_dir`` appends
+#: when its receipt was written and the removal then FAILED: it names the session
+#: and says the directory is still there, so counting it as an explanation would
+#: let it silently cover a later, genuinely unrecorded disappearance.
+_NON_REMOVAL_POLICIES = frozenset({"delegated_scratchpad", "hold-release", REMOVAL_FAILED_POLICY})
 
 
 def census_path(sessions_dir: Path) -> Path:
@@ -376,9 +380,27 @@ def run_store_census(
         return {"count": 0, "reported": 0, "complete": True, "enumerated": True}
 
     previous = _usable_baseline(read_census(sessions_dir))
-    sessions, complete, enumerated = _walk_store(config_root, sessions_dir, should_stop=should_stop)
-
     log_path = sessions_dir / CLEANUP_LOG_NAME
+    # THE OFFSET IS SAMPLED **BEFORE** THE WALK — review round 1, M-1, and the
+    # reason is the measurement, not symmetry. The walk is the snapshot: on the
+    # reference store it takes ~122 s over ~3,450 directories. A removal that
+    # lands inside that window appends its receipt AFTER the snapshot was taken
+    # but BEFORE the old code stat'd the log, so the receipt ended up BELOW the
+    # configured offset while the removed session stayed INSIDE the configured
+    # map — and the next pass, finding the directory gone and no row in range,
+    # reported an audited removal as ``unaccounted-removal``. Measured on that
+    # store: 488 of 492 live unaccounted rows named a session that carried a
+    # valid receipt. Sampling before the walk puts every row written during the
+    # walk at or after the recorded offset, which is exactly the property the
+    # comment on ``log_bytes`` claims and did not have.
+    log_offset = _log_size(log_path)
+    sessions, complete, enumerated = _walk_store(config_root, sessions_dir, should_stop=should_stop)
+    # The READ end is still sampled AFTER the walk, deliberately: this pass's own
+    # diff must see a receipt written during the walk for a session the walk had
+    # not yet visited (that removal is genuinely absent from the snapshot, and
+    # its row is the explanation). Reading past the recorded offset costs one
+    # re-read of rows the next pass will also see, and those rows are ignored
+    # there when their policy is ``unaccounted-*``.
     current_size = _log_size(log_path)
     reported = 0
     if previous is not None and enumerated:
@@ -479,12 +501,14 @@ def run_store_census(
         "schema": CENSUS_SCHEMA,
         "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         # THE OFFSET THE DIFF USED, NOT A POST-APPEND RE-STAT (review round 1,
-        # M2). A row landing between the snapshot and a later stat would sit
-        # below the recorded offset and no future pass would ever read it, so
-        # a *recorded* removal could be reported as unaccounted on the next
-        # run. Rows this pass appended sit AT or AFTER this offset and are
-        # read (and ignored, for ``unaccounted-*``) by the next pass.
-        "log_bytes": current_size,
+        # M2), and NOT A POST-WALK STAT EITHER (review round 1, M-1). A row
+        # landing between the snapshot and a later stat would sit below the
+        # recorded offset and no future pass would ever read it, so a *recorded*
+        # removal could be reported as unaccounted on the next run — measured as
+        # 488 of 492 false reports before ``log_offset`` was taken ahead of the
+        # walk. Rows this pass appended sit AT or AFTER this offset and are read
+        # (and ignored, for ``unaccounted-*``) by the next pass.
+        "log_bytes": log_offset,
         "count": len(sessions),
         "sessions": sessions,
         "complete": complete,

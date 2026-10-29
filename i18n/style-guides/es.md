@@ -22,11 +22,18 @@ translators and the auditor. Wave 1 locale.
 - Keep exactly as in glossary §1: "Local Operator", `lop`, tool names,
   `--flags`, config keys, paths, identifiers.
 - Kept-English technical list: commit, push, pull, merge, rebase, token,
-  cache, endpoint, script, prompt, deploy · API, CLI, TUI, JSON, YAML, HTTP,
+  endpoint, script, prompt, deploy · API, CLI, TUI, JSON, YAML, HTTP,
   URL, GPU. Wave-1 recorded additions: runtime, harness, hook(s), handshake,
   backoff. Reason: settled dev usage across Spain and LatAm.
 - Prefer Spanish where settled: servidor, archivo, carpeta, red, dispositivo,
   ajustes (settings), equipo (team), habilidad (skill).
+- **Amendment (es W1, 2026-10-29): `cache` → `caché`.** The kept-English list
+  above named `cache` before this amendment removed it. The shipped catalogue
+  already used `caché` in 19 keys (20 occurrences: `wire.settings` 15,
+  `wire.settings.account_policy` 3, `wire.host_speed` 2), including the required
+  `no garantiza un acierto de caché` in `wire.settings.account_policy` — a
+  string this wave ships. The guide now agrees with the shipped state; follow
+  `caché` rather than reopening the split.
 
 ## Locale calls (es)
 
@@ -39,6 +46,28 @@ translators and the auditor. Wave 1 locale.
   on **coste** throughout — recorded 2026-10-11).
 - job → trabajo (a backgrounded shell job; "control de trabajos" register —
   recorded 2026-10-11).
+- link → **vínculo** for a configured hub/agent/team link; **enlace** stays for
+  a hyperlink or a URL. W1 recorded both words in the catalogue before this
+  row existed; the rule is that a *configured link* is `vínculo`, so
+  `wire.slash.links`' `enlace` is a hyperlink and correct, not a drift.
+- lease → **concesión** (a provider credential lease; a DHCP-style grant, not a
+  rental contract).
+- skill → **habilidad**; the tight-form abbreviation `habil.` is acceptable only
+  where a hard cell budget forces it (`wire.settings.hub_defaults.agents.label`
+  is 29 cells and the full phrase does not fit).
+- **Amendment (es W2, 2026-10-29): three more recorded decisions.**
+  - `daemon` → **`daemon` / `daemons`, kept English.** The shipped catalogue
+    already used it (`relay.asks`, `wire.settings`, `cli.browser_help`) and the
+    borrowed form is standard in Spanish dev usage; W2 had introduced
+    `demonio`/`demonios` in eleven cli.* keys and the independent audit rejected
+    the split. Do not reopen it.
+  - `tenant` → **`tenant`, kept English**, lowercase mid-sentence
+    (`tenant de la organización`). It is a multi-tenancy term, and
+    `<tenant_id>` is a machine token that never translates.
+  - `starter` → **`plantilla incluida`** (shipped in
+    `tui.authoring.seed_not_installed`); the plural is `plantillas incluidas`.
+    W2 briefly used `perfiles iniciales`, which the audit flagged as a second
+    rendering of one product term.
 
 ## Plurals
 
@@ -63,6 +92,11 @@ translators and the auditor. Wave 1 locale.
   truncation, always.
 - Budgets: `maxCells` from the en sidecar; pinned: PERSIST_HINT 42/43 cells,
   tip pool 59, `/help` ≈ 55.
+- Recorded width exception: `cli.services_status` in this wave:
+  `serve_linger_required` measures 103 and `unsupervised_unknown` 87 cells with
+  `rich.cells.cell_len` against the 80/78 status budget. Recorded rather than
+  tightened to a shorter remedy, because the alternatives lose the logout-only
+  qualification or the scope name.
 
 ## Punctuation & typography
 

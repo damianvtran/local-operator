@@ -47,6 +47,9 @@ def _gates_open(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
+    # The room ops that are endpoint-addressed (channel_create/post/history/thread/react)
+    # dispatch through the OUTBOUND fence, so this file must open that one too.
+    monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda runtime: None)
     monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
 
 
@@ -79,7 +82,7 @@ class RecordingClient:
             "kind": "channel",
             "member_count": 1,
         }
-        self.sent_result = sent or {"message": {"id": "cmsg_1", "seq": 4}}
+        self.sent_result = sent if sent is not None else {"id": "bcmsg_post0001", "seq": 4}
         self.messages_result = messages or {"messages": []}
         self.replies_result: dict[str, Any] = {"root": {}, "replies": [], "has_more": False}
         self.conversation_result: dict[str, Any] = conversation or {"id": "bcv_abcd1234"}
@@ -95,9 +98,11 @@ class RecordingClient:
         *,
         actor_endpoint_id: str | None = None,
         origin_session_id: str | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
+                **({"expected_account_id": expected_account_id} if expected_account_id else {}),
                 "method": "create_conversation",
                 "body": dict(body),
                 "actor_endpoint_id": actor_endpoint_id,
@@ -125,10 +130,12 @@ class RecordingClient:
         actor_endpoint_id: str | None = None,
         origin_session_id: str | None = None,
         thread_root_id: str | None = None,
+        expected_account_id: str | None = None,
         mentions: Any = None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
+                **({"expected_account_id": expected_account_id} if expected_account_id else {}),
                 "method": "conversation_send",
                 "conversation_id": conversation_id,
                 "client_ref": client_ref,
@@ -337,7 +344,7 @@ async def test_channel_post_mints_one_client_ref_and_a_retry_reuses_it() -> None
         requests.append(request)
         if len(requests) == 1:
             return httpx.Response(401, json={"error": "unauthorized"})
-        return _ok({"message": {"id": f"cmsg_{len(requests)}", "seq": len(requests)}})
+        return _ok({"id": f"bcmsg_post{len(requests):04d}", "seq": len(requests)})
 
     runtime = _runtime(
         TeamBridgeClient(
@@ -351,6 +358,11 @@ async def test_channel_post_mints_one_client_ref_and_a_retry_reuses_it() -> None
         runtime, {"op": "channel_post", "channel_id": "bcv_abcd1234", "body": "hello"}
     )
     assert first["ok"] is True
+    assert first["message_id"] == "bcmsg_post0002"
+    assert first["seq"] == 2
+    assert first["conversation_id"] == "bcv_abcd1234"
+    assert "message bcmsg_post0002" in first["content"]
+    assert "at seq 2" in first["content"]
 
     # The 401 refresh retried ONCE with the same body: one client_ref.
     assert len(requests) == 2
@@ -366,6 +378,8 @@ async def test_channel_post_mints_one_client_ref_and_a_retry_reuses_it() -> None
         runtime, {"op": "channel_post", "channel_id": "bcv_abcd1234", "body": "hello again"}
     )
     assert second["ok"] is True
+    assert second["message_id"] == "bcmsg_post0003"
+    assert second["seq"] == 3
     # A second CALL is a second message, so it gets a fresh idempotency key.
     assert json.loads(requests[2].content)["client_ref"] != first_body["client_ref"]
 
@@ -610,6 +624,37 @@ async def test_react_paused_admission_refuses_before_write(monkeypatch):
     assert client.calls == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sent,message_id,seq",
+    [
+        ({"id": "bcmsg_post0001", "seq": 7}, "bcmsg_post0001", 7),
+        ({"message": {"id": "bcmsg_post0001", "seq": 7}}, "bcmsg_post0001", 7),
+        ({}, "", None),
+        ({"id": "bcmsg_post0001", "seq": True}, "bcmsg_post0001", None),
+    ],
+)
+async def test_channel_post_receipt_reports_only_confirmed_id_and_sequence(sent, message_id, seq):
+    # The hub unwraps to a message view; the nested proxy shape remains a
+    # compatibility case, not the fake used to prove the primary wire path.
+    client = RecordingClient(sent=sent)
+    outcome = await execute_bridge(
+        _runtime(client),
+        {"op": "channel_post", "channel_id": "bcv_abcd1234", "body": "hello"},
+    )
+    assert outcome["ok"] is True
+    assert outcome["message_id"] == message_id
+    assert outcome["seq"] == seq
+    assert outcome["conversation_id"] == "bcv_abcd1234"
+    assert outcome["destination_type"] == "conversation"
+    assert "message ?" not in outcome["content"]
+    if not message_id:
+        assert "returned no message id" in outcome["content"]
+    if seq is None:
+        assert " at seq " not in outcome["content"]
+    assert len(client.calls) == 1
+
+
 # -- threads (agent-server feat/bridge-threads) --------------------------------
 
 
@@ -734,7 +779,7 @@ async def test_thread_ops_reach_the_hub_with_the_exact_upstream_shape() -> None:
         requests.append(request)
         if request.method == "GET":
             return _ok({"root": {"id": "bcmsg_root0001", "reply_count": 1}, "replies": []})
-        return _ok({"message": {"id": "bcmsg_reply001", "seq": 2}})
+        return _ok({"id": "bcmsg_reply001", "seq": 2})
 
     runtime = _runtime(
         TeamBridgeClient(

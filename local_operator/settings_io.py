@@ -5781,9 +5781,15 @@ SETTINGS: tuple[Setting, ...] = (
         default="",
         # ONE session id: the designation §5.6 makes the wake consent. Deliberately
         # not a LIST — a list would imply multiple wake destinations, which the
-        # connector contract does not have in v1. Empty clears back to "none
-        # designated" (badge only).
-        empty_unsets=True,
+        # connector contract does not have in v1. An EMPTY value is "none
+        # designated" (badge only) and it is STORED, not deleted: the enable
+        # paths default this key to the chief-of-staff session only while it is
+        # ABSENT (`team_bridge.settings.record_local_session_if_unset`), so a
+        # deleted key would make a withdrawn wake consent indistinguishable from
+        # one that was never chosen — and the next enable would silently re-grant
+        # it (review round 1 MAJOR 3). `TeamBridgeSettings` already reads "" as
+        # badge-only and `_sync_designation` already maps it to SQL NULL.
+        empty_unsets=False,
         help=_t(_ws.team_bridge_session_help()),
     ),
     # -- asks ------------------------------------------------------------------

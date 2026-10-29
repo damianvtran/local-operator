@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "audit_id": "w2a3",
+  "audit_round": 1,
+  "locale": "es",
+  "namespace": "cli.services_help",
+  "audit_date": "2026-10-29",
+  "audited_revision": "088699bfea0fc33d6b2f0748037dd7e89d85627d",
+  "audited_revision_note": "The es catalogue local_operator/i18n/catalogues/es/cli.services_help.json is UNTRACKED at 088699bfea0fc33d6b2f0748037dd7e89d85627d (batched git status --porcelain reports '??'), so this audit binds the exact on-disk sha256 008f3dfe5a93443c0de8d2ca0e07b208cb696693fc9850aa04ce00168c06009d, not a committed target blob. English source and sidecar are tracked at that revision.",
+  "key_count": {
+    "en": 9,
+    "target": 9,
+    "context": 9
+  },
+  "verdict": "failed",
+  "result": "findings-require-remediation",
+  "verdict_reason": "Read all 9 keys. 0 blocker, 1 major, 0 minor, 0 nit; any blocker or major fails the namespace. All parser-derived machine checks pass and every behavioural promise not named in a finding survives.",
+  "finding_counts": {
+    "blocker": 0,
+    "major": 1,
+    "minor": 0,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 1,
+  "auditor": {
+    "agent": "translation-auditor (lopdev team delegation es-w2-auditor-c)",
+    "session_or_instance": "session 422494cdb264",
+    "model": "kimi/k3.1-pro",
+    "model_note": "SELF-REPORTED from this session model-switch notices, not independently observable. The turn opened on anthropic/claude-sonnet-5-5; provider-failure quota HTTP 429 notices switched to openai/gpt-6-astra and then kimi/k3.1-pro before substantive audit work. The audit was performed under kimi/k3.1-pro; no pinned primary-model completion is claimed.",
+    "model_switch_note": "Fallback disclosed; no role, tools or default profile was changed.",
+    "date": "2026-10-29",
+    "independence": "I authored none of this copy and did not repair it. I edited no catalogue, sidecar, ledger, allowance or generated file and ran no git write command. Only the requested evidence directories were written."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.services_help.json",
+      "revision": "088699bfea0fc33d6b2f0748037dd7e89d85627d",
+      "sha256": "76aca39fb3bfe46be1d31fbfde2176ee525b7ac650961104894a894f71751935"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/cli.services_help.json",
+      "sha256": "008f3dfe5a93443c0de8d2ca0e07b208cb696693fc9850aa04ce00168c06009d",
+      "tracked": false,
+      "note": "untracked; sha256 binds the on-disk bytes"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.services_help.context.json",
+      "sha256": "cc6104f97fbb0faac19232252063cdb7effaa2ffb4bbe2d4b65c2c749a8fe1e1"
+    }
+  },
+  "style_inputs": {
+    "style_guide": {
+      "path": "i18n/style-guides/es.md",
+      "sha256": "f2495debdf1615e75d83181107355e9853f2df858c5d3b797d97965a6718de44"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+    }
+  },
+  "findings": [
+    {
+      "id": "es-w2-C05",
+      "severity": "major",
+      "status": "open",
+      "keys": [
+        "cli.services_help.services",
+        "cli.services_help.services_description",
+        "cli.services_help.status_description",
+        "cli.services_help.wait",
+        "cli.services_help.reclaim",
+        "cli.services_help.reclaim_description",
+        "cli.services_help.pid"
+      ],
+      "detail": "Glossary drift: this namespace uses 'demonio'/'demonios', while the committed, shipped es relay.asks catalogue uses 'daemon' in error.reach_failed, error.no_reason and error.read_timeout; the W2 sibling cli.browser_help also uses 'daemon'. Neither the style guide nor glossary authorizes a daemon/demonio split. Current assigned values: cli.services_help.services: Pasar a la compilación actual los servicios de esta máquina que no son runtimes (demonios serve y supervisados), sin detener ninguna conversación activa | cli.services_help.services_description: Todo lo que local_operator ejecuta en esta máquina y no es una conversación. Un “servicio” es un demonio `lop serve` o un LaunchAgent supervisado: el relé móvil, el puente del navegador, el túnel y el agente de despertares. Los runtimes —los procesos que contienen tus conversaciones— nunca se detienen: “restart” recarga un demonio serve sin cambiar de proceso, conservando su pid y su socket. | cli.services_help.status_description: Solo lectura. Indica la compilación de la instalación y, para cada demonio `lop serve`, la que está SIRVIENDO: ambos lados de cada comparación, porque la deriva habitual en esta máquina es una recompilación de la misma versión, y la versión por sí sola no revela que un demonio esté desactualizado. | cli.services_help.wait: Cuánto esperar a que un demonio solicitado vuelva con la nueva compilación (predeterminado: {wait_seconds}s; debe ser positivo). Si no vuelve, se informa de ello, sigue sirviendo la compilación que cargó y el próximo `lop services restart` lo reintenta. | cli.services_help.reclaim: Terminar un demonio `lop serve` registrado que no esté sirviendo su dirección (nunca uno que la esté sirviendo) | cli.services_help.reclaim_description: Pedir a UN demonio `lop serve`, identificado por pid, que termine, escalando de SIGTERM a SIGKILL tras un tiempo límite, después de comprobar que el proceso es el demonio serve de este producto y que no es el que sirve la dirección indicada en su registro. `lop services status` lista los demonios a los que se aplica. Nunca es automático: el demonio puede supervisar runtimes de sesión y quien lee un registro no puede comprobar que un sucesor esté listo para ocupar su lugar. | cli.services_help.pid: pid del demonio, exactamente como lo imprime `lop services status`",
+      "remediation": "Standardize on 'daemon'/'daemons' in these keys (and coordinate the adjacent W2 browser keys so the surface stays consistent). Keep all surrounding grammar and ICU bodies otherwise unchanged."
+    }
+  ],
+  "display_side_note": "No value displayed as a redaction marker. The requested lop exec/read_public_copy probe was run in this worktree and refused the untracked target because it is not committed at HEAD; the reader also refuses context sidecars. No workaround was used.",
+  "check_output": {
+    "commands": [
+      "git rev-parse HEAD; git branch --show-current; git status --short -- <catalogue inputs>",
+      "python3 $LOCAL_OPERATOR_SCRATCHPAD/audit_es_w2a3.py",
+      "lop exec --run-in /Users/damian/lo-i18n-es <requested read_public_copy probe>",
+      "targeted grep/read over runtime.py, cli.py, mobile/install.py, update.py and the tracked es catalogue"
+    ],
+    "failures": "None in the final checker: 129 keys, 21 namespaces, zero mechanical failures. Earlier detector iterations flagged prose substrings and harmless added backticks; the final source-token-preservation check was corrected and rerun, not reported as catalogue failure.",
+    "negative_controls": "Synthetic in-memory controls detect a translated select label, renamed ICU argument, dropped %(default)s and non-Spanish few plural category. No repository file was modified for these controls.",
+    "select_render": null,
+    "printf_verbatim": null,
+    "plurals": "Zero plural arguments in the complete 129-key auditor-C scope; no few/zero/two category was introduced.",
+    "width": "Zero maxCells declarations across all 129 context entries. Expansion was measured for review (23 strings at ratio >=1.35); this is not evidence of clipping, and no rendered-fit claim is made.",
+    "namespace_output": "NAMESPACE cli.services_help\n  keys en=9 es=9 context=9 identical_key_sets=True\n  sha256 en=76aca39fb3bfe46be1d31fbfde2176ee525b7ac650961104894a894f71751935\n  sha256 es=008f3dfe5a93443c0de8d2ca0e07b208cb696693fc9850aa04ce00168c06009d\n  sha256 context=cc6104f97fbb0faac19232252063cdb7effaa2ffb4bbe2d4b65c2c749a8fe1e1\n  target_status=??\n  declared_maxCells=[]\n  mechanical_failures=[]"
+  }
+}

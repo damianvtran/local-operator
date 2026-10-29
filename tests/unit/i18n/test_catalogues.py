@@ -220,6 +220,10 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> N
     locale = "hi"
     namespaces = (
         "cli.exec_remote_help",
+        # The serve-supervision slice's 14-key namespace, carried in every locale
+        # only with its independently audited ledger row at the current en bytes;
+        # it sorts after cli.exec_remote_help.
+        "cli.services_status",
         "relay.approvals",
         "relay.ask",
         "relay.asks",
