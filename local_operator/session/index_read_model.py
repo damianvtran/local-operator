@@ -68,7 +68,43 @@ _MIGRATIONS: dict[tuple[str, str], asyncio.Task[None]] = {}
 #: is what stops an exact HIT from re-attempting a doomed build on every open.
 _FAILED: dict[tuple[str, str], tuple[int, int, float]] = {}
 #: (canonical identity, token, naming identity, checkpoints, naming) per session.
+#: Bounded LRU of served manifests, keyed by session. The bound must be generous
+#: relative to how many sessions a client polls between two polls of the SAME
+#: session: a FIFO of 8 turned a 13-session sweep into a rebuild per poll (QA Q3,
+#: round 3: 325-786 ms against 11-34 ms for a hit, with no write in the window),
+#: because each session's entry was evicted before it could be reused.
 _MANIFEST_MEMO: dict[tuple[str, str], tuple[Any, ...]] = {}
+_MANIFEST_MEMO_CAP = 64
+
+#: Concurrent companion builds. Each one is a SQLite write plus an fsync on the
+#: GIL; a burst of opens that all start one starves the refresh threads the opens
+#: are actually waiting on (QA Q4: 13 opens published 2/13 and one build took
+#: 34.96 s).
+_MATERIALIZE_MAX = 4
+
+#: Companion builds run on their OWN threads. On the loop's default executor they
+#: queued ahead of the small `to_thread` reads a poll needs (a 13-session sweep
+#: showed 70-220 ms polls whose manifest read was 0.4-3 ms), because the default
+#: executor is a queue, not a priority. A per-build daemon thread keeps the two
+#: off each other AND leaves nothing running once the build ends — a standing
+#: pool would outlive every test that started it.
+_MATERIALIZE_SLOTS = threading.BoundedSemaphore(_MATERIALIZE_MAX)
+
+#: Re-arm budget for a saturated pool (see schedule_materialize): 40 attempts at
+#: 50 ms is ~2 s of queueing before a session is given up for this publication.
+_MATERIALIZE_RETRIES: dict[tuple[str, str], int] = {}
+_MATERIALIZE_RETRIES_MAX = 40
+
+#: How long a materialisation may wait for the session's own refresh before
+#: giving up. The derivation it needs is the refresh's output, so chaining is the
+#: only way a burst ever publishes; the bound keeps a slow scan from pinning the
+#: queue.
+_MATERIALIZE_CHAIN_S = 20.0
+
+#: How long a materialisation may wait for the paint hold before giving up. The
+#: companion is an optimisation: an open must never queue behind it, and a build
+#: that cannot start promptly is dropped rather than deferred into a future poll.
+_MATERIALIZE_START_S = 0.25
 _MEMO_LOCK = threading.Lock()
 _TOKEN = re.compile(r"[0-9a-f]{32}\Z")
 _SID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
@@ -422,6 +458,11 @@ def publish(root: str | Path, sid: str, index: ti.TranscriptIndex) -> str | None
     return token
 
 
+async def _await_future(future: asyncio.Future[None]) -> None:
+    """Await a build's completion future (shielded so cancellation leaves it be)."""
+    await asyncio.shield(future)
+
+
 def _fsync_directory(directory: Path) -> None:
     """Durability hint for the rename itself; unsupported on Windows."""
     if os.name != "posix":
@@ -497,6 +538,25 @@ def write_naming(root: str | Path, sid: str, token: str | None, naming: dict[str
     finally:
         temp.unlink(missing_ok=True)
     return True
+
+
+def naming_for_root(root: str | Path, sid: str) -> dict[str, Any] | None:
+    """The naming sidecar published for the CURRENT head, or ``None``.
+
+    WHY THIS EXISTS. ``write_index`` merges the naming a concurrent
+    ``patch_naming`` landed, and reading that from the canonical document means
+    decoding the whole index — tens of MB, ~100 ms on an 11 MB fixture — on every
+    refresh write. The sidecar carries the SAME section for the same publication
+    (it is written under the same lock, before the document replace), so it is the
+    cheap source. Absent or mismatched, the caller falls back to the document.
+    """
+    probe = header(root, sid)
+    if probe.state != "ready":
+        return None
+    try:
+        return _naming(probe.value)
+    except (OSError, ValueError):
+        return None
 
 
 def _naming(pub: Publication) -> dict[str, Any]:
@@ -771,8 +831,19 @@ def schedule_materialize(root: str | Path, sid: str, index: ti.TranscriptIndex) 
         # A worker thread cannot own a task; the loop-side callers schedule it.
         return
     key = ti._key(root, sid)
-    if key in _MIGRATIONS or len(_MIGRATIONS) >= 16:
+    # Single-flight per SESSION, but never a global drop: the pool's width is what
+    # bounds concurrency, and a registry cap here silently abandoned every session
+    # past the fourth in a burst (13 opens published 6/13 with nothing left to
+    # reschedule them).
+    if key in _MIGRATIONS:
         return
+    # An open may already be refreshing THIS session. Do NOT skip: skipping is
+    # what made a 13-way burst publish 0/13, because every session in a burst has
+    # a refresh in flight at the moment the hook runs and nothing ever schedules
+    # the build afterwards. Chain onto that refresh instead, bounded, so the build
+    # waits for the derivation it needs and still runs.
+    refresh = ti._IN_FLIGHT.get(key)
+    pending = refresh[1] if refresh is not None else None
     started = time.monotonic()
 
     def build() -> None:
@@ -786,13 +857,45 @@ def schedule_materialize(root: str | Path, sid: str, index: ti.TranscriptIndex) 
 
     async def run() -> None:
         try:
+            if pending is not None and not pending.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(pending), _MATERIALIZE_CHAIN_S)
+                except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                    pass
             held = ti._PAINT_RELEASED.get(key)
             if held is not None and held[0] is loop and not held[1].is_set():
                 try:
-                    await asyncio.wait_for(held[1].wait(), ti._PAINT_HOLD_CEILING_S)
+                    await asyncio.wait_for(held[1].wait(), _MATERIALIZE_START_S)
                 except asyncio.TimeoutError:
-                    pass
-            worker = asyncio.create_task(asyncio.to_thread(build))
+                    # The hold outlived the start budget: give this build up.
+                    # Deferring it to a background queue is how a burst turns into
+                    # a 35 s tail; the next poll that finds no companion simply
+                    # schedules again, once the open is done.
+                    return
+            future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+            def run_build() -> None:
+                try:
+                    build()
+                finally:
+                    _MATERIALIZE_SLOTS.release()
+                    future.get_loop().call_soon_threadsafe(
+                        lambda: None if future.done() else future.set_result(None)
+                    )
+
+            if not _MATERIALIZE_SLOTS.acquire(blocking=False):
+                # Every slot is building. RE-ARM rather than drop: a drop is how a
+                # burst ended up publishing 5/13, because nothing schedules a
+                # session after the open that would have. Bounded, so a permanently
+                # saturated pool cannot spin.
+                attempts = _MATERIALIZE_RETRIES.get(key, 0)
+                if attempts >= _MATERIALIZE_RETRIES_MAX:
+                    return
+                _MATERIALIZE_RETRIES[key] = attempts + 1
+                loop.call_later(0.05, lambda: schedule_materialize(root, sid, index))
+                return
+            threading.Thread(target=run_build, name=f"read-model-{sid}", daemon=True).start()
+            worker = asyncio.create_task(_await_future(future))
             try:
                 await asyncio.shield(worker)
             except asyncio.CancelledError:
@@ -803,6 +906,7 @@ def schedule_materialize(root: str | Path, sid: str, index: ti.TranscriptIndex) 
         finally:
             _MIGRATIONS.pop(key, None)
 
+    _MATERIALIZE_RETRIES.pop(key, None)
     task = loop.create_task(run(), name=f"index-read-model-{sid}")
     _MIGRATIONS[key] = task
 
@@ -950,6 +1054,8 @@ def checkpoint_manifest(root: str | Path, sid: str) -> Result:
             and _naming_identity(probe.value) == naming_identity
             and journal == _journal_signature(probe.value.root, sid)
         ):
+            with _MEMO_LOCK:
+                _MANIFEST_MEMO[key] = memo  # LRU recency, so a sweep cannot evict it
             pub = Publication(
                 probe.value.root,
                 sid,
@@ -979,7 +1085,7 @@ def checkpoint_manifest(root: str | Path, sid: str) -> Result:
         return result
     resolved, (naming, checkpoints) = result.value
     with _MEMO_LOCK:
-        if len(_MANIFEST_MEMO) >= 8 and key not in _MANIFEST_MEMO:
+        while len(_MANIFEST_MEMO) >= _MANIFEST_MEMO_CAP and key not in _MANIFEST_MEMO:
             _MANIFEST_MEMO.pop(next(iter(_MANIFEST_MEMO)))
         _MANIFEST_MEMO[key] = (
             resolved.identity,
@@ -997,6 +1103,7 @@ def reset_for_tests() -> None:
     with _MEMO_LOCK:
         _MANIFEST_MEMO.clear()
     _FAILED.clear()
+    _MATERIALIZE_RETRIES.clear()
     for task in list(_MIGRATIONS.values()):
         task.cancel()
     _MIGRATIONS.clear()

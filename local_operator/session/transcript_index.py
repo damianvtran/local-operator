@@ -1114,9 +1114,18 @@ def write_index(
                     if not _sig_matches(index.sig, _journal_path(config_dir, session_id).stat()):
                         return
                 else:
-                    latest = _previous_if_current(previous, path) or _read_raw(
-                        config_dir, session_id
-                    )
+                    latest = _previous_if_current(previous, path)
+                    if latest is None:
+                        # The sidecar is the same naming section for the same
+                        # publication and costs a few KB; the document costs a full
+                        # decode of the whole index on every write (round-3 M3, and
+                        # the reason a one-row append could miss the open budget).
+                        sidecar = index_read_model.naming_for_root(config_dir, session_id)
+                        latest = (
+                            {"naming": sidecar}
+                            if sidecar is not None
+                            else _read_raw(config_dir, session_id)
+                        )
                     if latest is not None:
                         merged = preserved_naming(latest, {c.id for c in index.checkpoints})
                         live = {c.id for c in index.checkpoints if c.kind == KIND_USER}
