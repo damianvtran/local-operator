@@ -2561,11 +2561,12 @@
         "note": "Translated new command-surface strings; existing values retain their earlier translations."
       },
       "auditor": {
-        "agent": "coder (radientdev; self-audit only, NOT independent)",
-        "model": "kimi/k3.1-pro",
+        "agent": "local-operator session 28fad0ae283a (independent i18n auditor)",
+        "model": "radient/auto (provider fallbacks disclosed in PR #3143 comment 6494342521)",
         "date": "2026-10-29",
-        "result": "self-reviewed",
-        "findings": 0
+        "result": "no-copy-findings-open-ledger-findings",
+        "findings": 0,
+        "note": "Round 1 (PR #3143 comment 6494342521). Copy findings were ur/hi I1 (leading U+200F) and the I5/I6 wording minors; ledger-level I2/I3/I4 apply to every row in this delta and are not per-locale copy defects. NOT a pass: round 2 is scoped to the remediation commit."
       },
       "status": "pending-independent-audit",
       "second_audit": {
@@ -2576,7 +2577,7 @@
         "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
         "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
       },
-      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
+      "note": "Previously passed: auditor `translation-auditor` on kimi/k3.1-pro (2026-10-28, findings 0). That pass covered the 17 pre-existing keys; the 9 command keys are new here. This delta's new copy is coder-authored on kimi/k3.1-pro and recorded as pending; the independent audit ran as round 1 and raised findings, fixed in the remediation commit. Status stays pending-independent-audit until an independent round-2 audit passes. I4: the pre-existing `second_audit` block stays `pending` with its PR #3078 mode.help scope; this coder does not resolve that programme decision or flip this row to passed — the round-2 auditor or the programme owner does."
     },
     {
       "locale": "fr",
@@ -5072,7 +5073,7 @@
     {
       "locale": "fr",
       "namespace": "cli.exec_help",
-      "source_sha256": "0cf4fd220dd99750a64b79b8b679a908b1815c4c2a45415cae01c1b4e4f17d4e",
+      "source_sha256": "9c1026db630a4d609361fc152725519d52afd610362f02d2f6e3281acf3fa2bb",
       "translator": {
         "agent": "coder (radientdev; self-translated, no i18n-translator delegation)",
         "model": "kimi/k3.1-pro (fallback after quota failures)",
@@ -5080,14 +5081,15 @@
         "note": "Translated new command-surface strings; existing values retain their earlier translations."
       },
       "auditor": {
-        "agent": "coder (radientdev; self-audit only, NOT independent)",
-        "model": "kimi/k3.1-pro",
+        "agent": "local-operator session 28fad0ae283a (independent i18n auditor)",
+        "model": "radient/auto (provider fallbacks disclosed in PR #3143 comment 6494342521)",
         "date": "2026-10-29",
-        "result": "self-reviewed",
-        "findings": 0
+        "result": "no-copy-findings-open-ledger-findings",
+        "findings": 0,
+        "note": "Round 1 (PR #3143 comment 6494342521). Copy findings were ur/hi I1 (leading U+200F) and the I5/I6 wording minors; ledger-level I2/I3/I4 apply to every row in this delta and are not per-locale copy defects. NOT a pass: round 2 is scoped to the remediation commit."
       },
       "status": "pending-independent-audit",
-      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
+      "note": "Previously passed: translator `i18n-translator (session c37c11f4fcab)` on deepseek/deepseek-flash (2026-10-18); auditor `i18n-auditor (session cfaba0095633)` on openai/gpt-6.1-sol (2026-10-18, result passed, findings 0); PR #2592 round 2, comment 6249597453. That pass covered the pre-existing 21 keys; `cli.exec_help.saver` is new here. This delta's new copy is coder-authored on kimi/k3.1-pro and recorded as pending; the independent audit ran as round 1 and raised findings, fixed in the remediation commit. Status stays pending-independent-audit until an independent round-2 audit passes."
     },
     {
       "locale": "fr",
@@ -5100,11 +5102,12 @@
         "note": "Translated new command-surface strings; existing values retain their earlier translations."
       },
       "auditor": {
-        "agent": "coder (radientdev; self-audit only, NOT independent)",
-        "model": "kimi/k3.1-pro",
+        "agent": "local-operator session 28fad0ae283a (independent i18n auditor)",
+        "model": "radient/auto (provider fallbacks disclosed in PR #3143 comment 6494342521)",
         "date": "2026-10-29",
-        "result": "self-reviewed",
-        "findings": 0
+        "result": "no-copy-findings-open-ledger-findings",
+        "findings": 0,
+        "note": "Round 1 (PR #3143 comment 6494342521). Copy findings were ur/hi I1 (leading U+200F) and the I5/I6 wording minors; ledger-level I2/I3/I4 apply to every row in this delta and are not per-locale copy defects. NOT a pass: round 2 is scoped to the remediation commit."
       },
       "status": "pending-independent-audit",
       "second_audit": {
@@ -5115,7 +5118,7 @@
         "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
         "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
       },
-      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
+      "note": "Previously passed: auditor `translation-auditor` on kimi/k3.1-pro (2026-10-28, findings 0). That pass covered the 17 pre-existing keys; the 9 command keys are new here. This delta's new copy is coder-authored on kimi/k3.1-pro and recorded as pending; the independent audit ran as round 1 and raised findings, fixed in the remediation commit. Status stays pending-independent-audit until an independent round-2 audit passes. I4: the pre-existing `second_audit` block stays `pending` with its PR #3078 mode.help scope; this coder does not resolve that programme decision or flip this row to passed — the round-2 auditor or the programme owner does."
     },
     {
       "locale": "hi",
@@ -7752,11 +7755,12 @@
         "note": "Translated new command-surface strings; existing values retain their earlier translations."
       },
       "auditor": {
-        "agent": "coder (radientdev; self-audit only, NOT independent)",
-        "model": "kimi/k3.1-pro",
+        "agent": "local-operator session 28fad0ae283a (independent i18n auditor)",
+        "model": "radient/auto (provider fallbacks disclosed in PR #3143 comment 6494342521)",
         "date": "2026-10-29",
-        "result": "self-reviewed",
-        "findings": 0
+        "result": "findings",
+        "findings": 2,
+        "note": "Round 1 (PR #3143 comment 6494342521). Copy findings were ur/hi I1 (leading U+200F) and the I5/I6 wording minors; ledger-level I2/I3/I4 apply to every row in this delta and are not per-locale copy defects. NOT a pass: round 2 is scoped to the remediation commit."
       },
       "status": "pending-independent-audit",
       "second_audit": {
@@ -7767,7 +7771,7 @@
         "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
         "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
       },
-      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
+      "note": "Previously passed: auditor `translation-auditor` on kimi/k3.1-pro (2026-10-28, findings 0). That pass covered the 17 pre-existing keys; the 9 command keys are new here. This delta's new copy is coder-authored on kimi/k3.1-pro and recorded as pending; the independent audit ran as round 1 and raised findings, fixed in the remediation commit. Status stays pending-independent-audit until an independent round-2 audit passes. I4: the pre-existing `second_audit` block stays `pending` with its PR #3078 mode.help scope; this coder does not resolve that programme decision or flip this row to passed — the round-2 auditor or the programme owner does."
     },
     {
       "locale": "ru",
@@ -10422,11 +10426,12 @@
         "note": "Translated new command-surface strings; existing values retain their earlier translations."
       },
       "auditor": {
-        "agent": "coder (radientdev; self-audit only, NOT independent)",
-        "model": "kimi/k3.1-pro",
+        "agent": "local-operator session 28fad0ae283a (independent i18n auditor)",
+        "model": "radient/auto (provider fallbacks disclosed in PR #3143 comment 6494342521)",
         "date": "2026-10-29",
-        "result": "self-reviewed",
-        "findings": 0
+        "result": "no-copy-findings-open-ledger-findings",
+        "findings": 0,
+        "note": "Round 1 (PR #3143 comment 6494342521). Copy findings were ur/hi I1 (leading U+200F) and the I5/I6 wording minors; ledger-level I2/I3/I4 apply to every row in this delta and are not per-locale copy defects. NOT a pass: round 2 is scoped to the remediation commit."
       },
       "status": "pending-independent-audit",
       "second_audit": {
@@ -10437,7 +10442,7 @@
         "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
         "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
       },
-      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
+      "note": "Previously passed: auditor `translation-auditor` on kimi/k3.1-pro (2026-10-28, findings 0). That pass covered the 17 pre-existing keys; the 9 command keys are new here. This delta's new copy is coder-authored on kimi/k3.1-pro and recorded as pending; the independent audit ran as round 1 and raised findings, fixed in the remediation commit. Status stays pending-independent-audit until an independent round-2 audit passes. I4: the pre-existing `second_audit` block stays `pending` with its PR #3078 mode.help scope; this coder does not resolve that programme decision or flip this row to passed — the round-2 auditor or the programme owner does."
     },
     {
       "locale": "ur",
@@ -12874,11 +12879,12 @@
         "note": "Translated new command-surface strings; existing values retain their earlier translations."
       },
       "auditor": {
-        "agent": "coder (radientdev; self-audit only, NOT independent)",
-        "model": "kimi/k3.1-pro",
+        "agent": "local-operator session 28fad0ae283a (independent i18n auditor)",
+        "model": "radient/auto (provider fallbacks disclosed in PR #3143 comment 6494342521)",
         "date": "2026-10-29",
-        "result": "self-reviewed",
-        "findings": 0
+        "result": "findings",
+        "findings": 2,
+        "note": "Round 1 (PR #3143 comment 6494342521). Copy findings were ur/hi I1 (leading U+200F) and the I5/I6 wording minors; ledger-level I2/I3/I4 apply to every row in this delta and are not per-locale copy defects. NOT a pass: round 2 is scoped to the remediation commit."
       },
       "status": "pending-independent-audit",
       "second_audit": {
@@ -12889,7 +12895,7 @@
         "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
         "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
       },
-      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
+      "note": "Previously passed: auditor `translation-auditor` on kimi/k3.1-pro (2026-10-28, findings 0). That pass covered the 17 pre-existing keys; the 9 command keys are new here. This delta's new copy is coder-authored on kimi/k3.1-pro and recorded as pending; the independent audit ran as round 1 and raised findings, fixed in the remediation commit. Status stays pending-independent-audit until an independent round-2 audit passes. I4: the pre-existing `second_audit` block stays `pending` with its PR #3078 mode.help scope; this coder does not resolve that programme decision or flip this row to passed — the round-2 auditor or the programme owner does."
     },
     {
       "locale": "vi",
@@ -15545,11 +15551,12 @@
         "note": "Translated new command-surface strings; existing values retain their earlier translations."
       },
       "auditor": {
-        "agent": "coder (radientdev; self-audit only, NOT independent)",
-        "model": "kimi/k3.1-pro",
+        "agent": "local-operator session 28fad0ae283a (independent i18n auditor)",
+        "model": "radient/auto (provider fallbacks disclosed in PR #3143 comment 6494342521)",
         "date": "2026-10-29",
-        "result": "self-reviewed",
-        "findings": 0
+        "result": "no-copy-findings-open-ledger-findings",
+        "findings": 0,
+        "note": "Round 1 (PR #3143 comment 6494342521). Copy findings were ur/hi I1 (leading U+200F) and the I5/I6 wording minors; ledger-level I2/I3/I4 apply to every row in this delta and are not per-locale copy defects. NOT a pass: round 2 is scoped to the remediation commit."
       },
       "status": "pending-independent-audit",
       "second_audit": {
@@ -15560,7 +15567,7 @@
         "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
         "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
       },
-      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
+      "note": "Previously passed: auditor `translation-auditor` on kimi/k3.1-pro (2026-10-28, findings 0). That pass covered the 17 pre-existing keys; the 9 command keys are new here. This delta's new copy is coder-authored on kimi/k3.1-pro and recorded as pending; the independent audit ran as round 1 and raised findings, fixed in the remediation commit. Status stays pending-independent-audit until an independent round-2 audit passes. I4: the pre-existing `second_audit` block stays `pending` with its PR #3078 mode.help scope; this coder does not resolve that programme decision or flip this row to passed — the round-2 auditor or the programme owner does."
     },
     {
       "locale": "zh-CN",
@@ -17875,7 +17882,7 @@
     {
       "locale": "zh-CN",
       "namespace": "cli.exec_help",
-      "source_sha256": "0cf4fd220dd99750a64b79b8b679a908b1815c4c2a45415cae01c1b4e4f17d4e",
+      "source_sha256": "9c1026db630a4d609361fc152725519d52afd610362f02d2f6e3281acf3fa2bb",
       "translator": {
         "agent": "coder (radientdev; self-translated, no i18n-translator delegation)",
         "model": "kimi/k3.1-pro (fallback after quota failures)",
@@ -17883,14 +17890,15 @@
         "note": "Translated new command-surface strings; existing values retain their earlier translations."
       },
       "auditor": {
-        "agent": "coder (radientdev; self-audit only, NOT independent)",
-        "model": "kimi/k3.1-pro",
+        "agent": "local-operator session 28fad0ae283a (independent i18n auditor)",
+        "model": "radient/auto (provider fallbacks disclosed in PR #3143 comment 6494342521)",
         "date": "2026-10-29",
-        "result": "self-reviewed",
-        "findings": 0
+        "result": "no-copy-findings-open-ledger-findings",
+        "findings": 0,
+        "note": "Round 1 (PR #3143 comment 6494342521). Copy findings were ur/hi I1 (leading U+200F) and the I5/I6 wording minors; ledger-level I2/I3/I4 apply to every row in this delta and are not per-locale copy defects. NOT a pass: round 2 is scoped to the remediation commit."
       },
       "status": "pending-independent-audit",
-      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
+      "note": "Previously passed: translator `i18n-translator` on openai/gpt-6.1-sol (2026-10-19); auditor `translation-auditor (lopdev team)` on deepseek/deepseek-flash (2026-10-24, result passed, findings 0); evidence i18n/audits/evidence/zh-CN/cli.exec_help/zhca1/record.json. That pass covered the pre-existing 21 keys; `cli.exec_help.saver` is new here. This delta's new copy is coder-authored on kimi/k3.1-pro and recorded as pending; the independent audit ran as round 1 and raised findings, fixed in the remediation commit. Status stays pending-independent-audit until an independent round-2 audit passes."
     },
     {
       "locale": "zh-CN",
@@ -17903,11 +17911,12 @@
         "note": "Translated new command-surface strings; existing values retain their earlier translations."
       },
       "auditor": {
-        "agent": "coder (radientdev; self-audit only, NOT independent)",
-        "model": "kimi/k3.1-pro",
+        "agent": "local-operator session 28fad0ae283a (independent i18n auditor)",
+        "model": "radient/auto (provider fallbacks disclosed in PR #3143 comment 6494342521)",
         "date": "2026-10-29",
-        "result": "self-reviewed",
-        "findings": 0
+        "result": "no-copy-findings-open-ledger-findings",
+        "findings": 0,
+        "note": "Round 1 (PR #3143 comment 6494342521). Copy findings were ur/hi I1 (leading U+200F) and the I5/I6 wording minors; ledger-level I2/I3/I4 apply to every row in this delta and are not per-locale copy defects. NOT a pass: round 2 is scoped to the remediation commit."
       },
       "status": "pending-independent-audit",
       "second_audit": {
@@ -17918,7 +17927,7 @@
         "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
         "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
       },
-      "note": "Self-translation and self-audit recorded truthfully; no independent i18n-auditor delegation is available in this bounded coder role. This is NOT an independent pass. English fallback applies for this namespace until independent audit is completed."
+      "note": "Previously passed: auditor `translation-auditor` on kimi/k3.1-pro (2026-10-28, findings 0). That pass covered the 17 pre-existing keys; the 9 command keys are new here. This delta's new copy is coder-authored on kimi/k3.1-pro and recorded as pending; the independent audit ran as round 1 and raised findings, fixed in the remediation commit. Status stays pending-independent-audit until an independent round-2 audit passes. I4: the pre-existing `second_audit` block stays `pending` with its PR #3078 mode.help scope; this coder does not resolve that programme decision or flip this row to passed — the round-2 auditor or the programme owner does."
     }
   ]
 }
