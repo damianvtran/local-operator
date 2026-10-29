@@ -40,6 +40,7 @@ from local_operator.team_bridge.recipient_resolution import (
 )
 from local_operator.team_bridge.tool import execute_bridge
 from local_operator.team_bridge.types import (
+    NAMED_CANDIDATES_MAX,
     SCOPE_CONVERSATION,
     MemberCandidate,
     RecipientNameRefused,
@@ -51,7 +52,12 @@ from tests.unit.team_bridge.test_client import FakeStore, _ok
 CHANNEL = "bcv_abcd1234"
 TENANT = "ten_1"
 
-#: Ada is a HUMAN member; Bo is an AGENT member (agents carry an endpoint id).
+#: Ada is a HUMAN member; Bo is an AGENT member. Bo's ``endpoint_id`` is the
+#: OPTIMISTIC arm on purpose: an agent member may carry one and the mention row
+#: forwards it, but the frozen participant shape does not publish ``endpoint_id``,
+#: so production agent mentions are usually ``{kind, account_id}`` alone. Both are
+#: legal (``ScheduledMentionIn.endpoint_id`` is optional), and the omitted arm is
+#: exercised by every human case here.
 ADA = {"account_id": "acc_ada", "display_label": "Ada Lovelace", "kind": "human"}
 BO = {"account_id": "acc_bo", "display_label": "Bo Chen", "kind": "agent", "endpoint_id": "bep_9"}
 
@@ -319,16 +325,42 @@ async def test_an_id_recipient_is_not_a_channel_post_destination(tmp_path) -> No
 
 
 @pytest.mark.asyncio
-async def test_a_member_who_has_not_joined_is_not_a_candidate(tmp_path) -> None:
-    """An invite that cannot receive must not resolve: that would be a silent non-delivery."""
-    invited = dict(ADA) | {"status": "invited"}
-    client = RecordingClient(conversation=_conversation(invited, BO))
+@pytest.mark.parametrize("key", ["state", "status"])
+@pytest.mark.parametrize("value", ["invited", "left", "removed"])
+async def test_a_member_who_has_not_joined_is_not_a_candidate(tmp_path, key, value) -> None:
+    """An invite that cannot receive must not resolve: that would be a silent non-delivery.
+
+    Parametrised over BOTH spellings the participant shape has worn: ``state`` is
+    the frozen contract's, ``status`` is the legacy hub's. A resolver that read
+    only one of them would pass a single-key test and still deliver to somebody
+    who had left the conversation.
+    """
+    inactive = dict(ADA) | {key: value}
+    client = RecordingClient(conversation=_conversation(inactive, BO))
     outcome = await execute_bridge(
         _runtime(client, config_dir=tmp_path),
         {"op": "channel_post", "channel_id": CHANNEL, "body": "hi", "to": {"name": "Ada Lovelace"}},
     )
     assert outcome["ok"] is False
     assert "no active member by that name" in outcome["error"]
+    assert _posts_nothing(client)
+
+
+@pytest.mark.asyncio
+async def test_one_inactive_spelling_outranks_an_active_one(tmp_path) -> None:
+    """Fail closed: a row cannot be joined in one spelling and departed in another.
+
+    ANY present inactive state excludes the member. Reading only the first key
+    that happens to be present would let ``{state: invited, status: active}``
+    through, which is the guess this resolver exists not to make.
+    """
+    mixed = dict(ADA) | {"state": "invited", "status": "active"}
+    client = RecordingClient(conversation=_conversation(mixed))
+    outcome = await execute_bridge(
+        _runtime(client, config_dir=tmp_path),
+        {"op": "channel_post", "channel_id": CHANNEL, "body": "hi", "to": {"name": "Ada Lovelace"}},
+    )
+    assert outcome["ok"] is False
     assert _posts_nothing(client)
 
 
@@ -377,6 +409,68 @@ async def test_every_attempt_is_recorded_before_the_post_refusal_and_success(tmp
     assert len(raw.splitlines()) == 2  # the file is JSONL, one row per line
     assert '"body"' not in raw
     assert resolution_audit_path(tmp_path).name == RESOLUTION_AUDIT_FILENAME
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_candidate_set_is_recorded_as_unavailable(tmp_path) -> None:
+    """The one attempt that never classified anything is on the record too.
+
+    ``members_failed`` must not be the silent path: "I asked for Ada and nothing
+    happened" has to be reconstructable, and its outcome word must not pretend
+    the members were consulted (``no_match`` would say exactly that).
+    """
+
+    class UnreadableConversation(RecordingClient):
+        async def conversation(self, conversation_id: str, *, tenant_id: Any = None) -> Any:
+            self.calls.append({"method": "conversation", "conversation_id": conversation_id})
+            raise RuntimeError("hub said no")
+
+    client = UnreadableConversation()
+    outcome = await execute_bridge(
+        _runtime(client, config_dir=tmp_path),
+        {"op": "channel_post", "channel_id": CHANNEL, "body": "hi", "to": {"name": "Ada Lovelace"}},
+    )
+    assert outcome["ok"] is False and outcome["code"] == "members_failed"
+    assert _posts_nothing(client)
+    rows = _audit_rows(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "unavailable"
+    assert rows[0]["resolved_account_id"] is None
+    assert rows[0]["matched_count"] == 0
+    assert rows[0]["requested"] == "Ada Lovelace"
+    assert rows[0]["scope_id"] == CHANNEL
+
+
+@pytest.mark.asyncio
+async def test_the_ambiguity_refusal_is_bounded_but_the_count_is_exact(tmp_path) -> None:
+    """Many same-label members must not turn one refusal into a page of ids.
+
+    The legacy placeholder label (``Member``) is shared by many participants of
+    one conversation, so this is reachable: the sentence names at most
+    ``NAMED_CANDIDATES_MAX`` and says how many more there are, while the claim
+    about N stays exact.
+    """
+    crowd = [
+        {"account_id": f"acc_{index:03d}", "display_label": "Member", "kind": "human"}
+        for index in range(60)
+    ]
+    client = RecordingClient(conversation=_conversation(*crowd))
+    outcome = await execute_bridge(
+        _runtime(client, config_dir=tmp_path),
+        {"op": "channel_post", "channel_id": CHANNEL, "body": "hi", "to": {"name": "member"}},
+    )
+    assert outcome["ok"] is False and outcome["code"] == "invalid_request"
+    error = outcome["error"]
+    assert "matches 60 members" in error
+    assert error.count("acc_") == NAMED_CANDIDATES_MAX
+    assert f"and {60 - NAMED_CANDIDATES_MAX} more" in error
+    assert len(error) < 600
+    assert _posts_nothing(client)
+    # The AUDIT row is the wider record: it keeps its own bound and the exact count.
+    row = _audit_rows(tmp_path)[-1]
+    assert row["matched_count"] == 60
+    assert len(row["candidates"]) == 20
+    assert row["resolved_account_id"] is None
 
 
 @pytest.mark.asyncio

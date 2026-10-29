@@ -118,6 +118,7 @@ from .outbox import Outbox, send_from_outbox
 from .recipient_resolution import (
     ResolutionAuditUnavailable,
     members_from_conversation,
+    record_resolution,
     resolve_for_delivery,
 )
 from .types import _CONVERSATION_MESSAGE_ID as _CANONICAL_MESSAGE_ID
@@ -127,6 +128,7 @@ from .types import (
     SCOPE_CONVERSATION,
     SEND_RECIPIENT_DESCRIPTION,
     InvalidSendRecipient,
+    NameResolution,
     RecipientNameRefused,
     is_conversation_message_id,
     validate_recipient_shape,
@@ -800,6 +802,21 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                     channel_id, tenant_id=runtime.tenant_id
                 )
             except Exception as failure:
+                # No candidate set exists, so no resolution ran — but the ATTEMPT
+                # did, and every attempt is recorded. The outcome word is
+                # ``unavailable`` rather than a derived ``no_match``, because
+                # nobody was consulted; ``no_match`` would say the members were
+                # read and none matched, which is a different fact.
+                try:
+                    record_resolution(
+                        config_dir=runtime.config_dir,
+                        scope=SCOPE_CONVERSATION,
+                        scope_id=channel_id,
+                        resolution=NameResolution(requested=recipient["name"].strip(), matches=()),
+                        outcome="unavailable",
+                    )
+                except ResolutionAuditUnavailable as unaudited:
+                    return _error(str(unaudited), code=unaudited.code)
                 return _error(
                     f"could not read this conversation's members: {failure}",
                     code="members_failed",

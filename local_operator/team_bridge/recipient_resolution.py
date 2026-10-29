@@ -68,13 +68,19 @@ RESOLUTION_AUDIT_FILENAME = "recipient_resolutions.jsonl"
 INACTIVE_MEMBERSHIP_STATES = ("invited", "pending", "declined", "left", "removed", "revoked")
 
 #: The state keys a conversation member row may carry its membership in. Kept as
-#: a tuple, not a single name, so a server-side rename to ``state`` or
-#: ``membership`` does not silently turn every member into a candidate.
-_MEMBERSHIP_STATE_KEYS = ("status", "state", "membership")
+#: a tuple, not a single name, so a server-side rename between ``state`` (the
+#: frozen participant shape's spelling) and ``status`` does not silently turn
+#: every member into a candidate. ALL present keys are consulted and ANY inactive
+#: one excludes the member: a row cannot be active in one spelling and left in
+#: another, and the fail-closed reading is the only one that cannot deliver to
+#: somebody who is not there.
+_MEMBERSHIP_STATE_KEYS = ("state", "status", "membership")
 
 #: How many ambiguous candidates are named in one audit row: the count is always
 #: exact, the list is bounded so one pathological conversation cannot grow a row
-#: without limit. The refusal a model reads is bounded the same way.
+#: without limit. The refusal a model reads is bounded too, at
+#: ``types.NAMED_CANDIDATES_MAX`` (tighter, because that one is billed on every
+#: ambiguous call, while the row is read only when somebody asks what happened).
 _AUDIT_CANDIDATE_MAX = 20
 
 
@@ -99,10 +105,13 @@ def resolution_audit_path(config_dir: Path | str) -> Path:
 
 
 def _membership_is_active(member: Mapping[str, Any]) -> bool:
+    """Whether a member row is past invitation. ANY present inactive state wins."""
+
     for key in _MEMBERSHIP_STATE_KEYS:
         state = member.get(key)
         if isinstance(state, str) and state.strip():
-            return state.strip().casefold() not in INACTIVE_MEMBERSHIP_STATES
+            if state.strip().casefold() in INACTIVE_MEMBERSHIP_STATES:
+                return False
     return True
 
 
@@ -164,6 +173,7 @@ def record_resolution(
     scope: ResolutionScope,
     scope_id: str,
     resolution: NameResolution,
+    outcome: str | None = None,
 ) -> None:
     """Append ONE resolution row, before the caller may deliver. Raises on failure.
 
@@ -172,6 +182,11 @@ def record_resolution(
     the resolved account id or null, the matched count, the scope word and the
     scope's own id. A person's display name is personal data, which is why the
     file is created ``0600`` in a ``0700`` directory and never leaves this machine.
+
+    ``outcome`` overrides the derived word for the ONE attempt that never got to
+    classify anything: a candidate set that could not be read. Deriving an
+    outcome there would have written ``no_match``, which says the members were
+    consulted and nobody matched — the opposite of what happened.
     """
 
     row = {
@@ -183,7 +198,7 @@ def record_resolution(
             resolution.resolved.account_id if resolution.resolved is not None else None
         ),
         "matched_count": resolution.matched_count,
-        "outcome": _outcome(resolution),
+        "outcome": outcome or _outcome(resolution),
         "candidates": [
             {
                 "display_label": member.display_label,
@@ -194,9 +209,17 @@ def record_resolution(
         ],
     }
     path = resolution_audit_path(config_dir)
+    directory = path.parent
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(path.parent, 0o700)
+        # Only a directory THIS writer creates is tightened to 0700: the
+        # ``team_bridge`` directory is shared with the store and the outbox, and
+        # re-moding a directory an earlier component created is not this log's
+        # business. The ROW is what must be private, and it is created 0600
+        # below whether the directory was new or not.
+        created = not directory.exists()
+        directory.mkdir(parents=True, exist_ok=True)
+        if created:
+            os.chmod(directory, 0o700)
         line = json.dumps(row, ensure_ascii=False, default=str)
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
@@ -211,6 +234,13 @@ def record_resolution(
             "a directed delivery that cannot be accounted for is refused "
             f"({error.__class__.__name__})"
         ) from error
+
+
+#: The outcome words, closed. ``resolved``/``no_match``/``ambiguous`` are the
+#: three answers the matcher can give; ``unavailable`` is the fourth state, for an
+#: attempt whose candidate set could not be read at all (recorded BEFORE the
+#: refusal, so "I asked for Ada and nothing happened" is on the record too).
+OUTCOMES = ("resolved", "no_match", "ambiguous", "unavailable")
 
 
 def _outcome(resolution: NameResolution) -> str:
@@ -266,6 +296,7 @@ def resolve_for_delivery(
 
 __all__ = [
     "INACTIVE_MEMBERSHIP_STATES",
+    "OUTCOMES",
     "RESOLUTION_AUDIT_FILENAME",
     "ResolutionAuditUnavailable",
     "members_from_conversation",

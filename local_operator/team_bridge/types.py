@@ -49,6 +49,7 @@ __all__ = [
     "SCOPE_CONVERSATION",
     "SEND_RECIPIENT_DESCRIPTION",
     "MemberCandidate",
+    "NAMED_CANDIDATES_MAX",
     "NameResolution",
     "RecipientNameRefused",
     "ResolutionScope",
@@ -328,7 +329,8 @@ class ResolutionScope:
     arrive with a second spelling of "no member by that name".
     """
 
-    #: The audit vocabulary (``applies_to`` in every written row).
+    #: The audit vocabulary — the row's ``scope`` value (NOT ``applies_to``:
+    #: that was this field's working name and it never reached the log).
     name: str
     #: The clause a refusal uses, e.g. "in this conversation".
     where: str
@@ -378,17 +380,34 @@ class NameResolution:
         return self.matches[0] if len(self.matches) == 1 else None
 
     def candidates_named(self) -> tuple[str, ...]:
-        """``label (account_id)`` per candidate, for a refusal's disambiguation list.
+        """``label (account_id)`` per NAMED candidate, bounded like the audit row.
 
         A label is MEMBER-authored text (like a history sender label), so it is
         flattened and bounded here: a newline in a label must not be able to
-        restructure the sentence a model reads.
+        restructure the sentence a model reads. The LIST is bounded too, and for
+        the same class of reason one step out: the legacy placeholder label
+        ``Member`` is shared by many participants of one conversation, so an
+        unbounded join turned one refusal into a thousand characters of ids a
+        model pays for and cannot use. :meth:`unnamed_count` says how many were
+        left out, so the refusal stays exact about N even when it names few.
         """
 
         return tuple(
             f"{_flatten_label(member.display_label)} ({member.account_id})"
-            for member in self.matches
+            for member in self.matches[:NAMED_CANDIDATES_MAX]
         )
+
+    def unnamed_count(self) -> int:
+        """How many matches the refusal does NOT name (0 when it names them all)."""
+
+        return max(0, self.matched_count - NAMED_CANDIDATES_MAX)
+
+
+#: How many candidates ONE refusal names. The COUNT is always exact; the list is
+#: bounded so a conversation whose members share a placeholder label cannot turn
+#: a disambiguation sentence into a page of ids (the audit row keeps its own
+#: bound for the same reason, and only the log may be wider than the sentence).
+NAMED_CANDIDATES_MAX = 5
 
 
 class RecipientNameRefused(InvalidSendRecipient):
@@ -464,6 +483,9 @@ def resolve_member_by_name(
     if not matches:
         raise RecipientNameRefused(f"no active member by that name {scope.where}", resolution)
     named = ", ".join(resolution.candidates_named())
+    more = resolution.unnamed_count()
+    if more:
+        named += f", and {more} more"
     raise RecipientNameRefused(
         f"that name matches {len(matches)} members {scope.where}: {named} — ask for "
         f"{scope.disambiguator}",
