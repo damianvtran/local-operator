@@ -222,12 +222,12 @@ class _ConfinementRefusal(Exception):
 def _next_step(**fields: Any) -> dict[str, Any]:
     """Technical fields every structured refusal shares.
 
-    PROSE LIVES IN THE SCHEMA, NOT HERE. This route's refusals reach the model
-    (and the card headline), and AGENTS.md "Internationalization is mandatory"
-    keeps new human-facing English out of code. A code plus the accepted
-    repositories, path families and the one requirement that failed is enough
-    for the caller to repair its own call; ``ReadPublicCopyParams.repo_root``
-    explains what those fields mean once.
+    NO PROSE HERE. This route's refusals reach the model (and the card
+    headline), and AGENTS.md "Internationalization is mandatory" keeps new
+    human-facing English out of code. A code plus the accepted repositories,
+    path families and the one requirement that failed is enough for the caller
+    to repair its own call; the ``repo_root`` CONTRACT comment above
+    :class:`ReadPublicCopyParams` explains what those fields mean once.
     """
     return {
         "accepted_repositories": list(ACCEPTED_REPOSITORIES),
@@ -583,7 +583,8 @@ def _committed_public_copy(
             if wrapped is None:
                 # Fields only: ``execute_read_public_copy`` wraps a dict refusal
                 # through ``_next_step``, so prose here would bypass the
-                # "prose lives in the schema" rule the other refusals follow.
+                # fields-only rule the other refusals follow (the ``repo_root``
+                # CONTRACT comment above ``ReadPublicCopyParams``).
                 raise _ConfinementRefusal(
                     {
                         "code": "public_copy_confinement_unavailable",
@@ -941,9 +942,7 @@ def build_read_public_copy_tool() -> AgentTool:
     return AgentTool(
         name=TOOL_NAME,
         label="Read public copy",
-        description=(
-            "Read allowlisted public i18n copy: key, key-module line or map; audited."
-        ),
+        description=("Read allowlisted public i18n copy: key, key-module line or map; audited."),
         parameters=ReadPublicCopyParams.model_json_schema(),
         approval_tier="read",
         concurrency="shared",
