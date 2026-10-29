@@ -29,15 +29,20 @@ the checkout root validating one file while ``git show`` served another (S-5).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from local_operator.harness.types import ToolContext
+from local_operator.tools import public_copy as public_copy_module
 from local_operator.tools.public_copy import (
     _PUBLIC_COPY_PATTERNS,
     CORE_REPOSITORY,
@@ -1506,3 +1511,251 @@ async def test_the_audit_record_names_the_checkout_that_was_read(
     assert named.details is not None
     assert named.details["checkout"] == CORE_REPOSITORY
     assert Path(named.details["checkout_root"]) == audited.resolve()
+
+
+# --- round-1 remediation: what the review measured, pinned ------------------
+#
+# M-1: admission shells out to `git`; it must not run on the harness event loop.
+# m-2: a relative `repo_root` is ambiguous (it resolves against the PROCESS cwd).
+# m-3: the receipt must name the revision it served, or it cannot be reconciled.
+# m-4: the recorded identity must be true at the moment the bytes are served.
+# n-1: a named subdirectory must be told to name the checkout root, not to "run
+#      from the checkout root" — a thing a named-root caller cannot do.
+
+
+async def _with_heartbeat(call: Any, *, interval: float = 0.01) -> tuple[Any, float]:
+    """Await ``call()`` while sampling the loop; return the result and the worst gap.
+
+    A blocking probe inside the awaited call shows up here as a gap of one git
+    invocation, because nothing else on the loop runs while it blocks.
+    """
+    gaps: list[float] = []
+    stop = asyncio.Event()
+    last = time.monotonic()
+
+    async def beat() -> None:
+        nonlocal last
+        while not stop.is_set():
+            await asyncio.sleep(interval)
+            now = time.monotonic()
+            gaps.append(now - last)
+            last = now
+
+    task = asyncio.create_task(beat())
+    try:
+        result = await call()
+    finally:
+        stop.set()
+        await task
+    return result, max(gaps or [0.0])
+
+
+@pytest.mark.asyncio
+async def test_admitting_a_checkout_does_not_freeze_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M-1: a stalled ``git`` stalls the loop only if the probe runs inline.
+
+    Every `git` invocation is slowed by the stub below, so an inline admission
+    probe shows one heartbeat gap per call; the shipped route admits on a worker
+    thread and the loop keeps ticking. This is the measurement the review made,
+    pinned as a test: the gap is the verdict, not the wall time.
+    """
+    workspace = _public_repo(tmp_path, name="workspace", origin=CORE_ORIGIN_SSH)
+    audited = _public_repo(tmp_path, name="audited", origin=CORE_ORIGIN_SSH)
+    real_git = shutil.which("git")
+    assert real_git, "this test needs a real git on PATH"
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    stub = stub_dir / "git"
+    stub.write_text(f'#!/bin/sh\nsleep 0.8\nexec "{real_git}" "$@"\n', encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(stub_dir) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    context = _context(workspace, tmp_path)
+
+    async def call() -> Any:
+        return await execute_read_public_copy(
+            "call-loop",
+            {
+                "path": CORE_CATALOGUE,
+                "key": "wire.slash.credential",
+                "repo_root": str(audited),
+            },
+            None,
+            None,
+            context,
+        )
+
+    result, gap = await _with_heartbeat(call)
+
+    assert not result.is_error, result.text
+    assert gap < 0.4, (
+        f"the event loop stalled for {gap:.2f}s while admitting the checkout; "
+        "admission must run off the loop (asyncio.to_thread)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_relative_repo_root_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m-2: a relative spelling would resolve against the PROCESS cwd."""
+    workspace = _public_repo(tmp_path, name="workspace", origin=CORE_ORIGIN_SSH)
+    audited = _public_repo(tmp_path, name="audited", origin=CORE_ORIGIN_SSH)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    context = _context(workspace, tmp_path)
+    request = {"path": CORE_CATALOGUE, "key": "wire.slash.credential"}
+
+    relative = await execute_read_public_copy(
+        "call-relative", {**request, "repo_root": "audited"}, None, None, context
+    )
+    assert relative.is_error
+    assert "repo_root must be an absolute path" in relative.text
+    assert "harness process's working directory" in relative.text
+
+    # The same checkout, named absolutely, is admitted — the refusal is about the
+    # spelling, not the tree.
+    absolute = await execute_read_public_copy(
+        "call-absolute", {**request, "repo_root": str(audited)}, None, None, context
+    )
+    assert not absolute.is_error, absolute.text
+
+
+@pytest.mark.asyncio
+async def test_the_receipt_records_the_revision_it_served(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m-3: identity + path cannot distinguish two commits of one worktree."""
+    workspace = _public_repo(tmp_path, name="workspace", origin=CORE_ORIGIN_SSH)
+    audited = _public_repo(tmp_path, name="audited", value="first revision", origin=CORE_ORIGIN_SSH)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    context = _context(workspace, tmp_path)
+    request = {
+        "path": CORE_CATALOGUE,
+        "key": "wire.slash.credential",
+        "repo_root": str(audited),
+    }
+
+    first = await execute_read_public_copy("call-head-1", request, None, None, context)
+    first_head = subprocess.run(
+        ["git", "-C", str(audited), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    (audited / CORE_CATALOGUE).write_text(
+        json.dumps({"wire.slash.credential": "second revision"}), encoding="utf-8"
+    )
+    _git(audited, "add", "-A")
+    _git(audited, "-c", "commit.gpgsign=false", "commit", "-qm", "second revision")
+    second = await execute_read_public_copy("call-head-2", request, None, None, context)
+    second_head = subprocess.run(
+        ["git", "-C", str(audited), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    assert not first.is_error, first.text
+    assert not second.is_error, second.text
+    assert first_head != second_head
+    assert first.details is not None and second.details is not None
+    assert first.details["checkout_head"] == first_head
+    assert second.details["checkout_head"] == second_head
+    assert "second revision" in second.text
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "config" / "audit" / "public-copy-reads.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert [record["checkout_head"] for record in records] == [first_head, second_head]
+    # The path and the identity are IDENTICAL across the two reads: only the
+    # revision and the body digest distinguish them, which is the finding.
+    assert {record["path"] for record in records} == {CORE_CATALOGUE}
+    assert {record["checkout"] for record in records} == {CORE_REPOSITORY}
+    assert records[0]["sha256"] != records[1]["sha256"]
+
+
+@pytest.mark.asyncio
+async def test_a_checkout_whose_origin_changed_after_admission_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m-4: the identity the receipt records is re-derived where the bytes are read.
+
+    The stale admission below is exactly what a directory swapped between the
+    admission probe and the read looks like to the reader. A receipt whose
+    identity came only from the pre-read probe would serve this read and record
+    an identity the serving repository does not have.
+    """
+    workspace = _public_repo(tmp_path, name="workspace", origin=CORE_ORIGIN_SSH)
+    audited = _public_repo(tmp_path, name="audited", origin=CORE_ORIGIN_SSH)
+
+    def stale_admission(raw: str) -> tuple[Path, str, None]:
+        return audited.resolve(), UI_REPOSITORY, None
+
+    monkeypatch.setattr(public_copy_module, "_admitted_checkout", stale_admission)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-swap",
+        {
+            "path": CORE_CATALOGUE,
+            "key": "wire.slash.credential",
+            "repo_root": str(audited),
+        },
+        None,
+        None,
+        _context(workspace, tmp_path),
+    )
+
+    assert result.is_error
+    assert f"the origin of {audited.resolve()} is now damianvtran/local-operator" in result.text
+    assert f"not the {UI_REPOSITORY} this call admitted" in result.text
+    assert "record could not be written" not in result.text
+    assert not (tmp_path / "config" / "audit" / "public-copy-reads.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_named_subdirectory_is_refused_with_actionable_advice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """n-1: the caller named a checkout, so "run from the checkout root" is advice
+    they cannot act on. The copy root below EXISTS and is committed; the refusal
+    is the toplevel rule, and it must say "the named checkout root"."""
+    workspace = _public_repo(tmp_path, name="workspace", origin=CORE_ORIGIN_SSH)
+    root = tmp_path / "outer"
+    (root / "sub" / "local_operator/i18n/catalogues/en").mkdir(parents=True)
+    (root / "sub" / CORE_CATALOGUE).write_text(
+        json.dumps({"wire.slash.credential": "a committed copy below the root"}),
+        encoding="utf-8",
+    )
+    _git(root, "init", "-q")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "remote", "add", "origin", CORE_ORIGIN_SSH)
+    _git(root, "add", "-A")
+    _git(root, "-c", "commit.gpgsign=false", "commit", "-qm", "fixture")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    result = await execute_read_public_copy(
+        "call-subdir",
+        {
+            "path": CORE_CATALOGUE,
+            "key": "wire.slash.credential",
+            "repo_root": str(root / "sub"),
+        },
+        None,
+        None,
+        _context(workspace, tmp_path),
+    )
+
+    assert result.is_error
+    assert "the named checkout root" in result.text
+    assert "not one below it" in result.text
+    assert "run read_public_copy from the checkout root" not in result.text
+    assert "workspace" not in result.text
+    assert "a committed copy below the root" not in result.text

@@ -168,9 +168,12 @@ is **not** a redaction toggle:
   the bytes). Naming a checkout changes **where** the allowlist applies, never
   **what** may be read: the `path` argument stays repository-relative and
   allowlisted, a `..`, absolute or symlinked path out of the admitted root is
-  refused, and a directory with no origin, an unrecognised origin, a
-  non-directory or a symlinked spelling is refused with a sentence naming the
-  reason. The session-workspace arm is unchanged and asks for no identity.
+  refused, and a directory that is not a git checkout, has no origin or carries
+  an unrelated origin — as well as a non-directory or a symlinked spelling — is
+  refused with a sentence naming the reason. The identity is read from the
+  checkout's own `origin` configuration, so this is a guard against admitting an
+  unrelated tree and not an authenticity proof (§6). The session-workspace arm is
+  unchanged and asks for no identity.
 * It serves **the committed blob only**: the file must be tracked and its
   working tree clean against `HEAD` (`git ls-files --error-unmatch` plus
   `git diff --quiet HEAD --`). A working-tree difference or an untracked file is

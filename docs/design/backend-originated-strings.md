@@ -293,12 +293,23 @@ repository-relative: naming a checkout changes where the allowlist is applied,
 never what may be read.
 
 This is why it is still an audited route rather than a filesystem reader: the
-caller can name a **published tree**, not a file; a directory with no origin, an
-unrecognised origin (a fork, a lookalike, a tree created on the spot), a
-non-directory or a symlinked spelling is refused with a sentence naming the
-reason; and a `..`, absolute or symlinked path that leaves the admitted root is
-refused before the allowlist is consulted. The exact rule and its residuals are
-stated in `docs/security/redaction-policy.md` §4/§6.
+caller can name a **published tree**, not a file; a directory that is not a git
+checkout, has no origin, or carries an unrelated origin (a fork, another
+project's clone), as well as a non-directory or a symlinked spelling, is refused
+with a sentence naming the reason; and a `..`, absolute or symlinked path that
+leaves the admitted root is refused before the allowlist is consulted.
+
+**What the origin check is not.** It is a guard against admitting an unrelated
+tree, not an authenticity proof. The identity is the checkout's own `origin`
+configuration, so three commands — `git init`, `git remote add origin
+<allowlisted>`, commit — produce a directory that passes it, and this route's
+result is exempt from redaction by tool name, so nothing downstream will catch
+that. The controls that do hold are the allowlist (only the reviewed roots can be
+read), the committed-blob rule (the bytes are a `HEAD` blob in a clean checkout,
+so they are a real commit of that repository) and the audit record (identity,
+root, revision and body digest, before the content is returned). The same-UID
+residual in `docs/security/redaction-policy.md` §6 states the rest; a
+cryptographic check is not available offline for a checkout the caller clones.
 
 ## 5. Do-not-key boundary
 
