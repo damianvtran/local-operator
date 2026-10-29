@@ -254,7 +254,13 @@ async def test_the_no_supervisor_refusal_is_logged_for_automatic_callers(
 
     monkeypatch.setattr(supervisors, "supervisor", lambda: None)
     _commit(tmp_path)
-    with caplog.at_level(logging.INFO, logger=install.logger.name):
+    # AT THE DEFAULT LEVEL, DELIBERATELY (review MAJOR-2). The first version of
+    # this test forced INFO, which is exactly how the defect hid: the code logged
+    # at INFO and the callers that swallow the outcome run at WARNING, so the
+    # assertion passed while the operator still saw nothing. Asserting at WARNING
+    # is asserting what a default-configured `lop serve`, mobile service and
+    # desktop actually receive.
+    with caplog.at_level(logging.WARNING, logger=install.logger.name):
         outcome = install.sync_connector_service(tmp_path)
     assert outcome.code == install.CODE_NO_SUPERVISOR
     messages = [record.getMessage() for record in caplog.records]

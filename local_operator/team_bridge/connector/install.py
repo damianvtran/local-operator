@@ -1093,7 +1093,19 @@ def _reconcile(config_dir: Path, *, force_off: bool) -> ServiceOutcome:
             # startup at DEBUG, the mobile service dropping an unread future,
             # the desktop ignoring the return value). On a backend-only host
             # that is a receiver that is never placed and never mentioned.
-            if refused.code in (CODE_ISOLATED, CODE_NO_SUPERVISOR):
+            # LEVEL MATTERS MORE THAN THE LINE (review MAJOR-2). Logging this at
+            # INFO fixed nothing for the callers that swallow the outcome: `lop
+            # serve`, the mobile service and the desktop's server-backed path all
+            # run at WARNING by default, so an INFO line is dropped before anyone
+            # sees it and the host still installs nothing in silence.
+            #
+            # `no_supervisor` is therefore a WARNING - the machine is running
+            # without the receive path it asked for. `isolated` stays at INFO: it
+            # is a local misconfiguration with a stated fix, already visible in
+            # the paths that report it.
+            if refused.code == CODE_NO_SUPERVISOR:
+                logger.warning("bridge connector: %s", refused.detail)
+            elif refused.code == CODE_ISOLATED:
                 logger.info("bridge connector: %s", refused.detail)
             return refused
         # CHEAP PRE-CHECK, deliberately OUTSIDE the lock and side-effect free.
