@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "audit_id": "le28r2",
+  "locale": "fr",
+  "namespace": "wire.settings",
+  "hashes": {
+    "audit.log": "b79b4e4c647561ce233596965eb6ae213e4e68a5129d59658bca4d2ff411d685",
+    "coverage.json": "1a6cb40b9510ff178006bcf47511a3a8f21434685afa3b5550621843f00b4860",
+    "extra_checks.py.txt": "021b80e6a99f447fe6973af5c655c123750f7c042f1c5e8cb38c410e5e226d39",
+    "findings.json": "149a6274cf5b4eb2991ed0b1275addb2d48310406e25f355ca3cb7731d97d4db",
+    "mech_sweep.py.txt": "3905b1630aea590646fccb31b2628de7519a93fb4a443a62d9a0e161ba400348",
+    "mechanical.json": "40df0c9dccff80bf19c0389ef977495bb247266ab35ee48d4640dead55f05150",
+    "prior-ledger.json": "ef37643f0fb039c8c15e69406334274c6f5c98c3a9040e968d4e38a73f6029f9",
+    "probe.py.txt": "a431d62529197feec3f74988f1a19cefb5acfbf90e836f7fc382beb574517f31",
+    "record.json": "3db761a46fec26054a328ec2b36560535d9d115f38c1c0db4b223fb8fe54b8bd",
+    "rendered-text.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+    "renders.py.txt": "7cd2c376d3c59183f6fc60155dce9f6c2d514b10e58ce4da1f4dec49d657bf33",
+    "report.md": "54c0df490e763b19a778bc802040b3fddbd1cc9aabf316c36bc0dd6e110a02bb",
+    "route-receipts.json": "4ca70bbf07950440a93a131e37ce2557bf4308a993eaf733514c37842e46c55b",
+    "subaudit-original.json": "f1fd3784e681ccb394ea6298dcf41d9803a740a69e8928f9449e93b54aa89ec3",
+    "subaudit-original.md": "3cefe3bdcc7f043387e7c14e9ae3d0964784b9f6b1cd1ad54e646d3f01c3ab35",
+    "widths-and-rederivations.json": "6f9b90b186a2d423b45a3cb7d8c5382d73f186a183550190f58bf6e584fb2a0d"
+  }
+}

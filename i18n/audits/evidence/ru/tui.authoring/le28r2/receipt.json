@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "audit_id": "le28r2",
+  "locale": "ru",
+  "namespace": "tui.authoring",
+  "source_sha256": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
+  "target_sha256": "7c11cfbef7c700f5eab8173b064af41a33e6987b86ca181e4de093fe24702454",
+  "hashes": {
+    "audit.log": "1342648f76d0ef3eb05405986d32aaba475abe34f4b5377fe62648b0c5208771",
+    "coverage.json": "9f42655e09ec88b2f9e84bbd4a5e52a848d504c8860ddc4b64833e16230bb646",
+    "extra_checks.py.txt": "021b80e6a99f447fe6973af5c655c123750f7c042f1c5e8cb38c410e5e226d39",
+    "findings.json": "5dcc7b87bf1e76e5ab416e52daa5ed74322d3ca541ee3f03650be21b03bcee1d",
+    "mech_sweep.py.txt": "3905b1630aea590646fccb31b2628de7519a93fb4a443a62d9a0e161ba400348",
+    "mechanical.json": "857bf32097051abfca1ad1fff8d02f734cbc1143c96f68ea134d21c13bd82e91",
+    "prior-ledger.json": "e94efe3f38853683a3c57b08dc4657845cd580f54de6572d5af053eb9381ded4",
+    "probe.py.txt": "a431d62529197feec3f74988f1a19cefb5acfbf90e836f7fc382beb574517f31",
+    "record.json": "113487485ebcd23d2f97d643d872fa18805141582bca0eaebd90deeb61c95a5e",
+    "rendered-text.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+    "renders.py.txt": "7cd2c376d3c59183f6fc60155dce9f6c2d514b10e58ce4da1f4dec49d657bf33",
+    "report.md": "e9668c844c5fbd176272c2c67f02ffaa4a2bce57f8be30216c78ac4e3b95817f",
+    "route-receipts.json": "08f6660d4615f11d77a487d0f2103f2711ce7dedeebbe0a8da16068297780a95",
+    "widths-and-rederivations.json": "6bdeace78df58689ac2be9cd0d6ae8ed85e8f629fbc1979ec2f16f9f365dd5a2"
+  }
+}

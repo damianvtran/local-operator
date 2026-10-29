@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import re
 import threading
 import time
 from collections.abc import Iterable
@@ -45,11 +46,13 @@ from local_operator.library import identity
 from local_operator.library import index as library_index
 from local_operator.library.metadata import MetadataStore
 from local_operator.library.store import (
+    SCHEMA_VERSION,
     STATE_BACKFILL_DONE,
     STATE_BUILT_AT,
     STATE_LAST_RECONCILE,
     STATE_SESSIONS_SCANNED,
     STATE_SESSIONS_TOTAL,
+    IndexUnavailable,
     LibraryStore,
 )
 from local_operator.session_files import ledger
@@ -355,6 +358,42 @@ class _JournalHandler:
 #: sentinel can never be mistaken for a session id.
 _WAKE: Final = "\x00library-wake"
 
+#: A derived table name out of SQLite's own ``no such table`` message.
+_MISSING_DERIVED_TABLE: Final = re.compile(r"no such table: (idx_[A-Za-z0-9_]+)")
+
+
+def _log_worker_failure(headline: str, error: BaseException, store: LibraryStore) -> None:
+    """Report a worker failure: one actionable line, or a traceback when earned.
+
+    WHY NOT ``exc_info`` FOR EVERYTHING. The reconciler can legitimately meet a
+    file whose derived schema is absent — a database replaced under a live
+    process, a config directory recreated beneath it, a cache restored from
+    somewhere else. That state is recoverable and has exactly one thing to do
+    about it, but a traceback ending in ``IndexUnavailable: no such table:
+    idx_sessions`` names neither the file nor the migration, and it reached the
+    CLI's stderr as if the process had failed (CI shard 40812326996: an
+    entrypoint test asserted nothing was written to stderr while a leaked worker
+    reconciled an unmigrated file). Naming the table, the file and the migration
+    that creates it is what makes the warning actionable; everything else (a
+    torn page, a lapsed lock, an I/O error) is genuinely unexpected and keeps
+    its traceback. The level stays WARNING either way: a broken store must not
+    become silent.
+    """
+    missing = _MISSING_DERIVED_TABLE.search(str(error))
+    if missing is None or not isinstance(error, IndexUnavailable):
+        logger.warning("library: %s", headline, exc_info=True)
+        return
+    logger.warning(
+        "library: %s \u2014 derived table %s is missing from %s, so its schema has not "
+        "been migrated; it is created by the derived-index migration "
+        "(LibraryStore.ensure_schema, derived schema v%d), which the next read on "
+        "this file re-runs. Indexing for this file stays off until it succeeds.",
+        headline,
+        missing.group(1),
+        store.path,
+        SCHEMA_VERSION,
+    )
+
 
 class LibraryIndexer:
     """One background worker per config root. Use :func:`ensure_started`."""
@@ -474,8 +513,8 @@ class LibraryIndexer:
         self._start_thumb_worker()
         try:
             self.reconcile()
-        except Exception:  # noqa: BLE001 - a first reconcile is best effort
-            logger.warning("library: initial reconcile failed", exc_info=True)
+        except Exception as error:  # noqa: BLE001 - a first reconcile is best effort
+            _log_worker_failure("initial reconcile failed", error, self.store)
         self._start_observer()
         try:
             while not self._stop.is_set():
@@ -486,8 +525,8 @@ class LibraryIndexer:
                         break
                     try:
                         self.reconcile()
-                    except Exception:  # noqa: BLE001 - keep the worker alive
-                        logger.warning("library: periodic reconcile failed", exc_info=True)
+                    except Exception as error:  # noqa: BLE001 - keep the worker alive
+                        _log_worker_failure("periodic reconcile failed", error, self.store)
                     continue
                 if self._stop.is_set() or not first:
                     continue
@@ -495,8 +534,8 @@ class LibraryIndexer:
                 self._batch_active = True
                 try:
                     self.process_dirty(batch)
-                except Exception:  # noqa: BLE001 - one bad session must not stop the index
-                    logger.warning("library: session batch failed", exc_info=True)
+                except Exception as error:  # noqa: BLE001 - one bad session must not stop the index
+                    _log_worker_failure("session batch failed", error, self.store)
                 finally:
                     self._batch_active = False
                 if not wake:
