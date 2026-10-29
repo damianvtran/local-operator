@@ -694,6 +694,7 @@ export type MessageParams = {
   "wire.radient_saver.mode.help": undefined;
   "wire.radient_saver.mode.label": undefined;
   "wire.radient_saver.notice.disabled": undefined;
+  "wire.radient_saver.notice.gate_off": undefined;
   "wire.radient_saver.notice.no_credit": undefined;
   "wire.radient_saver.notice.no_session": undefined;
   "wire.radient_saver.notice.oversize": undefined;

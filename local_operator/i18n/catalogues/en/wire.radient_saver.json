@@ -12,7 +12,7 @@
   "wire.radient_saver.notice.signed_out": "Radient Saver is paused for this session because you are not signed in to Radient. Run /login radient to use it.",
   "wire.radient_saver.notice.no_credit": "Radient Saver is paused for this session because your Radient balance is empty. Add credit at console.radienthq.com to use it.",
   "wire.radient_saver.notice.rate_limited": "Radient Saver is busy, so your full history is sent until it accepts requests again.",
-  "wire.radient_saver.notice.disabled": "Radient Saver is not available with this configuration, so your full history is sent. Turn it on in /settings under Radient Saver, then /saver on.",
+  "wire.radient_saver.notice.disabled": "Radient Saver is not available for this request, so your whole conversation is sent. Nothing else is affected.",
   "wire.radient_saver.notice.oversize": "One message in this conversation is too large for Radient Saver, so it stays unshortened. Saver keeps working on the rest of the conversation.",
   "wire.radient_saver.command.description": "Set Radient Saver for this session",
   "wire.radient_saver.command.radient_description": "Radient Saver (/radient saver)",
@@ -24,5 +24,6 @@
   "wire.radient_saver.command.status.off": "Radient Saver: off for this session. Use /saver on to enable it; if the global setting is off, turn it on in /settings under Radient Saver.",
   "wire.radient_saver.command.badge": "saver",
   "wire.radient_saver.notice.unknown_balance": "Radient Saver could not check your Radient balance just now, so nothing changed. Try /saver on again in a moment.",
-  "wire.radient_saver.notice.no_session": "Radient Saver needs an open conversation; open one and try again."
+  "wire.radient_saver.notice.no_session": "Radient Saver needs an open conversation; open one and try again.",
+  "wire.radient_saver.notice.gate_off": "Radient Saver is off in your settings, so this session cannot turn it on. Turn it on in /settings under Radient Saver, then /saver on."
 }
