@@ -94,6 +94,7 @@ _MATERIALIZE_SLOTS = threading.BoundedSemaphore(_MATERIALIZE_MAX)
 #: 50 ms is ~2 s of queueing before a session is given up for this publication.
 _MATERIALIZE_RETRIES: dict[tuple[str, str], int] = {}
 _MATERIALIZE_RETRIES_MAX = 40
+_MATERIALIZE_RETRY_S = 0.05
 
 #: How long a materialisation may wait for the session's own refresh before
 #: giving up. The derivation it needs is the refresh's output, so chaining is the
@@ -231,8 +232,15 @@ def _path(root: Path, sid: str, token: str) -> Path:
     return path
 
 
-def header(root: str | Path, sid: str) -> Result:
-    """Read only the ordered head, binding built_at and token to the same FD."""
+def header(root: str | Path, sid: str, *, stale_ok: bool = False) -> Result:
+    """Read only the ordered head, binding built_at and token to the same FD.
+
+    ``stale_ok`` accepts a document whose journal has moved. Default callers get
+    ``stale`` because serving a previous derivation is exactly what the manifest
+    must not do; the ONE caller that passes it wants the publication's own naming
+    sidecar, which is still the newest naming for those turns (see
+    ``naming_for_root``).
+    """
     if not _SID.fullmatch(sid):
         return Result("unsupported")
     try:
@@ -458,6 +466,18 @@ def publish(root: str | Path, sid: str, index: ti.TranscriptIndex) -> str | None
     return token
 
 
+def _rearm(root: str | Path, sid: str, index: ti.TranscriptIndex) -> None:
+    """Re-offer a session whose build could not get a slot.
+
+    A thin wrapper so the retry cannot be mistaken for a fresh request: the
+    registry entry is cleared first, because the previous task has already
+    returned (it re-armed instead of building), and ``schedule_materialize``
+    refuses a session that looks in-flight.
+    """
+    _MIGRATIONS.pop(ti._key(root, sid), None)
+    schedule_materialize(root, sid, index)
+
+
 async def _await_future(future: asyncio.Future[None]) -> None:
     """Await a build's completion future (shielded so cancellation leaves it be)."""
     await asyncio.shield(future)
@@ -550,8 +570,16 @@ def naming_for_root(root: str | Path, sid: str) -> dict[str, Any] | None:
     (it is written under the same lock, before the document replace), so it is the
     cheap source. Absent or mismatched, the caller falls back to the document.
     """
-    probe = header(root, sid)
-    if probe.state != "ready":
+    # STALE IS THE CASE THIS EXISTS FOR (review round 4, MAJOR-1). The naming a
+    # concurrent patch landed lives in the sidecar of the publication the
+    # canonical document names — and that document is `stale` precisely when the
+    # journal has moved, which is exactly the append refresh. Gating on `ready`
+    # meant the sidecar was never readable there and the full document decode came
+    # straight back onto the path this helper was written to remove. The sidecar
+    # is bound to the publication identity, not to the journal's currentness: an
+    # old naming section is still the newest naming that exists for those turns.
+    probe = header(root, sid, stale_ok=True)
+    if probe.state not in ("ready", "stale") or probe.value is None:
         return None
     try:
         return _naming(probe.value)
@@ -879,21 +907,34 @@ def schedule_materialize(root: str | Path, sid: str, index: ti.TranscriptIndex) 
                     build()
                 finally:
                     _MATERIALIZE_SLOTS.release()
-                    future.get_loop().call_soon_threadsafe(
-                        lambda: None if future.done() else future.set_result(None)
-                    )
+                    try:
+                        future.get_loop().call_soon_threadsafe(
+                            lambda: None if future.done() else future.set_result(None)
+                        )
+                    except RuntimeError:
+                        # MINOR-1: the loop can be closed under teardown (observed
+                        # as "Event loop is closed" from this thread in the real
+                        # suite). The build is finished and the slot is already
+                        # released above; there is no waiter left to wake.
+                        pass
 
             if not _MATERIALIZE_SLOTS.acquire(blocking=False):
                 # Every slot is building. RE-ARM rather than drop: a drop is how a
                 # burst ended up publishing 5/13, because nothing schedules a
-                # session after the open that would have. Bounded, so a permanently
-                # saturated pool cannot spin.
+                # session after the open that would have. The counter is the ONLY
+                # bound that survives four stuck builds, so it must not be reset by
+                # the re-arm itself (review round 4 measured 111 re-arms of one
+                # session because it was).
                 attempts = _MATERIALIZE_RETRIES.get(key, 0)
                 if attempts >= _MATERIALIZE_RETRIES_MAX:
+                    _MIGRATIONS.pop(key, None)
                     return
                 _MATERIALIZE_RETRIES[key] = attempts + 1
-                loop.call_later(0.05, lambda: schedule_materialize(root, sid, index))
+                loop.call_later(_MATERIALIZE_RETRY_S, lambda: _rearm(root, sid, index))
                 return
+            # A slot is held: the queue wait is over for this publication, so the
+            # re-arm budget resets here and nowhere earlier.
+            _MATERIALIZE_RETRIES.pop(key, None)
             threading.Thread(target=run_build, name=f"read-model-{sid}", daemon=True).start()
             worker = asyncio.create_task(_await_future(future))
             try:
@@ -906,7 +947,6 @@ def schedule_materialize(root: str | Path, sid: str, index: ti.TranscriptIndex) 
         finally:
             _MIGRATIONS.pop(key, None)
 
-    _MATERIALIZE_RETRIES.pop(key, None)
     task = loop.create_task(run(), name=f"index-read-model-{sid}")
     _MIGRATIONS[key] = task
 
@@ -1104,6 +1144,10 @@ def reset_for_tests() -> None:
         _MANIFEST_MEMO.clear()
     _FAILED.clear()
     _MATERIALIZE_RETRIES.clear()
+    # A build that was still running when the suite moved on leaves its slot
+    # taken; a fresh semaphore is what makes the next test start from a known
+    # pool state.
+    globals()["_MATERIALIZE_SLOTS"] = threading.BoundedSemaphore(_MATERIALIZE_MAX)
     for task in list(_MIGRATIONS.values()):
         task.cancel()
     _MIGRATIONS.clear()

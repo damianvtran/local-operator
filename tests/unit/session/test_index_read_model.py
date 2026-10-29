@@ -8,6 +8,7 @@ which publication it is looking at instead of assuming a marker in the document.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import os
@@ -682,6 +683,92 @@ def test_a_stale_parse_is_not_merged_over_a_newer_patch(publication):
     ti.write_index(root, SID, parsed, previous=(receipt, stale_raw))
     written = json.loads(ti.index_path(root, SID).read_text())
     assert written["naming"]["items"]["u2"]["name"] == "Later", "a stale parse dropped a patch"
+
+
+def test_a_stale_head_still_yields_the_naming_sidecar(publication):
+    """Round-4 MAJOR-1: the sidecar must be readable exactly when it matters.
+
+    The append case is the one this helper was written for and it is also the case
+    where ``header()`` reports ``stale``, so a ``ready`` gate made it unreachable
+    and put the whole-document decode back on the write path.
+    """
+    root, index = publication
+    assert ti.patch_naming(root, SID, {"u1": {"name": "Kept", "summary": "s"}})
+    path = root / "sessions" / SID / "transcript.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("\n")
+    assert rm.header(root, SID).state == "stale"
+    sidecar = rm.naming_for_root(root, SID)
+    assert sidecar is not None and sidecar["items"]["u1"]["name"] == "Kept"
+
+    # And the WRITE path uses it: with the document read forbidden, a write must
+    # still merge the patch instead of raising or dropping it.
+    def forbidden(*args, **kwargs):
+        raise AssertionError("write_index decoded the whole document on a stale head")
+
+    fresh = dataclasses.replace(index, naming={"prompt_version": 1, "items": {}})
+    original = ti._read_raw
+    ti._read_raw = forbidden
+    try:
+        ti.write_index(root, SID, fresh)
+    finally:
+        ti._read_raw = original
+    written = json.loads(ti.index_path(root, SID).read_text())
+    assert written["naming"]["items"]["u1"]["name"] == "Kept"
+
+
+@pytest.mark.asyncio
+async def test_a_saturated_pool_bounds_its_rearms(tmp_path, monkeypatch):
+    """Round-4 MAJOR-2: with every slot stuck, the re-arm must stop.
+
+    The counter used to be reset by the re-arm itself, so four stuck builds meant
+    unbounded 20 Hz churn per waiting session (measured: 111 re-arms of one).
+    """
+    _journal(tmp_path)
+    index = ti.refresh_index(tmp_path, SID)
+    assert index is not None
+    _materialize(tmp_path, index)
+    rm.reset_for_tests()
+    held = [rm._MATERIALIZE_SLOTS.acquire(blocking=False) for _ in range(rm._MATERIALIZE_MAX)]
+    assert all(held), "the pool did not have the slots to hold"
+    rearms: list[int] = []
+    real_rearm = rm._rearm
+
+    def counting(root, sid, idx):
+        rearms.append(1)
+        return real_rearm(root, sid, idx)
+
+    monkeypatch.setattr(rm, "_rearm", counting)
+    try:
+        # A derivation with NO published companion, or the hook returns before it
+        # ever looks for a slot.
+        path = tmp_path / "sessions" / SID / "transcript.jsonl"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "id": "u9",
+                        "ts": 9.0,
+                        "type": "message",
+                        "payload": {
+                            "kind": "message",
+                            "role": "user",
+                            "content": [{"text": "another turn"}],
+                        },
+                    }
+                )
+                + "\n"
+            )
+        derived = ti.refresh_index(tmp_path, SID)
+        assert derived is not None
+        rm.schedule_materialize(tmp_path, SID, derived)
+        await asyncio.sleep(3.0)
+        assert len(rearms) <= rm._MATERIALIZE_RETRIES_MAX, len(rearms)
+        assert len(rearms) > 0, "the hook did not re-arm at all"
+        assert not [k for k in rm._MIGRATIONS], "a task stayed registered after the cap"
+    finally:
+        for _ in held:
+            rm._MATERIALIZE_SLOTS.release()
 
 
 def test_collection_keeps_the_referenced_token(publication):

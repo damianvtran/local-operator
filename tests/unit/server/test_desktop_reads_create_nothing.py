@@ -203,9 +203,13 @@ def test_the_other_read_routes_do_not_create_the_run_plane_either(tmp_path, monk
             portal = client.portal
             assert portal is not None
             portal.call(_settle_boot_task, task)
-        # Settle the library indexer's own writes first (see _settle_filesystem).
-        _settle_filesystem(root)
         for route in routes:
+            # Taken PER ROUTE (review round 4, MINOR-2). Once, a second indexer
+            # pass could still land inside a later route's window and read as that
+            # route's write; per route bounds the settle to the window it protects.
+            # It still cannot mask a route write: quiescence is measured before
+            # `before`, and the route's own work happens after it.
+            _settle_filesystem(root)
             before = _tree(root)
             client.get(route, headers=HEADERS)
             after = _tree(root)
