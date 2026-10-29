@@ -331,14 +331,52 @@ def describe_devices(args: argparse.Namespace) -> int:
         )
         if confirm and not selected:
             selected = [device.device_id for device in paired]
+        print_only = bool(getattr(args, "print_only", False))
+        if not print_only:
+            # THE PROMISE, PRINTED WHERE IT IS KEPT (agent review round 2, m6). The
+            # same function the desktop card renders from, so the gesture this verb
+            # announces and the prompt that follows cannot disagree — and when the
+            # gesture cannot be asked for, `_admission_install` says why instead of
+            # exiting silently.
+            from local_operator.operator.elevate import confirm_card_copy
+
+            print(confirm_card_copy()[2])
         code = confirm_devices(
             root,
             selected,
-            print_only=bool(getattr(args, "print_only", False)),
+            print_only=print_only,
             sudo_secret=str(getattr(args, "sudo_secret", "") or ""),
         )
         if code != 0:
             return code
+        # `--confirm` SELECTS THE PHONES ALREADY LISTED, so on a host whose list is
+        # already marked it changes nothing — and the receipt still claimed a
+        # confirmation while a phone this computer had never confirmed stayed refused
+        # (agent review round 2, m3). Ask the anchor again and name the verb that
+        # actually confirms a phone.
+        reloaded = load_anchor()
+        unconfirmed = [
+            device.device_id
+            for device in paired
+            if reloaded.usable
+            and reloaded.anchor is not None
+            and admission_enforced(reloaded.anchor)
+            and not reloaded.anchor.presence
+            and device.device_id not in open_device_ids(reloaded.anchor)
+        ]
+        if unconfirmed:
+            print(
+                "Nothing needed confirming: the phones already on this computer's list "
+                "were confirmed before this run. To confirm "
+                + ", ".join(unconfirmed)
+                + ", run "
+                + " or ".join(
+                    f"`lop operator devices --approve {device_id}`"
+                    for device_id in unconfirmed
+                )
+                + " (it asks for your approval)."
+            )
+            return 0
         print(
             "Confirmed on this computer. These phones will also be trusted on any "
             "computer that joins this one later; computers that joined earlier keep "
@@ -350,7 +388,7 @@ def describe_devices(args: argparse.Namespace) -> int:
         if not _stage_anchor_revocation(root, revoke, revoked=True):
             print(
                 "no installed operator anchor to record a revocation in — set up operator "
-                "authority on this machine first (the anchor staged earlier is not "
+                "authority on this computer first (the anchor staged earlier is not "
                 "trusted until the install step lands it)",
                 file=sys.stderr,
             )
@@ -374,8 +412,8 @@ def describe_devices(args: argparse.Namespace) -> int:
             "is lost or stolen, revoke it there too, or bring this computer's list to "
             f"them again. A running session picks this up within {int(ANCHOR_REFRESH_S)}s. "
             "To bring this device back, run "
-            f"`{devices.AUTHORISE_COMMAND.format(device_id=revoke)}` (needs the same "
-            "install step)."
+            f"`{devices.AUTHORISE_COMMAND.format(device_id=revoke)}` (this asks for your "
+            "approval)."
         )
 
     if authorise and not bool(getattr(args, "print_only", False)):
@@ -410,7 +448,7 @@ def describe_devices(args: argparse.Namespace) -> int:
                     "device."
                 )
             else:
-                print(f"nothing recorded a revocation of {authorise} on this machine.")
+                print(f"nothing recorded a revocation of {authorise} on this computer.")
         elif staged:
             code = install_anchor(
                 root,
@@ -505,7 +543,7 @@ def describe_devices(args: argparse.Namespace) -> int:
 
         if not recorded_here and not recorded_in_anchor:
             print(
-                f"preview: nothing recorded a revocation of {authorise} on this machine, "
+                f"preview: nothing recorded a revocation of {authorise} on this computer, "
                 f"so `{command}` would have nothing to lift and no privileged step "
                 "would be needed."
             )
@@ -513,7 +551,7 @@ def describe_devices(args: argparse.Namespace) -> int:
             print(
                 f"preview: `{command}` would clear the local revocation record — "
                 f"{authorise} could pair again — and do nothing else: there is no usable "
-                "installed operator anchor on this machine, so no anchor statement would "
+                "installed operator anchor on this computer, so no anchor statement would "
                 f"be written and no privileged step would be needed. Run `{command}` "
                 "without --print-only to do exactly that, and ask Local Operator to set "
                 "up operator authority if you expected an anchor here."
@@ -556,9 +594,9 @@ def describe_devices(args: argparse.Namespace) -> int:
                 # then repeating the fact and naming no route at all. So: no call, one
                 # remedy, in the right order, and the remedy is the route that exists.
                 print(
-                    "There is no staged anchor statement to install, so there is no "
-                    f"privileged command to print yet: run `{command}` without "
-                    "--print-only and it writes the statement and takes that step itself."
+                    "There is nothing waiting to install yet, so there is no command to "
+                    f"print: run `{command}` without --print-only and it writes the "
+                    "change and asks for your approval itself."
                 )
 
     # THE RULE, STATED ON THE VERB THAT LISTS PHONES — and stated on a host with NO
@@ -567,6 +605,15 @@ def describe_devices(args: argparse.Namespace) -> int:
     # shared with `lop operator status` (`trust.admission_sentence`), so the two
     # verbs cannot describe the same rule differently.
     print(f"phone admission        : {admission_sentence(usable_anchor)}")
+    if usable_anchor is not None and not presence and not enforcing:
+        # THE ROUTE, UNDER THE STATE IT ENDS (design round 1, D6). The migration
+        # sentence is the ruled §4 wording and says nothing about HOW; the listing is
+        # the whole discovery path (`status` prints the same line and no command), so
+        # the verb that ends the state is named here, under it, in the same listing.
+        print(
+            "                         run `lop operator devices --confirm` (it asks "
+            "for your approval)"
+        )
     for device in paired:
         expires = time.strftime("%Y-%m-%d", time.localtime(device.not_after))
         # THREE STATES RATHER THAN TWO, because the runtime now asks three questions of
@@ -586,6 +633,17 @@ def describe_devices(args: argparse.Namespace) -> int:
             f"  {device.device_id}  {device.name or '(unnamed)':<20} "
             f"{state:<8} expires {expires}  scopes {','.join(device.scope)}"
         )
+        if state == "unconfirmed":
+            # THE REMEDY, ON THE ROW THAT NEEDS IT (agent review round 2, m1). The
+            # revoked row three lines below carries its command; this one printed the
+            # state alone, and `--approve` — the only verb that clears it — was
+            # discoverable from `--help` alone. Being unconfirmed here is exactly the
+            # state a person meets after a plant or a re-join.
+            print(
+                f"    it cannot act here until it is confirmed: run "
+                f"`lop operator devices --approve {device.device_id}` (it asks for "
+                "your approval)"
+            )
     # A REVOKED DEVICE KEEPS ITS ROW (UX round 10, U1). It had none: the revocation
     # clears the certificate, so it cannot be in `paired`, and nothing printed the
     # anchor-only revocations — which left the id every remedy names readable nowhere

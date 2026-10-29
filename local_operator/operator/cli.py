@@ -115,15 +115,18 @@ def add_parser(subparsers: Any) -> None:
 
     devices_parser = actions.add_parser(
         "devices",
-        help="List paired phones, pending pairing requests, and revoke/authorise a device",
+        help=(
+            "List paired phones and pending pairing requests; confirm one, confirm "
+            "all pre-rule phones, remove or bring back a device"
+        ),
     )
     devices_parser.add_argument(
         "--revoke",
         default="",
         metavar="DEVICE_ID",
         help=(
-            "Add this device to the anchor's revocation list (needs the same ONE "
-            "privileged step as installing the anchor)"
+            "Remove this device on this computer: adds it to the anchor's "
+            "revocation list (this asks for your approval)"
         ),
     )
     devices_parser.add_argument(
@@ -131,26 +134,29 @@ def add_parser(subparsers: Any) -> None:
         default="",
         metavar="DEVICE_ID",
         help=(
-            "Lift a revocation for this device on this machine: clears the local "
-            "record and the anchor's entry (needs the same ONE privileged step as "
-            "--revoke). Host-side only — a phone cannot un-revoke itself"
+            "Bring back a phone you removed on this computer: clears the local record "
+            "and this computer's entry (this asks for your approval). Host-side only "
+            "— a phone cannot bring itself back"
         ),
     )
     devices_parser.add_argument(
         "--approve",
         default="",
         metavar="DEVICE_ID",
-        help="Confirm one paired phone on this computer with an in-person admin gesture",
+        help="Confirm one paired phone on this computer (this asks for your approval)",
     )
     devices_parser.add_argument(
         "--confirm",
         action="store_true",
-        help="Confirm the listed phones and end the pre-rule migration state",
+        help=(
+            "Confirm the phones already on this computer's list, ending the pre-rule "
+            "migration state (this asks for your approval)"
+        ),
     )
     devices_parser.add_argument(
         "--sudo-secret",
         default="",
-        help="Name of a stored admin password; admission writes refuse it",
+        help="Name of a stored admin password; confirming a phone refuses it",
     )
     devices_parser.add_argument(
         "--print-only",

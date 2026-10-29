@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import copy
+from dataclasses import replace
 import time
 from pathlib import Path
 from typing import Any
@@ -512,16 +513,146 @@ def test_a_revoked_key_is_refused_at_filing_and_at_apply(
 
     with pytest.raises(MeshRefusal) as raised:
         pair_op.apply(approval_id, pair_op.expected(A.load_record(approval_id, root=root)), root)
-    assert raised.value.code == "pair_device_not_admitted"
+    assert raised.value.code == "pair_device_revoked"
     assert not signer_calls
     assert devices.read_device(root, device_id) is None, "a refused apply installed a cert"
-    assert A.load_record(approval_id, root=root)["state"] == A.STATE_APPROVED
+    # The lease is taken BEFORE the privileged write (agent review round 2, M2), so a
+    # refusal releases the run: `failed` is retry-eligible (`begin_run` accepts
+    # approved|failed), which keeps the card usable once the phone is brought back.
+    assert A.load_record(approval_id, root=root)["state"] == A.STATE_FAILED
 
     # ... and at FILING: a revoked device cannot even ask again. The id it would install is
     # derived from the revoked key, so re-pairing by approval is not a way back.
     with pytest.raises(MeshRefusal) as raised:
         _file(root, phone=_unb64(record["device"]["spki"]))
     assert raised.value.code == "pair_device_revoked"
+
+
+def test_admit_refuses_a_phone_revoked_while_its_card_was_open(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1: the state the product creates — card open, revocation lands — must refuse.
+
+    THE CELL IT REPLACES PASSED FOR THE WRONG REASON (agent review round 2, M1): it
+    asserted the refusal `admit_device` gives a phone with no pending request, so a
+    revocation would have gone unnoticed. Here every other guard is satisfied — the
+    statement enforces its list and the phone HAS a pending pairing request — so the
+    revocation is the only thing that can refuse it.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.operator import trust as trust_module
+
+    _make_key(root)
+    _level(monkeypatch, FILE_ONLY)
+    record = _file(root)
+    approval_id = str(record["approval_id"])
+    device_id = str(record["device"]["device_id"])
+    pair_op.check_ack(approval_id, code=_phone_code(record, root), root=root)
+    _approve(root, record)
+
+    staged = trust_module.load_staged_anchor(root)
+    assert staged is not None
+    installed = replace(
+        staged,
+        admission=trust_module.ADMISSION_LISTED,
+        devices=({"device_id": device_id, "revoked": True},),
+    )
+    # The same ownership seam test_device_admission_writes uses: the installed
+    # statement is root-owned on a real host and no headless rig has one.
+    anchor_root = root / "anchor-root"
+    anchor_root.mkdir(exist_ok=True)
+    monkeypatch.setattr(trust_module, "_ANCHOR_ROOT_OVERRIDE", anchor_root)
+    target = trust_module.anchor_path()
+    target.write_bytes(trust_module.anchor_bytes(installed))
+    real_open = trust_module._open_no_follow
+
+    def as_root(path: Path) -> Any:
+        opened = real_open(path)
+        assert opened is not None
+        descriptor, _ = opened
+        return descriptor, SimpleNamespace(st_uid=0, st_mode=0o100644)
+
+    monkeypatch.setattr(trust_module, "_open_no_follow", as_root)
+    # The card is OPEN: the pairing request has not been dropped yet, so the pending
+    # guard passes and nothing but the revocation stands in this phone's way.
+    devices.write_pending(root, device_id=device_id, name=NAME, spki="00", code="123456")
+    # `lop operator init` already staged a statement for the bootstrap install, so the
+    # stage exists before this call; what must not change is its CONTENT.
+    staged_before = trust_module.staging_path(root).read_bytes()
+    # THE RIG PINS "NO INSTALLED ANCHOR" BY DEFAULT — no headless host has a
+    # root-owned one — and this cell is ABOUT the installed statement, so the pin is
+    # lifted for it. `handlers` bound the reader at import time, which is the only
+    # handle on the real function while the fixture's patch is live.
+    from local_operator.operator import handlers
+    from local_operator.operator.trust import device_is_revoked
+
+    monkeypatch.setattr(trust_module, "load_anchor", handlers.load_anchor)
+    # SETUP CHECK: the state under test really revokes this phone, through both the
+    # predicate the runtime uses and the product's combined question.
+    loaded = trust_module.load_anchor()
+    assert loaded.usable and loaded.anchor is not None
+    assert device_is_revoked(loaded.anchor, device_id)
+    assert devices.is_revoked(root, device_id)
+
+    prompts: list[Any] = []
+    monkeypatch.setattr(
+        "local_operator.operator.elevate.run_elevated", lambda command: prompts.append(command)
+    )
+    signer_calls: list[str] = []
+    monkeypatch.setattr(pair_op, "_issue_certificate", lambda **kwargs: signer_calls.append("sign"))
+
+    with pytest.raises(MeshRefusal) as raised:
+        pair_op.apply(approval_id, pair_op.expected(A.load_record(approval_id, root=root)), root)
+
+    assert raised.value.code == "pair_device_revoked", raised.value.code
+    assert signer_calls == [], "a revoked phone's certificate was signed"
+    assert devices.read_device(root, device_id) is None, "a refused apply installed a cert"
+    assert prompts == [], "a revoked phone spent the administrator prompt"
+    assert target.read_bytes() == trust_module.anchor_bytes(installed), (
+        "the admission write replaced the revoked entry"
+    )
+    assert trust_module.staging_path(root).read_bytes() == staged_before, (
+        "a refused admit rewrote the staged statement"
+    )
+
+
+@pytest.mark.parametrize("decided", ["requested", "denied"])
+def test_a_card_that_cannot_be_applied_costs_no_prompt_and_no_write(
+    root: Path, monkeypatch: pytest.MonkeyPatch, decided: str
+) -> None:
+    """M2: the state guards run BEFORE the privileged write, so a refusal is free.
+
+    At the previous head a card in `requested` or `denied` spent the administrator
+    prompt and rewrote the root-owned anchor, and only THEN reached `begin_run` — the
+    state machine's real gate — and refused. Both states are reachable: a filed card
+    is `requested` until it is approved, and `deny` is offered on every surface.
+    """
+    from local_operator.operator import handlers
+
+    _make_key(root)
+    _level(monkeypatch, FILE_ONLY)
+    record = _file(root)
+    approval_id = str(record["approval_id"])
+    if decided == "denied":
+        A.deny(approval_id, root=root)
+    admits: list[str] = []
+    monkeypatch.setattr(
+        handlers, "admit_device", lambda *args: admits.append(str(args[-1])) or 0
+    )
+    prompts: list[Any] = []
+    monkeypatch.setattr(
+        "local_operator.operator.elevate.run_elevated", lambda command: prompts.append(command)
+    )
+
+    with pytest.raises(MeshRefusal) as raised:
+        pair_op.apply(approval_id, pair_op.expected(A.load_record(approval_id, root=root)), root)
+
+    assert raised.value.code == "approval_not_runnable", raised.value.code
+    assert admits == [], "a card that cannot be applied still reached the privileged write"
+    assert prompts == [], "a card that cannot be applied still asked for approval"
+    state = A.load_record(approval_id, root=root)["state"]
+    assert state == (A.STATE_REQUESTED if decided == "requested" else A.STATE_DENIED), state
 
 
 # ---------------------------------------------------------------------------

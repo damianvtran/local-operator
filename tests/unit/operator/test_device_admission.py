@@ -321,7 +321,7 @@ def test_the_unconfirmed_copy_does_not_send_the_phone_to_pair_again(rig: _Rig) -
     assert refusal is not None
     sentence = json.loads(refusal.body)["error"]
     assert "confirm" in sentence
-    assert "pairing it again will not help" in sentence
+    assert "Pairing it again will not help." in sentence
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +515,8 @@ def test_status_and_the_listing_name_an_unlisted_phone_as_not_confirmed(
     listed = capsys.readouterr().out
     assert "phone admission        : on" in listed
     assert "unconfirmed" in listed
+    # m1: the row names the verb that clears it, not only the state.
+    assert "run `lop operator devices --approve" in listed, listed
 
 
 def test_the_devices_listing_names_the_migration_guard_on_a_pre_rule_anchor(
@@ -542,6 +544,9 @@ def test_the_devices_listing_names_the_migration_guard_on_a_pre_rule_anchor(
     assert "phones paired before this version keep working until you do" in printed
     assert "NOT ENFORCED" not in printed
     assert "unconfirmed" not in printed
+    # D6: the state is the whole discovery path, so the verb that ends it is named
+    # UNDER it — the delta's first-launch prompt is not on this head.
+    assert "run `lop operator devices --confirm` (it asks for your approval)" in printed
 
 
 def test_the_copy_states_the_presence_exemption_the_predicate_applies(
@@ -573,7 +578,7 @@ def test_the_copy_states_the_presence_exemption_the_predicate_applies(
 
     assert operator_handlers.dispatch(argparse.Namespace(operator_command="status")) == 0
     printed = capsys.readouterr().out
-    assert "not required on this host" in printed
+    assert "not needed on this computer" in printed
     assert "must be confirmed on this computer" not in printed
     assert "not confirmed on this computer" not in printed
 
@@ -586,7 +591,7 @@ def test_the_copy_states_the_presence_exemption_the_predicate_applies(
         == 0
     )
     listed = capsys.readouterr().out
-    assert "not required on this host" in listed
+    assert "not needed on this computer" in listed
     assert "unconfirmed" not in listed
     assert declared in listed
 

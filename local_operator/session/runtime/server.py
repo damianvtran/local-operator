@@ -6069,8 +6069,10 @@ class RuntimeServer:
 
         TWO WINDOWS, ONE ENTRY. What the anchor decides survives the entry for
         ``ANCHOR_REFRESH_S`` at most: an ADMITTED point is re-checked against the
-        anchor on every use (so a revocation or a de-listing takes effect on the
-        next frame), and a REFUSAL expires after the same window rather than after
+        anchor on every use (so a revocation or a de-listing made after that entry was
+        filled takes effect within one anchor window, not only on a restart — the
+        anchor it is checked against is the caller's snapshot, refreshed every
+        ``ANCHOR_REFRESH_S``), and a REFUSAL expires after the same window rather than after
         ``_DEVICE_CERT_TTL_S``, because listing is the transition a HUMAN causes and
         the phone has to be admitted within the time the confirming copy promises
         (agent review round 1, m2). Only the expensive half — the operator signature

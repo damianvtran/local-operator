@@ -2940,11 +2940,16 @@ OPERATOR_DEVICE_UNCONFIRMED_CODE = "operator_device_unconfirmed"
 #: the same route and tone as the phone's pair screen (``screens/pair.tsx``, the
 #: ``revoked`` state), which the phone shows verbatim as a fallback. Plain English
 #: beside a typed code, like the sibling ``/api/pair`` revoked refusal here.
+#:
+#: ONE REFERENT, ONE WORD: "the computer it is connected to", then "that computer",
+#: never "the machine" — the phone holds no name for the computer, so a second word
+#: reads as a second computer. And the person is never told to ask the agent: bringing
+#: the phone back is a gesture only they can make (design round 1, D1/D5).
 _OPERATOR_DEVICE_REVOKED = (
-    "This phone's approval access was removed on the computer, and only that "
-    "machine can restore it — pairing again will be refused until then. Ask Local "
-    "Operator on that machine to allow this phone again, then pair this phone again. "
-    "Removing it on one computer does not remove it on your other computers."
+    "This phone was removed on the computer it is connected to, and only that "
+    "computer can bring it back — pairing again is refused until then. Bring it "
+    "back there, then pair this phone again. Removing it on one computer does not "
+    "remove it on your other computers."
 )
 
 #: The unconfirmed phone's sentence, and the one thing it must NOT say is "pair
@@ -2955,10 +2960,17 @@ _OPERATOR_DEVICE_REVOKED = (
 #: — a loop with no exit — so the copy names the action that actually clears it
 #: (confirming the phone on that computer) and says explicitly that pairing will
 #: not help.
+#:
+#: IT MUST NOT SAY "YOU NEVER CONFIRMED IT" EITHER, which is untrue in the state this
+#: change creates: a phone confirmed on computer A and refused on computer B (B joined
+#: earlier, or was re-planted) IS confirmed, just not here. So the sentence is about
+#: THIS computer's list, names the gesture the person will meet there, and says where
+#: the phone still works (design round 1, D1).
 _OPERATOR_DEVICE_UNCONFIRMED = (
-    "This phone is paired but has not been confirmed on the computer yet, so it "
-    "cannot act there. Ask Local Operator on that machine to confirm this phone — "
-    "pairing it again will not help."
+    "This phone is paired, but the computer it is connected to has not confirmed it "
+    "yet, so it cannot act there. Confirm it on that computer — you will be asked to "
+    "approve it there — and any computer that confirmed it keeps trusting it. "
+    "Pairing it again will not help."
 )
 
 

@@ -662,10 +662,11 @@ def apply(approval_id: str, expected_block: dict[str, Any], root: Path) -> dict[
        ``approval_anchor_mismatch`` -- and the S2 admit helper writes the anchor INSIDE this
        step in the next slice. The key itself is what the certificate is signed with and
        what the decision verified against, so the check that matters stays;
-    3. admission is confirmed through the privileged writer BEFORE the signer, so a certificate
-       is never issued for a phone the root-owned anchor does not list;
-    4. the run lease is taken (``begin_run``) and re-verified (``verify_for_run``), so a
-       deny that landed mid-run stops here and the certificate is never issued;
+    3. the run lease is taken (``begin_run``) and re-verified (``verify_for_run``), so a
+       card that has already been denied or has expired stops here — BEFORE the
+       privileged write, so it spends no administrator prompt and changes no file;
+    4. admission is confirmed through the privileged writer, so a certificate is never
+       issued for a phone the root-owned anchor does not list;
     5. the certificate is signed (the SECOND prompt on a presence host), written to the
        device store, and the pending pairing request is dropped;
     6. the record moves to ``connected`` with a receipt;
@@ -674,8 +675,17 @@ def apply(approval_id: str, expected_block: dict[str, Any], root: Path) -> dict[
 
     The privileged write precedes certificate issuance because a first-time phone has no
     certificate for ``devices.is_admitted`` to parse yet. ``admit_device`` validates the
-    pending pairing request, refuses revocation lifts through ``install_anchor_from``, and
-    requires the in-person admission purpose rather than a stored administrator password.
+    pending pairing request, refuses a phone this computer revoked, refuses a revocation
+    lift through ``install_anchor_from``, and requires the in-person admission purpose
+    rather than a stored administrator password.
+
+    THE ONE STATE THIS FLOW CAN LEAVE BEHIND: an admitted anchor whose certificate write
+    then failed lists a device with no certificate. It is inert (the predicate binds the
+    id to the certificate's key, so only that phone's own key can satisfy it) and
+    recoverable at no cost (`admit_device` is idempotent on identical bytes, so the retry
+    re-signs without a second admin prompt), and `lop operator devices` will not show a
+    row for it — it lists the certificate store. Named here so an operator meeting a
+    listed id with no row for it does not have to infer its cause.
     """
     return _apply(approval_id, expected_block, root)
 
@@ -753,19 +763,21 @@ def _apply(
             "This pairing request names a different computer key than the one installed here, "
             "so nothing was installed. Ask the phone to start pairing again.",
         )
-    from local_operator.operator.handlers import admit_device
+    from local_operator.operator.handlers import ADMIT_OK, ADMIT_REFUSED, admit_device
 
-    admitted = admit_device(config_root, device_id)
-    if admitted != 0:
-        raise _refuse(
-            "pair_device_not_admitted",
-            "This phone was not confirmed on this computer, so no certificate was issued. "
-            "Confirm the phone here and try the pairing again; nothing was installed.",
-        )
+    # THE RUN LEASE COMES FIRST (agent review round 2, M2). A card in `requested`,
+    # `denied`, `withdrawn` or an expired one used to spend the administrator prompt
+    # and rewrite the root-owned anchor — and only THEN reach `begin_run`, which is
+    # the state machine's real gate, and refuse. Taking the lease and re-checking it
+    # before the privileged write means a state that cannot be applied costs no
+    # prompt and no write at all. Nothing in the admit needs the lease.
     run_id = approvals.new_run_id()
     approvals.begin_run(approval_id, run_id=run_id, runner_pid=os.getpid(), root=config_root)
     try:
         approvals.verify_for_run(approval_id, root=config_root)
+        admitted = admit_device(config_root, device_id)
+        if admitted != ADMIT_OK:
+            raise _refuse(ADMIT_REFUSED[admitted][0], ADMIT_REFUSED[admitted][1])
         certificate = _issue_certificate(
             device_spki=spki,
             device_id=device_id,

@@ -1417,6 +1417,17 @@ def admission_enforced(anchor: OperatorAnchor) -> bool:
     return bool(anchor.admission)
 
 
+#: The gesture each presence backend actually asks for, ONE name per host.
+#: Keyed by ``OperatorAnchor.backend`` (the key that signs on this machine), so the
+#: sentence can never name a gesture this computer does not have — the pair the old
+#: copy printed (design round 1, D3). The fallback is deliberately platform-neutral:
+#: a backend this build does not know may be a password or a fingerprint, and saying
+#: so is better than naming somebody else's key.
+_GESTURE_WORDS = {
+    "secure-enclave": "Touch ID",
+}
+
+
 def admission_sentence(anchor: OperatorAnchor | None) -> str:
     """THE sentence a reporting surface prints after ``phone admission        : ``.
 
@@ -1439,9 +1450,16 @@ def admission_sentence(anchor: OperatorAnchor | None) -> str:
         # backends cost a human gesture per signature, so an unlisted phone IS
         # admitted on such a host; a sentence claiming otherwise would be the same
         # over-claim the enforcement copy exists to remove, in the other direction.
+        #
+        # THE GESTURE IS NAMED PER HOST, ONE NAME AND NEVER BOTH (design round 1,
+        # D3): the old sentence said "not required on this host" (never saying what),
+        # "operator key" and "per signature" (both internal), and then named Touch ID
+        # AND Windows Hello on every machine — a Mac read Windows Hello, a Linux TPM
+        # host read neither. ``backend`` is already on the anchor, so it decides.
+        gesture = _GESTURE_WORDS.get(anchor.backend, "your password or your fingerprint")
         return (
-            "not required on this host — the operator key asks for a gesture per "
-            "signature (Touch ID, Windows Hello), so the gesture is the confirmation"
+            "not needed on this computer — every action there asks you for "
+            f"{gesture}, and that is what confirms the phone"
         )
     if not admission_enforced(anchor):
         # THE GUARD'S HOST, STATED WITHOUT A CLAIM IT DOES NOT MAKE. Every device this

@@ -175,7 +175,7 @@ def test_admit_refuses_migration_when_existing_phone_would_be_de_admitted(
     assert handlers.admit_device(root, ID_Y) == 2
     assert target.read_bytes() == old
     assert not trust.staging_path(root).exists()
-    assert "de-admit the phones you already paired" in capsys.readouterr().err
+    assert "un-confirm the phones you already paired" in capsys.readouterr().err
 
 
 def test_cancelled_prompt_writes_nothing_and_leaves_no_installable_stage(
@@ -193,10 +193,80 @@ def test_cancelled_prompt_writes_nothing_and_leaves_no_installable_stage(
         calls.append(command)
         return ElevationResult(1, cancelled=True)
 
-    assert handlers.confirm_devices(root, [ID_X], runner=cancelled) == 1
+    assert handlers.confirm_devices(root, [ID_X], runner=cancelled) == (
+        handlers.ADMIT_CANCELLED
+    )
     assert len(calls) == 1
     assert target.read_bytes() == anchor_bytes(installed)
     assert not trust.staging_path(root).exists(), "a later install must not apply a cancelled admit"
+
+
+def test_admit_refuses_a_phone_revoked_while_its_card_was_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M1: the state the product creates — card open, revocation lands — must refuse.
+
+    THE CELL THIS REPLACES PASSED FOR THE WRONG REASON (agent review round 2, M1):
+    it asserted the refusal `admit_device` gives a phone with no pending request, so
+    a revocation would have gone unnoticed. Here every other guard is satisfied —
+    the statement enforces its list, the phone HAS a pending pairing request — and
+    the only thing that can refuse it is the revocation.
+    """
+    from local_operator.operator import devices
+
+    installed = _anchor(
+        admission=trust.ADMISSION_LISTED,
+        devices=(({"device_id": ID_X, "revoked": True}),),
+    )
+    root, target = _install(tmp_path, monkeypatch, installed)
+    devices.write_pending(root, device_id=ID_X, name="phone", spki="00", code="123456")
+    prompts: list[Any] = []
+
+    def succeed(command: Any) -> ElevationResult:
+        prompts.append(command)
+        target.write_bytes(trust.staging_path(root).read_bytes())
+        return ElevationResult(0)
+
+    assert handlers.admit_device(root, ID_X, runner=succeed) == handlers.ADMIT_REVOKED
+    assert prompts == [], "a revoked phone spent the administrator prompt"
+    assert target.read_bytes() == anchor_bytes(installed), "the revocation was rewritten"
+    assert not trust.staging_path(root).exists(), "a refused admit left an installable stage"
+    assert "--authorise" in capsys.readouterr().err
+
+
+def test_an_admission_never_replaces_a_revoked_entry() -> None:
+    """The second lock: the builder cannot lift a revocation even if a caller is wrong."""
+    installed = _anchor(
+        admission=trust.ADMISSION_LISTED,
+        devices=(({"device_id": ID_X, "revoked": True}),),
+    )
+    proposed = handlers._admission_anchor(installed, [ID_X])
+    assert proposed.devices == ({"device_id": ID_X, "revoked": True},)
+    assert trust.device_is_revoked(proposed, ID_X)
+
+
+def test_a_failed_prompt_leaves_no_installable_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """m4: a non-cancelled failure must not leave a statement a later install applies."""
+    installed = _anchor()
+    root, target = _install(tmp_path, monkeypatch, installed)
+    monkeypatch.setattr(
+        "local_operator.operator.devices.list_devices",
+        lambda root: [SimpleNamespace(device_id=ID_X)],
+    )
+
+    def failed(command: Any) -> ElevationResult:
+        # NOT a cancellation: pkexec/sh report a real failure the same way a
+        # non-zero exit always does, and the statement used to survive it.
+        return ElevationResult(1, cancelled=False)
+
+    assert handlers.confirm_devices(root, [ID_X], runner=failed) == (
+        handlers.ADMIT_INSTALL_FAILED
+    )
+    assert target.read_bytes() == anchor_bytes(installed)
+    assert not trust.staging_path(root).exists(), "a failed prompt left an installable stage"
+    assert capsys.readouterr().err, "a failed privileged step printed nothing"
 
 
 def test_authorise_passes_the_admit_purpose_so_stored_password_is_refused(
