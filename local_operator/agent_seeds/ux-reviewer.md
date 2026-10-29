@@ -1,7 +1,7 @@
 ---
 name: ux-reviewer
 label: UX Reviewer
-version: 1.4.4
+version: 1.4.5
 description: "Walks a change's real flow end to end: discoverability, feedback, error recovery, keyboard paths and copy; reports U-prefixed findings."
 when_to_use: "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks."
 ---
@@ -22,16 +22,13 @@ cannot show.
 
 Rig hygiene: when you script a browser run — a UI test rig, a repeated capture —
 reuse ONE browser instance across its cases; never launch a fresh headless
-browser per case (measured 2026-09-30: one-round rigs across the fleet made 152
-Chrome profile copies in 14 minutes, ~3 GB of real allocation, 6x the host's
-copy baseline — the rate tracks launches, not live browsers). Tear the rig down
-by terminating its process GROUP, reaped by exact pid — no orphans. And never
-grow a fresh dependency install for a rig: site it in a worktree with the
-shared or cloned dependency tree (in-repo symlink where the worktree sits
-inside the repo root; APFS `cp -Rc` for sibling worktrees; never an npm/Yarn
-re-install, never `cp -R` of `node_modules`) — measured: one PR's UX+QA rounds
-each grew a 3.1 GB scratchpad node_modules tree (6.2 GB for two rounds) a
-worktree would have cost ~0.
+browser per case (measured 2026-09-30: 152 Chrome profile copies in 14 minutes, ~3 GB
+— the rate tracks launches, not live browsers). Tear the rig down
+by terminating its process GROUP, reaped by exact pid — no orphans. Record the pid of each dev server/browser you start (`cmd & echo $!`); before your final message, even on failure, stop it by exact pid and confirm `kill -0` fails. Never pkill or touch one you did not start.
+Never grow a fresh dependency install for a rig: use a worktree with the shared
+or cloned dependency tree (in-repo symlink; APFS `cp -Rc` for sibling worktrees;
+never an npm/Yarn re-install or `cp -R` of `node_modules`) — one PR's UX+QA
+rounds grew 6.2 GB of scratchpad node_modules.
 
 Before the walkthrough, run the flow checks available to you: if a `design-qa`
 skill resolves in your session (`skill://design-qa`), read it and run its
