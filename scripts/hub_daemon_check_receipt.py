@@ -134,6 +134,7 @@ first-run grace.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -194,7 +195,10 @@ from local_operator.hub_sync.settings import (  # noqa: E402
     DEFAULT_CHECK_INTERVAL_MIN,
     HubSyncSettings,
 )
-from local_operator.hub_sync.skill_document import SkillDocument, SkillFile  # noqa: E402
+from local_operator.hub_sync.skill_document import (  # noqa: E402
+    SkillDocument,
+    SkillFile,
+)
 from local_operator.providers.auth_store import AuthStore  # noqa: E402
 from local_operator.providers.radient_credentials import (  # noqa: E402
     configured_radient_base_url,
@@ -862,6 +866,83 @@ def _git(*args: str) -> str:
     return finished.stdout.strip()
 
 
+def _assert_single_runner_construction() -> str:
+    """Pin the ONE construction site a daemon-attached runner may come from.
+
+    The claim this script proves is that the DAEMON's lifespan attaches the
+    runner. A route-local ``HubSyncRunner(...)`` would not remove that
+    attachment, but it WOULD let a later reader satisfy this receipt by
+    inference -- "a runner exists, so the app must have attached one" -- which
+    is the defect that got the first attempt at this receipt (a script that
+    built its own runner) rejected. So the construction sites are read from the
+    same source tree the daemon loads: exactly one, inside ``app.py``'s
+    ``lifespan``, the function that owns the attachment.
+
+    Provenance only: nothing here imports, builds or runs a runner. The scan
+    covers the whole ``local_operator/server`` package rather than app.py alone,
+    because a route-local construction is precisely the shape that would escape
+    an app.py-only check.
+    """
+
+    server_root = _REPO_ROOT / "local_operator" / "server"
+    app_path = server_root / "app.py"
+    try:
+        modules = sorted(server_root.rglob("*.py"))
+    except OSError as error:
+        raise _Fail(f"cannot list {server_root}: {error}", code=2) from error
+    sites: list[tuple[Path, str, int]] = []
+
+    def visit(node: ast.AST, enclosing: str, path: Path) -> None:
+        for child in ast.iter_child_nodes(node):
+            function = (
+                child.name
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                else enclosing
+            )
+            if isinstance(child, ast.Call):
+                callee = child.func
+                called = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", "")
+                if called == "HubSyncRunner":
+                    sites.append((path, enclosing, child.lineno))
+            visit(child, function, path)
+
+    for module in modules:
+        try:
+            source = module.read_text(encoding="utf-8")
+        except OSError as error:
+            raise _Fail(f"cannot read {module}: {error}", code=2) from error
+        # Cheap gate: only the module that names the runner needs a parse.
+        if "HubSyncRunner" not in source:
+            continue
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as error:
+            raise _Fail(f"cannot parse {module}: {error}", code=2) from error
+        visit(tree, "<module>", module)
+
+    rendered = [
+        f"{path.relative_to(_REPO_ROOT)}:{line} in {function}()" for path, function, line in sites
+    ]
+    if len(sites) != 1:
+        raise _Fail(
+            "expected exactly ONE HubSyncRunner construction under "
+            f"{server_root.relative_to(_REPO_ROOT)}, found {rendered}. A second site "
+            "lets this receipt be satisfied by inference instead of the daemon's "
+            "lifespan attaching the runner; fix the construction site, do not widen "
+            "this check.",
+            code=2,
+        )
+    path, function, line = sites[0]
+    if path != app_path or function != "lifespan":
+        raise _Fail(
+            "the single HubSyncRunner construction is not the daemon's lifespan: "
+            f"{rendered[0]}. The receipt observes the daemon's own attachment, so a "
+            "runner built anywhere else proves nothing about it.",
+            code=2,
+        )
+    return f"{path.relative_to(_REPO_ROOT)}:{line} in {function}() (the only site)"
+
+
 def _preflight() -> _Plan:
     _say("hub daemon session-start receipt")
     _say("================================")
@@ -875,6 +956,7 @@ def _preflight() -> _Plan:
         raise _Fail("could not resolve `git rev-parse HEAD`", code=2)
     dirty = bool(_git("status", "--porcelain", "--untracked-files=no"))
     _say(f"preflight  repo HEAD             {head} ({'dirty' if dirty else 'clean'})")
+    _say(f"preflight  runner construction   {_assert_single_runner_construction()}")
 
     if not _port_free(_HUB_PORT):
         raise _Fail(
@@ -916,9 +998,7 @@ def _preflight() -> _Plan:
     config = ConfigManager(_CONFIG_DIR)
     resolved_base = configured_radient_base_url(config)
     if resolved_base != _HUB_BASE:
-        raise _Fail(
-            f"config resolved the hub base to {resolved_base!r}, not {_HUB_BASE!r}", code=2
-        )
+        raise _Fail(f"config resolved the hub base to {resolved_base!r}, not {_HUB_BASE!r}", code=2)
     _say(f"preflight  hub base              {_HUB_BASE} (RADIENT_API_BASE_URL)")
     _say("preflight  oauth destination     allowed (RADIENT_ORG_ALLOW_NONCANONICAL_BASE=1)")
 
