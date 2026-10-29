@@ -77,6 +77,37 @@ def run(current, arg: str) -> Result:
     return asyncio.run(command.saver_slash(current, arg, Result))
 
 
+def test_a_missing_session_is_refused_not_dereferenced(tmp_path):
+    """UX round 2, U11: `/saver inherit` on the setup screen killed the app.
+
+    The exception was `AttributeError: 'NoneType' object has no attribute
+    '_transcript'`, raised out of the TUI worker. Every command here either
+    answers or does nothing; none may crash on a session it does not have.
+    """
+    for arg in ("", "on", "off", "status", "inherit"):
+        result = asyncio.run(command.saver_slash(None, arg, Result))
+        assert result.text.strip(), arg
+        assert result.style == "warning"
+
+    # A half-built session (no journal) is the same refusal, not a crash.
+    half = SimpleNamespace(radient_saver_choice=None, routing_settings={})
+    assert asyncio.run(command.saver_slash(half, "inherit", Result)).style == "warning"
+
+
+def test_status_reports_the_next_request_not_the_setting(tmp_path, monkeypatch):
+    """UX round 2, U10: an agent pin + empty balance read "on" while the turn refused."""
+    async def empty() -> Availability:
+        return Availability(signed_in=True, positive_balance=False)
+
+    monkeypatch.setattr(command, "read_availability", empty)
+    current = session(tmp_path)
+    current._saver_agent_pin_value = True
+    current._saver_availability = Availability(signed_in=True, positive_balance=False)
+    assert command.saver_state(current).on is True, "the pin still says on"
+    assert command.request_state(current).on is False, "the turn will not splice"
+    assert run(current, "status").text.startswith("Radient Saver: off")
+
+
 def test_toggle_status_and_inherit_write_one_row_each(tmp_path):
     current = session(tmp_path)
     assert run(current, "status").text.startswith("Radient Saver: off")
@@ -185,8 +216,23 @@ def test_signed_out_can_still_read_and_clear(tmp_path, monkeypatch):
 
     monkeypatch.setattr(command, "read_availability", signed_out_read)
     assert run(current, "status").text.startswith("Radient Saver: off")
+
+    # CLEARING IS NOT ENABLING (review round 2, M2-3). `off` used to take the
+    # sign-in guard and refuse, leaving a stored `True` unturnable-off with the
+    # natural command once a login expired.
+    assert run(current, "off").text.startswith("Radient Saver is off")
+    assert current.radient_saver_choice is False
+    assert [row["details"]["enabled"] for row in rows(tmp_path)] == [False]
+
+    current.radient_saver_choice = True
     assert run(current, "inherit").text.startswith("Radient Saver now follows")
     assert current.radient_saver_choice is None
+    assert [row["details"]["enabled"] for row in rows(tmp_path)] == [False, None]
+
+    # ...while ENABLING is still refused, and writes nothing.
+    assert "/login radient" in run(current, "on").text
+    assert current.radient_saver_choice is None
+    assert [row["details"]["enabled"] for row in rows(tmp_path)] == [False, None]
 
 
 def test_the_command_and_the_turn_path_cannot_disagree(tmp_path):
@@ -215,6 +261,68 @@ def test_the_command_and_the_turn_path_cannot_disagree(tmp_path):
     current.radient_saver_choice = False
     assert command.saver_state(current).on is False
     assert command.saver_state(current).source == "session"
+
+
+def test_a_zero_balance_read_leaves_the_published_flag_off(tmp_path):
+    """Review round 2, M2-1: the published value outlived the state it named.
+
+    The setting can be `True` while the turn refuses to splice, because the gate
+    also reads the balance. A field called ``saver_on`` must describe the
+    NEXT REQUEST, so it is derived from the request resolver (session choice AND
+    the last availability read), not from the setting alone. Reverting the
+    publication to ``saver_on`` fails here.
+    """
+    current = session(tmp_path)
+    current.radient_saver_choice = True
+    current._saver_availability = Availability(signed_in=True, positive_balance=False)
+
+    assert command.saver_state(current).on is True, "the SETTING is still on"
+    assert command.request_state(current).on is False, "the request will not splice"
+    assert command.request_state(current).source == "no_credit"
+    assert command.published_saver_on(current) is False
+
+    # A positive read restores the honest ON, from the same resolver.
+    current._saver_availability = Availability(signed_in=True, positive_balance=True)
+    assert command.published_saver_on(current) is True
+    assert command.request_state(current).source == "session"
+
+
+def test_an_unread_balance_publishes_off(tmp_path):
+    """Unknown is refused by the resolver, so publication under-claims (M2-1)."""
+    current = session(tmp_path)
+    current.radient_saver_choice = True
+    current._saver_availability = None
+    assert command.saver_state(current).on is True
+    assert command.published_saver_on(current) is False
+
+
+def test_the_request_path_reads_the_shared_resolver(tmp_path):
+    """Review round 2, m2-1: bind the REAL stream method to the resolver.
+
+    The shipped test called ``command.saver_choices`` and ``saver_state`` and
+    never touched ``SessionStreamFn._saver_choices``, so replacing that method
+    with a constant kept it green. This drives the real object, so a bypass, a
+    removed pin or an inverted pin/parent order fails.
+    """
+    from local_operator.model.configure import create_stream_fn
+    from local_operator.providers.auth_store import AuthStore
+
+    store = AuthStore(tmp_path / "auth.db")
+    try:
+        stream = create_stream_fn(store, {"radient": {"saver": {"mode": "opt_in"}}})
+        current = SimpleNamespace(
+            radient_saver_choice=True,
+            _saver_agent_pin_value=False,
+            _stream_fn=stream,
+        )
+        stream.bind_saver_session(current)
+
+        assert stream._saver_choices() == command.saver_choices(current, stream=stream)
+        assert stream._saver_choices() == (True, False, None)
+        stream._saver_parent_value = True
+        assert stream._saver_choices() == (True, False, True)
+    finally:
+        store.close()
 
 
 def test_the_session_state_never_disagrees_with_the_request_resolver(tmp_path):

@@ -134,7 +134,9 @@ async def test_the_argument_list_offers_saver_words_not_providers(tmp_path: Path
         await _boot(pilot, app)
         for text, expected in (
             ("/saver ", {"status", "on", "off", "inherit"}),
-            ("/radient ", {"saver status", "saver on", "saver off", "saver inherit"}),
+            # U9: ONE row — the word the handler parses. The compound rows made
+            # Enter complete four tokens the user never typed.
+            ("/radient ", {"saver"}),
         ):
             app._editor().text = ""
             await pilot.pause()
@@ -142,9 +144,10 @@ async def test_the_argument_list_offers_saver_words_not_providers(tmp_path: Path
             await pilot.pause()
             rows = {row.name for row in app._editor().picker._choices}
             assert rows == expected, (text, rows)
-            # And the first row is the READ-ONLY word, so a stray Enter reports
-            # instead of spending credit.
-            assert app._editor().picker._choices[0].name.endswith("status")
+            # And the first row is the READ-ONLY word where the vocabulary has
+            # one, so a stray Enter reports instead of spending credit.
+            first_row = app._editor().picker._choices[0].name
+            assert first_row.endswith("status") or first_row == "saver"
 
 
 @pytest.mark.asyncio
@@ -171,6 +174,112 @@ async def test_the_badge_appears_iff_saver_is_on(tmp_path: Path) -> None:
             on = app._status.render_text(width).plain
             assert BADGE in on, (width, on)
             assert "\n" not in on
+
+
+def test_a_routed_session_paints_the_published_state() -> None:
+    """Review round 2, M2-2: a follower has ONLY the published bool to read.
+
+    ``FrontendSessionState`` carries no routing settings and no resolver
+    attributes, so the previous version — which called the local resolver
+    unconditionally — painted nothing for a routed session whose owner was on,
+    and could paint a bare glyph with no word beside it.
+    """
+    from local_operator.session.frontend_state import FrontendSessionState
+    from local_operator.tui.app import _saver_label
+
+    assert _saver_label(FrontendSessionState(session_id="s", epoch="e",  saver_on=True)) == "saver"
+    assert _saver_label(FrontendSessionState(session_id="s", epoch="e",  saver_on=False)) == ""
+    # An older backend omits the field and the model defaults it to False, so the
+    # follower paints nothing rather than guessing from state it cannot read.
+    assert _saver_label(FrontendSessionState(session_id="s", epoch="e")) == ""
+
+
+def test_the_badge_never_paints_an_empty_word(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A glyph with no word is unreadable, not compact."""
+    from types import SimpleNamespace
+
+    import local_operator.i18n.text as text_mod
+    from local_operator.tui.app import _saver_label
+
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    monkeypatch.setattr(text_mod, "tr", lambda namespace: (lambda message: "   "))
+    assert _saver_label(FrontendSessionState(session_id="s", epoch="e",  saver_on=True)) == ""
+
+
+@pytest.mark.asyncio
+async def test_the_routed_path_paints_through_apply_frontend_state(tmp_path: Path) -> None:
+    """UX round 2, U4: the badge never painted in the real app.
+
+    The real path is ``_apply_frontend_state`` → ``saver=_saver_label(state)``
+    with a ``FrontendSessionState``. The shipped test read
+    ``app._status.render_text()`` on a LOCAL session, so it never exercised this
+    call and stayed green while every routed band was blank. This drives the
+    real method and asserts the band, so a regression fails here.
+    """
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    session = FakeSession()
+    session.routing_settings = SETTINGS
+    session.radient_saver_choice = None
+    session._transcript = Transcript(tmp_path / "sessions" / "saver")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        for width in (80, 100, 120, 140):
+            await pilot.resize_terminal(width, 30)
+            await pilot.pause()
+            for published in (True, False):
+                state = FrontendSessionState(
+                    session_id="s", epoch="e", saver_on=published
+                )
+                app._apply_frontend_state(state)
+                # Assert THIS call's own effect, before any later repaint from a
+                # different path: `_status._saver` is what `_apply_frontend_state`
+                # pushed, and it is the value the band renders. A longer settle
+                # would let the local session's repaint answer the question and
+                # hide the very path this test exists for.
+                assert app._status._saver == ("saver" if published else ""), width
+                band = app._status.render_text(width).plain
+                assert ("\u2296 saver" in band) is published, (width, band)
+                assert "\n" not in band
+
+
+@pytest.mark.asyncio
+async def test_one_enter_on_a_bare_radient_fills_only_what_was_typed(tmp_path: Path) -> None:
+    """UX round 2, U9: Enter used to expand `/radient` into `saver status`.
+
+    The old test pressed Escape first, which hid the expansion. This presses
+    Enter on the first row and asserts the buffer is exactly `/radient saver` —
+    the word the handler parses — and that a second Enter is what runs it.
+    """
+    session = FakeSession()
+    session.routing_settings = SETTINGS
+    session.radient_saver_choice = None
+    session._transcript = Transcript(tmp_path / "sessions" / "saver")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._editor().text = ""
+        await pilot.pause()
+        await pilot.press(*["space" if char == " " else char for char in "/radient "])
+        await pilot.pause()
+        assert [row.name for row in app._editor().picker._choices] == ["saver"]
+
+        received: list[str] = []
+        inner = app._run_slash_command
+
+        def spy(*args, **kwargs):
+            received.append(args[0] if args else kwargs.get("command", ""))
+            return inner(*args, **kwargs)
+
+        app._run_slash_command = spy  # type: ignore[method-assign]
+        await pilot.press("enter")
+        for _ in range(40):
+            await pilot.pause()
+        # The ONE word the row offered, and nothing the user did not choose:
+        # this used to arrive as `/radient saver status` (UX round 2, U9).
+        assert received and received[-1] == "/radient saver", received[-3:]
 
 
 @pytest.mark.asyncio

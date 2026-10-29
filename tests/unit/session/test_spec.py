@@ -266,6 +266,11 @@ def test_spec_field_surface_is_pinned() -> None:
         # The model-world boundary (additive; construction/discovery-scoped,
         # never through the namespace — see sdk._resolve_world_root).
         "world_root",
+        # LO2 (PR #3143): the session's Saver choice, tri-state so `None` stays
+        # "follow the global setting and the agent's designation". Applied
+        # through ``saver.command.set_saver_choice`` rather than the namespace,
+        # for the same reason the output contract is.
+        "radient_saver",
     }
 
 

@@ -78,6 +78,10 @@ def notice_no_credit() -> Msg:
     return Msg("wire.radient_saver.notice.no_credit", {})
 
 
+def notice_no_session() -> Msg:
+    return Msg("wire.radient_saver.notice.no_session", {})
+
+
 def notice_oversize() -> Msg:
     return Msg("wire.radient_saver.notice.oversize", {})
 

@@ -84,6 +84,38 @@ def saver_choices(
     )
 
 
+def request_state(session: Any) -> SaverDecision:
+    """What the NEXT request will do — the answer every published field carries.
+
+    WHY THIS EXISTS (review round 2, M2-1). ``saver_state`` reports the session's
+    own setting and deliberately excludes the balance, which is right for
+    "did I opt in" and WRONG for a field named ``saver_on``: after a
+    zero-balance read the setting still says on while the turn refuses to splice,
+    so the indicator claimed a state the request contradicted. This answers with
+    the request path's own inputs — the session's choice/pin/parent AND the last
+    availability read — so publication and the splice cannot disagree.
+
+    Unknown availability is refused (the resolver's fail-closed step), so a
+    session whose balance has never been read publishes off. That is the
+    under-claim direction: a resumed opt-in conversation shows no badge until
+    its first turn or ``/saver status`` stamps the read, rather than showing one
+    the request will not honour.
+    """
+    session_choice, agent_pin, parent_value = saver_choices(session)
+    return resolve_saver(
+        session_settings(session),
+        cached_availability(session),
+        session_choice=session_choice,
+        agent_pin=agent_pin,
+        parent_value=parent_value,
+    )
+
+
+def published_saver_on(session: Any) -> bool:
+    """The bool the frontend state publishes, from :func:`request_state`."""
+    return request_state(session).on
+
+
 def cached_signed_in(session: Any) -> bool | None:
     """The last sign-in answer this session observed; ``None`` before any.
 
@@ -270,12 +302,29 @@ async def saver_slash(session: Any, arg: str, SlashResult: Any) -> Any:
     that says what a stored choice is doing — and the one word that clears it.
     Turning Saver ON still requires the account, which is the gate's own step.
     """
+    if session is None or getattr(session, "_transcript", None) is None:
+        # NO SESSION IS REFUSED, NOT DEREFERENCED (UX round 2, U11). The TUI
+        # guards before it dispatches, but this is the shared entry point: a
+        # half-built session reaching it used to raise `AttributeError:
+        # 'NoneType' object has no attribute '_transcript'` out of a worker and
+        # take the whole app down. Every command here answers or does nothing —
+        # none may crash.
+        return SlashResult(
+            kind="notice", text=_tr(_rs.notice_no_session()), style="warning"
+        )
     wanted = (arg or "").strip().lower()
     if wanted in {"status", "show"}:
         # A report is a user-initiated moment, so it takes the real read rather
         # than answering from a cache that may predate the balance running out.
         await refresh_availability(session)
-        key = _rs.command_status_on if saver_state(session).on else _rs.command_status_off
+        # REPORT WHAT THE NEXT REQUEST WILL DO (UX round 2, U10). Answering from
+        # the setting let an agent pin plus an empty balance read "on" while the
+        # turn resolved `no_credit` — the same split the published flag had.
+        key = (
+            _rs.command_status_on
+            if request_state(session).on
+            else _rs.command_status_off
+        )
         return SlashResult(kind="notice", text=_tr(key()), style="info")
     if wanted in {"inherit", "global", "default", "clear"}:
         await set_saver_choice(session, None)
@@ -288,10 +337,13 @@ async def saver_slash(session: Any, arg: str, SlashResult: Any) -> Any:
         target = not saver_state(session).on
     else:
         return SlashResult(kind="notice", text=_tr(_rs.command_usage()), style="warning")
-    if not signed_in():
-        # Before any write and before any read: the sign-in test is local, and
-        # the gate's own first step refuses on it, so this only turns the same
-        # answer into the sentence that names the remedy.
+    if target is True and not signed_in():
+        # THE GUARD IS ON ENABLING ONLY (review round 2, M2-3). Clearing is not
+        # enabling: `off` and `inherit` only ever reduce what leaves the machine,
+        # so gating them on an account left a stored `True` impossible to turn off
+        # with the natural command once a login expired — the writer's own
+        # contract already says `False`/`None` are always writable, and the guard
+        # here was contradicting it for `off` while letting `inherit` through.
         return SlashResult(kind="notice", text=_tr(_rs.notice_signed_out()), style="warning")
     # NO SECOND DECISION HERE (review M4). The writer reads the account half when
     # the enable needs it and refuses with the reason; duplicating that read in

@@ -896,6 +896,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     undeclared duck-typed member appears.
     """
 
+
     # --- what kind of viewer this is --------------------------------------
     @property
     def is_cold(self) -> bool:

@@ -46759,6 +46759,15 @@ class OperatorApp(App[None]):
         (review M2). The worker runs on this app's loop, so the notice, the
         publish and the band update all land once the row exists.
         """
+        if self._session is None:
+            # U11 (UX round 2): the worker dereferenced the session and killed the
+            # app with `AttributeError: 'NoneType' object has no attribute
+            # '_transcript'` — `/saver inherit` on the setup screen, `/saver off`
+            # on a signed-in but unbound session. The app already has ONE sentence
+            # for "no session yet", so this refuses with it instead of inventing a
+            # second wording.
+            self._system_notice(*self._no_session_notice())
+            return
         self.run_worker(self._saver_command(arg, notice), thread=False, group="saver")
 
     async def _saver_command(self, arg: str, notice: NoticeFn) -> None:
@@ -52863,17 +52872,18 @@ class OperatorApp(App[None]):
             "inherit": "follow the global setting and the agent's designation",
         }
         if command == "radient":
-            # `/radient` takes its subcommand first, so each row completes the
-            # WHOLE argument — one keystroke from `/radient ` to a usable word.
-            # The rows still match a typed ``saver `` prefix, which is what makes
-            # the second slot reachable without a two-level list.
+            # ONE ROW, the word the handler parses (the `/aida` shape). The
+            # compound rows this replaced (`saver on`, `saver status`, …) made the
+            # first Enter complete FOUR TOKENS the user never typed — measured as
+            # `/radient` + Enter silently becoming `/radient saver status` (UX
+            # round 2, U9) — and then a second Enter ran a word they had not
+            # chosen. Offering only `saver` keeps the completion equal to what was
+            # asked for; the four words are `/saver `'s list, one command away.
             return [
                 ArgumentChoice(
-                    name=f"saver {word}",
-                    display=f"saver {word}",
-                    description=described[word],
+                    name="saver",
+                    description="Radient Saver for this session: status, on, off or inherit",
                 )
-                for word in words
             ]
         return [
             ArgumentChoice(name=word, description=described[word]) for word in words
@@ -63929,33 +63939,54 @@ def _read_stored_frontend_state(directory: Path, session_id: str) -> Any | None:
         return None
 
 
-def _saver_label(session: Any) -> str:
-    """The localized Saver badge, or "" when this session is not opted in.
+def _saver_label(subject: Any) -> str:
+    """The localized Saver badge, or "" when the NEXT REQUEST will not splice.
 
     ONE RULE (design round 1, D1 + UX U4): the word is painted iff Saver is on
-    for THIS session, and off paints NOTHING rather than a reserved gap. The
+    for this session, and off paints NOTHING rather than a reserved gap. The
     reserved-gap version shipped a dim glyph with an empty value in every band
     for every user, which is the one thing a band segment must not do — its
-    presence is the message. The reading comes from the same
-    ``command.saver_state`` the slash command answers from, so the badge, the
-    status line and the turn path cannot disagree.
+    presence is the message.
 
-    Both shapes are read: a routed frontend publishes ``radient_saver_on``, and
-    the owner computes it locally. Neither is trusted over the other — a
-    published ``False`` on a session that IS on would blank the badge, so the
-    local read wins whenever the session object is the real thing.
+    TWO SHAPES, ONE ANSWER (review round 2, M2-2). A routed session is a
+    ``FrontendSessionState``: it carries no routing settings, no credential and
+    no live resolver attributes, so the only thing it can read is the published
+    ``saver_on`` — and the previous version ignored that field entirely,
+    which is how a routed badge came to paint an EMPTY label while the owner was
+    on. The owner shape has no such field and derives the same answer from
+    ``command.request_state``, the reading the publish itself uses, so parent and
+    follower cannot disagree.
+
+    NEVER PAINTS EMPTY: an empty or missing badge string returns "" instead of a
+    bare glyph, because a glyph with no word beside it is unreadable rather than
+    compact (the round-1 D1 defect at a different level).
     """
-    if session is None:
+    # The parameter is deliberately not named ``session``: it holds either a real
+    # session or a ``FrontendSessionState``, and the host-read guard treats every
+    # ``session.member`` in this file as a duck-typed session read that has to be
+    # declared on one of the protocols. Naming it for what it is keeps the read
+    # typed (an isinstance against the concrete state class) instead of forcing a
+    # session-protocol declaration that would be false for both classes.
+    if subject is None:
         return ""
     from local_operator.i18n.keys import wire_radient_saver
     from local_operator.i18n.text import tr
-    from local_operator.saver.command import saver_on
+    from local_operator.saver.command import request_state
 
-    return (
-        str(tr("wire.radient_saver")(wire_radient_saver.command_badge()))
-        if saver_on(session)
-        else ""
-    )
+    word = str(tr("wire.radient_saver")(wire_radient_saver.command_badge())).strip()
+    if not word:
+        # A catalogue that lost the word must not leave a mark that says nothing.
+        return ""
+    # A ROUTED surface hands this function a ``FrontendSessionState``, which is
+    # where the owner's answer is published; the owner shape is a real session
+    # and is resolved locally. Typed as an isinstance rather than a duck probe so
+    # the read is checked against the field's own declaration (the protocol test
+    # treats an undeclared duck-typed read as a silent-None hazard).
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    if isinstance(subject, FrontendSessionState):
+        return word if subject.saver_on else ""
+    return word if request_state(subject).on else ""
 
 
 def _fast_label(session) -> str:
