@@ -108,6 +108,11 @@ for path in records:
         resolved_majors+=sum(x['severity_raised'] in ('blocker','major') and x['resolved'] for x in rf['findings'])
     else:
         majors_unresolved+=raised
+    # The refreshed ledger row names the live auditor, so that claim must be the one
+    # its own record carries - otherwise the ledger would assert an auditor the bundle
+    # does not back.
+    agent=str(row['auditor'].get('agent','')).split('(')[0].strip().lower()
+    assert agent and agent in json.dumps(d['auditor'],ensure_ascii=False).lower(),(str(b),'ledger auditor not in record')
     counts[d['current_report_verdict']]=counts.get(d['current_report_verdict'],0)+1
 # A hashed companion cannot be changed without detection (counterfactual local
 # byte-only control, no mutation of tracked evidence).
