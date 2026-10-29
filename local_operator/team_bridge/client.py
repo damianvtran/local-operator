@@ -2438,7 +2438,7 @@ class TeamBridgeClient:
         self,
         *,
         tenant_id: str,
-        to: Mapping[str, str],
+        to: Mapping[str, str] | str,
         type: str,
         text: str,
         client_ref: str,
@@ -2453,11 +2453,13 @@ class TeamBridgeClient:
         thread, it never stands alone — a thread_id-only body is a 400): it
         is either ``{"endpoint_id": …}`` or ``{"account_id": …}``, exactly one
         of the two, and the server resolves the account form without an
-        existence oracle. ``client_ref`` is caller-owned and REQUIRED — retries
-        reuse the same ref and the server answers the identical replay with the
-        original message (same key + different body → ``409
-        idempotency_key_reused``; the durable outbox is what makes the retry
-        carry the same ref across restarts).
+        existence oracle. A BARE STRING is accepted as the account id
+        (``validate_send_recipient`` is the ONE place that maps it, so the tool
+        and this client cannot read it differently). ``client_ref`` is
+        caller-owned and REQUIRED — retries reuse the same ref and the server
+        answers the identical replay with the original message (same key +
+        different body → ``409 idempotency_key_reused``; the durable outbox is
+        what makes the retry carry the same ref across restarts).
 
         Decision replies never travel this path as free text (§13.5): the
         decide call carries the ``ask_ref`` receipt and the outcome message is

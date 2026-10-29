@@ -1,0 +1,7 @@
+import json,sys
+from pathlib import Path
+sys.path.insert(0,str(Path.cwd()))
+from local_operator.i18n import catalogues as C, runtime as R
+from rich.cells import cell_len
+l,n=sys.argv[1:];en=C.load_catalogue('en',n);t=C.load_catalogue(l,n);cx=C.context('en',n)
+print(json.dumps({'locale':l,'namespace':n,'key_count':len(t),'en_keys':len(en),'en_sha256':C.catalogue_sha256('en',n),'target_sha256':C.catalogue_sha256(l,n),'key_parity':set(t)==set(en),'plural_messages':sum(bool(R.plural_selectors(v)) for v in t.values()),'explicit_budget_count':sum('maxCells' in v for v in cx.values()),'explicit_over_budget':[(k,cell_len(t[k]),v['maxCells']) for k,v in cx.items() if 'maxCells' in v and not R.message_arguments(t[k]) and cell_len(t[k])>v['maxCells']]},ensure_ascii=False,indent=2))

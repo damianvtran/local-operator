@@ -393,6 +393,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Drops <config>/operator/revoked.json when its last entry is lifted",
     ),
     (
+        "local_operator/operator/handlers.py::_admission_install",
+        "<path>.unlink",
+        # The staged statement after a refused privileged step (agent review round
+        # 2, m4): a prompt the operator cancelled and a splint that exited non-zero
+        # both have to leave no bytes behind, because the next plain
+        # `lop operator install` would otherwise apply what this run did not.
+        # The path is `trust.staging_path(config_root)` =
+        # `operator_root(config_root)/"anchor.json"` — a LITERAL basename joined
+        # onto the literal segment "operator" under the CONFIG root, so it is a
+        # fixed sibling of `sessions/` and no input reaches it: no session id, no
+        # caller path, and the call can only ever name that one regular file.
+        "Drops <config>/operator/anchor.json, the staged statement this run wrote",
+        2,
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._release_sidebar_preparation",
         "<path>.remove",
         "Textual TranscriptView.remove unmounts a widget; no filesystem path",

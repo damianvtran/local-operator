@@ -197,6 +197,13 @@ _AMBIENT_VARS = (
     # plausibly carries it. Cells that want it on set it through ``monkeypatch``
     # explicitly.
     "RADIENT_ORG_ALLOW_NONCANONICAL_BASE",
+    # Radient Saver's process override (``saver/gate.py`` ``ENV_OVERRIDE``) beats
+    # ``radient.saver.mode``: ``auto`` would turn the gate ON and route
+    # conversation history to Radient's prepare route from any test that builds
+    # a stream, and ``off`` would make every gate-on cell pass the gate-off
+    # path. Either way an inherited value decides what a cell measures, the
+    # escape-hatch class above. Cells set it through ``monkeypatch`` explicitly.
+    "LOP_RADIENT_SAVER",
     "LOCAL_OPERATOR_HOME",
     "LOCAL_OPERATOR_DEBUG",
     # Names the session a `lop secret` retrieval is attributed to in the audit

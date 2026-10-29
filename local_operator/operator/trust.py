@@ -63,6 +63,19 @@ from local_operator.paths import config_dir
 #: can be refused by an old runtime instead of misread.
 ANCHOR_VERSION = 1
 
+#: The ``admission`` value that means "a device's certificate counts only if the
+#: anchor LISTS it". Spelled as a positive string rather than a boolean because it
+#: is a POLICY NAME: the file records which rule this host was set up under, and a
+#: future rule (a per-approval gesture, a Windows Hello key) is a new value rather
+#: than a second boolean whose interaction with the first has to be reasoned about.
+#:
+#: ONLY THE ROOT WRITE SETS IT. The confirm flow is the one writer, and it writes
+#: it in the same privileged step that lists the phones the human kept — so an
+#: agent that can write its own anchor (file-only hosts) still cannot claim the
+#: rule for itself, and one that can read the file key cannot clear it either,
+#: because both need the same root write.
+ADMISSION_LISTED = "listed"
+
 #: Where the anchor lives. A CONSTANT per platform, deliberately not a function
 #: of anything the gated subject can influence.
 _ANCHOR_ROOTS = {
@@ -284,8 +297,9 @@ class OperatorAnchor:
 
     ``devices`` is the revocation list the design asks for and is part of the
     pinned file rather than a separate store: an operator-signed certificate that
-    is not listed here is refused, so revoking a lost phone is an edit to a
-    root-owned file rather than an unauthenticated write to a cache.
+    is not listed here is refused on a host that requires its list, so revoking or
+    listing a phone is an edit to a root-owned file rather than an unauthenticated
+    write to a cache.
     """
 
     key_id: str
@@ -295,9 +309,20 @@ class OperatorAnchor:
     label: str = ""
     created_at: int = 0
     devices: tuple[dict[str, Any], ...] = ()
+    #: ``"listed"`` means the runtime additionally requires the anchor to name the
+    #: device (see :func:`device_is_admitted`).
+    #:
+    #: THE EMPTY VALUE IS THE MIGRATION GUARD, NOT AN "OFF" STATE. An anchor with
+    #: no marker was written before this rule existed, and the phones already paired
+    #: on it — which nothing ever listed — must not be de-admitted by the upgrade that
+    #: brings the rule. That is the guard's whole purpose, it ships ON, and it is the
+    #: only state in which a host that does not ask for a gesture per signature admits
+    #: an unlisted device (see :func:`admission_enforced` for exactly what ends it and
+    #: why no release writes an empty marker).
+    admission: str = ""
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        body: dict[str, Any] = {
             "v": ANCHOR_VERSION,
             "key_id": self.key_id,
             "alg": "ES256",
@@ -308,6 +333,16 @@ class OperatorAnchor:
             "created_at": self.created_at,
             "devices": list(self.devices),
         }
+        # EMITTED ONLY WHEN SET, and that is a compatibility requirement rather
+        # than tidiness: ``anchor_bytes`` is what ``statement_digest`` hashes, and
+        # every live approval card pins that digest in its provenance trio. Always
+        # emitting ``"admission": ""`` would change the bytes of every anchor in
+        # existence and make every card filed before this build refuse with
+        # ``approval_anchor_mismatch``. An anchor with no marker must serialise to
+        # the SAME bytes it did before this field existed.
+        if self.admission:
+            body["admission"] = self.admission
+        return body
 
     @classmethod
     def from_json(cls, body: Any) -> OperatorAnchor | None:
@@ -374,6 +409,17 @@ class OperatorAnchor:
             return None, ""
         backend = body.get("backend")
         presence = body.get("presence")
+        # AN ABSENT ``admission`` KEY IS THE NORMAL CASE, not a malformation: every
+        # anchor written before this field existed lacks it, and those hosts must
+        # keep parsing — they are exactly what the migration guard exists for. A
+        # present but non-string value is likewise read as "no marker" rather than
+        # refused: the field is a policy NAME, and a runtime that refuses the whole
+        # anchor over one it does not recognise would take operator authority away
+        # from a host whose key is perfectly good. Only a root write can produce that
+        # shape, and the reporting surfaces name the guard state it lands in
+        # (``trust.admission_sentence``), so it is visible rather than silently
+        # claimed as enforcement.
+        admission = body.get("admission")
         return (
             cls(
                 key_id=key_id,
@@ -385,6 +431,7 @@ class OperatorAnchor:
                     int(body["created_at"]) if isinstance(body.get("created_at"), int) else 0
                 ),
                 devices=tuple(devices),
+                admission=admission if isinstance(admission, str) else "",
             ),
             "",
         )
@@ -924,9 +971,19 @@ def load_local_anchor(config_root: Path | None = None) -> OperatorAnchor | None:
 #: place — so what lands is byte-for-byte what was validated, atomically.
 _POSIX_INSTALL_SCRIPT = (
     "set -eu; "
-    'staged="$1"; target="$2"; expected="$3"; group="$4"; '
+    'staged="$1"; target="$2"; expected="$3"; group="$4"; old="${5-}"; '
     'tmp="$(dirname "$target")/.anchor-install.$$"; '
     "trap 'rm -f \"$tmp\"' EXIT; "
+    # Admission writes pin BOTH sides. Onboarding has no installed statement;
+    # admission has one, and replacing a different statement than the human saw
+    # would turn an elevation prompt into approval for an unread write.
+    'if [ -n "$old" ]; then '
+    'if [ ! -f "$target" ]; then '
+    "echo 'the installed anchor is missing; nothing was installed' >&2; exit 3; fi; "
+    'before="$({hash} "$target" | cut -d " " -f 1)"; '
+    'if [ "$before" != "$old" ]; then '
+    "echo 'the installed anchor changed after it was read; nothing was installed' >&2; "
+    "exit 3; fi; fi; "
     'install -m 0600 -o root -g "$group" "$staged" "$tmp"; '
     'actual="$({hash} "$tmp" | cut -d " " -f 1)"; '
     'if [ "$actual" != "$expected" ]; then '
@@ -1058,8 +1115,16 @@ $hr=$null;$hd=$null
 try{
 $hr=LopDir $root
 $hd=LopDir $dir
-$old=LopOpen $target 0x80 3 7 ([IntPtr]::Zero) $false $true
-if($old){[void]$LopNative::CloseHandle($old)}
+$old=LopOpen $target 0x20080 3 7 ([IntPtr]::Zero) $false $true
+if($old){
+try{
+if($expectedOld){
+$stream=[IO.FileStream]::new([Microsoft.Win32.SafeHandles.SafeFileHandle]::new($old,$false),[IO.FileAccess]::Read)
+try{$before=-join([Security.Cryptography.SHA256]::Create().ComputeHash($stream)|ForEach-Object{$_.ToString('x2')})}finally{$stream.Dispose()}
+if($before -ne $expectedOld){throw 'the installed anchor changed after it was read; nothing was installed'}
+}
+}finally{[void]$LopNative::CloseHandle($old)}
+}elseif($expectedOld){throw 'the installed anchor is missing; nothing was installed'}
 $stale=LopOpen $tmp 0x10080 3 7 ([IntPtr]::Zero) $false $true
 if($stale){[void]$LopNative::CloseHandle($stale);[IO.File]::Delete($tmp)}
 $bytes=[IO.File]::ReadAllBytes($staged)
@@ -1075,7 +1140,9 @@ try{LopVerify (LopSd $hv $target) $target}finally{[void]$LopNative::CloseHandle(
 Write-Output "installed the operator anchor at $target\""""  # noqa: E501
 
 
-def _windows_install_script(staging: Path, target: Path, digest_hex: str) -> str:
+def _windows_install_script(
+    staging: Path, target: Path, digest_hex: str, expected_old_hex: str = ""
+) -> str:
     """The script the ELEVATED PowerShell runs (F4 problem 3; R1-2).
 
     The old step was a non-elevated ``Copy-Item`` that set no ACL. The round-1
@@ -1113,6 +1180,7 @@ def _windows_install_script(staging: Path, target: Path, digest_hex: str) -> str
             f"$tmp={_ps_quote(str(tmp))}",
             f"$staged={_ps_quote(str(staging))}",
             f"$expected={_ps_quote(digest_hex)}",
+            f"$expectedOld={_ps_quote(expected_old_hex)}",
         ]
     )
     # ``try``/``catch`` around everything: ``throw`` from a redirected
@@ -1227,7 +1295,9 @@ def install_refusal() -> str | None:
     return None
 
 
-def install_commands(staging: Path, target: Path, digest_hex: str) -> list[list[str]]:
+def install_commands(
+    staging: Path, target: Path, digest_hex: str, expected_old_hex: str = ""
+) -> list[list[str]]:
     """The privileged commands onboarding needs, spelled in ONE place.
 
     A list of argv lists rather than one joined string, so the caller runs them
@@ -1251,7 +1321,7 @@ def install_commands(staging: Path, target: Path, digest_hex: str) -> list[list[
         powershell = windows_powershell_path()
         if powershell is None:
             raise ValueError(install_refusal() or "Windows PowerShell could not be located")
-        script = _windows_install_script(staging, target, digest_hex)
+        script = _windows_install_script(staging, target, digest_hex, expected_old_hex)
         outer = _windows_outer_command(script, powershell)
         return [[powershell, "-NoProfile", "-NonInteractive", "-Command", outer]]
     group = "wheel" if sys.platform == "darwin" else "root"
@@ -1269,6 +1339,7 @@ def install_commands(staging: Path, target: Path, digest_hex: str) -> list[list[
             str(target),
             digest_hex,
             group,
+            *([expected_old_hex] if expected_old_hex else []),
         ],
     ]
 
@@ -1317,6 +1388,156 @@ def revoked_device_ids(anchor: OperatorAnchor) -> list[Any]:
 def open_device_ids(anchor: OperatorAnchor) -> list[Any]:
     """The anchor's listed, NOT revoked device ids, raw (see :func:`revoked_device_ids`)."""
     return [e.get("device_id") for e in anchor.devices if not e.get("revoked")]
+
+
+def admission_enforced(anchor: OperatorAnchor) -> bool:
+    """Whether this host's anchor requires its LIST (see ``OperatorAnchor.admission``).
+
+    ONE reading of the field, so a status line and the runtime cannot disagree
+    about whether listing is being required — a report that says "enforced" beside
+    a runtime that is not looking at the list is worse than the guard state it
+    claims to have left.
+
+    THE MIGRATION GUARD IS THE ONLY EXEMPTION, and it is the empty marker: an
+    anchor carrying no ``admission`` value is a statement written before this rule
+    existed, and the phones already paired on it must not be de-admitted by the
+    upgrade that brings the rule. The guard SHIPS ON — nothing switches it on, and
+    there is no build in which it is inactive; what ENDS it for a host is a
+    statement the confirm flow writes, because that flow writes ``"listed"`` in the
+    same privileged step that lists the phones the human kept. No release ships a
+    way to write an empty marker back over a marked statement, which is why no
+    release offers an "off" position an agent could reach.
+
+    ANY VALUE IS ENFORCEMENT, not just the one this build knows. ``ADMISSION_LISTED``
+    is the only policy written today, but a marker naming a future one still means
+    "this statement carries a policy", and reading it as the guard state would fail
+    OPEN on the one field whose whole purpose is to be conservative. An
+    unrecognised marker therefore enforces the list.
+    """
+    return bool(anchor.admission)
+
+
+#: The gesture each presence backend actually asks for, ONE name per host.
+#: Keyed by ``OperatorAnchor.backend`` (the key that signs on this machine), so the
+#: sentence can never name a gesture this computer does not have — the pair the old
+#: copy printed (design round 1, D3). The fallback is deliberately platform-neutral:
+#: a backend this build does not know may be a password or a fingerprint, and saying
+#: so is better than naming somebody else's key.
+_GESTURE_WORDS = {
+    "secure-enclave": "Touch ID",
+    "cng-presence": "Windows Hello",
+}
+
+
+def admission_sentence(anchor: OperatorAnchor | None) -> str:
+    """THE sentence a reporting surface prints after ``phone admission        : ``.
+
+    ONE string for both surfaces (`lop operator status` and `lop operator devices`)
+    rather than one hand-written sentence each, because two copies of one rule drift
+    exactly where a reader cannot check them: both used to state a LIST requirement
+    that ``anchor.presence`` exempts before the marker is ever read
+    (:func:`device_is_admitted`), so a Secure-Enclave host would have honoured an
+    unlisted phone while both surfaces said it would not (agent review round 1,
+    m1). The facts are read here, from the anchor, so no caller can pair the wrong
+    two of them.
+
+    ``None`` is "no usable anchor": there is no rule to report yet, and the status
+    line beside this one already says the level is capped for that reason.
+    """
+    if anchor is None:
+        return "no operator anchor installed — nothing to confirm or refuse yet"
+    if anchor.presence:
+        # THE EXEMPTION, NAMED WHERE THE OPERATOR READS THE RULE. The presence
+        # backends cost a human gesture per signature, so an unlisted phone IS
+        # admitted on such a host; a sentence claiming otherwise would be the same
+        # over-claim the enforcement copy exists to remove, in the other direction.
+        #
+        # THE GESTURE IS NAMED PER HOST, ONE NAME AND NEVER BOTH (design round 1,
+        # D3): the old sentence said "not required on this host" (never saying what),
+        # "operator key" and "per signature" (both internal), and then named Touch ID
+        # AND Windows Hello on every machine — a Mac read Windows Hello, a Linux TPM
+        # host read neither. ``backend`` is already on the anchor, so it decides.
+        gesture = _GESTURE_WORDS.get(anchor.backend, "your password or your fingerprint")
+        # WHAT THE GESTURE GATES (design round 2, D9): the operator key's signature,
+        # which is what issues the phone's certificate — NOT each action the phone
+        # takes afterwards (a paired phone signs with its own key, and nothing on this
+        # computer asks then). The old "every action there asks you" claimed a
+        # per-action gate this host does not have.
+        return (
+            f"not needed on this computer — pairing a phone here already asks for "
+            f"{gesture}, and that is what confirms it"
+        )
+    if not admission_enforced(anchor):
+        # THE GUARD'S HOST, STATED WITHOUT A CLAIM IT DOES NOT MAKE. Every device this
+        # key signed is still admitted here, not only the ones already paired — a
+        # whole-statement guard cannot be per-device, and the per-device alternative
+        # (trusting a record under the config root) would let the gated uid admit
+        # itself a device. So the sentence says exactly that, and names the guard
+        # rather than an "off" state no release ships.
+        return (
+            "waiting for you to confirm your phones — phones paired before this version "
+            "keep working until you do"
+        )
+    return "on — a phone must be confirmed on this computer"
+
+
+def device_is_admitted(anchor: OperatorAnchor, device_id: str, spki: bytes) -> bool:
+    """Whether the anchor ADMITS this device — not merely fails to revoke it.
+
+    THE ONE PREDICATE THE THREE CALLERS SHARE (the runtime's certificate point,
+    both arms of it, and the relay's command path). Revocation was the only
+    question a certificate had to answer, so an operator-signed certificate naming
+    a phone this host had never been told about was accepted — which is the whole
+    gap the two-lock pairing design closes: the six-digit code proves WHICH phone
+    is asking, and the computer's own admin gesture is what proves a PERSON
+    admitted it.
+
+    THREE CONDITIONS, each of which a caller cannot add or drop without this
+    function changing:
+
+    * **not revoked** — today's rule, unchanged at every level. A revoked device is
+      refused whether or not the host lists devices.
+    * **the id IS the key's id** (``device_id == key_id_for(spki)``).
+      ``verify_device_cert`` checks the domain, the operator signature and the
+      expiry, and ``read_device_cert`` takes ``device_id`` from the body AS GIVEN,
+      so a statement naming an admitted id while carrying a different key verifies
+      — measured in the S4a spike: signed with the file key, it verified, and the
+      id did not derive from the ``spki`` it carried. A list keyed on the id alone
+      would therefore be satisfied by a forged statement; the binding is what makes
+      the id mean the key that will actually sign the frames. It refuses nothing
+      legitimate: ``devices.new_device_id`` IS this same derivation and it is the
+      only way a certificate's id is ever chosen (``lop pair`` mints through it),
+      so only a hand-forged statement can fail the check.
+    * **the anchor lists it**, unless this host does not need a list. TWO exemptions,
+      both facts written by a root-owned step rather than by anything the gated uid
+      can reach: ``presence`` (a backend that costs a human gesture per signature —
+      the signature IS the confirmation, so asking for a second touch buys no
+      security) and a MISSING marker (the migration guard, below).
+
+    THE MIGRATION GUARD IS WHY A PAIRED PHONE SURVIVES THE UPGRADE. Hosts whose
+    anchor carries no ``admission`` marker are statements written before the rule,
+    and they behave as they do today — including anchors written before this field
+    existed (which serialise to identical bytes, so no pinned ``statement_digest``
+    moves). A phone paired before the upgrade therefore stays admitted after it with
+    no re-pair, which is the guard's only purpose; :func:`admission_enforced` says
+    what ends the guard state and why no release writes it. The residual it costs on
+    such a host — an agent that can reach the operator key can still mint a
+    certificate that is admitted — is stated where the operator reads it, in
+    :func:`admission_sentence`, rather than implied to be a boundary this host
+    applies.
+
+    ``presence: true`` with an UNLISTED device is admitted BY DESIGN (see above):
+    the presence backends are the ones whose signature already costs a gesture.
+    """
+    if device_is_revoked(anchor, device_id):
+        return False
+    if not spki or device_id != key_id_for(spki):
+        return False
+    if anchor.presence:
+        return True
+    if not admission_enforced(anchor):
+        return True
+    return device_id in open_device_ids(anchor)
 
 
 def is_presence_backend(backend: str) -> bool:

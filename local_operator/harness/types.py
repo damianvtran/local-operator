@@ -4428,6 +4428,14 @@ class ChatRequest(BaseModel):
     # Local, request-owned binding of the counted boundary to the native
     # protocol and credential selected by the wire client. Never serialized.
     context_binding: Any = Field(default=None, exclude=True, repr=False)
+    #: How many leading ``messages`` are Radient Saver epochs (contract §4).
+    #: Set ONLY by ``SessionStreamFn`` after a splice; ``None`` is today's
+    #: behaviour exactly, which is also Saver's fail-open state. When set, the
+    #: Anthropic and OpenAI-compatible wires put one cache marker on the last
+    #: block of the last epoch message and one on the final block, so the frozen
+    #: prefix is a byte-stable cache entry. Excluded from serialisation like
+    #: ``context_binding``: it is a wire-layout hint, never conversation content.
+    frozen_prefix_messages: int | None = Field(default=None, exclude=True, repr=False)
     #: Opt this request into Anthropic's cache diagnostics, comparing it with
     #: ``cache_diagnostics_previous_id`` (``None`` = the conversation's first
     #: diagnosed request, sent as an explicit JSON ``null``, which is still an
