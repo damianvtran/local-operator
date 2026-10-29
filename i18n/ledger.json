@@ -8645,6 +8645,139 @@
       },
       "status": "passed",
       "note": "es W1 backfill: 5 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.tunnel_setup/w1a3/. Open minor/nit findings are dispositioned in that report.md."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.services_status",
+      "source_sha256": "ae14884d1c5a795724b95b29f8abe620975e96cc895384923788faa1b22611df",
+      "translator": {
+        "agent": "local-operator implementer (coder role)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Independent audit passed 14/14 keys; the three supervision states stay distinct and placeholders and code spans are byte-identical; U+202F applied at 13 typography sites. 2 MINOR accepted: width (serve_linger_required 102, unsupervised_unknown 92 cells vs 80/78), recorded in style-guides/fr.md. No durability or reboot claim."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.services_status",
+      "source_sha256": "ae14884d1c5a795724b95b29f8abe620975e96cc895384923788faa1b22611df",
+      "translator": {
+        "agent": "local-operator implementer (coder role)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit passed: supervision_unknown hedges (no se pudo resolver) as the unreadable-cgroup branch requires, while unsupervised_unknown stays assertive. 14/14 keys, placeholders and code spans byte-identical. 1 MINOR accepted: width (103/87 cells vs 80/78), recorded in style-guides/es.md. No durability or reboot claim."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.services_status",
+      "source_sha256": "ae14884d1c5a795724b95b29f8abe620975e96cc895384923788faa1b22611df",
+      "translator": {
+        "agent": "local-operator implementer (coder role)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Independent audit passed 14/14 keys; 监督状态未知 keeps the unknown state hedged and matches the shipped 监督者 vocabulary; no CJK-Latin spacing per its guide. 2 findings recorded: the 监督状态未知 hedge confirmed and the serve_install_not_serving verb fixed to 未服务于其自身进程. Width fits the 80/78 budget. No durability or reboot claim."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.services_status",
+      "source_sha256": "ae14884d1c5a795724b95b29f8abe620975e96cc895384923788faa1b22611df",
+      "translator": {
+        "agent": "local-operator implementer (coder role)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit passed: supervision_unknown hedges (не удалось определить); unsupervised_unknown stays assertive. 14/14 keys, placeholders byte-identical. 1 MINOR accepted: width (serve_linger_required 97, restart_supervision_limit 84 vs 80/78; unsupervised_unknown 74 fits), recorded in style-guides/ru.md. No durability or reboot claim."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.services_status",
+      "source_sha256": "ae14884d1c5a795724b95b29f8abe620975e96cc895384923788faa1b22611df",
+      "translator": {
+        "agent": "local-operator implementer (coder role)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit passed: supervision_unknown hedges (không thể xác định); unsupervised_unknown stays assertive. 14/14 keys, placeholders byte-identical. 1 MINOR accepted: width (unsupervised_unknown 84 vs 78; serve_linger_required exactly 80), recorded in style-guides/vi.md. No durability or reboot claim."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.services_status",
+      "source_sha256": "ae14884d1c5a795724b95b29f8abe620975e96cc895384923788faa1b22611df",
+      "translator": {
+        "agent": "local-operator implementer (coder role)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit passed: supervision_unknown hedges (معلوم نہیں ہو سکا); unsupervised_unknown stays assertive. 14/14 keys, zero bidi control bytes, the LTR islands byte-identical. 1 MINOR accepted: width (89/81/80 vs 80/78), recorded in style-guides/ur.md. No durability or reboot claim."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.services_status",
+      "source_sha256": "ae14884d1c5a795724b95b29f8abe620975e96cc895384923788faa1b22611df",
+      "translator": {
+        "agent": "local-operator implementer (coder role)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit passed 14/14 keys after one BLOCKER was raised and fixed: an Urdu token in Arabic script stood inside the Devanagari string and was corrected to कोई; the script sweep over all 98 strings is clean. The three states stay distinct: निगरानी में / निगरानी से बाहर (assertive) / निगरानी अज्ञात (modal, no absence claim). Placeholders and code spans byte-identical; width fits rich.cells.cell_len so no exception bullet. No durability or reboot claim."
     }
   ]
 }
