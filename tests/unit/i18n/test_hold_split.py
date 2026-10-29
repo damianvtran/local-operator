@@ -173,7 +173,12 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # rows at the new English bytes: two more.
     # The serve-supervision slice adds the audited `cli.services_status` row at
     # the current English bytes: one more again.
-    assert len(hindi) == 52
+    # The relay-locale backfill adds one translator row per newly carried relay
+    # namespace (`relay.account_policy`, `relay.library`, `relay.session`,
+    # `relay.shell`; 75 keys in total): four more. Those rows carry no auditor
+    # attestation — the independent audit is dispatched on the same PR and adds
+    # it — which is why this count moved without a second wave.
+    assert len(hindi) == 56
     assert all(entry["status"] == "passed" for entry in hindi)
     _assert_latest_row_is_fresh_and_earlier_rows_superseded(hindi)
 

@@ -1,0 +1,15 @@
+{
+  "relay.account_policy.title": "कंप्यूटर सेटिंग",
+  "relay.account_policy.back": "वापस",
+  "relay.account_policy.loading": "खाता रूटिंग लोड हो रही है…",
+  "relay.account_policy.save": "नीति सहेजें",
+  "relay.account_policy.saving": "सहेजा जा रहा है…",
+  "relay.account_policy.saved": "इस कंप्यूटर पर सहेजा गया।",
+  "relay.account_policy.retry": "फिर कोशिश करें",
+  "relay.account_policy.unavailable": "इस रिले पर खाता रूटिंग सेटिंग उपलब्ध नहीं है। इस कंप्यूटर पर Local Operator अपडेट करें।",
+  "relay.account_policy.error": "बदलाव की पुष्टि नहीं हो सकी। कनेक्शन जाँचें और मौजूदा नीति पढ़ने के लिए फिर से लोड करें।",
+  "relay.account_policy.scope": "बदलाव सिर्फ़ इस कंप्यूटर पर लागू होते हैं।",
+  "relay.account_policy.entry": "सेटिंग",
+  "relay.account_policy.rejected": "बदलाव सहेजा नहीं गया। मान जाँचें या इस कंप्यूटर की सेटिंग देखें और फिर कोशिश करें।",
+  "relay.account_policy.load_error": "खाता रूटिंग लोड नहीं हो सकी। कनेक्शन जाँचें और फिर कोशिश करें।"
+}

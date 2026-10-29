@@ -9386,6 +9386,54 @@
       },
       "status": "passed",
       "note": "w2 es backfill: 17 keys; independent audit w2a1 passed (committed evidence i18n/audits/evidence/es/cli.wake_help/w2a1/). Open minor/nit findings are dispositioned in that evidence's report.md."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.shell",
+      "source_sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 75d96e08982f)",
+        "model": "radient/auto (primary anthropic/claude-opus-5-5 fell back on provider quota)",
+        "date": "2026-10-29"
+      },
+      "status": "passed",
+      "note": "Translator row only: 44/44 keys at en source f53b23560b88…, en key order, ICU arguments and plural categories preserved, Devanagari per i18n/style-guides/hi.md. Independent audit NOT performed by this row and no auditor attestation claimed — dispatched separately, to add its own fields and evidence. Translator ran radient/auto after anthropic quota fallback."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.session",
+      "source_sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 75d96e08982f)",
+        "model": "radient/auto (primary anthropic/claude-opus-5-5 fell back on provider quota)",
+        "date": "2026-10-29"
+      },
+      "status": "passed",
+      "note": "Translator row only: 17/17 keys at en source a4ae148de969…, en key order, ICU arguments and plural categories preserved, Devanagari per i18n/style-guides/hi.md. Independent audit NOT performed by this row and no auditor attestation claimed — dispatched separately, to add its own fields and evidence. Translator ran radient/auto after anthropic quota fallback."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.account_policy",
+      "source_sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 75d96e08982f)",
+        "model": "radient/auto (primary anthropic/claude-opus-5-5 fell back on provider quota)",
+        "date": "2026-10-29"
+      },
+      "status": "passed",
+      "note": "Translator row only: 13/13 keys at en source 0019b08106e6…, en key order, ICU arguments and plural categories preserved, Devanagari per i18n/style-guides/hi.md. Independent audit NOT performed by this row and no auditor attestation claimed — dispatched separately, to add its own fields and evidence. Translator ran radient/auto after anthropic quota fallback."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.library",
+      "source_sha256": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a",
+      "translator": {
+        "agent": "i18n-translator (lopdev lane, session 75d96e08982f)",
+        "model": "radient/auto (primary anthropic/claude-opus-5-5 fell back on provider quota)",
+        "date": "2026-10-29"
+      },
+      "status": "passed",
+      "note": "Translator row only: 1/1 keys at en source ad478c433a4d…, en key order, ICU arguments and plural categories preserved, Devanagari per i18n/style-guides/hi.md. Independent audit NOT performed by this row and no auditor attestation claimed — dispatched separately, to add its own fields and evidence. Translator ran radient/auto after anthropic quota fallback."
     }
   ]
 }
