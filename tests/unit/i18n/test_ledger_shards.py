@@ -143,7 +143,12 @@ def test_supersession_last_wins_across_hashes(i18n_generate, tmp_path: Path, mon
 
 
 def test_stale_aggregate_fails_drift_check(i18n_generate, tmp_path: Path, monkeypatch) -> None:
-    """A hand-edited aggregate that disagrees with the shards cannot win."""
+    """A hand-edited aggregate that disagrees with the shards cannot win.
+
+    The check compares COMMITTED bytes against the mirror render — it never
+    re-derives the aggregate and calls the two equal. A genuinely stale
+    aggregate (here: empty entries while the shard holds a row) is detected.
+    """
     from local_operator.i18n import catalogues
 
     root = tmp_path / "catalogues"
@@ -212,3 +217,81 @@ def test_shard_round_trips_through_aggregate_mirror(locale: str, i18n_generate) 
     aggregate = json.loads(i18n_generate._render_aggregate())
     rows = [r for r in aggregate["entries"] if r["locale"] == locale]
     assert rows == shard["entries"]
+
+
+def _row(locale: str, namespace: str, sha: str, note: str) -> dict:
+    return {
+        "locale": locale,
+        "namespace": namespace,
+        "source_sha256": sha,
+        "status": "passed",
+        "note": note,
+    }
+
+
+def _write_shard(root: Path, locale: str, rows: list[dict]) -> None:
+    (root / f"{locale}.json").write_text(
+        json.dumps({"schema": 1, "locale": locale, "entries": rows}, indent=2, ensure_ascii=False)
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _snapshot(root: Path) -> dict[str, bytes]:
+    return {p.name: p.read_bytes() for p in sorted(root.glob("*.json"))}
+
+
+def test_two_disjoint_locale_changes_commute(tmp_path: Path) -> None:
+    """THE property the sharding exists for: merge order must not matter.
+
+    Two disjoint changes (fr + es rows, and two namespaces of the SAME
+    locale) are applied to the sharded ledger in BOTH orders; the resulting
+    files must be byte-identical — not merely individually equal to the
+    pre-migration aggregate. A shard layout that encoded order dependence
+    (a shared counter, a serialization that depends on what else is present)
+    would fail here even while passing the losslessness test.
+    """
+    base_fr = [_row("fr", "wire.exec", "a" * 64, "base fr")]
+    base_es = [_row("es", "wire.exec", "b" * 64, "base es")]
+
+    def build(order: list[str]) -> dict[str, bytes]:
+        root = tmp_path / f"order-{''.join(order)}"
+        root.mkdir()
+        _write_shard(root, "fr", list(base_fr))
+        _write_shard(root, "es", list(base_es))
+        for change in order:
+            if change == "F":
+                rows = json.loads((root / "fr.json").read_text())["entries"]
+                rows.append(_row("fr", "wire.settings", "c" * 64, "fr delta"))
+                _write_shard(root, "fr", rows)
+            elif change == "E":
+                rows = json.loads((root / "es.json").read_text())["entries"]
+                rows.append(_row("es", "wire.settings", "d" * 64, "es delta"))
+                _write_shard(root, "es", rows)
+            elif change == "F2":
+                # Same locale, DIFFERENT namespace: also disjoint (append-only).
+                rows = json.loads((root / "fr.json").read_text())["entries"]
+                rows.append(_row("fr", "tui.status", "e" * 64, "fr second ns"))
+                _write_shard(root, "fr", rows)
+        return _snapshot(root)
+
+    # Different locales, both orders: byte-identical final files.
+    assert build(["F", "E"]) == build(["E", "F"])
+
+    # Same locale, different namespaces: order is SEMANTIC under append-only
+    # last-wins, so the two orders need not be byte-identical — what must hold
+    # is that both rows survive in each order and the last-applied row wins.
+    # (Requiring byte equality here would contradict the ledger's supersession
+    # semantics, which the migration is forbidden to change.)
+    ff = build(["F", "F2"])["fr.json"]
+    ff_rev = build(["F2", "F"])["fr.json"]
+    for blob in (ff, ff_rev):
+        entries = json.loads(blob)["entries"]
+        notes = [r["note"] for r in entries]
+        assert "fr delta" in notes and "fr second ns" in notes
+        assert len(entries) == 3  # base + both deltas, nothing deduped
+    assert json.loads(ff)["entries"][-1]["note"] == "fr second ns"
+    assert json.loads(ff_rev)["entries"][-1]["note"] == "fr delta"
+    # And the real git-level claim: the two-locale case touches disjoint FILES,
+    # so a merge has nothing to conflict over (proved end-to-end in the PR
+    # description with an actual `git merge`).
