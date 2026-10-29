@@ -187,7 +187,7 @@ export function DirectorySheet({
 						    path's last segment is the part that NAMES the directory,
 						    and an end-ellipsis hid exactly that. The rows may wrap;
 						    the chip above them stays a single truncated line. */}
-						<span className="min-w-0 flex-1 break-all font-mono text-mono-sm text-ink">
+						<span dir="ltr" className="min-w-0 flex-1 break-all font-mono text-mono-sm text-ink">
 							{displayPath(path, dirs?.home ?? home)}
 						</span>
 						{/* TEXT, never a glyph: a tick renders as tofu on phones whose
@@ -204,6 +204,7 @@ export function DirectorySheet({
 				    them all. */}
 				<div className="flex items-center gap-2">
 					<input
+						dir="ltr"
 						value={typed}
 						onChange={(e) => setTyped(e.target.value)}
 						placeholder={messageRuntime.t("relay.session.directory.path_placeholder")}

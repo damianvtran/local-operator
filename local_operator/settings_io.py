@@ -67,6 +67,7 @@ from local_operator.i18n.keys import wire_aida_cadence as _ac
 from local_operator.i18n.keys import wire_console as _cs
 from local_operator.i18n.keys import wire_host_speed as _hs
 from local_operator.i18n.keys import wire_memory as _mm
+from local_operator.i18n.keys import wire_radient_saver as _rsv
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.keys import wire_settings_account_policy as _ap
 from local_operator.i18n.keys import wire_settings_hub_defaults as _hd
@@ -140,6 +141,14 @@ except Exception:  # pragma: no cover - missing optional copy degrades to its co
 # ``wire.settings`` source hash the translated locales are pinned to.
 try:
     _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.host_speed"))
+except Exception:  # pragma: no cover - missing optional copy degrades to its code
+    pass
+
+# Radient Saver's section and row carry their copy in their own namespace for the
+# same reason as ``wire.host_speed``: the section is new, so adding it must not
+# move the ``wire.settings`` source hash the translated locales are pinned to.
+try:
+    _WIRE_SETTINGS_SOURCES.update(_catalogues.load_catalogue("en", "wire.radient_saver"))
 except Exception:  # pragma: no cover - missing optional copy degrades to its code
     pass
 
@@ -629,6 +638,15 @@ SECTIONS: tuple[Section, ...] = (
         _t(_ws.classification_title()),
         Scope.NEW_SESSIONS,
         _t(_ws.classification_description()),
+    ),
+    # LIVE: ``SessionStreamFn`` re-reads ``radient.saver.mode`` from the rebound
+    # settings mapping on every conversation turn (``saver.gate.configured_mode``),
+    # so switching it off stops the next upload without a ``/new``.
+    Section(
+        "radient_saver",
+        _t(_rsv.section_title()),
+        Scope.LIVE,
+        _t(_rsv.section_description()),
     ),
     Section(
         "supplements",
@@ -3623,6 +3641,43 @@ SETTINGS: tuple[Setting, ...] = (
         empty_unsets=True,
         gated_by="classification.auto",
     ),
+    # Radient Saver's gate (contract §1, §9). OFF by default: nothing uploads
+    # until the operator chooses ``opt_in``. The default here is the
+    # "later flip" the contract describes, pinned to ``saver.gate.DEFAULT_MODE``
+    # by a test; it is deliberately NOT in ``config.DEFAULT_CONFIG`` (R-6), so an
+    # unrelated settings write never persists it. Operator-only: the model's
+    # ``setting`` tool refuses it (``settings_control.OPERATOR_ONLY``, S-5).
+    # ``LOP_RADIENT_SAVER`` overrides it per process (the ``LOP_ASK_GATE``
+    # precedent), which the help names.
+    #
+    # ``auto`` is deliberately NOT offered (R6-2): in LO1 it always resolves OFF
+    # (``saver.gate`` -> ``auto_unavailable``) until the verifier can prove an
+    # epoch cheaper than the history it replaces, so a visible choice would be a
+    # mode that does nothing. ``saver.gate.MODES`` still RECOGNISES ``auto`` from
+    # config.yml or ``LOP_RADIENT_SAVER``, so an existing value keeps resolving
+    # OFF with its reason rather than becoming a parse error. Re-add the choice
+    # (and its catalogue keys) in the release that makes ``auto`` reachable.
+    Setting(
+        key="radient.saver.mode",
+        path=("radient", "saver", "mode"),
+        section="radient_saver",
+        label=_t(_rsv.mode_label()),
+        kind=Kind.ENUM,
+        default="off",
+        help=_t(_rsv.mode_help()),
+        choices=(
+            Choice(
+                "off",
+                _t(_rsv.mode_choice_off_label()),
+                _t(_rsv.mode_choice_off_description()),
+            ),
+            Choice(
+                "opt_in",
+                _t(_rsv.mode_choice_opt_in_label()),
+                _t(_rsv.mode_choice_opt_in_description()),
+            ),
+        ),
+    ),
     Setting(
         key="classification.timeoutMs",
         path=("classification", "timeoutMs"),
@@ -5915,6 +5970,20 @@ def read_setting(manager: "ConfigManager", setting: Setting) -> Any:
         return json.dumps(raw, default=str)
     if setting.kind is Kind.BOOL and isinstance(setting.default, bool):
         return strict_bool(raw, setting.default)
+    if (
+        setting.key == "radient.saver.mode"
+        and isinstance(raw, str)
+        and raw.strip().lower() == "auto"
+    ):
+        # A stored legacy `auto` READS as what it resolves to (S-22): in LO1 the
+        # gate refuses it (`auto_unavailable`), and serving `auto` beside a
+        # choice list that no longer offers it shows a UI a current value it
+        # cannot render. Normalised on READ only, like `strict_bool` above —
+        # the user's config file is never rewritten, so the value they wrote
+        # keeps resolving off with its reason, and the release that makes
+        # `auto` reachable sees it unchanged. No state note: that would be new
+        # user-facing copy, which needs every locale and an audited ledger row.
+        return "off"
     return raw
 
 

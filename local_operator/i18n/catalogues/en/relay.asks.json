@@ -15,6 +15,7 @@
   "relay.asks.card.secret_notice_persisted": "secret — sent directly, not shown in the transcript, and saved to your credential store",
   "relay.asks.card.placeholder_secret": "paste secret",
   "relay.asks.card.placeholder_answer": "your answer",
+  "relay.asks.card.other": "Other",
   "relay.asks.card.recommended": "· recommended",
   "relay.asks.card.choose_any": "choose any that apply",
   "relay.asks.card.urgent": "· urgent",

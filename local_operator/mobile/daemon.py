@@ -2453,9 +2453,14 @@ def _feature_flags() -> dict[str, Any]:
     global _FEATURE_FLAGS_MEMO
     if _FEATURE_FLAGS_MEMO is None:
         try:
+            from local_operator.server.features import DESKTOP_ONLY_FEATURES
             from local_operator.server.features import static_feature_flags as reader
 
-            _FEATURE_FLAGS_MEMO = dict(reader())
+            # A key only the desktop routes serve must not be advertised by a
+            # relay that would answer it with a legacy fallback.
+            _FEATURE_FLAGS_MEMO = {
+                key: value for key, value in reader().items() if key not in DESKTOP_ONLY_FEATURES
+            }
         except Exception:  # noqa: BLE001 — an absent/unreadable reader is "no features"
             _FEATURE_FLAGS_MEMO = {}
     flags = dict(_FEATURE_FLAGS_MEMO)
@@ -2920,10 +2925,18 @@ def _ask_gone_copy(op: str) -> str:
     return _ASK_GONE_RESPONSE
 
 
-#: The typed category of :func:`_revoked_device_refusal`, so the phone can key on
-#: WHICH refusal this is rather than pattern-match the sentence (the rule the
+#: The typed category of :func:`_device_refusal`, so the phone can key on WHICH
+#: refusal this is rather than pattern-match the sentence (the rule the
 #: command route's ``ValueError`` arm already follows for authority refusals).
 OPERATOR_DEVICE_REVOKED_CODE = "operator_device_revoked"
+
+#: The second typed category: the certificate is GOOD (the operator really signed
+#: it, for this key) but this computer has not confirmed the phone, so the anchor
+#: does not admit it. A separate code from revocation because the two states need
+#: OPPOSITE advice — a revocation is lifted from the computer's own device list,
+#: whereas a not-yet-confirmed phone has already done everything the pairing flow
+#: asks of it.
+OPERATOR_DEVICE_UNCONFIRMED_CODE = "operator_device_unconfirmed"
 
 #: Worded for the phone holding the revoked certificate: what happened, and the
 #: way back IN ORDER. Re-pairing alone is refused while the revocation stands
@@ -2932,15 +2945,42 @@ OPERATOR_DEVICE_REVOKED_CODE = "operator_device_revoked"
 #: the same route and tone as the phone's pair screen (``screens/pair.tsx``, the
 #: ``revoked`` state), which the phone shows verbatim as a fallback. Plain English
 #: beside a typed code, like the sibling ``/api/pair`` revoked refusal here.
+#:
+#: ONE REFERENT, ONE WORD: "the computer it is connected to", then "that computer",
+#: never "the machine" — the phone holds no name for the computer, so a second word
+#: reads as a second computer. And the person is never told to ask the agent: bringing
+#: the phone back is a gesture only they can make (design round 1, D1/D5).
 _OPERATOR_DEVICE_REVOKED = (
-    "This phone's approval access was removed on the computer, and only that "
-    "machine can restore it — pairing again will be refused until then. Ask Local "
-    "Operator on that machine to allow this phone again, then pair this phone again."
+    "This phone was removed on the computer it is connected to, and only that "
+    "computer can bring it back — pairing again is refused until then. Bring it "
+    "back there, then pair this phone again. Removing it on one computer does not "
+    "remove it on your other computers."
+)
+
+#: The unconfirmed phone's sentence, and the one thing it must NOT say is "pair
+#: again". Nothing is wrong with the pairing: the phone holds a certificate this
+#: computer's own key signed, and the certificate is refused only because the
+#: computer has not yet confirmed that this phone should act on it. Sending the
+#: human through a re-pair would produce the same certificate and the same refusal
+#: — a loop with no exit — so the copy names the action that actually clears it
+#: (confirming the phone on that computer) and says explicitly that pairing will
+#: not help.
+#:
+#: IT MUST NOT SAY "YOU NEVER CONFIRMED IT" EITHER, which is untrue in the state this
+#: change creates: a phone confirmed on computer A and refused on computer B (B joined
+#: earlier, or was re-planted) IS confirmed, just not here. So the sentence is about
+#: THIS computer's list, names the gesture the person will meet there, and says where
+#: the phone still works (design round 1, D1).
+_OPERATOR_DEVICE_UNCONFIRMED = (
+    "This phone is paired, but the computer it is connected to has not confirmed it "
+    "yet, so it cannot act there. Confirm it on that computer — you will be asked to "
+    "approve it there — and any computer that confirmed it keeps trusting it. "
+    "Pairing it again will not help."
 )
 
 
-def _revoked_device_refusal(certificate: Any) -> "JSONResponse | None":
-    """A 403 for a command presenting a REVOKED device's certificate, else ``None``.
+def _device_refusal(certificate: Any) -> "JSONResponse | None":
+    """A 403 for a command presenting a device certificate the anchor does not admit.
 
     THE TWO-LIST GAP. ``lop operator devices --revoke`` writes the relay's own
     ``revoked.json`` and deletes the stored certificate, but the phone keeps its
@@ -2952,12 +2992,29 @@ def _revoked_device_refusal(certificate: Any) -> "JSONResponse | None":
     is the same question asked on the command path, before any frame is written
     or future registered, so a refusal leaves nothing parked.
 
-    THE RELAY STAYS A COURIER. The check reads only public data — the device id
-    in an operator-signed public statement, and two revocation lists — and mints
-    nothing. It can only WITHHOLD a signature, never produce one. The certificate
-    is parsed, not verified: an unparsable one keeps today's behaviour (it is
-    forwarded and the runtime refuses it), and a forged certificate naming a
-    revoked id gains nothing by being refused here.
+    ONE PREDICATE, TWO SENTENCES. The question is now the runtime's own
+    ``devices.is_admitted`` — not revoked AND its id IS its key's id AND (a
+    presence host, or a host whose anchor predates the rule (the migration guard), or
+    a device the anchor lists). It is asked here for the same reason as before: the
+    phone should
+    hear about the refusal from the relay, in words that name the action that
+    clears it, rather than watch a parked command fail later. The two refusals keep
+    DIFFERENT typed codes because their remedies are different (lift the revocation
+    at the computer; confirm the phone at the computer) — and the unconfirmed copy
+    deliberately does not send the phone to re-pair, which would mint the same
+    certificate and meet the same refusal.
+
+    THE RELAY STAYS A COURIER. The check reads only public data — the device id and
+    key in an operator-signed public statement, and the anchor — and mints nothing.
+    It can only WITHHOLD a signature, never produce one. The certificate is parsed,
+    not verified: an unparsable one keeps today's behaviour (it is forwarded and
+    the runtime refuses it), and a forged certificate naming an admitted id gains
+    nothing by being refused here.
+
+    ``/api/pair`` IS DELIBERATELY NOT THIS PREDICATE (it asks ``is_revoked``, and
+    must keep asking only that): a phone that has never been here is BY DEFINITION
+    not listed yet, and its filing is what starts the confirmation. Refusing it
+    would make a new phone unable to ask to be admitted at all.
     """
     if not isinstance(certificate, str) or not certificate:
         return None
@@ -2974,6 +3031,11 @@ def _revoked_device_refusal(certificate: Any) -> "JSONResponse | None":
         return None
     try:
         revoked = devices.is_revoked(config_dir(), parsed.device_id)
+        # THE SAME FAIL-OPEN ARM COVERS BOTH QUESTIONS: ``is_admitted`` reads the
+        # same anchor through the same loader, and it answers "admit" when it cannot
+        # read one — the runtime is the authority that verifies the signature, and
+        # with no anchor it refuses every device certificate anyway.
+        admitted = devices.is_admitted(certificate)
     except OSError:
         # ``load_anchor`` is NOT total: a root-owned DIRECTORY at the anchor path
         # passes its owner and mode checks and then raises ``IsADirectoryError``
@@ -2999,12 +3061,20 @@ def _revoked_device_refusal(certificate: Any) -> "JSONResponse | None":
         # which makes this arm dead code. Only ``OSError``: anything else is a bug
         # and should surface.
         return None
-    if not revoked:
-        return None
-    return JSONResponse(
-        {"error": _OPERATOR_DEVICE_REVOKED, "code": OPERATOR_DEVICE_REVOKED_CODE},
-        status_code=403,
-    )
+    if revoked:
+        return JSONResponse(
+            {"error": _OPERATOR_DEVICE_REVOKED, "code": OPERATOR_DEVICE_REVOKED_CODE},
+            status_code=403,
+        )
+    if not admitted:
+        return JSONResponse(
+            {
+                "error": _OPERATOR_DEVICE_UNCONFIRMED,
+                "code": OPERATOR_DEVICE_UNCONFIRMED_CODE,
+            },
+            status_code=403,
+        )
+    return None
 
 
 def _session_is_live(daemon: "MobileDaemon", session_id: str) -> bool:
@@ -7728,9 +7798,9 @@ def build_app(daemon: MobileDaemon):
         op = body.pop("op", None)
         if not isinstance(op, str) or not op:
             return JSONResponse({"error": "op must be a non-empty string"}, status_code=422)
-        revoked = _revoked_device_refusal(body.get("operator_cert"))
-        if revoked is not None:
-            return revoked
+        denied = _device_refusal(body.get("operator_cert"))
+        if denied is not None:
+            return denied
         try:
             from local_operator.mobile.types import (
                 ContinuationCommand,
@@ -10728,6 +10798,10 @@ def _render_login_html(*, error: bool = False) -> str:
     return re.sub(r"__([A-Z_]+)__", lambda match: values[match[1]], _LOGIN_HTML)
 
 
+# The password input alone carries `dir="ltr"` (design round 1, D7 / QA Q-9): the
+# page is `dir="rtl"` for Urdu, and a field inheriting it puts the caret, and any
+# Latin password, on the wrong edge. The label, submit and error keep the page
+# direction — they are translated copy.
 _LOGIN_HTML = """<!doctype html>
 <html lang="__LANG__" dir="__DIR__">
 <head>
@@ -10843,7 +10917,7 @@ _LOGIN_HTML = """<!doctype html>
   __ERROR__
   <div class="field">
     <label for="password">__PASSWORD__</label>
-    <input id="password" type="password" name="password"
+    <input id="password" type="password" name="password" dir="ltr"
            autocomplete="current-password" autofocus required>
   </div>
   <button type="submit">__SUBMIT__</button>

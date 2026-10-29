@@ -1,0 +1,19 @@
+{
+  "locale": "ru",
+  "namespace": "tui.transcript",
+  "result": "PASS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [],
+  "adjudication": [],
+  "linguistic_gate_status": "passed",
+  "publication_hold_reasons": [
+    "en context sidecar not routable"
+  ]
+}

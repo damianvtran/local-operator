@@ -673,11 +673,19 @@ async def handle_conversation_available(
 
     Returns metadata only. ``action`` is one of ``delivered`` (admitted body),
     ``rejected`` (a confirmed moderation refusal: terminal, and it posts NO card
-    and wakes nobody), ``hold``, ``badge_only``, ``claimed_elsewhere`` or
-    ``skipped`` (the message is no longer in the conversation's history).
+    and wakes nobody), ``delivered_unadmitted`` (the recovery card), ``hold``,
+    ``badge_only``, ``claimed_elsewhere`` or ``duplicate`` (an admission whose
+    card already went out).
     """
 
-    from ..store import Store, StoreRefused
+    from ..store import (
+        CARD_OWED,
+        CARD_POSTED,
+        CARD_SETTLED,
+        CONNECTOR_CLAIM_TOKEN_PREFIX,
+        Store,
+        StoreRefused,
+    )
 
     message_id = ref.message_id
     store = Store(config_dir)
@@ -692,7 +700,9 @@ async def handle_conversation_available(
     if designation is None:  # the fence above guarantees this, kept for typing
         return {"action": "badge_only", "message_id": message_id}
 
-    token = f"connector:{uuid.uuid4()}"
+    # The prefix is load-bearing: the loop tells a connector's mid-handoff
+    # claim (re-drive after its lease) from a session's own claim by it.
+    token = f"{CONNECTOR_CLAIM_TOKEN_PREFIX}{uuid.uuid4()}"
     try:
         store.claim(owner, message_id, designation, token, expiry=time.time() + CLAIM_TTL_S)
     except StoreRefused as failure:
@@ -955,21 +965,42 @@ async def handle_conversation_available(
             body_hash=body_hash,
             designation=designation,
         )
-        if recorded == RESERVATION_ALREADY_RECORDED:
-            # A replay (crash-after-record, or a hub re-delivery) must not post
-            # a SECOND card: the row is the dedupe witness, and a duplicate
+        card = (
+            store.body_card_status(owner, ref.conversation_id, message_id)
+            if recorded == RESERVATION_ALREADY_RECORDED
+            else None
+        )
+        if card in (CARD_POSTED, CARD_SETTLED):
+            # A replay (a hub re-delivery, a crash before the ref delete, a
+            # re-drive of any hold) must not post a SECOND card: a duplicate
             # wake costs the agent a turn for a message it already answered.
-            # RESIDUAL, stated rather than hidden: a crash in the window
-            # between recording and the card leaves a pending row with no
-            # wake; the row survives and stays claimable, and closing that
-            # window needs a card-delivery marker the claiming slice owns.
+            # The reservation proves the admission; ``card_posted_at`` ON THAT
+            # ROW proves the card (PR #3063 reviews m6/M5). A reservation that
+            # is already completed or retired with no record (review m11) gets
+            # NO card either — its body was served, or never will be, so the
+            # card would wake the agent for nothing; record it and stop. Only
+            # a still-live reservation whose card was never handed off (a stop
+            # between the two) falls through and posts it.
+            if card == CARD_SETTLED:
+                try:
+                    store.mark_body_card_posted(
+                        owner, ref.conversation_id, message_id, now=time.time()
+                    )
+                except StoreRefused:
+                    pass  # still settled on the next replay: no card either way
             return {
                 "action": "duplicate",
                 "message_id": message_id,
                 "conversation_id": ref.conversation_id,
                 "reservation": "already_recorded",
             }
-        if recorded != RESERVATION_RECORDED:
+        if card == CARD_OWED:
+            # Review m12: the ONE bounded extra card is visible. A reservation
+            # with no record is either a stop between the reservation and the
+            # card, or a row from before ``card_posted_at`` existed whose card
+            # may already be out. Closed structural line, no content.
+            logger.warning("bridge: card re-posted code=card_unrecorded")
+        if recorded not in (RESERVATION_RECORDED, RESERVATION_ALREADY_RECORDED):
             return {"action": "hold", "message_id": message_id, "code": recorded}
         detail = await _deliver_card(
             owner,
@@ -978,6 +1009,16 @@ async def handle_conversation_available(
             config_dir=config_dir,
         )
         terminal = True
+        # Only after the hand-off returned. A failure to record it is not a
+        # failed delivery (the card IS out); it costs one re-posted card PER
+        # later replay while the mark keeps failing (review n6) — in
+        # production the outcome is terminal and the ref is deleted, so a
+        # replay needs a hub re-delivery — which beats reporting a held
+        # message.
+        try:
+            store.mark_body_card_posted(owner, ref.conversation_id, message_id, now=time.time())
+        except StoreRefused:
+            logger.warning("bridge: card posted, marker unrecorded code=store_refused")
         return {
             "action": "delivered",
             "message_id": message_id,

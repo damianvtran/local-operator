@@ -1,0 +1,11 @@
+{
+  "path": "local_operator/i18n/catalogues/hi/wire.settings.json",
+  "session": "c754bf63ab2a",
+  "ts": "2026-10-29T00:24:38Z",
+  "tool": "read_public_copy",
+  "policy": "docs/security/redaction-policy.md",
+  "chars": 83451,
+  "sha256": "e40740d559baffb4c9b8d2e11e9ee54f6a404f5301f9bafe5e6b23f966786825",
+  "recomputed_from_commit": "4d38a1d4b8e9a36fa0a38f4833ecf86263da45db",
+  "recomputed_body_sha256": "e40740d559baffb4c9b8d2e11e9ee54f6a404f5301f9bafe5e6b23f966786825"
+}

@@ -359,7 +359,9 @@ async def test_directory_is_readable_while_paused_but_not_disabled(runtime):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("op", ["directory", "dm", "shared_conversations", "shared_history"])
 async def test_owner_fence_precedes_every_new_operation(runtime, monkeypatch, op):
-    refusal = lambda runtime: {"code": "owner_changed", "error": "owner changed"}
+    def refusal(runtime):
+        return {"code": "owner_changed", "error": "owner changed"}
+
     # Both fences: shared_* keep the strict one, the rest take the outbound one.
     monkeypatch.setattr(host_mod, "owner_fence_refusal", refusal)
     monkeypatch.setattr(host_mod, "outbound_tool_fence", refusal)

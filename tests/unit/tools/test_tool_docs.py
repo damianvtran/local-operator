@@ -286,7 +286,16 @@ MEASURED_TOKENS: dict[str, int] = {
     # context budget had 2 billed tokens of headroom. The ``team`` entry moves by
     # the same -1 for its twin field; the same printed table measured both.
     "agent": 1364,
-    "ask": 1079,
+    # RE-MEASURED (ask/notify dedupe, asks/dedupe.py): 1079 -> 1078. The
+    # restraint now says "decide, never for FYI" and "asking notifies: never
+    # also `notify` it"; trims elsewhere in the same paragraph pay for it so
+    # the tail is net negative. Same reading on both ask arms (the doc renders
+    # the shared restraint plus each arm's tail; only the restraint moved).
+    # 1078 -> 1083 (CI remediation, #3094): the rewrite had dropped "decide
+    # yourself", "subagent" and "approved that action", which test_ask_tool.py
+    # pins as the last-resort and irreversible-trigger contract; restoring them
+    # costs +5, measured by this test's print on both LOP_ASK_NONBLOCKING arms.
+    "ask": 1083,
     "ask_withdraw": 452,
     "bash": 295,
     # NEW (H5d, Team Bridge): the ``bridge`` doc — take-up's hash rule, the
@@ -328,7 +337,18 @@ MEASURED_TOKENS: dict[str, int] = {
     # reading the reply. Measured by this test's own ledger print ON THIS HEAD (1674),
     # never carried across. The pair-lane caveat on `send` earns its tokens: without it
     # an agent answers a DM with `send`, which no Team Bridge UI shows.
-    "bridge": 1674,
+    # Independently, main's #3133 adds the recipient description below; the
+    # converged ledger must include BOTH changes and was measured by this test.
+    # 777 -> 839 (tb-send-recipient-ergonomics): the ``to`` parameter publishes
+    # its own DESCRIPTION now — both accepted object shapes, the bare account id
+    # and where the ids come from — because the schema is the model's first
+    # teacher, and the bare form was refused at validation while teaching
+    # nothing. +62 on this opt-in reference; the paired start-context raise is
+    # stated in scripts/bench_context_budget.py. Measured by this test's printed
+    # table, no other tool's bytes moved.
+    # Converged directory/dm + recipient-description ledger: 1,736 tokens,
+    # measured by this test's canonical renderer on the merged tree.
+    "bridge": 1736,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -475,7 +495,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # ``notify`` doc — its description plus the five-field schema rendered by
     # this file's own renderer. Re-measured via this test's print; it is the
     # ONLY entry that moved, every other count is byte-identical.
-    "notify": 242,
+    # RE-MEASURED (ask/notify dedupe): 242 -> 241 — "FYI ... never a question
+    # (`ask` notifies)", worded to cost less than the text it replaced.
+    "notify": 241,
     "patience": 330,
     # RE-MEASURED 2026-10-20 (evidence-attachment discoverability): ``project``
     # 1098 -> 1143 is the ONLY entry that moved — the ``attach`` description now

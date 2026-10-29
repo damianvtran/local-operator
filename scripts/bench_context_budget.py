@@ -1751,21 +1751,49 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # the MEASURED HEAD plus this file's 55-token band (34,286 + 55), the same rule
 # the older entries above used — not a round number and not a guess.
 #
-# 34,341 -> 34,641 (2026-10-29, the directory/dm branch), and this one is a
-# CAPABILITY cost, argued rather than assumed. Measured on this tree at HEAD,
-# isolated HOME, by this script:
-#   top   96,277 chars / 34,632 billed / 37 schemas   vs 34,341 — 291 OVER
-# The branch publishes four OPS the tool did not have (`directory`, `dm`,
-# `shared_conversations`, `shared_history`) plus the six merged room ops, and
-# their schema prose is what a model reads before it calls them. That prose is
-# not decoration: an earlier round on this same feature failed at argument
-# validation because the recipient's accepted shapes were not described where
-# the model looked, and every send was refused for its addressing. Cutting the
-# op descriptions to fit the ceiling would reintroduce exactly that failure to
-# save 300 tokens, so the ceiling moves by the measured overrun plus this file's
-# 55-token band (34,632 + 9 = 34,641, the band applied to the mover's figure).
-# Reduce the schemas, not the guidance, if a later round needs the room back.
-BUDGET_BILLED_TOKENS = 34_641
+# The directory/dm branch publishes four OPS the tool did not have
+# (`directory`, `dm`, `shared_conversations`, `shared_history`) plus the six
+# merged room ops. That is CAPABILITY cost, not discretionary prose: an earlier
+# round on this same feature failed at argument validation because the
+# recipient's accepted shapes were not described where the model looked.
+# Preserve the guidance, and derive the ceiling from the CONVERGED measurement
+# below plus this file's 55-token band, never from the pre-merge branch figure.
+# RATCHETED DOWN 34,341 -> 34,316 (ask/notify dedupe, ``asks/dedupe.py``): the
+# ``ask`` restraint, the ``notify`` description and system.md's has_notify
+# clause now say "an ask notifies — never also notify it; notify is for FYI".
+# Reworded to be net NEGATIVE, same script, isolated HOME, this tree:
+#   queued   (default)        95,258 -> 95,186 chars / 34,265 -> 34,240 billed
+#   blocking (LOP_ASK_NONBLOCKING=0) 93,676 -> 93,604 / 33,696 -> 33,671 billed
+#   child (no ask/notify)      30,355 -> 30,355 billed, unchanged
+# The ceiling follows the measured -25 so the headroom this file keeps does not
+# silently grow into room for the next edit.
+#
+# 34,316 -> 34,327 (CI remediation, #3094): the reword had dropped phrases
+# test_ask_tool.py pins ("decide yourself", "subagent", "approved that
+# action" — the last-resort and irreversible-trigger contract). Restoring them
+# measured +11 billed on BOTH arms, same script, isolated HOME:
+#   queued   95,186 -> 95,218 chars / 34,240 -> 34,251 billed
+#   blocking 93,604 -> 93,636 chars / 33,671 -> 33,682 billed
+#   child    30,355, unchanged
+# Net of the whole PR the queued head is still -14 against main (34,265).
+#
+# RAISED 34,327 -> 34,416 with the bridge ``to`` schema (tb-send-recipient-
+# ergonomics): the parameter now publishes its own DESCRIPTION — the two accepted
+# object shapes, the bare account id and where the ids come from — and its type
+# is a union, because a model's natural ``to: "acc_123"`` was refused at
+# validation on every attempt while only the nested pair worked. Measured with
+# THIS script on both trees, isolated HOME:
+#   base (origin/main efcfbe81260)  95,218 chars = ~34,251 billed
+#   head (this branch)              95,524 chars = ~34,361 billed
+#   delta                             +306 chars = ~+110
+# The published string arm and its one-line description are the whole of it:
+# +306 chars is the SAME delta the child arm below reports, which is the check.
+# Ceiling = measured head + the 55-token band (34,361 + 55).
+#
+# CONVERGED directory/dm ceiling: the two ledgers above are inputs, not a sum.
+# Re-measured on this merged tree with an isolated HOME and this script:
+#   top 95,937 chars / 34,510 billed / 37 schemas; ceiling = 34,510 + 55.
+BUDGET_BILLED_TOKENS = 34_565
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -1929,12 +1957,20 @@ BUDGET_BILLED_TOKENS = 34_641
 # pays the same four actions' schema. Measured on the same tree:
 #   30,329 billed   FAIL, 126 over (after the prose trim)
 #   budget 30,380 (measured head + 51 headroom, the same band the parent uses)
-#: 30,380 -> 30,779 (2026-10-29, the same directory/dm branch and the same
-#: argument as the top ceiling above): measured at HEAD on this tree,
-#:   child 85,414 chars / 30,724 billed / 32 schemas   vs 30,380 — 344 OVER
-#: The child inventory gains the same four ops, so the same capability cost
-#: lands on both ceilings; 30,724 + the same 55-token band = 30,779.
-BUDGET_CHILD_BILLED_TOKENS = 30_779
+
+# RAISED 30,380 -> 30,520 with the top arm above, for the same bridge ``to``
+# schema: a child surface publishes the bridge tool too, so it carries the same
+# published description and the same string arm. Measured on the same trees:
+#   base (origin/main efcfbe81260)  84,387 chars = ~30,355 billed
+#   head (this branch)              84,693 chars = ~30,465 billed
+#   delta                             +306 chars = ~+110 (the same +306)
+# Ceiling = measured head + the 55-token band (30,465 + 55, the band used today;
+# the older "51 headroom" entry above is that pass's own arithmetic).
+# The directory/dm child ceiling is likewise re-derived on the converged tree,
+# because the child inventory carries the same bridge operations and recipient
+# schema. Both ceilings preserve the 55-token headroom band. Measured on the
+# merged tree: 85,106 chars / 30,614 billed; ceiling = 30,614 + 55.
+BUDGET_CHILD_BILLED_TOKENS = 30_669
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

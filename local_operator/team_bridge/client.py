@@ -1629,8 +1629,10 @@ class TeamBridgeClient:
         caller's membership, and the server refuses a tenant the account cannot
         see (§6.5). The payload is the frozen desktop shape
         ``{members:[{account_id, display_label, role, bridge_enabled,
-        bridge_state}]}`` and is passed through untouched — this client never
-        re-orders, trims or renames a member row.
+        bridge_state, agent:{endpoint_id, name, state}}]}`` and is passed
+        through untouched — this client never re-orders, trims or renames a
+        member row. ``agent`` is optional per member; when present, its
+        ``endpoint_id`` is the address used to open a chief-of-staff DM.
         """
 
         return await self._send(
@@ -2484,7 +2486,7 @@ class TeamBridgeClient:
         self,
         *,
         tenant_id: str,
-        to: Mapping[str, str],
+        to: Mapping[str, str] | str,
         type: str,
         text: str,
         client_ref: str,
@@ -2499,11 +2501,13 @@ class TeamBridgeClient:
         thread, it never stands alone — a thread_id-only body is a 400): it
         is either ``{"endpoint_id": …}`` or ``{"account_id": …}``, exactly one
         of the two, and the server resolves the account form without an
-        existence oracle. ``client_ref`` is caller-owned and REQUIRED — retries
-        reuse the same ref and the server answers the identical replay with the
-        original message (same key + different body → ``409
-        idempotency_key_reused``; the durable outbox is what makes the retry
-        carry the same ref across restarts).
+        existence oracle. A BARE STRING is accepted as the account id
+        (``validate_send_recipient`` is the ONE place that maps it, so the tool
+        and this client cannot read it differently). ``client_ref`` is
+        caller-owned and REQUIRED — retries reuse the same ref and the server
+        answers the identical replay with the original message (same key +
+        different body → ``409 idempotency_key_reused``; the durable outbox is
+        what makes the retry carry the same ref across restarts).
 
         Decision replies never travel this path as free text (§13.5): the
         decide call carries the ``ask_ref`` receipt and the outcome message is
@@ -3608,8 +3612,8 @@ class TeamBridgeClient:
         have zero freshness lifetime: every reuse requires upstream membership
         authorization and a matching conditional 304 under that same login.
         """
-        from local_operator.paths import config_dir
-        from local_operator.team_bridge.avatar_cache import AVATAR_CACHE, Entity
+        from local_operator.team_bridge import avatar_cache
+        from local_operator.team_bridge.avatar_cache import Entity
         from local_operator.team_bridge.types import is_account_id
 
         if (
@@ -3620,42 +3624,29 @@ class TeamBridgeClient:
             or size not in (64, 256)
         ):
             raise ValueError("invalid avatar request")
-        self._require_destination()
-        store = self._auth_store()
-        scope = (str((self._config_dir or config_dir()).resolve()), self._base_url)
-        row = self._pinned_row()
-        if row is None:
-            AVATAR_CACHE.admit(scope, None)
-            raise BridgeSignInRequired(SIGN_IN_SENTENCE)
-        incarnation = store.native_login_incarnation(row.id)
+        scope, authority = self._avatar_authority(expected_account_id)
 
         def check_owner() -> None:
-            current = self._pinned_row()
-            if (
-                not incarnation
-                or current is None
-                or current.id != row.id
-                or current.data.get("account_id") != expected_account_id
-                or store.native_login_incarnation(row.id) != incarnation
-            ):
-                AVATAR_CACHE.admit(scope, None)
+            try:
+                current = self._avatar_authority(expected_account_id)
+            except BridgeSignInRequired:
+                current = None
+            if current != (scope, authority):
+                avatar_cache.admit(scope, None)
                 raise BridgeRefusal(
                     ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409
                 )
 
-        check_owner()
-        authority = (row.id, expected_account_id, incarnation)
-        AVATAR_CACHE.admit(scope, authority)
         key = (scope, authority, target_account_id, v, size)
         try:
             access = await self._guarded_access(expected_account_id)
         except (BridgeRefusal, BridgeSignInRequired):
-            AVATAR_CACHE.admit(scope, None)
+            avatar_cache.admit(scope, None)
             raise
         check_owner()
-        if access is None or access.credential_id != row.id:
+        if access is None or access.credential_id != authority[0]:
             raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
-        cached = AVATAR_CACHE.get(key)
+        cached = avatar_cache.AVATAR_CACHE.get(key)
         try:
             response = await self._dispatch(
                 "GET",
@@ -3668,15 +3659,15 @@ class TeamBridgeClient:
                 if_none_match=cached.etag if cached else None,
             )
         except httpx.HTTPError as failure:
-            AVATAR_CACHE.discard(key)
+            avatar_cache.AVATAR_CACHE.discard(key)
             raise BridgeUnreachable() from failure
         except BridgeRefusal:
-            AVATAR_CACHE.discard(key)
+            avatar_cache.AVATAR_CACHE.discard(key)
             raise
         check_owner()
         # Remove before interpreting the response: errors, malformed 304s and
         # no-store must never leave an entity available for a later retry.
-        AVATAR_CACHE.discard(key)
+        avatar_cache.AVATAR_CACHE.discard(key)
         if response.status_code >= 400:
             raise _refusal(response)
         etag = response.headers.get("etag")
@@ -3684,7 +3675,7 @@ class TeamBridgeClient:
         if response.status_code == 304 and cached is not None:
             if (etag is None or etag == cached.etag) and not response.content:
                 if storable:
-                    AVATAR_CACHE.put(key, cached)
+                    avatar_cache.AVATAR_CACHE.put(key, cached)
                 return cached.body, cached.mime
         mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
         if response.status_code != 200 or mime not in ATTACHMENT_MIME_TYPES or not response.content:
@@ -3696,8 +3687,111 @@ class TeamBridgeClient:
         # Only a bounded HTTP entity-tag can authorize conditional reuse. No
         # synthetic validators: an upstream without ETag simply cold-fetches.
         if storable and etag and re.fullmatch(r'(?:W/)?"[\x21\x23-\x7e]{0,254}"', etag):
-            AVATAR_CACHE.put(key, Entity(response.content, mime, etag))
+            avatar_cache.AVATAR_CACHE.put(key, Entity(response.content, mime, etag))
         return response.content, mime
+
+    def _avatar_authority(
+        self, expected_account_id: str
+    ) -> tuple[tuple[str, str], tuple[int, str, str]]:
+        """``(scope, authority)`` for the CURRENT login, exactly as ``fetch_avatar`` keys it.
+
+        Local only (no refresh, no network): the notification composite uses it
+        to fence its render to the same login ``fetch_avatar`` authorized under.
+        Refuses like ``fetch_avatar`` does when the captured viewer is not the
+        signed-in login.
+        """
+
+        from local_operator.paths import config_dir
+        from local_operator.team_bridge import avatar_cache
+
+        self._require_destination()
+        store = self._auth_store()
+        scope = (str((self._config_dir or config_dir()).resolve()), self._base_url)
+        row = self._pinned_row()
+        if row is None:
+            avatar_cache.admit(scope, None)
+            raise BridgeSignInRequired(SIGN_IN_SENTENCE)
+        incarnation = store.native_login_incarnation(row.id)
+        if not incarnation or row.data.get("account_id") != expected_account_id:
+            avatar_cache.admit(scope, None)
+            raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
+        authority = (row.id, expected_account_id, incarnation)
+        avatar_cache.admit(scope, authority)
+        return scope, authority
+
+    async def notification_avatar(
+        self,
+        sender_account_id: str,
+        *,
+        tenant_id: str,
+        kind: Literal["person", "person_agent"],
+        theme: Literal["light", "dark"],
+        size: int,
+        initials: str,
+        v: str | None,
+        expected_account_id: str,
+    ) -> bytes:
+        """Render only after current-avatar authorization, never from stale bytes.
+
+        The directory join belongs to the tenant-scoped desktop caller. Here
+        tenant is validated as part of the closed contract (the desktop keys its
+        display cache by it), NOT a replacement for the existing hub avatar
+        authorization. No-photo placeholders make no network request. The login
+        captured before network/CPU work is checked afterwards too; a queued
+        decode cannot return an image from a previous login.
+
+        Stateless: the composite is returned and forgotten. Display retention
+        is the desktop main process's (A0: in memory, <= 15 minutes, cleared on
+        auth transitions); see ``notification_avatar``'s module docstring.
+        """
+        from local_operator.team_bridge import avatar_cache
+        from local_operator.team_bridge import notification_avatar as na
+        from local_operator.team_bridge.types import is_account_id
+
+        if (
+            not is_account_id(sender_account_id)
+            or not is_account_id(expected_account_id)
+            or not tenant_id.strip()
+            or len(tenant_id) > 128
+            or kind not in na.KINDS
+            or theme not in na.THEMES
+            or type(size) is not int
+            or size not in na.SIZES
+            or not na.valid_initials(initials)
+            or (v is not None and re.fullmatch(r"[0-9a-f]{16}", v) is None)
+        ):
+            raise ValueError("invalid notification avatar request")
+        scope, authority = self._avatar_authority(expected_account_id)
+
+        def check_owner() -> None:
+            try:
+                current = self._avatar_authority(expected_account_id)
+            except BridgeSignInRequired:
+                current = None
+            if current != (scope, authority):
+                avatar_cache.admit(scope, None)
+                raise BridgeRefusal(
+                    ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409
+                )
+
+        variant = na.Variant(kind=kind, theme=theme, size=size, initials=initials)
+        photo: bytes | None = None
+        if v is not None:
+            # The raw entity keeps its own rules (revalidated per use, no-store
+            # honoured) in ``fetch_avatar``; nothing derived from it is kept here.
+            photo, _mime = await self.fetch_avatar(
+                sender_account_id, v=v, size=size, expected_account_id=expected_account_id
+            )
+        check_owner()
+        data = await na.render(
+            variant,
+            origin=self._base_url,
+            account_id=sender_account_id,
+            photo=photo,
+            check_owner=check_owner,
+        )
+        check_owner()
+        return data
 
     async def fetch_attachment(
         self,

@@ -6029,6 +6029,21 @@ def attach_credential_binding(
         from local_operator.session.credential_binding import mesh_copy_account
 
         install_account(lambda credential_id: mesh_copy_account(get_credential(credential_id)))
+    install_label = getattr(recorder, "set_label_resolver", None)
+    if callable(get_credential) and callable(install_label):
+        # The account-change NOTICE names the account by its sign-in label (the
+        # one ``credential_identity`` derivation the borrow listing and the
+        # login receipt use), so two logins on one device no longer render the
+        # same sentence. Read only when a notice is about to be journaled.
+        from local_operator.providers.auth_store import credential_identity
+
+        def _label(credential_id: int) -> str:
+            # ``get_credential`` is duck-typed here (``getattr``); the identity
+            # derivation is too — it accepts any row with a ``.data`` mapping.
+            row: Any = get_credential(credential_id)
+            return (credential_identity(row) or "") if row is not None else ""
+
+        install_label(_label)
     reader = getattr(auth_store, "set_binding_reader", None)
     if callable(reader):
         reader(recorder.recall_for)

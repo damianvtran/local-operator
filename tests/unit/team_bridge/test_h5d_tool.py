@@ -4,7 +4,7 @@ through the outbox, and NO decide authority."""
 from __future__ import annotations
 
 import json
-from typing import cast
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -159,6 +159,10 @@ async def test_ack_working_claims_and_done_releases_with_the_same_token(tmp_path
         {"account_id": "acc_2", "kind": "agent"},
         {"endpoint_id": "bep_9", "kind": "agent"},
         {"account_id": "acc_2", "endpoint_id": "bep_9"},
+        # A display label is NOT a destination: names are ambiguous and belong
+        # to the caller's own directory read, never to this client.
+        {"name": "Ada Lovelace"},
+        {"display_label": "Ada Lovelace"},
         {},
     ],
 )
@@ -181,6 +185,16 @@ def test_tool_recipient_schema_is_closed(target):
         ({"account_id": "acc_2", "endpoint_id": "bep_9"}, False),
         ({"account_id": ""}, False),
         ({"account_id": 42}, False),
+        # A guessed name object is not an addressable destination, in the
+        # PUBLISHED schema either.
+        ({"name": "Ada Lovelace"}, False),
+        # The bare-string form a model reaches for: accepted, and only as an id.
+        # ``" acc_2"`` is NOT listed here on purpose: padding is refused by the
+        # shared validator/executor (asserted below and in the client test), not
+        # by a JSON Schema that cannot express "unpadded".
+        ("acc_2", True),
+        ("", False),
+        (42, False),
         ({}, False),
     ],
 )
@@ -219,9 +233,11 @@ def test_compact_recipient_wire_schema_preserves_closed_one_of(target, valid):
         )
         assert (not errors) is valid
     if valid:
+        # The model hands on the CANONICAL pair: a bare id is the account form.
+        canonical = {"account_id": target} if isinstance(target, str) else target
         assert (
             BridgeToolParams.model_validate({"op": "send", "to": target}).model_dump()["to"]
-            == target
+            == canonical
         )
 
 
@@ -236,6 +252,15 @@ def test_compact_recipient_wire_schema_preserves_closed_one_of(target, valid):
         {"account_id": "acc_2", "endpoint_id": ""},
         {"account_id": "acc_2", "endpoint_id": "bep_9"},
         {"account_id": "   "},
+        # A guessed name learns the accepted shapes from the refusal itself.
+        {"name": "Ada Lovelace"},
+        # The bare-string form is an id or nothing: empty, padded, and a display
+        # NAME written as a bare string (ids never contain whitespace) refuse.
+        "",
+        "   ",
+        " acc_2",
+        "acc_2 ",
+        "Ada Lovelace",
         {},
     ],
 )
@@ -593,3 +618,179 @@ async def test_malformed_legacy_receipt_stays_pending_until_frozen_replay_confir
     }
     assert requests[0].content == requests[1].content
     assert outbox.pending(runtime.key()) == []
+
+
+# --- recipient ergonomics: the shape a model actually writes -----------------
+
+
+def test_a_bare_string_recipient_is_the_account_id_and_nothing_else() -> None:
+    """``{"to": "acct_123"}` is the account form, decided in exactly one place.
+
+    A model reaching for a recipient writes a bare id far more often than the
+    nested pair, and one string is one recipient in one field: there is nothing
+    to reinterpret and nothing that can be silently dropped, which is why the
+    mapping lives in the shared validator both the tool and the wire client
+    call — never in either serializer. The object forms (the positive controls)
+    are untouched.
+    """
+    from local_operator.team_bridge.tool import BridgeToolParams
+    from local_operator.team_bridge.types import validate_send_recipient
+
+    assert validate_send_recipient("acct_123") == {"account_id": "acct_123"}
+    # NO id GRAMMAR is imposed on the bare form: the ids this suite and the
+    # measured run actually use must pass. ``is_account_id`` is the WRONG guard
+    # here — its ``acc_`` grammar does not admit the ``acct-ada`` spelling, so it
+    # would refuse real ids while the server owns the id shape. This client only
+    # refuses what cannot be an id at all: empty, padded, internal whitespace.
+    for identifier in ("acct-123", "acc_2", "9f8a7b6c-1234-4abc-9def-0123456789ab"):
+        assert validate_send_recipient(identifier) == {"account_id": identifier}
+    # Pydantic is the tool's first door: it must hand on the canonical pair, or
+    # a later serializer would carry the raw string to the wire.
+    assert BridgeToolParams.model_validate({"op": "send", "to": "acct_123"}).to == {
+        "account_id": "acct_123"
+    }
+    assert validate_send_recipient({"account_id": "acc_2"}) == {"account_id": "acc_2"}
+    assert validate_send_recipient({"endpoint_id": "bep_9"}) == {"endpoint_id": "bep_9"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        ("acct_123", {"account_id": "acct_123"}),
+        ({"account_id": "acct_123"}, {"account_id": "acct_123"}),
+        ({"endpoint_id": "bep_9"}, {"endpoint_id": "bep_9"}),
+    ],
+)
+async def test_every_accepted_target_shape_sends_the_same_normalized_pair(
+    tmp_path, monkeypatch, target, expected
+) -> None:
+    """Both shapes are ONE contract: the durable intent and the wire agree.
+
+    The outbox row is what a restart retries, so the normalized pair has to be
+    what it records — a raw string surviving into ``to_json`` would replay a
+    body the server reads differently from the one that was validated.
+    """
+    from local_operator.team_bridge.outbox import Outbox
+
+    recorded: list[dict[str, Any]] = []
+    original = Outbox.record_send
+
+    def record(self, *args, **kwargs):
+        recorded.append(kwargs)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Outbox, "record_send", record)
+    requests: list[httpx.Request] = []
+    runtime = BridgeRuntime(
+        client=_client(
+            lambda request: (
+                requests.append(request),
+                _ok({"message": {"id": "bmsg_9"}}, status=201),
+            )[1]
+        ),
+        config_dir=tmp_path,
+        tenant_id=TENANT,
+        owner=_owner(),
+        session_id="synthetic-session",
+    )
+    result = await execute_bridge(runtime, {"op": "send", "to": target, "text": "synthetic"})
+    assert result["ok"] is True and result["state"] == "sent"
+    assert recorded[0]["to"] == expected
+    assert json.loads(requests[0].content)["to"] == expected
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"name": "Ada Lovelace"},
+        {"display_label": "Ada Lovelace"},
+        {"account_id": "acc_2", "endpoint_id": "bep_9"},
+        # A name written as a BARE string is the same guess through the new
+        # door: it reaches the teaching refusal, never the outbox.
+        "Ada Lovelace",
+    ],
+)
+def test_a_guessed_name_is_refused_with_the_accepted_shapes_and_the_directory(
+    target,
+) -> None:
+    """The refusal is the correction: a model that guessed a name learns the move.
+
+    Names are ambiguous and resolvable by the caller's own directory read, never
+    by this client — but a bare "unsupported field" taught the model nothing, so
+    every shape refusal names BOTH accepted shapes and where the ids come from.
+    It still quotes nothing caller-controlled (no value, no key).
+    """
+    from local_operator.team_bridge.types import (
+        RECIPIENT_ACCOUNT_SHAPE,
+        RECIPIENT_ENDPOINT_SHAPE,
+        InvalidSendRecipient,
+        validate_send_recipient,
+    )
+
+    with pytest.raises(InvalidSendRecipient) as refusal:
+        validate_send_recipient(target)
+    assert refusal.value.code == "invalid_request"
+    message = str(refusal.value)
+    assert RECIPIENT_ENDPOINT_SHAPE in message
+    assert RECIPIENT_ACCOUNT_SHAPE in message
+    assert "directory" in message
+    for caller_text in ("Ada", "Lovelace", "name", "display_label"):
+        assert caller_text not in message
+
+
+def test_the_published_to_schema_names_both_shapes_and_the_directory() -> None:
+    """The schema is the model's FIRST teacher, so it must describe what works.
+
+    Built from the same shape constants the refusals use — one source, so the
+    description cannot drift from what the validator accepts, and the bare form
+    passes the PUBLISHED schema rather than only Pydantic's runtime check.
+    """
+    from jsonschema import Draft202012Validator
+
+    from local_operator.providers.clients import (
+        _tools_to_openai,
+        _tools_to_openai_responses,
+    )
+    from local_operator.team_bridge.types import (
+        RECIPIENT_ACCOUNT_SHAPE,
+        RECIPIENT_ENDPOINT_SHAPE,
+        SEND_RECIPIENT_DESCRIPTION,
+    )
+
+    runtime = BridgeRuntime(
+        client=cast(TeamBridgeClient, object()),
+        config_dir=".",
+        tenant_id=TENANT,
+        owner=_owner(),
+        session_id="synthetic-schema",
+    )
+    tool = build_bridge_tool(ToolContext(bridge_runtime=runtime))
+    assert tool is not None
+    # The DESCRIPTION is the schema's own string: assert it on the parsed schema
+    # (json.dumps escapes the quotes the shapes are written with) and on every
+    # provider-compacted copy, since that is what a model actually reads.
+    description = tool.parameters["properties"]["to"]["description"]
+    assert description == SEND_RECIPIENT_DESCRIPTION
+    assert RECIPIENT_ACCOUNT_SHAPE in description
+    assert RECIPIENT_ENDPOINT_SHAPE in description
+    assert "directory" in description
+    for compacted in (
+        _tools_to_openai([tool])[0]["function"]["parameters"],
+        _tools_to_openai_responses([tool])[0]["parameters"],
+    ):
+        assert compacted["properties"]["to"]["description"] == SEND_RECIPIENT_DESCRIPTION
+    for schema in (
+        tool.parameters,
+        _tools_to_openai([tool])[0]["function"]["parameters"],
+        _tools_to_openai_responses([tool])[0]["parameters"],
+    ):
+        Draft202012Validator.check_schema(schema)
+        assert (
+            list(
+                Draft202012Validator(schema).iter_errors(
+                    {"op": "send", "to": "acct_123", "text": "synthetic"}
+                )
+            )
+            == []
+        )

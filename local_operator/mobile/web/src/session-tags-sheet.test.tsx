@@ -507,7 +507,7 @@ describe("copy and storage", () => {
 	   here while the SPA's runtime lookup missed it. 19 keys is the whole slice:
 	   the 18 sheet/list strings plus the list's long-press discoverer. */
 	it("ships every tag key in the English bundle under its own namespace", () => {
-		const messages = BUNDLED_OWNED["relay.session.tags"] ?? {};
+		const messages = BUNDLED_OWNED["relay.session.tags"].en ?? {};
 		const keys = Object.keys(messages);
 		expect(keys).toHaveLength(19);
 		expect(keys.every((key) => key.startsWith("relay.session.tags."))).toBe(true);

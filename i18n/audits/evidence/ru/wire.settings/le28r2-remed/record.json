@@ -1,0 +1,145 @@
+{
+  "schema": 1,
+  "audit_id": "le28r2-remed",
+  "locale": "ru",
+  "namespace": "wire.settings",
+  "audit_date": "2026-10-28",
+  "round": 2,
+  "scope": "delta: the corrected keys only, plus their direct sentence",
+  "remediation_commit": "4d38a1d4b8e9a36fa0a38f4833ecf86263da45db",
+  "previous_revision": "9495f8a6c3bf2b5438ef5c33d7274cf519435dda",
+  "key_count": 820,
+  "keys_reaudited": 4,
+  "input_hashes": {
+    "en": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+    "target_before": "f282f919845af17f0ee837083ee9e452796573c3af0d2b37580b775d3a0f963d",
+    "target_after": "9156360167e72197d97bfb8caeaa0c7e2795b03d0dceeb7195d24b8f9d1f40bd",
+    "target_after_original_remediation": "5185479b62b911f6db52d90e20356c0b002704738553bba44f7d90caf79d37e1"
+  },
+  "input_paths": {
+    "en": "local_operator/i18n/catalogues/en/wire.settings.json",
+    "target": "local_operator/i18n/catalogues/ru/wire.settings.json"
+  },
+  "current_bytes_match_audited_hashes": true,
+  "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+  "target_sha256": "9156360167e72197d97bfb8caeaa0c7e2795b03d0dceeb7195d24b8f9d1f40bd",
+  "current_report_verdict": "PASS",
+  "ledger_status": "passed",
+  "unresolved_blocker_major": 0,
+  "auditor": {
+    "agent": "translation-reviewer (independent; did not translate)",
+    "session": "bc5209588225",
+    "models": "anthropic/claude-sonnet-5-5 for the original wire.settings audits; openai/gpt-6-astra for reconciliation and packaging; provider fallbacks disclosed in the pair record",
+    "independence": "The remediation was authored in a separate translator session (c57356a6dc11 lane); this audit only judged the resulting bytes."
+  },
+  "read_provenance": {
+    "method": "delta judgement on the merged working tree; routed read_public_copy receipt at the remediation commit",
+    "mechanism": "lop exec --run-in <translator worktree at 4d38a1d4> --tools read_public_copy",
+    "sanctioned_reader_receipts": [
+      "route-receipt.json"
+    ],
+    "routed_files": [
+      "local_operator/i18n/catalogues/ru/wire.settings.json"
+    ],
+    "context_sidecar_routed": false,
+    "sanctioned_route_verified": "partial",
+    "note": "The en context sidecar is not routable at this tool version (non-string values); the unchanged English source hash is the one audited in le28r2."
+  },
+  "findings": [
+    {
+      "key": "wire.settings.subagents_max_running.label",
+      "severity_raised": "major",
+      "disposition": "fixed",
+      "resolved": true,
+      "new_value": "Макс. фоновых заданий",
+      "en": "Max background jobs",
+      "note": "job → «задание» per the ru guide; «задача» stays for todos."
+    },
+    {
+      "key": "wire.settings.supplements_maxcostusd.help",
+      "severity_raised": "major",
+      "disposition": "fixed",
+      "resolved": true,
+      "new_value": "Требует включённых графиков. Мягкий потолок расходов на одно задание.",
+      "en": "Needs graphics on. Soft cap on one job's spend.",
+      "note": "job → «задание»."
+    },
+    {
+      "key": "wire.settings.supplements_timeouts.help",
+      "severity_raised": "major",
+      "disposition": "fixed",
+      "resolved": true,
+      "new_value": "Требует включённых дополнений. Отказаться от всего задания по истечении этого срока.",
+      "en": "Needs Highlights on. Give up on a whole job after this long.",
+      "note": "job → «задание»."
+    },
+    {
+      "key": "wire.settings.librarian_enabled.help",
+      "severity_raised": "major",
+      "disposition": "fixed",
+      "resolved": true,
+      "new_value": "Считывается при запуске и в /v1/desktop/librarian; если отключено, его сессия не создаётся.",
+      "en": "Read at boot and by /v1/desktop/librarian; a disabled install never creates her session.",
+      "note": "session → «сессия»; masculine «его» agrees with «Библиотекарь» (m.), as in librarian_cadence_min_gap_minutes.help, librarian_cadence_max_extra_per_day.help and librarian_name.help. The first remediation used «её» (mirroring English \"her\" and the feminine Aida key) and was corrected in review round 1 (F1)."
+    }
+  ],
+  "limitations": [
+    "Delta scope only: the 809 unchanged keys keep their le28r2 judgement.",
+    "No native-speaker certification; Hindi idiom would need one.",
+    "Scalar text/ICU checks, not a rendered frame."
+  ],
+  "artifacts": [
+    "findings.json",
+    "receipt.json",
+    "record.json",
+    "report.md",
+    "route-receipt.json"
+  ],
+  "post_review_delta": {
+    "id": "le28r2-remed-r1-F1",
+    "date": "2026-10-29",
+    "commit": "bd47fce698d3d498c503f047216e4e442f7d0d67",
+    "key": "wire.settings.librarian_enabled.help",
+    "before": "Считывается при запуске и в /v1/desktop/librarian; если отключено, её сессия не создаётся.",
+    "after": "Считывается при запуске и в /v1/desktop/librarian; если отключено, его сессия не создаётся.",
+    "reason": "PR #3123 review round 1, F1 (major): «её» disagreed with the masculine «Библиотекарь»; every sibling librarian key uses «его»/«он».",
+    "catalogue_sha256_before": "5185479b62b911f6db52d90e20356c0b002704738553bba44f7d90caf79d37e1",
+    "catalogue_sha256_after": "9156360167e72197d97bfb8caeaa0c7e2795b03d0dceeb7195d24b8f9d1f40bd",
+    "catalogue_sha256_after_recomputed_from": "git show bd47fce698d:local_operator/i18n/catalogues/ru/wire.settings.json (122294 bytes), sha256 recomputed by the implementer",
+    "diff": "one file, one line, one word: «её» → «его»",
+    "independent_delta_audit": {
+      "verdict": "PASS",
+      "findings": 0,
+      "auditor": "translation-reviewer (independent; neither the translator nor the original le28r2 auditor)",
+      "job": "772c338410e1",
+      "model": "anthropic/claude-sonnet-5-5",
+      "fallback_observed": "none",
+      "native_speaker": false,
+      "scope": "the changed key and its direct sentence; sibling librarian keys and the aida contrast keys",
+      "siblings_read": {
+        "wire.settings.librarian_enabled.help": "его сессия (changed)",
+        "wire.settings.librarian_enabled.label": "Библиотекарь включён (m.)",
+        "wire.settings.librarian.title": "Библиотекарь",
+        "wire.settings.librarian.description": "no pronoun",
+        "wire.settings.librarian_cadence_min_gap_minutes.help": "его проходами",
+        "wire.settings.librarian_cadence_max_extra_per_day.help": "он может запросить",
+        "wire.settings.librarian_name.help": "его закреплённый разговор",
+        "wire.settings.aida_enabled.help": "её сессия (correct: Aida is feminine)"
+      },
+      "read_route": "direct git read of the worktree at bd47fce698d (not read_public_copy) plus one sanctioned keyed read_public_copy receipt",
+      "sanctioned_receipt": {
+        "tool": "read_public_copy",
+        "session": "a9c861a89848",
+        "ts": "2026-10-29T02:30:50Z",
+        "key": "wire.settings.librarian_enabled.help",
+        "chars": 138,
+        "sha256": "906cc219bdea84946cc233637cc1808a26f0eaf422b978cb47886fd9a997c3d4",
+        "sha256_note": "digest of the tool's rendered one-key response (138 chars), not of the file; the implementer matched it to the key's value rendered as a one-key JSON object (indent=1)"
+      },
+      "receipt_comparison": "the auditor compared the receipt text to the direct read by eye and content, NOT by a mechanical byte diff (the receipt reached it as model-relayed text); no byte-identity claim is made for that comparison",
+      "basis_caveat": "no formal ru glossary file was found by the auditor; the «сессия» judgement rests on usage consistency across the catalogue (i18n/glossary.md line 44 does list session → сессия)",
+      "conclusion": "«её» was a genuine agreement error, not a defensible reading; «его сессия» is correct and no sibling is inconsistent"
+    }
+  },
+  "routed_receipt_scope_note": "routed_receipt / route-receipt.json bind the ORIGINAL remediation bytes at 4d38a1d4b8e (catalogue sha256 c07e9c46…, body of the file as read then); the post-review F1 delta is recorded in post_review_delta"
+}

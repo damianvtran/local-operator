@@ -114,6 +114,18 @@ HOLD_CODES = (
     # card to engage it (team_bridge.engagement). Listed so the owner's surface
     # renders the specific reason rather than ``unknown_hold``.
     "open_chief_of_staff",
+    # Not a screening outcome either: the connector's wait for a DEAD
+    # connector's mid-handoff claim to expire before re-driving the message
+    # (team_bridge.connector.loop.HOLD_STALE_CLAIM). Transient — at most one
+    # claim lease — but listed so it renders as itself, not ``unknown_hold``.
+    "stale_claim",
+    # Its re-drive: the same message as an ordinary retry, so a stop that
+    # interrupts the re-drive can never retire it (PR #3063 review M1).
+    "stale_claim_retry",
+    # A re-drive that waits on something outside the row (review n4): the
+    # owner has no designated session, or a session/spine holds the claim.
+    "badge_only",
+    "claimed_elsewhere",
 )
 
 #: Per-type RAW utf8 caps on the fetched body (§8.3 screening inputs).

@@ -1,0 +1,81 @@
+{
+  "wire.radient_saver.section.title": {
+    "role": "settings section title in the TUI /settings page and connected settings UIs",
+    "tone": "plain",
+    "note": "'Radient Saver' is a product name: never translate it. '(beta)' marks the feature's release stage and must stay visible.",
+    "maxCells": 29
+  },
+  "wire.radient_saver.section.description": {
+    "role": "settings section description",
+    "tone": "plain, precise, reassuring",
+    "note": "'Radient Saver', 'Saver' and 'Radient' are product names: never translate them. The sentence 'Saver never sends your AI provider's credentials to Radient' is a mandatory security statement: keep its meaning exact (credentials = API keys and sign-in tokens for the user's AI provider such as Anthropic or OpenAI). 'Turn' = one request/answer exchange with the model."
+  },
+  "wire.radient_saver.mode.label": {
+    "role": "settings row label (enum)",
+    "tone": "plain",
+    "note": "Product name plus the release stage. 'Radient Saver' is never translated; '(beta)' must stay visible.",
+    "maxCells": 29
+  },
+  "wire.radient_saver.mode.help": {
+    "role": "settings row help text",
+    "tone": "plain, precise",
+    "note": "Product names 'Radient Saver', 'Saver', 'Radient' are never translated. 'LOP_RADIENT_SAVER' is an environment variable name: copy it exactly. The credential sentence is a mandatory security statement; keep its meaning exact. 'Radient credits' is the prepaid balance on the user's Radient account. 'Keeps none of its content' means Radient stores nothing of the conversation."
+  },
+  "wire.radient_saver.mode.choice.off.label": {
+    "role": "enum choice label",
+    "tone": "plain",
+    "note": "Choice value shown beside the description. Short, lowercase where the language allows.",
+    "maxCells": 12
+  },
+  "wire.radient_saver.mode.choice.off.description": {
+    "role": "enum choice description",
+    "tone": "plain",
+    "note": "Off is the shipped default. 'History' = the conversation's earlier messages."
+  },
+  "wire.radient_saver.mode.choice.opt_in.label": {
+    "role": "enum choice label",
+    "tone": "plain",
+    "note": "The feature is allowed, but each session must turn it on itself.",
+    "maxCells": 12
+  },
+  "wire.radient_saver.mode.choice.opt_in.description": {
+    "role": "enum choice description",
+    "tone": "plain",
+    "note": "Allowed but off by default for each session; a later release adds the per-session switch."
+  },
+  "wire.radient_saver.notice.unavailable": {
+    "role": "transient session notice (warning) shown once per session in the conversation",
+    "tone": "calm, reassuring",
+    "note": "The service could not be reached or timed out. The user's turn still succeeds; only the saving is skipped. 'Full history' = the whole conversation sent unshortened."
+  },
+  "wire.radient_saver.notice.rejected": {
+    "role": "transient session notice (warning) shown once per session",
+    "tone": "calm, factual",
+    "note": "The client validated the server's answer and refused it. Nothing went wrong for the user; the turn succeeds with the full history."
+  },
+  "wire.radient_saver.notice.signed_out": {
+    "role": "transient session notice (warning) shown once per session",
+    "tone": "plain, actionable",
+    "note": "'/login radient' is a command the user types: copy it exactly, never translate it."
+  },
+  "wire.radient_saver.notice.no_credit": {
+    "role": "transient session notice (warning) shown once per session",
+    "tone": "plain, actionable",
+    "note": "'console.radienthq.com' is a web address: copy it exactly. 'Credit' = prepaid money on the Radient account."
+  },
+  "wire.radient_saver.notice.rate_limited": {
+    "role": "transient session notice (info/warning) shown once per session",
+    "tone": "calm",
+    "note": "The service asked the client to slow down; it resumes by itself."
+  },
+  "wire.radient_saver.notice.disabled": {
+    "role": "transient session notice (warning) shown once per session",
+    "tone": "calm, factual",
+    "note": "Covers a server without the feature, a non-standard Radient address, or a sign-in that cannot be used for Saver. No action is implied."
+  },
+  "wire.radient_saver.notice.oversize": {
+    "role": "transient session notice (info/warning) shown once per session",
+    "tone": "calm, reassuring",
+    "note": "A single message (typically a very large tool output) is bigger than Saver can accept. It is sent in full; the rest of the conversation keeps being shortened. No action is needed."
+  }
+}

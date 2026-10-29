@@ -39,7 +39,11 @@ function primitiveParams(value: unknown): Record<string, PrimitiveType> | null {
 	return result;
 }
 
-export function createMessageRuntime(readContext: () => LocaleSnapshot, changed: () => void) {
+export function createMessageRuntime(
+	readContext: () => LocaleSnapshot,
+	changed: () => void,
+	requiredBundles: readonly string[] = [],
+) {
 	const bundles = new Map<string, Map<string, Catalogue>>();
 	const wires = new Map<string, Map<string, Catalogue>>();
 	const formats = new Map<string, IntlMessageFormat>();
@@ -69,13 +73,15 @@ export function createMessageRuntime(readContext: () => LocaleSnapshot, changed:
 		changed();
 	}
 	function uiLocaleFor(backendLocale: string | null): string {
-		// No own catalogues in B: English/LTR even if backend preference is fr.
-		// A later namespace extraction may register audited bundles. Require the
-		// whole English key set so partial maps cannot mislabel fallback copy.
-		if (!backendLocale || bundles.size === 0) return "en";
-		for (const locales of bundles.values()) {
-			const english = locales.get("en");
-			const translated = locales.get(backendLocale);
+		// Direction follows the copy actually selected, never backend preference.
+		// The generated owned-namespace manifest is explicit so a wholly absent
+		// namespace fails closed just like a partial key map. Partial maps cannot
+		// mix English fallback with translated copy under one page language.
+		if (!backendLocale || requiredBundles.length === 0) return "en";
+		for (const namespace of requiredBundles) {
+			const locales = bundles.get(namespace);
+			const english = locales?.get("en");
+			const translated = locales?.get(backendLocale);
 			if (!english || !translated || Object.keys(english).length === 0 || !Object.keys(english).every(key => key in translated)) return "en";
 		}
 		return backendLocale;

@@ -87,7 +87,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NoReturn
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -521,6 +521,13 @@ _READ_REFUSALS: dict[str, tuple[int, str]] = {
     "malformed_page": (
         502,
         "the agent-messages hub answered in a shape this build cannot read",
+    ),
+    # Transient local overload of the notification-avatar renderer, kept apart
+    # from ``malformed_page`` (a bad image) so the desktop never confuses the
+    # two (QA round 2, Q2). No ``Retry-After``: the desktop does not retry it.
+    "renderer_busy": (
+        503,
+        "the notification image renderer is busy; showing initials for now",
     ),
     "wrong_tenant": (
         409,
@@ -1431,10 +1438,30 @@ class ScheduledUpdateIn(_Strict):
     #: The schedule's COMPLETE replacement image set; ``[]`` removes every
     #: image (the hub releases them). Omitted = images unchanged.
     attachment_ids: list[str] | None = Field(default=None, max_length=4)
+    #: The ``version`` of the schedule view this edit was derived from, echoed
+    #: back so the hub (agent-server #223) applies it only to THAT version and
+    #: otherwise answers 409 ``invalid_transition`` ``{rule: concurrent_edit}``
+    #: with nothing written; without it a client editing a stale list would
+    #: silently overwrite another device's edit (its image list in particular).
+    #: Omitted = the hub's own read-then-write check only, the pre-#223 wire.
+    #:
+    #: Old hubs: the hub decodes this body with ``DisallowUnknownFields``, so a
+    #: pre-#223 hub answers 400 to the key. There is no capability flag for it;
+    #: the gate is the read itself: a hub that knows ``expected_version`` is the
+    #: one that returns ``version`` on every schedule response, and a caller may
+    #: only echo a ``version`` it read. Forwarded only when set
+    #: (``exclude_unset``), so a caller that never saw ``version`` never sends it.
+    #:
+    #: ``strict`` and the int64 ceiling mirror the hub's ``*int64`` decode: a
+    #: string, bool, fraction or overflow would be a hub 400, so it fails here.
+    expected_version: int | None = Field(default=None, ge=0, le=2**63 - 1, strict=True)
 
     @model_validator(mode="after")
     def _edit(self) -> "ScheduledUpdateIn":
-        if not self.model_fields_set or any(
+        # ``expected_version`` is a precondition, not a change: on its own the
+        # hub would answer ``empty_patch``, so it does not satisfy this rule.
+        # An explicit null is refused for every field, the precondition included.
+        if not (self.model_fields_set - {"expected_version"}) or any(
             getattr(self, name) is None for name in self.model_fields_set
         ):
             raise ValueError("a schedule edit requires body, send_at or attachment_ids")
@@ -2636,6 +2663,111 @@ async def get_account_avatar(
     return Response(
         content=data,
         media_type=mime,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
+_NOTIFICATION_AVATAR_REQUIRED = frozenset(
+    {"tenant_id", "kind", "theme", "size", "initials", "expected_account_id"}
+)
+_NOTIFICATION_AVATAR_PHOTO = frozenset({"v", "avatar_account_id"})
+
+
+@router.get("/v1/desktop/team-bridge/accounts/{target_account_id}/notification-avatar")
+async def get_notification_avatar(
+    target_account_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """One precomposed PNG for a Team Bridge OS notification's image slot.
+
+    Capability ``team_bridge_notification_avatar``. The desktop main process
+    calls this (never the renderer with a URL) to warm its display cache, and
+    on a miss waits at most 250 ms before posting with initials anyway (the
+    operator's bounded-wait decision), so this route can never hold a
+    notification back beyond that budget.
+
+    Closed query, every name single-valued:
+
+    * ``tenant_id`` the directory/event tenant (part of the desktop's display
+      cache key; never overrides hub authorization); ``kind`` ``person|person_agent``;
+      ``theme`` ``light|dark``; ``size``
+      ``64|256``; ``initials`` 0-2 letters/digits (may be empty);
+      ``expected_account_id`` the captured VIEWER receipt, as on ``/avatar``.
+    * ``v`` + ``avatar_account_id``: both or neither. With them, the photo is
+      read through the same closed ``/avatar`` relay; without, an initials
+      placeholder is drawn and no network is touched.
+
+    ``avatar_account_id`` must equal the path account: the Team Bridge sender
+    contract pins a ``person_agent``'s avatar to its OWNER's account (which is
+    the path id), so an avatar naming any other account is refused rather than
+    drawn under someone else's name.
+
+    ``private, no-store``: core renders statelessly and keeps no composite. The
+    desktop main process owns display retention (A0: in memory, <= 15 minutes,
+    cleared on auth transitions); an HTTP/disk cache here could not apply its
+    login fence.
+
+    Refusals specific to this route: ``502 malformed_page`` when the hub's
+    bytes are not a bounded PNG/JPEG, and ``503 renderer_busy`` when the
+    renderer's pending queue is full (a burst beyond 8 in flight). The second
+    is transient and carries no ``Retry-After``: the desktop shows initials
+    NOW, does not retry in the post path (the bounded wait has already spent
+    its budget, Team Bridge T2), and never negative-caches it as "no picture",
+    so the next notification from that sender asks again.
+    """
+
+    from local_operator.team_bridge import notification_avatar as na
+
+    query = request.query_params
+    names = set(query)
+    photo_names = names & _NOTIFICATION_AVATAR_PHOTO
+    if (
+        not _NOTIFICATION_AVATAR_REQUIRED <= names
+        or names - _NOTIFICATION_AVATAR_REQUIRED - _NOTIFICATION_AVATAR_PHOTO
+        or photo_names not in (set(), set(_NOTIFICATION_AVATAR_PHOTO))
+        or any(len(query.getlist(key)) != 1 for key in names)
+    ):
+        _raise_read("invalid_request")
+    if (
+        not is_account_id(target_account_id)
+        or not is_account_id(query["expected_account_id"])
+        or not query["tenant_id"].strip()
+        or len(query["tenant_id"]) > 128
+        or query["kind"] not in na.KINDS
+        or query["theme"] not in na.THEMES
+        or query["size"] not in {"64", "256"}
+        or not na.valid_initials(query["initials"])
+        or (photo_names and re.fullmatch(r"[0-9a-f]{16}", query["v"]) is None)
+        or (photo_names and query["avatar_account_id"] != target_account_id)
+    ):
+        _raise_read("invalid_request")
+    try:
+        data = await _conversation_reply(
+            _conversation_client(config_manager).notification_avatar(
+                target_account_id,
+                tenant_id=query["tenant_id"],
+                kind=cast(Literal["person", "person_agent"], query["kind"]),
+                theme=cast(Literal["light", "dark"], query["theme"]),
+                size=int(query["size"]),
+                initials=query["initials"],
+                v=query["v"] if photo_names else None,
+                expected_account_id=query["expected_account_id"],
+            )
+        )
+    except na.RendererBusy:
+        _raise_read("renderer_busy")
+    except na.AvatarImageRejected:
+        # The hub's bytes were not a bounded PNG/JPEG: same class as an
+        # avatar body this relay refuses to serve.
+        _raise_read("malformed_page")
+    return Response(
+        content=data,
+        media_type="image/png",
         headers={
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "default-src 'none'; sandbox",

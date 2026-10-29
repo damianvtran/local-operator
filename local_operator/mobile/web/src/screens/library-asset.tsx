@@ -37,7 +37,7 @@ import { cn } from "../lib/cn";
 import { assetPrompt, formatBytes, kindLabel, originLabel } from "../lib/library";
 import { formatRelative } from "../lib/format";
 import { navigate, navigateUp } from "../router";
-import { setDraft } from "../store";
+import { setDraft, useLocaleSnapshot } from "../store";
 import type { LibraryAsset } from "../types";
 
 const TEXT_PREVIEW_LIMIT = 32_000;
@@ -136,7 +136,7 @@ function Preview({ asset }: { asset: LibraryAsset }) {
 				<Markdown text={text.text} />
 			</div>
 		) : (
-			<pre className="lo-scroll max-h-[50vh] overflow-auto rounded-md bg-sunken p-3 font-mono text-mono-sm whitespace-pre-wrap text-ink">
+			<pre dir="ltr" className="lo-scroll max-h-[50vh] overflow-auto rounded-md bg-sunken p-3 font-mono text-mono-sm whitespace-pre-wrap text-ink">
 				{text.text}
 			</pre>
 		);
@@ -193,6 +193,8 @@ function commandId(): string {
 }
 
 export function LibraryAssetScreen({ assetId }: { assetId: string }) {
+	/* Repaint on a live language write (QA Q-1): `t()` alone never re-renders. */
+	useLocaleSnapshot();
 	const [asset, setAsset] = useState<LibraryAsset | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState("");
@@ -270,7 +272,7 @@ export function LibraryAssetScreen({ assetId }: { assetId: string }) {
 						aria-label="back to library"
 						className="flex min-h-11 min-w-11 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
 					>
-						‹
+						<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 					</button>
 					<h1 className="text-heading text-ink">asset</h1>
 				</header>
@@ -295,7 +297,7 @@ export function LibraryAssetScreen({ assetId }: { assetId: string }) {
 					aria-label="back to library"
 					className="flex min-h-11 min-w-11 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
 				>
-					‹
+					<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 				</button>
 				<h1 className="min-w-0 flex-1 truncate px-1 text-heading text-ink">{asset.name}</h1>
 				<button
@@ -360,7 +362,7 @@ export function LibraryAssetScreen({ assetId }: { assetId: string }) {
 								onClick={() => navigate(`/s/${encodeURIComponent(occurrence.session_id)}`)}
 								className="flex min-h-11 items-center justify-between gap-2 rounded-sm border border-hairline bg-surface px-2 text-start active:bg-elevated"
 							>
-								<span className="min-w-0 flex-1 truncate text-body-sm text-ink">
+								<span dir={occurrence.session_title ? undefined : "ltr"} className="min-w-0 flex-1 truncate text-body-sm text-ink">
 									{occurrence.session_title || occurrence.session_id}
 								</span>
 								<span className="text-meta text-ink-dim">{occurrence.origin}</span>
@@ -375,7 +377,7 @@ export function LibraryAssetScreen({ assetId }: { assetId: string }) {
 						onClick={() => navigate(`/s/${encodeURIComponent(asset.chat?.session_id ?? "")}`)}
 						className="flex min-h-11 items-center gap-2 rounded-sm border border-info-border bg-info-wash px-2 text-start text-body-sm text-info active:bg-elevated"
 					>
-						<span aria-hidden>↳</span>
+						<span aria-hidden className="lo-directional">↳</span>
 						<span className="min-w-0 flex-1 truncate">
 							chat: {asset.chat.title || asset.chat.session_id}
 						</span>

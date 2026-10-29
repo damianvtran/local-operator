@@ -123,6 +123,7 @@ def _consumer_defaults() -> dict[str, object]:
         RetrySettings,
     )
     from local_operator.remote_compute import DEFAULT_REMOTE_COMPUTE_ENABLED
+    from local_operator.saver.gate import DEFAULT_MODE as SAVER_DEFAULT_MODE
     from local_operator.scratchpad import SCRATCHPAD_TOTAL_BUDGET_BYTES
     from local_operator.session.cleanup import (
         DEFAULT_DELEGATED_ENABLED,
@@ -375,6 +376,10 @@ def _consumer_defaults() -> dict[str, object]:
         # constant here, and DEFAULT_CONFIG against it in
         # ``test_the_retire_below_tps_default_config_matches_the_consumer``.
         "providers.openrouter.retire_below_tps": OPENROUTER_RETIRE_BELOW_TPS,
+        # Radient Saver's gate reads ``saver.gate.DEFAULT_MODE`` when nothing is
+        # configured; the registry row and DEFAULT_CONFIG restate it, and the
+        # contract's "later flip" must move all three together.
+        "radient.saver.mode": SAVER_DEFAULT_MODE,
         # The fork keys have REAL single-value consumers — the constants
         # ``/fork`` itself reads — so they are mapped here rather than
         # allow-listed. An allow-list entry would buy a green test while leaving

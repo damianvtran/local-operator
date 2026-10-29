@@ -415,7 +415,7 @@ export function answeredPairs(
 					const option = (q.options ?? []).find((o) => o.label === label);
 					return option?.description ? `${label} — ${option.description}` : label;
 				})
-				.join(", "),
+				.join(" · "),
 		};
 	});
 }
