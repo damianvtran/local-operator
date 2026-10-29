@@ -381,16 +381,18 @@ SCOPE_CONVERSATION = ResolutionScope(
 
 #: ``send``/``reply``: the owner's REACHABLE set — the bridge directory
 #: intersected with the owner's own send-allowlist, never directory-wide. A name
-#: that resolves to nobody says BOTH reasons it might not, because "not on this
-#: team" and "their bridge is off" are different facts with different next moves
-#: for the human, and a model that cannot tell them apart guesses.
+#: that resolves to nobody names the reasons it might not — "not on this team",
+#: "their bridge is off", or "your allowlist does not name them" — because those
+#: are different facts with different next moves for the human, and a model that
+#: cannot tell them apart retries uselessly instead of saying something true.
 SCOPE_ALLOWLIST = ResolutionScope(
     name="allowlist",
     where="in your bridge allowlist",
     disambiguator="a more specific label, or an explicit account id",
     miss_hint=(
-        " — either they are not on this team, or their bridge is not enabled; "
-        "ask the human which, and an explicit account id still sends"
+        " — either they are not on this team, or their bridge is not enabled, or "
+        "your allowlist does not name them; ask the human which, and an explicit "
+        "account id still sends"
     ),
 )
 

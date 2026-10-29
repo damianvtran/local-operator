@@ -384,3 +384,65 @@ def test_the_schema_says_which_scope_each_op_resolves_in() -> None:
     assert "active members" in description
     assert "send/reply" in description
     assert "allowlist" in description
+
+
+@pytest.mark.asyncio
+async def test_a_reply_name_that_is_not_the_sender_is_refused(tmp_path) -> None:
+    """The negative case for the RELOCATED guard: a name must not redirect a reply.
+
+    A reply answers a message, so its recipient is that message's sender. Naming
+    somebody else is refused exactly as an explicit ``account_id`` naming somebody
+    else is — and the refusal happens BEFORE the outbox, so nothing is queued and
+    nothing is sent. Without this test the positive reply case would pass whether
+    or not the second ``_resolve_reply`` pass runs at all.
+    """
+    from local_operator.team_bridge.store import OwnerReceipt, OwnerSnapshot, Store
+    from local_operator.team_bridge.types import MessageRef
+
+    owner = OwnerSnapshot(
+        credential_id=1,
+        account_id="acc_owner",
+        tenant_id=TENANT,
+        endpoint_id="bep_owner",
+        canonical_base_url="https://hub.example",
+        enrollment_generation=1,
+    )
+    store = Store(tmp_path)
+    store.commit_enrollment(owner, OwnerReceipt(consent_version="cv-1", consent_ref="cr-1"))
+    store.merge_page(
+        owner,
+        [
+            MessageRef(
+                message_id="bmsg_ada",
+                thread_id="bth_ada",
+                tenant_id=TENANT,
+                message_type="note",
+                body_hash="b" * 64,
+                seq=1,
+                origin="member",
+                delivery_state="unread",
+                state_at="2026-10-20T00:00:00Z",
+                sender_account_id="acc_ada",
+                sender_endpoint_id="bep_ada",
+                recipient_account_id="acc_owner",
+                recipient_endpoint_id="bep_owner",
+                request_state=None,
+                request_expires_at=None,
+                request_ref=None,
+            ).validated()
+        ],
+        None,
+    )
+    # Bo IS reachable by name: the name resolves, and the reply guard is what
+    # refuses — which is the case this test exists for.
+    client, requests = _client(_directory(ADA, BO), _allowlist(_allow("acc_ada"), _allow("acc_bo")))
+    runtime = _runtime(client, config_dir=tmp_path, endpoint_id="bep_owner")
+    runtime.owner = owner
+    outcome = await execute_bridge(
+        runtime,
+        {"op": "reply", "message_id": "bmsg_ada", "to": {"name": "Bo Chen"}, "text": "psst"},
+    )
+    assert outcome["ok"] is False and outcome["code"] == "reply_conflict"
+    assert _posted(requests) == []
+    # The attempt is still on the record: it resolved, and was then refused.
+    assert _audit_rows(tmp_path)[-1]["resolved_account_id"] == "acc_bo"

@@ -676,9 +676,14 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         # wire body — sees exactly what an explicit account id would have given
         # it. Nothing downstream has to know a name was ever involved.
         resolved_to, unresolved = await _resolve_named_recipient(runtime, named_recipient)
-        if unresolved is not None:
-            return unresolved
-        assert resolved_to is not None  # the helper returns one or the other
+        if unresolved is not None or resolved_to is None:
+            # The helper returns a pair or a refusal. A None PAIR with no refusal
+            # would be a bug in it, and an `assert` here would be stripped under
+            # `-O` into an outbox intent whose `to` is None — so the unreachable
+            # case is a typed refusal, the same way every other unknown is.
+            return unresolved or _error(
+                "that recipient name did not resolve to an address; nothing was sent"
+            )
         args = {**args, "to": resolved_to}
         recipient = resolved_to
         if op == "reply":
