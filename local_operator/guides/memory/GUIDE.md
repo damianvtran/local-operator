@@ -42,13 +42,18 @@ global; `scope="session"` or `scope="global"` restricts it. Only those two scope
 values are accepted; team/agent and anything else is refused, never coerced.
 
 Global keeps a bounded shape check: a `#N` tracker reference next to a work word,
-any `!N` (GitLab work syntax), a `commit`/`sha`/`head` hex, a CI/release status verb,
-a `next step`/`HOLD` tied to a work word, a 12-hex session ID, a line opening as a
-goal statement (`Session goal (…):`), or an ISO date near PR/MR/merged/release/QA/
-review/round/lane/worktree/CI/gate/vX.Y.Z is refused, naming the marker and
-`scope="session"`. It is a bounded locator filter, not a classifier — prose work text
-with no locator, or a hyphenated key like `LOH-13`, still passes, and it is not a
-guarantee that a model will always choose the right scope.
+any `!N` (GitLab work syntax), a `commit`/`sha`/`head` hex, a line OPENING with
+`PR1234`/`MR1234`, a CI status verb, a merge/release verb, a `next step`/`next action`
+carrying a work noun, a work verb (`rebase`, `squash`, …) or a tool name, `session
+todo`, `task progress` on a named workstream, a `HOLD` on a PR/release/lane/merge/CI/
+deploy (or on a branch or ticket with a review state), a 12-hex session ID, a line
+opening as a goal statement (`Session goal (…):`), or an ISO date near PR/MR/merged/
+release/QA/review/round/lane/worktree/CI/gate/vX.Y.Z is refused, naming the shape that
+matched. It is a bounded locator filter, not a classifier — prose work text with no
+locator, a hyphenated key like `LOH-13`, or a personal reference number (`Flight
+PR102`, `policy PR90021`) still passes, and it is not a guarantee that a model will
+always choose the right scope. A `Session todo:` line is refused too: write the
+reminder itself, without the session framing, and it stores in global.
 
 Work state and checkpoints use `memory://session`; intentionally shared work uses
 `memory://team`, and persistent profile knowledge uses `memory://agent` when authorized.
@@ -207,7 +212,7 @@ consolidate. Rows print
 a paste-ready `SCOPE/ID`; `list` and `search` cover every scope the context is
 authorized for (`--session ID` adds a session), and items are labelled `captured`
 (status `candidate`, even when a deliberate edit or move has already taken it out of
-the automatic pass — see the capture paragraph above) or `stated` (deliberate).
+the automatic pass — see the capture paragraph above) or `stated`.
 `edit ID --revision REV --body …` changes only the named fields; `--json` prints
 machine-readable output.
 

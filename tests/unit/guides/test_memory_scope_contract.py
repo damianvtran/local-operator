@@ -71,3 +71,21 @@ def test_capture_label_and_tombstone_floor_claims_match_the_code() -> None:
     assert "(automatic, unreviewed)" not in body
     assert "once the session holds 2,500 tombstones" in body
     assert "its forgets and expiries counted with its evictions" in body
+
+
+def test_scope_fit_shapes_and_the_session_todo_remedy_are_documented() -> None:
+    """Review round 1 n-1/n-2 and QA round 1 Q-3/Q-4.
+
+    The shape list must name what the code actually refuses (a line-opening `PR1234`,
+    `session todo`, `task progress`, `next action`), it must not claim the refusal
+    says only "the marker", and the `stated` gloss must not re-create the
+    contradiction the capture paragraph removed.
+    """
+    body = _memory_guide()
+
+    assert "a line OPENING with" in body
+    assert "naming the shape that" in body
+    assert "naming the marker and" not in body
+    assert "A `Session todo:` line is refused too" in body
+    assert "write the reminder itself, without the session framing" in body
+    assert "or `stated` (deliberate)" not in body
