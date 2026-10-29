@@ -1,0 +1,11 @@
+{
+  "cli.services_help.services": "Pasar a la compilación actual los servicios de esta máquina que no son runtimes (daemons serve y supervisados), sin detener ninguna conversación activa",
+  "cli.services_help.services_description": "Todo lo que local_operator ejecuta en esta máquina y no es una conversación. Un “servicio” es un daemon `lop serve` o un LaunchAgent supervisado: el relé móvil, el puente del navegador, el túnel y el agente de despertares. Los runtimes —los procesos que contienen tus conversaciones— nunca se detienen: “restart” recarga un daemon serve sin cambiar de proceso, conservando su pid y su socket.",
+  "cli.services_help.status": "Mostrar cada servicio que no es runtime, la compilación que está sirviendo y la de la instalación",
+  "cli.services_help.status_description": "Solo lectura. Indica la compilación de la instalación y, para cada daemon `lop serve`, la que está SIRVIENDO: ambos lados de cada comparación, porque la deriva habitual en esta máquina es una recompilación de la misma versión, y la versión por sí sola no revela que un daemon esté desactualizado.",
+  "cli.services_help.restart": "Pasar todos los servicios a la compilación actual (nunca detiene un runtime)",
+  "cli.services_help.wait": "Cuánto esperar a que un daemon solicitado vuelva con la nueva compilación (predeterminado: {wait_seconds}s; debe ser positivo). Si no vuelve, se informa de ello, sigue sirviendo la compilación que cargó y el próximo `lop services restart` lo reintenta.",
+  "cli.services_help.reclaim": "Terminar un daemon `lop serve` registrado que no esté sirviendo su dirección (nunca uno que la esté sirviendo)",
+  "cli.services_help.reclaim_description": "Pedir a UN daemon `lop serve`, identificado por pid, que termine, escalando de SIGTERM a SIGKILL tras un tiempo límite, después de comprobar que el proceso es el daemon serve de este producto y que no es el que sirve la dirección indicada en su registro. `lop services status` lista los daemons a los que se aplica. Nunca es automático: el daemon puede supervisar runtimes de sesión y quien lee un registro no puede comprobar que un sucesor esté listo para ocupar su lugar.",
+  "cli.services_help.pid": "pid del daemon, exactamente como lo imprime `lop services status`"
+}

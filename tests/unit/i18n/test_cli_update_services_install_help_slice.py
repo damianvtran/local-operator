@@ -178,17 +178,20 @@ def test_french_locale_reaches_each_owned_message_and_falls_back(monkeypatch):
         ).is_file()
         en_values = catalogues.load_catalogue("en", "cli." + namespace + "_help")
         fr_values = catalogues.load_catalogue("fr", "cli." + namespace + "_help")
+        es_values = catalogues.load_catalogue("es", "cli." + namespace + "_help")
         assert set(fr_values) == set(en_values)
+        assert set(es_values) == set(en_values)
         alias = {"update": "_up", "services": "_sr", "install": "_in"}[namespace]
         for key, value in en_values.items():
             rendered_fr = _message(alias, key.rsplit(".", 1)[1]).envelope(locale="fr")["text"]
             expected_fr = fr_values[key].replace("{wait_seconds}", "45")
             assert rendered_fr == expected_fr
             assert rendered_fr != value.replace("{wait_seconds}", "45")
-            # A shipped locale without this namespace still reads the source.
-            assert _message(alias, key.rsplit(".", 1)[1]).envelope(locale="es")[
-                "text"
-            ] == value.replace("{wait_seconds}", "45")
+            # Spanish carries this namespace after the es W2 wave: it reads its
+            # own catalogue, and that copy is not the English source.
+            rendered_es = _message(alias, key.rsplit(".", 1)[1]).envelope(locale="es")["text"]
+            assert rendered_es == es_values[key].replace("{wait_seconds}", "45")
+            assert rendered_es != value.replace("{wait_seconds}", "45")
     assert parser.prog
 
 

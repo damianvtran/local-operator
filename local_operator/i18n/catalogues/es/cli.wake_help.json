@@ -1,0 +1,19 @@
+{
+  "cli.wake_help.wake": "Inspeccionar los despertares programados y el supervisor que los activa",
+  "cli.wake_help.status": "si hay un supervisor instalado y qué activaría a continuación",
+  "cli.wake_help.json": "salida legible por máquina",
+  "cli.wake_help.status_install": "instalar el supervisor ahora en lugar de esperar a la próxima programación",
+  "cli.wake_help.status_uninstall": "eliminar el supervisor; los despertares programados solo se activarán cuando haya una sesión abierta",
+  "cli.wake_help.install": "instalar o reparar el supervisor ahora (reinicia uno obsoleto o detenido)",
+  "cli.wake_help.list": "todos los despertares programados en esta máquina, primero los más próximos",
+  "cli.wake_help.create": "programar un despertar para una sesión (instala el supervisor si hace falta)",
+  "cli.wake_help.create_session": "ID de la sesión que despertar",
+  "cli.wake_help.create_when": "cuándo activarlo: una duración (\"in 2m\", \"45s\") o una hora (\"at 09:30\")",
+  "cli.wake_help.create_message": "prompt automático que se entrega al activarse (como máximo {max} caracteres)",
+  "cli.wake_help.create_every": "repetir cada DURATION tras la primera activación (\"5m\", \"1h\", \"8h30m\")",
+  "cli.wake_help.create_until": "dejar de repetir después de este momento (\"in 7d\", \"at 09:30\")",
+  "cli.wake_help.create_limit": "dejar de repetir después de N activaciones",
+  "cli.wake_help.create_notify": "avisar al completarse el turno del despertar (sin avisos de forma predeterminada: los despertares creados por scripts cumplen el contrato; los turnos con errores avisan igualmente)",
+  "cli.wake_help.serve": "ejecutar el supervisor en primer plano (lo que ejecuta LaunchAgent)",
+  "cli.wake_help.serve_once": "activar todo lo que esté pendiente ahora y salir"
+}
