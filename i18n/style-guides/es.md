@@ -27,6 +27,11 @@ translators and the auditor. Wave 1 locale.
   backoff. Reason: settled dev usage across Spain and LatAm.
 - Prefer Spanish where settled: servidor, archivo, carpeta, red, dispositivo,
   ajustes (settings), equipo (team), habilidad (skill).
+- **Amendment (es W1, 2026-10-29): `cache` → `caché`.** The kept-English list
+  above named `cache`, but the shipped catalogue already used `caché` in ~40
+  strings (including the required `no garantiza un acierto de caché` in
+  `wire.settings.account_policy`). The guide now agrees with the shipped state;
+  follow `caché` rather than reopening the split.
 
 ## Locale calls (es)
 
@@ -39,6 +44,15 @@ translators and the auditor. Wave 1 locale.
   on **coste** throughout — recorded 2026-10-11).
 - job → trabajo (a backgrounded shell job; "control de trabajos" register —
   recorded 2026-10-11).
+- link → **vínculo** for a configured hub/agent/team link; **enlace** stays for
+  a hyperlink or a URL. W1 recorded both words in the catalogue before this
+  row existed; the rule is that a *configured link* is `vínculo`, so
+  `wire.slash.links`' `enlace` is a hyperlink and correct, not a drift.
+- lease → **concesión** (a provider credential lease; a DHCP-style grant, not a
+  rental contract).
+- skill → **habilidad**; the tight-form abbreviation `habil.` is acceptable only
+  where a hard cell budget forces it (`wire.settings.hub_defaults.agents.label`
+  is 29 cells and the full phrase does not fit).
 
 ## Plurals
 

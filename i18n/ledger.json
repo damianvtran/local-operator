@@ -7994,7 +7994,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "w1 es backfill: 2 keys; independent audit w1a3 passed (committed evidence i18n/audits/evidence/es/wire.aida_cadence/w1a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+      "note": "es W1 backfill: 2 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.aida_cadence/w1a3/. Open minor/nit findings are dispositioned in that report.md."
     },
     {
       "locale": "es",
@@ -8013,7 +8013,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "w1 es backfill: 8 keys; independent audit w1a3 passed (committed evidence i18n/audits/evidence/es/wire.console/w1a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+      "note": "es W1 backfill: 8 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.console/w1a3/. Open minor/nit findings are dispositioned in that report.md."
     },
     {
       "locale": "es",
@@ -8032,7 +8032,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "w1 es backfill: 17 keys; independent audit w1a3 passed (committed evidence i18n/audits/evidence/es/wire.exec/w1a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+      "note": "es W1 backfill: 17 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.exec/w1a3/. Open minor/nit findings are dispositioned in that report.md."
     },
     {
       "locale": "es",
@@ -8051,7 +8051,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "w1 es backfill: 2 keys; independent audit w1a3 passed (committed evidence i18n/audits/evidence/es/wire.host_speed/w1a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+      "note": "es W1 backfill: 2 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.host_speed/w1a3/. Open minor/nit findings are dispositioned in that report.md."
     },
     {
       "locale": "es",
@@ -8070,7 +8070,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "w1 es backfill: 14 keys; independent audit w1a4 passed (committed evidence i18n/audits/evidence/es/wire.settings.account_policy/w1a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+      "note": "es W1 backfill: 14 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Composite audit: full-pass round 2 `w1a3` over all 14 keys plus delta round 3 `w1a4` binding the two keys changed afterwards; `w1a4` supersedes `w1a3` for those keys and `w1a3` remains the audit of record for the unchanged rest. 0 unresolved blocker/major on these bytes. Evidence: i18n/audits/evidence/es/wire.settings.account_policy/w1a3/ and …/w1a4/. Open minor/nit findings are dispositioned in those report.md files."
     },
     {
       "locale": "es",
@@ -8089,7 +8089,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "w1 es backfill: 9 keys; independent audit w1a4 passed (committed evidence i18n/audits/evidence/es/wire.settings.hub_defaults/w1a4/). Open minor/nit findings are dispositioned in that evidence's report.md."
+      "note": "es W1 backfill: 9 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Composite audit: full-pass round 2 `w1a3` over all 9 keys plus delta round 3 `w1a4` binding the two keys changed afterwards; `w1a4` supersedes `w1a3` for those keys and `w1a3` remains the audit of record for the unchanged rest. 0 unresolved blocker/major on these bytes. Evidence: i18n/audits/evidence/es/wire.settings.hub_defaults/w1a3/ and …/w1a4/. Open minor/nit findings are dispositioned in those report.md files."
     },
     {
       "locale": "es",
@@ -8108,7 +8108,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "w1 es backfill: 2 keys; independent audit w1a3 passed (committed evidence i18n/audits/evidence/es/wire.slash.library/w1a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+      "note": "es W1 backfill: 2 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.slash.library/w1a3/. Open minor/nit findings are dispositioned in that report.md."
     },
     {
       "locale": "es",
@@ -8127,7 +8127,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "w1 es backfill: 5 keys; independent audit w1a3 passed (committed evidence i18n/audits/evidence/es/wire.tunnel_setup/w1a3/). Open minor/nit findings are dispositioned in that evidence's report.md."
+      "note": "es W1 backfill: 5 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). Independent full-pass audit `w1a3` (round 2) binds exactly these bytes: 0 unresolved blocker/major. Round 1 (`w1a1`/`w1a2`) preceded remediation and binds superseded bytes; its findings are carried in the w1a3 report. Evidence: i18n/audits/evidence/es/wire.tunnel_setup/w1a3/. Open minor/nit findings are dispositioned in that report.md."
     }
   ]
 }
