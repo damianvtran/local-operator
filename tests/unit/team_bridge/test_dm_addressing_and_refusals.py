@@ -337,6 +337,27 @@ async def test_dm_to_keeps_the_not_found_refusal_identical(
 
 
 @pytest.mark.asyncio
+async def test_dm_to_keeps_the_self_target_refusal_identical() -> None:
+    """A DM has two identities, so reaching your OWN person refuses either way.
+
+    The resolver compares the chosen row against the caller's account, so this is
+    the one refusal that needs the directory to contain the caller: it is the
+    guard that stops ``to`` from addressing the sender. Both spellings must land
+    on the same ``self_target`` answer, and neither may write.
+    """
+
+    members = [_member(), _member(account_id="acc_owner", label="Damian", endpoint_id="bep_1")]
+    by_field = DmClient(members)
+    by_to = DmClient(members)
+    field_outcome = await execute_bridge(_runtime(by_field), _dm(account_id="acc_owner"))
+    to_outcome = await execute_bridge(_runtime(by_to), _dm(to={"account_id": "acc_owner"}))
+
+    assert to_outcome == field_outcome, to_outcome
+    assert to_outcome["code"] == "self_target"
+    assert not [c for c in by_to.calls if c["method"] == "create_conversation"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "args",
     [
