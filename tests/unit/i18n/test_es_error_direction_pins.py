@@ -88,7 +88,6 @@ def test_a_missing_credential_is_not_a_refusal(auth):
     _missing_direction(auth["wire.errors.auth.credentials_missing"])
 
 
-
 def test_account_not_found_stays_a_lookup_failure(auth):
     value = auth["wire.errors.auth.account_not_found"].lower()
     assert "no se encontr" in value
