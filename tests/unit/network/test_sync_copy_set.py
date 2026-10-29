@@ -73,6 +73,7 @@ def _entry_owners() -> dict[str, str]:
     from local_operator.session.auto_tag import AUTO_TAG_FILENAME
     from local_operator.session.channel_spend import PENDING_SIDECAR_NAME
     from local_operator.session.creation import CREATED_AT_NAME
+    from local_operator.session.cwd_move import MOVE_MARKER_NAME
     from local_operator.session.placement import MESH_STAMP_NAME
     from local_operator.session.retention import (
         ATTACHMENT_SIDECAR_FILENAME,
@@ -132,6 +133,13 @@ def _entry_owners() -> dict[str, str]:
         # fact the published object states (sync.COPY_SET_NAMES's comment has
         # the full argument).
         PENDING_SIDECAR_NAME: "session.channel_spend",
+        # The session's own relocation intent (``session.cwd_move``): a request
+        # naming THIS device's absolute path and the pid that asked, so it is
+        # excluded from the copy set (``sync.EXCLUDED_ENTRIES`` has the argument —
+        # a destination that adopted it would retire into a directory that need not
+        # exist there). Listed here so the round-trip test builds it and proves it
+        # does NOT arrive.
+        MOVE_MARKER_NAME: "session.cwd_move",
         # The copy machinery's own two: a replica's cursor (never inside a session)
         # and the move's boot marker, which lives in a staging directory and is
         # deleted by the promote (a crash can leave one inside a promoted session,

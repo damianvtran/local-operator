@@ -402,6 +402,19 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     "runtime-run.json": (
         "this device's latest-run marker; the destination writes its own at the next boot"
     ),
+    # THE OWN-CWD MOVE INTENT (``session.cwd_move.MOVE_MARKER_NAME``): a request for
+    # THIS device's runtime to relocate its own session, naming an absolute path on
+    # this device and the pid that asked. Neither means anything on a peer, and
+    # carrying it would do harm rather than nothing: the destination would boot with
+    # the intent still `queued`, its move watcher would consume it at the first idle
+    # tick, and the peer would retire a session into a directory that need not exist
+    # there — and nothing clears it, because a boot that is not in the destination is
+    # deliberately not read as a failure. The source's own directory goes with the
+    # move, so the record goes with it.
+    "runtime-cwd-move.json": (
+        "a local relocation request naming this device's path and pid; a destination "
+        "must not adopt it"
+    ),
     # Written by the destination itself, because ``home_device`` has to name the
     # NEW owner. Copying it would leave the moved session stamped as this
     # device's.
