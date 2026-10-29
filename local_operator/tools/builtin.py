@@ -32165,16 +32165,16 @@ def _ask_report(
 #: it would let the two modes drift into disagreeing about what warrants asking,
 #: which is the one thing about this tool that must not vary.
 _ASK_DESCRIPTION_RESTRAINT = (
-    "Ask the user to choose. LAST RESORT, not a checkpoint: research it, run it, "
-    "or delegate it to a subagent and decide yourself, then report what you chose. "
+    "Ask the user to decide, never for FYI. LAST RESORT, not a checkpoint: research, "
+    "run or delegate it to a subagent and decide yourself, then report the choice. "
     "Ask only when: the action is destructive or irreversible and the user has not "
     "EXPLICITLY approved that action; the REQUEST ITSELF has two plausible readings "
     "and no evidence picks between them; you need something only the user has (a "
-    "credential, an access decision); or the answer is genuinely theirs to state. "
+    "credential, access); or the answer is genuinely theirs to state. "
     "Two technical approaches is not ambiguity. Work the user already asked for is "
     "authorized: do not stop to confirm it — but that never extends to an "
-    "irreversible step by implication. Never put the question in your reply text; "
-    "mechanics: `read tool://ask`."
+    "irreversible step by implication. Asking notifies: never also `notify` it or "
+    "reply with it; mechanics: `read tool://ask`."
 )
 
 #: The tail for a host whose ``ask`` BLOCKS — the KILL-SWITCH arm.
@@ -32917,11 +32917,10 @@ class NotifyParams(BaseModel):
 #: The HOW lives here; the WHEN also lives in the gated ``system.md`` clause.
 #: Published after the live deferred pilot failed reliable tool discovery.
 _NOTIFY_DESCRIPTION = (
-    "Post an item to the operator's Notifications inbox: it stays listed until "
-    "they read or dismiss it, across sessions and devices. Use for results, "
-    "metrics or events they must see on return, never routine progress. Pass a "
-    "stable `key` so a repeat (a wake tick, an updated count) updates one item "
-    "instead of adding another."
+    "Post an item to the operator's Notifications inbox; it stays until read or "
+    "dismissed, on every device. For FYI results, metrics or events to see on "
+    "return; never routine progress or a question (`ask` notifies). Pass a "
+    "stable `key` so a repeat (a wake tick, a new count) updates one item."
 )
 
 

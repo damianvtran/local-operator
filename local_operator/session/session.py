@@ -12344,7 +12344,13 @@ class Session:
             return {"ok": False, "error": "this session has no queued-ask engine"}
         if relay is not None:
             return queue.enqueue_relay(relay, tool_call_id=tool_call_id)
-        return queue.enqueue(questions, timeout, tool_call_id=tool_call_id)
+        outcome = queue.enqueue(questions, timeout, tool_call_id=tool_call_id)
+        # The mirror of the notify door's check (``asks/dedupe.py``): a
+        # same-topic update raised just before this question leaves Unread and
+        # rides the ask. Not on the relay arm: those questions are another
+        # session's, and this session's updates are not about them.
+        self._merge_updates_into_ask(outcome)
+        return outcome
 
     #: TB-02 P1 (PR #2378): the sentence a plain ask door refuses a bridge
     #: request with — it names the door that works (the request's own verified
@@ -16511,6 +16517,12 @@ class Session:
         """
         from local_operator.notifications.store import NotificationStore
 
+        # ONE TOPIC, ONE ENTRY (``asks/dedupe.py``): an open same-topic ask from
+        # this session already notifies the operator, so the update rides it as
+        # context instead of becoming a second item they must also clear.
+        folded = await asyncio.to_thread(self._fold_notify_into_open_ask, title, body, priority)
+        if folded is not None:
+            return folded
         root = Path(self._config_dir)
         store = NotificationStore(root)
         outcome = await asyncio.to_thread(
@@ -16533,6 +16545,79 @@ class Session:
         if outcome.priority == "high":
             await self._route_item_banner(root, store, outcome, title=title, body=body)
         return _notify_sentence(outcome)
+
+    def _fold_notify_into_open_ask(self, title: str, body: str, priority: str) -> str | None:
+        """The suppression sentence when ``notify`` duplicates an open ask, else ``None``.
+
+        Best-effort by design: any failure (no queue on the blocking arm, an
+        unreadable log, a failed append) returns ``None`` and the update is
+        delivered as before — a missed merge costs one extra click, a lost
+        update costs the operator the information.
+        """
+        try:
+            queue = self.ask_queue()
+            if queue is None:
+                return None
+            from local_operator.asks import dedupe
+
+            match = dedupe.matching_ask(
+                queue.open_records(),
+                title=title,
+                body=body,
+                now=queue.clock_ms(),
+                priority=priority,
+            )
+            if match is None:
+                return None
+            if not queue.add_context(str(match["ask_id"]), title=title, body=body, source="notify"):
+                return None
+            return dedupe.SUPPRESSED_TEXT.format(ask_id=match["ask_id"])
+        except Exception:  # noqa: BLE001 — fall through to delivering the update
+            logger.debug("notify: open-ask dedupe check failed", exc_info=True)
+            return None
+
+    def _merge_updates_into_ask(self, outcome: Mapping[str, Any]) -> None:
+        """After an ask is queued: fold same-topic unread updates into it.
+
+        The mirror of :meth:`_fold_notify_into_open_ask` (``asks/dedupe.py``).
+        The text is appended to the ask FIRST and the update is marked read
+        (``via=merged_into_ask``, never dismissed) only once that append
+        landed, so a failure can leave both entries but never neither.
+        Best-effort.
+        """
+        try:
+            if not outcome.get("ok"):
+                return
+            details = outcome.get("details") or {}
+            ask_id = str(details.get("ask_id") or "")
+            queue = self.ask_queue()
+            if not ask_id or queue is None:
+                return
+            record = queue.find(ask_id)
+            if record is None:
+                return
+            from local_operator.asks import dedupe
+            from local_operator.notifications.store import NotificationStore
+
+            store = NotificationStore(Path(self._config_dir))
+            rows, _ = store.list_items(state="unread", session_id=self.session_id, limit=100)
+            # Measured from the ask's own creation stamp: "was this update raised
+            # within the window before the question" is the duplicate pattern.
+            matches = dedupe.matching_updates(
+                rows, ask=record, now=int(record.get("created_at") or 0)
+            )
+            for row in matches:
+                if not queue.add_context(
+                    ask_id,
+                    title=str(row.get("title") or ""),
+                    body=str(row.get("body_md") or ""),
+                    source="merged",
+                    item_id=str(row["id"]),
+                ):
+                    continue
+                store.merge_into_ask([(str(row["id"]), int(row.get("revision") or 1))])
+        except Exception:  # noqa: BLE001 — both entries stay; nothing is lost
+            logger.debug("ask: merging same-topic updates failed", exc_info=True)
 
     async def _route_item_banner(
         self, root: Path, store: Any, outcome: Any, *, title: str, body: str
