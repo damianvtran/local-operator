@@ -185,6 +185,9 @@ def test_tool_recipient_schema_is_closed(target):
         ({"account_id": "acc_2", "endpoint_id": "bep_9"}, False),
         ({"account_id": ""}, False),
         ({"account_id": 42}, False),
+        # A guessed name object is not an addressable destination, in the
+        # PUBLISHED schema either.
+        ({"name": "Ada Lovelace"}, False),
         # The bare-string form a model reaches for: accepted, and only as an id.
         # ``" acc_2"`` is NOT listed here on purpose: padding is refused by the
         # shared validator/executor (asserted below and in the client test), not
@@ -251,11 +254,13 @@ def test_compact_recipient_wire_schema_preserves_closed_one_of(target, valid):
         {"account_id": "   "},
         # A guessed name learns the accepted shapes from the refusal itself.
         {"name": "Ada Lovelace"},
-        # The bare-string form is an id or nothing: empty and padded refuse.
+        # The bare-string form is an id or nothing: empty, padded, and a display
+        # NAME written as a bare string (ids never contain whitespace) refuse.
         "",
         "   ",
         " acc_2",
         "acc_2 ",
+        "Ada Lovelace",
         {},
     ],
 )
@@ -621,6 +626,12 @@ def test_a_bare_string_recipient_is_the_account_id_and_nothing_else() -> None:
     from local_operator.team_bridge.types import validate_send_recipient
 
     assert validate_send_recipient("acct_123") == {"account_id": "acct_123"}
+    # NO id GRAMMAR is imposed on the bare form: the ids this suite and the
+    # measured run actually use must pass, and ``is_account_id`` would reject
+    # ``acct-ada``/``acc_2``. The SERVER owns the id shape; this client only
+    # refuses what cannot be an id at all (empty, padded, internal whitespace).
+    for identifier in ("acct-123", "acc_2", "9f8a7b6c-1234-4abc-9def-0123456789ab"):
+        assert validate_send_recipient(identifier) == {"account_id": identifier}
     # Pydantic is the tool's first door: it must hand on the canonical pair, or
     # a later serializer would carry the raw string to the wire.
     assert BridgeToolParams.model_validate({"op": "send", "to": "acct_123"}).to == {
@@ -683,6 +694,9 @@ async def test_every_accepted_target_shape_sends_the_same_normalized_pair(
         {"name": "Ada Lovelace"},
         {"display_label": "Ada Lovelace"},
         {"account_id": "acc_2", "endpoint_id": "bep_9"},
+        # A name written as a BARE string is the same guess through the new
+        # door: it reaches the teaching refusal, never the outbox.
+        "Ada Lovelace",
     ],
 )
 def test_a_guessed_name_is_refused_with_the_accepted_shapes_and_the_directory(

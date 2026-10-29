@@ -204,10 +204,14 @@ def _closed_recipient_schema(schema: dict[str, Any]) -> None:
     # requiring every provider to implement propertyNames. This preserves the
     # closed key set without a second hand-maintained list or duplicate models.
     # The field is a UNION (object | bare id | null), so the object branch is one
-    # of several at the top level; branches without ``propertyNames`` (the string
-    # and null arms) are already closed and are left exactly as published.
+    # of several at the top level; the string and null arms fail the ``type``
+    # test and are left exactly as published. The pop is deliberately UNGUARDED:
+    # if a serializer ever publishes the object branch without ``propertyNames``
+    # this must fail loudly here (a KeyError at import) rather than quietly leave
+    # a recipient object open to extra keys — that silence is the bug class the
+    # recipient validation exists to prevent.
     for branch in schema.get("anyOf", [schema]):
-        if branch.get("type") == "object" and "propertyNames" in branch:
+        if branch.get("type") == "object":
             names = branch.pop("propertyNames")["enum"]
             value = branch["additionalProperties"]
             branch["properties"] = {name: value for name in names}

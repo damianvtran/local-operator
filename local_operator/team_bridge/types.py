@@ -181,9 +181,17 @@ def validate_send_recipient(value: Any) -> dict[str, str]:
     a name is ambiguous and is the caller's own directory read to make, and a
     guessed ``{"name": ...}`` refuses with :data:`RECIPIENT_TEACHING`, which
     names both accepted shapes and the directory. The string checks are the SAME
-    ones the object values get, applied to the only value there is.
+    ones the object values get, applied to the only value there is, plus ONE
+    extra: a bare string carrying INTERNAL whitespace refuses with the same
+    teaching text, because a display name is a guess at an id (no id contains a
+    space) and accepting "Ada Lovelace" as an account would forward the mistake
+    to the server instead of correcting it. The OBJECT form is an explicit claim
+    that its value already IS an id, so its pre-existing contract — any non-empty
+    unpadded string — is deliberately unchanged here.
     """
     if isinstance(value, str):
+        if any(character.isspace() for character in value.strip()):
+            raise InvalidSendRecipient(RECIPIENT_TEACHING)
         key, identifier = "account_id", value
     else:
         if not isinstance(value, Mapping) or len(value) != 1:

@@ -1952,7 +1952,8 @@ BUDGET_BILLED_TOKENS = 34_416
 #   base (origin/main efcfbe81260)  84,387 chars = ~30,355 billed
 #   head (this branch)              84,693 chars = ~30,465 billed
 #   delta                             +306 chars = ~+110 (the same +306)
-# Ceiling = measured head + the 55-token band (30,465 + 55).
+# Ceiling = measured head + the 55-token band (30,465 + 55, the band used today;
+# the older "51 headroom" entry above is that pass's own arithmetic).
 BUDGET_CHILD_BILLED_TOKENS = 30_520
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.

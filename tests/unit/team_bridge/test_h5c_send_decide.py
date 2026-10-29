@@ -97,6 +97,7 @@ async def test_a_send_carries_the_caller_ref_and_the_named_destination() -> None
         "   ",
         " acc_2",
         "acc_2 ",
+        "Ada Lovelace",
         {},
     ],
 )
