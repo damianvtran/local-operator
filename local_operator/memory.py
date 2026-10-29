@@ -441,13 +441,14 @@ _NEXT_STEP = re.compile(
 # `scope_fit` now points the writer at the fact itself without the prefix.
 _SESSION_TODO = re.compile(r"\bsession todos?\b", re.I)
 # The live row that motivated the plan/progress widening reads `task progress on this
-# workstream`, and `task progress` alone is the shape: it is engineering-status
-# vocabulary in a way `workstream`, `sprint`, `milestone`, `lane` and `deliverable`
-# are not (review round 2, m-1: `sprint training`, `marathon milestones` and `wedding
-# deliverables` are ordinary prose). The cost is stated in the PR thread rather than
-# hidden: a personal note that says "not task progress" is refused too, and the writer
-# rephrases.
-_TASK_PROGRESS = re.compile(r"\btask progress\b", re.I)
+# workstream`, and the noun list beside it is gone (review round 2, m-1: `sprint
+# training`, `marathon milestones` and `wedding deliverables` are ordinary prose).
+# What is left is the REPORT shape, never the bare phrase: the operator's own stored
+# boundaries preference reads `… not task progress, release status, transient approvals
+# …`, a prohibition list rather than a report, and refusing it is the silent data loss
+# this guard exists to prevent (live row 01a141b9). A colon, or `is`/`was`/`on`/`for`
+# after the phrase, is what makes it a status line.
+_TASK_PROGRESS = re.compile(r"\btask progress\b\s*(?::|\bis\b|\bwas\b|\bon\b|\bfor\b)", re.I)
 _REMAINING_WORK = re.compile(r"\bremaining work\b", re.I)
 
 
@@ -582,7 +583,7 @@ def scope_fit(scope: str, fact: dict[str, Any]) -> None:
     A bounded SHAPE rule, not a classifier. It refuses, and NAMES, a tracker ref
     (``PR #12``, ``!1234``, a line that OPENS with ``PR3078``), a named commit, a
     CI/merge/release status verb, a ``next step``/``next action`` phrase carrying work
-    context, a ``session todo`` line, ``task progress`` on a named workstream, a
+    context, a ``session todo`` line, a ``task progress`` report (`task progress:`, `… on …`), a
     work-context ``HOLD``, a session self-reference, a goal statement and a dated work
     log — see :data:`_WORK_SHAPES`. Global is for durable personal facts, contacts,
     preferences, environment; work state belongs in a session bank.

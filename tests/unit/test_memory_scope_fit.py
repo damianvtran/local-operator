@@ -197,6 +197,16 @@ PERSONAL_PROSE: tuple[str, ...] = (
     "The next step is to cherry-pick the ripe fruit for the jam.",
     "next step: push the trolley round to the checkout",
     "Next action: squash the aphids on the roses.",
+    # --- the operator's own durable preference, from the live bank (01a141b9) ------
+    # A prohibition list that MENTIONS the phrase is not a progress report. This row
+    # is why `_TASK_PROGRESS` keys on the report shape (`task progress:`, `… on …`).
+    "Global memory is only for durable user/personal facts, preferences, contacts and "
+    "environment-not task progress, release status, transient approvals, debug logs or "
+    "session resumption; those use session/team/agent work banks.",
+    "task progress, release status, transient approvals",
+    # Review round 2, m-1's third sentence: `against` is not the report shape, so this
+    # personal training report stores.
+    "task progress against the marathon milestones is on track",
     # --- review round 2, m-1: plan nouns that are also personal vocabulary -----
     "sprint training",
     "marathon milestones",
@@ -249,14 +259,13 @@ WORK_SHAPES: tuple[tuple[str, str], ...] = (
 # personal prose, so they are listed and asserted REFUSED rather than dropped: the cost
 # is visible here, and reversing the decision is a test change, not an excavation.
 DOCUMENTED_PHRASE_COST: tuple[str, ...] = (
-    "Global memory is not task progress, release status, transient approvals, "
-    "debug logs or session resumption.",
+    # A report SHAPE, even about a kitchen: `task progress on …` reads as a status line,
+    # and the shape (not the subject) is what the arm tests.
     "Task progress on the kitchen renovation is slow.",
-    # Review round 2, m-1 measured these three as false positives from the noun list;
-    # the phrase rule refuses them too, and that is the accepted cost of keying on
-    # `task progress` alone (the bare nouns above store).
+    # Review round 2, m-1 measured these as false positives from the noun list. Two of
+    # them are `task progress on …` REPORTS, so the report shape refuses them; the
+    # third (`against`) is not the shape at all and stores — see PERSONAL_PROSE.
     "Task progress on this week's sprint training is good.",
-    "task progress against the marathon milestones is on track",
     "task progress on the wedding deliverables: rings bought",
 )
 
@@ -277,7 +286,12 @@ def test_work_shapes_are_refused_and_named(text, shape):
 
 @pytest.mark.parametrize("text", DOCUMENTED_PHRASE_COST)
 def test_the_cost_of_a_literal_phrase_is_pinned(text):
-    """The one class round 3 chose to refuse: prose that contains `task progress`."""
+    """Reports the guard refuses even when the subject is personal.
+
+    `task progress on …` is a status line whatever it is about, so a kitchen renovation
+    report is refused and the writer rephrases — while the operator's prohibition list
+    in `PERSONAL_PROSE` stores. That pair is the whole boundary.
+    """
     with pytest.raises(MemoryError) as exc:
         scope_fit("global", {"title": "x", "body": text, "tags": [], "aliases": [], "subject": ""})
     assert "task-progress" in str(exc.value)
@@ -289,9 +303,9 @@ def test_the_bias_is_store_the_fact(tmp_path):
     The numbers are deliberately exact: adding a sentence to either tuple without
     deciding which way it should fall is the mistake this catches.
     """
-    assert len(PERSONAL_PROSE) == 42
+    assert len(PERSONAL_PROSE) == 45
     assert len(WORK_SHAPES) == 16
-    assert len(DOCUMENTED_PHRASE_COST) == 5
+    assert len(DOCUMENTED_PHRASE_COST) == 3
     store = _store(tmp_path)
     for index, text in enumerate(PERSONAL_PROSE):
         stored = store.put("global", {"title": f"note {index}", "body": text, "tags": []})

@@ -86,7 +86,7 @@ def test_scope_fit_shapes_and_the_session_todo_remedy_are_documented() -> None:
     assert "a line OPENING with" in body
     assert "naming the shape that" in body
     assert "naming the marker and" not in body
-    assert "A `Session todo:` line is refused too" in body
+    assert "A `Session todo:` line is refused:" in body
     assert "write the reminder itself, without the session framing" in body
     assert "or `stated` (deliberate)" not in body
 
@@ -106,6 +106,21 @@ def test_the_boundaries_round_3_settled_are_documented() -> None:
     assert "or ticket with a review state" not in body
     assert "on a branch with a review state" in body
     assert "`task progress` on a named workstream" not in body
-    assert "the phrase `task progress`" in body
+    assert "a `task progress` report" in body
     assert "a personal identifier that OPENS a line" in body
     assert "write it mid-sentence" in body
+
+
+def test_the_task_progress_report_shape_is_documented() -> None:
+    """A `task progress` REPORT is work; a preference that lists the phrase is not.
+
+    The operator's own stored boundaries note reads `… not task progress, release
+    status …`, so a bare-phrase rule refused a live durable personal fact. The guide has
+    to say which of the two it refuses, or the next reader will re-widen it.
+    """
+    body = _memory_guide()
+
+    assert "a `task progress` report" in body
+    assert "only a `task progress` REPORT is" in body
+    assert "is not a report and stores" in body
+    assert "the literal phrase `task progress` is refused" not in body
