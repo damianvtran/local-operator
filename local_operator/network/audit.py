@@ -611,9 +611,7 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "device_pair.desktop_signed": frozenset(
         {"surface", "operation", "device_id", "key_id", "assurance"}
     ),
-    "device_pair.desktop_applied": frozenset(
-        {"surface", "device_id", "run_id", "lifetime_days"}
-    ),
+    "device_pair.desktop_applied": frozenset({"surface", "device_id", "run_id", "lifetime_days"}),
     "device_pair.desktop_apply_refused": frozenset({"surface", "device_id", "code"}),
     # Mesh rolling updates, member side. `rollout` is the origin's record id when
     # one exists (empty for the single-peer verb — S1 carries it through so the

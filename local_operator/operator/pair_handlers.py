@@ -395,8 +395,7 @@ def describe_devices(args: argparse.Namespace) -> int:
                 + ", ".join(unconfirmed)
                 + ", run "
                 + " or ".join(
-                    f"`lop operator devices --approve {device_id}`"
-                    for device_id in unconfirmed
+                    f"`lop operator devices --approve {device_id}`" for device_id in unconfirmed
                 )
                 + " (it asks for your approval)."
             )

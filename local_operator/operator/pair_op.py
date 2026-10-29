@@ -97,9 +97,7 @@ MAX_CERT_LIFETIME_S = 365 * 24 * 3600
 #: depth, read by the shape predicate AND by apply, so the two cannot disagree about which
 #: records are describable.
 _WHAT = frozenset({OP, "anchor"})
-_FIELDS = frozenset(
-    {"role", "scopes", "cert_lifetime_s", "via", "sas", "computer_id_pub"}
-)
+_FIELDS = frozenset({"role", "scopes", "cert_lifetime_s", "via", "sas", "computer_id_pub"})
 _DEVICE_KEYS = frozenset({"device_id", "spki", "key_fp", "name", "platform"})
 _SAS_KEYS = frozenset({"commit", "nd", "np"})
 _REQUESTED_BY = frozenset({"surface", "device_id", "session_id"})
@@ -416,7 +414,8 @@ def expected(record: Mapping[str, Any]) -> dict[str, Any]:
     from local_operator.operator import devices
     from local_operator.operator.verify import key_id_for
 
-    device = record.get("device") if isinstance(record.get("device"), Mapping) else {}
+    raw_device = record.get("device")
+    device: Mapping[str, Any] = raw_device if isinstance(raw_device, Mapping) else {}
     computer = devices.decode_spki(data["computer_id_pub"])
     return {
         "device_id": str(device.get("device_id") or ""),
@@ -607,7 +606,8 @@ def _require_checkable(record: Mapping[str, Any]) -> None:
 def _code_matches(record: Mapping[str, Any], typed: str, root: Path | None) -> bool:
     """Derive the six digits from THIS record and compare them in constant time."""
     data = intent(record)
-    device = record.get("device") if isinstance(record.get("device"), Mapping) else {}
+    raw_device = record.get("device")
+    device: Mapping[str, Any] = raw_device if isinstance(raw_device, Mapping) else {}
     if data is None or not exact_shape(record):
         raise payload_invalid()
     trio = approvals.local_anchor_trio(_config_root(root))
@@ -670,8 +670,12 @@ def apply(approval_id: str, expected_block: dict[str, Any], root: Path) -> dict[
     5. the certificate is signed (the SECOND prompt on a presence host), written to the
        device store, and the pending pairing request is dropped;
     6. the record moves to ``connected`` with a receipt;
-    7. every failure after the lease releases the run as a retry-eligible ``failed`` record,
-       so a cancelled prompt does not wedge the card in ``connecting`` for its window.
+    7. a failure after the lease settles THIS run without wedging the card in
+       ``connecting`` for its window: a ``connecting`` record becomes a retry-eligible
+       ``failed`` one; a record denied mid-run stays ``denied`` with a failed receipt
+       naming the stop; a record that reached any other final state (``expired``,
+       ``withdrawn``) or that another run superseded is left as that writer left it.
+       In every case the caller sees the ORIGINAL refusal, never a release error.
 
     The privileged write precedes certificate issuance because a first-time phone has no
     certificate for ``devices.is_admitted`` to parse yet. ``admit_device`` validates the
@@ -690,9 +694,7 @@ def apply(approval_id: str, expected_block: dict[str, Any], root: Path) -> dict[
     return _apply(approval_id, expected_block, root)
 
 
-def _apply(
-    approval_id: str, expected_block: dict[str, Any], root: Path | None
-) -> dict[str, Any]:
+def _apply(approval_id: str, expected_block: dict[str, Any], root: Path | None) -> dict[str, Any]:
     from local_operator.operator import devices
 
     config_root = _config_root(root)
@@ -792,6 +794,12 @@ def _apply(
             lifetime_s=int(data["cert_lifetime_s"]),
             root=config_root,
         )
+        # ...AND AGAIN AFTER THE SIGNING PROMPT (agent review round 4, m1). On a presence
+        # host signing IS a prompt (Touch ID / Windows Hello), so a deny can land inside it
+        # too. Checked before the certificate is installed and the pending request spent:
+        # an unused signed certificate is inert, an installed one admits the phone. The
+        # gap left before `mark_connected` is no prompt wide.
+        approvals.verify_for_run(approval_id, root=config_root)
         from local_operator.operator.verify import read_device_cert
 
         parsed = read_device_cert(certificate)
@@ -903,41 +911,29 @@ def _release_run(approval_id: str, run_id: str, detail: str, root: Path | None) 
     ``denied → failed`` is not a matrix row, so ``mark_failed`` refused it and that refusal
     was swallowed with every other one — the record kept only the deny's own receipt and
     nothing showed this run stopped. The deny is final and stays; the stop is recorded as
-    a failed receipt under it. Any OTHER refusal propagates: a release that cannot be
-    written is a fact the caller must see, not one to drop.
+    a failed receipt under it.
+
+    ANY OTHER FINAL STATE IS LEFT ALONE (agent review round 4, m2), as
+    ``finite_share._release_run`` leaves every non-``connecting`` record: a record that
+    EXPIRED (or was withdrawn) during the prompt cannot become ``failed`` either, and
+    ``mark_failed``'s ``approval_decision_conflict`` would replace the refusal that
+    actually stopped the run, and its sentence, in what the caller sees. What still
+    propagates is a release of a live record that cannot be written.
     """
     record = approvals.load_record(approval_id, root=root)
     raw_run = record.get("run")
     run: Mapping[str, Any] = raw_run if isinstance(raw_run, Mapping) else {}
     if str(run.get("run_id") or "") != run_id:
         return
-    if str(record.get("state")) == approvals.STATE_DENIED:
-        _record_denied_stop(approval_id, run_id, detail, root)
+    state = str(record.get("state"))
+    if state == approvals.STATE_DENIED:
+        approvals.append_stopped_receipt(
+            approval_id, run_id=run_id, step=STEP_INSTALL, detail=detail, root=root
+        )
+        return
+    if state in approvals.TERMINAL_STATES:
         return
     approvals.mark_failed(approval_id, run_id=run_id, step=STEP_INSTALL, detail=detail, root=root)
-
-
-def _record_denied_stop(approval_id: str, run_id: str, detail: str, root: Path | None) -> None:
-    """The failed receipt for a run a mid-run deny stopped; the state stays ``denied``.
-
-    Written under the record lock in the store's receipt shape; ``append_receipt`` itself
-    refuses any record that is not ``connecting``, which is why this is its own writer.
-    """
-    with approvals._record_lock(approval_id, root):
-        record = approvals._load_raw(approval_id, root)
-        if str(record.get("state")) != approvals.STATE_DENIED:
-            return
-        record.setdefault("receipts", []).append(
-            {
-                "run_id": str(run_id),
-                "step": STEP_INSTALL,
-                "at": time.time(),
-                "ok": False,
-                "detail": str(detail)[:400],
-                "digest": "",
-            }
-        )
-        approvals._write_record(record, root)
 
 
 # ---------------------------------------------------------------------------
@@ -1011,9 +1007,9 @@ def audit_apply_refused(
         root=root,
         detail={
             "surface": "desktop",
-            "device_id": str((device or {}).get("device_id") or "")
-            if isinstance(device, Mapping)
-            else "",
+            "device_id": (
+                str((device or {}).get("device_id") or "") if isinstance(device, Mapping) else ""
+            ),
             "code": code,
         },
     )

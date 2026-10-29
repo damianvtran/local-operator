@@ -253,8 +253,8 @@ def test_every_site_agrees_on_every_case(
         _device_refusal,
     )
     from local_operator.operator import devices as device_store
-    from local_operator.session.runtime import server as runtime_server
     from local_operator.operator.verify import verify_device_cert
+    from local_operator.session.runtime import server as runtime_server
 
     anchor = rig.anchor(anchor_kind)
     _install(rig.anchor_root, anchor)
@@ -292,7 +292,7 @@ def test_every_site_agrees_on_every_case(
     else:
         assert refusal is not None
         assert refusal.status_code == 403
-        body = json.loads(refusal.body)
+        body = json.loads(bytes(refusal.body))
         # TWO CODES, because the two remedies are different: a revocation is
         # lifted from this computer's device list, a not-yet-confirmed phone has
         # already done what pairing asks of it.
@@ -319,7 +319,7 @@ def test_the_unconfirmed_copy_does_not_send_the_phone_to_pair_again(rig: _Rig) -
     certificate, _, _ = rig.certificate("unlisted")
     refusal = _device_refusal(certificate)
     assert refusal is not None
-    sentence = json.loads(refusal.body)["error"]
+    sentence = json.loads(bytes(refusal.body))["error"]
     assert "confirm" in sentence
     assert "Pairing it again will not help." in sentence
 
@@ -403,7 +403,9 @@ def test_the_marker_survives_a_revocation_and_an_authorisation_restage(
     assert {"device_id": rig.unlisted_id, "revoked": True} in staged["devices"]
 
     # Installing the staged statement makes it the anchor the next verb reads.
-    _install(rig.anchor_root, trust.OperatorAnchor.from_json(staged))
+    restaged = trust.OperatorAnchor.from_json(staged)
+    assert restaged is not None
+    _install(rig.anchor_root, restaged)
     assert _stage_anchor_revocation(rig.config_root, rig.unlisted_id, revoked=False)
     restaged = json.loads(staging_path(config_dir()).read_bytes())
     assert restaged["admission"] == "listed"
@@ -702,9 +704,9 @@ def test_a_refusal_clears_within_the_anchor_window(
     assert runtime_server.RuntimeServer._device_cert_point(stub, certificate, anchor) is None
     stored = stub._device_certs[certificate]
     assert stored[0] is None, "the refusal is what was cached"
-    assert stored[1] - clock["t"] <= trust.ANCHOR_REFRESH_S, (
-        "a refusal may not outlive the window the confirming copy promises"
-    )
+    assert (
+        stored[1] - clock["t"] <= trust.ANCHOR_REFRESH_S
+    ), "a refusal may not outlive the window the confirming copy promises"
 
     # The human confirms this phone: the anchor now lists it. No new certificate.
     confirmed = replace(anchor, devices=anchor.devices + ({"device_id": declared},))
@@ -712,9 +714,9 @@ def test_a_refusal_clears_within_the_anchor_window(
     point = runtime_server.RuntimeServer._device_cert_point(stub, certificate, confirmed)
     assert point is not None, "the confirmation must take effect inside the anchor window"
     admitted_deadline = stub._device_certs[certificate][1]
-    assert admitted_deadline - clock["t"] > trust.ANCHOR_REFRESH_S, (
-        "an admitted point keeps the certificate TTL"
-    )
+    assert (
+        admitted_deadline - clock["t"] > trust.ANCHOR_REFRESH_S
+    ), "an admitted point keeps the certificate TTL"
 
 
 def test_no_usable_anchor_refuses_a_device_certificate_at_the_runtime_path(

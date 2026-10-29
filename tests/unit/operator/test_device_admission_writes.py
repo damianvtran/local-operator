@@ -57,9 +57,7 @@ def _install(
     return root, target
 
 
-def _plant(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, anchor: trust.OperatorAnchor
-) -> Path:
+def _plant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, anchor: trust.OperatorAnchor) -> Path:
     source = tmp_path / "received.json"
     source.write_bytes(anchor_bytes(anchor))
     monkeypatch.setattr(handlers, "install_anchor", lambda *a, **k: 0)
@@ -194,9 +192,7 @@ def test_cancelled_prompt_writes_nothing_and_leaves_no_installable_stage(
         calls.append(command)
         return ElevationResult(1, cancelled=True)
 
-    assert handlers.confirm_devices(root, [ID_X], runner=cancelled) == (
-        handlers.ADMIT_CANCELLED
-    )
+    assert handlers.confirm_devices(root, [ID_X], runner=cancelled) == (handlers.ADMIT_CANCELLED)
     assert len(calls) == 1
     assert target.read_bytes() == anchor_bytes(installed)
     assert not trust.staging_path(root).exists(), "a later install must not apply a cancelled admit"
@@ -262,9 +258,7 @@ def test_a_failed_prompt_leaves_no_installable_stage(
         # non-zero exit always does, and the statement used to survive it.
         return ElevationResult(1, cancelled=False)
 
-    assert handlers.confirm_devices(root, [ID_X], runner=failed) == (
-        handlers.ADMIT_INSTALL_FAILED
-    )
+    assert handlers.confirm_devices(root, [ID_X], runner=failed) == (handlers.ADMIT_INSTALL_FAILED)
     assert target.read_bytes() == anchor_bytes(installed)
     assert not trust.staging_path(root).exists(), "a failed prompt left an installable stage"
     assert capsys.readouterr().err, "a failed privileged step printed nothing"
@@ -292,24 +286,23 @@ def test_authorise_passes_the_admit_purpose_so_stored_password_is_refused(
         "local_operator.operator.pair_handlers.devices.forget_revocation",
         lambda *a, **k: True,
     )
-    monkeypatch.setattr(
-        "local_operator.operator.pair_handlers.devices.list_devices", lambda *a: []
-    )
-    monkeypatch.setattr(
-        "local_operator.operator.pair_handlers.devices.list_pending", lambda *a: []
-    )
+    monkeypatch.setattr("local_operator.operator.pair_handlers.devices.list_devices", lambda *a: [])
+    monkeypatch.setattr("local_operator.operator.pair_handlers.devices.list_pending", lambda *a: [])
     from argparse import Namespace
 
     from local_operator.operator.pair_handlers import describe_devices
 
-    assert describe_devices(
-        Namespace(
-            authorise=ID_X,
-            revoke="",
-            print_only=False,
-            sudo_secret="ADMIN_PW",
+    assert (
+        describe_devices(
+            Namespace(
+                authorise=ID_X,
+                revoke="",
+                print_only=False,
+                sudo_secret="ADMIN_PW",
+            )
         )
-    ) == 2
+        == 2
+    )
     assert resolved == []
     assert target.read_bytes() == anchor_bytes(installed)
 
@@ -324,9 +317,7 @@ def _admission_anchor_for_test(installed: trust.OperatorAnchor, device_id: str) 
 def test_downgrade_refuses_sudo_secret_without_resolving_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    root, target = _install(
-        tmp_path, monkeypatch, _anchor(admission=trust.ADMISSION_LISTED)
-    )
+    root, target = _install(tmp_path, monkeypatch, _anchor(admission=trust.ADMISSION_LISTED))
     handlers.stage_anchor(root, _anchor())
     resolved: list[str] = []
     monkeypatch.setattr(handlers, "_resolve_secret_bytes", lambda name: resolved.append(name))
@@ -366,9 +357,9 @@ def _run_posix_install(
     executable = shim / "install"
     # Ownership flags are the only part this unprivileged control removes.
     executable.write_text(
-        "#!/bin/sh\nwhile [ $# -gt 0 ]; do case \"$1\" in -o|-g) shift 2;; "
+        '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -o|-g) shift 2;; '
         "-m) shift 2;; *) break;; esac; done\n"
-        f"exec {shlex.quote(real)} \"$@\"\n"
+        f'exec {shlex.quote(real)} "$@"\n'
     )
     executable.chmod(0o755)
     command = trust.install_commands(
@@ -404,8 +395,7 @@ def test_privileged_cas_refuses_installed_swap_and_staged_swap(
     target.write_bytes(before)
     staged.write_bytes(anchor_bytes(_anchor(devices=({"device_id": ID_Y},))))
     assert (
-        _run_posix_install(tmp_path / "three", staged, target, old_hex, staged_hex).returncode
-        == 3
+        _run_posix_install(tmp_path / "three", staged, target, old_hex, staged_hex).returncode == 3
     )
     assert target.read_bytes() == before
 
@@ -574,6 +564,49 @@ def test_m2_osascript_exit_1_is_a_cancel_only_with_its_cancel_number(
     stderr["text"] = "0:120: execution error: the installed anchor changed (3)\n"
     refused = elevate.run_elevated(command, windows=False)
     assert refused.cancelled is False and refused.exit_code == 1
+
+
+def test_r4_m3_a_refused_install_script_says_why_and_a_cancel_says_nothing_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Capturing osascript's stderr must not swallow the install script's own refusal."""
+    from local_operator.operator import elevate
+
+    monkeypatch.setattr(elevate, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(elevate, "prompt_refusal", lambda **kwargs: None)
+    reason = "the installed anchor changed after it was read; nothing was installed"
+    stderr = {"text": ""}
+    monkeypatch.setattr(
+        elevate.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, "", stderr["text"]),
+    )
+    command = [["install", "-m", "0644", "a", "b"]]
+
+    stderr["text"] = f"0:120: execution error: {reason} (3)\n"
+    refused = elevate.run_elevated(command, windows=False)
+    assert refused.cancelled is False and reason in refused.diagnosis
+    stderr["text"] = "0:120: execution error: User canceled. (-128)\n"
+    assert elevate.run_elevated(command, windows=False).diagnosis == ""
+
+    # ...and the verb prints it, ahead of the generic retry sentence.
+    installed = _anchor()
+    root, _ = _install(tmp_path, monkeypatch, installed)
+    monkeypatch.setattr(
+        "local_operator.operator.devices.list_devices",
+        lambda root: [SimpleNamespace(device_id=ID_X)],
+    )
+    assert (
+        handlers.confirm_devices(root, [ID_X], runner=lambda command: refused)
+        == handlers.ADMIT_INSTALL_FAILED
+    )
+    err = capsys.readouterr().err
+    assert reason in err and err.index(reason) < err.index("did not complete"), err
+    cancel = elevate.ElevationResult(1, cancelled=True)
+    assert handlers.confirm_devices(root, [ID_X], runner=lambda command: cancel) == (
+        handlers.ADMIT_CANCELLED
+    )
+    assert "-128" not in capsys.readouterr().err
 
 
 def test_m3_the_second_lock_refuses_a_revoked_id_on_its_own(

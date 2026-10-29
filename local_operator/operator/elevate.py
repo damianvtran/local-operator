@@ -27,11 +27,20 @@ class ElevationResult:
     stream it reports on — and it is carried at all because discarding it made every
     one of those states exit silently while the pairing card promised a prompt
     (design round 1, D2).
+
+    ``diagnosis`` is the privileged command's OWN error output, on macOS only, for a
+    run that failed without being cancelled. macOS captures osascript's stderr to read
+    the cancel number, so the install script's refusal ("the installed anchor changed
+    after it was read; nothing was installed") no longer reached the terminal and the
+    user saw only the generic "did not complete" (agent review round 4, m3). It is
+    carried for the same reason ``refusal`` is, and is empty on a cancel: a cancel
+    already has its own sentence and osascript's "User canceled. (-128)" adds nothing.
     """
 
     exit_code: int
     cancelled: bool = False
     refusal: str = ""
+    diagnosis: str = ""
 
 
 def _without_sudo(command: list[list[str]]) -> list[list[str]]:
@@ -61,6 +70,16 @@ def windows_uac_refusal() -> str | None:
     UAC is off — it may well be on — so telling that person to "turn it back on" sent
     them to fix something that was not broken. Each branch now says what it knows.
     """
+    unreadable = (
+        "Windows did not say whether it will ask you for approval, so no phone was "
+        "confirmed. Check that User Account Control is on, then try again."
+    )
+    # A STATIC platform check, not only the ImportError below: pyright narrows on
+    # ``sys.platform`` and so type-checks the registry calls against the real
+    # ``winreg`` stubs instead of reporting them unknown off Windows. Off Windows the
+    # answer is the same as an unreadable policy -- nothing proves UAC will ask.
+    if sys.platform != "win32":
+        return unreadable
     try:
         import winreg
 
@@ -72,10 +91,7 @@ def windows_uac_refusal() -> str | None:
             consent = winreg.QueryValueEx(key, "ConsentPromptBehaviorAdmin")[0]
     except (ImportError, OSError):
         # A missing/unreadable policy must not become a claim that UAC will ask.
-        return (
-            "Windows did not say whether it will ask you for approval, so no phone was "
-            "confirmed. Check that User Account Control is on, then try again."
-        )
+        return unreadable
     if not enabled or consent == 0:
         return (
             "Windows User Account Control is set not to ask for approval, so this "
@@ -145,8 +161,10 @@ def run_elevated(command: list[list[str]], *, windows: bool | None = None) -> El
     darwin = sys.platform == "darwin" and not is_windows
     try:
         # Only osascript's stderr is captured: it carries the cancel number and no
-        # secret, while sudo/pkexec keep the terminal they prompt on.
-        result = subprocess.run(argv, check=False, capture_output=darwin, text=darwin)
+        # secret, while sudo/pkexec keep the terminal they prompt on. ``text=True``
+        # everywhere so the captured stream is always ``str`` (with nothing captured
+        # it changes nothing).
+        result = subprocess.run(argv, check=False, capture_output=darwin, text=True)
     except OSError:
         return ElevationResult(1)
     cancelled = (
@@ -155,7 +173,11 @@ def run_elevated(command: list[list[str]], *, windows: bool | None = None) -> El
         or (argv[0] == "sh" and result.returncode in (1, 130, -2))
         or (is_windows and result.returncode in (1223, -1073740771))
     )
-    return ElevationResult(result.returncode, cancelled)
+    diagnosis = ""
+    if darwin and result.returncode != 0 and not cancelled:
+        # Bounded: it is printed to a terminal, and a runaway script must not flood it.
+        diagnosis = (result.stderr or "").strip()[:2000]
+    return ElevationResult(result.returncode, cancelled, diagnosis=diagnosis)
 
 
 def confirm_card_copy(*, windows: bool | None = None) -> tuple[str, str, str]:

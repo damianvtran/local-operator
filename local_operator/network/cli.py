@@ -9526,9 +9526,7 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
         try:
             described = pair_op.card_lines(dict(record))
         except MeshRefusal:
-            described = [
-                "A phone pairing request this build cannot describe; do not approve it."
-            ]
+            described = ["A phone pairing request this build cannot describe; do not approve it."]
         return [
             *described,
             f"Approval {record.get('approval_id', '')}: {record.get('state', '')}",

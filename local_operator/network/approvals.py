@@ -1802,6 +1802,56 @@ def mark_failed(
         return presented(record)
 
 
+def append_stopped_receipt(
+    approval_id: str,
+    *,
+    run_id: str,
+    step: str,
+    detail: str = "",
+    root: Path | None = None,
+) -> dict[str, Any] | None:
+    """The failed receipt for a run a mid-run DENY stopped; the state stays ``denied``.
+
+    WHY A SEPARATE WRITER: ``connecting → denied`` is a matrix row whose receipt
+    promises "the runner stops at its next step check", and the runner that stops
+    must leave a receipt saying so. ``append_receipt`` refuses every record that is
+    not ``connecting`` and ``mark_failed`` refuses ``denied → failed`` (the deny is
+    final), so neither can write it. This writer is narrow on purpose: it lands
+    ONLY on a ``denied`` record, never touches ``state``/``signature`` (F3), and
+    answers ``None`` without writing when the record is in any other state, since
+    that record belongs to whichever writer moved it (agent review round 4, n1:
+    this used to live in ``operator/pair_op.py``, reaching into the store's
+    private helpers with no audit line).
+    """
+    _require(bool(str(step)), "a receipt needs a step name")
+    with _record_lock(approval_id, root):
+        record = _load_raw(approval_id, root)
+        if str(record.get("state")) != STATE_DENIED:
+            return None
+        record.setdefault("receipts", []).append(
+            {
+                "run_id": str(run_id),
+                "step": str(step),
+                "at": time.time(),
+                "ok": False,
+                "detail": str(detail)[:400],
+                "digest": "",
+            }
+        )
+        _write_record(record, root)
+        # The run DID fail, so the existing event is the true one; the record's own
+        # ``audit`` fold is left alone because its last entry, ``onboard_denied``, is
+        # the record's state and must stay so.
+        _audit(
+            "onboard_failed",
+            actor="self",
+            subject=approval_id,
+            root=root,
+            detail={"kind": str(record.get("kind")), "step": str(step), "run_id": str(run_id)},
+        )
+        return presented(record)
+
+
 def mark_connected(
     approval_id: str,
     *,

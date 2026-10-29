@@ -597,6 +597,9 @@ def _admission_install(
                 file=sys.stderr,
             )
             return ADMIT_CANCELLED
+        # The script's own reason first, then the retry (agent review round 4, m3).
+        if result.diagnosis:
+            print(result.diagnosis, file=sys.stderr)
         print(
             "The approval did not complete, so nothing was confirmed. Run the same "
             "command again to retry.",
@@ -605,9 +608,7 @@ def _admission_install(
         return ADMIT_INSTALL_FAILED
     try:
         installed_raw = target.read_bytes()
-        loaded = trust_module.OperatorAnchor.from_json(
-            json.loads(installed_raw.decode("utf-8"))
-        )
+        loaded = trust_module.OperatorAnchor.from_json(json.loads(installed_raw.decode("utf-8")))
     except (OSError, UnicodeDecodeError, ValueError):
         return ADMIT_INSTALL_FAILED
     return (
@@ -780,12 +781,9 @@ def admit_device(
         # came back by finishing that card. `--authorise` is the one route back.
         _print_revoked_refusal([device_id])
         return ADMIT_REVOKED
-    if (
-        not trust_module.admission_enforced(installed)
-        and any(
-            device.device_id not in trust_module.open_device_ids(installed)
-            for device in list_devices(root)
-        )
+    if not trust_module.admission_enforced(installed) and any(
+        device.device_id not in trust_module.open_device_ids(installed)
+        for device in list_devices(root)
     ):
         print(
             "confirm your existing phones before adding another; adding one must not "

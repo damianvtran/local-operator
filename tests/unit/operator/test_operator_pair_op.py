@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import base64
 import copy
-from dataclasses import replace
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -269,6 +269,7 @@ def test_the_disclosure_follows_the_signed_payload_not_a_default(root: Path) -> 
     assert custom["via"] == {"route": "custom"}
     assert custom["requested_from"] == "your phone"
 
+
 # ---------------------------------------------------------------------------
 # One decision, one signature, one certificate
 # ---------------------------------------------------------------------------
@@ -507,9 +508,7 @@ def test_a_revoked_key_is_refused_at_filing_and_at_apply(
     # Revoked AFTER the decision: the privileged writer refuses before the second gesture.
     devices.record_revocation(root, device_id)
     signer_calls: list[str] = []
-    monkeypatch.setattr(
-        pair_op, "_issue_certificate", lambda **kwargs: signer_calls.append("sign")
-    )
+    monkeypatch.setattr(pair_op, "_issue_certificate", lambda **kwargs: signer_calls.append("sign"))
 
     with pytest.raises(MeshRefusal) as raised:
         pair_op.apply(approval_id, pair_op.expected(A.load_record(approval_id, root=root)), root)
@@ -609,12 +608,12 @@ def test_admit_refuses_a_phone_revoked_while_its_card_was_open(
     assert signer_calls == [], "a revoked phone's certificate was signed"
     assert devices.read_device(root, device_id) is None, "a refused apply installed a cert"
     assert prompts == [], "a revoked phone spent the administrator prompt"
-    assert target.read_bytes() == trust_module.anchor_bytes(installed), (
-        "the admission write replaced the revoked entry"
-    )
-    assert trust_module.staging_path(root).read_bytes() == staged_before, (
-        "a refused admit rewrote the staged statement"
-    )
+    assert target.read_bytes() == trust_module.anchor_bytes(
+        installed
+    ), "the admission write replaced the revoked entry"
+    assert (
+        trust_module.staging_path(root).read_bytes() == staged_before
+    ), "a refused admit rewrote the staged statement"
 
 
 @pytest.mark.parametrize("decided", ["requested", "denied"])
@@ -637,9 +636,7 @@ def test_a_card_that_cannot_be_applied_costs_no_prompt_and_no_write(
     if decided == "denied":
         A.deny(approval_id, root=root)
     admits: list[str] = []
-    monkeypatch.setattr(
-        handlers, "admit_device", lambda *args: admits.append(str(args[-1])) or 0
-    )
+    monkeypatch.setattr(handlers, "admit_device", lambda *args: admits.append(str(args[-1])) or 0)
     prompts: list[Any] = []
     monkeypatch.setattr(
         "local_operator.operator.elevate.run_elevated", lambda command: prompts.append(command)
@@ -702,6 +699,88 @@ def test_a_deny_during_the_prompt_stops_the_certificate_and_records_the_stop(
     ]
     assert stops and stops[-1]["ok"] is False, finished["receipts"]
     assert stops[-1]["detail"] == "approval_denied", stops[-1]
+
+
+def test_a_deny_during_the_signing_prompt_installs_nothing_and_spends_no_request(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 4 m1: on a presence host signing the certificate is the SECOND prompt.
+
+    At `308269650273` a deny that landed during Touch ID / Windows Hello still had the
+    certificate written and the phone's pending request spent, on a record reading
+    `denied` -- an installed, valid certificate the operator had refused.
+    """
+    from local_operator.operator import handlers
+
+    _make_key(root)
+    _level(monkeypatch, FILE_ONLY)
+    record = _file(root)
+    approval_id = str(record["approval_id"])
+    device_id = str(record["device"]["device_id"])
+    devices.write_pending(
+        root, device_id=device_id, name=NAME, spki=str(record["device"]["spki"]), code="123456"
+    )
+    pair_op.check_ack(approval_id, code=_phone_code(record, root), root=root)
+    _counted_signer(root, monkeypatch)
+    _approve(root, record)
+    monkeypatch.setattr(handlers, "admit_device", lambda *args: handlers.ADMIT_OK)
+    real_issue = pair_op._issue_certificate
+
+    def deny_while_signing(**kwargs: Any) -> str:
+        # The certificate IS signed; another surface denies while the sheet is up.
+        certificate = real_issue(**kwargs)
+        A.deny(approval_id, root=root)
+        return certificate
+
+    monkeypatch.setattr(pair_op, "_issue_certificate", deny_while_signing)
+
+    with pytest.raises(MeshRefusal) as raised:
+        pair_op.apply(approval_id, pair_op.expected(A.load_record(approval_id, root=root)), root)
+
+    assert raised.value.code == "approval_denied", raised.value.code
+    assert devices.read_device(root, device_id) is None, "a denied card installed a cert"
+    assert devices.read_pending(root, device_id) is not None, "a denied card spent the request"
+    finished = A.load_record(approval_id, root=root)
+    assert finished["state"] == A.STATE_DENIED, "the operator's deny must stay final"
+    run_id = str(finished["run"]["run_id"])
+    stops = [r for r in finished["receipts"] if r.get("run_id") == run_id]
+    assert stops and stops[-1]["ok"] is False and stops[-1]["detail"] == "approval_denied"
+
+
+def test_a_record_that_expires_during_the_prompt_keeps_the_real_refusal(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 4 m2: the release must not replace the refusal that stopped the run.
+
+    At `308269650273` a record that EXPIRED while the administrator prompt was up made
+    `mark_failed` raise `approval_decision_conflict` (``expired -> failed`` is no matrix
+    row) from inside the release, and that store error reached the caller in place of
+    the admit's own refusal and its sentence.
+    """
+    from local_operator.operator import handlers
+
+    _make_key(root)
+    _level(monkeypatch, FILE_ONLY)
+    record = _file(root)
+    approval_id = str(record["approval_id"])
+    pair_op.check_ack(approval_id, code=_phone_code(record, root), root=root)
+    _counted_signer(root, monkeypatch)
+    _approve(root, record)
+
+    def end_while_prompting(config_root: Path, phone_id: str) -> int:
+        # Any writer's sweep lands the expiry while the person reads the prompt.
+        A.sweep(root=root, now=time.time() + 10 * 24 * 3600)
+        assert A.load_record(approval_id, root=root)["state"] == A.STATE_EXPIRED
+        return handlers.ADMIT_CANCELLED
+
+    monkeypatch.setattr(handlers, "admit_device", end_while_prompting)
+
+    with pytest.raises(MeshRefusal) as raised:
+        pair_op.apply(approval_id, pair_op.expected(A.load_record(approval_id, root=root)), root)
+
+    code, sentence = handlers.ADMIT_REFUSED[handlers.ADMIT_CANCELLED]
+    assert (raised.value.code, raised.value.sentence) == (code, sentence), raised.value.code
+    assert A.load_record(approval_id, root=root)["state"] == A.STATE_EXPIRED
 
 
 # ---------------------------------------------------------------------------

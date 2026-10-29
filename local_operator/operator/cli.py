@@ -161,9 +161,7 @@ def add_parser(subparsers: Any) -> None:
     devices_parser.add_argument(
         "--print-only",
         action="store_true",
-        help=(
-            "With a device write, print the privileged command instead of running it"
-        ),
+        help=("With a device write, print the privileged command instead of running it"),
     )
 
     sign_parser = actions.add_parser(
