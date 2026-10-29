@@ -96,6 +96,48 @@ def test_render_carries_category_source_hint_and_raw():
     assert "previous turn ended" in text
 
 
+#: The operator's own screenshot, verbatim: an OpenAI content filter whose body
+#: names OpenAI's Daybreak programme and ``platform.openai.com`` while the
+#: incident's source read ``anthropic/claude-opus-5-5`` — a provider the turn had
+#: already failed over FROM. The reader was being sent to debug the model that
+#: did nothing wrong and was never even reached.
+OPERATOR_REFUSAL = (
+    "transient provider error: cyber_policy: This content was flagged for possible "
+    "cybersecurity risk. If this seems wrong, try rephrasing your request. If you're "
+    "doing authorized security work that requires more cyber permissive safeguards, "
+    "apply for Daybreak access via "
+    "https://platform.openai.com/settings/organization/status-and-access before retrying."
+)
+
+
+def test_an_incident_names_the_model_that_produced_the_error():
+    """The failure is attributed to the TARGET, never to the selection.
+
+    A user who reads ``anthropic/claude-opus-5-5`` here goes and debugs Anthropic.
+    """
+    text = format_incident_message(OPERATOR_REFUSAL, "openai", "gpt-5", "anthropic/claude-opus-5-5")
+    head = text.splitlines()[0]
+    assert head.startswith("[session incident (openai/gpt-5)] content-filter:")
+    assert "anthropic" not in head, head
+    # …and the failure CLASS survives the relabelling: ``cyber_policy`` is what
+    # tells a reader that a retry on the same model fails identically, while a
+    # retry on another model may not.
+    assert "cyber_policy" in text
+    assert "suggested action:" in text
+
+
+def test_an_incident_states_the_failover_path_when_there_was_one():
+    text = format_incident_message(OPERATOR_REFUSAL, "openai", "gpt-5", "anthropic/claude-opus-5-5")
+    assert "failed on openai/gpt-5 after failing over from anthropic/claude-opus-5-5" in text
+
+
+def test_an_incident_on_the_selected_model_says_nothing_about_failover():
+    """No hop, no sentence: the head already names the model that answered."""
+    text = format_incident_message(OPERATOR_REFUSAL, "openai", "gpt-5", "openai/gpt-5")
+    assert "failed over" not in text
+    assert format_incident_message(OPERATOR_REFUSAL, "openai", "gpt-5").count("failed on") == 0
+
+
 def test_the_reasoning_echo_refusal_names_a_next_step():
     """A refusal the harness could not clear must not read as a generic 400.
 

@@ -1,0 +1,21 @@
+{
+  "relay.session.tags.action": "ٹیگز…",
+  "relay.session.tags.sheet_title": "ٹیگز",
+  "relay.session.tags.loading": "لوڈ ہو رہا ہے…",
+  "relay.session.tags.empty": "ابھی کوئی ٹیگ زمرہ نہیں",
+  "relay.session.tags.empty_hint": "ڈیسک ٹاپ ایپ یا ٹرمینل میں ایک بنائیں",
+  "relay.session.tags.load_error": "ٹیگ کیٹلاگ لوڈ نہیں ہو سکا۔",
+  "relay.session.tags.retry": "دوبارہ کوشش کریں",
+  "relay.session.tags.limit_hint": "{count} ٹیگز ایک گفتگو کے لیے زیادہ سے زیادہ حد ہے — دوسرا شامل کرنے کے لیے ایک ہٹائیں۔",
+  "relay.session.tags.primary": "بنیادی",
+  "relay.session.tags.make_primary": "{name} کو بنیادی ٹیگ بنائیں",
+  "relay.session.tags.more": "{count, plural, one {# مزید ٹیگ} other {# مزید ٹیگز}}",
+  "relay.session.tags.missing": "کیٹلاگ میں نہیں",
+  "relay.session.tags.saving": "محفوظ ہو رہا ہے…",
+  "relay.session.tags.save_error": "ٹیگز محفوظ نہیں ہو سکے",
+  "relay.session.tags.remove_all": "تمام ٹیگز ہٹائیں",
+  "relay.session.tags.remove_all_confirm": "تمام ٹیگز ہٹائیں؟",
+  "relay.session.tags.cancel": "منسوخ کریں",
+  "relay.session.tags.done": "ہو گیا",
+  "relay.session.tags.pin_and_tags_hint": "پن یا ٹیگ کرنے کے لیے قطار کو دبا کر رکھیں"
+}

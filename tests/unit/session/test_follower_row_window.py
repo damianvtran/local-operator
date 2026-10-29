@@ -566,7 +566,7 @@ def test_a_follower_that_has_no_older_runtime_count_derives_it_from_its_window(
                 **frame.changes,
                 "jobs": [
                     {k: v for k, v in row.items() if k != "trajectory_length"}
-                    for row in frame.changes["jobs"]
+                    for row in frame.job_deltas["upserted"]
                 ],
             }
         }
@@ -584,8 +584,8 @@ def test_invalid_explicit_count_refuses_entire_delta(invalid_count: Any) -> None
     follower.apply_update(wire.append_rows())
     previous = follower.state
     frame = wire.append_rows()
-    valid_count = frame.changes["jobs"][1]["trajectory_length"]
-    frame.changes["jobs"][1]["trajectory_length"] = invalid_count
+    valid_count = frame.job_deltas["upserted"][1]["trajectory_length"]
+    frame.job_deltas["upserted"][1]["trajectory_length"] = invalid_count
     with pytest.raises(ValueError):
         follower.apply_update(frame)
     assert follower.state == previous
@@ -593,7 +593,7 @@ def test_invalid_explicit_count_refuses_entire_delta(invalid_count: Any) -> None
 
     # A refused packet must leave the same sequence available for a corrected
     # retry, including the cached windows of jobs processed before the bad one.
-    frame.changes["jobs"][1]["trajectory_length"] = valid_count
+    frame.job_deltas["upserted"][1]["trajectory_length"] = valid_count
     follower.apply_update(frame)
     assert follower.state == wire.owner.state
 

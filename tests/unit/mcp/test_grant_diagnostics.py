@@ -130,6 +130,7 @@ async def test_sdk_callback_attributes_native_and_rotation_preserves_event(
         assert metadata["native_event_at"] == auth._chain_stamp_of(row.data)
         snapshot = auth.mcp_grant_diagnostics(URL, store)
         assert snapshot["provenance"] == "native"
+        assert snapshot["grant_chain_at"] == metadata["native_event_at"]
         assert snapshot["scopes_known"] is scope
         assert snapshot["identity_verified"] is False
         assert snapshot["sharing_mode"] == "finite_only"
@@ -259,12 +260,15 @@ async def test_snapshot_is_one_lookup_material_free_and_readiness_offers_are_tru
         assert item["auth_diagnostics"]["identity_verified"] is False
         assert set(item["auth_diagnostics"]) == {
             "has_row",
+            # Value-free boolean: the runtime's own "would it use this row" answer.
+            "usable_grant",
             "provenance",
             "identity_verified",
             "identity_state",
             "sharing_mode",
             "refresh_presence",
             "expiry_known",
+            "grant_chain_at",
             "scopes_known",
             "access_state",
         }
@@ -304,6 +308,9 @@ async def test_snapshot_is_one_lookup_material_free_and_readiness_offers_are_tru
         store.upsert_credential(
             auth.MCP_OAUTH_PROVIDER, {k: v for k, v in data.items() if k != "type"}
         )
+        # The readiness path deliberately reports an open WAL as unknown; close
+        # the writer so this cell checks the expired row, not that separate arm.
+        store.close()
         facts = readiness.collect_peer_facts(tmp_path)
         rows = readiness.mcp_credential_rows(
             _member(), facts, viewer=_FakeViewer(), peer_label="synthetic-peer"
@@ -434,6 +441,7 @@ def test_unreadable_registration_only_and_unknown_expiry_do_not_invent_evidence(
 
     unknown = auth.mcp_grant_diagnostics(URL, Unreadable())
     assert unknown["has_row"] is None and unknown["access_state"] == "unknown"
+    assert unknown["usable_grant"] is None
     assert unknown["refresh_presence"] == "unknown"
     assert unknown["identity_verified"] is False
 
@@ -449,5 +457,7 @@ def test_unreadable_registration_only_and_unknown_expiry_do_not_invent_evidence(
 
     registration = auth.mcp_grant_diagnostics(URL, RowStore())
     assert registration["has_row"] is True
+    # A row, but not a grant the runtime would use (F-READY-1).
+    assert registration["usable_grant"] is False
     assert registration["sharing_mode"] == "unavailable"
     assert registration["expiry_known"] is False

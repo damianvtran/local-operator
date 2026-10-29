@@ -351,7 +351,7 @@ def test_one_failing_listing_does_not_end_the_run(tmp_path) -> None:
 
 def test_hub_sync_ignores_rows_without_the_marker(tmp_path) -> None:
     registry = AgentRegistry(tmp_path)
-    install_seed("reviewer", registry=registry)
+    install_seed("reviewer", registry=registry, scope="global")
 
     assert sync_hub_agents(registry, radient_client=None) == []
 
@@ -384,7 +384,7 @@ def test_the_coordinator_reports_a_hub_row_once_and_answers_every_requested_name
 
 def test_the_coordinator_runs_the_seed_arm_while_the_hub_degrades(tmp_path) -> None:
     registry = AgentRegistry(tmp_path)
-    install_seed("reviewer", registry=registry)
+    install_seed("reviewer", registry=registry, scope="global")
     _pull(registry, agent_id="abc-123", name="hunter", description="d", text="PROMPT v1")
 
     report = sync_agent_profiles(registry, radient_client=None)
@@ -427,7 +427,7 @@ def test_an_unbumped_update_does_not_render_as_a_no_op() -> None:
 
 def test_the_payload_carries_every_verdict_field_and_a_kind(tmp_path) -> None:
     registry = AgentRegistry(tmp_path)
-    install_seed("reviewer", registry=registry)
+    install_seed("reviewer", registry=registry, scope="global")
     _pull(registry, agent_id="abc-123", name="hunter", description="d", text="PROMPT v1")
 
     payload = sync_payload(sync_agent_profiles(registry, radient_client=None))

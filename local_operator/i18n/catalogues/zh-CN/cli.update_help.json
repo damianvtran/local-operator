@@ -1,0 +1,8 @@
+{
+  "cli.update_help.update": "从PyPI升级此安装。并非lop-update脚本，后者从本地git检出重建全局运行时。",
+  "cli.update_help.check": "打印已安装版本与PyPI版本，不安装",
+  "cli.update_help.from_snapshot": "将本地源码树（目录或当前仓库的git引用）安装为独立安装代次。在macOS上，恰好对应已发布版本的引用会安装PyPI上发布的wheel，这是唯一包含macOS密钥智能体的构建；其他引用均从源码构建。",
+  "cli.update_help.allow_downgrade": "允许--from-snapshot安装比当前安装更旧的构建（主动回滚；记录于安装标记）。不带--from-snapshot时，PyPI路径拒绝此选项，仅安装更新版本；刷新标志优先。",
+  "cli.update_help.no_services": "不将`lop serve`守护进程切换至新构建；仍会修复受监督的守护进程。仅在其他机制将启动serve进程时使用，例如负责启动它们的脚本。",
+  "cli.update_help.no_roll": "无论`network.rollout_on_update`如何设置，都不将此次更新加入mesh分发队列；仍可用`lop network update`手动分发。"
+}

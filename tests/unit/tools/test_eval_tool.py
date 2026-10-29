@@ -893,7 +893,6 @@ def _pad_over_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     filled.write_bytes(b"x" * 8192)
     held = filled.stat().st_blocks * 512
     monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", held - 1)
-    monkeypatch.setattr(builtin, "SCRATCHPAD_TOTAL_BUDGET_BYTES", held - 1)
     context = ToolContext(cwd=str(tmp_path), session_id="eval-pad", scratchpad_dir=str(pad))
     return context, pad, held
 

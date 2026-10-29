@@ -2,11 +2,90 @@
 
 import argparse
 import hashlib
+import os
+import sys
+import types
 from pathlib import Path
 
 import pytest
 
+import local_operator
 from local_operator import update_bootstrap as bootstrap
+
+
+def _prepared_base_interpreter(
+    destination, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stub: types.ModuleType
+) -> str:
+    """Run ``bootstrap`` to the controller-preparation step and return its base.
+
+    ``scripts/lop-update.sh`` runs this module from the TARGET ref under the
+    INSTALLED interpreter, so the ``local_operator.procname`` it imports is the
+    OLD generation's module — the stub here. ``_run`` and the download are
+    stubbed so the cell is about the ask, not about uv.
+    """
+    root, generation = destination
+    wheel = b"fixture"
+    archive = hashlib.sha256(wheel).hexdigest()
+    monkeypatch.setattr(
+        bootstrap,
+        "_publication",
+        lambda _target: ("0.70.99", "x.whl", "https://example.invalid/x.whl", archive),
+    )
+    monkeypatch.setattr(bootstrap, "_read_url", lambda *_args, **_kwargs: wheel)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _name: "/usr/bin/uv")
+    commands: list[list[str]] = []
+    monkeypatch.setattr(bootstrap, "_run", lambda argv, **_kwargs: commands.append(argv))
+    # The PACKAGE attribute, not ``sys.modules``: ``from local_operator import
+    # procname`` answers from the package first, which is exactly the path the
+    # seed takes against the installed generation.
+    monkeypatch.setattr(local_operator, "procname", stub, raising=False)
+    python = tmp_path / "gen" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(Path(os.path.realpath(sys.executable)))
+    monkeypatch.setattr(bootstrap.sys, "executable", str(python))
+    args = argparse.Namespace(
+        root=str(root),
+        baseline=str(generation),
+        target=None,
+        caller=bootstrap.CALLER_CONTRACT,
+        snapshot=None,
+        no_services=False,
+    )
+
+    assert bootstrap.bootstrap(args) == 0
+
+    assert commands[0][:3] == ["/usr/bin/uv", "venv", "--python"], commands[0]
+    return commands[0][3]
+
+
+def test_preparation_survives_a_procname_without_real_interpreter(
+    destination, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """B1: the seed cannot import a name the INSTALLED generation does not have.
+
+    The reproduction is the one the reviewer ran: origin/main's ``procname`` on
+    the path, and ``real_interpreter`` does not exist there.
+    """
+    stub = types.ModuleType("local_operator.procname")
+    assert not hasattr(stub, "real_interpreter")
+
+    base = _prepared_base_interpreter(destination, monkeypatch, tmp_path, stub)
+
+    assert base == os.path.realpath(
+        sys.executable
+    ), "the venv is built from the resolved executable"
+
+
+def test_preparation_uses_the_private_seam_when_that_is_all_the_old_module_has(
+    destination, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The seam's other spelling: ``_real_interpreter`` is what v0.74.0 carries."""
+    stub = types.ModuleType("local_operator.procname")
+    stub._real_interpreter = lambda: Path("/base/python3.12")  # type: ignore[attr-defined]
+
+    base = _prepared_base_interpreter(destination, monkeypatch, tmp_path, stub)
+
+    assert base == "/base/python3.12"
 
 
 @pytest.fixture

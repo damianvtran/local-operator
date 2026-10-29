@@ -548,6 +548,7 @@ def test_an_ordinary_role_edit_cannot_strip_a_deliberate_reactive_switch(
         registry,
         AgentParams(op="update", name="aida", description="a typo fix in her prompt"),
         creating=False,
+        scope="global",
     )
     edited = AgentRegistry(isolated_root).get_agent_by_name("aida")
     assert edited is not None
@@ -573,6 +574,7 @@ async def test_a_switched_off_agent_is_not_re_armed_by_a_boot_after_an_edit(
         registry,
         AgentParams(op="update", name="aida", description="a prompt fix"),
         creating=False,
+        scope="global",
     )
 
     session_dir = isolated_root / "sessions" / "439818272d84"

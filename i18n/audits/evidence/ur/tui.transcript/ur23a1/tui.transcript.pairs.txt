@@ -1,0 +1,68 @@
+tui.transcript.ask.key_name
+EN "{keys} (key name)"
+UR "{keys} (کلید کا نام)"
+CX {"role": "ask card Q&A value", "tone": "terse, parenthetical", "note": "The ask card's Q&A row for a SECRET answer: only the collected key NAMES are shown, never values. The suffix disambiguates `[DEPLOY_KEY]` from the secret it stands in for (design round 1, D11) — keep it a short parenthetical, not a sentence."}
+tui.transcript.ask.not_answered
+EN "not answered"
+UR "جواب نہیں دیا گیا"
+CX {"role": "ask card Q&A value", "tone": "plain, two words", "note": "The ask card's Q&A row when a non-secret question went unanswered (timeout or a declined prompt). Distinct from 'not provided', which is about a secret's key never being collected."}
+tui.transcript.ask.not_provided
+EN "not provided"
+UR "فراہم نہیں کیا گیا"
+CX {"role": "ask card Q&A value", "tone": "plain, two words", "note": "The ask card's Q&A row when a secret question's key was never provided. Distinct from 'not answered' (a non-secret question); the two must not collapse to one word, they name different states."}
+tui.transcript.attach.receipt
+EN "↑ {count, plural, one {# image} other {# images}} attached"
+UR "↑ {count, plural, one {# تصویر} other {# تصویریں}} منسلک"
+CX {"role": "prompt receipt row", "tone": "plain confirmation", "note": "The receipt row under a prompt with pasted attachments: the app confirming BYTES were attached, not repeating the pasted marker (which the user could have typed). ICU plural; the leading arrow is the receipt mark and is part of the value."}
+tui.transcript.catchup.headline
+EN "catch-up — {label}"
+UR "بیداری کا خلاصہ — {label}"
+CX {"role": "wake receipt headline", "tone": "terse summary", "note": "The wake catch-up receipt's headline. `{label}` is the rendered missed-wakes count (see catchup.missed); the em dash joins them in ONE line by design. 'catch-up' is the wake system's own term — keep it short, it rides a one-row receipt."}
+tui.transcript.catchup.missed
+EN "{count, plural, one {# missed wake} other {# missed wakes}}"
+UR "{count, plural, one {# چھوٹی ہوئی بیداری} other {# چھوٹی ہوئی بیداریاں}}"
+CX {"role": "wake receipt label", "tone": "plain count", "note": "The missed-wakes count that fills catchup.headline's `{label}`. ICU plural. Rides a one-row receipt on the transcript spine; 'wake' is the product term for a scheduled session wake."}
+tui.transcript.queued.newest
+EN "· queued for the next runtime — esc takes it back"
+UR "· اگلے رن ٹائم کے لیے قطار میں — esc سے واپس لیں"
+CX {"role": "queued prompt marker", "tone": "state + affordance", "note": "The marker on the NEWEST queued prompt: a state plus an OFFER ('esc takes it back'), and the offer can be refused — the refusal has its own sentence. The leading middle dot is the marker and part of the value. Only the newest queued message offers recall, so this key must stay longer than queued.older by exactly that clause."}
+tui.transcript.queued.older
+EN "· queued for the next runtime"
+UR "· اگلے رن ٹائم کے لیے قطار میں"
+CX {"role": "queued prompt marker", "tone": "plain state", "note": "The same state WITHOUT the recall offer, for every queued message but the newest: a second row advertising the same key would promise a recall the press declines (UX round 2, U4). Deliberately a strict prefix of queued.newest's words."}
+tui.transcript.sender.pid
+EN "pid {pid}"
+UR "pid {pid}"
+CX {"role": "peer sender identity", "tone": "machine label", "note": "One identity bit on a peer message's sender line: the process id that sent it. Composed into a ' · '-joined line with the name and model, so keep it to the label and the number."}
+tui.transcript.sender.unknown
+EN "another session"
+UR "کوئی اور سیشن"
+CX {"role": "peer sender identity", "tone": "plain fallback", "note": "The sender fallback when nothing identifies the peer. MUST stay the same vocabulary harness/comms.py uses for the same case: a reader meeting one in a transcript and one in a tool result must not read them as different states."}
+tui.transcript.group.messages
+EN "messages · {count}"
+UR "پیغامات · {count}"
+CX {"role": "quiet group summary", "tone": "terse advisory", "note": "Preserve the existing English clause exactly; counts are actual tool work or explicit receipt flags, never total group members. "}
+tui.transcript.group.actions
+EN "{count, plural, one {{label} action} other {{label} actions}}"
+UR "{count, plural, one {{label} کارروائی} other {{label} کارروائیاں}}"
+CX {"role": "quiet group summary", "tone": "terse advisory", "note": "Actions count actual tool work, never incoming receipts, quiet no_reply calls or total group members. English singular is '1 action'; other counts retain 'actions'. {count} selects the locale noun form via ICU plurals; {label} is format_number(count, active_locale) for non-English locales, and the raw decimal for English. In es/fr the CLDR many branch carries no preposition after formatted digits — the guides' 'de' examples describe lexical number words such as 'un millón', not formatted numerals."}
+tui.transcript.group.reply_requested
+EN "{count, plural, one {{label} reply requested} other {{label} reply requested}}"
+UR "{count, plural, one {{label} جواب کی درخواست} other {{label} جواب کی درخواستیں}}"
+CX {"role": "quiet group summary", "tone": "terse advisory", "note": "Requested agent intent only, not outstanding operator attention or an action count. Preserve the existing English clause exactly; counts are actual tool work or explicit receipt flags, never total group members.  {count} selects the locale noun form via ICU plurals; {label} is format_number(count, active_locale) for non-English locales, and the raw decimal for English so reviewed frames stay byte-identical. In es/fr the CLDR many branch carries no preposition after formatted digits — the guides' 'de' examples describe lexical number words such as 'un millón', not formatted numerals."}
+tui.transcript.group.steered
+EN "{count, plural, one {{label} steered} other {{label} steered}}"
+UR "{count, plural, one {{label} رخ بدلنے والا پیغام} other {{label} رخ بدلنے والے پیغامات}}"
+CX {"role": "quiet group summary", "tone": "terse advisory", "note": "Preserve the existing English clause exactly; counts are actual tool work or explicit receipt flags, never total group members.  {count} selects the locale noun form via ICU plurals; {label} is format_number(count, active_locale) for non-English locales, and the raw decimal for English so reviewed frames stay byte-identical. In es/fr the CLDR many branch carries no preposition after formatted digits — the guides' 'de' examples describe lexical number words such as 'un millón', not formatted numerals."}
+tui.transcript.hub.reply_requested
+EN "Reply requested"
+UR "جواب کی درخواست"
+CX {"role": "hub receipt header", "tone": "terse advisory", "note": "Requested agent intent only, not outstanding operator attention or an action count. Header of an internal hub receipt; authored body and sender identity are not translated. "}
+tui.transcript.hub.steered
+EN "Steered"
+UR "رخ بدلا گیا"
+CX {"role": "hub receipt header", "tone": "terse advisory", "note": "Header of an internal hub receipt; authored body and sender identity are not translated. "}
+tui.transcript.hub.from
+EN "From {identity}"
+UR "{identity} کی طرف سے"
+CX {"role": "hub receipt header", "tone": "terse advisory", "note": "Header of an internal hub receipt; authored body and sender identity are not translated. "}

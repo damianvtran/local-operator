@@ -80,6 +80,56 @@ async def _collect(stream: Any) -> list[Any]:
     return [event async for event in stream]
 
 
+@pytest.mark.parametrize("provider", ["kimi", "kimi-wechat"])
+async def test_kimi_login_flavours_send_the_same_device_identity(
+    provider: str, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The outgoing streaming URL stays Kimi's; only request identity is aliased."""
+    from local_operator.providers.oauth.kimi import kimi_common_headers
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    expected = kimi_common_headers()
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200,
+            content=_sse(
+                [
+                    {
+                        "id": "chatcmpl-synthetic",
+                        "object": "chat.completion.chunk",
+                        "created": 1,
+                        "model": "k3",
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                    }
+                ]
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    from local_operator.providers.auth_store import OAuthAccess
+
+    spec = _spec(provider=provider, model_id="k3")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = client_for_spec(spec, http_client=http)
+        await _collect(
+            client.stream(
+                ChatRequest(model=spec, messages=[Message.user("synthetic")]),
+                "synthetic-oauth",
+                OAuthAccess(credential_id=1, kind="oauth", access_token="synthetic-oauth"),
+            )
+        )
+    assert len(captured) == 1
+    request = captured[0]
+    assert str(request.url) == "https://api.kimi.com/coding/v1/chat/completions"
+    assert request.headers["Authorization"] == "Bearer synthetic-oauth"
+    fingerprint = {name: value for name, value in expected.items() if name.startswith("X-Msh-")}
+    assert len(fingerprint) == 6
+    assert all(request.headers.get(name) == value for name, value in fingerprint.items())
+
+
 # ---------------------------------------------------------------------------
 # OpenAI-compatible
 # ---------------------------------------------------------------------------
@@ -4706,14 +4756,15 @@ def test_openai_wires_still_backfill_a_content_less_user_turn() -> None:
     """M1's other half: dropping blank parts must not remove the shape a
     genuinely content-less turn depends on.
 
-    With every part dropped, ``parts`` is empty and each wire falls back to the
-    shape it already had — the chat wire joins its parts into a single string,
-    and the Responses wire keeps a user item because a request cannot drop its
-    own subject (see ``EMPTY_USER_TEXT`` for why that is a backfill and not a
-    skip).
+    With every part dropped, ``parts`` is empty and both wires keep a user turn
+    because a request cannot drop its own subject (see ``EMPTY_USER_TEXT`` for
+    why that is a backfill and not a skip). The chat wire used to join zero
+    parts into ``"content": ""``, which an openai-compat route forwarding to
+    Claude (OpenRouter, Radient) turns into the very blank block Anthropic
+    refuses — so it backfills the placeholder like the Responses wire.
     """
     empty = Message(role="user", content=[])
-    assert _message_to_openai(empty) == {"role": "user", "content": ""}
+    assert _message_to_openai(empty) == {"role": "user", "content": EMPTY_USER_TEXT}
     assert _messages_to_openai_responses([empty]) == [
         {"role": "user", "content": [{"type": "input_text", "text": EMPTY_USER_TEXT}]}
     ]

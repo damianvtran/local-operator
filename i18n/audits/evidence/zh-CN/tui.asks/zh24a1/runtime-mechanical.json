@@ -1,0 +1,236 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "tui.asks",
+  "revision": "f7a884b7b73e0b92d2b44ea2020c46b9b0d4843f",
+  "generated_utc": "2026-10-24T23:28:38Z",
+  "renderer": "local_operator.i18n.runtime.render_message (in-house ICU subset)",
+  "plural_categories": {
+    "zh-CN": [
+      "other"
+    ],
+    "en": [
+      "one",
+      "other"
+    ]
+  },
+  "arguments": {
+    "keys_checked": 11,
+    "mismatches": []
+  },
+  "plural_selector_parity": {
+    "rows": [
+      {
+        "key": "tui.asks.context.messages",
+        "en_selectors": [
+          [
+            "one",
+            "other"
+          ]
+        ],
+        "zh_selectors": [
+          [
+            "other"
+          ]
+        ]
+      }
+    ],
+    "errors": []
+  },
+  "plural_render_samples": [
+    {
+      "key": "tui.asks.context.messages",
+      "count": 0,
+      "zh_category": "other",
+      "en_category": "other",
+      "zh_render": "提问后你发来0条消息（最后19:36）",
+      "en_render": "0 messages from you since this was asked (last 19:36)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.asks.context.messages",
+      "count": 1,
+      "zh_category": "other",
+      "en_category": "one",
+      "zh_render": "提问后你发来1条消息（最后19:36）",
+      "en_render": "1 message from you since this was asked (last 19:36)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.asks.context.messages",
+      "count": 2,
+      "zh_category": "other",
+      "en_category": "other",
+      "zh_render": "提问后你发来2条消息（最后19:36）",
+      "en_render": "2 messages from you since this was asked (last 19:36)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.asks.context.messages",
+      "count": 5,
+      "zh_category": "other",
+      "en_category": "other",
+      "zh_render": "提问后你发来5条消息（最后19:36）",
+      "en_render": "5 messages from you since this was asked (last 19:36)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.asks.context.messages",
+      "count": 11,
+      "zh_category": "other",
+      "en_category": "other",
+      "zh_render": "提问后你发来11条消息（最后19:36）",
+      "en_render": "11 messages from you since this was asked (last 19:36)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.asks.context.messages",
+      "count": 21,
+      "zh_category": "other",
+      "en_category": "other",
+      "zh_render": "提问后你发来21条消息（最后19:36）",
+      "en_render": "21 messages from you since this was asked (last 19:36)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.asks.context.messages",
+      "count": 100,
+      "zh_category": "other",
+      "en_category": "other",
+      "zh_render": "提问后你发来100条消息（最后19:36）",
+      "en_render": "100 messages from you since this was asked (last 19:36)",
+      "zh_error": null,
+      "en_error": null
+    }
+  ],
+  "plural_render_failures": [],
+  "static_render_samples": [
+    {
+      "key": "tui.asks.dismiss.answered_in_chat",
+      "zh_render": "已在聊天中回答",
+      "en_render": "Answered in chat",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.asks.dismiss.answered_in_chat_note",
+      "zh_render": "你已在对话中回复",
+      "en_render": "you already replied in the conversation",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.asks.dismiss.fleet_gone",
+      "zh_render": "此问题已不在该会话的记录中。",
+      "en_render": "the ask is no longer in that conversation's log.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.asks.dismiss.hint",
+      "zh_render": "enter忽略 · esc取消",
+      "en_render": "enter dismiss · esc cancel",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.asks.dismiss.moot",
+      "zh_render": "不再需要",
+      "en_render": "No longer needed",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.asks.dismiss.moot_note",
+      "zh_render": "不再等待此问题",
+      "en_render": "stop waiting on it",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.asks.dismiss.notice_answered_in_chat",
+      "zh_render": "已忽略 — 已在聊天中回答",
+      "en_render": "Dismissed — answered in chat",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.asks.dismiss.notice_moot",
+      "zh_render": "已忽略 — 不再需要",
+      "en_render": "Dismissed — no longer needed",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.asks.dismiss.notice_no_reply",
+      "zh_render": "已忽略 — 未发送回复",
+      "en_render": "Dismissed — no reply sent",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "tui.asks.dismiss.title",
+      "zh_render": "忽略此问题",
+      "en_render": "Dismiss this ask",
+      "zh_error": null,
+      "en_error": null
+    }
+  ],
+  "select_render_samples": [],
+  "direction_punctuation": {
+    "locale_dir": "ltr",
+    "rtl_controls": 0,
+    "checks": [
+      "full-width punctuation inventory (，。：；！？、；“”（）)",
+      "ellipsis form (…… vs three dots)",
+      "ASCII punctuation adjacent to CJK prose",
+      "quote form (mainland “ ”; no 「」)",
+      "embedded Latin/digit runs adjacent to CJK without a space"
+    ],
+    "note": "zh-CN is LTR: the ur bundle's RTL-specific punctuation-placement, direction-token and embedded-Latin-isolation checks have no counterpart. The punctuation inventory was still scanned and is recorded in mechanical-raw.json (bidi_controls, cjk_latin_space, fullwidth_latin_or_digits)."
+  },
+  "technical_tokens": {
+    "patterns": {
+      "backtick_span": "`[^`\\n]+`",
+      "long_flag": "(?<![\\w/])--[a-zA-Z][a-zA-Z0-9_-]*",
+      "slash_command": "(?<![\\w/])/[a-zA-Z][a-zA-Z0-9_-]*",
+      "env_or_constant": "(?<![A-Za-z0-9_])[A-Z][A-Z0-9_]{2,}(?![A-Za-z0-9_])",
+      "url_scheme": "(?:https?|ssh)://[^\\s，。；：]+",
+      "ipv4": "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b",
+      "ipv6_loopback": "::1(?![\\w:])",
+      "hostname": "\\blocalhost\\b",
+      "home_path": "~/[\\w./-]+",
+      "abs_path": "/(?:bin|Users|Volumes|tmp|var|etc)/[\\w./-]+",
+      "percent_token": "%[sdif]"
+    },
+    "literals": [
+      "lop",
+      "lop-update",
+      "Radient",
+      "Local Operator",
+      "Git",
+      "JSON",
+      "ASCII",
+      "MiB",
+      "SHA",
+      "API",
+      "URL",
+      "TUI"
+    ],
+    "missing": []
+  },
+  "width": {
+    "over_budget": [],
+    "checked_keys_with_budget": 11
+  },
+  "review_disposition": {
+    "mechanical_status": "passed",
+    "note": "Mechanical only: no native terminal, relay SPA or rendered-frame pass is claimed by this document. Semantic findings are in report.md."
+  }
+}

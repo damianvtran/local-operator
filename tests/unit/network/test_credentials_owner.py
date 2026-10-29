@@ -426,8 +426,9 @@ def test_a_revoked_holder_stops_being_served(owner: Any, idp: RotatingIdP) -> No
     assert idp.posts == []
 
 
+@pytest.mark.parametrize("provider", ["kimi", "kimi-wechat"])
 def test_a_device_bound_provider_is_refused_by_name(
-    owner: Any, idp: RotatingIdP, monkeypatch: pytest.MonkeyPatch
+    owner: Any, idp: RotatingIdP, provider: str
 ) -> None:
     """Kimi is refused before authorisation is even consulted (finding 7).
 
@@ -435,10 +436,48 @@ def test_a_device_bound_provider_is_refused_by_name(
     grant presents the owner's token with ITS OWN fingerprint, which is a different
     device using that token — the case the design itself calls never.
     """
-    detail = _ask_grant(owner, BORROWER_DEVICE, key="kimi", provider="kimi")
+    detail = _ask_grant(owner, BORROWER_DEVICE, key=provider, provider=provider)
     assert detail["code"] == "device_bound"
     assert "bound to the device that made them" in detail["message"]
     assert idp.posts == []
+
+
+@pytest.mark.parametrize("provider", ["kimi", "kimi-wechat"])
+def test_an_authorized_device_bound_alias_is_never_served(
+    owner: Any, idp: RotatingIdP, provider: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact legacy escape: a holder exists and the same nonportable row is asked.
+
+    The legacy placement document simulates a grant admitted before the alias
+    gate existed. The serve-side predicate must refuse it before reading or
+    returning its bearer, independently of declare/grant admission.
+    """
+    from local_operator.network.credentials import types
+
+    monkeypatch.setattr(
+        owner.broker,
+        "_entry",
+        lambda key: placement_mod.CredentialPlacementEntry(
+            key=key,
+            provider="kimi",
+            kind="oauth-rotating",
+            owner_device=OWNER_DEVICE,
+            holders=[types.Holder(device=BORROWER_DEVICE)],
+        ),
+    )
+    detail = _ask_grant(owner, BORROWER_DEVICE, key=provider, provider=provider)
+    assert detail["code"] == "device_bound"
+    assert "access_token" not in detail
+    assert idp.posts == []
+
+
+def test_an_authorized_ordinary_provider_still_serves_its_bearer(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    grant = _ask_grant(owner, BORROWER_DEVICE, provider=STUB_PROVIDER)
+    assert grant["kind"] == "grant"
+    assert grant["access_token"] == "access-1"
+    assert idp.posts, "the ordinary provider retained its previous mint path"
 
 
 def test_a_forced_refresh_from_a_non_admin_is_refused(owner: Any, idp: RotatingIdP) -> None:
@@ -2034,3 +2073,260 @@ def test_a_grant_for_a_quota_blocked_family_says_quota_blocked(
         owner, BORROWER_DEVICE, key="mesh-empty", provider="mesh-empty", session="sess-3"
     )
     assert empty["code"] == "no_local_credential", empty
+
+
+def test_a_borrow_reaching_a_closed_broker_is_refused_as_unavailable(owner: Any) -> None:
+    """R1-2: the teardown race is a named refusal, not a handler that reads as a bug.
+
+    A slow-op handler can already hold the broker when the relay's stop hook closes
+    its loop. The closed latch refuses to restart (that is the leak fix); this is
+    the answer the peer must see — ``unavailable`` with the reason — rather than the
+    generic ``internal`` / ``RuntimeError`` a bare closed-loop error used to become.
+    """
+    owner.broker._loop.close()
+    detail = _ask_grant(owner, BORROWER_DEVICE)
+    assert detail["code"] == "unavailable", detail
+    assert "shutting down" in str(detail.get("message") or ""), detail
+
+
+# ---------------------------------------------------------------------------
+# Usage-depleted pools with no live SQL block (2026-10-28 remote quota follow-up)
+# ---------------------------------------------------------------------------
+
+
+def _usage_reports(owner: Any, monkeypatch: pytest.MonkeyPatch, used: dict[int, Any]) -> None:
+    """Pin each row's cached usage report (the selector's own seam), by row id.
+
+    ``used`` maps a row id to its shared 5-hour utilisation, or ``None`` for a row
+    with no usable evidence. The reset is 20 minutes ahead and the report is fresh,
+    so a 100% row is ``depleted`` with a PROVEN reopening — the node-2 shape at
+    18:23Z with every SQL timer lapsed.
+    """
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+
+    now = int(time.time() * 1000)
+
+    def _report(row: Any, provider: str) -> Any:
+        fraction = used.get(row.id)
+        if fraction is None:
+            return None
+        return UsageReport(
+            STUB_PROVIDER,
+            fetched_at=now - 1_000,
+            limits=[
+                UsageLimit(
+                    id="synthetic:5h",
+                    label="5h",
+                    window="5 hour",
+                    shared=True,
+                    amount=UsageAmount(used_fraction=fraction),
+                    resets_at_ms=now + 20 * 60_000,
+                )
+            ],
+        )
+
+    monkeypatch.setattr(owner.auth, "_cached_usage_report", _report)
+
+
+def _no_sql_blocks(owner: Any) -> int:
+    return int(
+        owner.auth._conn.execute(
+            "SELECT COUNT(*) FROM auth_credential_blocks WHERE blocked_until_ms > ?",
+            (int(time.time() * 1000),),
+        ).fetchone()[0]
+    )
+
+
+def test_a_usage_depleted_pool_with_no_live_block_says_quota_blocked(
+    owner: Any, idp: RotatingIdP, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FAILING FIRST: enabled, unexpired OAuth rows, NO live SQL block, all usage spent.
+
+    The selector drops every row as ``depleted`` from fresh shared-5h 100% evidence,
+    so the owner's resolve is empty. The empty answer used to be explained from the
+    SQL blocks alone — none live — and the borrower was told ``no_local_credential``
+    with a re-login remedy. The same selector's verdicts now name the cause, with
+    the PROVEN reopening as the wait. Nothing is written: no block, no policy row.
+    """
+    second = _second_row(owner)
+    _usage_reports(owner, monkeypatch, {owner.row.id: 1.0, second.id: 1.0})
+    assert _no_sql_blocks(owner) == 0
+
+    refused = _ask_grant(owner, BORROWER_DEVICE)
+
+    assert refused["code"] == "quota_blocked", refused
+    assert 18 * 60_000 < int(refused["retry_after_ms"]) <= 20 * 60_000, refused
+    assert "usage window" not in str(refused.get("message") or ""), refused
+    assert _no_sql_blocks(owner) == 0, "the diagnosis must not write a block"
+
+
+def test_a_mixed_pool_keeps_serving_and_unknown_evidence_never_fabricates_a_block(
+    owner: Any, idp: RotatingIdP, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Controls: a usable row still wins; an unknown verdict is not a quota limit."""
+    second = _second_row(owner)
+    _usage_reports(owner, monkeypatch, {owner.row.id: 1.0, second.id: 0.1})
+    served = _ask_grant(owner, BORROWER_DEVICE)
+    assert served["kind"] == "grant", served
+
+    # One depleted row, one with no usable evidence: the selector fails open on
+    # unknown, so the unknown row still serves and no quota claim is made.
+    _usage_reports(owner, monkeypatch, {owner.row.id: 1.0, second.id: None})
+    eligibility = owner.auth.quota_eligibility(STUB_PROVIDER, "stub-model")
+    assert not eligibility.all_quota_limited, eligibility
+    assert eligibility.retry_after_ms == 0
+    unknown_served = _ask_grant(owner, BORROWER_DEVICE, session="sess-unknown")
+    assert unknown_served["kind"] == "grant", unknown_served
+
+
+def test_a_depleted_pool_whose_reopening_is_unproven_says_quota_blocked_without_a_time(
+    owner: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spent usage whose reset nobody stated: the code is honest, no wait is invented."""
+    from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+
+    now = int(time.time() * 1000)
+    spent = UsageReport(
+        STUB_PROVIDER,
+        fetched_at=now - 1_000,
+        limits=[
+            UsageLimit(
+                id="synthetic:5h",
+                label="5h",
+                window="5 hour",
+                shared=True,
+                amount=UsageAmount(used_fraction=1.0),
+            )
+        ],
+    )
+    monkeypatch.setattr(owner.auth, "_cached_usage_report", lambda row, provider: spent)
+    refused = _ask_grant(owner, BORROWER_DEVICE)
+    assert refused["code"] == "quota_blocked", refused
+    assert not refused.get("retry_after_ms"), refused
+    assert "until its usage window resets" in str(refused.get("message") or ""), refused
+
+
+def test_no_login_at_all_still_says_no_local_credential(
+    owner: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The true no-login control: an empty pool is not a quota pool."""
+    owner.auth.delete_credential(owner.row.id)
+    assert owner.auth.list_credentials(STUB_PROVIDER) == []
+    assert not owner.auth.quota_eligibility(STUB_PROVIDER, "stub-model").all_quota_limited
+    refused = _ask_grant(owner, BORROWER_DEVICE)
+    assert refused["code"] == "no_local_credential", refused
+
+
+def test_the_two_zero_remainder_quota_arms_carry_their_marker_and_older_owners_default() -> None:
+    """#3108 review m1: ``reason`` names the arm; an older owner keeps today's rule."""
+    from local_operator.network.credentials.types import (
+        QUOTA_REASON_HOLDER_EXCLUDED,
+        QUOTA_REASON_POOL_DEPLETED,
+        BrokerError,
+    )
+
+    pool = BrokerError(code="quota_blocked", reason=QUOTA_REASON_POOL_DEPLETED)
+    detail = pool.to_detail()
+    assert detail["reason"] == "pool_depleted" and "retry_after_ms" not in detail, detail
+    assert not BrokerError.from_detail(detail).is_holder_exclusion
+    holder = BrokerError.from_detail(
+        BrokerError(code="quota_blocked", reason=QUOTA_REASON_HOLDER_EXCLUDED).to_detail()
+    )
+    assert holder.is_holder_exclusion
+    # An older owner: no marker, so 0 remainder still reads as the exclusion arm,
+    # and a measured remainder still reads as the owner's own block.
+    assert BrokerError.from_detail({"code": "quota_blocked"}).is_holder_exclusion
+    assert not BrokerError.from_detail(
+        {"code": "quota_blocked", "retry_after_ms": 5_000}
+    ).is_holder_exclusion
+    # A marker this build does not know is dropped at the boundary, never trusted.
+    assert BrokerError.from_detail({"code": "quota_blocked", "reason": "x"}).reason == ""
+    assert "reason" not in BrokerError(code="revoked").to_detail()
+
+
+def test_the_owner_marks_a_depleted_pool_refusal_pool_depleted(
+    owner: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The producer side of m1: the spent-pool arm says which arm it is."""
+    second = _second_row(owner)
+    _usage_reports(owner, monkeypatch, {owner.row.id: 1.0, second.id: 1.0})
+    refused = _ask_grant(owner, BORROWER_DEVICE)
+    assert refused["code"] == "quota_blocked", refused
+    assert refused.get("reason") == "pool_depleted", refused
+
+
+def _holder_excludes(
+    owner: Any, monkeypatch: pytest.MonkeyPatch, excluded: tuple[int, ...]
+) -> None:
+    """A derived holder whose approval does not cover ``excluded`` (``serve_gate``'s seam)."""
+    from local_operator.network.credentials import reconcile as reconcile_mod
+
+    rows = [row.id for row in owner.auth.list_credentials(STUB_PROVIDER)]
+    allowed = tuple(row for row in rows if row not in excluded)
+    monkeypatch.setattr(reconcile_mod, "is_derived", lambda holder: True)
+    monkeypatch.setattr(reconcile_mod, "serve_gate", lambda *a, **k: (allowed, tuple(excluded), ""))
+    # The mint-time re-verification of a signed scope is not under test here; the
+    # serve gate above already decided which rows the approval covers.
+    monkeypatch.setattr(reconcile_mod, "derived_mint_check", lambda *a, **k: None)
+
+
+def test_a_holder_excluded_healthy_row_and_a_depleted_rest_says_quota_blocked(
+    owner: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3108 review m3(a): the verdict is over the rows the holder may be lent.
+
+    The approval does not cover the healthy row, and every row it does cover is
+    spent: that is a quota refusal for THIS holder, not a missing login. The
+    excluded healthy row must neither be lent nor rescue the verdict.
+    """
+    second = _second_row(owner)
+    _usage_reports(owner, monkeypatch, {owner.row.id: 1.0, second.id: 0.1})
+    _holder_excludes(owner, monkeypatch, (second.id,))
+    refused = _ask_grant(owner, BORROWER_DEVICE)
+    assert refused["code"] == "quota_blocked", refused
+    assert refused.get("reason") == "pool_depleted", refused
+
+
+def test_a_holder_excluded_depleted_row_and_an_unknown_rest_lends_the_unknown_row(
+    owner: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3108 review m3(b): an excluded spent row cannot make the verdict quota."""
+    second = _second_row(owner)
+    _usage_reports(owner, monkeypatch, {owner.row.id: 1.0, second.id: None})
+    _holder_excludes(owner, monkeypatch, (owner.row.id,))
+    eligibility = owner.auth.quota_eligibility(
+        STUB_PROVIDER, "stub-model", exclude_credential_ids=(owner.row.id,)
+    )
+    assert [row.credential_id for row in eligibility.rows] == [second.id], eligibility
+    assert not eligibility.all_quota_limited, eligibility
+    # The unknown row is still servable, so the holder is lent it — no quota claim.
+    served = _ask_grant(owner, BORROWER_DEVICE)
+    assert served["kind"] == "grant", served
+    assert served["credential_ref"]["credential_id"] == second.id, served
+
+
+def test_a_depleted_pool_still_lends_the_env_api_key(
+    owner: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3108 review m3(c): the env tier is reached before any refusal is classified.
+
+    Spent OAuth rows leave the cascade to the env/provider API key (tier 5), which
+    the owner's own routing would serve; with no peer exclusion it is lent, and
+    the eligibility read is never consulted.
+    """
+    from local_operator.providers.auth_store import AuthStore
+
+    second = _second_row(owner)
+    _usage_reports(owner, monkeypatch, {owner.row.id: 1.0, second.id: 1.0})
+    monkeypatch.setattr(AuthStore, "_env_api_key", lambda _self, _provider: "sk-ambient-env-key")
+    asked: list[str] = []
+    real = AuthStore.quota_eligibility
+    monkeypatch.setattr(
+        AuthStore,
+        "quota_eligibility",
+        lambda self, *a, **k: asked.append("asked") or real(self, *a, **k),
+    )
+    served = _ask_grant(owner, BORROWER_DEVICE)
+    assert served["kind"] == "grant", served
+    assert int(served["credential_ref"]["credential_id"]) <= 0, served
+    assert asked == [], "an env-key lend must not reach the refusal classifier"

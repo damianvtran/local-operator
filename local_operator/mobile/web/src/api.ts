@@ -19,9 +19,19 @@ import type {
 	ProjectLinkedSession,
 	ProjectSummary,
 	ProjectView,
+	LibraryAsset,
+	LibraryChatLink,
+	LibraryListing,
+	LibraryTag,
+	NotificationDetail,
+	NotificationsPage,
+	NotificationsReceipt,
+	NotificationToken,
 	SessionSummary,
+	SessionTagsResponse,
 	SlashCommand,
 	SubagentDetail,
+	TagsResponse,
 	TranscriptEntry,
 } from "./types";
 
@@ -63,8 +73,12 @@ export function isAuthorityRefusalCode(code: string): boolean {
     dead and every further call fails the same way, so the page reloads and the
     server 303s to /login. The multipart upload below is NOT the JSON helper but
     must not invent a second answer to this. */
-function handleUnauthorized(): void {
-
+let unauthorizedReloadStarted = false;
+export function handleUnauthorized(): void {
+	// List, projection and config requests can fail together. Cleanup/reload is
+	// a page-wide transition, not one reload per concurrent unauthorized leg.
+	if (unauthorizedReloadStarted) return;
+	unauthorizedReloadStarted = true;
 	/* A replaced/login-expired browser session must not expose drafts or
 	   retry envelopes to whoever authenticates next on this device. */
 	clearPrivateSessionStorage();
@@ -190,6 +204,36 @@ export function getDirectories(): Promise<Directories> {
 
 export function getPastSessions(): Promise<{ sessions: PastSession[] }> {
 	return request("/api/sessions/past");
+}
+
+/** The SHARED conversation-tag registry (`GET /api/tags`), read only.
+
+    There is deliberately no catalogue write here: identity (create/rename) lives
+    with the desktop app and agent callers, and a second implementation of it on
+    the phone is how the two surfaces start disagreeing. `order` is the
+    registry's own ordering field; the sheet renders rows in it. */
+export function getTags(): Promise<TagsResponse> {
+	return request("/api/tags");
+}
+
+/** Assign a conversation's tags as DESIRED STATE.
+
+    `{tags, primary}` and nothing else: the relay refuses a body without
+    `primary` (never a silent re-primary) or with an unknown key. Sending the
+    state wanted rather than a delta is the property that makes a retry land on
+    the same assignment, and `[]` + `null` is the clear. The answer is the store's
+    canonical read-back — paint it rather than the request, because the store may
+    have pruned a category deleted between the catalogue read and this write. */
+export function setSessionTags(
+	sessionId: string,
+	tags: string[],
+	primary: string | null,
+): Promise<SessionTagsResponse> {
+	return request(`/api/sessions/${encodeURIComponent(sessionId)}/tags`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ tags, primary }),
+	});
 }
 
 /** Search past sessions by name, id, or conversation body (the /resume
@@ -513,6 +557,11 @@ export function pairingStatus(deviceId: string): Promise<{
 	    `GateSheet`/`PairScreen`: false between `lop operator init` and
 	    `lop operator install`, which is the state the old success box lied about. */
 	authority_ready?: boolean;
+	/** The installed operator key's public point (base64url SPKI) that signed
+	    `certificate`, so the phone could verify its own certificate rather than
+	    trust this answer. Empty when the installed anchor is not the signer (a
+	    superseded or missing anchor). Not read by the phone yet. */
+	operator_spki?: string;
 }> {
 	return request(`/api/pair/${encodeURIComponent(deviceId)}`);
 }
@@ -541,6 +590,23 @@ export function attachmentUrl(
 ): string {
 	const q = new URLSearchParams({ entry: entryId, i: String(index), kind });
 	return `/api/sessions/${encodeURIComponent(sessionId)}/attachment?${q}`;
+}
+
+/** One supplement sound's bytes, keyed by the beat's own
+    `sounds[].attachment` digest. A separate route from `attachmentUrl` on
+    purpose: a turn's generated sound is a supplement artifact with no message
+    block to index, so `(entry, kind, i)` cannot address it. Range-capable — the
+    player's media element needs 206s — and the digest is the cache key. */
+export function soundUrl(sessionId: string, digest: string): string {
+	const q = new URLSearchParams({ digest });
+	return `/api/sessions/${encodeURIComponent(sessionId)}/sound?${q}`;
+}
+
+/** The waveform sidecar for one supplement sound, keyed by the same digest.
+    404 (never fabricated zeros) means "draw the flat scrubber". */
+export function soundWaveformUrl(sessionId: string, digest: string): string {
+	const q = new URLSearchParams({ digest });
+	return `/api/sessions/${encodeURIComponent(sessionId)}/waveform?${q}`;
 }
 
 /* ---- turn supplements ("Highlights", memo §2.7) --------------------------- */
@@ -835,4 +901,185 @@ export function removeProjectMilestone(
 		`/api/projects/${encodeURIComponent(key)}/milestones/${encodeURIComponent(name)}`,
 		{ method: "DELETE" },
 	);
+}
+
+/* ---------------------------------------------------------------------------
+ * Library
+ *
+ * Every call is the relay's own `/api/library*`; ids are opaque `la_` values and
+ * no caller can name a path. `bytes`/`thumb` are URLs rather than fetch wrappers
+ * because the media elements and a download anchor need the URL itself.
+ * ------------------------------------------------------------------------- */
+
+export type LibraryQuery = {
+	q?: string;
+	categories?: string[];
+	kinds?: string[];
+	origin_groups?: string[];
+	origins?: string[];
+	tag?: string;
+	tag_mode?: "all" | "any";
+	highlighted?: boolean;
+	organized?: boolean;
+	favorite?: boolean;
+	session?: string;
+	sort?: "recent" | "name" | "kind" | "size" | "created" | "modified" | "organized";
+	order?: "asc" | "desc";
+	limit?: number;
+	cursor?: string;
+};
+
+function libraryParams(query: LibraryQuery): string {
+	const params = new URLSearchParams();
+	for (const [key, value] of Object.entries(query)) {
+		if (value === undefined || value === null || value === "") continue;
+		if (Array.isArray(value)) {
+			if (value.length) params.set(key, value.join(","));
+			continue;
+		}
+		params.set(key, String(value));
+	}
+	return params.toString();
+}
+
+export function getLibrary(query: LibraryQuery = {}): Promise<LibraryListing> {
+	const encoded = libraryParams(query);
+	return request(`/api/library/assets${encoded ? `?${encoded}` : ""}`);
+}
+
+export function getLibraryAsset(assetId: string): Promise<LibraryAsset> {
+	return request(`/api/library/assets/${encodeURIComponent(assetId)}`);
+}
+
+export function patchLibraryAsset(
+	assetId: string,
+	fields: Partial<Pick<LibraryAsset, "name" | "description" | "favorite" | "locked" | "archived">>,
+): Promise<LibraryAsset> {
+	return request(`/api/library/assets/${encodeURIComponent(assetId)}`, {
+		method: "PATCH",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(fields),
+	});
+}
+
+export function getLibraryTags(): Promise<{ tags: LibraryTag[] }> {
+	return request("/api/library/tags");
+}
+
+export function createLibraryTag(
+	name: string,
+	category = "custom",
+): Promise<{ tag: LibraryTag }> {
+	return request("/api/library/tags", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ name, category }),
+	});
+}
+
+export function renameLibraryTag(tagId: string, name: string): Promise<{ tag: LibraryTag }> {
+	return request(`/api/library/tags/${encodeURIComponent(tagId)}`, {
+		method: "PATCH",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ name }),
+	});
+}
+
+export function mergeLibraryTag(tagId: string, into: string): Promise<{ tag: LibraryTag }> {
+	return request(`/api/library/tags/${encodeURIComponent(tagId)}/merge`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ into }),
+	});
+}
+
+export function setLibraryTags(
+	assetId: string,
+	tagIds: string[],
+	primary?: string | null,
+): Promise<LibraryAsset> {
+	/* `primary` is OMITTED unless the caller states one. The relay (like the
+	   desktop store) reads a present null as "clear the primary", so a metadata
+	   save that only renamed a file must not send one — it silently dropped the
+	   tag the reader had chosen elsewhere (review R-3). Passing an explicit
+	   null still clears, for a caller that means it. */
+	const body: { tags: string[]; primary?: string | null } = { tags: tagIds };
+	if (primary !== undefined) body.primary = primary;
+	return request(`/api/library/assets/${encodeURIComponent(assetId)}/tags`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(body),
+	});
+}
+
+export function linkLibraryChat(
+	assetId: string,
+	sessionId: string,
+): Promise<{ chat: LibraryChatLink }> {
+	return request(`/api/library/assets/${encodeURIComponent(assetId)}/chat`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ session_id: sessionId }),
+	});
+}
+
+/** The preview URL for one asset. `download` flips the relay's disposition. */
+export function libraryBytesUrl(assetId: string, download = false): string {
+	const suffix = download ? "?download=1" : "";
+	return `/api/library/assets/${encodeURIComponent(assetId)}/content${suffix}`;
+}
+
+export function libraryThumbUrl(assetId: string, width = 480): string {
+	return `/api/library/assets/${encodeURIComponent(assetId)}/thumbnail?w=${width}`;
+}
+
+/** One audio asset's waveform payload (`no-store`). A 404 is the honest
+    no-waveform state, which the player draws as a flat scrubber. */
+export function libraryWaveformUrl(assetId: string): string {
+	return `/api/library/assets/${encodeURIComponent(assetId)}/waveform`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Notifications inbox (#2939's relay routes, contract §5.4)            */
+/* ------------------------------------------------------------------ */
+
+/** One reel page. `through_seq` pins later pages to the FIRST page's
+    `high_water`, so a bulk write over every loaded page names one consistent
+    read rather than a moving one. */
+export function getNotifications(query: {
+	state: "unread" | "all";
+	cursor?: string;
+	through_seq?: number;
+	/** Narrow to one conversation (the by-session dismiss reads its own set). */
+	session_id?: string;
+	limit?: number;
+}): Promise<NotificationsPage> {
+	const params = new URLSearchParams({ state: query.state });
+	if (query.session_id) params.set("session_id", query.session_id);
+	if (query.limit !== undefined) params.set("limit", String(query.limit));
+	if (query.cursor) params.set("cursor", query.cursor);
+	if (query.through_seq !== undefined) params.set("through_seq", String(query.through_seq));
+	return request(`/api/notifications?${params.toString()}`);
+}
+
+export function getNotification(itemId: string): Promise<NotificationDetail> {
+	return request(`/api/notifications/${encodeURIComponent(itemId)}`);
+}
+
+/** The ONE write door, token-bound (contract §5.2). Exactly one target:
+    `ids` (each `{id, revision}` the reader rendered), or `session_id` +
+    `through_seq` + `observed`, or `all` + `through_seq` + `observed`. A bulk
+    write never discovers rows itself: an item published after the read is
+    not in `observed` and is left untouched (the late-arrival rule). */
+export type NotificationsPatchBody =
+	| { op: "read" | "unread" | "dismiss" | "undismiss"; ids: NotificationToken[] }
+	| { op: "read" | "dismiss"; session_id: string; through_seq: number; observed: NotificationToken[] }
+	| { op: "read" | "dismiss"; all: true; through_seq: number; observed: NotificationToken[] };
+
+export function patchNotifications(body: NotificationsPatchBody): Promise<NotificationsReceipt> {
+	return request("/api/notifications", {
+		method: "PATCH",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(body),
+	});
 }

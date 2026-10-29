@@ -305,10 +305,22 @@ def _render_show(view: dict[str, Any]) -> str:
         lines.append(f"head: {head[:10]} ({refs})")
     ci = view.get("ci") or {}
     if ci:
+        # THE COUNTS ARE THE MERGE-GATE FACTS, so the line must be readable as
+        # one. ``skipped`` is printed whenever the host carries it (GitHub
+        # always does) because a run whose checks did not run is exactly the
+        # case where a bare "0 passed" invites the reader to guess why; the
+        # state words are the adapter's and never say ``success`` for a set
+        # that did not fully conclude success.
         counts = ", ".join(
             f"{ci.get(name)} {name}"
-            for name in ("passed", "failed", "pending")
-            if ci.get(name) is not None
+            for name, always in (
+                ("passed", True),
+                ("failed", True),
+                ("skipped", False),
+                ("neutral", False),
+                ("pending", True),
+            )
+            if ci.get(name) is not None and (always or ci.get(name))
         )
         total = f" of {ci.get('total')}" if ci.get("total") is not None else ""
         lines.append(f"CI: {ci.get('status')}{' — ' + counts + total if counts else ''}")

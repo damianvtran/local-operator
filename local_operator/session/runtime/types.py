@@ -172,6 +172,20 @@ VIEWED_MOVE_REFUSAL = (
 #: client gates the send on this string being present in the record).
 EVENT_MUTE_CAPABILITY = "event-mute-v1"
 
+#: The owner accepts the viewer's INPUT-FRESHNESS report (``activity``, R6-1):
+#: one epoch millisecond saying when the newest key/mouse edge arrived, which the
+#: runtime keeps per attach connection so rung 4 can stand down for a conversation
+#: the operator is demonstrably reading.
+#:
+#: ADVERTISED, AND THE VIEWER GATES ON IT, because the failure mode of a blind
+#: send is not an error — it is a DEAD STREAM. An owner that does not know the op
+#: answers with an error frame, and the relay treats an owner-side error as
+#: ``peer-stopped-answering`` and closes the viewer's stream
+#: (``_forward_stream_frame``), so a best-effort optimisation would cost the TUI
+#: its attach every ten seconds. Same argument, same shape as
+#: ``EVENT_MUTE_CAPABILITY`` above; presence of the string is the whole check.
+ATTACH_ACTIVITY_CAPABILITY = "attach-activity-v1"
+
 #: Additive attach capability: this owner accepts the ``operator_challenge`` op
 #: and will admit an authority-increasing frame that carries a valid
 #: ``operator_sig`` (with ``operator_key_id``, and ``operator_cert`` for a
@@ -209,6 +223,16 @@ OPERATOR_SIGNATURE_CAPABILITY = "operator-signature-v1"
 #: contract revision (the mode axis plus its reserved route slot), so a client
 #: that may send one may send the other.
 INPUT_MODE_CAPABILITY = "input-mode-v1"
+
+#: Additive attach capability: this owner's ``prompt``/``steer`` take the
+#: ``files`` keyword and resolve ``Prompt.files`` references against its own
+#: attachment store. Advertised only by a handle that does, because the send
+#: it gates must be REFUSED rather than silently stripped: an owner that
+#: ignored the key would admit the text of a send whose file chip the user
+#: watched leave, and the model would answer without the document (contract
+#: amendment 1). One string for both ops, like ``input-mode-v1``: a client
+#: that may send a file on a prompt may send one on a steer.
+DOCUMENT_ATTACHMENTS_CAPABILITY = "document-attachments-v1"
 
 #: Additive attach capability: this owner's ``ask_respond`` accepts IMAGES on a
 #: queued-ask answer (``images`` on the frame: a flat list of
@@ -1369,6 +1393,15 @@ class SessionRecord:
     #: A turn is running right now. The picker's liveness marker, and the
     #: difference between a session that is working and one merely resident.
     busy: bool = False
+    #: Canonical job ids an in-flight foreground wait is parked on. Zero means
+    #: not waiting, not that this runtime has no background work. ADDITIVE like
+    #: busy above: older readers ignore the key, older writers get the default,
+    #: and PROTOCOL_VERSION deliberately stays unchanged.
+    waiting_on: int = 0
+    #: Running background jobs EXCLUDING task/subagent rows, which the roster
+    #: counts separately below. None is an older/unreadable producer's no-claim;
+    #: zero is a measured empty set. Keep that distinction across every wire.
+    jobs_running: int | None = None
     #: This session has run at least one REAL turn (a user prompt, a wake
     #: delivery, a resume catch-up — anything through ``_run_turn_pipeline``).
     #: ``False`` marks the window after ``/new`` when the record is already

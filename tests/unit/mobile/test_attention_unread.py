@@ -236,8 +236,8 @@ async def test_overlapping_reads_publish_one_builds_pair(
     real_merge = table._merge_summaries
     merges: list[int] = []
 
-    def tagged(durable):
-        rows = real_merge(durable)
+    def tagged(durable, tags=None):
+        rows = real_merge(durable, tags)
         tag = len(merges)
         merges.append(tag)
         for row in rows:

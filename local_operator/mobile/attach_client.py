@@ -76,6 +76,7 @@ from local_operator.session.runtime.registry import scan
 from local_operator.session.runtime.types import (
     ASK_ATTACHMENTS_CAPABILITY,
     ASK_ATTACHMENTS_UNSUPPORTED,
+    ATTACH_ACTIVITY_CAPABILITY,
     DESKTOP_WATCH_CAPABILITY,
     EVENT_MUTE_CAPABILITY,
     EXCLUSIVE_MOVE_CAPABILITY,
@@ -90,9 +91,13 @@ try:
     # absent and this client fails CLOSED — it never sends the annotation —
     # which is the same rule the relay's strip-gate (``MobileDaemon.request``)
     # follows.
-    from local_operator.session.runtime.types import INPUT_MODE_CAPABILITY
+    from local_operator.session.runtime.types import (
+        DOCUMENT_ATTACHMENTS_CAPABILITY,
+        INPUT_MODE_CAPABILITY,
+    )
 except ImportError:  # pragma: no cover — only on a pre-carriage tree
     INPUT_MODE_CAPABILITY = ""
+    DOCUMENT_ATTACHMENTS_CAPABILITY = ""
 
 #: How long to wait for an ack/error matching a request id. Mirrors the
 #: daemon's ``request`` timeout: long enough for a turn-boundary op (prompt
@@ -1068,6 +1073,7 @@ class AttachClient:
         self._session_id = ""
         self._attention_supported = False
         self._event_mute_supported = False
+        self._activity_supported = False
         self._exclusive_move_supported = False
         self._ask_attachments_supported = False
         self._connected = False
@@ -1079,6 +1085,17 @@ class AttachClient:
     @property
     def supports_completion_ack(self) -> bool:
         return self.connected and self._attention_supported
+
+    @property
+    def supports_activity(self) -> bool:
+        """Whether this owner advertised ``ATTACH_ACTIVITY_CAPABILITY``.
+
+        An owner without the string is exactly the pre-R6-1 behaviour: nobody
+        knows the operator is at the keyboard, so rung 4 keeps notifying — the
+        safe direction. What must NOT happen is the blind send, which the owner
+        answers with an error frame and the relay turns into a closed stream.
+        """
+        return self.connected and self._activity_supported
 
     @property
     def supports_event_mute(self) -> bool:
@@ -1167,12 +1184,25 @@ class AttachClient:
         self._drain_phrase = ""
         self._attention_supported = "completion-ack-v1" in record.capabilities
         self._event_mute_supported = EVENT_MUTE_CAPABILITY in record.capabilities
+        # Whether this owner takes the input-freshness stamp. Read at DIAL like
+        # the mute flag: sending blind is not a refused optimisation, it is a
+        # dead stream (`_forward_stream_frame` closes on an owner-side error),
+        # so the caller must gate on this and never send without it.
+        self._activity_supported = ATTACH_ACTIVITY_CAPABILITY in record.capabilities
         # MAY THIS OWNER STORE THE INPUT ANNOTATION, resolved per dial exactly
         # like the mute flag beside it: the fields ride only to a record that
         # advertised input-mode-v1, and an older/unadvertised owner gets frames
         # byte-identical to today's — absence is the legacy reading.
         self._input_mode_supported = bool(INPUT_MODE_CAPABILITY) and (
             INPUT_MODE_CAPABILITY in record.capabilities
+        )
+        # MAY THIS OWNER RESOLVE ``Prompt.files`` REFERENCES. Gated like the
+        # carriage above, and it gates a REFUSAL rather than a strip
+        # (``attached.admit_prompt``): a document send to an owner that cannot
+        # carry it must fail in words, because forwarding the text alone
+        # answers a question the user believes was about the attached file.
+        self._document_attachments_supported = bool(DOCUMENT_ATTACHMENTS_CAPABILITY) and (
+            DOCUMENT_ATTACHMENTS_CAPABILITY in record.capabilities
         )
         # The supplements twin: this build renders the family, and only an
         # owner that advertises ``supplements-v1`` (a handle that honours
@@ -1593,6 +1623,10 @@ class AttachClient:
             # is untrusted input here, and a reason outside the enumerated set
             # degrades to the generic sentence instead of rendering.
             reason=reply.get("error_reason"),
+            # The missing-attachment refusal's file NAME, the same bounded
+            # field carriage as ``error_model``: the sentence is rebuilt here
+            # around the sanitised value.
+            filename=reply.get("error_name"),
         )
         if known is not None:
             raise known
@@ -2121,6 +2155,31 @@ class AttachClient:
         """
         return await self._request("viewer_watch", displaying=displaying)
 
+    async def activity(self, *, input_at_ms: int) -> str:
+        """Report the newest real Key/MouseDown edge on this terminal's screen.
+
+        The input half of the runtime's "watched AND active" predicate (the item
+        ladder's rung 4 stands down for it). ``viewer_watch`` says which
+        conversation is on screen; this says someone is still at the keyboard.
+
+        ONE INTEGER AND NOTHING ELSE — no keycodes, no text, no counts. What was
+        typed is not the runtime's business; the age of the newest edge is the
+        whole of what a routing decision needs, and the TUI throttles it to one
+        report per 10 s.
+
+        Best-effort by contract, like ``viewer_watch``: an owner too old to know
+        the op answers with an error frame, and the caller swallows it — the
+        parameter is an optimisation of the banner ladder, never a feature whose
+        absence breaks a turn.
+        """
+        if not self._activity_supported:
+            # Skew, new viewer x old owner: the op is a no-op rather than a send.
+            # The return type is the owner's reply, which this side never reads
+            # (the TUI fires and forgets), so "" is the honest answer for "not
+            # asked".
+            return ""
+        return await self._request("activity", input_at_ms=int(input_at_ms))
+
     async def abort(self) -> str:
         return await self._request("abort")
 
@@ -2610,8 +2669,11 @@ class AttachClient:
             fields["by"] = by
         return await self._request("ask_decline", **fields)
 
-    async def ask_dismiss(self, ask_id: str, *, by: str = "") -> str:
-        """Dismiss a TIMED-OUT ask from the view. Asks the model nothing, ever.
+    async def ask_dismiss(self, ask_id: str, *, by: str = "", reason: str | None = None) -> str:
+        """Dismiss an ask from the view. Asks the model nothing, ever.
+
+        ``reason`` (``answered_in_chat`` | ``moot``) rides the frame only when given,
+        so an older runtime sees the frame it always did.
 
         What it can still OWE is the ask's deadline notice, when that was never
         delivered (fork A, 2026-10-16, design §14): the queue's reconcile writes
@@ -2620,6 +2682,8 @@ class AttachClient:
         fields: dict[str, Any] = {"ask_id": ask_id}
         if by:
             fields["by"] = by
+        if reason:
+            fields["reason"] = reason
         return await self._request("ask_dismiss", **fields)
 
     async def recall_steer(self, command_id: str) -> str:

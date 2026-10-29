@@ -58,6 +58,9 @@ pytestmark = pytest.mark.asyncio
 
 TOKEN = "test-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
+#: Bound at IMPORT time: the `api` fixture swaps `tb_client.TeamBridgeClient` for
+#: the fake, and a composed test needs the class this module shipped.
+_REAL_TEAM_BRIDGE_CLIENT = tb_client.TeamBridgeClient
 
 
 # --- the tripwire: no REAL wire object may be built inside these cells (R-2) --
@@ -342,6 +345,9 @@ class FakeClient:
 
     behavior: dict[str, Any] = {}
     instances: list["FakeClient"] = []
+    #: Every scripted method reach lands here; the route guards are asserted to
+    #: refuse BEFORE this counter moves.
+    calls: int = 0
     #: The committed hub of the fixtures below. A REAL client always names its
     #: destination, and the read path refuses one that cannot (the shared
     #: destination guard), so a double that omitted this would exercise the
@@ -353,6 +359,7 @@ class FakeClient:
         FakeClient.instances.append(self)
 
     def _answer(self, name: str) -> Any:
+        FakeClient.calls += 1
         value = FakeClient.behavior.get(name, {})
         if isinstance(value, Exception):
             raise value
@@ -413,6 +420,10 @@ class FakeClient:
     async def settings(self, *, tenant_id: str | None = None) -> dict[str, Any]:
         return self._answer("settings")
 
+    async def directory(self, tenant_id: str) -> dict[str, Any]:
+        FakeClient.behavior["last_directory_tenant"] = tenant_id
+        return self._answer("directory")
+
     async def put_settings(self, **kwargs: Any) -> dict[str, Any]:
         FakeClient.behavior["last_put_kwargs"] = kwargs
         return self._answer("put_settings")
@@ -433,6 +444,262 @@ class FakeClient:
             "expected_account_id": expected_account_id,
         }
         return self._answer("put_allowlist")
+
+    async def conversations(
+        self,
+        *,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        before: str | None = None,
+        cursor: str | None = None,
+        scope: str | None = None,
+        status: str | None = None,
+        access: Any = None,
+    ) -> dict[str, Any]:
+        FakeClient.behavior["last_conversations_kwargs"] = {
+            "tenant_id": tenant_id,
+            "limit": limit,
+            "before": before,
+            "cursor": cursor,
+            "scope": scope,
+            "status": status,
+        }
+        return self._answer("conversations")
+
+    async def conversation(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str | None = None,
+        access: Any = None,
+    ):
+        FakeClient.behavior["last_conversation_id"] = conversation_id
+        return self._answer("conversation")
+
+    async def create_conversation(self, body: Any, *, access: Any = None, expected_account_id=None):
+        FakeClient.behavior["last_create_body"] = dict(body)
+        return self._answer("create_conversation")
+
+    async def conversation_lifecycle(
+        self,
+        conversation_id: str,
+        action: str,
+        *,
+        tenant_id=None,
+        access: Any = None,
+        expected_account_id=None,
+    ):
+        FakeClient.behavior["last_lifecycle"] = (conversation_id, action)
+        return self._answer("conversation_lifecycle")
+
+    async def conversation_delete(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id=None,
+        access: Any = None,
+        expected_account_id=None,
+    ):
+        FakeClient.behavior["last_deleted"] = (conversation_id, tenant_id, expected_account_id)
+        return self._answer("conversation_delete")
+
+    async def conversation_members(
+        self,
+        conversation_id: str,
+        members: Any,
+        *,
+        tenant_id=None,
+        access=None,
+        expected_account_id=None,
+    ):
+        FakeClient.behavior["last_members"] = list(members)
+        return self._answer("conversation_members")
+
+    async def conversation_remove_member(
+        self,
+        conversation_id: str,
+        account_id: str,
+        *,
+        tenant_id=None,
+        access=None,
+        expected_account_id=None,
+    ):
+        FakeClient.behavior["last_removed"] = (conversation_id, account_id)
+        return self._answer("conversation_remove_member")
+
+    async def conversation_consent(
+        self,
+        conversation_id: str,
+        account_id: str,
+        *,
+        decision: str,
+        consent_version: str | None = None,
+        endpoint_id: str | None = None,
+        tenant_id=None,
+        access=None,
+        expected_account_id=None,
+    ):
+        FakeClient.behavior["last_consent"] = (
+            conversation_id,
+            account_id,
+            decision,
+            consent_version,
+        )
+        FakeClient.behavior["last_consent_endpoint"] = endpoint_id
+        return self._answer("conversation_consent")
+
+    async def owned_agent_invitations(
+        self,
+        *,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ):
+        FakeClient.behavior["last_invitations"] = {
+            "expected_account_id": expected_account_id,
+            "tenant_id": tenant_id,
+            "limit": limit,
+            "cursor": cursor,
+        }
+        return self._answer("owned_agent_invitations")
+
+    async def conversation_join(
+        self, conversation_id: str, *, tenant_id=None, access=None, expected_account_id=None
+    ):
+        FakeClient.behavior["last_join"] = (conversation_id, tenant_id)
+        return self._answer("conversation_join")
+
+    async def conversation_leave(
+        self, conversation_id: str, *, tenant_id=None, access=None, expected_account_id=None
+    ):
+        FakeClient.behavior["last_leave"] = conversation_id
+        return self._answer("conversation_leave")
+
+    async def conversation_messages(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id=None,
+        limit=None,
+        before_seq=None,
+        after_seq=None,
+        endpoint_id=None,
+        access=None,
+    ):
+        FakeClient.behavior["last_history_kwargs"] = {
+            "conversation_id": conversation_id,
+            "tenant_id": tenant_id,
+            "limit": limit,
+            "before_seq": before_seq,
+            "after_seq": after_seq,
+            "endpoint_id": endpoint_id,
+        }
+        return self._answer("conversation_messages")
+
+    async def conversation_send(
+        self,
+        conversation_id: str,
+        *,
+        client_ref: str,
+        text: str,
+        tenant_id=None,
+        agent_label=None,
+        thread_root_id=None,
+        attachment_ids=None,
+        access=None,
+        expected_account_id=None,
+    ):
+        FakeClient.behavior["last_send_attachment_ids"] = attachment_ids
+        FakeClient.behavior["last_send"] = {
+            "conversation_id": conversation_id,
+            "client_ref": client_ref,
+            "text": text,
+            "tenant_id": tenant_id,
+            "agent_label": agent_label,
+        }
+        FakeClient.behavior["last_send_thread_root_id"] = thread_root_id
+        return self._answer("conversation_send")
+
+    async def conversation_replies(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        tenant_id=None,
+        limit=None,
+        after_seq=None,
+        endpoint_id=None,
+        access=None,
+        expected_account_id=None,
+    ):
+        FakeClient.behavior["last_replies_kwargs"] = {
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+            "tenant_id": tenant_id,
+            "expected_account_id": expected_account_id,
+            "limit": limit,
+            "after_seq": after_seq,
+            "endpoint_id": endpoint_id,
+        }
+        return self._answer("conversation_replies")
+
+    async def conversation_body(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        tenant_id=None,
+        endpoint_id=None,
+        access=None,
+    ):
+        return self._answer("conversation_body")
+
+    async def conversation_admit(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        verdict: str,
+        body_hash: str,
+        tenant_id=None,
+        endpoint_id=None,
+        access=None,
+        expected_account_id=None,
+    ):
+        FakeClient.behavior["last_admit"] = (
+            conversation_id,
+            message_id,
+            verdict,
+            body_hash,
+            endpoint_id,
+        )
+        return self._answer("conversation_admit")
+
+    async def conversation_react(self, conversation_id, message_id, emoji, **kwargs):
+        FakeClient.behavior["last_react"] = (conversation_id, message_id, emoji, kwargs)
+        return self._answer("conversation_react")
+
+    async def conversation_read(
+        self,
+        conversation_id: str,
+        *,
+        seq=None,
+        muted=None,
+        notify=None,
+        tenant_id=None,
+        access=None,
+        expected_account_id=None,
+    ):
+        FakeClient.behavior["last_read"] = (conversation_id, seq, muted, notify, tenant_id)
+        return self._answer("conversation_read")
+
+    async def unread(self, *, tenant_id=None, scope=None, access=None):
+        FakeClient.behavior["last_unread_kwargs"] = {
+            "tenant_id": tenant_id,
+            "scope": scope,
+        }
+        return self._answer("unread")
 
 
 class FakeDiscipline:
@@ -517,6 +784,39 @@ async def api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         yield client, root, discipline
 
 
+async def test_directory_accepts_a_uuid_tenant_id(api):
+    """The live tenant id is a UUID, not the legacy ``tnt_`` form.
+
+    The route's pre-I/O grammar used to accept only ``tnt_...``; a real tenant
+    was therefore refused with 422 ``invalid_request`` and the renderer showed
+    its "needs a newer version" cause even though the deployed server had the
+    directory. The UUID must reach the client unchanged.
+    """
+
+    client, _root, _discipline = api
+    tenant_id = "5b72d9f4-8ce7-4821-ac8a-f92c365ed5b3"
+    FakeClient.behavior["directory"] = {"members": []}
+    response = await client.get(
+        "/v1/desktop/team-bridge/directory", params={"tenant_id": tenant_id}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == {"members": []}
+    assert FakeClient.behavior["last_directory_tenant"] == tenant_id
+
+
+async def test_directory_names_a_malformed_tenant_as_a_local_validation_error(api):
+    client, _root, _discipline = api
+    response = await client.get(
+        "/v1/desktop/team-bridge/directory", params={"tenant_id": "../not-a-tenant"}
+    )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "invalid_request"
+    assert detail["field"] == "tenant_id"
+    assert "tenant_id" in detail["message"]
+    assert "newer version" not in detail["message"]
+
+
 async def test_status_composes_state_local_config_consent_and_the_screening_receipt(api):
     client, _root, discipline = api
     response = await client.get("/v1/desktop/team-bridge/status?boundary=app_start")
@@ -555,7 +855,13 @@ async def test_status_composes_state_local_config_consent_and_the_screening_rece
     assert result["state_note"] is None
     assert result["texts_rejected"] == []
     # The local keys the renderer composes its gate from.
-    assert result["local"] == {"enabled": False, "onboarding": "", "session": ""}
+    # The consent hold: an absent local key reads as OFF.
+    assert result["local"] == {
+        "enrolled": False,
+        "enabled": False,
+        "onboarding": "",
+        "session": "",
+    }
     # The consent renders exactly as served, with its source named.
     assert result["consent"] == {
         "version": "bridge_consent_v1",
@@ -566,6 +872,49 @@ async def test_status_composes_state_local_config_consent_and_the_screening_rece
     assert result["screening"] == {"required": True}
     assert result["error"] is None
     assert discipline.boundaries == ["app_start"]
+
+
+async def test_status_never_claims_a_receiver_that_is_not_installed(api):
+    """D2a: ``connector`` says what the SERVICE is, and fails closed here.
+
+    This suite's store is a scratch root, which is exactly the shape the
+    per-user LaunchAgent must never serve (and on a non-macOS runner there is
+    no launchd at all), so the answer is the refusal code rather than a state.
+    A status read that reported ``installed``/``loaded`` for a store nothing
+    supervises is how "on but deaf" stays invisible.
+    """
+
+    client, _root, _discipline = api
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    assert result["connector"] in {"isolated", "unsupported"}, result["connector"]
+
+
+async def test_status_asks_launchd_off_the_event_loop(api, monkeypatch):
+    """R1-3: the status route's launchctl probe must not run on the loop.
+
+    ``connector_state`` runs ``launchctl print`` (15 s timeout), so the route
+    hands it to a worker thread. Asserted on the THREAD the probe observes,
+    which is the mechanism itself rather than a timing.
+    """
+
+    import threading
+
+    from local_operator.team_bridge.connector import install
+
+    client, root, _discipline = api
+    seen: list[threading.Thread] = []
+
+    def spy(config_dir):
+        seen.append(threading.current_thread())
+        return install.STATE_MISSING
+
+    monkeypatch.setattr(install, "connector_state", spy)
+    response = await client.get("/v1/desktop/team-bridge/status")
+    assert response.status_code == 200
+    assert response.json()["result"]["connector"] == install.STATE_MISSING
+    assert (
+        seen and seen[0] is not threading.main_thread()
+    ), "the launchctl probe ran on the event loop"
 
 
 async def test_status_reports_signed_out_as_a_state_not_an_error(api, monkeypatch):
@@ -599,7 +948,192 @@ async def test_settings_get_passes_the_payload_through(api):
     FakeClient.behavior["settings"] = payload
     response = await client.get("/v1/desktop/team-bridge/settings?tenant_id=tnt_1")
     assert response.status_code == 200
-    assert response.json()["result"] == payload
+    # Passed through untouched, plus the ONE additive provenance flag.
+    assert response.json()["result"] == {**payload, "default_on": False}
+
+
+# -- default-on (bridge_consent_v2) additive contract ------------------------
+
+
+def _v2_check() -> StatusCheck:
+    base = _status_check()
+    payload = dict(base.payload or {})
+    payload["consent"] = {
+        "version": "bridge_consent_v2",
+        "text": "the served text",
+        "accepted_versions": ["bridge_consent_v1", "bridge_consent_v2"],
+    }
+    texts = {
+        "consent": AcceptedText(
+            version="bridge_consent_v2", text="the served text", sha256="x", accepted_at=1.0
+        )
+    }
+    return replace(base, payload=payload, texts=texts)
+
+
+async def test_status_exposes_the_default_on_inputs_for_the_banner(api):
+    client, _root, discipline = api
+    discipline.check_result = _v2_check()
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    # An absent key reads ON only while v2 is in force; the banner flag is pending
+    # until dismissed. The full v2 text rides ``consent`` for "Read what this means".
+    assert result["default_on"] == {"in_force": True, "notice_pending": True}
+    assert result["local"]["enabled"] is True
+    assert result["consent"]["version"] == "bridge_consent_v2"
+    assert result["consent"]["text"] == "the served text"
+
+
+async def test_status_v1_payload_is_unchanged_apart_from_the_additive_block(api):
+    client, _root, _discipline = api
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    assert result["default_on"] == {"in_force": False, "notice_pending": True}
+    assert result["local"] == {
+        "enrolled": False,
+        "enabled": False,
+        "onboarding": "",
+        "session": "",
+    }
+
+
+async def test_an_explicit_local_off_wins_over_a_served_v2(api):
+    client, root, discipline = api
+    discipline.check_result = _v2_check()
+    from local_operator.team_bridge.settings import record_local_enabled
+
+    record_local_enabled(root, False)
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    assert result["local"]["enabled"] is False
+    assert result["default_on"]["in_force"] is True
+
+
+async def test_settings_get_flags_default_on_provenance(api):
+    client, _root, _discipline = api
+    for via, expected in (("default_on", True), ("settings", False), ("dialog", False)):
+        FakeClient.behavior["settings"] = {
+            "endpoint": {
+                "id": "bep_1",
+                "consent": {"version": "bridge_consent_v2", "consented_via": via},
+            },
+            "settings": {},
+        }
+        result = (await client.get("/v1/desktop/team-bridge/settings")).json()["result"]
+        assert result["default_on"] is expected
+        # The hub's own block passes through untouched.
+        assert result["endpoint"]["consent"]["consented_via"] == via
+
+
+async def test_dismiss_marks_the_notice_seen_idempotently_and_it_never_returns(api):
+    client, root, discipline = api
+    discipline.check_result = _v2_check()
+    for _ in range(2):
+        response = await client.post("/v1/desktop/team-bridge/onboarding/dismiss")
+        assert response.status_code == 200
+        assert response.json()["result"] == {"onboarding": "seen"}
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    assert result["default_on"]["notice_pending"] is False
+    assert result["local"]["onboarding"] == "seen"
+
+
+async def test_a_client_surface_can_never_claim_default_on(api):
+    client, _root, _discipline = api
+    calls = FakeClient.calls
+    response = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={
+            "state": "active",
+            "consent_version": "bridge_consent_v2",
+            "consented_via": "default_on",
+            "expected_account_id": "acc_1",
+        },
+    )
+    assert response.status_code == 422
+    assert FakeClient.calls == calls
+
+
+# -- the directory read (pair backend: GET /v1/messaging/directory) ----------
+
+DIRECTORY = "/v1/desktop/team-bridge/directory"
+
+
+def _directory_payload() -> dict[str, Any]:
+    return {
+        "members": [
+            {
+                "account_id": "acc_2",
+                "display_label": "Ada Lovelace",
+                "role": "admin",
+                "bridge_enabled": True,
+                "bridge_state": "active",
+            },
+            {
+                "account_id": "acc_3",
+                "display_label": "Grace Hopper",
+                "role": "member",
+                "bridge_enabled": False,
+                "bridge_state": "disabled",
+            },
+        ]
+    }
+
+
+async def test_directory_passes_the_frozen_member_shape_through(api):
+    """The frozen shape is the pair's; this route adds and drops nothing."""
+
+    client, _root, _discipline = api
+    FakeClient.behavior["directory"] = _directory_payload()
+    response = await client.get(f"{DIRECTORY}?tenant_id=tnt_1")
+
+    assert response.status_code == 200
+    assert response.json()["result"] == _directory_payload()
+    assert FakeClient.behavior["last_directory_tenant"] == "tnt_1"
+
+
+async def test_directory_requires_a_tenant_and_refuses_a_bad_grammar(api):
+    """``tenant_id`` is the one required input; a malformed one is 422.
+
+    The closed read-table answer carries no echo of the caller's value (S-RSA-7),
+    and neither refusal reaches the upstream client.
+    """
+
+    client, _root, _discipline = api
+    calls_before = FakeClient.calls
+    missing = await client.get(DIRECTORY)
+    assert missing.status_code == 422
+    # The closed read-table answer, not FastAPI's echoing validation body.
+    assert missing.json()["detail"]["code"] == "invalid_request"
+
+    malformed = await client.get(f"{DIRECTORY}?tenant_id=../tnt_1")
+    assert malformed.status_code == 422
+    assert malformed.json()["detail"]["code"] == "invalid_request"
+    assert "../tnt_1" not in malformed.text
+    assert FakeClient.calls == calls_before, "a refused query reached the transport"
+
+
+async def test_directory_carries_an_upstream_refusal_verbatim(api):
+    """§6.5 status + code pass through, as the settings read already does."""
+
+    client, _root, _discipline = api
+    FakeClient.behavior["directory"] = BridgeRefusal(
+        "bridge_not_available", "agent messages are not available", http_status=403
+    )
+    response = await client.get(f"{DIRECTORY}?tenant_id=tnt_1")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == {
+        "code": "bridge_not_available",
+        "message": "agent messages are not available",
+    }
+
+
+async def test_directory_maps_the_sign_in_state_to_a_401(api):
+    client, _root, _discipline = api
+    FakeClient.behavior["directory"] = BridgeSignInRequired(
+        "Sign in to Radient to use agent messages."
+    )
+    response = await client.get(f"{DIRECTORY}?tenant_id=tnt_1")
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "bridge_signin_required"
 
 
 async def test_sign_in_required_maps_to_a_401_with_its_own_code(api):
@@ -801,6 +1335,7 @@ async def test_every_route_requires_the_desktop_bearer(tmp_path: Path, monkeypat
             ("GET", "/v1/desktop/team-bridge/status"),
             ("GET", "/v1/desktop/team-bridge/settings"),
             ("PUT", "/v1/desktop/team-bridge/settings"),
+            ("GET", "/v1/desktop/team-bridge/directory?tenant_id=tnt_1"),
             ("GET", "/v1/desktop/team-bridge/allowlist"),
             ("PUT", "/v1/desktop/team-bridge/allowlist"),
         ]:
@@ -885,7 +1420,12 @@ async def test_status_reads_hot_writes_through_a_retained_manager(retained_api):
     assert first.status_code == 200
     first_body = first.json()["result"]
     assert first_body["state"] == STATE_SIGNED_OUT
-    assert first_body["local"] == {"enabled": False, "onboarding": "", "session": ""}
+    assert first_body["local"] == {
+        "enrolled": False,
+        "enabled": False,
+        "onboarding": "",
+        "session": "",
+    }
 
     # A real separate process writes the registered keys through settings_io.
     _external(
@@ -914,6 +1454,7 @@ async def test_status_reads_hot_writes_through_a_retained_manager(retained_api):
     )
     third = await client.get("/v1/desktop/team-bridge/status?boundary=surface_open")
     assert third.json()["result"]["local"] == {
+        "enrolled": False,
         "enabled": False,
         "onboarding": "",
         "session": "",
@@ -941,7 +1482,12 @@ async def test_status_reads_hot_writes_through_a_retained_manager(retained_api):
     malformed_bytes = (root / "config.yml").read_bytes()
     fifth = await client.get("/v1/desktop/team-bridge/status?boundary=window_focus")
     fifth_local = fifth.json()["result"]["local"]
-    assert fifth_local == {"enabled": False, "onboarding": "seen", "session": ""}
+    assert fifth_local == {
+        "enrolled": False,
+        "enabled": False,
+        "onboarding": "seen",
+        "session": "",
+    }
     # The unreadable document is left EXACTLY as written: no repair, no
     # rewrite, no ``config.yml.bad.<ts>`` moved aside (the last-good snapshot
     # is kept instead — the write guard's behaviour, not ``_load_config``'s).
@@ -1187,7 +1733,7 @@ def _plant_proof(
                     )
 
 
-def _enroll(root: Path, *, enabled: bool = True) -> OwnerSnapshot:
+def _enroll(root: Path, *, enabled: bool = True, account_id: str = "acc_1") -> OwnerSnapshot:
     """Commit the owner + consent receipt H4 commits, and set the local switch.
 
     The switch is the DOCUMENT the running daemon reads (`values.team_bridge.
@@ -1195,7 +1741,7 @@ def _enroll(root: Path, *, enabled: bool = True) -> OwnerSnapshot:
     the file from disk, never a long-lived manager, so a fixture that set an
     in-memory value would test nothing.
     """
-    owner = _owner()
+    owner = replace(_owner(), account_id=account_id)
     Store(root).commit_enrollment(owner, OwnerReceipt("bridge_consent_v1", "ref-1"))
     (root / "config.yml").write_text(
         yaml.safe_dump({"values": {"team_bridge": {"enabled": enabled}}})
@@ -1329,6 +1875,77 @@ def _seed_allow_receipt(root: Path, message_id: str) -> None:
                 0.0,
             ),
         )
+
+
+# Synthetic canonical UUIDs exercise the production identity SHAPE, not a real account.
+UUID_ACCOUNT = "12345678-1234-4234-8234-123456789abc"
+UUID_SENDER = "87654321-4321-4321-8321-cba987654321"
+
+
+@pytest.mark.parametrize("account_id", ["acc_1", UUID_ACCOUNT])
+@pytest.mark.parametrize("sender_id", ["acc_9", UUID_SENDER])
+async def test_uuid_account_inbox_preserves_metadata_and_authority(api, account_id, sender_id):
+    client, root, _discipline = api
+    _enroll(root, account_id=account_id)
+    FakeClient.behavior["access"] = _access(account_id)
+    FakeClient.behavior["inbox"] = _page(_item(recipient_account=account_id))
+    before = _digest(root)
+    response = await client.get(
+        INBOX, params=_query(expected_account_id=account_id, sender_account_id=sender_id)
+    )
+    assert response.status_code == 200
+    assert FakeClient.behavior["last_inbox_kwargs"]["sender_account_id"] == sender_id
+    assert _digest(root) == before
+
+
+@pytest.mark.parametrize("account_id", ["acc_1", UUID_ACCOUNT])
+async def test_uuid_account_all_read_query_and_path_guards_accept(account_id):
+    desktop_team_bridge.TeamBridgeMessageQuery(expected_account_id=account_id, tenant_id="tnt_1")
+    desktop_team_bridge.TeamBridgeInboxQuery(
+        expected_account_id=account_id, tenant_id="tnt_1", sender_account_id=account_id
+    )
+    desktop_team_bridge._require_account_id(account_id)
+
+
+@pytest.mark.parametrize(
+    "account_id",
+    [
+        "",
+        "../acc_1",
+        "acc_1\n",
+        UUID_ACCOUNT + "\n",
+        " " + UUID_ACCOUNT,
+        UUID_ACCOUNT.replace("-", ""),
+        "{" + UUID_ACCOUNT + "}",
+        "urn:uuid:" + UUID_ACCOUNT,
+        UUID_ACCOUNT + "?tenant_id=tnt_other",
+    ],
+)
+async def test_account_identity_negative_guards_remain_closed(account_id):
+    from fastapi import HTTPException
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        desktop_team_bridge.TeamBridgeMessageQuery(
+            expected_account_id=account_id, tenant_id="tnt_1"
+        )
+    for field in ("expected_account_id", "sender_account_id"):
+        with pytest.raises(ValidationError):
+            desktop_team_bridge.TeamBridgeInboxQuery(**_query(**{field: account_id}))
+    with pytest.raises(HTTPException):
+        desktop_team_bridge._require_account_id(account_id)
+
+
+async def test_uuid_account_read_still_refuses_wrong_authority(api):
+    client, root, _discipline = api
+    _enroll(root, account_id=UUID_ACCOUNT)
+    FakeClient.behavior["access"] = _access(UUID_SENDER)
+    before = _digest(root)
+    response = await client.get(INBOX, params=_query(expected_account_id=UUID_ACCOUNT))
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "account_mismatch"
+    assert FakeClient.behavior.get("last_inbox_kwargs") is None
+    assert _digest(root) == before
 
 
 async def test_the_inbox_read_needs_the_desktop_bearer(api):
@@ -2126,3 +2743,1275 @@ async def test_a_text_epoch_is_a_typed_refusal_and_not_a_500(api) -> None:
     assert result["content"] is None
     assert result["body_included"] is False
     assert "not-a-number" not in response.text
+
+
+# ---------------------------------------------------------------------------
+# Conversations (docs/TEAM-BRIDGE-CONVERSATIONS.md)
+# ---------------------------------------------------------------------------
+
+
+async def test_conversation_list_forwards_tenant_and_paging(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversations"] = {
+        "conversations": [{"id": "bcv_1", "kind": "dm", "unread_count": 2}],
+        "has_more": False,
+    }
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations?tenant_id=tnt_1&limit=20&before=2026-10-18T00:00:00Z"
+    )
+    assert response.status_code == 200
+    assert response.json()["result"]["conversations"][0]["id"] == "bcv_1"
+    assert FakeClient.behavior["last_conversations_kwargs"] == {
+        "tenant_id": "tnt_1",
+        "limit": 20,
+        "before": "2026-10-18T00:00:00Z",
+        "cursor": None,
+        "scope": None,
+        "status": None,
+    }
+
+
+async def test_conversation_list_forwards_the_archived_status_and_refuses_unknown_ones(api):
+    """The archived half is one closed selector; the server owns who sees what in it."""
+
+    client, _root, _d = api
+    FakeClient.behavior["conversations"] = {"conversations": [{"id": "bcv_1"}], "has_more": False}
+    for status in ("archived", "open"):
+        response = await client.get(
+            f"/v1/desktop/team-bridge/conversations?tenant_id=tnt_1&status={status}"
+        )
+        assert response.status_code == 200, response.text
+        assert FakeClient.behavior["last_conversations_kwargs"]["status"] == status
+    # The account-wide page takes it too (the merged "Archived channels" list).
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations?scope=account&status=archived"
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_conversations_kwargs"]["status"] == "archived"
+    calls_before = FakeClient.calls
+    for bad in ("deleted", "ARCHIVED", ""):
+        response = await client.get(f"/v1/desktop/team-bridge/conversations?status={bad}")
+        assert response.status_code == 422, (bad, response.text)
+    assert FakeClient.calls == calls_before
+
+
+async def test_conversation_delete_forwards_the_receipt_and_answers_the_server(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_delete"] = {
+        "id": "bcv_abc12345",
+        "tenant_id": "tnt_1",
+        "deleted": True,
+        "messages_erased": 3,
+    }
+    response = await client.delete(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345"
+        "?tenant_id=tnt_1&expected_account_id=acc_a"
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["messages_erased"] == 3
+    assert FakeClient.behavior["last_deleted"] == ("bcv_abc12345", "tnt_1", "acc_a")
+
+
+async def test_conversation_list_forwards_the_account_scope_and_cursor(api):
+    """The merged page: one server-derived scope, one opaque position."""
+
+    client, _root, _d = api
+    FakeClient.behavior["conversations"] = {
+        "conversations": [
+            {"id": "bcv_1", "kind": "dm", "tenant_id": "tnt_1"},
+            {"id": "bcv_2", "kind": "group", "tenant_id": "tnt_2"},
+        ],
+        "cursor": "bcur_next",
+        "has_more": True,
+    }
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations?scope=account&limit=20&cursor=bcur_abc"
+    )
+    assert response.status_code == 200, response.text
+    # Each row still belongs to exactly ONE org: the account page groups by the
+    # row's tenant_id and never merges conversations across orgs.
+    assert [row["tenant_id"] for row in response.json()["result"]["conversations"]] == [
+        "tnt_1",
+        "tnt_2",
+    ]
+    assert FakeClient.behavior["last_conversations_kwargs"] == {
+        "tenant_id": None,
+        "limit": 20,
+        "before": None,
+        "cursor": "bcur_abc",
+        "scope": "account",
+        "status": None,
+    }
+
+
+async def test_conversation_list_refuses_a_tenant_or_a_before_beside_the_account_scope(api):
+    """The aggregate's org set is the server's; a second position is a conflict."""
+
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    responses = (
+        await client.get("/v1/desktop/team-bridge/conversations?scope=account&tenant_id=tnt_1"),
+        await client.get(
+            "/v1/desktop/team-bridge/conversations?scope=account&before=2026-10-18T00:00:00Z"
+        ),
+        # ``after`` is not a name of this read at all; the closed table refuses
+        # it on every page.
+        await client.get("/v1/desktop/team-bridge/conversations?scope=account&after=x"),
+    )
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.calls == calls_before, "a refused query reached the transport"
+
+
+async def test_conversation_list_forwards_a_cursor_on_a_tenant_page(api):
+    """Upstream returns ``next_cursor`` on tenant pages too; ties depend on it."""
+
+    client, _root, _d = api
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations?tenant_id=tnt_1&cursor=bcur_abc"
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_conversations_kwargs"] == {
+        "tenant_id": "tnt_1",
+        "limit": None,
+        "before": None,
+        "cursor": "bcur_abc",
+        "scope": None,
+        "status": None,
+    }
+
+
+async def test_conversation_list_refuses_before_combined_with_cursor(api):
+    """The compound position and the legacy timestamp bound are exclusive."""
+
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    responses = (
+        await client.get(
+            "/v1/desktop/team-bridge/conversations"
+            "?tenant_id=tnt_1&before=2026-10-18T00:00:00Z&cursor=bcur_abc"
+        ),
+        await client.get(
+            "/v1/desktop/team-bridge/conversations"
+            "?scope=account&before=2026-10-18T00:00:00Z&cursor=bcur_abc"
+        ),
+    )
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.calls == calls_before
+
+
+async def test_conversation_reads_refuse_an_unknown_scope(api):
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    responses = (
+        await client.get("/v1/desktop/team-bridge/conversations?scope=tenant"),
+        await client.get("/v1/desktop/team-bridge/unread?scope=organisation"),
+    )
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.calls == calls_before
+
+
+async def test_id_addressed_reads_refuse_a_scope(api):
+    """The id already names one org; a dropped scope would answer the wrong one."""
+
+    client, _root, _d = api
+    responses = (
+        await client.get("/v1/desktop/team-bridge/conversations/bcv_abc12345?scope=account"),
+        await client.get(
+            "/v1/desktop/team-bridge/conversations/bcv_abc12345"
+            "/messages/bcmsg_abcdef12/body?scope=account"
+        ),
+    )
+    for response in responses:
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.instances == []
+
+
+async def test_conversation_create_forwards_the_strict_body(api):
+    client, _root, _d = api
+    FakeClient.behavior["create_conversation"] = {"id": "bcv_2", "kind": "dm"}
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations",
+        json={
+            "tenant_id": "tnt_1",
+            "kind": "dm",
+            "members": [{"account_id": "acct-b", "kind": "human", "display_label": "Bea"}],
+        },
+    )
+    assert response.status_code == 200
+    body = FakeClient.behavior["last_create_body"]
+    assert body["kind"] == "dm"
+    assert body["members"][0]["account_id"] == "acct-b"
+
+
+async def test_conversation_create_refuses_an_unknown_field(api):
+    client, _root, _d = api
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations",
+        json={"kind": "dm", "members": [], "unexpected": True},
+    )
+    assert response.status_code == 422
+
+
+async def test_conversation_send_requires_a_client_ref(api):
+    client, _root, _d = api
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={"body": "hello"},
+    )
+    assert response.status_code == 422
+
+
+async def test_conversation_send_forwards_the_text_and_key(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_send"] = {"id": "bcmsg_1", "seq": 1}
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={"tenant_id": "tnt_1", "client_ref": "ref-1", "body": "hello"},
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_send"] == {
+        "conversation_id": "bcv_abc12345",
+        "client_ref": "ref-1",
+        "text": "hello",
+        "tenant_id": "tnt_1",
+        "agent_label": None,
+    }
+
+
+async def test_conversation_join_forwards_the_tenant(api):
+    client, _root, _d = api
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/join",
+        json={"tenant_id": "tnt_2"},
+    )
+    assert response.status_code == 200
+    assert FakeClient.behavior["last_join"] == ("bcv_abc12345", "tnt_2")
+
+
+async def test_conversation_join_without_a_body_defaults_to_the_single_org(api):
+    client, _root, _d = api
+    response = await client.post("/v1/desktop/team-bridge/conversations/bcv_abc12345/join")
+    assert response.status_code == 200
+    assert FakeClient.behavior["last_join"][1] is None
+
+
+async def test_conversation_read_forwards_the_notify_policy(api):
+    client, _root, _d = api
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/read",
+        json={"notify": "mute"},
+    )
+    assert response.status_code == 200
+    assert FakeClient.behavior["last_read"][3] == "mute"
+    assert FakeClient.behavior["last_read"][2] is None
+
+
+async def test_conversation_read_refuses_muted_and_notify_together(api):
+    client, _root, _d = api
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/read",
+        json={"muted": True, "notify": "mention"},
+    )
+    assert response.status_code == 422
+
+
+async def test_conversation_read_requires_something_to_do(api):
+    client, _root, _d = api
+    response = await client.post("/v1/desktop/team-bridge/conversations/bcv_abc12345/read", json={})
+    assert response.status_code == 422
+
+
+async def test_unread_is_one_badge_read(api):
+    client, _root, _d = api
+    FakeClient.behavior["unread"] = {
+        "total": 3,
+        "conversations": [{"conversation_id": "bcv_1", "unread_count": 3, "muted": False}],
+    }
+    response = await client.get("/v1/desktop/team-bridge/unread?tenant_id=tnt_1")
+    assert response.status_code == 200
+    assert response.json()["result"]["total"] == 3
+    assert FakeClient.behavior["last_unread_kwargs"] == {
+        "tenant_id": "tnt_1",
+        "scope": None,
+    }
+
+
+async def test_unread_forwards_the_account_scope(api):
+    """One authorized read for the badge, with a per-org breakdown."""
+
+    client, _root, _d = api
+    FakeClient.behavior["unread"] = {
+        "total": 7,
+        "organizations": [
+            {"tenant_id": "tnt_1", "tenant_name": "One", "unread": 5, "eligible": True},
+            {"tenant_id": "tnt_2", "tenant_name": "Two", "unread": 2, "eligible": False},
+        ],
+    }
+    response = await client.get("/v1/desktop/team-bridge/unread?scope=account")
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["total"] == 7
+    assert FakeClient.behavior["last_unread_kwargs"] == {
+        "tenant_id": None,
+        "scope": "account",
+    }
+
+
+async def test_unread_refuses_a_tenant_beside_the_account_scope(api):
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    response = await client.get("/v1/desktop/team-bridge/unread?scope=account&tenant_id=tnt_1")
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.calls == calls_before
+
+
+async def test_every_desktop_write_refuses_a_scope(api):
+    """A write names exactly one tenant; ``scope`` is refused before any I/O."""
+
+    client, _root, _d = api
+    base = "/v1/desktop/team-bridge/conversations/bcv_abc12345"
+    writes = (
+        (
+            "put",
+            "/v1/desktop/team-bridge/settings?scope=account",
+            {"state": "active", "expected_account_id": "acc_a"},
+        ),
+        (
+            "put",
+            "/v1/desktop/team-bridge/allowlist?scope=account",
+            {"entries": [], "expected_account_id": "acc_a"},
+        ),
+        ("post", "/v1/desktop/team-bridge/conversations?scope=account", {"kind": "dm"}),
+        ("post", f"{base}/archive?scope=account", None),
+        ("post", f"{base}/unarchive?scope=account", None),
+        ("delete", f"{base}?scope=account", None),
+        (
+            "post",
+            f"{base}/members?scope=account",
+            [{"account_id": "acc_b", "display_label": "Bea"}],
+        ),
+        ("delete", f"{base}/members/acc_b?scope=account", None),
+        (
+            "post",
+            f"{base}/members/acc_b/consent?scope=account",
+            {"decision": "accept", "consent_version": "v1"},
+        ),
+        ("post", f"{base}/join?scope=account", None),
+        ("post", f"{base}/leave?scope=account", None),
+        (
+            "post",
+            f"{base}/messages?scope=account",
+            {"client_ref": "ref-1", "body": "hello"},
+        ),
+        (
+            "post",
+            f"{base}/messages/bmsg_1/admit?scope=account",
+            {"verdict": "allow", "body_hash": "hash-1"},
+        ),
+        ("post", f"{base}/read?scope=account", {"seq": 1}),
+    )
+    for method, path, payload in writes:
+        response = await client.request(method, path, json=payload)
+        assert response.status_code == 422, (path, response.text)
+        assert response.json()["detail"]["code"] == "invalid_request", path
+    # Construction is what a guard moved after ``_conversation_client`` would
+    # reach; ``_answer`` never runs on a refused write, so ``calls`` cannot see it.
+    assert FakeClient.instances == []
+
+
+async def test_conversation_history_forwards_parsed_cursors(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_messages"] = {
+        "messages": [{"id": "bcmsg_1", "seq": 1}],
+        "has_more": False,
+    }
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages"
+        "?tenant_id=tnt_1&limit=20&before_seq=41"
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_history_kwargs"] == {
+        "conversation_id": "bcv_abc12345",
+        "tenant_id": "tnt_1",
+        "limit": 20,
+        "before_seq": 41,
+        "after_seq": None,
+        "endpoint_id": None,
+    }
+
+
+async def test_conversation_history_refuses_a_non_numeric_cursor(api):
+    client, _root, _d = api
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages?before_seq=nope"
+    )
+    # A caller-controlled cursor is the family's invalid_request (422), never a
+    # 500 from int().
+    assert response.status_code == 422
+
+
+async def test_conversation_routes_refuse_a_malformed_id_before_io(api):
+    client, _root, _d = api
+    cases = (
+        ("get", "/v1/desktop/team-bridge/conversations/nope", None),
+        ("get", "/v1/desktop/team-bridge/conversations/nope/messages", None),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/archive", None),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/unarchive", None),
+        ("delete", "/v1/desktop/team-bridge/conversations/nope", None),
+        (
+            "post",
+            "/v1/desktop/team-bridge/conversations/nope/members",
+            [{"account_id": "acc_b", "display_label": "Bea"}],
+        ),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/join", {}),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/leave", {}),
+        ("post", "/v1/desktop/team-bridge/conversations/nope/read", {"seq": 1}),
+        (
+            "post",
+            "/v1/desktop/team-bridge/conversations/nope/messages/bcmsg_abc12345/admit",
+            {"verdict": "allow", "body_hash": "x"},
+        ),
+    )
+    calls_before = FakeClient.calls
+    for method, path, payload in cases:
+        response = (
+            await client.get(path)
+            if method == "get"
+            else (
+                await client.delete(path)
+                if method == "delete"
+                else await client.post(path, json=payload)
+            )
+        )
+        assert response.status_code == 422, (path, response.text)
+    # None of the guards admitted a transport call.
+    assert FakeClient.calls == calls_before
+
+
+def test_account_grammar_matches_the_reader():
+    from local_operator.server.routes.desktop_team_bridge import (
+        is_account_id as route_guard,
+    )
+    from local_operator.team_bridge.read_context import is_account_id as read_guard
+    from local_operator.team_bridge.types import is_account_id
+
+    assert route_guard is read_guard is is_account_id
+
+
+async def test_member_and_message_ids_cannot_reshape_the_upstream_path(api):
+    client, _root, _d = api
+    # `..` collapses the DELETE path; `x?tenant_id=evil` injects a query. Both
+    # must be refused by the local charset guard, never handed to httpx.
+    response = await client.delete(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/members/%2E%2E"
+    )
+    assert response.status_code == 422, response.text
+    response = await client.delete(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/members/x%3Ftenant_id%3Devil"
+    )
+    assert response.status_code == 422, response.text
+    # The message id itself is a path segment: a value outside the minted
+    # grammar must be refused before the transport builds anything.
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/nope/body"
+    )
+    assert response.status_code == 422, response.text
+    # Consent names an account in the path; `..` must not reshape it.
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/members/%2E%2E/consent",
+        json={"decision": "accept", "consent_version": "bridge_consent_v1"},
+    )
+    assert response.status_code == 422, response.text
+
+
+async def test_conversation_reactions_forward_and_preserve_summary(api):
+    from urllib.parse import quote
+
+    client, _root, _d = api
+    summary = {
+        "message_id": "bcmsg_abcdef12",
+        "reactions": [{"emoji": "👍", "count": 2, "reacted_by_me": True, "sample_labels": ["Bea"]}],
+    }
+    FakeClient.behavior["conversation_react"] = summary
+    path = (
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_abcdef12/reactions/"
+        + quote("👍", safe="")
+    )
+    receipt = {"tenant_id": "tnt_1", "expected_account_id": "acc_1"}
+    response = await client.put(path, json=receipt)
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == summary
+    assert FakeClient.behavior["last_react"] == (
+        "bcv_abc12345",
+        "bcmsg_abcdef12",
+        "👍",
+        {"active": True, "tenant_id": "tnt_1", "expected_account_id": "acc_1"},
+    )
+    response = await client.delete(path + "?tenant_id=tnt_1&expected_account_id=acc_1")
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_react"][3] == {
+        "active": False,
+        "tenant_id": "tnt_1",
+        "expected_account_id": "acc_1",
+    }
+
+
+@pytest.mark.parametrize(
+    "put_body,delete_query",
+    [
+        pytest.param({}, "", id="no-receipt"),
+        pytest.param({"tenant_id": "tnt_1"}, "?tenant_id=tnt_1", id="tenant-only"),
+        pytest.param(
+            {"expected_account_id": "acc_1"}, "?expected_account_id=acc_1", id="owner-only"
+        ),
+        pytest.param(
+            {"tenant_id": "tnt_1", "expected_account_id": "  "},
+            "?tenant_id=tnt_1&expected_account_id=%20",
+            id="blank-owner",
+        ),
+        pytest.param(
+            {"tenant_id": "tnt_1", "expected_account_id": "acc/../x"},
+            "?tenant_id=tnt_1&expected_account_id=acc%2F..%2Fx",
+            id="owner-grammar",
+        ),
+        pytest.param(
+            {"tenant_id": "tnt_1", "expected_account_id": "acc_1", "scope": "account"},
+            "?tenant_id=tnt_1&expected_account_id=acc_1&expected_account_id=acc_2",
+            id="extra-or-repeated",
+        ),
+    ],
+)
+async def test_conversation_reactions_require_the_owner_receipt(api, put_body, delete_query):
+    """The reaction capability promises a REQUIRED receipt: no unguarded path."""
+    from urllib.parse import quote
+
+    client, _root, _d = api
+    path = (
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_abcdef12/reactions/"
+        + quote("👍", safe="")
+    )
+    assert (await client.put(path, json=put_body)).status_code == 422
+    assert (await client.put(path)).status_code == 422
+    assert (await client.delete(path + delete_query)).status_code == 422
+    assert FakeClient.instances == []
+
+
+async def test_conversation_reactions_refuse_agent_impersonation_and_oversized_input(api):
+    from urllib.parse import quote
+
+    client, _root, _d = api
+    path = "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_abcdef12/reactions/"
+    response = await client.put(path + quote("👍"), json={"actor_endpoint_id": "bep_other"})
+    assert response.status_code == 422
+    response = await client.put(path + quote("😀" * 33), json={})
+    assert response.status_code == 422
+    receipt = "?tenant_id=tnt_1&expected_account_id=acc_1"
+    response = await client.delete(path + quote("👍") + receipt + "&actor_endpoint_id=bep_other")
+    assert response.status_code == 422
+    assert FakeClient.instances == []
+
+
+# -- threads (agent-server feat/bridge-threads) --------------------------------
+
+
+async def test_conversation_send_forwards_a_thread_root(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_send"] = {"id": "bcmsg_2", "seq": 2}
+    # A threaded reply REQUIRES the captured-owner receipt (`team_bridge_threads`
+    # covers the mutation half too — round-1 review R1), so the forwarding case
+    # carries one; an ordinary send still omits it, as the case below pins.
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={
+            "client_ref": "ref-2",
+            "body": "on it",
+            "thread_root_id": "bcmsg_root0001",
+            "tenant_id": "org_other",
+            "expected_account_id": "acc_a",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_send_thread_root_id"] == "bcmsg_root0001"
+
+
+async def test_conversation_send_without_a_thread_root_forwards_none(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_send"] = {"id": "bcmsg_3", "seq": 3}
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={"client_ref": "ref-3", "body": "hello"},
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_send_thread_root_id"] is None
+
+
+async def test_conversation_send_refuses_a_malformed_thread_root_before_io(api):
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages",
+        json={"client_ref": "ref-4", "body": "x", "thread_root_id": "../../status"},
+    )
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls_before
+
+
+async def test_conversation_replies_forwards_parsed_hints(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_replies"] = {
+        "root": {"id": "bcmsg_root0001", "seq": 1, "reply_count": 2},
+        "replies": [{"id": "bcmsg_rep00001", "seq": 2}],
+        "has_more": False,
+    }
+    response = await client.get(
+        "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_root0001/replies"
+        "?tenant_id=tnt_1&expected_account_id=acc_1&limit=20&after_seq=2"
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["root"]["reply_count"] == 2
+    assert FakeClient.behavior["last_replies_kwargs"] == {
+        "conversation_id": "bcv_abc12345",
+        "message_id": "bcmsg_root0001",
+        "tenant_id": "tnt_1",
+        "expected_account_id": "acc_1",
+        "limit": 20,
+        "after_seq": 2,
+        "endpoint_id": None,
+    }
+
+
+async def test_conversation_replies_refuses_bad_input_before_io(api):
+    client, _root, _d = api
+    calls_before = FakeClient.calls
+    base = "/v1/desktop/team-bridge/conversations"
+    root = f"{base}/bcv_abc12345/messages/bcmsg_root0001/replies"
+    owner = "tenant_id=tnt_1&expected_account_id=acc_1"
+    for path in (
+        f"{base}/nope/messages/bcmsg_root0001/replies?{owner}",
+        f"{base}/bcv_abc12345/messages/nope/replies?{owner}",
+        f"{root}?{owner}&after_seq=x",
+        f"{root}?{owner}&after_seq=-1",
+        f"{root}?{owner}&before_seq=3",
+        # The threads capability promises a REQUIRED receipt: each of these
+        # would otherwise be an unguarded thread read.
+        root,
+        f"{root}?tenant_id=tnt_1",
+        f"{root}?expected_account_id=acc_1",
+        f"{root}?tenant_id=tnt_1&expected_account_id=%20",
+        f"{root}?tenant_id=%20&expected_account_id=acc_1",
+        f"{root}?tenant_id=tnt_1&expected_account_id=acc%2F..%2Fx",
+        f"{root}?{owner}&expected_account_id=acc_2",
+        f"{root}?{owner}&scope=account",
+    ):
+        response = await client.get(path)
+        assert response.status_code == 422, (path, response.text)
+    assert FakeClient.calls == calls_before
+
+
+# -- the chief-of-staff identity: pass-throughs a future whitelist must not drop
+#
+# The directory's per-member ``agent`` block and the conversations' ``builtin``
+# flag are ADDITIVE agent-server fields (§6.6) the desktop renders "Aida (Ben)"
+# and the built-in #humans/#agents channels from. These routes pass the payload
+# through untouched today; each cell below pins one field so a later
+# projection/whitelist that drops it fails here rather than silently in the UI.
+
+
+async def test_directory_passes_the_member_agent_block_through(api):
+    client, _root, _discipline = api
+    payload = _directory_payload()
+    payload["members"][0]["agent"] = {"endpoint_id": "bep_2", "name": "Aida", "state": "active"}
+    payload["members"][1]["agent"] = None
+    FakeClient.behavior["directory"] = payload
+
+    response = await client.get(f"{DIRECTORY}?tenant_id=tnt_1")
+
+    assert response.status_code == 200
+    members = response.json()["result"]["members"]
+    assert members[0]["agent"] == {"endpoint_id": "bep_2", "name": "Aida", "state": "active"}
+    assert members[1]["agent"] is None
+
+
+async def test_conversation_list_and_get_pass_the_builtin_flag_through(api):
+    client, _root, _discipline = api
+    FakeClient.behavior["conversations"] = {
+        "conversations": [
+            {"id": "bcv_h", "kind": "channel", "name": "humans", "builtin": "humans"},
+            {"id": "bcv_d", "kind": "dm"},
+        ]
+    }
+    FakeClient.behavior["conversation"] = {
+        "id": "bcv_abc12345",
+        "kind": "channel",
+        "name": "agents",
+        "builtin": "agents",
+    }
+
+    listed = await client.get("/v1/desktop/team-bridge/conversations?tenant_id=tnt_1")
+    one = await client.get("/v1/desktop/team-bridge/conversations/bcv_abc12345?tenant_id=tnt_1")
+
+    assert listed.status_code == 200 and one.status_code == 200
+    rows = listed.json()["result"]["conversations"]
+    assert rows[0]["builtin"] == "humans"
+    # Absent stays absent: the route invents no field for an ordinary row.
+    assert "builtin" not in rows[1]
+    assert one.json()["result"]["builtin"] == "agents"
+
+
+async def test_conversation_create_forwards_an_agent_dm_member(api):
+    """Clicking a chief of staff opens a dm with that person's AGENT endpoint."""
+
+    client, _root, _d = api
+    FakeClient.behavior["create_conversation"] = {"id": "bcv_3", "kind": "dm"}
+    response = await client.post(
+        "/v1/desktop/team-bridge/conversations",
+        json={
+            "tenant_id": "tnt_1",
+            "kind": "dm",
+            "members": [
+                {
+                    "account_id": "acct-b",
+                    "kind": "agent",
+                    "endpoint_id": "bep_2",
+                    "display_label": "Aida (Ben)",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_create_body"]["members"] == [
+        {
+            "account_id": "acct-b",
+            "kind": "agent",
+            "endpoint_id": "bep_2",
+            "display_label": "Aida (Ben)",
+        }
+    ]
+
+
+async def test_an_active_settings_write_carries_the_cos_name(api):
+    """The route resolves the name from runtime state; the body never supplies it."""
+
+    from local_operator import settings_io
+    from local_operator.aida import state as aida_state
+
+    client, root, _discipline = api
+    aida_state.write_state(root, {"session_id": "sess_aida"})
+    settings_io.write_setting(
+        ConfigManager(root), settings_io.BY_KEY["team_bridge.session"], "sess_aida"
+    )
+    FakeClient.behavior["put_settings"] = {"endpoint": None}
+
+    active = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={"state": "active", "consent_version": "v1", "expected_account_id": "acc_7"},
+    )
+    assert active.status_code == 200, active.text
+    assert FakeClient.behavior["last_put_kwargs"]["agent_name"] == "Aida"
+
+    paused = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={"state": "paused", "expected_account_id": "acc_7"},
+    )
+    assert paused.status_code == 200
+    # §5.2 rule 2: a pause is sent alone.
+    assert FakeClient.behavior["last_put_kwargs"]["agent_name"] is None
+
+    # The desktop body cannot smuggle a name in (strict body).
+    smuggled = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={"state": "active", "agent_name": "Mallory", "expected_account_id": "acc_7"},
+    )
+    assert smuggled.status_code == 422
+
+
+async def test_an_active_settings_write_without_a_cos_sends_no_name(api):
+    client, _root, _discipline = api
+    FakeClient.behavior["put_settings"] = {"endpoint": None}
+
+    response = await client.put(
+        "/v1/desktop/team-bridge/settings",
+        json={"state": "active", "consent_version": "v1", "expected_account_id": "acc_7"},
+    )
+
+    assert response.status_code == 200
+    assert FakeClient.behavior["last_put_kwargs"]["agent_name"] is None
+
+
+# -- owner agent consent: withdraw + owned invitations (agent-server #227) ------
+
+CONSENT = "/v1/desktop/team-bridge/conversations/bcv_abc12345/members/acc_1/consent"
+INVITATIONS = "/v1/desktop/team-bridge/agents/owned/invitations"
+#: What the ROUTE sets. The `api` fixture mounts the router alone, so these cells
+#: see it verbatim; the running core's `managed_desktop_boundary` rewrites every
+#: `/v1/desktop/` answer to plain `no-store` (pre-existing, app-wide), and that
+#: SERVED value is pinned separately by
+#: `test_an_old_hub_through_the_mounted_boundary_is_409_outdated_hub_on_both_arms`.
+ROUTE_SET_CACHE_CONTROL = desktop_team_bridge.OWNER_INVITATIONS_CACHE_CONTROL
+
+
+async def test_withdraw_needs_no_consent_version_and_forwards_the_endpoint_pin(api):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_consent"] = {"member": {"state": "left"}}
+    response = await client.post(
+        CONSENT, json={"decision": "withdraw", "endpoint_id": "bep_1", "tenant_id": "tnt_1"}
+    )
+    assert response.status_code == 200, response.text
+    assert FakeClient.behavior["last_consent"] == ("bcv_abc12345", "acc_1", "withdraw", None)
+    assert FakeClient.behavior["last_consent_endpoint"] == "bep_1"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Leaving is not consenting: a version on withdraw is refused, not dropped.
+        {"decision": "withdraw", "consent_version": "bridge_agent_participation_v1"},
+        # The two answers to an invitation still need the served version.
+        {"decision": "accept"},
+        {"decision": "decline"},
+        {"decision": "remove"},
+        {"decision": "withdraw", "endpoint_id": ""},
+    ],
+)
+async def test_consent_version_is_validated_per_decision_before_any_io(api, body):
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.post(CONSENT, json=body)
+    assert response.status_code == 422, response.text
+    assert FakeClient.calls == calls, "a refused decision reached the transport"
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "details"),
+    [
+        (409, "invalid_transition", {"rule": "not_invited"}),
+        (409, "invalid_transition", {"rule": "not_active"}),
+        (400, "invalid_request", {"field": "endpoint_id", "rule": "ambiguous"}),
+        (409, "outdated_hub", {"hub_status": 400, "hub_code": "invalid_request"}),
+    ],
+)
+async def test_consent_refusals_pass_through_untouched(api, status, code, details):
+    client, _root, _d = api
+    FakeClient.behavior["conversation_consent"] = BridgeRefusal(
+        code, "refused", http_status=status, details=details
+    )
+    response = await client.post(CONSENT, json={"decision": "withdraw"})
+    assert response.status_code == status
+    assert response.json()["detail"] == {"code": code, "message": "refused", "details": details}
+
+
+def _invitation(**over: Any) -> dict[str, Any]:
+    """One served invitation row, in the hub's own field names."""
+
+    row = {
+        "conversation_id": "bcv_abc12345",
+        "tenant_id": "tnt_1",
+        "kind": "channel",
+        "name": "opaque name",
+        "visibility": "private",
+        "status": "open",
+        "created_by": "acc_human",
+        "created_by_label": "Ana",
+        "endpoint_id": "bep_1",
+        "agent_label": "Aida",
+        "invited_at": "2026-10-01T10:00:00Z",
+        "last_message_at": "2026-10-02T11:00:00Z",
+    }
+    row.update(over)
+    return row
+
+
+async def test_owned_invitations_pass_through_with_no_store_and_the_opaque_cursor(api):
+    client, _root, _d = api
+    page = {
+        "invitations": [_invitation()],
+        "next_cursor": "opaque+/=",
+        "has_more": True,
+    }
+    FakeClient.behavior["owned_agent_invitations"] = page
+    response = await client.get(
+        INVITATIONS,
+        params={
+            "expected_account_id": "acc_1",
+            "tenant_id": "tnt_1",
+            "limit": "20",
+            "cursor": "opaque+/=",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == ROUTE_SET_CACHE_CONTROL
+    assert response.json()["result"] == page
+    assert FakeClient.behavior["last_invitations"] == {
+        "expected_account_id": "acc_1",
+        "tenant_id": "tnt_1",
+        "limit": 20,
+        "cursor": "opaque+/=",
+    }
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        # The hub's "metadata only" guarantee is the hub's, so a page carrying a
+        # field this build cannot classify (a body, a preview, a member list) is
+        # refused rather than forwarded to the renderer (review R1-1).
+        {"invitations": [_invitation(body={"text": "secret"})], "has_more": False},
+        {"invitations": [_invitation()], "has_more": False, "counts": {}},
+        {
+            "invitations": [{k: v for k, v in _invitation().items() if k != "endpoint_id"}],
+            "has_more": False,
+        },
+        {"invitations": [_invitation(invited_at=0)], "has_more": False},
+        {"invitations": [], "has_more": "no"},
+        {"invitations": {}, "has_more": False},
+        {"invitations": [], "has_more": False, "next_cursor": "x" * 513},
+        [],
+    ],
+)
+async def test_a_page_this_build_cannot_read_is_malformed_page(api, page):
+    client, _root, _d = api
+    FakeClient.behavior["owned_agent_invitations"] = page
+    response = await client.get(INVITATIONS, params={"expected_account_id": "acc_1"})
+    assert response.status_code == 502, response.text
+    assert response.json()["detail"]["code"] == "malformed_page"
+    assert response.headers["cache-control"] == ROUTE_SET_CACHE_CONTROL
+
+
+@pytest.mark.parametrize("tenant", ["../tnt_1", "tnt_1!", "TNT_1", "x" * 200])
+async def test_a_malformed_tenant_is_refused_on_this_family_s_own_grammar(api, tenant):
+    """A tenant outside the accepted grammar never becomes a hub round trip (R1-2)."""
+
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.get(
+        INVITATIONS, params={"expected_account_id": "acc_1", "tenant_id": tenant}
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_request"
+    assert FakeClient.calls == calls, "a refused tenant reached the transport"
+
+
+async def test_a_tenant_this_machine_did_not_enroll_with_is_invalid_tenant(api):
+    """The inbox's cross-check, over the READ-ONLY owner accessor (review R1-2)."""
+
+    from local_operator.team_bridge.store import OwnerReceipt, OwnerSnapshot, Store
+
+    client, root, _d = api
+    Store(root).commit_enrollment(
+        OwnerSnapshot(
+            credential_id=1,
+            account_id="acc_1",
+            tenant_id="tnt_enrolled",
+            endpoint_id="bep_1",
+            canonical_base_url="https://api.radienthq.com/v1",
+            enrollment_generation=1,
+        ),
+        OwnerReceipt("bridge_consent_v1", "ref-1"),
+    )
+    calls = FakeClient.calls
+    foreign = await client.get(
+        INVITATIONS, params={"expected_account_id": "acc_1", "tenant_id": "tnt_other"}
+    )
+    assert foreign.status_code == 422, foreign.text
+    assert foreign.json()["detail"]["code"] == "invalid_tenant"
+    assert FakeClient.calls == calls
+
+    # The enrolled org itself passes the cross-check.
+    FakeClient.behavior["owned_agent_invitations"] = {"invitations": [], "has_more": False}
+    ok = await client.get(
+        INVITATIONS, params={"expected_account_id": "acc_1", "tenant_id": "tnt_enrolled"}
+    )
+    assert ok.status_code == 200, ok.text
+
+
+async def test_an_enrolled_machine_requires_the_tenant_rather_than_letting_the_hub_pick(api):
+    """Omitted, the hub would answer for the account's FIRST membership (R2-2).
+
+    That need not be the enrolled org, so the route refuses before any I/O
+    instead of defaulting: a default could name an org the signed-in account
+    is not a member of. Naming the enrolled org still answers.
+    """
+
+    client, root, _d = api
+    _enroll(root)
+    calls = FakeClient.calls
+    omitted = await client.get(INVITATIONS, params={"expected_account_id": "acc_1"})
+    assert omitted.status_code == 422, omitted.text
+    assert omitted.json()["detail"]["code"] == "invalid_request"
+    assert omitted.headers["cache-control"] == ROUTE_SET_CACHE_CONTROL
+    assert FakeClient.calls == calls, "an omitted tenant reached the transport"
+
+    FakeClient.behavior["owned_agent_invitations"] = {"invitations": [], "has_more": False}
+    named = await client.get(
+        INVITATIONS, params={"expected_account_id": "acc_1", "tenant_id": _owner().tenant_id}
+    )
+    assert named.status_code == 200, named.text
+    assert FakeClient.behavior["last_invitations"]["tenant_id"] == _owner().tenant_id
+
+
+async def test_an_unenrolled_machine_is_not_refused_by_the_cross_check(api):
+    """No committed owner: nothing to compare against, so the hub answers.
+
+    Requiring an enrollment would make the invitation list unreadable exactly for
+    an owner who has not committed yet -- the person the list exists for.
+    """
+
+    client, _root, _d = api
+    FakeClient.behavior["owned_agent_invitations"] = {"invitations": [], "has_more": False}
+    response = await client.get(
+        INVITATIONS, params={"expected_account_id": "acc_1", "tenant_id": "tnt_1"}
+    )
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.parametrize(
+    ("limit", "code"),
+    [
+        ("0", "bad_limit"),
+        ("101", "bad_limit"),
+        ("07", "bad_limit"),
+        ("+20", "bad_limit"),
+        ("1_0", "bad_limit"),
+        ("ten", "bad_limit"),
+        # Unicode digits pass `str.isdigit()`: "²" then crashed `int()` into a
+        # 500 and "٣" was forwarded as 3 (R2-1). ASCII only.
+        ("²", "bad_limit"),
+        ("٣", "bad_limit"),
+        ("١٢", "bad_limit"),
+        # An empty value is refused by the query-wide guard before the limit arm.
+        ("", "invalid_request"),
+    ],
+)
+async def test_limit_is_canonical_digits_inside_the_inbox_window(api, limit, code):
+    """The value validated is the value sent, and the window is the inbox's (R1-4)."""
+
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.get(
+        INVITATIONS, params={"expected_account_id": "acc_1", "limit": limit}
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == code
+    assert FakeClient.calls == calls
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "",  # the captured-owner receipt is required
+        "?tenant_id=tnt_1",
+        "?expected_account_id=acc_1&endpoint_id=bep_1",  # no endpoint parameter
+        "?expected_account_id=acc_1&scope=account",
+        "?expected_account_id=acc_1&expected_account_id=acc_2",
+        "?expected_account_id=../x",
+    ],
+)
+async def test_owned_invitations_refuse_an_open_query_before_any_io(api, query):
+    client, _root, _d = api
+    calls = FakeClient.calls
+    response = await client.get(f"{INVITATIONS}{query}")
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "invalid_request"
+    assert response.headers["cache-control"] == ROUTE_SET_CACHE_CONTROL
+    assert FakeClient.calls == calls, "a refused query reached the transport"
+
+
+async def test_owned_invitations_refusals_carry_no_store_and_outdated_hub_passes(api):
+    client, _root, _d = api
+    FakeClient.behavior["owned_agent_invitations"] = BridgeRefusal(
+        "outdated_hub", "update", http_status=409, details={"hub_status": 404}
+    )
+    response = await client.get(INVITATIONS, params={"expected_account_id": "acc_1"})
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "outdated_hub"
+    assert response.headers["cache-control"] == ROUTE_SET_CACHE_CONTROL
+
+
+def test_owner_invitations_capability_is_advertised():
+    from local_operator.server.features import static_feature_flags
+
+    assert static_feature_flags()["team_bridge_owner_invitations"] == 1
+
+
+class _CredentialStore:
+    """The credential seam the REAL client resolves through (test_client's shape)."""
+
+    class Row:
+        def __init__(self) -> None:
+            self.id = 1
+            self.data = {"access": "token-1", "account_id": "acc_1"}
+            self.provider = "radient"
+            self.credential_type = "oauth"
+
+    def __init__(self) -> None:
+        self.rows = [self.Row()]
+
+    def list_credentials(self, provider=None, include_disabled=False):
+        return [r for r in self.rows if provider is None or r.provider == provider]
+
+    def get_credential(self, credential_id: int):
+        return next((r for r in self.rows if r.id == credential_id), None)
+
+    async def ensure_oauth_fresh_or_raise(self, credential_id: int, *, force: bool = False):
+        row = self.get_credential(credential_id)
+        return dict(row.data) if row is not None else None
+
+
+async def test_the_composed_seam_an_old_hub_becomes_an_update_prompt_not_a_retry(
+    api, monkeypatch: pytest.MonkeyPatch
+):
+    """Fake hub bytes -> the REAL client's reclassification -> the route's answer.
+
+    Each half was pinned separately (review R1-6); this drives the seam a renderer
+    actually consumes: an uncoded 404 on the invitations path must arrive as a 409
+    `outdated_hub` carrying no-store, not as a 404 the UI would render as "gone".
+    """
+
+    import httpx as httpx_mod
+
+    client, _root, _d = api
+    seen: list[httpx_mod.Request] = []
+
+    def handler(request: httpx_mod.Request) -> httpx_mod.Response:
+        seen.append(request)
+        return httpx_mod.Response(404, json={"message": "Not Found"})
+
+    monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
+
+    # The cell DECLARES its real client: a scripted fake cannot prove the
+    # reclassification the client performs. The tripwire bomb sits on the CLASS
+    # (the fixture arms it before the fake replaces the module attribute), so the
+    # allowance is aimed at the class, restored in `finally`. MockTransport is the
+    # only transport, so no socket is opened and the httpx/subprocess arms stay
+    # armed throughout.
+    saved_init = _REAL_TEAM_BRIDGE_CLIENT.__init__
+    _REAL_TEAM_BRIDGE_CLIENT.__init__ = _REAL_CLIENT_INIT
+    try:
+        wire = _REAL_TEAM_BRIDGE_CLIENT(
+            None,
+            base_url="https://hub.example/v1",
+            store=_CredentialStore(),
+            transport=httpx_mod.MockTransport(handler),
+        )
+    finally:
+        _REAL_TEAM_BRIDGE_CLIENT.__init__ = saved_init
+    monkeypatch.setattr(desktop_team_bridge, "_conversation_client", lambda cm: wire)
+
+    response = await client.get(INVITATIONS, params={"expected_account_id": "acc_1"})
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "outdated_hub"
+    assert detail["details"] == {"hub_status": 404, "hub_code": "bridge_error"}
+    assert response.headers["cache-control"] == ROUTE_SET_CACHE_CONTROL
+    assert [r.url.path for r in seen] == ["/v1/messaging/agents/owned/invitations"]
+
+
+async def test_an_old_hub_through_the_mounted_boundary_is_409_outdated_hub_on_both_arms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """QA r1 item 1: the old-hub answer as the RUNNING core serves it.
+
+    QA's daemon runs against the old hub answered `conversation_not_found` and
+    an invitation row. A pre-#227 hub can produce neither: its `consent()`
+    refuses `withdraw` on the decision check BEFORE any conversation lookup, and
+    it serves no invitations route. Those answers came from a #227 hub, so the
+    daemon was still addressing one (a rig artefact). Reproduced end to end
+    (the core's real app + a loopback hub answering the pre-#227 bytes), both
+    arms answer this 409 on every repeat and every call reaches the hub, so the
+    core neither caches nor re-routes. This cell pins that seam with
+    the app-wide `managed_desktop_boundary` middleware mounted, which the `api`
+    fixture omits: the hub bytes are agent-server `c082e1b0^1`'s -- the coded
+    `decision`/`unknown_value` refusal of `withdraw`, and echo's uncoded router
+    404 for the invitations path.
+
+    It also pins the SERVED Cache-Control (QA r1 Q1): the middleware rewrites
+    every `/v1/desktop/` answer to `no-store`, so the route's own
+    `private, no-store` is what a router-only app sees, never what ships.
+    """
+
+    import httpx as httpx_mod
+
+    from local_operator.server.app import managed_desktop_boundary
+
+    seen: list[str] = []
+
+    def handler(request: httpx_mod.Request) -> httpx_mod.Response:
+        seen.append(f"{request.method} {request.url.path}")
+        if request.url.path.endswith("/consent"):
+            return httpx_mod.Response(
+                400,
+                json={
+                    "error": "invalid request",
+                    "code": "invalid_request",
+                    "details": {"field": "decision", "rule": "unknown_value"},
+                },
+            )
+        return httpx_mod.Response(404, json={"message": "Not Found"})
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / ".local-operator"))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
+    monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
+    # The real client over MockTransport, built under the same tripwire allowance
+    # as the composed-seam cell above: no socket is opened.
+    saved_init = _REAL_TEAM_BRIDGE_CLIENT.__init__
+    _REAL_TEAM_BRIDGE_CLIENT.__init__ = _REAL_CLIENT_INIT
+    try:
+        wire = _REAL_TEAM_BRIDGE_CLIENT(
+            None,
+            base_url="https://hub.example/v1",
+            store=_CredentialStore(),
+            transport=httpx_mod.MockTransport(handler),
+        )
+    finally:
+        _REAL_TEAM_BRIDGE_CLIENT.__init__ = saved_init
+    monkeypatch.setattr(desktop_team_bridge, "_conversation_client", lambda cm: wire)
+
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(tmp_path / ".local-operator")
+    app.include_router(desktop_team_bridge.router)
+    app.middleware("http")(managed_desktop_boundary)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://localhost", headers=AUTH
+    ) as client:
+        for _ in range(2):  # a repeat must be the same answer, not a cached one
+            withdraw = await client.post(
+                CONSENT,
+                json={
+                    "decision": "withdraw",
+                    "expected_account_id": "acc_1",
+                    "tenant_id": "tnt_1",
+                },
+            )
+            assert withdraw.status_code == 409, withdraw.text
+            assert withdraw.json()["detail"]["code"] == "outdated_hub"
+            assert withdraw.json()["detail"]["details"] == {
+                "hub_status": 400,
+                "hub_code": "invalid_request",
+            }
+
+            page = await client.get(INVITATIONS, params={"expected_account_id": "acc_1"})
+            assert page.status_code == 409, page.text
+            assert page.json()["detail"]["code"] == "outdated_hub"
+            assert page.json()["detail"]["details"] == {
+                "hub_status": 404,
+                "hub_code": "bridge_error",
+            }
+            for answer in (withdraw, page):
+                assert answer.headers["cache-control"] == "no-store"
+    assert (
+        seen
+        == [
+            "POST /v1/messaging/conversations/bcv_abc12345/members/acc_1/consent",
+            "GET /v1/messaging/agents/owned/invitations",
+        ]
+        * 2
+    )

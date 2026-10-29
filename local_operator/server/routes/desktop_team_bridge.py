@@ -5,6 +5,13 @@ The UI lane's HTTP surfaces over :mod:`local_operator.team_bridge`:
 - ``GET  /v1/desktop/team-bridge/status``    — the eligibility/state read.
 - ``GET  /v1/desktop/team-bridge/settings``  — endpoint, consent record, policies.
 - ``PUT  /v1/desktop/team-bridge/settings``  — state changes (the consented write).
+  ``state="disabled"`` is the one-click **Turn off** of the default-on notice: after
+  the hub accepts it the runtime also persists the sticky local opt-out (see below).
+- ``POST /v1/desktop/team-bridge/onboarding/dismiss`` — mark the one-time
+  "Team Bridge is on for you" notice dismissed on this machine (never returns).
+- ``GET  /v1/desktop/team-bridge/directory`` — the organization's member rows,
+  the frozen ``{members:[{account_id,display_label,role,bridge_enabled,
+  bridge_state}]}`` shape, for the surface that chooses who an agent may reach.
 - ``GET  /v1/desktop/team-bridge/allowlist`` — own policy entries + honest defaults.
 - ``PUT  /v1/desktop/team-bridge/allowlist`` — the bounded replace-set.
 - ``GET  /v1/desktop/team-bridge/inbox``     — one page of agent messages, METADATA
@@ -20,6 +27,26 @@ server dark (``BRIDGE_ENABLED`` off, RFC §5.5) the upstream answers 503
 ``messaging_unavailable``; the STATUS route renders that as a state
 (``unavailable`` with the refusal), which is the fail-closed behaviour the
 contract asks for, and the other routes carry the §6.5 code through.
+
+DEFAULT-ON CONTRACT (``bridge_consent_v2``, the UI banner "Team Bridge is on for you").
+The enrolment itself is NOT a route: the runtime's status discipline performs it
+(``POST /v1/messaging/enrollment`` upstream) when the hub serves and accepts v2,
+the member is eligible with no endpoint and has not opted out here. These routes
+only expose what the banner needs, all ADDITIVE:
+
+* status ``default_on`` — ``{in_force, notice_pending}``: ``in_force`` the hub
+  serves+accepts v2 for this caller (the opt-out default applies);
+  ``notice_pending`` the one-time notice was not dismissed
+  (``team_bridge.onboarding != "seen"``). The banner shows when the surface is
+  state C, settings ``default_on`` is true and ``notice_pending`` is true.
+* status ``local.enabled`` — the COMPOSED switch: an explicit value wins; an
+  absent key reads ON only while ``in_force`` (``enabled_given``).
+* settings GET ``default_on`` — the endpoint's consent was recorded as
+  ``consented_via == "default_on"`` (the hub's own provenance, passed through
+  untouched in ``endpoint.consent`` as well).
+* the PUT's ``consented_via`` stays ``dialog | settings``: ``default_on`` is
+  server-asserted and a client surface can never claim it (a body carrying it is
+  a 422).
 
 NONE of the routes gate on local ``team_bridge.enabled``: the composed surface
 gate is capability × eligible × enabled and it is the RENDERER's (RFC §5.4), so a
@@ -52,11 +79,17 @@ every ``lop serve`` boot, and the desktop_radient rule (a module-scope httpx was
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
+import unicodedata
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Literal, NoReturn
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from local_operator.config import ConfigManager
@@ -64,8 +97,20 @@ from local_operator.config_watch import process_watcher
 from local_operator.server.dependencies import get_config_manager
 from local_operator.server.desktop import require_desktop
 from local_operator.server.features import feature_flags
+from local_operator.server.models.desktop_team_bridge_owner_audit import (
+    OwnerAuditConversationPage,
+    OwnerAuditMessagePage,
+    OwnerAuditThread,
+    owner_audit_projection,
+)
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import reply
+from local_operator.team_bridge.types import (
+    _CONVERSATION_MESSAGE_ID,
+    ATTACHMENT_ID_PATTERN,
+    CONVERSATION_ID_PATTERN,
+    is_account_id,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     # The class lives in a module that pulls httpx; importing it here would put
@@ -75,6 +120,126 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     from local_operator.team_bridge.client import BridgeRefusal
 
 router = APIRouter(tags=["Desktop agent messages"], dependencies=[Depends(require_desktop)])
+
+#: The shared minted grammar (``team_bridge.types.CONVERSATION_ID_PATTERN``):
+#: validating it BEFORE interpolating an id into an upstream path is the pair
+#: lane's rule (review S-RSA-5) and applies unchanged here. Imported rather
+#: than respelled so the agent tool and this route cannot drift apart.
+_CONVERSATION_ID = re.compile(CONVERSATION_ID_PATTERN)
+#: The conversation domain's other two interpolated path/query values. Both are
+#: opaque server-minted strings; this route family only has to prove they
+#: cannot change the SHAPE of the upstream URL (`..`, `/`, `?`, `%`), so the
+#: rule is a conservative charset rather than a re-implementation of the
+#: server's mint.
+#: A conversation MESSAGE id, taken from the package's ONE grammar rather than
+#: re-spelled here. Two literals already drifted once: the desktop copy allowed
+#: eight characters where the agent tool's allowed one, so a thread root the
+#: tool accepted was refused by the desktop send and scheduled routes.
+_MESSAGE_ID = _CONVERSATION_MESSAGE_ID
+#: The wire grammar for a thread root. Same object as ``_MESSAGE_ID`` — one
+#: grammar, two names only because the two call sites read differently.
+CONVERSATION_REPLY_ROOT_PATTERN = _CONVERSATION_MESSAGE_ID.pattern
+#: Mirrors ``read_context.ACCOUNT_ID_PATTERN``. Spelled here rather than imported
+#: because that module rides the httpx boot path this file must not pull at
+#: module scope; ``test_account_grammar_matches_the_reader`` pins the two equal.
+_ACCOUNT_ID = re.compile(r"^acc_[A-Za-z0-9_-]{1,64}$")
+#: Image attachment ids (``team_bridge.types.ATTACHMENT_ID_PATTERN``), checked
+#: before interpolation exactly like the conversation id above.
+_ATTACHMENT_ID = re.compile(ATTACHMENT_ID_PATTERN)
+#: Spelled here rather than imported from the client: that module rides the
+#: httpx boot path this file must not pull at module scope. Pinned equal to
+#: ``client.ATTACHMENT_MAX_BYTES`` / ``ATTACHMENT_MIME_TYPES`` by a test.
+_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
+_ATTACHMENT_SERVABLE = {"image/png", "image/jpeg"}
+#: ``attachment_ids`` on a send or schedule: the hub's per-message bound and id
+#: grammar, enforced before the request leaves the machine.
+_ATTACHMENT_IDS = Field(default=None, min_length=1, max_length=4)
+
+
+# -- access-log redaction ----------------------------------------------------
+#
+# WHY: uvicorn's access logger writes the REQUEST PATH, and the three attachment
+# routes carry the conversation, message and attachment ids in it. The desktop
+# backend's log captures those lines (QA on local-operator-ui#1314, Q2), and the
+# attachment contract (D9) keeps ids out of logs; the hub already logs these
+# routes by template (``:attachmentid``). This filter rewrites the logged path to
+# the same template form so the two ends agree.
+#
+# Scope: ONLY ``/v1/desktop/team-bridge/conversations/.../attachments...`` paths.
+# Other team-bridge paths (e.g. scheduled ids) are out of this change. The
+# filter sits on the ``uvicorn.access`` LOGGER, not on a handler, so it applies
+# whatever handler config uvicorn or the launcher installs, and dictConfig
+# (which uvicorn runs) leaves logger filters in place. The request itself is
+# untouched — only the record's text changes.
+# The optional trailing ``/`` (review R4-01): Starlette's ``redirect_slashes``
+# answers a slash-suffixed variant with a 307, and that line is access-logged
+# too, so the non-canonical form must template exactly like the canonical one.
+_ATTACHMENT_ROUTE_PATH = re.compile(
+    r"^(?P<prefix>/v1/desktop/team-bridge/conversations/)[^/?#]+"
+    r"(?P<middle>(?:/messages/[^/?#]+)?/attachments)(?P<tail>(?:/[^/?#]+)?)"
+    r"(?P<slash>/?)(?P<query>[?#].*)?$"
+)
+#: A Team Bridge id in a QUERY value. The routes accept only ``tenant_id``, but
+#: a request refused for an extra or unknown parameter is still access-logged
+#: with the query exactly as sent (R4-01), so any id-shaped value there is
+#: templated too rather than trusting the caller to have sent none.
+_BRIDGE_ID_IN_QUERY = re.compile(r"(?:batt|bcmsg|bcv)_[0-9A-Za-z-]+")
+
+
+def _template_attachment_path(path: str) -> str:
+    """``path`` with its id segments replaced by route placeholders.
+
+    The query string is kept for diagnosis, minus any id-shaped value: the
+    routes accept only ``tenant_id``, but a refused request logs its query
+    verbatim, so ids are templated there as well.
+    """
+
+    match = _ATTACHMENT_ROUTE_PATH.match(path)
+    if match is None:
+        return path
+    middle = match["middle"]
+    if middle.startswith("/messages/"):
+        middle = "/messages/:messageid/attachments"
+    tail = "/:attachmentid" if match["tail"] else ""
+    query = _BRIDGE_ID_IN_QUERY.sub(":id", match["query"] or "")
+    return f"{match['prefix']}:conversationid{middle}{tail}{match['slash']}{query}"
+
+
+class _AttachmentPathRedaction(logging.Filter):
+    """Template the attachment routes' ids out of uvicorn access records.
+
+    uvicorn logs ``'%s - "%s %s HTTP/%s" %d'`` with the path as ``args[2]``;
+    only that argument is rewritten so the line keeps its format. A filter
+    must never raise (``Logger.handle`` consults it before any handler's
+    error handling), so anything unexpected passes the record through.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            args = record.args
+            if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+                templated = _template_attachment_path(args[2])
+                if templated != args[2]:
+                    record.args = (*args[:2], templated, *args[3:])
+        except Exception:  # noqa: BLE001 — never break the caller's logging
+            pass
+        return True
+
+
+_ACCESS_LOG_REDACTION = _AttachmentPathRedaction()
+
+
+def install_access_log_redaction() -> None:
+    """Attach the filter to ``uvicorn.access``; idempotent."""
+
+    access = logging.getLogger("uvicorn.access")
+    if _ACCESS_LOG_REDACTION not in access.filters:
+        access.addFilter(_ACCESS_LOG_REDACTION)
+
+
+# Installed when the router is imported, i.e. whenever the app that serves these
+# routes is built — no separate wiring step a launcher could forget.
+install_access_log_redaction()
 
 
 class _Strict(BaseModel):
@@ -179,15 +344,11 @@ class TeamBridgeMessageQuery(_Strict):
 
     @model_validator(mode="after")
     def _grammar(self) -> "TeamBridgeMessageQuery":
-        from local_operator.team_bridge.read_context import (
-            ACCOUNT_ID_PATTERN,
-            TENANT_ID_PATTERN,
-        )
+        from local_operator.team_bridge.read_context import TENANT_ID_PATTERN
 
-        checks = (
-            (self.expected_account_id, ACCOUNT_ID_PATTERN, "expected_account_id"),
-            (self.tenant_id, TENANT_ID_PATTERN, "tenant_id"),
-        )
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        checks = ((self.tenant_id, TENANT_ID_PATTERN, "tenant_id"),)
         for value, pattern, name in checks:
             # ``fullmatch``, not ``match`` (review R-5): these patterns are
             # anchored ``^…$``, and ``$`` also matches BEFORE a trailing newline,
@@ -224,19 +385,22 @@ class TeamBridgeInboxQuery(_Strict):
     @model_validator(mode="after")
     def _grammar(self) -> "TeamBridgeInboxQuery":
         from local_operator.team_bridge.read_context import (
-            ACCOUNT_ID_PATTERN,
             CURSOR_PATTERN,
             DELIVERY_STATES,
             TENANT_ID_PATTERN,
             THREAD_ID_PATTERN,
         )
 
+        for value, name in (
+            (self.expected_account_id, "expected_account_id"),
+            (self.sender_account_id, "sender_account_id"),
+        ):
+            if value is not None and not is_account_id(value):
+                raise ValueError(f"{name} is outside the accepted grammar")
         checks = (
-            (self.expected_account_id, ACCOUNT_ID_PATTERN, "expected_account_id"),
             (self.tenant_id, TENANT_ID_PATTERN, "tenant_id"),
             (self.after, CURSOR_PATTERN, "after"),
             (self.thread_id, THREAD_ID_PATTERN, "thread_id"),
-            (self.sender_account_id, ACCOUNT_ID_PATTERN, "sender_account_id"),
         )
         for value, pattern, name in checks:
             # ``fullmatch``, not ``match`` (review R-5): these patterns are
@@ -358,6 +522,13 @@ _READ_REFUSALS: dict[str, tuple[int, str]] = {
         502,
         "the agent-messages hub answered in a shape this build cannot read",
     ),
+    # Transient local overload of the notification-avatar renderer, kept apart
+    # from ``malformed_page`` (a bad image) so the desktop never confuses the
+    # two (QA round 2, Q2). No ``Retry-After``: the desktop does not retry it.
+    "renderer_busy": (
+        503,
+        "the notification image renderer is busy; showing initials for now",
+    ),
     "wrong_tenant": (
         409,
         "the answer carried a message from another organization's namespace",
@@ -390,6 +561,68 @@ def _raise_read(code: str) -> NoReturn:
     raise HTTPException(status, {"code": code, "message": message})
 
 
+#: The desktop's ONE accepted multi-organization scope for the two aggregate
+#: reads. The organization set is SERVER-DERIVED from the signed-in account's
+#: active memberships, and eligibility is applied per org by the same resolver
+#: the pair lane uses; the renderer therefore never supplies a tenant list (the
+#: design note's tenant-isolation invariant) and never gets to name a second
+#: scope.
+ACCOUNT_SCOPE = "account"
+
+#: The list's lifecycle selector (agent-server ``status`` query). Closed here
+#: for the same reason ``scope`` is: a stale or mistyped value must not be
+#: forwarded as if the server had a mode for it.
+_LIST_STATUSES: dict[str, Literal["open", "archived"]] = {"open": "open", "archived": "archived"}
+
+
+def _account_scope(scope: str | None) -> bool:
+    """Normalize a read's ``scope``: the one account literal, or absent.
+
+    Any other value is a caller bug and is refused before I/O. One helper for
+    both reads keeps the accepted vocabulary from drifting; the page-specific
+    conflicts (tenant/position names beside it) stay with the route that owns
+    that table.
+    """
+
+    if scope is None:
+        return False
+    if scope != ACCOUNT_SCOPE:
+        _raise_read("invalid_request")
+    return True
+
+
+def _refuse_read_scope(request: Request) -> None:
+    """Id-addressed reads never take a scope: the id already names one org.
+
+    Ignoring a scope here would answer from the default organization while the
+    client believed it had asked for another, so the upstream refuses it on
+    every id-addressed read and this mirror does the same. The refused name is
+    only ``scope``, not the whole query: each route keeps its own closed table
+    (tenant, cursors, endpoint) and this rule does not become a second copy of
+    it.
+    """
+
+    if "scope" in request.query_params:
+        _raise_read("invalid_request")
+
+
+def _refuse_write_scope(request: Request) -> None:
+    """Writes never take a scope: each names exactly ONE tenant.
+
+    An account-wide read is an aggregate over memberships; a write cannot be
+    aggregated, because the server would have to guess which organization the
+    send/read/join was meant to land in. That is the "communicate only in the
+    expected space" invariant, so ``scope`` is refused here before any I/O. The
+    check is the same closed-table pattern the reads use, over an empty accepted
+    set: it names ONLY ``scope``, so a write keeps whatever other query names its
+    own route already accepts (``endpoint_id`` on admit) without this becoming a
+    second table.
+    """
+
+    if "scope" in request.query_params:
+        _raise_read("invalid_request")
+
+
 @router.get("/v1/desktop/team-bridge/status", response_model=CRUDResponse[Any])
 async def status(
     boundary: str = Query(default="surface_open"),
@@ -406,7 +639,9 @@ async def status(
     """
 
     from local_operator.team_bridge.client import (
+        attachments_capability,
         consent_for_display,
+        default_on_in_force,
         get_status_discipline,
         selected_tenant_id,
         surface_projection,
@@ -438,11 +673,19 @@ async def status(
     watcher.poll_now()
     local = TeamBridgeSettings.from_values(watcher.values)
     consent = consent_for_display(check)
+    in_force = default_on_in_force(check)
     # §5.6's A–G reading, computed ONCE (the same function the availability
     # record uses), so a renderer binds to the backend's policy instead of
     # re-deriving it. The onboarding row also needs the LOCAL dismissal flag:
     # "once" in state B is decided by ``team_bridge.onboarding``.
     projection = surface_projection(check, onboarding_seen=local.onboarding == "seen")
+    # D1: the hub's ACTIVE endpoint (state C) proves only the hub side. Without
+    # a committed local owner for that exact endpoint this device never polls,
+    # so "can receive" must not be claimed for it.
+    enrolled = _locally_enrolled(config_manager, check)
+    #: The COMPOSED switch, computed ONCE so ``can_receive`` below and
+    #: ``local.enabled`` cannot disagree about the same machine (review R2-2).
+    composed_enabled = local.enabled_given(in_force)
     result = {
         # The capability THIS route family advertises (a renderer reads the
         # same number off ``GET /v1/capabilities``; it rides here so one
@@ -472,12 +715,32 @@ async def status(
         "state_note": check.state_note,
         "visibility": projection["visibility"],
         "read_only": projection["read_only"],
-        "can_receive": projection["can_receive"],
+        #: The claim needs BOTH sides, not just the hub's state (review R2-2):
+        #: a committed owner HERE and the local switch on. An explicit OFF holds
+        #: every message ``bridge_off`` in the wake spine, so an owned device
+        #: with the switch off receives nothing while ``local.enabled`` says so
+        #: right beside this field.
+        "can_receive": bool(projection["can_receive"]) and enrolled and composed_enabled,
         "can_decide": projection["can_decide"],
         "local": {
-            "enabled": local.enabled,
+            #: Whether THIS machine holds the committed owner for the selected
+            #: account, tenant and endpoint (D1). False with an active hub
+            #: endpoint is "on elsewhere, not on this device": the surface's cue
+            #: to offer enabling here instead of showing "on".
+            "enrolled": enrolled,
+            # The COMPOSED switch (see the module docstring): explicit wins, an
+            # absent key follows the served consent. v1-only hubs read exactly
+            # ``local.enabled`` as before.
+            "enabled": composed_enabled,
             "onboarding": local.onboarding,
             "session": local.session,
+        },
+        # The default-on banner's inputs (module docstring). Flags only: the
+        # copy belongs to the renderer, and the full v2 text is already in
+        # ``consent.text`` for "Read what this means".
+        "default_on": {
+            "in_force": in_force,
+            "notice_pending": local.onboarding != "seen",
         },
         # The admission-gate receipt (§8, §13.9): screening is an INVARIANT of
         # this client, not a setting — no registered key can turn it off (a
@@ -493,15 +756,108 @@ async def status(
         #: Served-text slots refused on this answer — a surface refreshes
         #: rather than rendering refused or stale bytes (review round 1, R3).
         "texts_rejected": sorted(check.rejected),
-        "status": check.payload,
+        # The raw hub payload, except ``attachments``: that block is the one
+        # field a renderer switches behaviour on (show image affordances, send
+        # ``attachment_ids``), so it passes through the client's ONE capability
+        # reading (review R1-06) — malformed/disabled/no usable type is
+        # removed, never forwarded for the UI to second-guess. Absent = off.
+        "status": _status_with_attachments(check.payload, attachments_capability),
         "consent": (
             {"version": consent[0], "text": consent[1], "source": consent[2]}
             if consent is not None
             else None
         ),
         "error": _refusal_detail(check.error) if check.error is not None else None,
+        #: Messages this machine is HOLDING for the owner (F8). Code + count
+        #: only, never ids or content; the renderer owns the sentence ("Send
+        #: your chief of staff a message once to receive them", #1325). ``None``
+        #: when nothing waits, so an older renderer that ignores the key loses
+        #: nothing.
+        "delivery_hold": _delivery_hold(config_manager),
+        # The receiver's SERVICE state, distinct from enrolment: installed is
+        # a plist launchd does not hold; missing is no receiver at all. Off
+        # macOS this says ``unsupported``; for an isolated store, ``isolated``.
+        # Awaited IN A THREAD (review R1-3): the reading runs ``launchctl
+        # print``, so on the loop one wedged launchd would stall every status
+        # poll rather than only this field.
+        "connector": await asyncio.to_thread(_connector_state, config_manager.config_dir),
     }
     return reply(result)
+
+
+def _connector_state(config_dir: Path) -> str:
+    """The connector's service state, as ``install.connector_state`` reports it.
+
+    SYNCHRONOUS on purpose: the caller owns the thread (``asyncio.to_thread``),
+    because the reading runs ``launchctl print`` and must not sit on the event
+    loop. It is otherwise cheap — one plist existence check plus at most that
+    one probe — never raises, and never installs; installation belongs to the
+    commit, opt-out and app-start events.
+    """
+
+    from local_operator.team_bridge.connector.install import connector_state
+
+    return connector_state(config_dir)
+
+
+def _locally_enrolled(config_manager: ConfigManager, check: Any) -> bool:
+    """Whether the committed local owner IS the selected account/tenant/endpoint.
+
+    Read-only (an absent store stays absent) and local, no network. Any store
+    failure, zero or several owners, or an owner for another endpoint reads as
+    False: the claim is "this device receives", and doubt must not assert it.
+    """
+
+    import sqlite3
+
+    from local_operator.team_bridge.client import select_tenant
+    from local_operator.team_bridge.store import Store, StoreRefused
+
+    selected = select_tenant(check.payload)
+    endpoint = selected.get("endpoint") if selected is not None else None
+    endpoint_id = endpoint.get("id") if isinstance(endpoint, dict) else None
+    if not isinstance(endpoint_id, str) or not endpoint_id or not check.account_id:
+        return False
+    try:
+        owner = Store(config_manager.config_dir).active_owner_readonly()
+    except (StoreRefused, sqlite3.Error):
+        return False
+    return owner is not None and (owner.account_id, owner.tenant_id, owner.endpoint_id) == (
+        check.account_id,
+        selected.get("tenant_id") if selected is not None else None,
+        endpoint_id,
+    )
+
+
+def _delivery_hold(config_manager: ConfigManager) -> dict[str, Any] | None:
+    """The owner-visible F8 hold: cards waiting for the owner to message their chief of staff.
+
+    WHY: a member whose ACCEPTED consent is ``bridge_consent_v1`` never agreed
+    that a message may engage a session they have not used, so a card to a
+    never-opened designated session is held (``open_chief_of_staff``) rather
+    than engaging it. That hold must not be silent — the owner has to learn
+    that one action — sending the session a message — releases it (opening
+    it does not: release needs a user turn on disk). Read-only, local,
+    no network; any store failure reads as "nothing to show".
+    """
+
+    import sqlite3
+
+    from local_operator.team_bridge.engagement import HOLD_OPEN_CHIEF_OF_STAFF
+    from local_operator.team_bridge.store import Store, StoreRefused
+
+    try:
+        store = Store(config_manager.config_dir)
+        owner = store.active_owner_readonly()
+        if owner is None:
+            return None
+        count = store.hold_count_readonly(owner, HOLD_OPEN_CHIEF_OF_STAFF)
+        session = store.designated_session_for_readonly(owner)
+    except (StoreRefused, sqlite3.Error):
+        return None
+    if count <= 0:
+        return None
+    return {"code": HOLD_OPEN_CHIEF_OF_STAFF, "count": count, "session": session}
 
 
 @router.get("/v1/desktop/team-bridge/settings", response_model=CRUDResponse[Any])
@@ -524,11 +880,23 @@ async def get_settings(
         _raise_sign_in(exc)
     except BridgeRefusal as exc:
         _raise_bridge(exc)
+    # ADDITIVE: the hub's provenance verdict as a flag, so the banner does not
+    # re-derive it. ``endpoint.consent`` itself passes through untouched.
+    endpoint = payload.get("endpoint") if isinstance(payload, dict) else None
+    consent = endpoint.get("consent") if isinstance(endpoint, dict) else None
+    if isinstance(payload, dict):
+        payload = {
+            **payload,
+            "default_on": (
+                isinstance(consent, dict) and consent.get("consented_via") == "default_on"
+            ),
+        }
     return reply(payload)
 
 
 @router.put("/v1/desktop/team-bridge/settings", response_model=CRUDResponse[Any])
 async def put_settings(
+    request: Request,
     body: TeamBridgeSettingsPut,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
@@ -540,14 +908,22 @@ async def put_settings(
     next PUT fail the same way.
     """
 
+    _refuse_write_scope(request)
     from local_operator.team_bridge.client import (
         BridgeRefusal,
         BridgeSignInRequired,
         TeamBridgeClient,
         get_status_discipline,
     )
+    from local_operator.team_bridge.cos_name import cos_display_name
 
     client = TeamBridgeClient(config_manager.config_dir)
+    # The chief of staff's current name rides every ACTIVE write (enable,
+    # resume, rename) so teammates see "Aida (Ben)" from the first moment the
+    # endpoint exists. It is resolved HERE, not taken from the body: the name
+    # is runtime state (aida.name + team_bridge.session), not a desktop input,
+    # and a pause/opt-out must be sent alone (§5.2 rule 2) so it never carries it.
+    agent_name = cos_display_name(config_manager.config_dir) if body.state == "active" else None
     try:
         payload = await client.put_settings(
             state=body.state,
@@ -555,6 +931,7 @@ async def put_settings(
             consent_version=body.consent_version,
             consented_via=body.consented_via,
             label=body.label,
+            agent_name=agent_name,
             expected_account_id=body.expected_account_id,
         )
     except BridgeSignInRequired as exc:
@@ -571,6 +948,84 @@ async def put_settings(
         # missing consent echo for a known-to-be-required case): caller bugs, in
         # the desktop plane's validation register.
         raise HTTPException(422, {"code": "invalid_request", "message": str(exc)}) from None
+    return reply(payload)
+
+
+@router.post("/v1/desktop/team-bridge/onboarding/dismiss", response_model=CRUDResponse[Any])
+async def dismiss_onboarding(
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Mark the one-time notice seen on this machine; it never returns.
+
+    The smallest addition that lets the default-on banner be dismissed:
+    ``team_bridge.onboarding`` is internal state with no registry row (so
+    ``settings.edit`` cannot write it) and is client-local by design (RFC
+    §5.3) — no upstream call, no consent change, idempotent. Dismissing the
+    notice does not turn Team Bridge off or on.
+    """
+
+    from local_operator.team_bridge.settings import record_onboarding_seen
+
+    try:
+        record_onboarding_seen(config_manager.config_dir)
+    except Exception:  # noqa: BLE001 - surfaced as a coded 500, never a stack
+        raise HTTPException(
+            500,
+            {"code": "onboarding_not_saved", "message": "could not save the dismissal"},
+        ) from None
+    return reply({"onboarding": "seen"})
+
+
+@router.get("/v1/desktop/team-bridge/directory", response_model=CRUDResponse[Any])
+async def get_directory(
+    tenant_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One organization's member directory (§6.1), passed through untouched.
+
+    The payload is the frozen desktop shape
+    ``{members:[{account_id, display_label, role, bridge_enabled,
+    bridge_state}]}``; this route adds nothing and drops nothing, so the pair
+    backend owns the member fields and a later additive field arrives without
+    a route change (§6.6).
+
+    ``tenant_id`` is validated BEFORE any I/O against the SAME grammar the
+    other tenant-scoped reads use, and a malformed one answers the closed
+    read-table's ``invalid_request`` (422) rather than FastAPI's echoing
+    validation body: this family never puts a caller-supplied value back on
+    the wire (S-RSA-7). Upstream refusals keep their §6.5 status and code
+    verbatim through ``_raise_bridge``, exactly like the settings read.
+    """
+
+    from local_operator.team_bridge.client import (
+        BridgeRefusal,
+        BridgeSignInRequired,
+        TeamBridgeClient,
+    )
+
+    # Imported here, not at module scope: read_context reaches the client stack,
+    # which must never ride ``lop serve``'s boot path (module docstring).
+    from local_operator.team_bridge.read_context import TENANT_ID_PATTERN
+
+    if tenant_id is None or re.fullmatch(TENANT_ID_PATTERN, tenant_id) is None:
+        # Name the field, not the version. A local grammar refusal used to carry
+        # the generic read sentence, which the renderer classified as an outdated
+        # server and told the user to update a current client.
+        raise HTTPException(
+            422,
+            {
+                "code": "invalid_request",
+                "message": "tenant_id was not in a shape this client accepts",
+                "field": "tenant_id",
+            },
+        )
+    client = TeamBridgeClient(config_manager.config_dir)
+    try:
+        payload = await client.directory(tenant_id)
+    except BridgeSignInRequired as exc:
+        _raise_sign_in(exc)
+    except BridgeRefusal as exc:
+        _raise_bridge(exc)
     return reply(payload)
 
 
@@ -608,11 +1063,13 @@ async def get_allowlist(
 
 @router.put("/v1/desktop/team-bridge/allowlist", response_model=CRUDResponse[Any])
 async def put_allowlist(
+    request: Request,
     body: TeamBridgeAllowlistPut,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
     """The bounded replace-set write (§6.1/§9). ``entries`` is whole-policy."""
 
+    _refuse_write_scope(request)
     from local_operator.team_bridge.client import (
         BridgeRefusal,
         BridgeSignInRequired,
@@ -894,3 +1351,2120 @@ async def get_message(
     except ReadRefused as exc:
         _raise_read(exc.code)
     return reply(detail_view(detail))
+
+
+# ---------------------------------------------------------------------------
+# Conversations (docs/TEAM-BRIDGE-CONVERSATIONS.md)
+# ---------------------------------------------------------------------------
+#
+# These routes are PASS-THROUGH by design. Membership, the human-only rule,
+# agent consent/joined_seq, the screening fetch/admit split, unread counters and
+# every authorization decision live on the server; duplicating any of them here
+# would create a second, subtly different policy and a second place to get
+# tenant scoping wrong. What this plane adds is the desktop contract: strict
+# bodies, the shared refusal mapping, and the same no-store/no-body-cache rules
+# as the pair lane — an answer is returned to the renderer and never persisted.
+#
+# A body cached here would break team_bridge/store.py's §13.9 rule, so there is
+# deliberately no store call in this section: conversations are read live.
+
+
+# Schedules are server-owned: this proxy returns the author's unsent body only
+# for the current request, never writes it to the local conversation store, and
+# never starts a timer. The server alone arbitrates tenant/author access and the
+# edit/cancel race with its delivery worker.
+_SCHEDULED_ID = re.compile(r"^bsch_[0-9a-f]{32}$")
+_RFC3339 = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]"
+    r"(?:\.[0-9]+)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$"
+)
+
+
+def _validate_attachment_ids(ids: list[str] | None) -> None:
+    # Same grammar the routes use for path ids: an id that could reshape the
+    # hub's URL never leaves, and a duplicate would silently change the bound
+    # set (and its attachments_hash), so it is refused rather than deduped.
+    if not ids:
+        return
+    if len(set(ids)) != len(ids) or any(_ATTACHMENT_ID.fullmatch(i) is None for i in ids):
+        raise ValueError("attachment_ids must be distinct batt_ ids")
+
+
+def _validate_schedule_time(value: str) -> None:
+    # Keep the moving 1-minute/120-day window authoritative on the server, whose
+    # clock will also fire the message; only reject malformed wire dates here.
+    if _RFC3339.fullmatch(value) is None:
+        raise ValueError("send_at must be RFC3339")
+    datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+class ScheduledMentionIn(_Strict):
+    kind: Literal["human", "agent"]
+    account_id: str = Field(min_length=1, max_length=128)
+    endpoint_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ScheduledCreateIn(_Strict):
+    tenant_id: str = Field(min_length=1, max_length=128)
+    conversation_id: str = Field(pattern=CONVERSATION_ID_PATTERN)
+    client_ref: str = Field(min_length=1, max_length=128)
+    #: May be empty only when ``attachment_ids`` carries at least one image
+    #: (an image-only message); the hub applies the same rule.
+    body: str = ""
+    send_at: str
+    mentions: list[ScheduledMentionIn] = Field(default_factory=list)
+    attachment_ids: list[str] | None = _ATTACHMENT_IDS
+    #: Reply in this root message's thread once the schedule fires. SAME
+    #: spelling and SAME canonical grammar as ``ConversationSendIn`` — the hub
+    #: receives one wire field name, so a scheduled message and an immediate
+    #: one cannot drift apart. Without it a scheduled thread reply was simply
+    #: impossible: ``_Strict`` rejected the field, so callers could not ask.
+    thread_root_id: str | None = Field(default=None, pattern=CONVERSATION_REPLY_ROOT_PATTERN)
+
+    @model_validator(mode="after")
+    def _date(self) -> "ScheduledCreateIn":
+        _validate_schedule_time(self.send_at)
+        _validate_attachment_ids(self.attachment_ids)
+        if not self.body and not self.attachment_ids:
+            raise ValueError("a scheduled message needs body or attachment_ids")
+        return self
+
+
+class ScheduledUpdateIn(_Strict):
+    #: An empty body is accepted here only as part of an image-only edit; the
+    #: hub's PreflightSend decides against the row's resulting attachment set.
+    body: str | None = None
+    send_at: str | None = None
+    #: The schedule's COMPLETE replacement image set; ``[]`` removes every
+    #: image (the hub releases them). Omitted = images unchanged.
+    attachment_ids: list[str] | None = Field(default=None, max_length=4)
+    #: The ``version`` of the schedule view this edit was derived from, echoed
+    #: back so the hub (agent-server #223) applies it only to THAT version and
+    #: otherwise answers 409 ``invalid_transition`` ``{rule: concurrent_edit}``
+    #: with nothing written; without it a client editing a stale list would
+    #: silently overwrite another device's edit (its image list in particular).
+    #: Omitted = the hub's own read-then-write check only, the pre-#223 wire.
+    #:
+    #: Old hubs: the hub decodes this body with ``DisallowUnknownFields``, so a
+    #: pre-#223 hub answers 400 to the key. There is no capability flag for it;
+    #: the gate is the read itself: a hub that knows ``expected_version`` is the
+    #: one that returns ``version`` on every schedule response, and a caller may
+    #: only echo a ``version`` it read. Forwarded only when set
+    #: (``exclude_unset``), so a caller that never saw ``version`` never sends it.
+    #:
+    #: ``strict`` and the int64 ceiling mirror the hub's ``*int64`` decode: a
+    #: string, bool, fraction or overflow would be a hub 400, so it fails here.
+    expected_version: int | None = Field(default=None, ge=0, le=2**63 - 1, strict=True)
+
+    @model_validator(mode="after")
+    def _edit(self) -> "ScheduledUpdateIn":
+        # ``expected_version`` is a precondition, not a change: on its own the
+        # hub would answer ``empty_patch``, so it does not satisfy this rule.
+        # An explicit null is refused for every field, the precondition included.
+        if not (self.model_fields_set - {"expected_version"}) or any(
+            getattr(self, name) is None for name in self.model_fields_set
+        ):
+            raise ValueError("a schedule edit requires body, send_at or attachment_ids")
+        if self.send_at is not None:
+            _validate_schedule_time(self.send_at)
+        _validate_attachment_ids(self.attachment_ids)
+        if (
+            self.body == ""
+            and "attachment_ids" in self.model_fields_set
+            and not self.attachment_ids
+        ):
+            raise ValueError("a schedule edit cannot clear both body and images")
+        return self
+
+
+def _scheduled_selector(request: Request, scheduled_id: str | None = None) -> str:
+    # Reject duplicate/unknown selectors rather than letting a URL parser choose
+    # a tenant differently from the upstream server.
+    values = request.query_params.getlist("tenant_id")
+    if (
+        set(request.query_params) != {"tenant_id"}
+        or len(values) != 1
+        or not values[0].strip()
+        or len(values[0]) > 128
+        or (scheduled_id is not None and _SCHEDULED_ID.fullmatch(scheduled_id) is None)
+    ):
+        _raise_read("invalid_request")
+    return values[0]
+
+
+async def _scheduled_body(request: Request, model: Any) -> Any:
+    # Parse explicitly so validation errors never echo an unsent body (or a
+    # custom validator's input) into FastAPI's default 422 response.
+    try:
+        return model.model_validate(await request.json())
+    except ValueError:
+        _raise_read("invalid_request")
+
+
+@router.get("/v1/desktop/team-bridge/scheduled", response_model=CRUDResponse[Any])
+async def scheduled_list(
+    request: Request, config_manager: ConfigManager = Depends(get_config_manager)
+) -> CRUDResponse[Any]:
+    tenant_id = _scheduled_selector(request)
+    return reply(
+        await _conversation_reply(
+            _conversation_client(config_manager).scheduled_list(tenant_id=tenant_id)
+        )
+    )
+
+
+@router.post("/v1/desktop/team-bridge/scheduled", response_model=CRUDResponse[Any])
+async def scheduled_create(
+    request: Request, config_manager: ConfigManager = Depends(get_config_manager)
+) -> CRUDResponse[Any]:
+    if request.query_params:
+        _raise_read("invalid_request")
+    body = await _scheduled_body(request, ScheduledCreateIn)
+    return reply(
+        await _conversation_reply(
+            _conversation_client(config_manager).scheduled_create(
+                # ``body`` always travels (possibly "" for an image-only
+                # schedule); everything else only when the caller set it, so a
+                # text-only schedule stays the pre-attachment wire.
+                # ``exclude_none`` too (review R1-04): an explicit
+                # ``attachment_ids: null`` is "no images", and an old hub
+                # refuses the unknown key even when its value is null.
+                {"body": body.body, **body.model_dump(exclude_unset=True, exclude_none=True)}
+            )
+        )
+    )
+
+
+@router.patch("/v1/desktop/team-bridge/scheduled/{scheduled_id}", response_model=CRUDResponse[Any])
+async def scheduled_update(
+    scheduled_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    tenant_id = _scheduled_selector(request, scheduled_id)
+    body = await _scheduled_body(request, ScheduledUpdateIn)
+    return reply(
+        await _conversation_reply(
+            _conversation_client(config_manager).scheduled_update(
+                scheduled_id, tenant_id=tenant_id, body=body.model_dump(exclude_unset=True)
+            )
+        )
+    )
+
+
+@router.delete("/v1/desktop/team-bridge/scheduled/{scheduled_id}", response_model=CRUDResponse[Any])
+async def scheduled_cancel(
+    scheduled_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    tenant_id = _scheduled_selector(request, scheduled_id)
+    return reply(
+        await _conversation_reply(
+            _conversation_client(config_manager).scheduled_cancel(scheduled_id, tenant_id=tenant_id)
+        )
+    )
+
+
+class ConversationMemberIn(_Strict):
+    account_id: str = Field(min_length=1, max_length=128)
+    kind: Literal["human", "agent"] = "human"
+    endpoint_id: str | None = Field(default=None, max_length=128)
+    display_label: str = Field(min_length=1, max_length=64)
+
+
+class ConversationOwnerIn(_Strict):
+    """Optional anti-replay receipt, separate from upstream authorization.
+
+    Older clients may omit the receipt. A guarded mutation must name the tenant
+    of the captured DATA, not the current picker/default OAuth organization: one
+    account can legitimately belong to several organizations. The client checks
+    the owner against the exact bearer snapshot; the server checks membership.
+    """
+
+    expected_account_id: str | None = Field(default=None, min_length=1, max_length=128)
+    tenant_id: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def _guard_target(self) -> "ConversationOwnerIn":
+        if self.expected_account_id is not None:
+            if not self.expected_account_id.strip():
+                raise ValueError("expected_account_id must be nonempty")
+            if self.tenant_id is None or not self.tenant_id.strip():
+                raise ValueError("a guarded mutation needs an explicit tenant_id")
+        return self
+
+
+class ConversationCreateIn(ConversationOwnerIn):
+    kind: Literal["dm", "group", "channel"]
+    name: str | None = Field(default=None, max_length=128)
+    topic: str | None = Field(default=None, max_length=512)
+    visibility: Literal["private", "tenant"] | None = None
+    agent_capable: bool = False
+    members: list[ConversationMemberIn] = Field(default_factory=list, max_length=500)
+
+
+class ConversationSendIn(ConversationOwnerIn):
+    client_ref: str = Field(min_length=1, max_length=128)
+    #: Empty only for an image-only message (``attachment_ids`` non-empty).
+    body: str = ""
+    agent_label: str | None = Field(default=None, max_length=64)
+    #: Staged uploads to bind to this message, in display order. Forwarded only
+    #: when present, so a text-only send is the unchanged pre-attachment wire.
+    attachment_ids: list[str] | None = _ATTACHMENT_IDS
+    #: Reply in this root message's thread (agent-server threads). Held to the
+    #: minted message-id grammar here so a malformed id never reaches the hub;
+    #: the hub owns the real rule (same conversation, root not a reply).
+    thread_root_id: str | None = Field(default=None, pattern=CONVERSATION_REPLY_ROOT_PATTERN)
+
+    @model_validator(mode="after")
+    def _content(self) -> "ConversationSendIn":
+        _validate_attachment_ids(self.attachment_ids)
+        if not self.body and not self.attachment_ids:
+            raise ValueError("a message needs body or attachment_ids")
+        # A THREADED send (``thread_root_id`` present) REQUIRES the captured-owner
+        # receipt, because it is a thread MUTATION and ``team_bridge_threads``
+        # promises the guard on the thread surface, the same promise the replies
+        # read keeps: a reply composed as account A and sent after a login
+        # switch must not post as B, and a pre-fix client must not be able to
+        # mutate through this route at all. An ordinary top-level send keeps the
+        # legacy optional receipt (``team_bridge_conversation_owner_guard``) so
+        # an older renderer keeps working. No shipped renderer ever sent a reply
+        # (the desktop UI held threads closed), so requiring it here breaks no
+        # working caller; round-1 review R1 found this path still dispatched
+        # receipt-less after an account switch.
+        if self.thread_root_id is not None:
+            if self.expected_account_id is None or not self.expected_account_id.strip():
+                raise ValueError("a threaded reply needs expected_account_id")
+            if self.tenant_id is None or not self.tenant_id.strip():
+                raise ValueError("a threaded reply needs an explicit tenant_id")
+        return self
+
+
+class ConversationJoinIn(ConversationOwnerIn):
+    """A guarded join always names the captured target organization."""
+
+
+class ConversationReadIn(ConversationOwnerIn):
+    seq: int | None = Field(default=None, ge=0)
+    muted: bool | None = None
+    #: The per-member notification policy (agent-server #148). `muted` is the
+    #: legacy spelling of the same fact; the server refuses both at once, so the
+    #: route refuses the pair here rather than forwarding an ambiguous write.
+    notify: Literal["all", "mention", "mute"] | None = None
+
+    @model_validator(mode="after")
+    def _something_to_do(self) -> "ConversationReadIn":
+        if self.seq is None and self.muted is None and self.notify is None:
+            raise ValueError("a read write needs seq, muted, or notify")
+        if self.muted is not None and self.notify is not None:
+            raise ValueError("muted and notify cannot both be set")
+        return self
+
+
+class ConversationConsentIn(ConversationOwnerIn):
+    """The owner's decision about their own agent (agent-server #227).
+
+    ``accept``/``decline`` answer an ``invited`` row and ``withdraw`` takes an
+    ``active`` agent out. Only the two answers to an invitation carry the
+    participation ``consent_version``: leaving is not consenting, so withdraw
+    neither needs nor sends one (a version on it is refused rather than
+    dropped, so a caller cannot believe it recorded consent). ``endpoint_id``
+    pins one of the caller's agent rows, as the invitations read hands it out;
+    it travels in the body, never in a path, so a length bound is enough here
+    and the hub owns the "is this one of yours" rule.
+    """
+
+    decision: Literal["accept", "decline", "withdraw"]
+    consent_version: str | None = Field(default=None, min_length=1, max_length=128)
+    endpoint_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _version_per_decision(self) -> "ConversationConsentIn":
+        if self.decision == "withdraw":
+            if self.consent_version is not None:
+                raise ValueError("withdraw carries no consent_version")
+        elif self.consent_version is None:
+            raise ValueError("accept and decline require consent_version")
+        return self
+
+
+class ConversationAdmitIn(ConversationOwnerIn):
+    verdict: Literal["allow", "reject"]
+    body_hash: str = Field(min_length=1, max_length=128)
+
+
+class ConversationReactIn(_Strict):
+    """The reaction PUT body: the captured DATA-owner receipt, REQUIRED.
+
+    DELIBERATELY NOT a subclass of :class:`ConversationOwnerIn`, on the rule
+    :class:`MessageAdmission` states for its own fields: that base declares
+    ``expected_account_id`` and ``tenant_id`` OPTIONAL (the legacy conversation
+    writes stay compatible with an older renderer that omits them), and
+    narrowing a mutable field to required in a subclass is not a narrowing at
+    all — pyright's ``reportIncompatibleVariableOverride`` refuses it, rightly,
+    because the inherited annotation would still advertise the optional
+    contract on a route that refuses to run without it. A field type here is the
+    API contract for the renderer, so both receipt fields are stated in full.
+
+    Unlike the legacy conversation writes, no shipped renderer ever called the
+    reaction routes: the UI held them closed (`TEAM_BRIDGE_REACTIONS_SHIPPED_IN_THIS_BUILD`)
+    because the old path had never been reviewed for account/retry safety. So
+    there is no legacy caller to stay compatible with, and an OPTIONAL guard
+    would regress the first time a new renderer forgot it (the attachment
+    routes' #2772 B1 rule). ``tenant_id`` is required for the same reason the
+    base's validator requires it once a receipt is present: a guarded write
+    names the tenant of the captured data, never the picker's default
+    organization.
+
+    There is still no ``actor_endpoint_id`` here, so the renderer cannot react
+    as an agent (``_Strict`` refuses the extra key).
+    """
+
+    expected_account_id: str = Field(min_length=1, max_length=128)
+    tenant_id: str = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _receipt_grammar(self) -> "ConversationReactIn":
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        # ``min_length`` admits a whitespace-only tenant; the guarded write
+        # needs a real organization, exactly as ``ConversationOwnerIn`` refuses
+        # a blank one.
+        if not self.tenant_id.strip():
+            raise ValueError("a guarded mutation needs an explicit tenant_id")
+        return self
+
+
+#: The query names the thread replies read accepts. ``expected_account_id`` and
+#: ``tenant_id`` are REQUIRED (see ``_required_owner_query``); the rest are the
+#: history route's paging/endpoint hints.
+_REPLIES_QUERY = frozenset(
+    {"expected_account_id", "tenant_id", "limit", "after_seq", "endpoint_id"}
+)
+#: The reaction DELETE's query: the receipt only. ``actor_endpoint_id`` is
+#: deliberately absent, so the desktop can never remove an agent's reaction.
+_REACTION_DELETE_QUERY = frozenset({"expected_account_id", "tenant_id"})
+
+
+#: The hub's reaction-key byte bound (agent-server §10.2: NFC, <=128 UTF-8
+#: bytes, one fully-qualified RGI sequence). Only the BOUND is mirrored here,
+#: as a cheap pre-flight: the RGI allowlist is the hub's, and keeping a second
+#: copy in the runtime would be a second opinion that drifts with Unicode.
+_REACTION_EMOJI_MAX_BYTES = 128
+
+
+def _require_reaction_emoji(emoji: str) -> str:
+    """Refuse an empty or over-long reaction key before any upstream I/O.
+
+    The value is percent-encoded with no safe characters by the client, so it
+    can never reshape the upstream path; this guard only stops obviously
+    non-emoji input (text, pasted paragraphs) from costing a hub round trip.
+    """
+
+    key = unicodedata.normalize("NFC", emoji)
+    if not key or len(key.encode("utf-8")) > _REACTION_EMOJI_MAX_BYTES:
+        _raise_read("invalid_request")
+    return key
+
+
+def _conversation_owner_query(request: Request) -> ConversationOwnerIn:
+    """Receipt for bodyless writes and the legacy list-body member invitation.
+
+    Keep the member list's wire shape intact. Query and body receipts use the
+    same validation; never silently discard a supplied owner or guess a tenant.
+    The receipt is local-only and must not be forwarded to the service.
+    """
+
+    try:
+        return ConversationOwnerIn(
+            expected_account_id=request.query_params.get("expected_account_id"),
+            tenant_id=request.query_params.get("tenant_id"),
+        )
+    except ValueError:
+        _raise_read("invalid_request")
+
+
+def _required_owner_query(request: Request, accepted: frozenset[str]) -> ConversationOwnerIn:
+    """The REQUIRED captured-owner receipt for a query-addressed thread/reaction call.
+
+    Used by the reaction DELETE (a DELETE body is not reliably carried) and the
+    thread replies GET, the two query-addressed halves of the thread/reaction
+    surface the desktop re-enables behind ``team_bridge_threads`` and
+    ``team_bridge_reactions``. Both capabilities PROMISE this guard, so it is not
+    optional here: an absent, repeated or blank ``expected_account_id`` or
+    ``tenant_id`` is refused before any I/O rather than taking the unguarded
+    path, and so is any query name outside ``accepted`` (closed table, like
+    every route in this family). The receipt is local-only: the client compares
+    it against the exact bearer snapshot it dispatches with and never forwards
+    it upstream.
+    """
+
+    if set(request.query_params) - accepted:
+        _raise_read("invalid_request")
+    values: dict[str, str] = {}
+    for name in ("expected_account_id", "tenant_id"):
+        got = request.query_params.getlist(name)
+        if len(got) != 1:
+            _raise_read("invalid_request")
+        values[name] = got[0]
+    try:
+        receipt = ConversationOwnerIn(**values)
+    except ValueError:
+        _raise_read("invalid_request")
+    if receipt.expected_account_id is None or not is_account_id(receipt.expected_account_id):
+        _raise_read("invalid_request")
+    return receipt
+
+
+def _conversation_client(config_manager: ConfigManager):
+    """The transport, imported INSIDE the handler (the httpx boot rule)."""
+
+    from local_operator.team_bridge.client import TeamBridgeClient
+
+    return TeamBridgeClient(config_manager.config_dir)
+
+
+def _require_conversation_id(conversation_id: str) -> None:
+    """Refuse a malformed conversation id BEFORE it is interpolated upstream.
+
+    The id comes from the path and the client builds the upstream path from it,
+    so this is the pair lane's review S-RSA-5 rule applied to the new family: a
+    value outside the minted grammar is this route family's 404/400, never a
+    path of the caller's choosing. One helper, so a new route cannot forget it.
+    """
+
+    if _CONVERSATION_ID.fullmatch(conversation_id) is None:
+        _raise_read("invalid_request")
+
+
+def _require_message_id(message_id: str) -> None:
+    """Refuse a message id that could reshape the upstream path. See above."""
+
+    if _MESSAGE_ID.fullmatch(message_id) is None:
+        _raise_read("invalid_request")
+
+
+def _require_account_id(account_id: str) -> None:
+    """Refuse an account id carrying URL syntax. See above."""
+
+    if not is_account_id(account_id):
+        _raise_read("invalid_request")
+
+
+async def _conversation_reply(awaitable: Any) -> Any:
+    """Map the transport's two refusal families, exactly like the pair routes."""
+
+    from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
+
+    try:
+        return await awaitable
+    except BridgeSignInRequired as exc:
+        _raise_sign_in(exc)
+    except BridgeRefusal as exc:
+        _raise_bridge(exc)
+
+
+@router.get("/v1/desktop/team-bridge/conversations", response_model=CRUDResponse[Any])
+async def list_conversations(
+    request: Request,
+    tenant_id: str | None = Query(default=None),
+    limit: str | None = Query(default=None),
+    before: str | None = Query(default=None),
+    cursor: str | None = Query(default=None),
+    scope: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One page, tenant-scoped or (with ``scope=account``) merged across orgs.
+
+    ``status=archived`` selects the archived half (the "Archived channels"
+    surface); omitted/``open`` is the live list. The set is closed here so a typo
+    is this family's ``invalid_request`` rather than a hub round trip, and what
+    the caller may see in the archived half is entirely the server's rule.
+
+    The account page is ordered by activity across the caller's organizations and
+    carries each row's own ``tenant_id``; conversations are never merged into one
+    row. BOTH scopes return the lossless compound ``cursor`` the server mints —
+    on a tenant page it preserves ties in ``last_message_at`` — and ``before`` is
+    the legacy timestamp-only bound, mutually exclusive with it. ``before`` and a
+    ``tenant_id`` beside the account scope would name a conflicting read and are
+    refused here rather than being resolved by the server.
+    """
+
+    if set(request.query_params) - {
+        "tenant_id",
+        "limit",
+        "before",
+        "cursor",
+        "scope",
+        "status",
+    }:
+        _raise_read("invalid_request")
+    if status is not None and status not in _LIST_STATUSES:
+        _raise_read("invalid_request")
+    account_wide = _account_scope(scope)
+    if before is not None and cursor is not None:
+        # The upstream's own rule for both scopes: a legacy timestamp bound
+        # cannot be combined with the compound position.
+        _raise_read("invalid_request")
+    if account_wide and (tenant_id is not None or before is not None):
+        # ``after`` is not a name of this read at all, so the closed table above
+        # refuses it on every page; these two are the page-specific conflicts.
+        _raise_read("invalid_request")
+    parsed_limit: int | None = None
+    if limit is not None:
+        try:
+            parsed_limit = int(limit)
+        except ValueError:
+            _raise_read("invalid_request")
+    client = _conversation_client(config_manager)
+    payload = await _conversation_reply(
+        client.conversations(
+            tenant_id=tenant_id,
+            limit=parsed_limit,
+            before=before,
+            cursor=cursor,
+            scope=ACCOUNT_SCOPE if account_wide else None,
+            status=_LIST_STATUSES[status] if status is not None else None,
+        )
+    )
+    return reply(payload)
+
+
+@router.post("/v1/desktop/team-bridge/conversations", response_model=CRUDResponse[Any])
+async def create_conversation(
+    request: Request,
+    body: ConversationCreateIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Create (or find, for a dm) a conversation. The payload is the wire shape."""
+
+    _refuse_write_scope(request)
+    client = _conversation_client(config_manager)
+    payload = {
+        key: value
+        for key, value in body.model_dump(exclude={"expected_account_id"}).items()
+        if value is not None and not (key == "members" and not value)
+    }
+    payload["members"] = [member.model_dump(exclude_none=True) for member in body.members]
+    result = await _conversation_reply(
+        client.create_conversation(payload, expected_account_id=body.expected_account_id)
+    )
+    return reply(result)
+
+
+@router.get(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}",
+    response_model=CRUDResponse[Any],
+)
+async def get_conversation(
+    conversation_id: str,
+    request: Request,
+    tenant_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One conversation: members, read state and latest seq. No body, ever."""
+    _require_conversation_id(conversation_id)
+    _refuse_read_scope(request)
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(client.conversation(conversation_id, tenant_id=tenant_id))
+    )
+
+
+# Archive and unarchive are TWO static paths, deliberately not one
+# ``{action}`` route: a dynamic segment there matched ``/messages`` and made
+# every send a 422 (found by the route test). A closed path is also the guard
+# the pair-lane reader relies on — the id grammar is checked before any I/O.
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/archive",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_archive(
+    conversation_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Archive (read-only for every member). Owner, or an org owner/admin on a channel."""
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_lifecycle(
+                conversation_id, "archive", **_conversation_owner_query(request).model_dump()
+            )
+        )
+    )
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/unarchive",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_unarchive(
+    conversation_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Unarchive (same authority as archive, server-enforced)."""
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_lifecycle(
+                conversation_id, "unarchive", **_conversation_owner_query(request).model_dump()
+            )
+        )
+    )
+
+
+@router.delete(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_delete(
+    conversation_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Permanently delete an ARCHIVED conversation (irreversible).
+
+    Passed through untouched: the server permits only the conversation owner or
+    an organization owner/admin, only on an archived non-built-in conversation,
+    and answers ``not_archived`` / ``builtin`` / ``conversation_not_found``
+    itself. Nothing is cached locally (the store keeps no bodies), so there is
+    nothing to purge on this side. The same owner receipt as every other write
+    is accepted and stripped.
+    """
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_delete(
+                conversation_id, **_conversation_owner_query(request).model_dump()
+            )
+        )
+    )
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/members",
+    response_model=CRUDResponse[Any],
+)
+async def add_conversation_members(
+    conversation_id: str,
+    request: Request,
+    members: list[ConversationMemberIn],
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Invite members. Humans are invited; agents stay invited until their owner consents."""
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+
+    client = _conversation_client(config_manager)
+    payload = [member.model_dump(exclude_none=True) for member in members]
+    return reply(
+        await _conversation_reply(
+            client.conversation_members(
+                conversation_id, payload, **_conversation_owner_query(request).model_dump()
+            )
+        )
+    )
+
+
+@router.delete(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/members/{account_id}",
+    response_model=CRUDResponse[Any],
+)
+async def remove_conversation_member(
+    conversation_id: str,
+    account_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Remove a human member (owner only; the server owns succession)."""
+    _require_conversation_id(conversation_id)
+    _require_account_id(account_id)
+    _refuse_write_scope(request)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_remove_member(
+                conversation_id, account_id, **_conversation_owner_query(request).model_dump()
+            )
+        )
+    )
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/members/{account_id}/consent",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_consent(
+    conversation_id: str,
+    account_id: str,
+    request: Request,
+    body: ConversationConsentIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Record an agent owner's participation decision (accept, decline or withdraw).
+
+    The hub's state refusals (409 ``invalid_transition`` with ``rule``
+    ``not_invited``/``not_active``, 400 ``rule=ambiguous``) pass through
+    verbatim. Only a hub that refuses ``withdraw`` as an unknown decision (coded
+    400 ``decision``/``unknown_value``) becomes the client's 409
+    ``outdated_hub``; an older hub's uncoded refusal of ``endpoint_id`` passes
+    through as its own 400 ``bridge_error``.
+    """
+    _require_conversation_id(conversation_id)
+    _require_account_id(account_id)
+    _refuse_write_scope(request)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_consent(
+                conversation_id,
+                account_id,
+                decision=body.decision,
+                consent_version=body.consent_version,
+                endpoint_id=body.endpoint_id,
+                tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
+            )
+        )
+    )
+
+
+# -- owner's pending agent invitations (agent-server #227) ---------------------
+#
+# `GET /conversations` lists only what the caller's HUMAN identity is in, so an
+# agent invited into a private channel or group its owner is not in was
+# visible to nobody who could accept it. This read is the owner's list of those
+# invitations; each row is answered through the consent route above, naming the
+# row's `endpoint_id`.
+#
+# It sits under the owner-audit gate on the hub (caller + tenant, no endpoint
+# parameter, `private, no-store`), and this route mirrors that gate: a closed,
+# single-valued query, the captured-owner receipt REQUIRED, an uncacheable
+# answer every time including refusals (served as `no-store`; see below), and
+# nothing persisted or cached. The rows
+# are metadata only (no body, preview or member list) and pass through as the
+# hub sent them; `cursor` is the hub's opaque `next_cursor`, forwarded verbatim.
+#
+# Availability is the `team_bridge_owner_invitations` capability
+# (server/features.py), never a probe: a hub that predates #227 answers 404 here,
+# which the client surfaces as 409 `outdated_hub`.
+#
+# SERVED vs SET Cache-Control. The route sets `private, no-store` so it carries
+# the hub's contract wherever the router is mounted, but the running core's
+# app-wide `managed_desktop_boundary` (server/app.py) rewrites EVERY
+# `/v1/desktop/` answer to plain `no-store`, as it already does for the avatar
+# and attachment routes. That is no weaker -- `no-store` keeps the page out of
+# every cache, shared or private -- so the served header is `no-store`; the
+# value below is what a router-only mount (the unit fixture) sees.
+
+OWNER_INVITATIONS_CACHE_CONTROL = "private, no-store"
+_OWNER_INVITATIONS_QUERY = frozenset({"expected_account_id", "tenant_id", "limit", "cursor"})
+_OWNER_INVITATIONS_LIMIT = re.compile(r"[1-9][0-9]{0,2}")
+#: The whole vocabulary of ONE invitation row, and the subset this build cannot
+#: render without. The hub's guarantee is "metadata only, no body, preview or
+#: member list"; that guarantee is the HUB's, so the only way this build can
+#: keep it is to refuse a page it cannot account for (review R1-1). An unknown
+#: key is not dropped, it is malformed_page: a hub that starts sending `body`
+#: must surface as "this build cannot read that", never as a forwarded body
+#: nobody validated. Same rule as the inbox's `inbox_view`/`malformed_page`.
+_OWNER_INVITATION_ROW_FIELDS = frozenset(
+    {
+        "conversation_id",
+        "tenant_id",
+        "kind",
+        "name",
+        "visibility",
+        "status",
+        "created_by",
+        "created_by_label",
+        "invited_by",
+        "invited_by_label",
+        "endpoint_id",
+        "agent_label",
+        "invited_at",
+        "last_message_at",
+    }
+)
+_OWNER_INVITATION_ROW_REQUIRED = frozenset(
+    {
+        "conversation_id",
+        "tenant_id",
+        "kind",
+        "visibility",
+        "status",
+        "created_by",
+        "created_by_label",
+        "endpoint_id",
+        "agent_label",
+        "invited_at",
+        "last_message_at",
+    }
+)
+_OWNER_INVITATIONS_PAGE_FIELDS = frozenset({"invitations", "next_cursor", "has_more"})
+
+
+def _owner_invitation_page(payload: Any) -> dict[str, Any]:
+    """The invitations page as this build can read it, or ``malformed_page``.
+
+    Every served field is a string (the hub's row is ids, labels, timestamps), so
+    a non-string is as unreadable as an unknown name — including the nested
+    value a `body`/`members` regression would carry.
+    """
+
+    if not isinstance(payload, Mapping) or set(payload) - _OWNER_INVITATIONS_PAGE_FIELDS:
+        _raise_read("malformed_page")
+    rows = payload.get("invitations")
+    if not isinstance(rows, list) or not isinstance(payload.get("has_more"), bool):
+        _raise_read("malformed_page")
+    cursor = payload.get("next_cursor")
+    if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 512):
+        _raise_read("malformed_page")
+    out_rows: list[dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, Mapping) or set(row) - _OWNER_INVITATION_ROW_FIELDS:
+            _raise_read("malformed_page")
+        if _OWNER_INVITATION_ROW_REQUIRED - set(row):
+            _raise_read("malformed_page")
+        if any(not isinstance(value, str) for value in row.values()):
+            _raise_read("malformed_page")
+        out_rows.append(dict(row))
+    page: dict[str, Any] = {"invitations": out_rows, "has_more": payload["has_more"]}
+    if cursor is not None:
+        page["next_cursor"] = cursor
+    return page
+
+
+def _refuse_foreign_tenant(config_dir: Any, tenant_id: str | None) -> None:
+    """Refuse a tenant this machine did not enroll with, as the inbox does (R1-2).
+
+    On an enrolled machine the tenant is REQUIRED (R2-2): omitted, the hub would
+    answer for the account's first active membership, which need not be the
+    enrolled org, so "a page answers for this machine's org" would hold only
+    when the caller happened to name it. Refusing beats defaulting to the
+    enrolled org: the store cannot tell a single-org account from a multi-org
+    one, and the enrolled owner's account is not compared to the caller's
+    ``expected_account_id`` here, so a silent default could send a tenant the
+    signed-in account does not belong to. The inbox requires the tenant too.
+
+    The enrolled org is the only local fact that can answer this, and it lives in
+    the bridge store — so the read is the READ-ONLY accessor (review R-1/M-9):
+    a machine with no committed owner stays unenrolled rather than having a store
+    made for it, and the hub's own membership gate answers instead. Skipping the
+    cross-check there is deliberate: requiring an enrollment would make the
+    invitation list unreadable exactly for an owner who has not committed yet,
+    and this read exists to be answered before that.
+    """
+
+    from local_operator.team_bridge.read_context import TENANT_ID_PATTERN
+    from local_operator.team_bridge.store import Store, StoreRefused
+
+    if tenant_id is not None and re.fullmatch(TENANT_ID_PATTERN, tenant_id) is None:
+        _raise_read("invalid_request")
+    try:
+        owner = Store(config_dir).active_owner_readonly()
+    except StoreRefused as exc:
+        # A damaged store is a refusal on every read path (R-7), not a reason to
+        # let the hub decide what this machine's org is.
+        _raise_read(exc.code or "state_unreadable")
+    if owner is None:
+        return
+    if tenant_id is None:
+        _raise_read("invalid_request")
+    if owner.tenant_id != tenant_id:
+        _raise_read("invalid_tenant")
+
+
+@router.get(
+    "/v1/desktop/team-bridge/agents/owned/invitations",
+    response_model=CRUDResponse[Any],
+)
+async def owned_agent_invitations(
+    request: Request,
+    response: Response,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One page of the conversations where the signed-in owner's agent is invited.
+
+    Result: ``{invitations: [...], next_cursor?, has_more}``. Unknown or
+    repeated query names are refused before any I/O rather than dropped (the
+    hub refuses ``endpoint_id``/``scope``/``before`` on this read too), a
+    malformed or foreign ``tenant_id`` is refused on this family's own
+    vocabulary, and the page is shape-checked before the renderer sees it.
+    """
+
+    response.headers["Cache-Control"] = OWNER_INVITATIONS_CACHE_CONTROL
+    try:
+        names = set(request.query_params)
+        if names - _OWNER_INVITATIONS_QUERY or "expected_account_id" not in names:
+            _raise_read("invalid_request")
+        query: dict[str, str] = {}
+        for name in names:
+            values = request.query_params.getlist(name)
+            if len(values) != 1 or not values[0].strip() or len(values[0]) > 512:
+                _raise_read("invalid_request")
+            # The STRIPPED value is what is validated and what is sent: keeping
+            # the raw one made the two disagree about what was checked (R1-4).
+            query[name] = values[0].strip()
+        if not is_account_id(query["expected_account_id"]):
+            _raise_read("invalid_request")
+        _refuse_foreign_tenant(config_manager.config_dir, query.get("tenant_id"))
+        limit: int | None = None
+        if "limit" in query:
+            # Canonical ASCII digits and the inbox's own 1..100 window: a value
+            # this route accepts is one the hub is known to accept. `[0-9]` is
+            # deliberately not `str.isdigit()`/`\d`, which admit Unicode digits
+            # (`"²"` crashed `int()` into a 500, `"١٢"` was forwarded as 12; R2-1),
+            # and the leading `[1-9]` refuses `"0"`/`"07"` with `"+20"`/`"1_0"`.
+            if _OWNER_INVITATIONS_LIMIT.fullmatch(query["limit"]) is None:
+                _raise_read("bad_limit")
+            limit = int(query["limit"])
+            if limit > 100:
+                _raise_read("bad_limit")
+
+        client = _conversation_client(config_manager)
+        payload = await _conversation_reply(
+            client.owned_agent_invitations(
+                expected_account_id=query["expected_account_id"],
+                tenant_id=query.get("tenant_id"),
+                limit=limit,
+                cursor=query.get("cursor"),
+            )
+        )
+        return reply(_owner_invitation_page(payload))
+    except HTTPException as exc:
+        # A refusal is an answer about the owner's agent too; it must not sit
+        # in a shared cache either (the hub stamps its refusals the same way).
+        exc.headers = {**(exc.headers or {}), "Cache-Control": OWNER_INVITATIONS_CACHE_CONTROL}
+        raise
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/join",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_join(
+    conversation_id: str,
+    request: Request,
+    body: ConversationJoinIn | None = None,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Accept an invitation, or self-join a tenant-visible channel."""
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_join(
+                conversation_id,
+                tenant_id=body.tenant_id if body else None,
+                expected_account_id=body.expected_account_id if body else None,
+            )
+        )
+    )
+
+
+class ConversationCosReadIn(ConversationOwnerIn):
+    """Share/unshare one conversation with the signed-in person's OWN chief of staff.
+
+    A guarded human mutation: the tenant and the captured owner are REQUIRED,
+    so a renderer holding a stale account can never grant on someone else's
+    behalf. No endpoint field exists on purpose: the hub derives the chief of
+    staff from the signed-in account, so a request cannot name another agent.
+    """
+
+    @model_validator(mode="after")
+    def _guarded(self) -> "ConversationCosReadIn":
+        if self.expected_account_id is None or self.tenant_id is None:
+            raise ValueError("a chief-of-staff share names tenant_id and expected_account_id")
+        return self
+
+
+@router.put(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/cos-read",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_cos_read_grant(
+    conversation_id: str,
+    request: Request,
+    body: ConversationCosReadIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Let my chief of staff read THIS conversation (agent-server §17).
+
+    The ONLY grant path: the bridge tool has no grant op, so an agent cannot
+    widen its own reach (pinned in ``tests/unit/team_bridge/test_cos_read_grant.py``).
+    Reads served under the grant are audited on the hub, per page.
+    """
+    _require_conversation_id(conversation_id)
+    # ONE closed table for both verbs (review round 2, MINOR E): a share is never
+    # scoped, and an unknown query name is REFUSED rather than silently ignored, so
+    # the grant and the revoke cannot disagree about which spellings are legal.
+    if set(request.query_params) - {"tenant_id", "expected_account_id"}:
+        _raise_read("invalid_request")
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.cos_read_grant(
+                conversation_id,
+                tenant_id=str(body.tenant_id),
+                expected_account_id=str(body.expected_account_id),
+            )
+        )
+    )
+
+
+@router.delete(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/cos-read",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_cos_read_revoke(
+    conversation_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Withdraw the share; idempotent. Guard fields ride the query (DELETE body rule)."""
+    _require_conversation_id(conversation_id)
+    if set(request.query_params) - {"tenant_id", "expected_account_id"}:
+        _raise_read("invalid_request")
+    try:
+        guard = ConversationCosReadIn(
+            tenant_id=request.query_params.get("tenant_id"),
+            expected_account_id=request.query_params.get("expected_account_id"),
+        )
+    except ValueError:
+        _raise_read("invalid_request")
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.cos_read_revoke(
+                conversation_id,
+                tenant_id=str(guard.tenant_id),
+                expected_account_id=str(guard.expected_account_id),
+            )
+        )
+    )
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/leave",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_leave(
+    conversation_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Leave. Leaving is the leave/re-add boundary: re-entry needs a fresh invite."""
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_leave(
+                conversation_id, **_conversation_owner_query(request).model_dump()
+            )
+        )
+    )
+
+
+@router.get(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_history(
+    conversation_id: str,
+    request: Request,
+    tenant_id: str | None = Query(default=None),
+    limit: str | None = Query(default=None),
+    before_seq: str | None = Query(default=None),
+    after_seq: str | None = Query(default=None),
+    endpoint_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One history page. Bodies are present only where the server's rule allows them."""
+
+    _require_conversation_id(conversation_id)
+    if set(request.query_params) - {
+        "tenant_id",
+        "limit",
+        "before_seq",
+        "after_seq",
+        "endpoint_id",
+    }:
+        _raise_read("invalid_request")
+    if before_seq and after_seq:
+        _raise_read("invalid_request")
+    parsed_limit: int | None = None
+    if limit is not None:
+        try:
+            parsed_limit = int(limit)
+        except ValueError:
+            _raise_read("invalid_request")
+    # The two cursors are parsed, not interpolated: `int("x")` raises and an
+    # unwrapped raise is a 500 on a caller-controlled value. The server answers
+    # invalid_request for the same shape, so both ends agree on the refusal.
+    parsed_before: int | None = None
+    parsed_after: int | None = None
+    try:
+        parsed_before = int(before_seq) if before_seq else None
+        parsed_after = int(after_seq) if after_seq else None
+    except ValueError:
+        _raise_read("invalid_request")
+    if (parsed_before is not None and parsed_before < 0) or (
+        parsed_after is not None and parsed_after < 0
+    ):
+        _raise_read("invalid_request")
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_messages(
+                conversation_id,
+                tenant_id=tenant_id,
+                limit=parsed_limit,
+                before_seq=parsed_before,
+                after_seq=parsed_after,
+                endpoint_id=endpoint_id,
+            )
+        )
+    )
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages",
+    response_model=CRUDResponse[Any],
+)
+async def send_conversation_message(
+    conversation_id: str,
+    request: Request,
+    body: ConversationSendIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Append one message. The body is returned to the renderer and never stored here."""
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_send(
+                conversation_id,
+                client_ref=body.client_ref,
+                text=body.body,
+                tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
+                agent_label=body.agent_label,
+                thread_root_id=body.thread_root_id,
+                attachment_ids=body.attachment_ids,
+            )
+        )
+    )
+
+
+def _status_with_attachments(payload: Any, read_capability: Any) -> Any:
+    """``payload`` with ``attachments`` replaced by its normalized reading.
+
+    Copies rather than mutates: the payload is the discipline's cached
+    last-good answer shared by every caller.
+    """
+
+    if not isinstance(payload, dict) or "attachments" not in payload:
+        return payload
+    out = dict(payload)
+    capability = read_capability(payload)
+    if capability is None:
+        out.pop("attachments", None)
+    else:
+        out["attachments"] = capability
+    return out
+
+
+def _attachment_query(request: Request) -> tuple[str | None, str]:
+    """The attachment routes' accepted query names, closed and validated.
+
+    Closed-table like every route here: ``scope`` (and anything else) is
+    refused rather than dropped, and a duplicated name would let the URL parser
+    pick a value differently from the hub.
+
+    ``expected_account_id`` is the CAPTURED-ACCOUNT receipt and it is
+    REQUIRED. These routes once forwarded only the already-resolved ``access``
+    snapshot, so a chip staged under account A could be fetched or deleted
+    while the machine was signed in as B. Optional, the guard would regress the
+    first time a new renderer forgot the parameter — a guard whose reach
+    depends on every caller remembering is not a guard — so an omission is
+    refused HERE, at the route, instead of silently taking the unguarded path.
+    The client compares the receipt against the exact dispatch snapshot before
+    any bytes move.
+    """
+
+    if set(request.query_params) - {"tenant_id", "expected_account_id"}:
+        _raise_read("invalid_request")
+    tenants = request.query_params.getlist("tenant_id")
+    if len(tenants) > 1 or (tenants and (not tenants[0].strip() or len(tenants[0]) > 128)):
+        _raise_read("invalid_request")
+    expected = request.query_params.getlist("expected_account_id")
+    if len(expected) != 1 or not expected[0].strip() or len(expected[0]) > 128:
+        # Absent, repeated or blank all mean "no captured owner", and a route
+        # that proceeds without one cannot enforce its own guard.
+        _raise_read("invalid_request")
+    if not is_account_id(expected[0]):
+        _raise_read("invalid_request")
+    return (tenants[0] if tenants else None), expected[0]
+
+
+def _require_attachment_id(attachment_id: str) -> None:
+    if _ATTACHMENT_ID.fullmatch(attachment_id) is None:
+        _raise_read("invalid_request")
+
+
+async def _bounded_upload(request: Request) -> bytes:
+    """Read the raw upload body, refusing past the hub's ceiling.
+
+    Streamed and counted rather than ``await request.body()``: a declared
+    ``Content-Length`` is checked first (cheap refusal), and the running count
+    still stops a chunked or lying sender at the bound, so this loopback route
+    never buffers more than one image. Nothing touches disk; the bytes are
+    forwarded once and dropped with the request.
+    """
+
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > _ATTACHMENT_MAX_BYTES:
+                raise HTTPException(
+                    413, {"code": "attachment_too_large", "message": "The image is too large."}
+                )
+        except ValueError:
+            _raise_read("invalid_request")
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > _ATTACHMENT_MAX_BYTES:
+            raise HTTPException(
+                413, {"code": "attachment_too_large", "message": "The image is too large."}
+            )
+        chunks.append(chunk)
+    if not size:
+        raise HTTPException(422, {"code": "attachment_invalid", "message": "The image is empty."})
+    return b"".join(chunks)
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/attachments",
+    response_model=CRUDResponse[Any],
+    status_code=201,
+)
+async def upload_conversation_attachment(
+    conversation_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Stage one image for a later send; the hub sniffs, bounds and stores it.
+
+    The body is the raw image (any declared Content-Type is ignored, exactly
+    as the hub ignores it). The answer is the hub's ``{attachment: {...}}``
+    descriptor, passed through; the bytes are never kept here.
+    """
+
+    _require_conversation_id(conversation_id)
+    tenant_id, expected_account_id = _attachment_query(request)
+    data = await _bounded_upload(request)
+    client = _conversation_client(config_manager)
+    result = await _conversation_reply(
+        client.upload_attachment(
+            conversation_id,
+            data,
+            tenant_id=tenant_id,
+            expected_account_id=expected_account_id,
+        )
+    )
+    return CRUDResponse(status=201, message="Attachment staged.", result=result)
+
+
+@router.delete(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/attachments/{attachment_id}",
+    status_code=204,
+)
+async def delete_conversation_attachment(
+    conversation_id: str,
+    attachment_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """Discard one staged upload (a composer chip removed before send)."""
+
+    _require_conversation_id(conversation_id)
+    _require_attachment_id(attachment_id)
+    tenant_id, expected_account_id = _attachment_query(request)
+    client = _conversation_client(config_manager)
+    await _conversation_reply(
+        client.delete_attachment(
+            conversation_id,
+            attachment_id,
+            tenant_id=tenant_id,
+            expected_account_id=expected_account_id,
+        )
+    )
+    return Response(status_code=204)
+
+
+@router.get("/v1/desktop/team-bridge/accounts/{target_account_id}/avatar")
+async def get_account_avatar(
+    target_account_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """Relay only a versioned account image, never a renderer-supplied URL.
+
+    The viewer receipt is mandatory even on GET: queued desktop work must not
+    acquire a new account's authority after login changes. No-store prevents
+    an HTTP cache from outliving that account fence.
+    """
+    query = request.query_params
+    keys = {"v", "size", "expected_account_id"}
+    if set(query) != keys or any(len(query.getlist(key)) != 1 for key in keys):
+        _raise_read("invalid_request")
+    if (
+        not is_account_id(target_account_id)
+        or not is_account_id(query["expected_account_id"])
+        or re.fullmatch(r"[0-9a-f]{16}", query["v"]) is None
+        or query["size"] not in {"64", "256"}
+    ):
+        _raise_read("invalid_request")
+    data, mime = await _conversation_reply(
+        _conversation_client(config_manager).fetch_avatar(
+            target_account_id,
+            v=query["v"],
+            size=int(query["size"]),
+            expected_account_id=query["expected_account_id"],
+        )
+    )
+    if mime not in _ATTACHMENT_SERVABLE or len(data) > 1024 * 1024:
+        _raise_read("malformed_page")
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
+_NOTIFICATION_AVATAR_REQUIRED = frozenset(
+    {"tenant_id", "kind", "theme", "size", "initials", "expected_account_id"}
+)
+_NOTIFICATION_AVATAR_PHOTO = frozenset({"v", "avatar_account_id"})
+
+
+@router.get("/v1/desktop/team-bridge/accounts/{target_account_id}/notification-avatar")
+async def get_notification_avatar(
+    target_account_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """One precomposed PNG for a Team Bridge OS notification's image slot.
+
+    Capability ``team_bridge_notification_avatar``. The desktop main process
+    calls this (never the renderer with a URL) to warm its display cache, and
+    on a miss waits at most 250 ms before posting with initials anyway (the
+    operator's bounded-wait decision), so this route can never hold a
+    notification back beyond that budget.
+
+    Closed query, every name single-valued:
+
+    * ``tenant_id`` the directory/event tenant (part of the desktop's display
+      cache key; never overrides hub authorization); ``kind`` ``person|person_agent``;
+      ``theme`` ``light|dark``; ``size``
+      ``64|256``; ``initials`` 0-2 letters/digits (may be empty);
+      ``expected_account_id`` the captured VIEWER receipt, as on ``/avatar``.
+    * ``v`` + ``avatar_account_id``: both or neither. With them, the photo is
+      read through the same closed ``/avatar`` relay; without, an initials
+      placeholder is drawn and no network is touched.
+
+    ``avatar_account_id`` must equal the path account: the Team Bridge sender
+    contract pins a ``person_agent``'s avatar to its OWNER's account (which is
+    the path id), so an avatar naming any other account is refused rather than
+    drawn under someone else's name.
+
+    ``private, no-store``: core renders statelessly and keeps no composite. The
+    desktop main process owns display retention (A0: in memory, <= 15 minutes,
+    cleared on auth transitions); an HTTP/disk cache here could not apply its
+    login fence.
+
+    Refusals specific to this route: ``502 malformed_page`` when the hub's
+    bytes are not a bounded PNG/JPEG, and ``503 renderer_busy`` when the
+    renderer's pending queue is full (a burst beyond 8 in flight). The second
+    is transient and carries no ``Retry-After``: the desktop shows initials
+    NOW, does not retry in the post path (the bounded wait has already spent
+    its budget, Team Bridge T2), and never negative-caches it as "no picture",
+    so the next notification from that sender asks again.
+    """
+
+    from local_operator.team_bridge import notification_avatar as na
+
+    query = request.query_params
+    names = set(query)
+    photo_names = names & _NOTIFICATION_AVATAR_PHOTO
+    if (
+        not _NOTIFICATION_AVATAR_REQUIRED <= names
+        or names - _NOTIFICATION_AVATAR_REQUIRED - _NOTIFICATION_AVATAR_PHOTO
+        or photo_names not in (set(), set(_NOTIFICATION_AVATAR_PHOTO))
+        or any(len(query.getlist(key)) != 1 for key in names)
+    ):
+        _raise_read("invalid_request")
+    if (
+        not is_account_id(target_account_id)
+        or not is_account_id(query["expected_account_id"])
+        or not query["tenant_id"].strip()
+        or len(query["tenant_id"]) > 128
+        or query["kind"] not in na.KINDS
+        or query["theme"] not in na.THEMES
+        or query["size"] not in {"64", "256"}
+        or not na.valid_initials(query["initials"])
+        or (photo_names and re.fullmatch(r"[0-9a-f]{16}", query["v"]) is None)
+        or (photo_names and query["avatar_account_id"] != target_account_id)
+    ):
+        _raise_read("invalid_request")
+    try:
+        data = await _conversation_reply(
+            _conversation_client(config_manager).notification_avatar(
+                target_account_id,
+                tenant_id=query["tenant_id"],
+                kind=cast(Literal["person", "person_agent"], query["kind"]),
+                theme=cast(Literal["light", "dark"], query["theme"]),
+                size=int(query["size"]),
+                initials=query["initials"],
+                v=query["v"] if photo_names else None,
+                expected_account_id=query["expected_account_id"],
+            )
+        )
+    except na.RendererBusy:
+        _raise_read("renderer_busy")
+    except na.AvatarImageRejected:
+        # The hub's bytes were not a bounded PNG/JPEG: same class as an
+        # avatar body this relay refuses to serve.
+        _raise_read("malformed_page")
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
+@router.get(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}"
+    "/attachments/{attachment_id}"
+)
+async def get_conversation_attachment(
+    conversation_id: str,
+    message_id: str,
+    attachment_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """One bound image's bytes for the HUMAN reader (the renderer's blob cache).
+
+    No ``endpoint_id``/``purpose`` is accepted: those name an AGENT read, and
+    the agent's screen/context fetches happen inside the runtime, never through
+    this renderer-facing route. Response headers follow the attachment route in
+    ``desktop_sessions`` and the hub: a closed type map (the client already
+    refused anything but png/jpeg), ``nosniff`` so the browser never
+    re-decides the type, a sandboxing CSP for a direct navigation, and
+    ``private, no-store`` so no shared or disk cache keeps a teammate's image.
+    """
+
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    _require_attachment_id(attachment_id)
+    tenant_id, expected_account_id = _attachment_query(request)
+    client = _conversation_client(config_manager)
+    data, mime = await _conversation_reply(
+        client.fetch_attachment(
+            conversation_id,
+            message_id,
+            attachment_id,
+            tenant_id=tenant_id,
+            expected_account_id=expected_account_id,
+        )
+    )
+    if mime not in _ATTACHMENT_SERVABLE:  # the client refuses first; defence in depth
+        _raise_read("malformed_page")
+    return Response(
+        content=data,
+        media_type=mime,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
+@router.get(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}/replies",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_replies(
+    conversation_id: str,
+    message_id: str,
+    request: Request,
+    limit: str | None = Query(default=None),
+    after_seq: str | None = Query(default=None),
+    endpoint_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One thread (root + replies, oldest-first) under the history route's gate.
+
+    Mirrors ``conversation_history``'s discipline: the id grammar is checked
+    before any I/O, an unknown query key is refused rather than dropped, and the
+    numeric hints are parsed (never interpolated) so a caller-controlled value
+    is a 422, not a 500.
+
+    OWNER-GUARDED (``team_bridge_threads``): the captured ``expected_account_id``
+    and target ``tenant_id`` are REQUIRED, and the client compares the receipt
+    against the exact bearer it dispatches with, so a thread opened (or a
+    delayed/retried read started) as account A is refused with
+    ``409 account_mismatch`` once the machine is signed in as B, instead of
+    answering B's thread into A's cache. No shipped renderer called this route
+    before the guard (the UI held threads closed), so there is no legacy caller
+    an optional receipt would protect.
+    """
+
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    owner = _required_owner_query(request, _REPLIES_QUERY)
+    try:
+        parsed_limit = int(limit) if limit is not None else None
+        parsed_after = int(after_seq) if after_seq else None
+    except ValueError:
+        _raise_read("invalid_request")
+    if parsed_after is not None and parsed_after < 0:
+        _raise_read("invalid_request")
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_replies(
+                conversation_id,
+                message_id,
+                tenant_id=owner.tenant_id,
+                expected_account_id=owner.expected_account_id,
+                limit=parsed_limit,
+                after_seq=parsed_after,
+                endpoint_id=endpoint_id,
+            )
+        )
+    )
+
+
+@router.get(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}/body",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_message_body(
+    conversation_id: str,
+    message_id: str,
+    request: Request,
+    tenant_id: str | None = Query(default=None),
+    endpoint_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """The agent classification fetch: body + binding hash. Not a context path."""
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    _refuse_read_scope(request)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_body(
+                conversation_id, message_id, tenant_id=tenant_id, endpoint_id=endpoint_id
+            )
+        )
+    )
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}/admit",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_admit(
+    conversation_id: str,
+    message_id: str,
+    request: Request,
+    body: ConversationAdmitIn,
+    endpoint_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Record the harness's screening verdict. A reject is terminal on the server."""
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    _refuse_write_scope(request)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_admit(
+                conversation_id,
+                message_id,
+                verdict=body.verdict,
+                body_hash=body.body_hash,
+                tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
+                endpoint_id=endpoint_id,
+            )
+        )
+    )
+
+
+@router.put(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}"
+    "/messages/{message_id}/reactions/{emoji}",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_react_add(
+    conversation_id: str,
+    message_id: str,
+    emoji: str,
+    request: Request,
+    body: ConversationReactIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Add the signed-in person's reaction; idempotent upstream.
+
+    The desktop reacts as the HUMAN only: an agent reaction goes through the
+    agent's own ``bridge`` tool (``react``), which carries the actor endpoint
+    from the runtime and is screened like every agent write. There is no
+    ``actor_endpoint_id`` on this body, so the renderer cannot act as an agent.
+
+    OWNER-GUARDED (``team_bridge_reactions``): the body REQUIRES the captured
+    ``expected_account_id`` and target ``tenant_id`` (``ConversationReactIn``),
+    compared atomically against the dispatch bearer, so a click (or retry)
+    captured as account A never reacts as B.
+    """
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    _refuse_write_scope(request)
+    key = _require_reaction_emoji(emoji)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_react(
+                conversation_id,
+                message_id,
+                key,
+                active=True,
+                tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
+            )
+        )
+    )
+
+
+@router.delete(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}"
+    "/messages/{message_id}/reactions/{emoji}",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_react_remove(
+    conversation_id: str,
+    message_id: str,
+    emoji: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Remove the signed-in person's reaction; removing an unset one is a no-op.
+
+    The receipt (``expected_account_id`` + ``tenant_id``) rides in the QUERY
+    here (not a body) because a DELETE body is not reliably carried by every
+    client and proxy; the hub accepts the tenant either way, and the receipt
+    never leaves this process. Both are REQUIRED, exactly as on the PUT.
+    """
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    _refuse_write_scope(request)
+    owner = _required_owner_query(request, _REACTION_DELETE_QUERY)
+    key = _require_reaction_emoji(emoji)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_react(
+                conversation_id,
+                message_id,
+                key,
+                active=False,
+                tenant_id=owner.tenant_id,
+                expected_account_id=owner.expected_account_id,
+            )
+        )
+    )
+
+
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/read",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_read(
+    conversation_id: str,
+    request: Request,
+    body: ConversationReadIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Advance the read cursor and/or mute; the answer is the post-state."""
+    _require_conversation_id(conversation_id)
+    _refuse_write_scope(request)
+
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.conversation_read(
+                conversation_id,
+                seq=body.seq,
+                muted=body.muted,
+                notify=body.notify,
+                tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
+            )
+        )
+    )
+
+
+@router.get("/v1/desktop/team-bridge/unread", response_model=CRUDResponse[Any])
+async def conversation_unread(
+    request: Request,
+    tenant_id: str | None = Query(default=None),
+    scope: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """The ONE badge read: per-conversation counts plus the unmuted total.
+
+    With ``scope=account`` the server iterates the caller's active memberships
+    and answers ``{total, organizations: [...]}`` in the same one authorized
+    read, so the badge never fans out into N per-org calls. A ``tenant_id``
+    beside it is refused: the aggregate's organization set is the server's to
+    derive, not the renderer's.
+    """
+
+    if set(request.query_params) - {"tenant_id", "scope"}:
+        _raise_read("invalid_request")
+    account_wide = _account_scope(scope)
+    if account_wide and tenant_id is not None:
+        _raise_read("invalid_request")
+    client = _conversation_client(config_manager)
+    return reply(
+        await _conversation_reply(
+            client.unread(tenant_id=tenant_id, scope=ACCOUNT_SCOPE if account_wide else None)
+        )
+    )
+
+
+# -- owner audit (HUMAN-ONLY) --------------------------------------------------
+#
+# "{Chief of staff}'s messages": the agent OWNER's read-only audit of every
+# conversation their own agent is or was in (agent-server #221,
+# docs/TEAM-BRIDGE-CONVERSATIONS.md §16; owner-audit contract v1-v3 + FROZEN).
+#
+# HUMAN-ONLY BODY PATH. These routes serve FULL bodies, including messages the
+# agent's screening rejected or never screened — screening protects the agent's
+# context from injection; it does not keep text from the agent's owner. They
+# exist for the renderer alone: nothing in the agent's runtime (the
+# `team_bridge` tool, read_context, model_boundary, the connector) reaches the
+# client methods behind them, which
+# tests/unit/team_bridge/test_owner_audit_isolation.py pins.
+#
+# READ-ONLY AND STATELESS. No route here posts, reacts, admits, joins or marks
+# anything read, and nothing is persisted: no bridge-store write, no body cache
+# (store.py's no-body-cache rule), and every answer — success or refusal raised
+# here — carries `Cache-Control: private, no-store` like the hub's own.
+#
+# NO ENDPOINT PARAMETER (contract v2 M1). The hub derives the audited agent rows
+# from the signed-in caller + tenant, so the renderer cannot name an endpoint and
+# a non-owner cannot even express the request. Every refusal the hub makes —
+# not the owner, not a member, outside the window, unknown — is ONE uniform 404
+# (`conversation_not_found` / `attachment_not_found`), passed through unchanged
+# so this surface is no more of an existence oracle than the hub.
+#
+# The captured-owner receipt (`expected_account_id`) is REQUIRED on every read:
+# an audit page captured for account A must not be answered while the machine is
+# signed in as B (the attachment routes' #2772 B1 rule, applied from the start).
+
+# SERVED vs SET, the same split ``OWNER_INVITATIONS_CACHE_CONTROL`` documents above:
+# each route here sets ``private, no-store`` so it carries the hub's contract
+# wherever the router is mounted, and the running core's app-wide
+# ``managed_desktop_boundary`` (``server/app.py``) rewrites every ``/v1/desktop/``
+# answer to plain ``no-store``. That is no weaker (``no-store`` keeps the page out
+# of every cache, shared or private), so the SERVED header is ``no-store`` and the
+# value below is what a router-only mount sees.
+OWNER_AUDIT_CACHE_CONTROL = "private, no-store"
+#: Spelled here (not imported from the client) for the httpx boot rule; pinned
+#: equal to ``client.OWNER_AUDIT_ATTACHMENT_MIME_TYPES`` by a test.
+_OWNER_AUDIT_SERVABLE = {"image/png", "image/jpeg", "application/octet-stream"}
+_OWNER_AUDIT_FILE_MIME = "application/octet-stream"
+
+
+@contextmanager
+def _owner_audit_no_store() -> Iterator[None]:
+    """Stamp ``private, no-store`` on any refusal raised inside the block.
+
+    A success gets the header from the route's ``Response``; an
+    ``HTTPException`` is rendered by FastAPI's handler from ``exc.headers``
+    alone, so without this a 404 for someone's conversation would leave with a
+    weaker policy than the page it stands in for (the hub sets the header on
+    refusals too, review #221).
+    """
+
+    try:
+        yield
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), "Cache-Control": OWNER_AUDIT_CACHE_CONTROL}
+        raise
+
+
+def _owner_audit_query(request: Request, allowed: frozenset[str]) -> dict[str, str]:
+    """The audit routes' query, closed, single-valued and with the receipt REQUIRED.
+
+    An unknown name (``endpoint_id``, ``scope``, ``purpose`` …) is refused before
+    any I/O rather than dropped: the hub refuses the same names, and a renderer
+    that believes it read "as" an endpoint must learn otherwise here. A repeated
+    name is refused too — the URL parser and the hub could pick different values.
+    """
+
+    names = set(request.query_params)
+    if names - allowed or "expected_account_id" not in names:
+        _raise_read("invalid_request")
+    out: dict[str, str] = {}
+    for name in names:
+        values = request.query_params.getlist(name)
+        if len(values) != 1 or not values[0].strip() or len(values[0]) > 512:
+            _raise_read("invalid_request")
+        out[name] = values[0]
+    if not is_account_id(out["expected_account_id"]):
+        _raise_read("invalid_request")
+    if len(out.get("tenant_id", "")) > 128:
+        _raise_read("invalid_request")
+    return out
+
+
+def _owner_audit_int(query: dict[str, str], name: str) -> int | None:
+    """A numeric hint parsed (never interpolated); a bad or negative value is a 422."""
+
+    raw = query.get(name)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        _raise_read("invalid_request")
+    if value < 0:
+        _raise_read("invalid_request")
+    return value
+
+
+async def _owner_audit_reply(awaitable: Any, model: Any) -> Any:
+    """Await one audit read and project it through its contract model.
+
+    The refusal mapping is the conversation family's (``_conversation_reply``),
+    so the hub's uniform 404 arrives as-is. A success the contract cannot read
+    is ``malformed_page`` rather than a half-understood page in the renderer.
+    """
+
+    from pydantic import ValidationError
+
+    payload = await _conversation_reply(awaitable)
+    try:
+        return reply(owner_audit_projection(model, payload))
+    except ValidationError:
+        _raise_read("malformed_page")
+
+
+@router.get(
+    "/v1/desktop/team-bridge/owner-audit/conversations",
+    response_model=CRUDResponse[OwnerAuditConversationPage],
+    # Only the fields the hub SENT: an omitted `left_seq` must not become an
+    # explicit null that reads as state (see the contract module).
+    response_model_exclude_unset=True,
+)
+async def owner_audit_conversations(
+    request: Request,
+    response: Response,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One page of the conversations the signed-in owner's agent is or was in.
+
+    Result: ``OwnerAuditConversationPage``. Activity-descending; page with the
+    opaque ``cursor`` (the previous page's ``next_cursor``). No read state and
+    no unread counts — auditing never raises a badge.
+    """
+
+    with _owner_audit_no_store():
+        response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
+        query = _owner_audit_query(
+            request, frozenset({"expected_account_id", "tenant_id", "limit", "cursor"})
+        )
+        limit = _owner_audit_int(query, "limit")
+        client = _conversation_client(config_manager)
+        return await _owner_audit_reply(
+            client.owner_audit_conversations(
+                expected_account_id=query["expected_account_id"],
+                tenant_id=query.get("tenant_id"),
+                limit=limit,
+                cursor=query.get("cursor"),
+            ),
+            OwnerAuditConversationPage,
+        )
+
+
+@router.get(
+    "/v1/desktop/team-bridge/owner-audit/conversations/{conversation_id}/messages",
+    response_model=CRUDResponse[OwnerAuditMessagePage],
+    # Only the fields the hub SENT: an omitted `left_seq` must not become an
+    # explicit null that reads as state (see the contract module).
+    response_model_exclude_unset=True,
+)
+async def owner_audit_messages(
+    conversation_id: str,
+    request: Request,
+    response: Response,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One audited timeline page (``OwnerAuditMessagePage``), newest-first.
+
+    FULL bodies with each message's ``agent_delivery_status``. ``before_seq``
+    (older page) and ``after_seq`` are mutually exclusive, as on the member
+    history route.
+    """
+
+    with _owner_audit_no_store():
+        response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
+        _require_conversation_id(conversation_id)
+        query = _owner_audit_query(
+            request,
+            frozenset({"expected_account_id", "tenant_id", "limit", "before_seq", "after_seq"}),
+        )
+        if "before_seq" in query and "after_seq" in query:
+            _raise_read("invalid_request")
+        limit = _owner_audit_int(query, "limit")
+        before_seq = _owner_audit_int(query, "before_seq")
+        after_seq = _owner_audit_int(query, "after_seq")
+        client = _conversation_client(config_manager)
+        return await _owner_audit_reply(
+            client.owner_audit_messages(
+                conversation_id,
+                expected_account_id=query["expected_account_id"],
+                tenant_id=query.get("tenant_id"),
+                limit=limit,
+                before_seq=before_seq,
+                after_seq=after_seq,
+            ),
+            OwnerAuditMessagePage,
+        )
+
+
+@router.get(
+    "/v1/desktop/team-bridge/owner-audit/conversations/{conversation_id}/messages/{message_id}"
+    "/replies",
+    response_model=CRUDResponse[OwnerAuditThread],
+    # Only the fields the hub SENT: an omitted `left_seq` must not become an
+    # explicit null that reads as state (see the contract module).
+    response_model_exclude_unset=True,
+)
+async def owner_audit_replies(
+    conversation_id: str,
+    message_id: str,
+    request: Request,
+    response: Response,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """One audited thread (``OwnerAuditThread``): root + replies, oldest-first."""
+
+    with _owner_audit_no_store():
+        response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
+        _require_conversation_id(conversation_id)
+        _require_message_id(message_id)
+        query = _owner_audit_query(
+            request, frozenset({"expected_account_id", "tenant_id", "limit", "after_seq"})
+        )
+        limit = _owner_audit_int(query, "limit")
+        after_seq = _owner_audit_int(query, "after_seq")
+        client = _conversation_client(config_manager)
+        return await _owner_audit_reply(
+            client.owner_audit_replies(
+                conversation_id,
+                message_id,
+                expected_account_id=query["expected_account_id"],
+                tenant_id=query.get("tenant_id"),
+                limit=limit,
+                after_seq=after_seq,
+            ),
+            OwnerAuditThread,
+        )
+
+
+@router.get(
+    "/v1/desktop/team-bridge/owner-audit/conversations/{conversation_id}/messages/{message_id}"
+    "/attachments/{attachment_id}"
+)
+async def owner_audit_attachment(
+    conversation_id: str,
+    message_id: str,
+    attachment_id: str,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> Response:
+    """One audited attachment's bytes for the human owner.
+
+    Headers follow :func:`get_conversation_attachment`: a closed type map,
+    ``nosniff``, a sandboxing CSP and ``private, no-store``. The audit branch
+    also serves generic FILES (the hub's ``application/octet-stream``); those
+    go out as a download with the hub's fixed name, never inline, so a file can
+    never be rendered by the renderer under a type it chose.
+    """
+
+    with _owner_audit_no_store():
+        _require_conversation_id(conversation_id)
+        _require_message_id(message_id)
+        _require_attachment_id(attachment_id)
+        tenant_id, expected_account_id = _attachment_query(request)
+        client = _conversation_client(config_manager)
+        data, mime = await _conversation_reply(
+            client.owner_audit_attachment(
+                conversation_id,
+                message_id,
+                attachment_id,
+                tenant_id=tenant_id,
+                expected_account_id=expected_account_id,
+            )
+        )
+        if mime not in _OWNER_AUDIT_SERVABLE:  # the client refuses first; defence in depth
+            _raise_read("malformed_page")
+        headers = {
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": OWNER_AUDIT_CACHE_CONTROL,
+        }
+        if mime == _OWNER_AUDIT_FILE_MIME:
+            headers["Content-Disposition"] = 'attachment; filename="attachment.bin"'
+        return Response(content=data, media_type=mime, headers=headers)

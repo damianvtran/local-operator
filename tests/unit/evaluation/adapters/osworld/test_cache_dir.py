@@ -142,12 +142,14 @@ class _Shim:
         *,
         timeout: float,
         # Accepted for signature parity with ``AdapterSupervisor._call_raw`` and
-        # deliberately unused: this double calls the adapter IN PROCESS, so
-        # there is no RPC deadline for the per-action overhead to fund. Dropping
-        # the keyword would be a TypeError the moment a caller sets a rate.
+        # deliberately unused: this double calls the adapter IN PROCESS, so there
+        # is no RPC deadline for the per-action overhead to fund and no timeout
+        # sentence to contextualise. Dropping a keyword would be a TypeError the
+        # moment a caller sets one.
         execution_overhead_seconds_per_action: float = 0.0,
+        timeout_context: str | None = None,
     ) -> object:
-        del timeout, execution_overhead_seconds_per_action
+        del timeout, execution_overhead_seconds_per_action, timeout_context
         return await getattr(self._adapter, method)(params)
 
 

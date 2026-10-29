@@ -681,6 +681,9 @@ def resolve_hosting_model_dry(exec_args: ExecArgs) -> tuple[str, str]:
         model=exec_args.model,
         agent_name=exec_args.agent_name,
         agent_id=exec_args.agent_id,
+        # Preflight must resolve the same saved selection as the session factory;
+        # otherwise a resume can be refused for an unrelated global provider key.
+        resume=exec_args.resume,
         team_model_suggestion=team_suggestion,
     )
     # ``agent_registry`` is None only when no selector is present (the guard

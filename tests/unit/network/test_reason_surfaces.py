@@ -55,9 +55,26 @@ _GLOSSES = frozenset({"peer_reason_words", "doctor_detail_words", "table_reason_
 #: person's problem)``. The count is part of the key on purpose: a second raw read
 #: inside an already-declared function is a new site and must be looked at.
 _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
+    # A failed credential card's "Why it stopped" line (UX review #3002 r1, U1). The value
+    # is ``approval_copy.reason_for(code)`` -- this project's own sentence for a refusal code,
+    # never a peer's raw token; ``approval_copy.last_failure`` maps the stored code first.
+    ("local_operator/network/credentials/finite_share.py", "next_lines", "reason"): (
+        1,
+        "approval_copy's own sentence for the stored refusal code, not a raw token",
+    ),
+    ("local_operator/network/credentials/finite_share.py", "list_lines", "reason"): (
+        1,
+        "approval_copy's own sentence for the stored refusal code, not a raw token",
+    ),
+    # Reads the stored refusal CODE off a failed receipt to look up this project's sentence
+    # (``outcome(code)``); the raw value is never rendered.
+    ("local_operator/network/credentials/approval_copy.py", "last_failure", "detail"): (
+        1,
+        "the stored refusal code, mapped to approval_copy's sentence before any surface",
+    ),
     # Exact executed-step discriminator for retaining signed intent; compared
     # internally, never rendered as a reason or substituted for signature proof.
-    ("local_operator/network/approvals.py", "sweep", "detail"): (
+    ("local_operator/network/approvals.py", "_sweep_namespace", "detail"): (
         1,
         "internal executed-permission retention discriminator, never rendered",
     ),
@@ -77,6 +94,35 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/cli.py", "_content_row_text", "reason"): (
         1,
         "the content layer's own class prose (merged-clean clone / stale output past the window)",
+    ),
+    # The operator's own hold/release reasons, typed on THIS device and stored
+    # in ``sessions/.session-holds.json`` (the release also lands in the
+    # cleanup log). Nothing here arrives over a relay, and nothing is rendered
+    # for a peer: these are the human's words about their own store, declared
+    # by field name for the same reason as the prune vocabulary above.
+    ("local_operator/cli.py", "sessions_hold_command", "reason"): (
+        3,
+        "the operator's own hold reason: blank check, hold record, and echo",
+    ),
+    ("local_operator/cli.py", "sessions_unhold_command", "reason"): (
+        2,
+        "the operator's own release reason: blank check and the logged hold-release row",
+    ),
+    ("local_operator/cli.py", "sessions_holds_command", "reason"): (
+        1,
+        "the operator's own stored hold reason, printed in this device's listing",
+    ),
+    # The ``ask_dismiss`` ``reason`` (design ``ask-nonblocking.md`` §15): a closed
+    # operator token, ``answered_in_chat`` | ``moot``, validated against that set in
+    # ``mobile/types.py`` and forwarded to the engine, where it picks the agent-facing
+    # copy. It is never rendered to a person as a reason and carries no peer prose.
+    ("local_operator/mobile/daemon.py", "build_app", "reason"): (
+        2,
+        "ask_dismiss closed-set operator token (cold + dial arms), never rendered",
+    ),
+    ("local_operator/session/runtime/server.py", "RuntimeServer._dispatch", "reason"): (
+        1,
+        "ask_dismiss closed-set operator token forwarded to the session, never rendered",
     ),
     # ``lop wake``'s booking reason — likewise prose, and not a mesh value at all.
     ("local_operator/cli.py", "wake_command", "reason"): (2, "the wake booking's own prose"),
@@ -98,6 +144,19 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/cli.py", "hub_link_set_command", "reason"): (
         1,
         "the local hub_sync eligibility token, compared by update_policy's consent carve-out",
+    ),
+    # The skills CLI's named refusal codes. Both surfaces route the value
+    # through ``_reason_error`` + ``_skills_refusal``, which maps it to a human
+    # sentence with a next action; the raw code is only ever a JSON machine
+    # field, never the reason text a person reads. Declared per read because the
+    # truthiness checks are not inside a glossing call.
+    ("local_operator/cli.py", "_skills_publish", "reason"): (
+        2,
+        "the preview's named refusal code; glossed by _skills_refusal, raw only as a JSON code",
+    ),
+    ("local_operator/cli.py", "_skills_push", "reason"): (
+        1,
+        "the outbound outcome's named refusal code; glossed by _skills_refusal in the printed line",
     ),
     # The inspect page's own disposition prose. ``memory_inspect._disposition``
     # composes every sentence this read prints ("Already in the global bank; ...",
@@ -130,6 +189,10 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # Assigned to the payload's ``code`` key, not to a line: the human half of that
     # refusal is ``message``.
     ("local_operator/network/cli.py", "_cmd_service", "reason"): (1, "a payload key, not a line"),
+    # ``lop network install`` carries the same shape: the install receipt's machine
+    # reason is the payload's ``code``, never a rendered line; ``message`` is the
+    # human half.
+    ("local_operator/network/cli.py", "_cmd_install", "reason"): (1, "a payload key, not a line"),
     # ``lop network start`` on Linux when a missing unit had to be installed first:
     # the value read is the INSTALL receipt's own machine reason (``no_supervisor``
     # / ``isolated_home`` / ``enable_failed`` / ``not_serving``) and it rides the
@@ -159,6 +222,14 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("local_operator/network/relay.py", "refresh_unit_if_stale", "reason"): (
         1,
         "the wrapper's machine reason, compared to pick the failure clause — never printed",
+    ),
+    # The install's supervision-conflict warning (2026-10-21, cloud-node-1): the
+    # ``detail`` read is ``foreign_supervision``'s own composed SENTENCE ("a system
+    # unit (<path>) also runs the relay; …"), never a wire token, joined with its
+    # remedy into one ``steps`` line.
+    ("local_operator/network/relay.py", "_install_systemd", "detail"): (
+        1,
+        "foreign_supervision's composed sentence, not a machine token",
     ),
     # The onboarding adapter COPIES the runner's own receipt row into the store's
     # six fields: ``detail`` here was composed by the runner a moment earlier
@@ -196,6 +267,22 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "the member's own receipt sentence, authored-for-a-reader prose passed "
         "through verbatim (the design's 'the member's own words'); glossing it "
         "re-worded receipts into false states (round 3, M2/Q-R3-2)",
+    ),
+    ("local_operator/network/meshrestart.py", "restart_after_reply", "reason"): (
+        2,
+        "the member's busy receipt and its own supervisor's failure text, passed "
+        "verbatim into the member outcome; these are answered prose, not dial tokens, "
+        "and the peer-reason gloss would rewrite the actual refusal",
+    ),
+    ("local_operator/network/meshrestart.py", "_confirm_restart", "reason"): (
+        1,
+        "the member's post-acceptance busy/failure prose returned in its evidence "
+        "outcome; this is the member's answered sentence, not a dial token",
+    ),
+    ("local_operator/network/meshrestart.py", "restart_peer", "reason"): (
+        2,
+        "the member's own busy or bad-response prose, passed through verbatim like "
+        "meshupdate's receipts rather than rewritten by the transport-reason gloss",
     ),
     # The relay's OWN sentence for a session op (``runtime joining``), printed verbatim
     # on purpose: the wire facts (``outcome``/``engaged``/``admitted``) are the booleans
@@ -248,6 +335,38 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         2,
         "the peer's own conflict and refusal sentences, printed verbatim",
     ),
+    # The MCP credential repair verb reads its OWN skip vocabulary. The rows come
+    # from ``placement.grant_key_set`` and this handler's ``local-only`` check in
+    # process (``no_local_credential``, ``local_only``, ...); ``--json`` carries
+    # them as machine tokens and the human line only counts them. No peer prose
+    # can reach this read.
+    ("local_operator/network/cli.py", "_cmd_mcp_credentials", "reason"): (
+        2,
+        "this device's own grant-skip code (a --json machine token) plus the "
+        "credential-status pass's locally composed, value-free sentence",
+    ),
+    # The three readers of that credential-status sentence. It is authored HERE,
+    # by ``mcp.credential_status`` — "sign in again on <owner>", "not yet synced —
+    # run ..." — bounded at composition and carrying names only. None of these is
+    # a peer's prose and no value can reach them.
+    ("local_operator/mcp/manager.py", "McpManager.credential_reason", "reason"): (
+        1,
+        "the local credential-status sentence, composed on this device",
+    ),
+    ("local_operator/mcp/manager.py", "McpManager._credential_hint", "reason"): (
+        1,
+        "the local credential-status sentence, composed on this device",
+    ),
+    ("local_operator/network/cli.py", "_render_mcp_credential_row", "reason"): (
+        1,
+        "the local credential-status sentence, composed on this device",
+    ),
+    # ``_dedupe_skip_rows`` reads the same local code only to form the dedupe
+    # identity: compared, never rendered.
+    ("local_operator/network/cli.py", "_dedupe_skip_rows", "reason"): (
+        1,
+        "the same local skip code, compared for deduplication — never rendered",
+    ),
     ("local_operator/network/cli.py", "_cmd_definitions", "reason"): (
         1,
         "the peer's own conflict sentence, printed verbatim",
@@ -260,6 +379,16 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "LinkTransport.ask",
         "detail",
     ): (1, "the ack's own payload key, not a rendered reason"),
+    # ``hand_off_session_dir``'s ``HandOffOutcome.reason``: a cause THIS device
+    # composed (``session/cleanup.py``'s guard sentence, the receipt failure, the
+    # rename's ``OSError``), put in the refusal sentence so the person who asked for
+    # the move can act on it (QA round 1, Q-4). No peer writes it and nothing
+    # crosses the wire.
+    (
+        "local_operator/network/mobility.py",
+        "_source_commit",
+        "reason",
+    ): (1, "this device's own handoff cause, printed in its own refusal"),
     # The refusing device's code and sentence, handed to ``refusal_from_pairing``, whose
     # code-to-sentence map is what a person reads (Q-R3-3).
     ("local_operator/network/cli.py", "_finish_pairing", "detail"): (
@@ -338,6 +467,18 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "classifier input (both dialects' codes, compared against the producers' "
         "constants); the row's sentence is rendered by the glossing renderers",
+    ),
+    # The default-model frame (PR #2923): ``model_credential_row`` wraps the verdict
+    # chain's OWN sentence for the NOT_SHARED / NO_CREDENTIAL arms in the clause that
+    # names the peer's default and the create refusal. That ``detail`` is composed in
+    # ``_model_credential_verdict`` in this module (never a peer's token -- the token
+    # rides ``code``, which the frame checks and leaves alone), so a gloss would map a
+    # sentence, not a token; it is nested verbatim and rendered by
+    # ``render_check_lines`` like every other row.
+    ("local_operator/network/readiness.py", "model_credential_row", "detail"): (
+        1,
+        "nests the verdict chain's own composed sentence in the default-model frame; "
+        "the machine token stays in `code`",
     ),
     (
         "local_operator/network/readiness.py",

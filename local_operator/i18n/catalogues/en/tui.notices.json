@@ -9,6 +9,7 @@
   "tui.notices.output_limit_tool_call": "the model hit the output limit mid tool call — nothing was executed; re-asking it to re-emit the call in smaller pieces",
   "tui.notices.output_limit_before_call": "the model hit the output limit before the call ran — nothing was executed; re-asking it to re-issue the call as it is",
   "tui.notices.empty_reply": "the model''s reply arrived empty (no text, no tool calls) — re-asking it for its next action or finish",
+  "tui.notices.fast_mode_refused": "fast mode: refused by {selector} — {reason}; switched off, serving at standard speed",
   "tui.notices.repeated_tool_errors": "Repeated tool errors — requesting a different approach.",
   "tui.notices.kept_going_stopped": "This turn was stopped because it kept being asked to keep going; the pending message was dropped. Reply with what to do next.",
   "tui.notices.image_unsupported": "{model} does not accept images — the images in this conversation are omitted from its context. Switch to a model that accepts images to see them again.",

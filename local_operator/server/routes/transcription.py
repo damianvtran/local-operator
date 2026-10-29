@@ -20,16 +20,17 @@ from local_operator.server.dependencies import get_config_manager, get_radient_c
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.utils.voice_spend import emit_voice_spend
 from local_operator.stt.cleanup import (
-    CLIENT_RULES_PROVENANCE,
     InvalidCleanupMode,
-    apply_client_rules,
-    choose_cleanup_language,
     configured_cleanup,
     normalize_language_hint,
     resolve_cleanup,
 )
 from local_operator.stt.errors import (
     classify_upstream_failure as _classify_upstream_failure,
+)
+from local_operator.stt.radient_cleanup import (
+    normalize_radient_cleanup,
+    radient_cleanup_options,
 )
 
 router = APIRouter()
@@ -132,7 +133,6 @@ async def create_transcription_endpoint(
         transcription_result = radient_client.create_transcription(
             file_path=temp_file_path,
             model=model,
-            prompt=prompt,
             response_format=response_format,
             temperature=temperature,
             # Radient's field is ISO-639-1; a BCP-47 tag or an unmapped
@@ -141,39 +141,24 @@ async def create_transcription_endpoint(
             provider=provider,
             session_id=str(session_id or "") or None,
             client_request_id=request_id,
+            **radient_cleanup_options(mode, prompt, language, provider=provider),
         )
 
         # The legacy route shares the cascade's pure rules, so two live
         # endpoints cannot return different text for the same audio. The
         # response is additive: ``cleanup``/``raw_text``/``removed`` sit beside
         # the existing fields (the model allows extras).
-        raw_text = str(transcription_result.text or "")
-        detected = getattr(transcription_result, "language", None) or getattr(
-            transcription_result, "language_code", None
-        )
-        probability = getattr(transcription_result, "language_probability", None)
-        cleaned = None
-        if mode in ("auto", "client"):
-            cleaned = apply_client_rules(
-                raw_text,
-                language=choose_cleanup_language(
-                    language,
-                    detected if isinstance(detected, str) else None,
-                    float(probability) if isinstance(probability, (int, float)) else None,
-                ),
-            )
-        transcription_result.text = cleaned.text if cleaned else raw_text
-        transcription_result.language = detected if isinstance(detected, str) else None
-        transcription_result.cleanup = CLIENT_RULES_PROVENANCE if cleaned else "none"
-        transcription_result.raw_text = raw_text
-        transcription_result.removed = (
-            [
-                {"start": span.start, "end": span.end, "kind": span.kind, "token": span.token}
-                for span in cleaned.removed
-            ]
-            if cleaned
-            else []
-        )
+        normalized = normalize_radient_cleanup(transcription_result, mode, caller_language=language)
+        transcription_result.text = normalized.text
+        transcription_result.language = normalized.language
+        transcription_result.language_probability = normalized.language_probability
+        transcription_result.cleanup = normalized.cleanup
+        transcription_result.raw_text = normalized.raw_text
+        transcription_result.raw_unavailable = normalized.raw_unavailable
+        transcription_result.removed = [
+            {"start": span.start, "end": span.end, "kind": span.kind, "token": span.token}
+            for span in normalized.removed
+        ]
 
         # The charge (PR-3): the hub's transcription envelope carries the cost
         # object inside ``result``. The unit count is the metered seconds —

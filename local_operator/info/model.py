@@ -154,6 +154,26 @@ class SessionLine:
     #: uptime to report. ``None`` for a live/wedged/stale row, which carries
     #: ``uptime_s``/``heartbeat_age_s`` instead.
     last_activity_s: float | None = None
+    #: WHEN THIS SESSION'S RUNTIME LAST LEFT THROUGH ITS OWN EXIT PATH — the
+    #: ``at`` of ``journal.ExitRecord`` — or ``None`` when no exit record attests
+    #: to one. ``None`` is the load-bearing half: a session whose runtime was
+    #: SIGKILLed writes no record, and the listing must say "unknown" rather
+    #: than dress the transcript's mtime up as a stop time. Only ``stored`` rows
+    #: are filled in (see ``collect._stored_lines``), because a live row has
+    #: nothing to report and the record on disk, if any, is HISTORY from a
+    #: previous life of this session.
+    stopped_at_s: float | None = None
+    #: WHY it left, in the runtime's own words: the ``_clean_exit`` reason
+    #: (``idle-exit``, ``retiring for 0.85.0``, ``SIGTERM``, ``socket-stop``).
+    #: Empty string when no record exists, matching its neighbours' convention so
+    #: no surface has to branch on key existence.
+    stop_reason: str = ""
+    #: DID A PERSON ASK FOR IT — ``True`` only when a durable stop marker covers
+    #: that run, ``False`` for a policy exit or an unattributed signal, and
+    #: ``None`` when there is no record to answer. The tri-state is deliberate:
+    #: collapsing "no evidence" into ``False`` would report every crash as a
+    #: departure nobody requested, which is a fact nobody observed.
+    stop_requested: bool | None = None
     pending: str | None = None
     busy: bool = False
     #: This runtime HAS COMMITTED TO LEAVING and is finishing work in flight
@@ -225,6 +245,9 @@ class SessionLine:
     #: means the runtime did not report — an older build, or a handle that
     #: cannot answer the probe — which is NOT the same fact as zero and must
     #: never be summed as one. See :attr:`SessionsInfo.subagents_unreported`.
+    # Presence is additive; None remains an unreported background-job count.
+    waiting_on: int = 0
+    jobs_running: int | None = None
     subagents_running: int | None = None
     subagents_queued: int | None = None
     #: The LAST STORED OUTCOME for this session, read from the attention store:

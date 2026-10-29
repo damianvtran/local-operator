@@ -2271,7 +2271,12 @@ class McpManager:
                 # is the one thing they can do about it. A server that REFUSED
                 # us (McpAuthChallengeError) lands here too, so the opaque
                 # "Server returned an error response" never reaches the splash.
-                message = self._auth_failure_text(name, exc, store=self._effective_auth_store())
+                message = self._auth_failure_text(
+                    name,
+                    exc,
+                    store=self._effective_auth_store(),
+                    credential_hint=self._credential_hint(name),
+                )
                 result.errors[name] = message
                 # An authorization shape is never a transport failure, so the
                 # flag stays clear: the reauth/login command this line names is
@@ -2305,7 +2310,11 @@ class McpManager:
                 # DNS failure could only render the hostless fallback.
                 url = self._server_url(name)
                 message = self._auth_failure_text(
-                    name, exc, url, store=self._effective_auth_store()
+                    name,
+                    exc,
+                    url,
+                    store=self._effective_auth_store(),
+                    credential_hint=self._credential_hint(name),
                 )
                 result.errors[name] = message
                 # The flag comes from the EXCEPTION, not from the rendered text:
@@ -2566,6 +2575,7 @@ class McpManager:
         *,
         interactive: bool = False,
         attempt: _AttemptRecord | None = None,
+        _force_brokered: bool = False,
     ) -> ServerConnection:
         """Open transport + session, initialize, list tools, update cache.
 
@@ -2670,6 +2680,11 @@ class McpManager:
         url = getattr(cfg, "url", None)
         challenge_watcher = _AuthChallengeWatcher(url) if isinstance(url, str) and url else None
         try:
+            # ``force_brokered`` is passed ONLY on the retry. The helper is a test
+            # seam several cells replace with a fixed signature; paying a new
+            # keyword on every ordinary connect would break every one of them for
+            # a flag that is False almost always.
+            extra = {"force_brokered": True} if _force_brokered else {}
             conn = await self._open_transport_and_session(
                 stack,
                 name,
@@ -2678,6 +2693,7 @@ class McpManager:
                 stderr_log,
                 interactive=interactive,
                 challenge_watcher=challenge_watcher,
+                **extra,
             )
             # The live connection carries the PRISTINE config, never the resolved
             # one: ``ServerConnection`` is a plain dataclass, six registration
@@ -2702,6 +2718,28 @@ class McpManager:
                 await stack.aclose()
             except BaseException as ce:  # noqa: BLE001 — examined below, never lost
                 close_exc = ce
+            # ONE BROKER RETRY AFTER A LOCAL 401 (real-node QA, cloud-node-1).
+            # A row that LOOKS like a local grant but cannot serve a bearer — an
+            # emptied row, or a tombstoned refresh token ``server_has_stored_grant``
+            # now refuses — made the local path win over the borrow and produced a
+            # bare 401 with no borrow ever attempted. If this device is a holder
+            # that may borrow, try exactly ONCE with ``BrokeredBearerAuth``. The
+            # recursive call passes ``_force_brokered=True`` and ``attempt=None``:
+            # depth is therefore bounded at one, and the attempt marker taken by
+            # the first try (the grant it actually presented) is not overwritten
+            # by the retry.
+            if (
+                close_exc is None
+                and not _force_brokered
+                and self._broker_retry_available(transport_cfg, exc)
+            ):
+                return await self._connect_server(
+                    name,
+                    cfg,
+                    interactive=interactive,
+                    attempt=None,
+                    _force_brokered=True,
+                )
             # ONE pop for the whole classification, whatever the exception turns
             # out to be, so a record cannot leak into a later connect of the
             # same server. It is consumed below only by the cancellation arm,
@@ -3009,6 +3047,7 @@ class McpManager:
         *,
         interactive: bool = False,
         challenge_watcher: "_AuthChallengeWatcher | None" = None,
+        force_brokered: bool = False,
     ) -> ServerConnection:
         """Enter the transport + ClientSession context managers on ``stack``.
 
@@ -3041,7 +3080,9 @@ class McpManager:
                 streamable_http_client,
             )
 
-            oauth_provider = self._build_oauth_auth(cfg.url, cfg, interactive=interactive)
+            oauth_provider = self._build_oauth_auth(
+                cfg.url, cfg, interactive=interactive, force_brokered=force_brokered
+            )
             http_client = create_mcp_http_client(
                 headers=dict(cfg.headers) or None,
                 auth=oauth_provider,
@@ -3125,7 +3166,12 @@ class McpManager:
         return await probe_oauth_capability(cfg, self._effective_auth_store())
 
     def _build_oauth_auth(
-        self, url: str, cfg: MCPServerConfig, *, interactive: bool = False
+        self,
+        url: str,
+        cfg: MCPServerConfig,
+        *,
+        interactive: bool = False,
+        force_brokered: bool = False,
     ) -> OAuthClientProvider | BrokeredBearerAuth | None:
         """The auth this server's HTTP client is built with.
 
@@ -3170,7 +3216,7 @@ class McpManager:
         # matter: a local row always wins (the local path below is byte-identical,
         # which is the non-regression guarantee), and a device with no placement at
         # all never reaches here because its store carries no mesh client.
-        brokered = self._brokered_mcp_auth(url)
+        brokered = self._brokered_mcp_auth(url, ignore_local=force_brokered)
         if brokered is not None:
             return brokered
 
@@ -3204,7 +3250,42 @@ class McpManager:
             self._oauth_flows[url] = flow
         return provider
 
-    def _brokered_mcp_auth(self, url: str) -> Any:
+    def _broker_retry_available(self, cfg: MCPServerConfig, exc: BaseException) -> bool:
+        """Whether a failed LOCAL connect may be retried once through the broker.
+
+        Both halves are required, and neither is a policy of its own:
+
+        * the failure is an auth shape (a 401/challenge or a dead grant the auth
+          layer refused) — a transport or schema error must not be retried;
+        * this device may borrow the key AND a local grant was what the attempt
+          used. ``server_has_stored_grant`` is now the USABLE test, so a row that
+          cannot serve is exactly the case that still qualifies here (the local
+          path was taken because ``_brokered_mcp_auth`` reads the same predicate
+          — once it reads False, ``_build_oauth_auth`` already chose the broker
+          and the retry condition is unreachable).
+        """
+        url = getattr(cfg, "url", None)
+        if not isinstance(url, str) or not url:
+            return False
+        if not isinstance(
+            _unwrap_auth_required(exc), (McpAuthRequiredError, McpAuthChallengeError)
+        ):
+            return False
+        store = self._effective_auth_store()
+        client = getattr(store, "mesh_client", None)
+        if client is None:
+            return False
+        from local_operator.mcp.auth import server_has_stored_grant
+        from local_operator.network.credentials.types import credential_key_for_mcp
+
+        if not client.should_borrow(credential_key_for_mcp(url)):
+            return False
+        try:
+            return server_has_stored_grant(url, store)
+        except Exception:  # noqa: BLE001 — an unreadable store cannot justify a retry
+            return False
+
+    def _brokered_mcp_auth(self, url: str, *, ignore_local: bool = False) -> Any:
         """A borrowed bearer for an MCP server whose grant lives elsewhere, or ``None``.
 
         ``server_has_stored_grant`` is the local-wins test, and it is asked FIRST: a
@@ -3224,13 +3305,20 @@ class McpManager:
         key = credential_key_for_mcp(url)
         if not client.should_borrow(key):
             return None
-        try:
-            from local_operator.mcp.auth import server_has_stored_grant
+        if ignore_local:
+            # THE RETRY PATH ONLY. The first attempt used the local path and the
+            # server refused it; asking the same predicate again would answer
+            # "local" and return ``None`` — the retry has to be allowed to
+            # override the local-wins rule exactly once.
+            pass
+        else:
+            try:
+                from local_operator.mcp.auth import server_has_stored_grant
 
-            if server_has_stored_grant(url, store):
+                if server_has_stored_grant(url, store):
+                    return None
+            except Exception:  # noqa: BLE001 — an unreadable store must not invent a borrow
                 return None
-        except Exception:  # noqa: BLE001 — an unreadable store must not invent a borrow
-            return None
         # Imported HERE, not at module scope: this module keeps a lazy-SDK property
         # (see _TRANSPORT_EXC_DETAIL), and the brokered auth subclasses ``httpx2.Auth``.
         # Reaching this line requires a mesh client, so the dependency arrives only on
@@ -3360,6 +3448,7 @@ class McpManager:
         exc: "McpAuthRequiredError | McpAuthChallengeError",
         *,
         brokered_owner: str | None = None,
+        credential_hint: str = "",
     ) -> str:
         """The startup-toast wording for a server that needs an OAuth login.
 
@@ -3400,6 +3489,12 @@ class McpManager:
         falls back to a lookup.
         """
         has_stored_grant = getattr(exc, "has_stored_grant", None)
+        if credential_hint:
+            # THE DURABLE STATUS KNOWS MORE THAN THE EXCEPTION DOES, and the
+            # sentence is composed where the status lives (credential_status.py)
+            # so every surface says one thing. The hint already names the owner
+            # and/or the command that fixes it; see ``_credential_hint``.
+            return credential_hint
         if brokered_owner:
             # A BORROWING DEVICE IS A DIFFERENT CASE, and answering it with the local
             # verbs is wrong twice over (review round 1, R1). ``/mcp login <name>`` here
@@ -3442,7 +3537,11 @@ class McpManager:
 
     @staticmethod
     def _auth_challenge_text(
-        name: str, exc: McpAuthChallengeError, *, brokered_owner: str | None = None
+        name: str,
+        exc: McpAuthChallengeError,
+        *,
+        brokered_owner: str | None = None,
+        credential_hint: str = "",
     ) -> str:
         """The wording for a server that REFUSED us with 401/403.
 
@@ -3471,12 +3570,16 @@ class McpManager:
           There is no command to lead with here, so the status code earns its
           place as the concrete fact the user can act on.
         """
+        if credential_hint:
+            return credential_hint
         if not exc.oauth_available:
             return (
                 f"{name} rejected our credentials ({exc.status_code}) — "
                 "set its API key or headers"
             )
-        return McpManager._auth_required_text(name, exc, brokered_owner=brokered_owner)
+        return McpManager._auth_required_text(
+            name, exc, brokered_owner=brokered_owner, credential_hint=credential_hint
+        )
 
     @staticmethod
     def _brokered_owner(store: Any, exc: BaseException) -> str | None:
@@ -3548,6 +3651,7 @@ class McpManager:
         url: str | None = None,
         *,
         store: Any = None,
+        credential_hint: str = "",
     ) -> str:
         """Actionable wording for EITHER auth failure shape.
 
@@ -3580,9 +3684,13 @@ class McpManager:
         """
         brokered_owner = cls._brokered_owner(store, exc)
         if isinstance(exc, McpAuthChallengeError):
-            return cls._auth_challenge_text(name, exc, brokered_owner=brokered_owner)
+            return cls._auth_challenge_text(
+                name, exc, brokered_owner=brokered_owner, credential_hint=credential_hint
+            )
         if isinstance(exc, McpAuthRequiredError):
-            return cls._auth_required_text(name, exc, brokered_owner=brokered_owner)
+            return cls._auth_required_text(
+                name, exc, brokered_owner=brokered_owner, credential_hint=credential_hint
+            )
         reason_code = getattr(exc, "reason_code", None)
         if reason_code is not None:
             return _REFRESH_REFUSAL_TEXT.get(reason_code, REFRESH_REFUSAL_UNKNOWN_TEXT)
@@ -3620,6 +3728,51 @@ class McpManager:
         cfg = self._configs.get(name)
         url = getattr(cfg, "url", None) if cfg is not None else None
         return url if isinstance(url, str) and url else None
+
+    def _credential_row(self, name: str) -> dict[str, Any]:
+        """This server's credential-status row, or ``{}``. No dial, never raises.
+
+        The manager's cwd is the session's, which is the folder whose ``mcp.json``
+        defined the server being reported. A status read that fails degrades to
+        the exception's own wording, which is exactly what every surface said
+        before this row existed.
+        """
+        try:
+            from local_operator.mcp.credential_status import server_states
+
+            return dict((server_states(self.cwd) or {}).get(name) or {})
+        except Exception:  # noqa: BLE001 — a hint never replaces the error
+            return {}
+
+    def credential_reason(self, name: str) -> str:
+        """WHY ``name`` is not usable, in the status vocabulary. CHEAP: no dial.
+
+        The public accessor for surfaces that want the sentence without the auth
+        exception path (the ``/mcp`` block, the desktop catalog). Empty when the
+        status has nothing to add, which is the ``synced`` and ``unknown`` cases —
+        a reason for either would be noise a reader has to discard.
+        """
+        return str(self._credential_row(name).get("reason") or "")
+
+    def _credential_hint(self, name: str) -> str:
+        """The composed remedy line for an auth failure, or ``""``.
+
+        Kept separate from :meth:`credential_reason` because the surfaces differ:
+        a row wants the bare reason, while the toast/transcript line IS the remedy
+        and must carry the command. The owner prefix is already inside an
+        owner-carrying reason (``credential_status`` composes it), so it is not
+        added twice here.
+        """
+        row = self._credential_row(name)
+        state = str(row.get("state") or "")
+        reason = str(row.get("reason") or "")
+        if not reason or state in ("synced", "unknown", ""):
+            return ""
+        if state == "needs_operator_login":
+            return f"/mcp login {name} — {reason}"
+        if state == "expired" and not row.get("owner"):
+            return f"/mcp reauth {name} — {reason}"
+        return reason
 
     def auth_recovery_hint(self, rendered_error: str) -> str | None:
         """The truthful remedy line for an MCP auth failure in ``rendered_error``.
@@ -3680,7 +3833,9 @@ class McpManager:
                 oauth_available=OAUTH_CHALLENGES.get(url, True),
                 has_stored_grant=server_has_stored_grant(url, store),
             )
-            return self._auth_failure_text(name, exc, store=store)
+            return self._auth_failure_text(
+                name, exc, store=store, credential_hint=self._credential_hint(name)
+            )
         except Exception:  # noqa: BLE001 — a hint must never replace the error
             logger.debug("MCP auth recovery hint could not be derived", exc_info=True)
             return None
@@ -3705,7 +3860,12 @@ class McpManager:
         try:
             sink(
                 name,
-                self._auth_failure_text(name, exc, store=self._effective_auth_store()),
+                self._auth_failure_text(
+                    name,
+                    exc,
+                    store=self._effective_auth_store(),
+                    credential_hint=self._credential_hint(name),
+                ),
             )
             self._auth_toasted.add(name)
         except Exception:  # noqa: BLE001 — UI hooks must never break the manager
@@ -3880,6 +4040,7 @@ class McpManager:
                                 name,
                                 auth_exc,
                                 store=self._effective_auth_store(),
+                                credential_hint=self._credential_hint(name),
                             ),
                         )
                         # Arm the recovery notice. This line MUST stay INSIDE
@@ -3943,6 +4104,7 @@ class McpManager:
                         auth_exc,
                         self._server_url(name),
                         store=self._effective_auth_store(),
+                        credential_hint=self._credential_hint(name),
                     ),
                     # Classified from ``auth_exc`` — the SAME value the text is
                     # composed from — so a group that wraps both an auth
@@ -4869,7 +5031,12 @@ class McpManager:
                 try:
                     sink(
                         name,
-                        self._auth_failure_text(name, exc, store=self._effective_auth_store()),
+                        self._auth_failure_text(
+                            name,
+                            exc,
+                            store=self._effective_auth_store(),
+                            credential_hint=self._credential_hint(name),
+                        ),
                     )
                     # Arm the recovery notice — INSIDE the ``if sink is not
                     # None`` branch, deliberately: the gate means "the MODEL

@@ -1,14 +1,31 @@
-"""Hindi-only split: held Chinese bytes must be absent, not merely unlisted.
+"""The security-hold split: held bytes are absent, not merely unlisted.
 
-No runtime policy is changed here. The current main's public wire and TUI
-entrypoints enforce eligibility and fall back to English for held locales.
-The complete candidate remains on a remote-held ref for future audit work.
+``SECURITY_HELD_LOCALES`` in ``scripts/i18n/generate.py`` is EMPTY as of
+2026-10-24, by the policy owner's explicit disposition: zh-CN's blocking
+``wire.slash`` audit was remediated at current bytes and every carried
+namespace now has a fresh passed ledger row, so the generated shipped set
+carries eight locales. This file no longer pins Chinese's hold; it pins the
+MECHANISM that made the hold meaningful, because an empty hold set is exactly
+the condition under which a future edit could delete the check as "dead code":
+
+* the active tree may only carry bytes for locales the ledger ships (a held
+  locale's bytes are removed, not hidden behind an eligibility filter);
+* the generator still excludes a locale that is IN the hold set even when
+  every ledger row it needs is present and passed — proven with synthetic
+  catalogue bytes in an isolated fixture, both for zh-CN and for a locale that
+  was never held, so the check cannot regress into a zh-CN special case;
+* the same fixture ships those locales when the hold is empty, which is the
+  positive control that stops the negative control from passing vacuously.
+
+The Hindi team-bridge delta at the bottom is unrelated to the disposition; it
+stays here because it landed in the same wave and is still a live contract.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from rich.cells import cell_len
@@ -16,13 +33,94 @@ from rich.cells import cell_len
 from local_operator.i18n import catalogues, resolve, runtime, text
 from local_operator.i18n.messages import Msg, envelope
 
+REPO = Path(__file__).resolve().parents[3]
 
-def test_active_ledger_excludes_the_entire_held_chinese_candidate() -> None:
-    ledger = Path(__file__).resolve().parents[3] / "i18n" / "ledger.json"
-    entries = json.loads(ledger.read_bytes())["entries"]
-    assert not any(entry["locale"] == "zh-CN" for entry in entries)
-    hindi = [entry for entry in entries if entry["locale"] == "hi"]
-    # NINETEEN: the union of both branches' additions the rebase merged in.
+
+def _assert_latest_row_is_fresh_and_earlier_rows_superseded(rows: list[dict[str, Any]]) -> None:
+    """Judge ledger freshness on the LATEST row per namespace, and prove the rest superseded.
+
+    WHY NOT EVERY ROW. ``i18n/ledger.json`` is append-only: re-auditing a namespace at
+    new English bytes appends a row and keeps the old one at its superseded source
+    hash, and ``generate.py`` ships by the LAST row per ``(locale, namespace)``. A
+    check that demanded every row be fresh would forbid ever re-auditing.
+
+    WHY NOT ONLY THE LATEST. Reading just the last row would let a stale duplicate,
+    or an older audit appended AFTER a newer one, pass unseen. So: the last row must
+    be at the current English hash, and every earlier row for that namespace must be
+    at a DIFFERENT hash (a second row at the same hash is a duplicate, not history).
+    """
+
+    by_namespace: dict[str, list[dict[str, Any]]] = {}
+    for entry in rows:  # file order: the ledger is read last-wins
+        by_namespace.setdefault(entry["namespace"], []).append(entry)
+    for namespace, entries in by_namespace.items():
+        current = catalogues.catalogue_sha256("en", namespace)
+        assert entries[-1]["source_sha256"] == current, (
+            namespace,
+            "stale audit against the current English bytes",
+        )
+        for earlier in entries[:-1]:
+            assert earlier["source_sha256"] != current, (
+                namespace,
+                "an earlier row is at the current hash: a duplicate, or a stale row after it",
+            )
+
+
+def test_active_ledger_carries_the_released_chinese_candidate() -> None:
+    ledger = json.loads((REPO / "i18n" / "ledger.json").read_bytes())["entries"]
+    chinese = [entry for entry in ledger if entry["locale"] == "zh-CN"]
+    # The disposition was taken because every namespace the locale CARRIES has
+    # a passed audit at the CURRENT en bytes; a row for a namespace with no
+    # file (or a file with no row) would mean the released package carries
+    # unaudited or missing copy. Keep the exact-name and freshness pins, not
+    # just the cardinality: 81 was the number that satisfied the gate on the
+    # disposition date, and the set equality is what actually enforces it.
+    # The relay wave adds the two namespaces zh-CN now carries alongside the
+    # release: `relay.approvals` (17 keys, the approval-scope copy main added
+    # as literals) and the restored 77-key `relay.asks`. Both were independently
+    # audited at these bytes on 2026-10-25 (four MINOR findings on relay.asks,
+    # nits elsewhere, no blocker/major), so the cardinality went 81 -> 83.
+    # The borderless relay redesign's own audited `relay.chrome` row (the
+    # namespace its English freeze minted, translated and independently audited
+    # at these bytes on 2026-10-25) is the eighty-fourth: it is CARRIED, so the
+    # set equality below already requires its row, and the pin moves with it.
+    # The condensed relay transcript's `relay.transcript` row (19 keys, its
+    # zh-CN bytes independently audited at the current English source) is the
+    # eighty-fifth: likewise CARRIED, so set equality requires it too.
+    # The session status dot's own nine-key `relay.health` namespace (minted
+    # so relay.chrome's frozen English bytes stay untouched; two keys audited
+    # on 2026-10-26, the round-2 seven added and the whole namespace's zh-CN
+    # bytes doubly audited at the current English source on 2026-10-27) is
+    # the eighty-sixth, CARRIED on the same terms.
+    # The skill-write error keys (PR #3013) re-audited `wire.errors.desktop`, a
+    # namespace the locale already carried, and the append-only ledger gained a
+    # second zh-CN row for it (the earlier row is retained at its superseded
+    # source hash): the eighty-seventh.
+    # PR #3072's independently audited `wire.settings` delta (the two 1h
+    # cache-TTL help strings) appends a fresh zh-CN row at the new English
+    # bytes; the earlier row stays at its superseded hash: one more.
+    # The mobile ask card's `Other` row adds one key to `relay.asks`; the ledger
+    # is append-only, so a fresh zh-CN row lands at the new English bytes and the
+    # earlier row stays at its superseded hash: one more. Radient Saver LO1
+    # (PR #3078) adds the CARRIED 17-key `wire.radient_saver` with its
+    # independently audited row at the current English bytes: one more again.
+    # The relay composer placeholder slice then appends a fresh zh-CN row for
+    # each of `relay.chrome` (two new placeholder keys) and `relay.health` (the
+    # deleted ended placeholder): two more. Both contributions are counted.
+    # The serve-supervision slice adds the independently audited 14-key
+    # `cli.services_status` row at the current English bytes: one more again.
+    assert len(chinese) == 97
+    assert all(entry["status"] == "passed" for entry in chinese)
+    carried = set(catalogues.namespaces("zh-CN"))
+    assert {entry["namespace"] for entry in chinese} == carried
+    _assert_latest_row_is_fresh_and_earlier_rows_superseded(chinese)
+
+    hindi = [entry for entry in ledger if entry["locale"] == "hi"]
+    # TWENTY-FOUR: the union plus independently audited P3a/P3b namespaces,
+    # the scratchpad-hygiene slice's hi wire.settings row, P4a's audited
+    # tui.viewer row (including its keyboard-hint audit refresh), and the
+    # i18n lane's audited `wire.memory` row for the namespace translated in
+    # five active locales.
     # Base is twelve (the Wave-3 ten retain their audited source pins). Main
     # added a wire.settings row for the hub-setting deletion and the LOH-19
     # review slice added a tui.review row; the earlier branch added a
@@ -31,49 +129,179 @@ def test_active_ledger_excludes_the_entire_held_chinese_candidate() -> None:
     # transcription-cleanup setting and its D1 copy remediation. P1 adds the
     # audited `tui.schedule` row on top — SEVENTEEN from main's history plus
     # that one. LOH-19 P2 adds the audited `tui.projects_edit` row — EIGHTEEN
-    # plus that one. Keep the cardinality pin: adding an audited union must not
+    # plus that one. P3a adds `tui.authoring` after its independent 40-key
+    # audit — NINETEEN plus one. Keep the cardinality pin: adding an audited union must not
     # silently admit an unrelated held namespace or discard the previous audit
     # history.
-    assert len(hindi) == 19
+    # P3b adds its 35-key tui.team_authoring namespace after independent audit.
+    # The audited `hi/wire.memory` row this branch lands makes it TWENTY-FOUR;
+    # the /tag slice's independently re-audited 27-key `tui.tags` row makes it
+    # TWENTY-FIVE. LOH-11's independently audited `relay.session.tags` row
+    # makes it TWENTY-SIX. The remote_compute six-key wire.settings delta's
+    # independently audited row makes it TWENTY-SEVEN. The S3e remote-compute
+    # wave adds one row per carried namespace (`cli.exec_remote_help`,
+    # `wire.remote_compute`) -- TWENTY-NINE. The pin stays cardinal so an
+    # unrelated held namespace cannot slip in. The session-transcript-
+    # compression slice's independently audited 8-key `wire.settings` delta
+    # (0 blocker, 0 major; comments carried) makes it THIRTY. The R5 stale-ask
+    # wave's two independently audited namespaces (`tui.asks`, `relay.ask`)
+    # make it THIRTY-TWO, and the P5 command-palette slice's independently
+    # audited 7-key `tui.palette` row makes it THIRTY-THREE. The fast-mode
+    # fix's refusal notices add one audited row each for `tui.notices` and
+    # `wire.errors.desktop` -- THIRTY-FIVE (both newly carried, 30 and 84 keys).
+    # The relay.asks re-audit adds the 77-key `hi/relay.asks` row -- THIRTY-SIX.
+    # The approvals slice adds the independently audited 17-key
+    # `hi/relay.approvals` row -- THIRTY-SEVEN. The borderless relay redesign's
+    # audited `relay.chrome` row (its English freeze minted the namespace; the
+    # Hindi bytes were translated and independently audited on 2026-10-25 at
+    # these source bytes) makes it THIRTY-EIGHT. The condensed relay
+    # transcript's independently audited 19-key `hi/relay.transcript` row makes
+    # it THIRTY-NINE. PR #2985's independently audited `wire.settings` delta
+    # (Anthropic cache-TTL help + subagent row) appends a fresh Hindi row at the
+    # new English bytes: FORTY. The session status dot's independently audited
+    # `hi/relay.health` row makes it FORTY-ONE.
+    # The skill-write error re-audit (PR #3013) appends a second hi row for the
+    # already-carried `wire.errors.desktop`: FORTY-TWO.
+    # PR #3072's independently audited `wire.settings` delta (the two 1h
+    # cache-TTL help strings) appends a fresh Hindi row at the new English
+    # bytes: one more.
+    # The mobile ask card's `Other` row appends a fresh hi `relay.asks` row at
+    # the new English bytes; the earlier row stays superseded: one more.
+    # Radient Saver LO1 (PR #3078) adds the audited, newly carried
+    # `hi/wire.radient_saver` row: one more again. The relay composer
+    # placeholder slice then appends fresh hi `relay.chrome` and `relay.health`
+    # rows at the new English bytes: two more.
+    # The serve-supervision slice adds the audited `cli.services_status` row at
+    # the current English bytes: one more again.
+    assert len(hindi) == 52
     assert all(entry["status"] == "passed" for entry in hindi)
+    _assert_latest_row_is_fresh_and_earlier_rows_superseded(hindi)
 
 
-@pytest.mark.parametrize("namespace", catalogues.namespaces("en"))
-def test_no_held_chinese_namespace_can_be_loaded(namespace: str) -> None:
-    with pytest.raises(catalogues.CatalogueNotFound):
-        catalogues.load_catalogue("zh-CN", namespace)
-    with pytest.raises(catalogues.CatalogueNotFound):
-        catalogues.catalogue_sha256("zh-CN", namespace)
+def test_the_active_tree_holds_bytes_only_for_shipped_locales() -> None:
+    # The real-tree half of the mechanism: the generator gate is what forces a
+    # held locale's bytes out of the package, so with the hold empty every
+    # committed locale directory must be a shipped one, and vice versa. A
+    # directory that is present but not shipped is the "unlisted, not absent"
+    # state the hold was created to prevent.
+    shipped = resolve.shipped_locales()
+    assert shipped == ("en", "fr", "es", "zh-CN", "ru", "vi", "ur", "hi")
+    assert set(catalogues.locales()) == set(shipped)
+    generated = json.loads((REPO / "local_operator/i18n/data/shipped.json").read_text())
+    assert tuple(generated["locales"]) == shipped
+    for locale in shipped:
+        for namespace in catalogues.namespaces(locale):
+            assert catalogues.catalogue_bytes(locale, namespace), (locale, namespace)
+    chinese = set(catalogues.namespaces("zh-CN"))
+    for namespace in sorted(set(catalogues.namespaces("en")) - chinese):
+        # Per-namespace fallback (§2.5) covers an en-only child: the loader
+        # must report absence, never serve a forged English copy as Chinese.
+        with pytest.raises(catalogues.CatalogueNotFound):
+            catalogues.load_catalogue("zh-CN", namespace)
+
+
+def test_chinese_carries_its_own_copy_in_every_namespace() -> None:
+    for namespace in catalogues.namespaces("zh-CN"):
+        translated = catalogues.load_catalogue("zh-CN", namespace)
+        source = catalogues.load_catalogue("en", namespace)
+        if not source:
+            # The three `wire.*` extraction stubs M0 shipped are empty in EVERY
+            # locale until their slice populates them (RFC §5). Empty is not an
+            # English fallback: there are no keys to render.
+            assert translated == {}, namespace
+            continue
+        assert catalogues.catalogue_bytes("zh-CN", namespace) != catalogues.catalogue_bytes(
+            "en", namespace
+        ), f"{namespace}: shipped Chinese bytes are the English source"
+        # A shipped locale must be complete for the namespace it carries; a
+        # partial file would silently fall back per key under a zh-CN tag.
+        assert translated.keys() == source.keys(), namespace
+        for key in source:
+            assert runtime.message_arguments(translated[key]) == runtime.message_arguments(
+                source[key]
+            ), (namespace, key)
+
+
+def test_a_held_locale_is_excluded_even_with_every_row_passed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_generate
+) -> None:
+    """The hold still gates the generator, and it is not a zh-CN special case.
+
+    Synthetic bytes only: en, fr and zh-CN each carry the SAME namespace, and
+    fr/zh-CN get a passed, current-byte ledger row. Without a hold both ship
+    (the positive control). Adding either to ``SECURITY_HELD_LOCALES`` — the
+    locale that was held and the one that never was — excludes exactly that
+    locale, so a later "dead code" deletion fails here.
+    """
+    root = tmp_path / "catalogues"
+    for locale in ("en", "fr", "zh-CN"):
+        (root / locale).mkdir(parents=True)
+        (root / locale / "wire.exec.json").write_text(
+            json.dumps({"wire.exec.demo": "Synthetic receipt"}), encoding="utf-8"
+        )
+    monkeypatch.setattr(catalogues, "_CATALOGUES", root)
+    monkeypatch.setattr(i18n_generate, "LEDGER", tmp_path / "ledger.json")
+    en_sha = catalogues.catalogue_sha256("en", "wire.exec")
+    i18n_generate.LEDGER.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "locale": locale,
+                        "namespace": "wire.exec",
+                        "status": "passed",
+                        "source_sha256": en_sha,
+                    }
+                    for locale in ("fr", "zh-CN")
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Positive control: the disposition's real, empty hold set ships both.
+    assert i18n_generate.SECURITY_HELD_LOCALES == frozenset()
+    assert i18n_generate._shipped_locales() == ["en", "fr", "zh-CN"]
+
+    monkeypatch.setattr(i18n_generate, "SECURITY_HELD_LOCALES", frozenset({"fr"}))
+    assert i18n_generate._shipped_locales() == ["en", "zh-CN"]
+    monkeypatch.setattr(i18n_generate, "SECURITY_HELD_LOCALES", frozenset({"zh-CN"}))
+    assert i18n_generate._shipped_locales() == ["en", "fr"]
+    monkeypatch.setattr(i18n_generate, "SECURITY_HELD_LOCALES", frozenset({"fr", "zh-CN"}))
+    assert i18n_generate._shipped_locales() == ["en"]
 
 
 @pytest.mark.parametrize("key", ("wire.slash.delete", "wire.exec.receipt_suffix"))
-def test_explicit_held_locale_uses_existing_wire_english_fallback(key: str) -> None:
+def test_shipped_chinese_uses_its_own_wire_copy(key: str) -> None:
     message = Msg(key)
+    chinese = message.envelope(locale="zh-CN")
     english = message.envelope(locale="en")
+    assert chinese["text"] != key
     assert english["text"] != key
-    assert message.envelope(locale="zh-CN") == english
-    assert envelope(key, locale="zh-CN") == english
+    # The shipped tag renders the Chinese catalogue value, not the source.
+    assert chinese["text"] == catalogues.load_catalogue("zh-CN", key.rsplit(".", 1)[0])[key]
+    assert chinese["text"] != english["text"]
+    assert envelope(key, locale="zh-CN") == chinese
 
 
 @pytest.mark.parametrize("key", ("wire.slash.delete", "wire.exec.receipt_suffix"))
-def test_direct_tr_never_exposes_held_copy_fresh_or_cached(key: str) -> None:
+def test_direct_tr_uses_shipped_copy_fresh_and_after_selection(key: str) -> None:
     namespace = key.rsplit(".", 1)[0]
     message = Msg(key)
     render = text.tr(namespace)
     previous = text.active_locale()
     try:
-        # The upstream eligibility/fallback fix normalizes held tags at the
-        # direct entrypoint too. Preserve that landed policy during convergence,
-        # rather than restoring this branch's older message-code degradation.
         text.set_active_locale("zh-CN")
-        assert text.active_locale() == "en"
-        english = message.envelope(locale="en")["text"]
-        assert english != key
-        assert render(message) == english
-        assert render(message) == english
-        # Normal product selection also resolves the held tag before using tr.
+        assert text.active_locale() == "zh-CN"
+        chinese = message.envelope(locale="zh-CN")["text"]
+        assert chinese != message.envelope(locale="en")["text"]
+        # Twice: the second call exercises the cached render path, where a
+        # stale English entry would show up as a silent fallback.
+        assert render(message) == chinese
+        assert render(message) == chinese
+        # Normal product selection also resolves the shipped tag before tr.
         text.set_active_locale(resolve.resolve_language("zh-CN", environ={}, system="Linux"))
-        assert render(message) == message.envelope(locale="en")["text"]
+        assert text.active_locale() == "zh-CN"
+        assert render(message) == chinese
     finally:
         text.set_active_locale(previous)
 

@@ -1,0 +1,58 @@
+{
+  "namespace": "tui.authoring",
+  "generated_by": "translation-auditor (lopdev team), independent read-only audit",
+  "checks": {
+    "key_parity": {
+      "en_keys": 49,
+      "zh_keys": 49,
+      "missing": [],
+      "extra": []
+    },
+    "argument_parity": {
+      "keys_checked": 49,
+      "failures": []
+    },
+    "plural_structure": {
+      "plural_keys": [],
+      "rows": [],
+      "failures": [],
+      "note": "zh-CN legally uses other-only where en has one/other (style guide: no plural agreement); only structural failures are counted."
+    },
+    "hard_token_parity": {
+      "patterns": {
+        "backtick_span": "`[^`\\n]+`",
+        "long_flag": "(?<![\\w/])--[a-zA-Z0-9][a-zA-Z0-9_-]*",
+        "angle_token": "<[a-zA-Z][^>\\n]*>",
+        "url": "(?:https?|ssh)://[^\\s，。；）)]+",
+        "path": "(?:~/[\\w./-]+|/(?:bin|Users|Volumes|tmp|var|etc)/[\\w./-]+)",
+        "percent_token": "%[sdif]"
+      },
+      "failures": []
+    },
+    "width": {
+      "rows": [],
+      "over_budget": []
+    },
+    "punctuation": {
+      "failures": []
+    },
+    "latin_spacing": {
+      "failures": []
+    },
+    "register": {
+      "address": "你",
+      "nin_occurrences": []
+    },
+    "encoding": {
+      "non_nfc": [],
+      "bidi_controls": []
+    },
+    "numbers": {
+      "failures": []
+    },
+    "render": {
+      "keys_checked": 49,
+      "failures": []
+    }
+  }
+}

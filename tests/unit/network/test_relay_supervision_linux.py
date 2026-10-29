@@ -17,6 +17,8 @@ manager.
 
 from __future__ import annotations
 
+import json
+import plistlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -36,13 +38,52 @@ def linux_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(supervisors, "enable_linger", lambda: True)
+    monkeypatch.setattr(supervisors, "linger_enabled", lambda: True)
     monkeypatch.setattr(relay.sys, "platform", "linux")
     monkeypatch.setattr(
         relay.shutil,
         "which",
         lambda name: "/usr/bin/systemctl" if name == "systemctl" else f"/usr/bin/{name}",
     )
+    # THE PORT PROBE IS HOST-GLOBAL, so a scratch HOME does not isolate it. `ss`
+    # answers for the whole machine, and `service_action("start"|"restart")`
+    # ADOPTS (SIGTERMs) every listener on the unit's port whose argv verifies as
+    # a relay of ours. On a Linux host running a real relay on :4097, a cell
+    # whose `systemctl_user` stub reports no MainPID took the live relay for a
+    # hand-started one and stopped it (#3028 round 3: the remote node's
+    # local-operator-network exited 0 at 21:23:08Z during a unit run). Cells
+    # that need holders pin them explicitly through `_pin_supervision`.
+    monkeypatch.setattr(relay, "_port_holder_pids", lambda port: [])
     return home
+
+
+def test_the_linux_host_fixture_never_sees_a_real_listener(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real listening socket on this host must be invisible to the fixture's probe.
+
+    Fails on the old fixture on Linux: `ss` reports this test's own pid, the same
+    way it reported the live relay that a cell in this file then stopped.
+    """
+    import socket
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        assert relay._port_holder_pids(port) == []
+        # The whole adoption input, with the same "no MainPID" stub the log-parent
+        # cell uses: nothing on this host may become a holder to stop.
+        monkeypatch.setattr(
+            supervisors,
+            "systemctl_user",
+            lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+        )
+        assert relay._supervision_state(port)["holders"] == []
+    finally:
+        listener.close()
 
 
 def _unit(home: Path) -> Path:
@@ -67,7 +108,13 @@ def test_render_systemd_has_the_contract_every_unit_shares(tmp_path: Path) -> No
     # The config-dir pin is present and QUOTED (an unquoted assignment truncates
     # at the first space — the mobile daemon's own measured lesson).
     assert 'Environment="LOCAL_OPERATOR_CONFIG_DIR=' in text
-    assert "Restart=on-failure" in text
+    # SELF-HEAL WITHOUT RESURRECTING A DELIBERATE STOP (2026-10-27 node): every
+    # exit nobody asked for is restarted; only the deliberate-stop status is not.
+    lines = text.splitlines()
+    assert "Restart=always" in lines
+    assert f"RestartPreventExitStatus={relay.DELIBERATE_STOP_EXIT_STATUS}" in lines
+    assert f"SuccessExitStatus={relay.DELIBERATE_STOP_EXIT_STATUS}" in lines
+    assert "Restart=on-failure" not in lines
     assert "WantedBy=default.target" in text
     # THE SESSION-SAFETY FIX (2026-10-11, stale-relay memo): the relay's cgroup
     # holds the device's session runtimes, so its unit must kill only the main
@@ -82,9 +129,24 @@ def test_no_other_daemons_unit_grows_the_relays_kill_mode(tmp_path: Path) -> Non
     """``kill_mode`` is opt-in: the shared renderer and every sibling unit are
     byte-unchanged, which is the other half of the KillMode pin.
 
-    The relay is deliberately the ONE unit that names a kill mode (see
+    The relay was the first unit to name a kill mode (see
     ``supervisors.render_systemd_unit`` for why); a sibling that grew the line
     would change what its own daemon's stop does, which no one asked for.
+
+    ONE NAMED EXEMPTION, the wakes supervisor (#3028, agent review round 1 M2),
+    because the relay's reason is not relay-specific: it is "this daemon's
+    cgroup holds detached session runtimes", and the wakes supervisor's does
+    too (it engages them through ``procstate.detached_popen_kwargs``). Under
+    the default ``control-group`` a unit stop SIGKILLed every wake-spawned
+    session at 90 s, shorter than the runtime's own signal drain. Review round 2
+    checked the three properties that make ``process`` safe there: (a) a stop
+    signals only the supervisor, and each runtime leaves by its own residency
+    rule; (b) uninstall orphans nothing in the defect sense — survivors are
+    listed, stoppable sessions, the relay's no-ExecStop rule; (c) a restart
+    cannot double-spawn, because engagement keys on the transcript lease
+    (``_has_live_runtime``, then ``launch.py``'s lease arbitration). The
+    exemption is pinned EXACTLY: wakes must carry ``process`` and still no
+    ExecStop reaper, and every other sibling stays bare.
     """
     from local_operator.browser_bridge import install as browser_install
     from local_operator.mobile import install as mobile_install
@@ -101,9 +163,13 @@ def test_no_other_daemons_unit_grows_the_relays_kill_mode(tmp_path: Path) -> Non
         "wakes supervisor": wakes_install.render_systemd(tmp_path / "cfg"),
         "mobile": mobile_install.render_systemd(4098),
     }
+    exempt = {"wakes supervisor": "KillMode=process"}
     for name, text in rendered.items():
-        assert "KillMode" not in text, name
         assert "ExecStop" not in text, name
+        if name in exempt:
+            assert exempt[name] in text.splitlines(), name
+            continue
+        assert "KillMode" not in text, name
 
 
 def test_install_dry_run_names_the_unit_and_touches_nothing(
@@ -283,6 +349,11 @@ def test_service_action_drives_systemctl_when_a_unit_is_there(
     )
 
     assert relay.service_action("restart")["ok"] is True
+    # ONE MANAGER CALL, NOT THREE. Durability is read through
+    # ``linger_enabled``/the unit file, not through a second service-state
+    # query: the update path's proven-move restart also runs this arm, and its
+    # exact-call contract forbids extra ``is-enabled``/``is-active`` probes
+    # (``test_refresh_unit_restarts_exactly_once_on_a_proven_move``).
     assert seen == [("restart", relay.SYSTEMD_UNIT)]
 
 
@@ -976,6 +1047,7 @@ def test_refresh_unit_restarts_exactly_once_on_a_proven_move(
         "stale_generation_of_process",
         lambda pid: generation if pid == 111 else None,
     )
+    monkeypatch.setattr(update_mod, "generation_staleness_of_process", lambda pid: False)
 
     outcome = relay.refresh_unit_if_stale()
 
@@ -989,6 +1061,47 @@ def test_refresh_unit_restarts_exactly_once_on_a_proven_move(
     ), line
     assert len(line) <= 80, line
     assert outcome.warning() == ""
+
+
+def test_refresh_unit_restart_must_verify_the_loaded_generation(
+    linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new PID still running the old generation is a failed update step.
+
+    The supervisor receipt proves replacement, not which build the replacement
+    loaded. The update child must not turn that receipt into a success while the
+    relay keeps serving the pre-update generation.
+    """
+    _shim_rig(tmp_path, monkeypatch)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(relay.render_systemd(), encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    calls, record = _manager_recorder()
+    monkeypatch.setattr(supervisors, "systemctl_user", record)
+    _pin_supervision(
+        monkeypatch,
+        managed=_Script(111, 111, 222),
+        record=_RelayRecordScript(111, 222),
+    )
+    old = tmp_path / "lop" / "generations" / "20261025T122513Z-0.90.1"
+    current = tmp_path / "lop" / "generations" / "20261025T123000Z-0.90.2"
+    monkeypatch.setattr(
+        update_mod,
+        "stale_generation_of_process",
+        lambda pid: old if pid == 111 else None,
+    )
+    monkeypatch.setattr(update_mod, "generation_staleness_of_process", lambda pid: True)
+    monkeypatch.setattr(update_mod, "generation_of_process", lambda pid: old)
+    monkeypatch.setattr(update_mod, "current_generation", lambda: current)
+
+    outcome = relay.refresh_unit_if_stale()
+
+    assert calls == [("daemon-reload",), ("restart", relay.SYSTEMD_UNIT)], calls
+    assert outcome.kind == "failed", outcome
+    assert old.name in outcome.detail
+    assert current.name in outcome.detail
+    assert "lop network install" in outcome.detail
 
 
 def test_refresh_unit_does_not_bounce_a_current_build(
@@ -1138,6 +1251,8 @@ def test_refresh_unit_retries_the_loaded_policy_after_a_failed_reload(
     )
     monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda pid: tmp_path / _GEN)
 
+    monkeypatch.setattr(update_mod, "generation_staleness_of_process", lambda pid: False)
+
     first = relay.refresh_unit_if_stale()
     assert first.kind == "failed", first
     assert calls == [("daemon-reload",)], calls
@@ -1187,3 +1302,828 @@ def test_refresh_unit_a_raising_probe_is_a_failure_never_an_escape(
     assert outcome.kind == "failed", outcome
     assert "probe exploded" in outcome.detail, outcome.detail
     assert "lop network install" in outcome.detail, outcome.detail
+
+
+@pytest.mark.parametrize(
+    ("installed", "linger", "enabled", "persistent"),
+    [
+        (True, True, True, True),
+        (True, False, True, False),
+        (False, True, True, False),
+        (True, True, False, False),
+    ],
+)
+def test_supervision_state_requires_unit_enabled_and_linger(
+    linux_host, monkeypatch, installed, linger, enabled, persistent
+) -> None:
+    """An active unit alone does not prove restart-on-boot durability."""
+    if installed:
+        unit = _unit(linux_host)
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text("(unit)\n")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    calls = []
+
+    def systemctl(*args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=0 if args[0] != "is-enabled" or enabled else 1)
+
+    monkeypatch.setattr(supervisors, "systemctl_user", systemctl)
+    monkeypatch.setattr(supervisors, "linger_enabled", lambda: linger)
+    state = relay.supervision_state()
+    assert state == {
+        "platform": "systemd",
+        "addressable": True,
+        "unit": relay.SYSTEMD_UNIT,
+        "installed": installed,
+        "enabled": enabled,
+        "active": True,
+        "linger": linger,
+        "persistent": persistent,
+    }
+    assert calls == [("is-enabled", relay.SYSTEMD_UNIT), ("is-active", relay.SYSTEMD_UNIT)]
+
+
+@pytest.mark.parametrize("linger", [True, False])
+def test_existing_unit_start_repairs_linger_without_failing_the_start(
+    linux_host, monkeypatch, linger
+) -> None:
+    """Existing installations must repair linger, not only missing units."""
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text("(unit)\n")
+    monkeypatch.setattr(relay, "_systemd_guard", lambda action: None)
+    calls = []
+    monkeypatch.setattr(supervisors, "enable_linger", lambda: calls.append("linger") or linger)
+    monkeypatch.setattr(supervisors, "linger_enabled", lambda: linger)
+    monkeypatch.setattr(
+        supervisors, "systemctl_user", lambda *a, **k: SimpleNamespace(returncode=0, stderr="")
+    )
+    result = relay._service_action_systemd("start")
+    assert calls == ["linger"]
+    assert result["ok"] is True
+    assert result["linger"] is linger and result["persistent"] is linger
+
+
+@pytest.mark.parametrize(
+    "stdout, expected", [("Linger=yes\n", True), ("Linger=no\n", False), ("", False)]
+)
+def test_linger_state_reads_loginctl_without_mutating_it(monkeypatch, stdout, expected) -> None:
+    """Diagnostics query loginctl; only a service action may enable linger."""
+    calls = []
+    monkeypatch.setattr(supervisors.shutil, "which", lambda name: "/usr/bin/loginctl")
+    monkeypatch.setenv("USER", "synthetic-user")
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout=stdout)
+
+    monkeypatch.setattr(supervisors.subprocess, "run", run)
+    assert supervisors.linger_enabled() is expected
+    assert calls == [["/usr/bin/loginctl", "show-user", "synthetic-user", "-p", "Linger"]]
+
+
+def test_linger_without_a_user_or_getuid_is_unproven(monkeypatch) -> None:
+    """A platform with neither `USER` nor `getuid` cannot be asked; it must not crash.
+
+    The cross-platform probe's static pass rejects an unguarded `os.getuid` on
+    Windows, where the attribute does not exist. This cell pins the runtime half:
+    absent both facts, durability is unproven rather than an AttributeError.
+    """
+    monkeypatch.setattr(supervisors.shutil, "which", lambda name: "/usr/bin/loginctl")
+    monkeypatch.delenv("USER", raising=False)
+    monkeypatch.delattr(supervisors.os, "getuid", raising=False)
+    assert supervisors.linger_enabled() is False
+
+
+def test_supervision_state_without_a_supervisor_is_not_persistent(monkeypatch) -> None:
+    """A host without a manager cannot claim durability."""
+    monkeypatch.setattr(supervisors, "supervisor", lambda: None)
+    state = relay.supervision_state()
+    assert state["platform"] == "none" and not state["persistent"] and not state["installed"]
+
+
+def test_supervision_state_survives_an_unavailable_user_bus(linux_host, monkeypatch) -> None:
+    """Unavailable systemd is diagnostic evidence, never an exception to callers."""
+
+    def unavailable(*args, **kwargs):
+        raise OSError("synthetic bus unavailable")
+
+    monkeypatch.setattr(supervisors, "systemctl_user", unavailable)
+    state = relay.supervision_state()
+    assert not state["enabled"] and not state["active"] and not state["persistent"]
+
+
+@pytest.mark.parametrize("run_at_load", [False, True])
+@pytest.mark.parametrize("loaded", [False, True])
+def test_launchd_persistence_follows_the_installed_run_at_load_plist(
+    monkeypatch, tmp_path, loaded, run_at_load
+) -> None:
+    """Launchd boot persistence is distinct from whether the job is loaded now."""
+    plist = tmp_path / "relay.plist"
+    plist.write_bytes(plistlib.dumps({"RunAtLoad": run_at_load}))
+    monkeypatch.setattr(supervisors, "supervisor", lambda: supervisors.LAUNCHCTL)
+    monkeypatch.setattr(relay, "plist_path", lambda: plist)
+    monkeypatch.setattr(relay, "_plist_is_addressable", lambda: True)
+    monkeypatch.setattr(relay, "_domain", lambda: "gui/synthetic")
+    monkeypatch.setattr(
+        relay, "_launchctl", lambda *a: SimpleNamespace(returncode=0 if loaded else 1)
+    )
+    state = relay.supervision_state()
+    assert state["platform"] == "launchd" and state["installed"]
+    assert state["persistent"] is run_at_load and state["active"] is loaded
+    assert state["linger"] is None
+
+
+def test_a_truncated_plist_is_unproven_not_an_exception(monkeypatch, tmp_path) -> None:
+    """Malformed XML leaves the boot claim false rather than escaping the doctor.
+
+    ``plistlib`` raises ``ExpatError`` on a truncated document, and that class is
+    not a ``ValueError`` on every expat build; the diagnostic must answer the
+    conservative verdict for the same reason an unreadable file does.
+    """
+    plist = tmp_path / "relay.plist"
+    plist.write_bytes(b"<plist><dict><key>RunAtLoad</key>")
+    monkeypatch.setattr(relay, "plist_path", lambda: plist)
+    assert relay._launchd_boot_persistent() is False
+
+
+def test_start_enables_a_disabled_unit_once_but_restart_does_not(linux_host, monkeypatch):
+    """Start repairs boot enablement without extra calls on update restarts."""
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True)
+    unit.write_text("unit")
+    monkeypatch.setattr(relay, "_systemd_guard", lambda action: None)
+    calls = []
+
+    def systemctl(*args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(supervisors, "systemctl_user", systemctl)
+    started = relay._service_action_systemd("start")
+    assert started["ok"] and started["persistent"]
+    assert calls == [("enable", relay.SYSTEMD_UNIT), ("start", relay.SYSTEMD_UNIT)]
+    calls.clear()
+    restarted = relay._service_action_systemd("restart")
+    assert restarted["ok"] and not restarted["persistent"]
+    assert calls == [("restart", relay.SYSTEMD_UNIT)]
+    wants = unit.parent / "default.target.wants"
+    wants.mkdir()
+    (wants / relay.SYSTEMD_UNIT).symlink_to(unit)
+    calls.clear()
+    assert relay._service_action_systemd("start")["persistent"]
+    assert calls == [("start", relay.SYSTEMD_UNIT)]
+
+
+@pytest.mark.parametrize("action", ["start", "restart"])
+def test_launchd_missing_plist_installs_instead_of_kickstarting(monkeypatch, tmp_path, action):
+    """The advertised repair creates the missing boot job on macOS too."""
+    monkeypatch.setattr(relay, "_launchd_guard", lambda action: None)
+    monkeypatch.setattr(relay, "plist_path", lambda: tmp_path / "missing.plist")
+    calls = []
+    monkeypatch.setattr(
+        relay,
+        "_install_launchd",
+        lambda: calls.append("install")
+        or {
+            "ok": True,
+            "linger": None,
+            "persistent": True,
+        },
+    )
+    monkeypatch.setattr(relay, "_launchctl", lambda *a: pytest.fail("kickstarted missing job"))
+    assert relay._service_action_launchd(action)["persistent"]
+    assert calls == ["install"]
+
+
+@pytest.mark.parametrize("platform", ["systemd", "launchd"])
+def test_supervision_redirected_home_never_queries_a_live_manager(monkeypatch, tmp_path, platform):
+    """Reading another HOME's file cannot authorize a query of the real manager."""
+    unit = tmp_path / "unit"
+    unit.write_bytes(plistlib.dumps({"RunAtLoad": True}))
+    monkeypatch.setattr(
+        supervisors,
+        "supervisor",
+        lambda: (supervisors.SYSTEMCTL if platform == "systemd" else supervisors.LAUNCHCTL),
+    )
+    monkeypatch.setattr(relay, "systemd_path", lambda: unit)
+    monkeypatch.setattr(relay, "plist_path", lambda: unit)
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: False)
+    monkeypatch.setattr(relay, "_plist_is_addressable", lambda: False)
+    monkeypatch.setattr(supervisors, "systemctl_user", lambda *a, **k: pytest.fail("live manager"))
+    monkeypatch.setattr(relay, "_launchctl", lambda *a: pytest.fail("live manager"))
+    state = relay.supervision_state()
+    assert state["installed"] and not state["addressable"]
+    assert not state["enabled"] and not state["active"] and not state["persistent"]
+
+
+def test_invalid_launchd_plist_never_claims_boot_persistence(monkeypatch, tmp_path):
+    """An unparseable file is not proof of RunAtLoad."""
+    plist = tmp_path / "bad.plist"
+    plist.write_text("broken")
+    monkeypatch.setattr(relay, "plist_path", lambda: plist)
+    monkeypatch.setattr(relay, "_plist_is_addressable", lambda: True)
+    monkeypatch.setattr(supervisors, "supervisor", lambda: supervisors.LAUNCHCTL)
+    monkeypatch.setattr(relay, "_domain", lambda: "gui/synthetic")
+    monkeypatch.setattr(relay, "_launchctl", lambda *a: SimpleNamespace(returncode=0))
+    state = relay.supervision_state()
+    assert state["active"] and not state["persistent"]
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_systemd_install_prepares_append_log_parent_before_start(linux_host, monkeypatch, existing):
+    """systemd opens the log before the daemon can create its own directory."""
+    log = linux_host / "logs" / "network.log"
+    monkeypatch.setattr(relay, "log_path", lambda: log)
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    monkeypatch.setattr(relay, "render_systemd", lambda port: f"StandardOutput=append:{log}\n")
+    monkeypatch.setattr(relay, "_answers_as_service", lambda: True)
+    if existing:
+        log.parent.mkdir()
+    starts = []
+
+    def systemctl(*args, **kwargs):
+        if "enable" in args:
+            assert log.parent.is_dir()
+            assert f"StandardOutput=append:{log}" in _unit(linux_host).read_text()
+            starts.append(args)
+        return SimpleNamespace(returncode=0, stdout="active", stderr="")
+
+    monkeypatch.setattr(supervisors, "systemctl_user", systemctl)
+    assert relay._install_systemd()["ok"]
+    assert len(starts) == 1
+
+
+def test_systemd_install_dry_run_does_not_prepare_log_parent(linux_host, monkeypatch):
+    log = linux_host / "logs" / "network.log"
+    monkeypatch.setattr(relay, "log_path", lambda: log)
+    _no_systemctl(monkeypatch)
+    assert relay._install_systemd(dry_run=True)["ok"]
+    assert not log.parent.exists()
+
+
+def test_systemd_log_parent_failure_never_starts_service(linux_host, monkeypatch):
+    log = linux_host / "logs" / "network.log"
+    monkeypatch.setattr(relay, "log_path", lambda: log)
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    _no_systemctl(monkeypatch)
+    mkdir = Path.mkdir
+
+    def fail_log_parent(path, *args, **kwargs):
+        if path == log.parent:
+            raise PermissionError("synthetic log parent refusal")
+        return mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_log_parent)
+    with pytest.raises(PermissionError, match="synthetic log parent refusal"):
+        relay._install_systemd()
+
+
+@pytest.mark.parametrize("linger", [False, True])
+def test_systemd_install_receipt_reports_actual_linger(linux_host, monkeypatch, linger):
+    """Enable success cannot silently stand in for successful linger repair."""
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    monkeypatch.setattr(relay, "render_systemd", lambda port: "synthetic unit")
+    monkeypatch.setattr(supervisors, "enable_linger", lambda: linger)
+    monkeypatch.setattr(supervisors, "linger_enabled", lambda: linger)
+    monkeypatch.setattr(
+        supervisors,
+        "systemctl_user",
+        lambda *a, **k: SimpleNamespace(
+            returncode=0,
+            stdout="active",
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(relay, "_answers_as_service", lambda: True)
+    result = relay._install_systemd()
+    assert result["ok"] and result["linger"] is linger and result["persistent"] is linger
+
+
+def test_launchd_install_receipt_reports_run_at_load(monkeypatch, tmp_path):
+    """Installer JSON keeps boot durability explicit on the launchd arm too."""
+    from local_operator import launchd
+
+    monkeypatch.setattr(relay, "_plist_is_addressable", lambda: True)
+    monkeypatch.setattr(relay, "plist_path", lambda: tmp_path / "relay.plist")
+    monkeypatch.setattr(relay, "render_plist", lambda port: {"RunAtLoad": True})
+    monkeypatch.setattr(launchd, "reload_job", lambda **kwargs: SimpleNamespace(ok=True))
+    monkeypatch.setattr(relay, "_answers_as_service", lambda: True)
+    result = relay._install_launchd()
+    assert result["ok"] and result["persistent"] and result["linger"] is None
+
+
+def test_enabled_unit_start_uses_its_symlink_without_reenabling(linux_host, monkeypatch):
+    """An existing enablement link is sufficient proof without manager reads."""
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True)
+    unit.write_text("unit")
+    wants = unit.parent / "default.target.wants"
+    wants.mkdir()
+    (wants / relay.SYSTEMD_UNIT).symlink_to(unit)
+    monkeypatch.setattr(relay, "_systemd_guard", lambda action: None)
+    calls = []
+
+    def systemctl(*args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(supervisors, "systemctl_user", systemctl)
+    assert relay._service_action_systemd("start")["persistent"]
+    assert calls == [("start", relay.SYSTEMD_UNIT)]
+
+
+# Host hardening (2026-10-21, cloud-node-1) -------------------------------
+
+
+def test_render_systemd_carries_the_relay_oom_score_adjust(tmp_path: Path) -> None:
+    """The relay asks the OOM killer to pick almost anything else first.
+
+    A 2 GB node OOM-killed its own relay (oom_score_adj 0, anon-rss 266 MB) while
+    session work survived, which took every session there off the mesh.
+    """
+    text = relay.render_systemd(4097)
+    assert f"OOMScoreAdjust={relay.RELAY_OOM_SCORE_ADJUST}\n" in text
+    assert relay.RELAY_OOM_SCORE_ADJUST < 0 < 300
+    # Inside [Service], beside the other execution directives.
+    service = text.split("[Service]\n", 1)[1].split("[Install]", 1)[0]
+    assert "OOMScoreAdjust=" in service
+
+
+def test_other_daemons_render_byte_identically_without_oom_adjust() -> None:
+    """The parameter is opt-in: no unit that predates it gains the line."""
+    text = supervisors.render_systemd_unit(description="x", exec_start="/bin/true")
+    assert "OOMScoreAdjust" not in text
+
+
+def test_refresh_unit_migrates_a_pre_oom_unit(
+    linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An installed unit without the line is rewritten to gain it, no restart."""
+    _shim_rig(tmp_path, monkeypatch)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    legacy = relay.render_systemd().replace(f"OOMScoreAdjust={relay.RELAY_OOM_SCORE_ADJUST}\n", "")
+    assert "OOMScoreAdjust" not in legacy
+    unit.write_text(legacy, encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    calls, record = _manager_recorder()
+    monkeypatch.setattr(supervisors, "systemctl_user", record)
+    _pin_supervision(monkeypatch, managed=_Script(111), record=_RelayRecordScript(111))
+    monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda pid: None)
+
+    outcome = relay.refresh_unit_if_stale()
+
+    assert calls == [("daemon-reload",)], calls
+    assert unit.read_text(encoding="utf-8") == relay.render_systemd()
+    assert outcome.kind == "current", outcome
+
+
+def test_refresh_unit_repoints_a_generation_pinned_unit_to_the_shim(
+    linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pinned-unit drift is independent restart proof when the process probe fails.
+
+    The old code rewrote the unit, then returned ``current`` without a restart
+    whenever ``stale_generation_of_process`` answered ``None``. That left the
+    live relay on the old build with a success receipt. The unit's own generation
+    must drive the restart instead, followed by the post-restart build proof.
+    """
+    _shim_rig(tmp_path, monkeypatch)
+    generations = tmp_path / "lop" / "generations"
+    old_python = generations / "20261001T000000Z-0.82.3" / "venv" / "bin" / "python3"
+    old_python.parent.mkdir(parents=True)
+    old_python.write_text("", encoding="utf-8")
+    monkeypatch.setattr(update_mod, "generations_dir", lambda: generations)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    shim = str(_fake_shim(tmp_path))
+    pinned = relay.render_systemd().replace(shim, str(old_python))
+    assert str(old_python) in pinned
+    unit.write_text(pinned, encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    calls, record = _manager_recorder()
+    monkeypatch.setattr(supervisors, "systemctl_user", record)
+    _pin_supervision(
+        monkeypatch,
+        managed=_Script(111, 111, 222),
+        record=_RelayRecordScript(111, 222),
+    )
+    monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda pid: None)
+    monkeypatch.setattr(
+        update_mod,
+        "current_generation",
+        lambda: generations / "20261025T123000Z-0.90.2",
+    )
+    monkeypatch.setattr(update_mod, "generation_staleness_of_process", lambda pid: False)
+
+    outcome = relay.refresh_unit_if_stale()
+
+    assert unit.read_text(encoding="utf-8") == relay.render_systemd()
+    assert shim in unit.read_text(encoding="utf-8")
+    assert calls == [("daemon-reload",), ("restart", relay.SYSTEMD_UNIT)], calls
+    assert outcome.kind == "restarted", outcome
+
+
+def test_foreign_system_unit_is_named_with_its_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hand-made system unit running ``lop network serve`` is a named conflict."""
+    system = tmp_path / "etc-systemd-system"
+    system.mkdir()
+    (system / "lop-net-relay.service").write_text(
+        "[Service]\nExecStart=/home/ubuntu/.local/bin/lop network serve\n", encoding="utf-8"
+    )
+    (system / "unrelated.service").write_text(
+        "[Service]\nExecStart=/usr/bin/nginx\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(relay, "SYSTEM_UNIT_DIRS", (str(system),))
+    monkeypatch.setattr(relay, "_port_holder_pids", lambda port: [])
+    monkeypatch.setattr(relay, "_unit_image", lambda: None)
+    monkeypatch.setattr(relay.sys, "platform", "linux")
+
+    found = relay.foreign_supervision(4097)
+
+    assert [row["code"] for row in found] == ["system_unit"], found
+    assert "lop-net-relay.service" in found[0]["detail"]
+    assert "systemctl disable --now lop-net-relay.service" in found[0]["remedies"][0]
+
+
+def test_foreign_port_holder_is_named(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Something other than the managed pid on the relay port is a conflict."""
+    monkeypatch.setattr(relay, "SYSTEM_UNIT_DIRS", ())
+    monkeypatch.setattr(relay, "_port_holder_pids", lambda port: [111, 222])
+    monkeypatch.setattr(relay, "_managed_service_pid", lambda: 111)
+    monkeypatch.setattr(relay, "_pid_cmdline", lambda pid: "python3 -m http.server 4097")
+    monkeypatch.setattr(relay, "_unit_image", lambda: None)
+    monkeypatch.setattr(relay.sys, "platform", "linux")
+
+    found = relay.foreign_supervision(4097)
+
+    assert [row["code"] for row in found] == ["port_holder"], found
+    assert "pid 222" in found[0]["detail"] and "stop pid 222" in found[0]["remedies"][0]
+
+
+def test_install_warns_about_a_foreign_system_unit_before_writing(
+    linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    system = tmp_path / "sys"
+    system.mkdir()
+    (system / "lop-net-relay.service").write_text(
+        "[Service]\nExecStart=/usr/bin/python3 -m local_operator.network.relay\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(relay, "SYSTEM_UNIT_DIRS", (str(system),))
+    monkeypatch.setattr(relay, "_port_holder_pids", lambda port: [])
+    _no_systemctl(monkeypatch)
+
+    result = relay.install(4097, dry_run=True)
+
+    assert result["ok"] is True
+    assert any("lop-net-relay.service" in step for step in result["steps"]), result
+    assert result["conflicts"][0]["code"] == "system_unit"
+
+
+# ---------------------------------------------------------------------------
+# The supervised log's parent (#2918 lane audit, 2026-10-25)
+# ---------------------------------------------------------------------------
+
+
+def test_the_log_parent_exists_before_an_existing_unit_is_started(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """systemd opens ``StandardOutput=append:`` BEFORE exec, so the relay cannot.
+
+    The normal install created this parent; the REFRESH and the existing-unit
+    start/restart did not, and on systemd 240+ a missing parent means the start fails
+    outright ("Failed to set up standard output") or the service comes up with no
+    log at all. Measured as the shape behind a remote node whose ``network.log`` was
+    0 bytes while its relay had been running for hours.
+
+    Fails on the old code: nothing created the parent on this path.
+    """
+    _unit(linux_host).parent.mkdir(parents=True, exist_ok=True)
+    _unit(linux_host).write_text(relay.render_systemd(4097), encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    log_parent = relay.log_path().parent
+    assert not log_parent.exists()
+
+    monkeypatch.setattr(
+        supervisors,
+        "systemctl_user",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    relay.service_action("start")
+
+    assert log_parent.is_dir(), "the unit's append-log parent was not created before start"
+
+
+def test_the_log_parent_exists_before_a_linux_refresh_reloads_the_unit(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``lop update``'s roll reaches this path, and it reloads the unit from here.
+
+    ``meshupdate``'s own roll inherits whatever this arm does, so the parent is
+    created before ``daemon-reload``/restart and not merely by the installer.
+    Fails on the old code: the reload ran with no log parent.
+    """
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    # THE SHIM FIRST: the unit is rendered from ``procname.supervised_image``, so the
+    # rig has to be in place before the file is written or the image guard declines.
+    _shim_rig(linux_host, monkeypatch)
+    unit.write_text(_migratable_unit(), encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    calls, record = _manager_recorder()
+    monkeypatch.setattr(supervisors, "systemctl_user", record)
+    monkeypatch.setattr(relay, "_managed_service_pid", lambda: None)
+    log_parent = relay.log_path().parent
+    assert not log_parent.exists()
+
+    relay.refresh_unit_if_stale()
+
+    assert ("daemon-reload",) in calls, calls
+    assert log_parent.is_dir(), "the refresh reloaded a unit whose log parent was missing"
+
+
+# The deliberate-stop exit status (2026-10-27 node: a relay that exited 0
+# unrequested stayed down ~4 min under Restart=on-failure) ------------------
+
+
+def test_the_deliberate_stop_status_cannot_collide_with_another_exit() -> None:
+    """75 is outside Python's 0/1/2, a signal's 128+N and systemd's 200-243."""
+    status = relay.DELIBERATE_STOP_EXIT_STATUS
+    assert status not in (0, 1, 2)
+    assert status < 128
+    assert not 200 <= status <= 243
+
+
+def test_an_unrequested_exit_returns_zero_so_the_unit_restarts_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(relay.sys, "platform", "linux")
+    assert relay._exit_status(tmp_path) == 0  # noqa: SLF001
+
+
+def test_a_marked_stop_exits_with_the_deliberate_status_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The marker describes exactly ONE exit: it is consumed on the way out."""
+    monkeypatch.setattr(relay.sys, "platform", "linux")
+    relay.mark_deliberate_stop("lop network stop", tmp_path)
+    assert relay.deliberate_stop_marker_path(tmp_path).is_file()
+
+    assert relay._exit_status(tmp_path) == relay.DELIBERATE_STOP_EXIT_STATUS  # noqa: SLF001
+    assert not relay.deliberate_stop_marker_path(tmp_path).exists()
+    assert relay._exit_status(tmp_path) == 0  # noqa: SLF001
+
+
+def test_a_stale_marker_never_suppresses_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stop that never reached a relay must not excuse a later unrequested exit."""
+    monkeypatch.setattr(relay.sys, "platform", "linux")
+    relay.mark_deliberate_stop("lop network stop", tmp_path)
+    marker = relay.deliberate_stop_marker_path(tmp_path)
+    stale = json.loads(marker.read_text(encoding="utf-8"))
+    stale["at"] -= relay.DELIBERATE_STOP_MARKER_TTL_S + 1
+    marker.write_text(json.dumps(stale), encoding="utf-8")
+
+    assert relay.deliberate_stop_requested(tmp_path) is False
+    assert relay._exit_status(tmp_path) == 0  # noqa: SLF001
+
+
+def test_macos_never_returns_the_status_launchd_would_relaunch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KeepAlive {SuccessfulExit: false} reads any non-zero exit as a crash."""
+    monkeypatch.setattr(relay.sys, "platform", "darwin")
+    relay.mark_deliberate_stop("lop network stop", tmp_path)
+    assert relay._exit_status(tmp_path) == 0  # noqa: SLF001
+
+
+def _write_unit_pinning(home: Path, config: Path) -> Path:
+    """An installed relay unit whose pinned config root is ``config``."""
+    unit = _unit(home)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(
+        "[Service]\nExecStart=/x/python3 -m local_operator.network.relay --port 4097\n"
+        f"Environment={supervisors.quoted(f'{relay.CONFIG_DIR_ENV}={config}')}\n",
+        encoding="utf-8",
+    )
+    return unit
+
+
+def test_the_stop_verb_marks_the_stop_before_the_arm_signals(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``lop network stop`` is deliberate: the marker exists when systemctl runs."""
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    _write_unit_pinning(linux_host, config)
+    seen: list[tuple[tuple[str, ...], bool]] = []
+
+    def _record(*args: str, **kwargs: Any) -> Any:
+        seen.append((tuple(args), relay.deliberate_stop_requested(config)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(supervisors, "systemctl_user", _record)
+    _pin_supervision(monkeypatch, managed=_Script(1000, None), record=None, answering=False)
+
+    assert relay.service_action("stop")["ok"] is True
+    assert seen == [(("stop", relay.SYSTEMD_UNIT), True)], seen
+
+
+def test_start_and_restart_never_mark_a_stop(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A restart's exit is systemd's own (never restarted twice); no marker."""
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text("(unit)\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisors,
+        "systemctl_user",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    _pin_supervision(
+        monkeypatch, managed=_Script(1000, 2000), record=_RelayRecordScript(1000, 2000)
+    )
+
+    relay.service_action("restart")
+
+    assert not relay.deliberate_stop_marker_path(config).exists()
+
+
+def test_uninstall_marks_the_stop_before_disable_now(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``uninstall``'s ``disable --now`` is deliberate: marked first."""
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    _write_unit_pinning(linux_host, config)
+    seen: list[tuple[tuple[str, ...], bool]] = []
+
+    def _record(*args: str, **kwargs: Any) -> Any:
+        seen.append((tuple(args), relay.deliberate_stop_requested(config)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(supervisors, "systemctl_user", _record)
+
+    relay.uninstall(root=config)
+
+    assert (("disable", "--now", relay.SYSTEMD_UNIT), True) in seen, seen
+
+
+def test_amain_exits_with_the_status_its_stop_was_asked_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The supervised entry point returns what ``_exit_status`` decides, and a
+    marker present at START (a stop that never arrived) is cleared first."""
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(relay.sys, "platform", "linux")
+    relay.mark_deliberate_stop("left over", config)
+
+    class _Server:
+        def __init__(self, **kwargs: Any) -> None:
+            self.root = config
+
+        def serve_forever(self) -> None:
+            # The leftover marker was cleared before serving began; this stop
+            # is the one that was asked for while it served.
+            assert not relay.deliberate_stop_marker_path(config).exists()
+            relay.mark_deliberate_stop("lop network stop", config)
+
+    monkeypatch.setattr(relay, "RelayServer", _Server)
+    assert relay.amain(["--port", "4197"]) == relay.DELIBERATE_STOP_EXIT_STATUS
+
+    class _Unasked(_Server):
+        def serve_forever(self) -> None:
+            return None
+
+    relay.mark_deliberate_stop("left over", config)
+    monkeypatch.setattr(relay, "RelayServer", _Unasked)
+    assert relay.amain(["--port", "4197"]) == 0
+
+
+def test_refresh_unit_migrates_an_on_failure_unit_to_the_self_heal(
+    linux_host: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Existing installs gain Restart=always through the existing drift path."""
+    _shim_rig(tmp_path, monkeypatch)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    status = relay.DELIBERATE_STOP_EXIT_STATUS
+    legacy = (
+        relay.render_systemd()
+        .replace("Restart=always\n", "Restart=on-failure\n")
+        .replace(f"RestartPreventExitStatus={status}\n", "")
+        .replace(f"SuccessExitStatus={status}\n", "")
+    )
+    assert "Restart=always" not in legacy and "KillMode=process\n" in legacy
+    unit.write_text(legacy, encoding="utf-8")
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda name: True)
+    calls, record = _manager_recorder()
+    monkeypatch.setattr(supervisors, "systemctl_user", record)
+    _pin_supervision(monkeypatch, managed=_Script(111), record=_RelayRecordScript(111))
+    monkeypatch.setattr(update_mod, "stale_generation_of_process", lambda pid: None)
+
+    outcome = relay.refresh_unit_if_stale()
+
+    assert calls == [("daemon-reload",)], calls
+    written = unit.read_text(encoding="utf-8")
+    assert written == relay.render_systemd()
+    assert "Restart=always\n" in written and "KillMode=process\n" in written
+    assert outcome.kind == "current", outcome
+
+
+def test_a_failed_stop_clears_its_marker_so_a_later_crash_restarts(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review m1: ``systemctl stop`` failed (e.g. no user bus), so the relay still
+    runs and its next exit is NOT asked-for. A marker left behind would keep a
+    genuine crash inside the TTL down instead of restarting it."""
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    _write_unit_pinning(linux_host, config)
+    marked_during: list[bool] = []
+
+    def _no_bus(*args: str, **kwargs: Any) -> Any:
+        marked_during.append(relay.deliberate_stop_requested(config))
+        return SimpleNamespace(returncode=1, stdout="", stderr="Failed to connect to bus")
+
+    monkeypatch.setattr(supervisors, "systemctl_user", _no_bus)
+    _pin_supervision(monkeypatch, managed=_Script(1000), record=None, answering=True)
+    monkeypatch.setattr(relay.sys, "platform", "linux")
+
+    assert relay.service_action("stop")["ok"] is False
+    assert marked_during and marked_during[0] is True, "marked before the arm ran"
+    assert not relay.deliberate_stop_marker_path(config).exists()
+    assert relay._exit_status(config) == 0  # noqa: SLF001 — the crash is restarted
+
+
+def test_the_stop_marker_lands_in_the_root_the_unit_pins(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review m4: a stop run under a DIFFERENT config override still marks the
+    root the supervised relay reads, never its own."""
+    unit_root = tmp_path / 'unit root %with "quote"'
+    other = tmp_path / "other"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(other))
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    _write_unit_pinning(linux_host, unit_root)
+    monkeypatch.setattr(
+        supervisors,
+        "systemctl_user",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    _pin_supervision(monkeypatch, managed=_Script(1000, None), record=None, answering=False)
+
+    assert relay.service_action("stop")["ok"] is True
+    assert relay.deliberate_stop_requested(unit_root)
+    assert not relay.deliberate_stop_marker_path(other).exists()
+
+
+def test_a_unit_without_a_pinned_root_writes_no_marker(
+    linux_host: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No pinned root is no supervised relay to address: no stray marker."""
+    config = tmp_path / "cfg"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda unit: True)
+    unit = _unit(linux_host)
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text("(unit)\n", encoding="utf-8")
+    monkeypatch.setattr(
+        supervisors,
+        "systemctl_user",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    _pin_supervision(monkeypatch, managed=_Script(1000, None), record=None, answering=False)
+
+    assert relay.service_action("stop")["ok"] is True
+    assert not relay.deliberate_stop_marker_path(config).exists()
+
+
+def test_a_failed_marker_write_leaves_no_staging_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review n1: the writer's own ``.tmp`` never outlives a failed replace."""
+
+    def _refuse(src: Any, dst: Any) -> None:
+        raise OSError("read-only")
+
+    monkeypatch.setattr(relay.os, "replace", _refuse)
+    relay.mark_deliberate_stop("lop network stop", tmp_path)
+
+    run = relay.deliberate_stop_marker_path(tmp_path).parent
+    assert sorted(path.name for path in run.iterdir()) == []

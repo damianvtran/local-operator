@@ -1,0 +1,115 @@
+# tui.analytics — sampled en/zh pairs for attestation zhca1
+# 28/98 keys; all >120 chars and all plurals included
+
+## tui.analytics.empty.hint  [78 chars]
+EN: Analytics accrue as sessions make provider calls. Come back after a few turns.
+ZH: 会话调用提供商后会累积统计数据。进行几轮后再来查看。
+
+## tui.analytics.hint.none.full  [8 chars]
+EN: esc back
+ZH: esc返回
+
+## tui.analytics.input.meta  [35 chars]
+EN: ≈ estimated split of context tokens
+ZH: ≈ 上下文token分布估算
+
+## tui.analytics.input.title  [16 chars]
+EN: Where input went
+ZH: 输入去向
+
+## tui.analytics.legend.cost  [59 chars]
+EN: + lower bound (some calls unpriced)   $— no published price
+ZH: + 费用下限（部分调用无定价）   $— 无公开价格
+
+## tui.analytics.search.by_provider  [11 chars]
+EN: By provider
+ZH: 按提供商
+
+## tui.analytics.search.counted_read  [57 chars, PLURAL]
+EN: {count, plural, one {{shown} read} other {{shown} reads}}
+ZH: {count, plural, other {{shown}次读取}}
+
+## tui.analytics.search.counted_search  [62 chars, PLURAL]
+EN: {count, plural, one {{shown} search} other {{shown} searches}}
+ZH: {count, plural, other {{shown}次搜索}}
+
+## tui.analytics.search.incl_free_read  [79 chars, PLURAL]
+EN: {count, plural, one {incl. {shown} free read} other {incl. {shown} free reads}}
+ZH: {count, plural, other {含{shown}次免费读取}}
+
+## tui.analytics.search.incl_free_search  [84 chars, PLURAL]
+EN: {count, plural, one {incl. {shown} free search} other {incl. {shown} free searches}}
+ZH: {count, plural, other {含{shown}次免费搜索}}
+
+## tui.analytics.search.incl_money_search  [20 chars]
+EN: incl. {money} search
+ZH: 含{money}搜索费用
+
+## tui.analytics.search.incl_unpriced_read  [87 chars, PLURAL]
+EN: {count, plural, one {incl. {shown} unpriced read} other {incl. {shown} unpriced reads}}
+ZH: {count, plural, other {含{shown}次无定价读取}}
+
+## tui.analytics.search.incl_unpriced_search  [92 chars, PLURAL]
+EN: {count, plural, one {incl. {shown} unpriced search} other {incl. {shown} unpriced searches}}
+ZH: {count, plural, other {含{shown}次无定价搜索}}
+
+## tui.analytics.search.note  [171 chars, LONG>120]
+EN: Read from this process's live search ledger, not from disk. A resumed conversation restores its recorded searches into it; sessions that are not open here are not counted.
+ZH: 数据来自此进程的实时搜索台账，而非磁盘。恢复会话时，其已记录的搜索会恢复到此台账；未在此处打开的会话不计入。
+
+## tui.analytics.search.note_join  [20 chars]
+EN: {note} · {read_note}
+ZH: {note} · {read_note}
+
+## tui.analytics.search.note_read_full  [78 chars, PLURAL]
+EN: {count, plural, one {{shown} read} other {{shown} reads}} · no published price
+ZH: {count, plural, other {{shown}次读取}} · 无公开价格
+
+## tui.analytics.search.note_read_partial  [79 chars, PLURAL]
+EN: {count, plural, one {{shown} read} other {{shown} reads}} · {unpriced} unpriced
+ZH: {count, plural, other {{shown}次读取}} · {unpriced}次无定价
+
+## tui.analytics.search.note_read_unpriced  [68 chars, PLURAL]
+EN: {count, plural, one {{shown} read} other {{shown} reads}} · unpriced
+ZH: {count, plural, other {{shown}次读取}} · 无定价
+
+## tui.analytics.search.note_search_full  [83 chars, PLURAL]
+EN: {count, plural, one {{shown} search} other {{shown} searches}} · no published price
+ZH: {count, plural, other {{shown}次搜索}} · 无公开价格
+
+## tui.analytics.search.note_search_partial  [84 chars, PLURAL]
+EN: {count, plural, one {{shown} search} other {{shown} searches}} · {unpriced} unpriced
+ZH: {count, plural, other {{shown}次搜索}} · {unpriced}次无定价
+
+## tui.analytics.search.note_search_unpriced  [73 chars, PLURAL]
+EN: {count, plural, one {{shown} search} other {{shown} searches}} · unpriced
+ZH: {count, plural, other {{shown}次搜索}} · 无定价
+
+## tui.analytics.search.row_session  [12 chars]
+EN: This session
+ZH: 此会话
+
+## tui.analytics.search.share_short  [29 chars]
+EN: {counted} · {share} of search
+ZH: {counted} · 搜索占比{share}
+
+## tui.analytics.table.calls  [13 chars]
+EN: {value} calls
+ZH: {value}次调用
+
+## tui.analytics.table.subagent_suffix  [67 chars, PLURAL]
+EN: {count, plural, one {+{shown} subagent} other {+{shown} subagents}}
+ZH: {count, plural, other {+{shown}个子智能体}}
+
+## tui.analytics.totals.calls_meta  [13 chars]
+EN: {count} calls
+ZH: {count}次调用
+
+## tui.analytics.totals.days_with_usage  [66 chars, PLURAL]
+EN: {count, plural, one {{shown} day} other {{shown} days}} with usage
+ZH: 有用量的{count, plural, other {{shown}天}}
+
+## tui.analytics.totals.subagent_meta  [24 chars]
+EN: totals include subagents
+ZH: 总量包含子智能体
+

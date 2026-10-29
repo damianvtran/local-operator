@@ -48,6 +48,7 @@ from local_operator.tui.events import TurnEnded
 from local_operator.tui.terminal_title import TerminalTitle
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+from tests.unit.legacy_skill_payload import legacy_skill_payload
 from tests.unit.tui.test_app_pilot import (
     FakeSession,
     _factory,
@@ -1663,24 +1664,13 @@ def test_the_theme_sampler_reads_a_skill_turn_as_the_line_that_was_typed() -> No
 
 
 def _skill_payload(typed: str) -> str:
-    """A ``$skill`` invocation in its PERSISTED form — the real renderer's output.
+    """A ``$skill`` invocation in the LEGACY persisted form.
 
-    The real ``Skill`` and the real ``render_invocation``, so the sampler is
-    handed the payload the product stores rather than a hand-spelled tag.
+    The reader is kept forever (old transcripts never migrate), so this pins the
+    shape it must keep reading; ``legacy_skill_payload`` reproduces the deleted
+    writer's attribute escaping.
     """
-    from local_operator.skills.discovery import Skill
-    from local_operator.skills.invoke import parse_invocation, render_invocation
-
-    skill = Skill(
-        name="research",
-        description="research things",
-        file_path=Path("/skills/research/SKILL.md"),
-        base_dir=Path("/skills/research"),
-        source="user",
-    )
-    invocation = parse_invocation(typed, {"research": skill})
-    assert invocation is not None
-    return render_invocation(invocation, "# Research\n\nSKILL_BODY_MARKER\n")
+    return legacy_skill_payload(typed)
 
 
 def test_should_refresh_theme_follows_the_geometric_schedule() -> None:

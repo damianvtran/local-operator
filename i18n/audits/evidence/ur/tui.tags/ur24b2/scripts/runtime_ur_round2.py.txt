@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""Exercise scoped Urdu plurals, maxCells budgets, pseudo fit, and /help risks."""
+from __future__ import annotations
+
+import json
+import math
+import re
+import sys
+import unicodedata
+from pathlib import Path
+
+REPO = Path('/Users/damian/local-operator/.worktrees/i18n-ur-core')
+OUT = Path('/Users/damian/.local-operator/sessions/3e0f499dc2ee/scratchpad/ur-core-round2-audit')
+sys.path.insert(0, str(REPO))
+from local_operator.i18n.format import plural_category  # noqa: E402
+from local_operator.i18n.runtime import render_message  # noqa: E402
+
+rows = json.loads((OUT / 'mechanical-rows.json').read_text())
+
+
+def cells(text: str) -> int:
+    return sum(
+        0 if unicodedata.combining(c) or unicodedata.category(c) == 'Cf' or c in '\n\r'
+        else 2 if unicodedata.east_asian_width(c) in {'W', 'F'} else 1
+        for c in text
+    )
+
+
+fit_rows = []
+for row in rows:
+    context = row['context']
+    if not isinstance(context, dict) or not isinstance(context.get('maxCells'), int):
+        continue
+    names = set(re.findall(r'\{([A-Za-z_]\w*)\s*(?:\}|,)', row['en']))
+    params = {name: ('19:36' if name == 'time' else 1 if name in {'count', 'amount'} else 'Radient' if name == 'login' else 'X') for name in names}
+    rendered = render_message(row['ur'], params, 'ur')
+    width = cells(rendered)
+    budget = context['maxCells']
+    fit_rows.append({
+        'key': row['key'],
+        'maxCells': budget,
+        'params': params,
+        'rendered': rendered,
+        'cells': width,
+        'pseudo_30pct_cells': math.ceil(width * 1.30),
+        'fits': width <= budget,
+        'pseudo_fits': math.ceil(width * 1.30) <= budget,
+    })
+
+plural_rows = []
+for row in rows:
+    if ', plural,' not in row['en']:
+        continue
+    samples = []
+    for count in [0, 1, 2, 21, 1.5]:
+        rendered = render_message(row['ur'], {'count': count}, 'ur')
+        samples.append({'count': count, 'category': plural_category('ur', count), 'rendered': rendered, 'count_present': str(count) in rendered})
+    plural_rows.append({'key': row['key'], 'samples': samples})
+
+help_rows = [
+    {'key': row['key'], 'ur': row['ur'], 'cells': cells(row['ur']), 'approx_guide_cells': 55, 'overflow_risk': cells(row['ur']) > 55}
+    for row in rows if row['namespace'] == 'wire.slash'
+]
+result = {
+    'method': 'Core render_message(locale=ur) for scoped maxCells and plural values; Unicode combining/Cf zero cells; pseudo=ceil(actual*1.30); /help compares text cells with the approximate 55-cell guide and is not a rendered test.',
+    'fit_key_count': len(fit_rows),
+    'actual_overflow_count': sum(not r['fits'] for r in fit_rows),
+    'pseudo_30pct_overflow_count': sum(not r['pseudo_fits'] for r in fit_rows),
+    'fit_rows': fit_rows,
+    'plural_key_count': len(plural_rows),
+    'plural_render_count': sum(len(r['samples']) for r in plural_rows),
+    'plural_error_count': 0,
+    'plural_category_mismatch_count': sum(sample['category'] != ('one' if sample['count'] == 1 else 'other') for row in plural_rows for sample in row['samples']),
+    'plural_missing_count_count': sum(not sample['count_present'] for row in plural_rows for sample in row['samples']),
+    'plural_rows': plural_rows,
+    'approximate_help_key_count': len(help_rows),
+    'approximate_help_overflow_count': sum(r['overflow_risk'] for r in help_rows),
+    'approximate_help_rows': help_rows,
+}
+(OUT / 'runtime-fit-plurals.json').write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps({k: v for k, v in result.items() if k not in {'fit_rows', 'plural_rows', 'approximate_help_rows'}}, ensure_ascii=False, indent=2))
+for row in fit_rows:
+    print('FIT', row['key'], row['cells'], '/', row['maxCells'], 'pseudo', row['pseudo_30pct_cells'], row['rendered'])
+for row in plural_rows:
+    print('PLURAL', row['key'], row['samples'])
+for row in help_rows:
+    if row['overflow_risk']:
+        print('HELP_RISK', row['key'], row['cells'], '/~55', row['ur'])

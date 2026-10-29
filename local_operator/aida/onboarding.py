@@ -413,10 +413,7 @@ def _settles_the_greeting(config_dir: Path | str, others: list[str]) -> bool:
         over it stamped ``skipped`` on a fresh isolated root while the same
         millisecond's ``state.created_at`` shows her own session being created.
     """
-    from local_operator.session.runtime.engagement import (
-        TRANSCRIPT_FILENAME,
-        session_has_durable_history,
-    )
+    from local_operator.session.runtime.engagement import session_has_durable_history
 
     root = _sessions_root(config_dir)
     for session_id in others:
@@ -426,12 +423,16 @@ def _settles_the_greeting(config_dir: Path | str, others: list[str]) -> bool:
         except Exception:  # noqa: BLE001 — unknown: do not discount it
             logger.warning("aida: could not read session %s", session_id, exc_info=True)
             return True
+        from local_operator.session import compression
+
         try:
-            lines = (
-                (root / session_id / TRANSCRIPT_FILENAME)
-                .read_text(encoding="utf-8", errors="replace")
-                .splitlines()
-            )
+            # The resolver, so a compressed session's rows are still evidence:
+            # reading the plain name alone reported "nothing was ever written"
+            # for a conversation whose whole body is in an archive.
+            path = compression.transcript_for_read(root / session_id)
+            if path is None:
+                continue  # nothing was ever written: no evidence either way
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except FileNotFoundError:
             continue  # nothing was ever written: no evidence either way
         except OSError:
@@ -521,15 +522,17 @@ def _counts_as_operator_conversation(entry: Path, root: Path) -> bool:
     counts as the operator's. Only the two shapes that positively say nothing
     was ever said here are discounted: no transcript at all, and an empty one.
     """
-    from local_operator.session.runtime.engagement import (
-        TRANSCRIPT_FILENAME,
-        session_has_durable_history,
-    )
+    from local_operator.session.runtime.engagement import session_has_durable_history
 
     if session_has_durable_history(entry.name, root=root):
         return True
+    from local_operator.session import compression
+
     try:
-        return (entry / TRANSCRIPT_FILENAME).stat().st_size > 0
+        # The PHYSICAL file, whose size is nonzero for an archive too. Statting
+        # the plain name reported "no durable history" for every compressed
+        # session, which the first-run predicate reads as a fresh install.
+        return compression.transcript_source(entry)[0].stat().st_size > 0
     except FileNotFoundError:
         return False
     except OSError:

@@ -80,10 +80,15 @@ remedy instead of failing later.
   idempotent (200, `vendor_stopped:true`); a completed/failed job refuses with
   **409 `audio_already_completed`**. Nothing claims a guaranteed stop.
 - Admission bound (HTTP 429, code `audio_rate_limited`, no `Retry-After`): a
-  SUBMIT refusal happens before a job row exists, so it is retried with
-  bounded backoff (2, 4, 8 s; four attempts) and surfaced as
-  `reason_class="transient"` with `error_type="audio_rate_limited"` and the
-  server's sentence. An ADMITTED job that hits a vendor rate limit settles
+  SUBMIT refusal happens before a job row exists, so it is retried with a
+  bounded ladder of four attempts at 0/10/30/65 s (batch waits jitter
+  1.0-1.15x, so 65-74.75 s) — sized to outlast the server's 45 s hold on a
+  running vendor call — and surfaced as `reason_class="transient"` with
+  `error_type="audio_rate_limited"` and the receipt `Audio platform at
+  capacity: N attempts over M s.` Only HTTP 429 is retried: a 5xx or any
+  other status fails straight through regardless of the body's code, because a
+  re-POST may bill twice. The same ladder serves the BYOK vendor POST. An
+  ADMITTED job that hits a vendor rate limit settles
   `COMPLETED` + `error_type:"audio_rate_limited"` with zero cost — never
   retried automatically; a resubmit is the caller's decision.
 
@@ -124,10 +129,22 @@ lane's; a failed walk records `failed`/None with the documented
 The server contract v1 emits no `waveform` field, so the local default is
 `audiogen.peaks`: decode with **miniaudio 1.71** to 8 kHz mono FLOAT32
 (measured 63.7 ms for a 98 s MP3), 240 even buckets, max-abs per bucket
-clamped 0..1. Peaks are computed **once, at artifact creation**, by
-`cache_media(kind="audio")` and stored as the `<digest>.peaks.json` sidecar of
-the same content-addressed store the bytes live in — never decoded in a
-render loop, and never carried in `AttachmentContent`.
+clamped 0..1. Peaks are computed **once**, by
+`cache_media(kind="audio")` at artifact creation, and stored as the
+`<digest>.peaks.json` sidecar of the same content-addressed store the bytes
+live in — never decoded in a render loop, and never carried in
+`AttachmentContent`.
+
+The Library's waveform route is the one place "once" is not "at creation":
+an indexed path asset (a user file, not a generated attachment) has no
+sidecar, so its first `GET /v1/desktop/library/assets/{asset_id}/waveform`
+decodes it once and caches `{version,bars,peaks}` under
+`config/cache/library/peaks/<asset-id>-<mtime>.json` — the thumbnail cache's
+invalidation key. That decode runs in the same bounded child process and
+under the same single decode slot as legacy repair (8 MiB input cap, 10 s
+deadline, one at a time); a slot that cannot be had or a decode that fails
+is an ordinary 404, never fabricated silence. Digest assets read the sidecar,
+so no generated sound is decoded by a request at all.
 
 The decoder is a **base runtime dependency**, so bare installed generations
 write sidecars too; `local-operator[audio]` remains a compatibility alias.

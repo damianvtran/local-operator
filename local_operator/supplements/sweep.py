@@ -63,6 +63,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Iterable, Mapping
 
+from local_operator.session import compression
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME
 from local_operator.supplements.contract import JOURNALED_STATES, SUPPLEMENT_CUSTOM_TYPE
 
@@ -103,7 +104,6 @@ DISPOSED_ERROR: Final = "disposed"
 _CONTENT_SUFFIX: Final = ".bin"
 _META_SUFFIX: Final = ".json"
 
-_TRANSCRIPT_NAME: Final = "transcript.jsonl"
 _SESSIONS_DIRNAME: Final = "sessions"
 
 
@@ -203,7 +203,20 @@ def blob_candidates(
 
 
 def _session_transcripts(sessions_dir: Path) -> tuple[list[Path], list[str]]:
-    """Every session transcript under ``sessions_dir``, plus discovery problems.
+    """Every session DIRECTORY under ``sessions_dir`` that holds a transcript.
+
+    Directories rather than transcript files, because a transcript has two
+    physical forms: the plain journal and the compressed archive an aged session
+    keeps instead. Returning the file path would force this module to know which
+    form it found and to spell the archive names a second time; the caller asks
+    :func:`compression.transcript_for_read` and gets a readable path either way.
+
+    A compressed session is NOT skipped here. Skipping it would mean its
+    attachment references were invisible to :func:`referenced_digests`, whose
+    contract is complete enumeration — and an unseen reference is exactly how
+    this pass deletes a blob a conversation still uses (the round-1 regression
+    this function's docstring records). An archive this build cannot decode is a
+    ``problem`` for the same reason: unreadable is not empty.
 
     Discovery is the first half of the fail-closed contract -- an entry this
     scan cannot enumerate or stat may hold a transcript that references a
@@ -236,14 +249,18 @@ def _session_transcripts(sessions_dir: Path) -> tuple[list[Path], list[str]]:
             continue
         if not child_is_dir:
             continue
-        transcript = child / _TRANSCRIPT_NAME
-        try:
-            transcript_is_file = transcript.is_file()
-        except OSError:
-            problems.append(f"stat:{transcript}")
+        # ``transcript_state``, not ``has_transcript``: an UNREADABLE session is
+        # a discovery problem (the scan cannot prove what it references), while
+        # only a genuinely ABSENT transcript may be skipped. Folding the two
+        # together is how a mode-000 directory let this pass delete a blob its
+        # transcript still named (the round-2 regression this function's
+        # docstring records).
+        state = compression.transcript_state(child)
+        if state == compression.TRANSCRIPT_UNREADABLE:
+            problems.append(f"stat:{child}")
             continue
-        if transcript_is_file:
-            found.append(transcript)
+        if state == compression.TRANSCRIPT_PRESENT:
+            found.append(child)
     return found, problems
 
 
@@ -279,8 +296,23 @@ def referenced_digests(
     digests: set[str] = set()
     sessions = 0
     scanned_bytes = 0
-    transcripts, problems = _session_transcripts(sessions_dir)
-    for transcript in transcripts:
+    directories, problems = _session_transcripts(sessions_dir)
+    for directory in directories:
+        # ``transcript_for_read`` resolves EITHER form (plain journal, or the
+        # archive decompressed into its bounded cache), so the scan's byte budget
+        # below measures the same decoded bytes it always did. A decode failure is
+        # a problem, never a skip: this scan's completeness is what makes deleting
+        # an unreferenced blob safe.
+        try:
+            transcript = compression.transcript_for_read(directory)
+        except compression.ArchiveError as exc:
+            problems.append(f"read:{directory.name}")
+            logger.warning("supplements sweep: cannot decode %s: %s", directory.name, exc)
+            continue
+        if transcript is None:
+            # Removed between discovery and the read: no reference to miss, the
+            # same rule this function applies to a transcript deleted mid-scan.
+            continue
         try:
             stat = transcript.stat()
         except FileNotFoundError:

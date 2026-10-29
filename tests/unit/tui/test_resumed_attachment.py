@@ -579,10 +579,13 @@ async def test_the_team_listing_footer_advertises_the_detach_verb(tmp_path) -> N
     async with app.run_test(size=(120, 24)) as pilot:
         await _adopted(app, pilot, resumed)
 
-        assert app._team_listing_footer() == "Send: /team <name> <message> · Detach: /team clear"
+        authoring = " · /team chart <name> · /team new · /team edit <name>"
+        assert app._team_listing_footer() == (
+            "Send: /team <name> <message> · Detach: /team clear" + authoring
+        )
 
         app._cmd_team("clear", app._notice)
         for _ in range(6):
             await pilot.pause()
 
-        assert app._team_listing_footer() == "Send: /team <name> <message>"
+        assert app._team_listing_footer() == "Send: /team <name> <message>" + authoring

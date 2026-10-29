@@ -1,0 +1,183 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "relay.ask",
+  "revision": "f7a884b7b73e0b92d2b44ea2020c46b9b0d4843f",
+  "generated_utc": "2026-10-24T23:28:36Z",
+  "method": "Audit-local read-only checks over the two catalogues. Width counts follow the zh-CN style guide (CJK/fullwidth 2 cells, ASCII 1, combining/format 0); zh_rendered_cells substitutes representative values for placeholders.",
+  "inputs": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/relay.ask.json",
+      "sha256": "2ead3ad32467d6e7c7a7a4aa96a4bde65f7451687fe0878f8dedb464340b24e7"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/relay.ask.context.json",
+      "sha256": "85cb7131423eab2649ff1b7600eeedde3308cdfb36491a04e32daae16ab68c42"
+    },
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/relay.ask.json",
+      "sha256": "f57ce252403652914ec7817fab373940dd3e22687788b8c45c931d826044f9a7"
+    }
+  },
+  "checks": {
+    "key_parity": {
+      "key_count_en": 11,
+      "key_count_zh": 11,
+      "missing": [],
+      "extra": [],
+      "order_identical": true,
+      "order_mismatch": [],
+      "ok": true
+    },
+    "non_nfc": [],
+    "control_chars": [],
+    "bidi_controls": [],
+    "zero_width": [],
+    "fullwidth_latin_or_digits": [],
+    "cjk_latin_space": [],
+    "icu_arguments": {
+      "mismatches": [],
+      "ok": true
+    },
+    "plural_structure": {
+      "rows": [
+        {
+          "key": "relay.ask.context.messages",
+          "en_selectors": [
+            [
+              "one",
+              "other"
+            ]
+          ],
+          "zh_selectors": [
+            [
+              "other"
+            ]
+          ]
+        }
+      ],
+      "errors": [],
+      "ok": true
+    },
+    "technical_tokens": {
+      "missing": [],
+      "ok": true
+    },
+    "width": {
+      "over_budget": [],
+      "ok": true
+    }
+  },
+  "width_rows": [
+    {
+      "key": "relay.ask.context.messages",
+      "maxCells": 60,
+      "en_cells": 139,
+      "zh_cells": 58,
+      "zh_rendered_cells": 32,
+      "over": -28,
+      "ratio": 0.417,
+      "zh_wide_cells": 34
+    },
+    {
+      "key": "relay.ask.dismiss.answered_in_chat",
+      "maxCells": 34,
+      "en_cells": 16,
+      "zh_cells": 14,
+      "zh_rendered_cells": 14,
+      "over": -20,
+      "ratio": 0.875,
+      "zh_wide_cells": 14
+    },
+    {
+      "key": "relay.ask.dismiss.answered_in_chat_note",
+      "maxCells": 44,
+      "en_cells": 39,
+      "zh_cells": 16,
+      "zh_rendered_cells": 16,
+      "over": -28,
+      "ratio": 0.41,
+      "zh_wide_cells": 16
+    },
+    {
+      "key": "relay.ask.dismiss.cancel",
+      "maxCells": 12,
+      "en_cells": 6,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "over": -8,
+      "ratio": 0.667,
+      "zh_wide_cells": 4
+    },
+    {
+      "key": "relay.ask.dismiss.moot",
+      "maxCells": 34,
+      "en_cells": 16,
+      "zh_cells": 8,
+      "zh_rendered_cells": 8,
+      "over": -26,
+      "ratio": 0.5,
+      "zh_wide_cells": 8
+    },
+    {
+      "key": "relay.ask.dismiss.moot_note",
+      "maxCells": 44,
+      "en_cells": 18,
+      "zh_cells": 14,
+      "zh_rendered_cells": 14,
+      "over": -30,
+      "ratio": 0.778,
+      "zh_wide_cells": 14
+    },
+    {
+      "key": "relay.ask.dismiss.open",
+      "maxCells": 12,
+      "en_cells": 8,
+      "zh_cells": 6,
+      "zh_rendered_cells": 6,
+      "over": -6,
+      "ratio": 0.75,
+      "zh_wide_cells": 6
+    },
+    {
+      "key": "relay.ask.dismiss.receipt",
+      "maxCells": 44,
+      "en_cells": 25,
+      "zh_cells": 19,
+      "zh_rendered_cells": 19,
+      "over": -25,
+      "ratio": 0.76,
+      "zh_wide_cells": 19
+    },
+    {
+      "key": "relay.ask.dismiss.receipt_answered_in_chat",
+      "maxCells": 44,
+      "en_cells": 28,
+      "zh_cells": 23,
+      "zh_rendered_cells": 23,
+      "over": -21,
+      "ratio": 0.821,
+      "zh_wide_cells": 23
+    },
+    {
+      "key": "relay.ask.dismiss.receipt_moot",
+      "maxCells": 44,
+      "en_cells": 28,
+      "zh_cells": 17,
+      "zh_rendered_cells": 17,
+      "over": -27,
+      "ratio": 0.607,
+      "zh_wide_cells": 17
+    },
+    {
+      "key": "relay.ask.dismiss.title",
+      "maxCells": 24,
+      "en_cells": 16,
+      "zh_cells": 10,
+      "zh_rendered_cells": 10,
+      "over": -14,
+      "ratio": 0.625,
+      "zh_wide_cells": 10
+    }
+  ]
+}

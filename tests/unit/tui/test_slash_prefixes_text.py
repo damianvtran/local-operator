@@ -111,6 +111,8 @@ PREFIXES_TEXT_POLICY = {
     # A DIRECTORY, not a prompt or a value from a list: `/move ~/x` names where
     # the session works, and the desktop refuses hand-typed arguments here.
     "move": False,
+    # The TUI-only viewer owns a filesystem path, never a prefixed model prompt.
+    "view": False,
     # A LABEL, not a value from a list: the desktop opens a form for it.
     "rename": False,
     # A toggle with an optional on/off/status word — but the word is a plain
@@ -181,6 +183,7 @@ PREFIXES_TEXT_POLICY = {
     # the single token `read` is the control. The shape below is what draws that
     # line; this flag would erase it.
     "notifications": False,
+    "unread": False,
     # FALSE, all three, for `/notifications`' reason: the text these own is a
     # WORD the handler reads (`yes`), and a sentence after it must stay a
     # message — `/delete yes please tell me what happened` is prose a user is
@@ -188,6 +191,17 @@ PREFIXES_TEXT_POLICY = {
     "archive": False,
     "unarchive": False,
     "delete": False,
+    # Takes no argument at all: the page is the receipt.
+    "library": False,
+    # The verbs are a selection; none of them is a prompt.
+    "librarian": False,
+    # TUI-only inline lists. `prefixes_text` is the DESKTOP claim (does the
+    # desktop's command path own this trailing text), and the desktop does not
+    # offer either command; the terminal's list is driven by `ArgumentMode`.
+    # Keeping these false leaves `/tag Review` a prose message on the desktop,
+    # the direction that cannot swallow a user's sentence.
+    "tag": False,
+    "tags": False,
 }
 
 
@@ -246,6 +260,7 @@ ARGUMENT_SHAPE_POLICY = {
     # sentence. An empty vocabulary is exactly what makes one token the control
     # and two the message.
     "notifications": ArgumentShape.WORD,
+    "unread": ArgumentShape.WORD,
     # ONE flag, `--copy`, from a one-word vocabulary (`SESSION_COPY_FLAG`). Its
     # path USES the token — the terminal copies the ID, the desktop route refuses
     # it by name — so `/session --copy` is the control while `/session more
@@ -286,6 +301,9 @@ ARGUMENT_SHAPE_POLICY = {
     # the command on every surface that validates it.
     "memory": ArgumentShape.SUBCOMMAND,
     "project": ArgumentShape.SUBCOMMAND,
+    # `<verb>` over `librarian_control.VERBS`; the handler refuses anything
+    # else with the list.
+    "librarian": ArgumentShape.SUBCOMMAND,
     # ANY text, because everything after the word is either a reserved word
     # (`AIDA_SUBCOMMANDS`) the HANDLER parses or a request she is given.
     # SUBCOMMAND would make the command route refuse a request
@@ -297,6 +315,9 @@ ARGUMENT_SHAPE_POLICY = {
     # executes the path directly, spaces included.
     "rename": ArgumentShape.ANY,
     "move": ArgumentShape.ANY,
+    # Paths may contain spaces: ANY is the registry's whole-path shape, not
+    # WORD. The TUI-only /view row does not publish a desktop destination.
+    "view": ArgumentShape.ANY,
     # --- none: text after the word is PROSE -----------------------------------
     # The page or panel IS the receipt and takes no argument at all; these open a
     # surface rather than consuming text, so a sentence after them is a message.
@@ -311,6 +332,8 @@ ARGUMENT_SHAPE_POLICY = {
     "failovers": ArgumentShape.NONE,
     "info": ArgumentShape.NONE,
     "mobile": ArgumentShape.NONE,
+    # The page is the receipt and takes no argument at all.
+    "library": ArgumentShape.NONE,
     # The operator's own row, and the reason it is NONE rather than ANY: the
     # desktop runs `/compact` and SILENTLY DROPS what follows (the report was
     # that `/compact hello` "used to run and silently eat `hello`"). A command
@@ -357,6 +380,11 @@ ARGUMENT_SHAPE_POLICY = {
     # rehearsal. WORD rather than ANY, so `/delete yes please explain` stays a
     # message instead of being planned as a control the route would then run.
     "delete": ArgumentShape.WORD,
+    # A tag name may contain spaces, so `/tag Deep Work` is ONE name and the
+    # whole trailing text is the command's argument.
+    "tag": ArgumentShape.ANY,
+    # `on`/`off` are selectors; a sentence after them is prose.
+    "tags": ArgumentShape.WORD,
 }
 
 

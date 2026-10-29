@@ -272,7 +272,7 @@ def _serving(monkeypatch):
         session.model_label = session.effective_model_label = f"{spec.provider}/{spec.model_id}"
 
     monkeypatch.setattr(session, "set_model", set_model, raising=False)
-    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
     monkeypatch.setattr(peer_model, "provider_usable_here", lambda _p: True)
     cards: list[tuple[str, dict[str, Any]]] = []
 
@@ -385,7 +385,9 @@ async def test_serving_busy_switch_names_the_call_in_flight(monkeypatch) -> None
 async def test_serving_a_switch_that_did_not_take_is_a_refusal(monkeypatch) -> None:
     """The answer comes from the read-back, never from the switch's receipt."""
     handle, session, _applied, cards = _serving(monkeypatch)
-    monkeypatch.setattr(session, "set_model", lambda spec, explicit=False: None, raising=False)
+    monkeypatch.setattr(
+        session, "set_model", lambda spec, explicit=False, **kw: None, raising=False
+    )
     with pytest.raises(ValueError) as caught:
         await handle.receive_peer_model("deepseek", "deepseek-flash", sender={})
     assert "did not take effect" in str(caught.value)

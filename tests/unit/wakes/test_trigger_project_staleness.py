@@ -12,6 +12,8 @@ never silently fork.
 from __future__ import annotations
 
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -209,3 +211,61 @@ def test_the_source_enabled_switch_reads_the_snapshot(tmp_path: Path) -> None:
     # is not a recognised false — the registry writes real bools, so a junk
     # value should read the default, not flip the source off by accident.
     assert project_staleness.SOURCE.enabled({"wakes.triggers.project_staleness.enabled": 1}) is True
+
+
+# -- the row page: recency, and exactly what it left out -------------------------
+
+
+def test_the_row_page_is_ranked_by_recency_and_counts_its_tail(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """Recency, not filename — the store's own ranking, mirrored.
+
+    The live row sorts LAST by filename, so a filename page would evaluate the
+    dormant one instead: this pins which one survives the cut. Recency is what
+    makes "the rest are not evaluated" harmless for live rows — a project whose
+    work is moving has a recent mtime, so only dormant rows can fall off.
+    """
+    root = _root(tmp_path)
+    monkeypatch.setattr(project_staleness, "_MAX_ROWS", 1)
+    _row(root, "aaa-dormant", progress_updated_at=NOW_S - 9 * 3600)
+    _row(root, "zzz-live", progress_updated_at=NOW_S - 9 * 3600)
+    dormant = root / "projects" / "aaa-dormant.json"
+    live = root / "projects" / "zzz-live.json"
+    os.utime(dormant, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+    os.utime(live, ns=(1_700_000_001_000_000_000, 1_700_000_001_000_000_000))
+
+    with caplog.at_level(
+        logging.WARNING, logger="local_operator.wakes.triggers.sources.project_staleness"
+    ):
+        assert [instance.key for instance in _evaluate(root)] == ["zzz-live"]
+
+    # Exact counts, not "more than N": a reader must be able to say how much of
+    # the store this pass did not look at.
+    assert "holds 2 rows" in caplog.text
+    assert "evaluating the 1 most recently written" in caplog.text
+    assert "leaving 1 quiet row unevaluated" in caplog.text
+
+
+def test_the_row_cap_mirrors_the_store() -> None:
+    """The page size is a mirror too: the supervisor cannot import the store."""
+    from local_operator.projects import _MAX_ROWS as STORE_MAX_ROWS
+
+    assert project_staleness._MAX_ROWS == STORE_MAX_ROWS
+
+
+def test_the_tail_count_is_pluralised(tmp_path: Path, monkeypatch, caplog) -> None:
+    """n2: "1 dormant rows" read as a template that had never been seen."""
+    root = _root(tmp_path)
+    monkeypatch.setattr(project_staleness, "_MAX_ROWS", 1)
+    for index, project_id in enumerate(("aaa", "bbb", "ccc")):
+        _row(root, project_id, progress_updated_at=NOW_S - 9 * 3600)
+        path = root / "projects" / f"{project_id}.json"
+        os.utime(path, ns=(1_700_000_000_000_000_000 + index, 1_700_000_000_000_000_000 + index))
+
+    with caplog.at_level(
+        logging.WARNING, logger="local_operator.wakes.triggers.sources.project_staleness"
+    ):
+        assert [instance.key for instance in _evaluate(root)] == ["ccc"]
+
+    assert "leaving 2 quiet rows unevaluated" in caplog.text

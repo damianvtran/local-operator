@@ -1,0 +1,97 @@
+{
+  "relay.session.tags.action": {
+    "role": "long-press action sheet entry that opens the tag sheet",
+    "tone": "Sentence-ish label, the ellipsis is U+2026 and means a sheet opens.",
+    "note": "Owned relay SPA session copy. Rendered only when capabilities.session_tags.available is true; the row itself never carries tag controls."
+  },
+  "relay.session.tags.sheet_title": {
+    "role": "tag sheet's title",
+    "tone": "lowercase, one word.",
+    "note": "Owned relay SPA session copy. The conversation's name is deliberately not repeated here: the action sheet that opened this one already named it."
+  },
+  "relay.session.tags.loading": {
+    "role": "catalogue read in flight",
+    "tone": "lowercase, U+2026.",
+    "note": "Owned relay SPA session copy."
+  },
+  "relay.session.tags.empty": {
+    "role": "tag sheet's empty-catalogue state",
+    "tone": "lowercase; no advice, the hint below carries it.",
+    "note": "Owned relay SPA session copy. Shown only when the catalogue resolved and has no entries; the phone cannot create categories."
+  },
+  "relay.session.tags.empty_hint": {
+    "role": "empty-catalogue hint naming the surfaces that own category identity",
+    "tone": "lowercase, no terminal punctuation.",
+    "note": "Owned relay SPA session copy. Category create/rename deliberately lives in the desktop app and agent callers, not the phone."
+  },
+  "relay.session.tags.load_error": {
+    "role": "catalogue read failure",
+    "tone": "Sentence, sentence case.",
+    "note": "Owned relay SPA session copy. Paired with the retry control; the daemon's own refusal is not shown here because the read carries none."
+  },
+  "relay.session.tags.retry": {
+    "role": "re-read the catalogue after a failure",
+    "tone": "lowercase, imperative.",
+    "note": "Owned relay SPA session copy."
+  },
+  "relay.session.tags.limit_hint": {
+    "role": "explains why unchecked categories are disabled at the cap",
+    "tone": "Sentence, em dash, {count} is the relay's cap.",
+    "note": "Owned relay SPA session copy. Also the aria-describedby target of every disabled row, so the reason is audible, not only visible."
+  },
+  "relay.session.tags.primary": {
+    "role": "screen-reader word beside the row's leading dot",
+    "tone": "lowercase, one word.",
+    "note": "Owned relay SPA session copy. The primary mark is a shape plus this word, never colour alone."
+  },
+  "relay.session.tags.make_primary": {
+    "role": "accessible name of a selected row's primary radio",
+    "tone": "lowercase, {name} is the category's own name.",
+    "note": "Owned relay SPA session copy. The radio itself is mark-only; this sentence is what a screen reader hears."
+  },
+  "relay.session.tags.more": {
+    "role": "accessible name of the row's +N mark",
+    "tone": "ICU plural on count; lowercase.",
+    "note": "Owned relay SPA session copy. The visible mark is only +N, so this is the whole sentence assistive tech gets."
+  },
+  "relay.session.tags.missing": {
+    "role": "note beside an assigned category absent from the registry",
+    "tone": "lowercase, no terminal punctuation.",
+    "note": "Owned relay SPA session copy. Such a row stays selectable so the reader can remove an assignment the catalogue can no longer explain."
+  },
+  "relay.session.tags.saving": {
+    "role": "per-row pending mark while an assignment write is in flight",
+    "tone": "lowercase, U+2026.",
+    "note": "Owned relay SPA session copy."
+  },
+  "relay.session.tags.save_error": {
+    "role": "refusal lead for a rejected assignment write",
+    "tone": "Sentence case, no terminal punctuation: the daemon's own sentence follows after a colon.",
+    "note": "Owned relay SPA session copy. Shared refusal hygiene (lib/refusal) appends the relay's sentence, which is written for this reader and passes through unrewritten."
+  },
+  "relay.session.tags.remove_all": {
+    "role": "first press of the two-step clear",
+    "tone": "lowercase, imperative.",
+    "note": "Owned relay SPA session copy. Turns into the confirm pair; no write happens on this press."
+  },
+  "relay.session.tags.remove_all_confirm": {
+    "role": "the confirmation press that clears the assignment",
+    "tone": "lowercase, question mark.",
+    "note": "Owned relay SPA session copy. Sends the exact empty desired state {tags: [], primary: null}."
+  },
+  "relay.session.tags.cancel": {
+    "role": "inline confirm's cancel button in the remove-all row",
+    "tone": "lowercase, imperative.",
+    "note": "Owned relay SPA session copy. Cancels the pending remove-all confirmation and writes nothing."
+  },
+  "relay.session.tags.done": {
+    "role": "tag sheet's closing button",
+    "tone": "lowercase, imperative.",
+    "note": "Owned relay SPA session copy. Closes the sheet; every assignment already landed as its own write."
+  },
+  "relay.session.tags.pin_and_tags_hint": {
+    "role": "long-press discoverer when the relay also serves tags",
+    "tone": "Preserve current copy and casing, lowercase. Names both verbs a long-press offers.",
+    "note": "Owned relay SPA session copy. Rendered only when capabilities.session_tags.available is true; relays without the tag routes keep the pin-only sentence, so the hint never promises a screen this build cannot serve."
+  }
+}

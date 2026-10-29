@@ -67,12 +67,16 @@ from local_operator.server.utils.desktop_receipts import Unclaimed
 
 router = APIRouter(tags=["Desktop mesh"], dependencies=[Depends(require_desktop)])
 
-#: Refusals that did NOT leave a move behind, so a retry of the same request id must
-#: be allowed to run again rather than replay a refusal forever. Anything else (a
-#: move that reached a phase it cannot roll back from, or an answer this device never
-#: received) is RECORDED: the renderer is told the outcome is unconfirmed and must
-#: re-read the row rather than retry into a second move.
-_MOVE_UNCONFIRMED_CODES = frozenset({"relay_unavailable", "deadline_exceeded", "peer_unreachable"})
+#: Refusals where the request WAS sent and this device cannot say nothing moved, so a
+#: retry of the same request id must REPLAY the recorded answer rather than start a
+#: second move. Anything else (a move that failed before its commit, or a refusal
+#: that left the source where it was) is released: the user frees the session up and
+#: presses again. ``unconfirmed`` is the destination's lost-commit-reply case: its
+#: verified copy is kept in staging and the owner may already have handed the id
+#: over, so a blind retry is the one thing that must not happen.
+_MOVE_UNCONFIRMED_CODES = frozenset(
+    {"relay_unavailable", "deadline_exceeded", "peer_unreachable", "unconfirmed"}
+)
 
 
 def _refusal(error: MeshRefusal) -> dict[str, Any]:

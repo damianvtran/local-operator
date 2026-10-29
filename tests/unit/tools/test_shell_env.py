@@ -744,3 +744,44 @@ def test_the_launcher_shim_never_shadows_the_users_python(tmp_path, monkeypatch)
 
     assert shutil.which("python3", path=injected["PATH"]) == str(user_bin / "python3")
     assert shutil.which("lop", path=injected["PATH"]) is not None
+
+
+# ---------------------------------------------------------------------------
+# The desktop bearer never reaches an agent's tool child (operator ask a-772b)
+# ---------------------------------------------------------------------------
+
+#: The daemon's desktop bearer. Spelled out rather than imported so this test fails
+#: (rather than errors) on a build that has no scrub constant at all.
+DESKTOP_BEARER_NAME = "LOCAL_OPERATOR_DESKTOP_TOKEN"
+DESKTOP_BEARER_SENTINEL = "sentinel-desktop-bearer"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["inherit", "allowlist"])
+async def test_the_desktop_bearer_never_reaches_a_bash_tool_child(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """Cell 14 (QA #3002): a real bash tool child inherited the daemon's bearer and
+    approved a credential card with no person involved. The default ``inherit`` mode
+    passes the parent environment whole, so the scrub has to be in the builder itself,
+    in BOTH modes -- and it must also beat a policy that names it in ``inherit``.
+    """
+    _store_policy(config_dir, mode=mode, inherit=[DESKTOP_BEARER_NAME])
+    monkeypatch.setenv(DESKTOP_BEARER_NAME, DESKTOP_BEARER_SENTINEL)
+    context = ToolContext(cwd=str(tmp_path), variables=_session_store())
+
+    result = await builtin.execute_bash(
+        "bash-env", {"command": _env_names_command()}, AbortSignal(), None, context
+    )
+    names = _child_environment_names(result)
+
+    assert "LOCAL_OPERATOR_AGENT_SHELL" in names, "the probe ran inside a real tool child"
+    assert DESKTOP_BEARER_NAME not in names
+    assert DESKTOP_BEARER_SENTINEL not in _stdout_block(result)
+    # An injection cannot reintroduce it either: the scrub runs last.
+    env = shell_env.child_environment(
+        shell_env.policy_from_values("inherit", [], []),
+        parent={DESKTOP_BEARER_NAME: DESKTOP_BEARER_SENTINEL, "PATH": "/bin"},
+        injections={DESKTOP_BEARER_NAME: DESKTOP_BEARER_SENTINEL},
+    )
+    assert DESKTOP_BEARER_NAME not in env and env["PATH"] == "/bin"

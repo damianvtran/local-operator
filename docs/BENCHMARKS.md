@@ -199,7 +199,8 @@ Values and skills are deliberately NOT baked into the context:
 - Skills are selected semantically and **frozen per session**; the volatile
   skills block rides LAST in a fixed-arity block list so the conversation
   prefix stays byte-stable (the cache design).
-- The env block is ~3 lines (platform, python, cwd), never a full dump.
+- The env block is ~4 lines (platform, python, cwd, session id), never a full
+  dump.
 
 ## Install weight
 

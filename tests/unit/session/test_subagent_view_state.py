@@ -50,7 +50,7 @@ def test_todo_delta_is_watched_and_does_not_ride_roster_or_attach() -> None:
     update = owner.mutate(jobs=[_job(_todos("Child work"))])
     assert update is not None
     payload = update.model_dump(mode="json")
-    assert "todos" not in payload["changes"]["jobs"][0]
+    assert "todos" not in payload["job_deltas"]["upserted"][0]
     assert filter_update_trajectories(payload, lambda _: False)["job_todo_updates"] == {}
     watched = filter_update_trajectories(payload, lambda _: True)
     follower.apply_update(FrontendUpdate.model_validate_json(json.dumps(watched)))
@@ -609,7 +609,7 @@ def test_launch_identity_rides_the_wire_and_rebuilds_the_follower_node(tmp_path)
     # per update through ``_job_summary``, which never sees ``sync_wire_payload``.
     update = owner.mutate(jobs=[job.model_copy(update={"status": "completed"})])
     assert update is not None
-    delta_job = update.model_dump(mode="json")["changes"]["jobs"][0]
+    delta_job = update.model_dump(mode="json")["job_deltas"]["upserted"][0]
     assert "launch_message_id" not in delta_job
     assert "launch_id_derived" not in delta_job
     assert delta_job["launch_prompts"] == job.launch_prompts
@@ -780,7 +780,7 @@ def test_launch_prompt_text_is_shared_across_the_roster_not_per_row() -> None:
     fresh.subscribe(lambda _: None)
     update = fresh.mutate(jobs=jobs)
     assert update is not None
-    delta_rows = update.model_dump(mode="json")["changes"]["jobs"]
+    delta_rows = update.model_dump(mode="json")["job_deltas"]["upserted"]
     delta_spent = sum(
         len(key) + len(value)
         for job in delta_rows
@@ -802,7 +802,7 @@ def test_a_row_with_no_launch_facts_spends_no_wire_bytes_on_them() -> None:
     assert "launch_message_id" not in row and "launch_prompts" not in row
     update = owner.mutate(jobs=[JobState(id="bash-1", type="bash", status="completed")])
     assert update is not None
-    delta_row = update.model_dump(mode="json")["changes"]["jobs"][0]
+    delta_row = update.model_dump(mode="json")["job_deltas"]["upserted"][0]
     assert "launch_message_id" not in delta_row and "launch_prompts" not in delta_row
     # And the follower rebuilt from those rows behaves exactly as before.
     follower = FrontendStateStore(_state())

@@ -1,0 +1,46 @@
+Spanish W2 audit es-w2-auditor-b / w2a2 — 2026-10-29
+Worktree: /Users/damian/lo-i18n-es
+Revision: 088699bfea0fc33d6b2f0748037dd7e89d85627d (feat/i18n-es-wire-runtime)
+
+$ git status --short -- <five Spanish target paths>
+?? local_operator/i18n/catalogues/es/cli.browser.json
+?? local_operator/i18n/catalogues/es/cli.browser_help.json
+?? local_operator/i18n/catalogues/es/cli.exec_help.json
+?? local_operator/i18n/catalogues/es/cli.exec_runtime.json
+?? local_operator/i18n/catalogues/es/cli.exec_worker_help.json
+
+$ python3 <initial .venv probe>
+/opt/homebrew/bin/bash: line 1: .venv/bin/python: No such file or directory
+Recovery: used python3 stdlib for the committed runtime; used the existing main checkout interpreter with PYTHONPATH for real parser construction. No dependencies installed.
+
+$ python3 <AST parity, token, newline, width and select-render audit>
+PARSER: /Users/damian/lo-i18n-es/local_operator/i18n/runtime.py
+{"cli.browser": {"keys": 64, "key_context_parity": true, "icu_parse_and_parity": true, "authored_newline_mismatches": [], "select_renders": [], "maxCells_keys": [], "argparse_printf_token_keys": []}}
+{"cli.browser_help": {"keys": 20, "key_context_parity": true, "icu_parse_and_parity": true, "authored_newline_mismatches": [], "select_renders": ["Iniciar el daemon", "Detener el daemon", "Reiniciar el daemon", "unknown el daemon"], "maxCells_keys": [], "argparse_printf_token_keys": []}}
+{"cli.exec_help": {"keys": 20, "key_context_parity": true, "icu_parse_and_parity": true, "authored_newline_mismatches": [], "select_renders": [], "maxCells_keys": [], "argparse_printf_token_keys": []}}
+{"cli.exec_worker_help": {"keys": 11, "key_context_parity": true, "icu_parse_and_parity": true, "authored_newline_mismatches": [], "select_renders": [], "maxCells_keys": [], "argparse_printf_token_keys": []}}
+{"cli.exec_runtime": {"keys": 11, "key_context_parity": true, "icu_parse_and_parity": true, "authored_newline_mismatches": [], "select_renders": [], "maxCells_keys": [], "argparse_printf_token_keys": []}}
+NEGATIVE_CONTROL: Translated start label detected; start falls through to other -> start el daemon
+
+$ LOP_I18N=1 LOP_LANG=es PYTHONPATH=/Users/damian/lo-i18n-es /Users/damian/local-operator/.venv/bin/python -c <build_cli_parser probe>
+exit_code=0
+start: Iniciar el daemon
+stop: Detener el daemon
+restart: Reiniciar el daemon
+command: Prompt literal; '-' u omitirlo con stdin por tubería lee stdin; opcional para un bucle
+output_schema: Archivo JSON Schema que debe cumplir el payload JSON/YAML/TOML decodificado. Para --output-format markdown: un objeto JSON {'required_sections': [...]}. Requiere --output-format.
+output_retries: Máximo de reintentos tras una respuesta final fallida (0-5; predeterminado: 2). Requiere --output-format.
+exec-worker hidden from top-level choices: True
+
+$ python3 <exact source/target hash audit>
+cli.browser: en=a9841deed81927762716c7592a592bb4e3f069d16f6ba0def6becb755b728321 target=5c44bbf8afb79aeddf704464621b3858aed8bc51e3435af5061227aa6e0182e2 context=1e5f1dfeaa5d828302831cba4134605a1a7ff46b5c8ac7af7fcd913da95cbaee
+cli.browser_help: en=7fd47199bb8d443a0fbf7469d635453cd6f57bb7c14efec91862c6b5b0c1b1e6 target=23b8945bc337c04d4a2f698c014ce53ef53f730484093c39cf0dc8914a6b557b context=05160cd292e9c18125f62b7112e06cbb474556847b449ad63d3fcbac5d8c0908
+cli.exec_help: en=1a44c9ea283ce8c4a9bb8ffab403e9cb36cf4a73fce832d91e79f355448b02eb target=870c96f52bab91cbf5be083ed3e8bdc5b28d285febea4ffb3fcd060913b8b987 context=c195f3c67a0669ce114d6498ccde81886964653ff3b5e1b1cd8051968080fcfd
+cli.exec_worker_help: en=aa501d6d894fdb20462595582d43e435364f200e677a50e52fd8d2b93706a957 target=80d1760634b765a160d5e9f12978866cb575ed300f39aefbb17d19d9a5f366ec context=e8bd9d8dfad7482a1018201fca4c89e9bd0bcbb944c6df39a0aaad0c1cde2ce8
+cli.exec_runtime: en=3eee7ca31076e48ccf7e1c8854c5647d0859e5341b26b10c8043e53825de72fd target=d9fecc90be9764a8b608162d0e1c42bd1096b6bfbd8f26deb711a7c9f310f35a context=8a1e4417475daf6d0de3398f511eb46fb591cbc586cd3a039e7813a139d84e33
+
+Semantic result: 126/126 keys read. No blockers, majors, or minors.
+Findings: es-w2-B01 and es-w2-B02, both nits in cli.browser for one-/two-cell alignment drift.
+Both byte-identical supervisor_line and exec_runtime.error judged legitimate after reading their context and production consumers.
+No read_public_copy call was needed: no value displayed as a redaction marker; the reader cannot serve these untracked targets or context sidecars.
+No catalogue, sidecar, ledger, allowance, generated file, or git state was modified.

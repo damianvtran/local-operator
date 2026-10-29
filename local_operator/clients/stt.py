@@ -36,12 +36,10 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
 
 from local_operator.stt import RemovedSpan
-from local_operator.stt.cleanup import (
-    CLIENT_RULES_PROVENANCE,
-    apply_client_rules,
-    choose_cleanup_language,
-    normalize_language_hint,
-    resolve_cleanup,
+from local_operator.stt.cleanup import normalize_language_hint, resolve_cleanup
+from local_operator.stt.radient_cleanup import (
+    normalize_radient_cleanup,
+    radient_cleanup_options,
 )
 
 logger = logging.getLogger(__name__)
@@ -302,34 +300,27 @@ def _transcribe_radient_sync(
         result = client.create_transcription(
             file_path=file_path,
             model=model,
-            prompt=prompt,
             language=language,
+            **radient_cleanup_options(resolve_cleanup(cleanup), prompt, language),
         )
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
-    raw_text = str(getattr(result, "text", "") or "")
-    detected = getattr(result, "language", None) or getattr(result, "language_code", None)
-    probability = getattr(result, "language_probability", None)
-    cleaned = None
-    if resolve_cleanup(cleanup) in ("auto", "client"):
-        cleaned = apply_client_rules(
-            raw_text,
-            language=choose_cleanup_language(
-                caller_language if caller_language is not None else language,
-                detected if isinstance(detected, str) else None,
-                float(probability) if isinstance(probability, (int, float)) else None,
-            ),
-        )
+    normalized = normalize_radient_cleanup(
+        result,
+        resolve_cleanup(cleanup),
+        caller_language=caller_language if caller_language is not None else language,
+    )
     return SttOutcome(
-        text=cleaned.text if cleaned else raw_text,
+        text=normalized.text,
         provider=str(getattr(result, "provider", "") or "radient"),
         model=getattr(result, "model", None) or model,
         path="provider_stt_radient",
-        raw_text=raw_text,
-        language=detected if isinstance(detected, str) else None,
-        cleanup=(CLIENT_RULES_PROVENANCE if cleaned else "none"),
-        removed=cleaned.removed if cleaned else (),
+        raw_text=normalized.raw_text,
+        raw_unavailable=normalized.raw_unavailable,
+        language=normalized.language,
+        cleanup=normalized.cleanup,
+        removed=normalized.removed,
     )
 
 

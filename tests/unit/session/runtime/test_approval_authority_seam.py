@@ -2389,8 +2389,6 @@ async def test_a_paired_phone_is_offered_the_loosening_in_its_report(
     pinned separately by ``test_the_capability_name_appears_only_where_it_has_to``
     (which drives the same sentence through both branches). Two pins, one fact.
     """
-    from local_operator.harness.approval import approvals_default_notice
-
     rig = await _phone_over_relay(tmp_path, monkeypatch)
     try:
         remote = [c for c in rig.live.runtime._clients.values() if c.locality == "remote"]
@@ -2409,9 +2407,6 @@ async def test_a_paired_phone_is_offered_the_loosening_in_its_report(
         # indistinguishable by accident, so the distinction it draws is "proved"
         # versus "did not say".
         assert rig.live.runtime._connection_may_loosen(frame, conn) is not True
-        offered = approvals_default_notice(may_loosen=False)
-        assert "has to come from the window" not in offered, offered
-        assert "needs the operator's own consent" in offered, offered
     finally:
         await rig.aclose()
 
@@ -2755,36 +2750,38 @@ async def test_a_parked_card_refused_twice_tells_the_pane_once(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_the_routed_report_speaks_for_the_connection_that_asks(
-    tmp_path: Path, no_anchor: None
+async def test_the_routed_default_is_a_capability_frame_and_only_the_capable_host_may_set_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_anchor: None
 ) -> None:
-    """Who the report is FOR, driven through the runtime (agent R3-1 = U10 = Q6).
+    """``/approvals default <mode>`` is authority-increasing SINCE 2026-10-23.
 
-    ``no_anchor`` pins the host fact the unproved branch's sentence turns on
-    (``operator_authority_unusable()`` reads the machine's real anchor file): without it
-    this cell goes red on any host that has run ``lop operator init``, for a reason that
-    says nothing about the code.
+    The runtime used to DECLINE the persist half ("a runtime cannot edit the
+    machine that launched it"), which made the frame ordinary and let any
+    connection that merely held the record key ask for it. The sink now honours
+    it — it writes ``tool_approval_mode`` through this process's settings facade,
+    which loosens every live session that never chose — so the frame demands the
+    same proof the bare ``auto`` form does.
 
-    The first version of this asked the seam's own predicate about a frame the
-    seam built, so it read a proof off a frame that had none and answered a
-    constant "this connection may not loosen" — measured on production objects: a
-    console that had just been told ``/approvals auto`` succeeded was then told
-    by ``/approvals default auto`` that loosening "has to come from the window
-    that started it", and offered retirement as an alternative.
+    Driven on real sockets, in both directions, because the property is the
+    SOCKET's: a console that holds the capability gets the write; a record-key
+    follower is refused and the file is untouched. Before the reclassification
+    the follower's frame reached the sink and the file changed.
 
-    What the runtime can actually verify is the connection's HANDSHAKE proof, so
-    the two directions are driven here on real sockets: a console offers a nonce,
-    verifies the runtime's proof and presents its own; a follower does neither.
-    The sentence each one gets is the one that is true for it.
+    ``no_anchor`` keeps the follower's refusal on the "no operator authority
+    here" branch regardless of whether this machine has run ``lop operator
+    init`` — the same host fact the sentence turns on.
     """
-    from local_operator.harness.approval import handshake_proof, mint_operator_cap
+    from local_operator.harness.approval import mint_operator_cap
 
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     cap = mint_operator_cap()
     live = await _serve(tmp_path, operator_cap=cap)
     console = follower = None
     try:
-        console = await _dial(live.record, cap=cap, client="attach")
-        assert console.salt, "the console's handshake did not complete"
+        # Dialled WITH the capability and presenting it on the frame — the same
+        # route ``test_the_console_holding_the_capability_loosens_the_gate``
+        # exercises for the bare ``auto`` form.
+        console = await _dial(live.record, client="daemon", cap=cap)
         capable = await _send(
             console,
             None,
@@ -2793,61 +2790,35 @@ async def test_the_routed_report_speaks_for_the_connection_that_asks(
                 "command": "approvals",
                 "args": "default auto",
                 "images": [],
-                "operator_handshake": handshake_proof(
-                    cap, client_nonce=console.nonce, server_salt=console.salt
-                ),
+                "operator_cap": console.proof(cap),
             },
         )
+        assert capable.get("op") != "error", capable
         capable_text = str(capable.get("data", {}).get("text", ""))
-        # The console IS the window that started this session, so the report may
-        # offer it both directions.
-        assert "/approvals ask|auto switches this session now" in capable_text, capable_text
-        assert "has to come from the window" not in capable_text, capable_text
+        assert "tool approvals: auto" in capable_text, capable_text
+        assert "tool_approval_mode" in capable_text, capable_text
+        assert "other conversations with their own choice keep it" in capable_text, capable_text
+        # THE WRITE REALLY HAPPENED, read back from the file rather than trusted
+        # from the receipt.
+        assert ConfigManager(tmp_path).get_config_value("tool_approval_mode") == "auto"
 
+        # The refused frame reaches no sink: put the file back to `ask` first,
+        # so "still ask" is evidence rather than the value the capable call left.
+        ConfigManager(tmp_path).set_config_value("tool_approval_mode", "ask")
         follower = await _dial(live.record, client="attach")
         unproved = await _send(
             follower,
             None,
             {"op": "slash_result", "command": "approvals", "args": "default auto", "images": []},
         )
-        unproved_text = str(unproved.get("data", {}).get("text", ""))
-        # THE CONSERVATIVE BRANCH NAMES THE REAL LEVERS, NOT THE SPAWNER (stage F).
-        # It used to say "has to come from the window that started it", which under
-        # revision 2 is the user-visible regression this redesign deletes: a
-        # background-started runtime HAS no window that started it. The pin is on
-        # the clause that identifies the branch, so the two branches stay
-        # distinguishable while the remedies inside are free to move.
-        assert "needs the operator's own consent" in unproved_text, unproved_text
-        assert "has to come from the window" not in unproved_text, unproved_text
-        assert "/approvals ask switches this session now" in unproved_text, unproved_text
-
-        # A WRONG proof is not a proof: it names the same frame the receipt does,
-        # on a connection that did not hand-shake, and must stay conservative.
-        forged = await _dial(live.record, client="attach")
-        try:
-            reply = await _send(
-                forged,
-                None,
-                {
-                    "op": "slash_result",
-                    "command": "approvals",
-                    "args": "default auto",
-                    "images": [],
-                    "operator_handshake": handshake_proof(
-                        mint_operator_cap(),
-                        client_nonce=console.nonce,
-                        server_salt=console.salt,
-                    ),
-                },
-            )
-            forged_text = str(reply.get("data", {}).get("text", ""))
-            assert "needs the operator's own consent" in forged_text, forged_text
-        finally:
-            forged.close()
+        assert unproved["op"] == "error", unproved
+        assert _REFUSAL.split(" — ")[0] in unproved["message"], unproved
+        assert ConfigManager(tmp_path).get_config_value("tool_approval_mode") == "ask"
     finally:
-        for conn in (console, follower):
-            if conn is not None:
-                conn.close()
+        if console is not None:
+            console.close()
+        if follower is not None:
+            follower.close()
         await live.close(tmp_path)
 
 
@@ -3204,22 +3175,19 @@ async def test_a_connection_to_a_runtime_with_no_anchor_is_refused_with_the_type
 
 
 @pytest.mark.asyncio
-async def test_the_report_offers_loosening_to_a_local_connection_that_can_sign(
+async def test_a_local_connection_needs_an_anchor_to_set_the_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_anchor: None
 ) -> None:
-    """The sentence half of the capability restoration (revision 2, §3).
+    """The anchor is what makes a LOCAL connection able to loosen (revision 2 §3).
 
-    ``no_anchor`` for the same reason as the routed-report cell above: the ``bare``
-    runtime's sentence depends on whether THIS machine has an installed anchor.
+    ``/approvals default auto`` is authority-increasing, so a pane attached to
+    another process's runtime may set the machine default only when this machine
+    has an operator anchor it can sign with. With one, the write lands; without
+    one, the refusal names the consent route and the file is untouched.
 
-    ``_connection_may_loosen`` decides which remedy a report may name, and under
-    revision 1 it answered from the spawn capability alone — so a pane attached
-    to a runtime another process started was told loosening "has to come from the
-    window that started it" while the revision-2 client was, at that very moment,
-    about to loosen it with a signature. With an anchor installed and a LOCAL
-    connection, the report must offer the loosening route; without one it must
-    keep the conservative sentence, because there is genuinely nothing to sign
-    with and naming a route that cannot work is the dead end UX round 2 removed.
+    ``no_anchor`` for the same reason as the routed-default cell above: the
+    ``bare`` runtime's refusal must not depend on whether THIS machine has run
+    ``lop operator init``.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     reset_operator_caps_for_tests()
@@ -3227,30 +3195,48 @@ async def test_the_report_offers_loosening_to_a_local_connection_that_can_sign(
     lived = await _serve(tmp_path, operator_cap=mint_operator_cap(), operator_anchor=anchor)
     bare = await _serve(tmp_path, operator_cap=mint_operator_cap(), operator_anchor=None)
     try:
-        for live, expect_offer in ((lived, True), (bare, False)):
-            conn = await _dial(live.record, client="attach")
-            try:
-                reply = await _send(
-                    conn,
-                    None,
-                    {
-                        "op": "slash_result",
-                        "command": "approvals",
-                        "args": "default auto",
-                        "images": [],
-                    },
-                )
-                text = str(reply.get("data", {}).get("text", ""))
-                offered = "needs the operator's own consent" not in text
-                assert offered is expect_offer, (expect_offer, text)
-                # And the one remedy that is true on BOTH is named either way. The
-                # sentence is spelled differently in the two cases — `ask|auto`
-                # when auto is offered, `ask` alone when it is not — so the pin is
-                # on the part that does not move, plus the presence of `auto`.
-                assert "/approvals ask" in text, text
-                assert ("ask|auto switches this session now" in text) is expect_offer, text
-            finally:
-                conn.close()
+        conn = await _dial(lived.record, client="attach")
+        try:
+            # A local pane signs the runtime's own challenge — the one presence
+            # gesture that makes it the operator here (revision 2 §3).
+            challenge = await _challenge(conn, action="loosen")
+            signature = _sign_for(config_dir(), challenge, "loosen", lived.record.session_id)
+            reply = await _send(
+                conn,
+                None,
+                {
+                    "op": "slash_result",
+                    "command": "approvals",
+                    "args": "default auto",
+                    "images": [],
+                    "operator_sig": signature["sig"],
+                    "operator_key_id": signature["key_id"],
+                },
+            )
+            assert reply["op"] != "error", reply
+            assert ConfigManager(tmp_path).get_config_value("tool_approval_mode") == "auto"
+        finally:
+            conn.close()
+
+        # Back to `ask`, so the refusal cell cannot pass on the value above.
+        ConfigManager(tmp_path).set_config_value("tool_approval_mode", "ask")
+        conn = await _dial(bare.record, client="attach")
+        try:
+            refused = await _send(
+                conn,
+                None,
+                {
+                    "op": "slash_result",
+                    "command": "approvals",
+                    "args": "default auto",
+                    "images": [],
+                },
+            )
+            assert refused["op"] == "error", refused
+            assert _REFUSAL.split(" — ")[0] in refused["message"], refused
+            assert ConfigManager(tmp_path).get_config_value("tool_approval_mode") == "ask"
+        finally:
+            conn.close()
     finally:
         await bare.close(tmp_path)
         await lived.close(tmp_path)

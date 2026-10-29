@@ -1,0 +1,33 @@
+{
+  "arguments": {
+    "keys_checked": 52,
+    "failures": []
+  },
+  "plural_selector_parity": {
+    "plural_keys": [],
+    "rows": [],
+    "failures": []
+  },
+  "technical_tokens": {
+    "hard_token_failures": [],
+    "soft_uppercase_differences_reviewed": [],
+    "note": "Only backtick spans, flags, angle tokens, URLs, paths and percent tokens are hard. Upper-case prose acronyms (API, CLI, MCP, OAuth, ID) were reviewed by hand; none is an identifier that must survive."
+  },
+  "direction_punctuation": {
+    "applicable": false,
+    "reason": "zh-CN is left-to-right; RTL punctuation, bidi controls and embedded-Latin direction checks are not applicable.",
+    "failures": []
+  },
+  "encoding": {
+    "non_nfc": [],
+    "bidi_controls": []
+  },
+  "numbers": {
+    "failures": []
+  },
+  "render": {
+    "keys_checked": 52,
+    "failures": []
+  },
+  "plural_render_samples": []
+}

@@ -338,6 +338,228 @@ def test_include_stored_appends_stored_rows(monkeypatch: Any, tmp_path: Path) ->
     assert stored.pid == 0 and stored.rss_bytes is None and stored.uptime_s == 0.0
 
 
+def test_a_stored_row_carries_its_own_exit_record(monkeypatch: Any, tmp_path: Path) -> None:
+    """When and why the runtime left, from ``sessions/<id>/runtime-exit.json``.
+
+    THE OPERATOR'S QUESTION this answers: ``stored`` used to be one word for both
+    "it idled out" and "it was killed", and neither age nor reason existed
+    anywhere the listing could read (2026-10-21).
+    """
+    from local_operator.session.runtime import journal
+
+    _stored(monkeypatch, [_StoredRow("dead00000001", "old work", 5.0)])
+    directory = tmp_path / "sessions" / "dead00000001"
+    directory.mkdir(parents=True)
+    journal.write_exit_record(
+        "dead00000001",
+        conversation_dir=directory,
+        pid=4242,
+        started_at=900.0,
+        reason="idle-exit",
+        detail="no work, no viewer, no wake within 90s",
+    )
+
+    info = collect_sessions(
+        tmp_path,
+        scan=_scan([]),
+        usage=_usage({}),
+        now=1000.0,
+        include_stored=True,
+    )
+
+    stored = next(line for line in info.lines if line.state == "stored")
+    assert stored.stopped_at_s is not None
+    assert stored.stop_reason == "idle-exit"
+    assert stored.stop_requested is False
+    # LAST_ACTIVITY KEEPS ITS MEANING: the transcript's clock, never the
+    # departure's. Conflating the two is what made "when did it stop"
+    # unanswerable in the first place.
+    assert stored.last_activity_s == 5.0
+
+    rows = collect_mod.session_rows(tmp_path, include_stored=True, stored_limit=10)
+    row = next(item for item in rows if item["session_id"] == "dead00000001")
+    assert row["stopped_at_s"] == stored.stopped_at_s
+    assert row["stop_reason"] == "idle-exit"
+    assert row["stop_requested"] is False
+
+
+def test_a_hostile_pressure_reading_does_not_take_the_listing_down(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """A corrupt reading refuses the ROW, never the command (review round 3, R3-1).
+
+    ``collect`` reads the record on the listing path, and its own guard covers
+    only ``json.loads``. A 400-digit integer literal therefore escaped the reader
+    through ``math.isfinite`` — which coerces to float — and
+    ``lop sessions --all`` died. The row must read unknown here, and this call
+    must return.
+    """
+    import json
+
+    _stored(monkeypatch, [_StoredRow("dead00000003", "old work", 5.0)])
+    directory = tmp_path / "sessions" / "dead00000003"
+    directory.mkdir(parents=True)
+    (directory / "runtime-exit.json").write_text(
+        json.dumps(
+            {
+                "v": 1,
+                "kind": "runtime-exit",
+                "session_id": "dead00000003",
+                "pid": 4242,
+                "started_at": 900.0,
+                "at": 950.0,
+                "reason": "idle-exit",
+                "detail": "",
+                "requested": False,
+                "build": "",
+                "pressure": {"free_disk_bytes": int("9" * 400), "load_1m": 1e400},
+            }
+        )
+    )
+
+    info = collect_sessions(
+        tmp_path,
+        scan=_scan([]),
+        usage=_usage({}),
+        now=1000.0,
+        include_stored=True,
+    )
+
+    stored = next(line for line in info.lines if line.state == "stored")
+    assert stored.stopped_at_s is None
+    assert stored.stop_reason == ""
+    assert stored.stop_requested is None
+
+
+def test_a_stored_row_without_a_record_reports_unknown(monkeypatch: Any, tmp_path: Path) -> None:
+    """No exit record is UNKNOWN — a SIGKILLed runtime writes none.
+
+    The three fields stay ``None``/""/``None`` rather than borrowing the
+    transcript's mtime, because that would dress an observation nobody made as a
+    fact (the same rule the stall readings follow).
+    """
+    _stored(monkeypatch, [_StoredRow("dead00000002", "crashed", 5.0)])
+    (tmp_path / "sessions" / "dead00000002").mkdir(parents=True)
+
+    info = collect_sessions(
+        tmp_path,
+        scan=_scan([]),
+        usage=_usage({}),
+        now=1000.0,
+        include_stored=True,
+    )
+
+    stored = next(line for line in info.lines if line.state == "stored")
+    assert stored.stopped_at_s is None
+    assert stored.stop_reason == ""
+    assert stored.stop_requested is None
+
+
+def test_a_stored_row_wears_no_previous_runs_exit_record(monkeypatch: Any, tmp_path: Path) -> None:
+    """THE RESUME→KILL CASE (review round 1, MAJOR-1).
+
+    Run A exits cleanly and leaves ``runtime-exit.json`` naming A. The session is
+    resumed and run B is SIGKILLed. The row is stored again, and A's record is
+    still on disk — reporting it would tell the operator this session idled out
+    at A's time, which is a departure B never made. The run record written at B's
+    boot is what distinguishes them: a run key that disagrees with the exit
+    record means the latest run reported no exit, so the row reads unknown.
+    """
+    from local_operator.session.runtime import journal
+
+    _stored(monkeypatch, [_StoredRow("dead00000003", "resumed then killed", 5.0)])
+    directory = tmp_path / "sessions" / "dead00000003"
+    directory.mkdir(parents=True)
+    journal.write_exit_record(
+        "dead00000003",
+        conversation_dir=directory,
+        pid=111,
+        started_at=100.0,
+        reason="idle-exit",
+        detail="no work, no viewer, no wake within 90s",
+    )
+    # The later, killed run announced itself at boot and never reported leaving.
+    journal.write_run_record("dead00000003", conversation_dir=directory, pid=222, started_at=900.0)
+
+    info = collect_sessions(
+        tmp_path,
+        scan=_scan([]),
+        usage=_usage({}),
+        now=2000.0,
+        include_stored=True,
+    )
+
+    stored = next(line for line in info.lines if line.state == "stored")
+    assert stored.stopped_at_s is None
+    assert stored.stop_reason == ""
+    assert stored.stop_requested is None
+
+
+def test_the_run_record_of_the_same_run_does_not_hide_its_exit_record(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The pre-clear window is not a false negative.
+
+    ``_clean_exit`` writes the exit record and then removes the run record, while
+    the lease still belongs to this process. A listing landing between the two
+    reads both rows with the SAME run key, which is this run — so the record is
+    still the truth about the last departure.
+    """
+    from local_operator.session.runtime import journal
+
+    _stored(monkeypatch, [_StoredRow("dead00000004", "just left", 5.0)])
+    directory = tmp_path / "sessions" / "dead00000004"
+    directory.mkdir(parents=True)
+    journal.write_exit_record(
+        "dead00000004",
+        conversation_dir=directory,
+        pid=333,
+        started_at=300.0,
+        reason="idle-exit",
+    )
+    journal.write_run_record("dead00000004", conversation_dir=directory, pid=333, started_at=300.0)
+
+    info = collect_sessions(
+        tmp_path,
+        scan=_scan([]),
+        usage=_usage({}),
+        now=2000.0,
+        include_stored=True,
+    )
+
+    stored = next(line for line in info.lines if line.state == "stored")
+    assert stored.stop_reason == "idle-exit"
+    assert stored.stopped_at_s is not None
+
+
+def test_a_live_row_never_wears_a_previous_lifes_exit_record(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """The record is HISTORY and only a STORED row may show it.
+
+    A session that exited cleanly and was resumed has an old record on disk while
+    a runtime is live; reading it onto the live row would report a stop for a
+    process that is running.
+    """
+    from local_operator.session.runtime import journal
+
+    _stored(monkeypatch, [])
+    directory = tmp_path / "sessions" / "sess"
+    directory.mkdir(parents=True)
+    journal.write_exit_record(
+        "sess", conversation_dir=directory, pid=1, started_at=1.0, reason="idle-exit"
+    )
+
+    info = collect_sessions(
+        tmp_path, scan=_scan([(_Record(pid=1), "live")]), usage=_usage({}), now=1000.0
+    )
+
+    live = next(line for line in info.lines if line.state == "live")
+    assert live.stopped_at_s is None
+    assert live.stop_reason == ""
+    assert live.stop_requested is None
+
+
 def test_stored_rows_never_inflate_the_fleet_counters(monkeypatch: Any, tmp_path: Path) -> None:
     """A stored session has no runtime; ``total``/``live`` must not count it."""
     _stored(monkeypatch, [_StoredRow("dead00000001", "old work", 5.0)])

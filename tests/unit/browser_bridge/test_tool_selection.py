@@ -127,6 +127,9 @@ def test_scroll_logs_and_tabs_are_advertised_actions() -> None:
             "request_access",
             "await_access",
             "cancel_access",
+            # The read-only DOM query needs a page-script primitive cmux does not
+            # expose, like the other structured reads.
+            "query",
             # File transfer joined the set for a reason of its own: cmux drives a
             # terminal browser panel and has no primitive for handing a file to a
             # page or taking one from it, and the action list and the degrade check
@@ -139,6 +142,12 @@ def test_scroll_logs_and_tabs_are_advertised_actions() -> None:
             "styles",
             "hit_test",
             "ancestors",
+            # Network telemetry uses a standing CDP Network-domain subscription
+            # on the desktop host; cmux has no equivalent request stream.
+            "network_start",
+            "network_stop",
+            "network_read",
+            "network_clear",
         }
     )
 

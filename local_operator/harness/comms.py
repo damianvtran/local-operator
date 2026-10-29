@@ -89,7 +89,7 @@ from local_operator.harness.types import (
     StaleAside,
 )
 from local_operator.session import subagent_ledger as ledger
-from local_operator.session.transcript import TRANSCRIPT_FILENAME, TranscriptEntry
+from local_operator.session.transcript import TranscriptEntry
 
 if TYPE_CHECKING:
     from local_operator.session.session import Session
@@ -101,6 +101,23 @@ logger = logging.getLogger(__name__)
 #: them to the model; these lifecycle facts never enter LLM history and exist
 #: only to correlate the parent's action with a later child reply.
 HUB_COMMUNICATION_CUSTOM_TYPE = "hub_communication"
+
+#: How long a child's UNPROMPTED note may hold back its parent's wake while
+#: the parent is mid-turn; 0 restores the immediate wake.
+#:
+#: WHY 20 s, from 7 days of top-level transcripts (9,271 child->parent notes):
+#: 5,535 were followed by the same job's settle within 120 s, 3,048 of them
+#: within 10 s and 1,097 more within 10-20 s, so a 20 s window coalesces ~75%
+#: of the double-wakes a 120 s window would, while a genuine "I am blocked"
+#: note — the one case where the parent must act before the child finishes —
+#: reaches it at most 20 s late. Past 20 s the curve flattens: each extra
+#: second buys few coalesced wakes and delays every real mid-job note.
+#:
+#: Deliberately NOT a config key yet: a ``/settings`` row re-hashes the
+#: ``wire.settings`` catalogue (every locale needs a fresh audited ledger pass
+#: before it ships again), and nothing yet says an operator needs to tune this.
+#: Read at call time (a module global), so a test patches it here.
+HUB_NOTE_WAKE_GRACE_S = 20.0
 
 #: Opening and closing tags of the model-facing envelope
 #: :meth:`SubagentComms._format_to_child` wraps parent→child text in. A hub
@@ -374,6 +391,11 @@ class ChildInfo:
     #: ``""``. Read by a parent asking "why did that child stop?" after the job
     #: row was swept, which is exactly when this roster is the only surface
     #: left that can answer.
+    last_step: str = ""
+    wip_ref: str = ""
+    death_cause: str = ""
+    wip_files: int = 0
+    wip_at: float = 0.0
     cut_off_cause: str = ""
     #: Terminal payloads resolved with the same lifecycle precedence as
     #: ``status``. These survive the job-manager sweep so reconnecting readers
@@ -573,6 +595,11 @@ class _ChildRecord:
     #: job manager sweeps settled rows after its retention window while this
     #: record outlives them, so without it ``hub op='list'`` could say a child
     #: failed but never WHY once its row aged out.
+    last_step: str = ""
+    wip_ref: str = ""
+    death_cause: str = ""
+    wip_files: int = 0
+    wip_at: float = 0.0
     cut_off_cause: str = ""
     #: The child's terminal payload. Kept with the outcome because status and
     #: content are one durable fact after the ephemeral job row is swept.
@@ -1098,6 +1125,11 @@ class RosterPass:
             resumable=resumable,
             age_s=age,
             detail=detail,
+            last_step=record.last_step,
+            wip_ref=record.wip_ref,
+            death_cause=record.death_cause,
+            wip_files=record.wip_files,
+            wip_at=record.wip_at,
             cut_off_cause=record.cut_off_cause,
             result_text=result_text,
             error_text=error_text,
@@ -1303,7 +1335,12 @@ class SubagentComms:
         cached = self._transcript_probes.get(session_dir)
         if cached is not None and now - cached[1] < TRANSCRIPT_PROBE_TTL_S:
             return cached[0]
-        present = (session_dir / TRANSCRIPT_FILENAME).exists()
+        from local_operator.session import compression
+
+        # Both forms. This probe decides whether the viewer treats the child as
+        # having durable history at all; a compressed transcript answering
+        # "absent" hid the trajectory and showed the missing-history notice.
+        present = compression.has_transcript(session_dir)
         self._transcript_probes[session_dir] = (present, now)
         return present
 
@@ -2024,6 +2061,26 @@ class SubagentComms:
         record.ended_by = stamp.prior_ended_by
         record.cancel_reason = stamp.prior_cancel_reason
 
+    def note_checkpoint(
+        self,
+        job_id: str,
+        *,
+        last_step: str = "",
+        wip_ref: str = "",
+        death_cause: str = "",
+        wip_files: int = 0,
+        wip_at: float = 0.0,
+    ) -> None:
+        """Carry recovery evidence past the live job's retention window."""
+        record = self._records.get(job_id)
+        if record is not None:
+            record.last_step = last_step or record.last_step
+            record.wip_ref = wip_ref
+            record.death_cause = death_cause or record.death_cause
+            record.wip_files = wip_files
+            record.wip_at = wip_at
+            self._notify_change()
+
     def apply_lane_evidence(self, evidence: "Iterable[ledger.LaneEvidence]") -> None:
         """Fold the boot reconcile pass's findings onto the live records.
 
@@ -2039,6 +2096,13 @@ class SubagentComms:
             if item.ended_by or item.cancel_reason:
                 record.ended_by = item.ended_by
                 record.cancel_reason = item.cancel_reason
+            record.last_step = item.last_step or record.last_step
+            record.wip_ref = item.wip_ref or record.wip_ref
+            # Reconciliation fills missing evidence; a settled loop's own
+            # classification outranks an earlier stop request that raced it.
+            record.death_cause = record.cut_off_cause or record.death_cause or item.death_cause
+            record.wip_files = item.wip_files or record.wip_files
+            record.wip_at = item.wip_at or record.wip_at
             if item.never_settled:
                 record.lane_never_settled = True
 
@@ -2158,6 +2222,11 @@ class SubagentComms:
                     "outcome": record.outcome,
                     # Rides with the outcome: both are the same durable fact,
                     # and both must outlive the job row the manager sweeps.
+                    "last_step": record.last_step,
+                    "wip_ref": record.wip_ref,
+                    "death_cause": record.death_cause,
+                    "wip_files": record.wip_files,
+                    "wip_at": record.wip_at,
                     "cut_off_cause": record.cut_off_cause,
                     "result_text": record.result_text,
                     "error_text": record.error_text,
@@ -2292,6 +2361,11 @@ class SubagentComms:
                 # Missing defaults to "", which is right for a sidecar written
                 # before this field existed: it reproduces today's behaviour for
                 # old rows and cannot invent a cut-off that was never recorded.
+                last_step=str(row.get("last_step") or ""),
+                wip_ref=str(row.get("wip_ref") or ""),
+                death_cause=str(row.get("death_cause") or ""),
+                wip_files=int(row.get("wip_files") or 0),
+                wip_at=float(row.get("wip_at") or 0),
                 cut_off_cause=str(row.get("cut_off_cause") or ""),
                 result_text=(
                     str(row["result_text"]) if row.get("result_text") is not None else None
@@ -2363,8 +2437,9 @@ class SubagentComms:
                 0,
                 error=detail,
             )
-        transcript_file = record.session_dir / TRANSCRIPT_FILENAME
-        if not transcript_file.exists():
+        from local_operator.session import compression
+
+        if not compression.has_transcript(record.session_dir):
             return PeekWindow(
                 job_id,
                 record.label,
@@ -3133,7 +3208,9 @@ class SubagentComms:
                 f"{record.label} is already resumed as job {live.job_id}; two agents sharing "
                 "one transcript would overwrite each other's history"
             )
-        if not (record.session_dir / TRANSCRIPT_FILENAME).exists():
+        from local_operator.session import compression
+
+        if not compression.has_transcript(record.session_dir):
             return None, f"transcript for {record.label} is gone from disk; launch a new one"
         # Relaunch under the child's REAL parent when that parent is live, so
         # the continuation lands in the ledger that owns it and its replies
@@ -3263,6 +3340,13 @@ class SubagentComms:
             jobs_manager=jobs,
             model_spec=model_spec,
             resume_dir=record.session_dir,
+            resume_facts={
+                "cut_off_cause": record.cut_off_cause,
+                "death_cause": record.death_cause,
+                "error_text": record.error_text,
+                "last_step": record.last_step,
+                "wip_ref": record.wip_ref,
+            },
             agent=agent,
             effort=effort,
             model_selector=selector,
@@ -3380,7 +3464,22 @@ class SubagentComms:
                 ),
             },
         )
-        self._parent_session_of(record).queue_aside(lambda: message)
+        parent_session = self._parent_session_of(record)
+        coalesce = getattr(parent_session, "queue_aside_coalesced", None)
+        jobs = self._owning_jobs(job_id)
+        settled_event = getattr(jobs, "settled_event", None) if jobs is not None else None
+        if callable(coalesce) and callable(settled_event):
+            # Only the WAKE waits; the note is queued now (see
+            # ``Session.queue_aside_coalesced`` for the measured double-wake this
+            # removes). Keyed on the job manager that owns the row, so a
+            # grandchild's note coalesces with ITS settle in the lead's ledger.
+            coalesce(
+                lambda: message,
+                settled=settled_event(record.job_id if record is not None else job_id),
+                grace_s=HUB_NOTE_WAKE_GRACE_S,
+            )
+        else:
+            parent_session.queue_aside(lambda: message)
         return "delivered to the parent (it will read this at its next step)"
 
     def _parent_session_of(self, record: _ChildRecord | None) -> Any:
@@ -3972,23 +4071,62 @@ def _call_line(call: Any) -> str:
     return head
 
 
+def is_peek_step_entry(entry: Any) -> bool:
+    """Whether one transcript entry renders as a peek step — THE renderer's filter.
+
+    ONE predicate, and every caller of the step stream uses it (this module's
+    ``peek``, and ``tools/builtin.py``'s ``_peek_message_entries``, whose step
+    arithmetic has to count the same rows the renderer numbers). A second
+    definition of "what is a step" is how a window's cursor and the steps under
+    it drift apart.
+
+    Two classes are NOT steps:
+
+    * anything that is not a ``message`` row — compaction markers and host
+      bookkeeping (wake schedules, checkpoints);
+    * ``session_credential_binding_notice.v1``, the account-change notice. A
+      peek's steps are pasted into a TOOL RESULT, i.e. straight into model
+      context, and since round 1 of #3098 that sentence NAMES THE ACCOUNT
+      (``network/credentials/messages.py``). This type is operator-facing only
+      — see the surface list on ``SESSION_BINDING_NOTICE_MESSAGE_TYPE`` in
+      ``harness/message_types.py``, whose first entry is the transcript row and
+      whose second is "nothing else". The row used to render here as an
+      "account change" step; a parent that peeked its child got the child's
+      account label (an email) back as model text, which is exactly the
+      exclusion that type promises.
+    """
+    if getattr(entry, "type", "") != "message":
+        return False
+    payload = getattr(entry, "payload", None) or {}
+    if payload.get("kind") == "custom":
+        return payload.get("custom_type") != SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    return True
+
+
 def _render_transcript_steps(entries: list[Any]) -> list[PeekStep]:
     """Render transcript entries as numbered peek steps.
 
-    Only LLM-visible rows become steps — compaction markers and host
-    bookkeeping (wake schedules, checkpoints) are invisible to the child's
-    reasoning and would only spend the parent's context saying nothing. A
-    hub message renders by its direction so a parent reading its own child
-    sees the conversation, not raw JSON.
+    Only rows :func:`is_peek_step_entry` admits become steps — compaction
+    markers and host bookkeeping (wake schedules, checkpoints) are invisible to
+    the child's reasoning and would only spend the parent's context saying
+    nothing, and the account-change notice is operator-facing only. A hub
+    message renders by its direction so a parent reading its own child sees the
+    conversation, not raw JSON.
+
+    NUMBERING COUNTS ONLY WHAT IS RENDERED, which is what keeps the step stream
+    dense (1..N, no gaps) and therefore what keeps ``peek``'s ranges and
+    cursors meaningful: a row filtered out here consumes no number, so a
+    caller's "give me from step N+1" cannot land inside a hole.
     """
     steps: list[PeekStep] = []
     index = 0
     for entry in entries:
-        payload = entry.payload or {}
-        if entry.type == "message":
-            index += 1
-            steps.append(_render_message_step(index, payload))
-        # compaction + custom bookkeeping: deliberately not a step.
+        if not is_peek_step_entry(entry):
+            # compaction + custom bookkeeping, and the account-change notice:
+            # deliberately not a step, and deliberately not numbered.
+            continue
+        index += 1
+        steps.append(_render_message_step(index, entry.payload or {}))
     return steps
 
 
@@ -4053,11 +4191,9 @@ def _render_custom_step(index: int, payload: dict[str, Any]) -> PeekStep:
         # that date still carries the rows: without it a parent peeking an old
         # child would see the raw wire type where it used to read a phrase.
         return PeekStep(index, "system", "credential masked", _clip(str(details.get("text", ""))))
-    if custom_type == SESSION_BINDING_NOTICE_MESSAGE_TYPE:
-        # The account-change notice (mesh credential binding, slice B). Like the
-        # row above, this is a notice the operator is meant to READ, and the
-        # text is already a rendered sentence — so the peek names what happened
-        # in words rather than printing the wire type over a sentence that
-        # already says it.
-        return PeekStep(index, "system", "account change", _clip(str(details.get("text", ""))))
+    # NO BRANCH FOR SESSION_BINDING_NOTICE_MESSAGE_TYPE, and its absence is the
+    # fix rather than an oversight: that row never reaches this function, because
+    # ``is_peek_step_entry`` refuses it (the sentence names the account, and a
+    # step's body is pasted into model context). A renderer arm here is exactly
+    # how the leak comes back the next time someone adds a reader.
     return PeekStep(index, "system", custom_type, _clip(str(details.get("text", ""))))

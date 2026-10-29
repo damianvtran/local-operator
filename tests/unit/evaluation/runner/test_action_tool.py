@@ -54,10 +54,12 @@ from local_operator.evaluation.protocol import (
     FrameRef,
     FrameSize,
     Observation,
+    TypeAction,
 )
 from local_operator.evaluation.runner.action_tool import (
     _HINT_SHAPE,
     _NO_PENDING_OBSERVATION_REFUSAL,
+    ACTION_TOOL_DESCRIPTION,
     ACTION_TOOL_NAME,
     REJECTION_CLASS_KEY,
     PendingObservationToken,
@@ -337,7 +339,6 @@ def test_projection_only_rephrases_owned_nonblank_patterns() -> None:
         ("double_click", "frame_id"),
         ("drag", "frame_id"),
         ("scroll", "frame_id"),
-        ("type", "text"),
         ("finish", "reason"),
         ("ask_user", "request_id"),
         ("ask_user", "question"),
@@ -346,10 +347,16 @@ def test_projection_only_rephrases_owned_nonblank_patterns() -> None:
     assert Draft202012Validator(frame).is_valid("x" * 256)
     assert not Draft202012Validator(frame).is_valid("x" * 257)
     # A search without the anchors retries a greedy prefix at every position:
-    # a valid-length whitespace-only type payload would become quadratic work.
+    # a valid-length whitespace-only reason would become quadratic work.
+    reason = fields[("finish", "reason")]
+    assert reason["pattern"].startswith("^") and reason["pattern"].endswith("$")
+    assert not Draft202012Validator(reason).is_valid(" " * reason["maxLength"])
+    # ``type.text`` is keystrokes, not a label: whitespace is valid input there
+    # (a newline presses Return), so the offer carries no nonblank pattern.
     text = fields[("type", "text")]
-    assert text["pattern"].startswith("^") and text["pattern"].endswith("$")
-    assert not Draft202012Validator(text).is_valid(" " * text["maxLength"])
+    assert "pattern" not in text
+    assert Draft202012Validator(text).is_valid("\n")
+    assert not Draft202012Validator(text).is_valid("")
     assert Draft202012Validator(text).is_valid("\n" + "x" * (text["maxLength"] - 2) + "\n")
 
 
@@ -1262,3 +1269,239 @@ def test_the_envelope_hint_for_the_same_class_still_states_the_whole_contract(
         assert hint
         assert "observation_id" not in hint, class_key
         assert "public_observations" not in hint, class_key
+
+
+@pytest.mark.asyncio
+async def test_a_standard_key_alias_is_bound_and_executed_under_its_canonical_name() -> None:
+    """Normalisation happens BEFORE the batch is bound.
+
+    The main16 OSWorld evidence includes refusals of ``Return``, ``Escape``
+    and ``Page_Down``. The call must now execute, and the parsed batch handed
+    to the adapter must carry canonical names, so its action-batch id matches
+    what the canonical spelling produces. Raw model-response evidence is not
+    rewritten and may still contain aliases.
+    """
+
+    pending = _observation(2, frames=(_frame("screen"),))
+    offline = _Offline(pending)
+    result = await offline.call(
+        {
+            "actions": [
+                {"kind": "key", "keys": ["Escape"]},
+                {"kind": "key", "keys": ["ctrl", "minus"]},
+                {"kind": "key", "keys": ["Return"]},
+            ]
+        }
+    )
+
+    assert not result.is_error, result.content
+    (batch,) = offline.execute.batches
+    assert [action.keys for action in batch.actions] == [  # type: ignore[union-attr]
+        ("ESC",),
+        ("CTRL", "-"),
+        ("ENTER",),
+    ]
+    canonical = ActionBatch.model_validate(
+        {
+            **batch.model_dump(),
+            "actions": [
+                {**action.model_dump(), "keys": keys}
+                for action, keys in zip(batch.actions, (["esc"], ["ctrl", "-"], ["enter"]))
+            ],
+        }
+    )
+    assert canonical_digest("adapter-action-batch-v1", batch) == canonical_digest(
+        "adapter-action-batch-v1", canonical
+    )
+
+
+#: The field-placement refusals measured in the main16 evidence, with the
+#: repair each hint must now state on top of the generic "not a field" line.
+_PLACEMENT_REPAIRS = [
+    (
+        "wait-on-key",
+        {
+            "actions": [
+                {"kind": "type", "text": "ls"},
+                {"kind": "key", "keys": ["enter"], "wait": 1},
+            ]
+        },
+        [
+            '"wait" is not a field of a "key" action',
+            "A pause is its own action",
+            '[{"kind": "key", "keys": ["enter"]}, {"kind": "wait", "duration_ms": 1000}]',
+        ],
+    ),
+    (
+        "wait-ms-on-key",
+        {"actions": [{"kind": "key", "keys": ["enter"], "wait_ms": 500}]},
+        ['"wait_ms" is not a field', '{"kind": "wait", "duration_ms": 1000}'],
+    ),
+    (
+        "key-for-keys",
+        {"actions": [{"kind": "key", "key": "End"}]},
+        ['"key" is not a field of a "key" action', 'Did you mean "keys"?'],
+    ),
+    (
+        "duplicate-keys",
+        {"actions": [{"kind": "key", "keys": ["down", "down"]}]},
+        [
+            '"keys" in a "key" action was refused',
+            "cannot contain duplicate keys",
+            'send 2 separate actions, each {"kind": "key", "keys": ["down"]}',
+        ],
+    ),
+    # The 2026-10-28 session-arm refusals, each with the repair it now carries.
+    (
+        "page-up-twice",
+        {"actions": [{"kind": "key", "keys": ["Page_Up", "Page_Up"]}]},
+        ['each {"kind": "key", "keys": ["pageup"]}'],
+    ),
+    (
+        "chord-spells-text",
+        {"actions": [{"kind": "key", "keys": ["e", "c", "h", "o", " ", "A"]}]},
+        ["pressed together as one chord", '{"kind": "type", "text": "echo A"}'],
+    ),
+    (
+        "word-as-a-key",
+        {"actions": [{"kind": "key", "keys": ["comp.scm"]}]},
+        ["'comp.scm' is not an accepted key name", '{"kind": "type", "text": "comp.scm"}'],
+    ),
+    (
+        "plus-joined-chord",
+        {"actions": [{"kind": "key", "keys": ["ctrl+t"]}]},
+        ['a chord lists each key separately: send "keys": ["ctrl", "t"]'],
+    ),
+    (
+        "ctrl-plus-plus",
+        {"actions": [{"kind": "key", "keys": ["ctrl++"]}]},
+        ['send "keys": ["ctrl", "+"]'],
+    ),
+    (
+        "names-the-failing-action",
+        {
+            "actions": [
+                *[{"kind": "wait", "duration_ms": 5}] * 6,
+                {"kind": "key", "keys": ["<<'SCM'"]},
+                {"kind": "wait", "duration_ms": 5},
+                {"kind": "key", "keys": ["(define"]},
+            ]
+        },
+        ["(action index 6)", '{"kind": "type", "text": "<<\'SCM\'"}'],
+    ),
+    (
+        "batch-over-the-bound",
+        {"actions": [{"kind": "wait", "duration_ms": 5}] * 65},
+        ["more than 64 actions", "send at most 64"],
+    ),
+    (
+        "zero-scroll",
+        {"actions": [{"kind": "scroll", "frame_id": "screen", "x": 1, "y": 1, "delta_y": 0}]},
+        ["scroll requires a non-zero delta", "delta_y > 0 scrolls up and < 0 scrolls down"],
+    ),
+    (
+        "finish-behind-wait",
+        {
+            "actions": [
+                {"kind": "wait", "duration_ms": 500},
+                {"kind": "finish", "status": "infeasible", "reason": "placeholder"},
+            ]
+        },
+        ["must be the only action in their batch", "send the finish alone"],
+    ),
+    (
+        "cmd-is-ambiguous",
+        {"actions": [{"kind": "key", "keys": ["cmd", "a"]}]},
+        ["'cmd' is not an accepted key name", '"ctrl" for the application shortcut', '"meta"'],
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "arguments", "expected"),
+    _PLACEMENT_REPAIRS,
+    ids=[case[0] for case in _PLACEMENT_REPAIRS],
+)
+async def test_a_misplaced_field_refusal_shows_the_corrected_form(
+    name: str, arguments: dict[str, Any], expected: list[str]
+) -> None:
+    """Still REFUSED -- the contract stays strict -- but the repair is stated.
+
+    The corrected example is in this tool's own projected shape, so it never
+    re-advertises ``observation_id``.
+    """
+
+    pending = _observation(2, frames=(_frame("screen"),))
+    offline = _Offline(pending)
+    result = await offline.call(arguments)
+
+    assert result.is_error, name
+    assert offline.execute.batches == []
+    text = result.content[0].text  # type: ignore[union-attr]
+    for phrase in expected:
+        assert phrase in text, (name, text)
+    assert "observation_id" not in text, name
+    assert 'use "meta" instead' not in text, name
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["\n", " "])
+async def test_whitespace_type_now_runs(text: str) -> None:
+    """Measured refused on 2026-10-28; a newline or a space is a real keystroke."""
+
+    pending = _observation(2, frames=(_frame("screen"),))
+    offline = _Offline(pending)
+    result = await offline.call({"actions": [{"kind": "type", "text": text}]})
+
+    assert not result.is_error
+    assert [batch.actions[0] for batch in offline.execute.batches] == [
+        TypeAction(observation_id=pending.observation_id, text=text)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_misspelled_key_is_not_answered_as_text() -> None:
+    """The type repair is only for a name NO key is near: ``pagedwn`` is a typo."""
+
+    offline = _Offline(_observation(2, frames=(_frame("screen"),)))
+    result = await offline.call({"actions": [{"kind": "key", "keys": ["pagedwn"]}]})
+
+    text = result.content[0].text  # type: ignore[union-attr]
+    assert result.is_error
+    assert 'use "pagedown" instead' in text
+    assert '"type" action' not in text
+
+
+def test_the_description_states_the_chord_and_scroll_sign() -> None:
+    """The two facts the schema cannot carry, kept short (cache prefix)."""
+
+    assert "ONE chord pressed together" in ACTION_TOOL_DESCRIPTION
+    assert "delta_y > 0 is up, < 0 is down" in ACTION_TOOL_DESCRIPTION
+    assert len(ACTION_TOOL_DESCRIPTION) < 300
+
+
+@pytest.mark.parametrize(
+    ("sent", "chord"),
+    [
+        ("ctrl+t", ["ctrl", "t"]),
+        ("ctrl++", ["ctrl", "+"]),
+        ("ctrl+alt+t", ["ctrl", "alt", "t"]),
+        ("a+b", ["a", "b"]),
+        # A suggestion the validator would refuse in turn is never offered.
+        ("A+B", None),
+        ("a+a", None),
+        ("ctrl+", None),
+        ("ctrl+++", None),
+        ("+", None),
+    ],
+)
+def test_a_plus_joined_suggestion_is_always_an_accepted_chord(
+    sent: str, chord: list[str] | None
+) -> None:
+    from local_operator.evaluation.protocol import KeyAction
+    from local_operator.evaluation.runner.provider_client import _joined_chord
+
+    assert _joined_chord(sent) == chord
+    if chord is not None:
+        KeyAction(observation_id="o", keys=tuple(chord))

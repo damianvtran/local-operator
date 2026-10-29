@@ -34,9 +34,11 @@ from local_operator.evaluation.evidence.models import (
     EnvironmentStepPayload,
     ErrorPayload,
     EvidenceArtifactRef,
+    ModelRequestPayload,
     ModelResponsePayload,
     ObservationPayload,
     ReconciliationPayload,
+    RouteIdentity,
     ScoreArtifact,
     UsageCostPayload,
 )
@@ -48,6 +50,7 @@ from local_operator.evaluation.runner.episode import (
     MAX_STDERR_TAIL_CHARS,
     EpisodeConfig,
     EpisodeRunner,
+    _canary_values_outside_own_identity,
     _canary_values_outside_own_roots,
     _failure_diagnostic_text,
     _failure_layer,
@@ -226,6 +229,44 @@ async def test_paper_action_overhead_funds_actual_execute_timeout(
 
     assert outcome.status == "completed", outcome.diagnostic
     assert adapter.timeouts["execute"] == [35.0]
+
+
+@pytest.mark.asyncio
+async def test_a_slow_score_seals_and_reports_the_episodes_steps(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """A score that takes real time still reaches ``scoring_result``.
+
+    The production numbers are 300 s (retired) and 1800 s (current); waiting
+    either is not a unit test, so 0.4 s stands in for a slow judge and 2.0 s
+    for the new budget. ``FakeAdapter`` replaces the supervisor, so the
+    deadline itself is exercised in ``test_rpc`` -- what this test holds is
+    the episode half of the incident: the run is not discarded, the score is
+    sealed in a verified bundle, and the timeout sentence, had it fired,
+    would have carried the step count the runner supplies.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id, score_delay=0.4)
+    runner = _runner(
+        tmp_path,
+        episode_id,
+        adapter=adapter,
+        model=ScriptedModel(["step", "finish"]),
+        config=build_config(tmp_path, score_timeout=2.0),
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "completed", outcome.diagnostic
+    assert outcome.score is not None and outcome.score.status == "scored"
+    root = outcome.bundle_root
+    assert root is not None
+    report = verify_bundle(root)
+    assert report.valid, [issue.code for issue in report.issues]
+    assert "scoring_result" in _kinds(root)
+    # The message is built one layer below this fake; what the runner owes it
+    # is the step count, which is the fact the incident's fatal lacked.
+    assert adapter.timeout_contexts["score"] == ["episode ran 1 of 4 steps"]
 
 
 @pytest.mark.asyncio
@@ -3578,6 +3619,7 @@ async def test_host_refusal_does_not_publish_supplied_answer(
         *,
         timeout: float,
         execution_overhead_seconds_per_action: float = 0.0,
+        timeout_context: str | None = None,
     ) -> Any:
         if method == "ask_user_exchange":
             adapter.calls.append(method)
@@ -3590,6 +3632,7 @@ async def test_host_refusal_does_not_publish_supplied_answer(
             result_type,
             timeout=timeout,
             execution_overhead_seconds_per_action=execution_overhead_seconds_per_action,
+            timeout_context=timeout_context,
         )
 
     adapter._call_raw = refusing
@@ -3951,6 +3994,125 @@ async def test_scoring_details_publish_own_path_but_refuse_real_secret(
         for path in (refused.bundle_root / "artifacts").iterdir()
         if path.is_file()
     )
+
+
+# A route whose provider id is long enough to be canaried (``RedactionSet``
+# ignores values under ``_MIN_CANARY_BYTES``), shaped like the OSWorld rig's: an aggregator
+# provider and a folded vendor/model id.
+_IDENTITY_ROUTE = RouteIdentity(
+    provider_id="example-router",
+    route_id="example-router:vendor_smodel-x-1017",
+    model_id="vendor_smodel-x-1017",
+)
+
+
+@pytest.mark.asyncio
+async def test_a_resolved_value_equal_to_the_route_is_not_a_canary(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """The measured 2026-10-27 refusal, at the write that actually refused.
+
+    The OSWorld rig resolves its non-secret infra constants through the sealed
+    ref channel, so the JUDGE's provider name became a canary. Once the episode
+    itself was routed through that same provider, the FIRST ``model_request``
+    event -- which carries ``requested_route`` -- was refused before any model
+    response was recorded, and the episode was abandoned with
+    ``evidence-evidencefailure`` (operation ``append:model_request``). The
+    manifest had already sealed that same route identity unscanned, so the
+    canary could not protect anything; it could only kill the run.
+
+    (a) The legitimate case seals: the route-equal value is resolved and
+    widens nothing, and the request event carries it.
+    (b) The guarantee is unchanged: in the same configuration a genuine secret
+    the capture carries still refuses the scoring receipt.
+    """
+
+    provider_value = _IDENTITY_ROUTE.provider_id
+    secret = "fake-credential-7f3a9c"
+    refs = {"JUDGE_PROVIDER_ROW": provider_value, "API_KEY_ROW": secret}
+
+    async def _run(base: Path, case_id: str, details_text: str) -> Any:
+        base.mkdir()
+        payload = json.dumps(
+            {"evaluator_diagnostics": {"stderr": {"text": details_text}}},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        sha = hashlib.sha256(payload).hexdigest()
+        (base / "artifacts").mkdir()
+        (base / "artifacts" / sha).write_bytes(payload)
+        details = EvidenceArtifactRef(
+            sha256=sha, media_type="application/json", byte_count=len(payload)
+        )
+        model = ScriptedModel(["step", "finish"])
+        model.route = _IDENTITY_ROUTE
+        return await _runner(
+            base,
+            case_id,
+            adapter=FakeAdapter(
+                base, case_id, score=ScoreArtifact(status="scored", binary=0, details=details)
+            ),
+            model=model,
+            spec=replace(
+                build_spec(case_id),
+                requested_route=_IDENTITY_ROUTE,
+                secret_refs=tuple(SecretRef(name=name) for name in refs),
+            ),
+            secrets=StaticSecretResolver(refs),
+        ).run()
+
+    # (a) Before the fix this abandoned at ``append:model_request``.
+    sealed = await _run(tmp_path / "own", f"{episode_id}-own", "judge answered")
+    assert sealed.status == "completed", sealed.diagnostic
+    assert sealed.comparability_label == "comparable"
+    assert sealed.bundle_root is not None and verify_bundle(sealed.bundle_root).valid
+    requests = payloads(sealed.bundle_root, ModelRequestPayload)
+    assert requests and all(
+        request.requested_route.provider_id == provider_value for request in requests
+    )
+
+    # (b) A genuine secret is still a canary in the very same episode shape.
+    refused = await _run(tmp_path / "leak", f"{episode_id}-leak", f"key {secret} accepted")
+    assert refused.status == "abandoned", refused.diagnostic
+    assert refused.bundle_root is not None
+    report = verify_bundle(refused.bundle_root)
+    assert report.abandonment is not None
+    assert report.abandonment.diagnostic_code == "evidencefailure"
+    assert not any(
+        secret.encode() in path.read_bytes()
+        for path in (refused.bundle_root / "artifacts").iterdir()
+        if path.is_file()
+    )
+
+
+def test_identity_drop_is_scoped_to_values_the_identity_carries() -> None:
+    """Only a value the episode's own identity would trip is dropped.
+
+    Discriminating in both directions: the route-equal value and a value
+    contained in the folded model id are dropped (the writer would refuse the
+    run's own route with either), while a value that merely CONTAINS the
+    provider id, an unrelated secret, and an empty identity are untouched --
+    in order, so the caller's later validation sees exactly what it did before.
+    """
+
+    identity = (
+        _IDENTITY_ROUTE.provider_id,
+        _IDENTITY_ROUTE.route_id,
+        _IDENTITY_ROUTE.model_id,
+    )
+    values = (
+        "example-router",
+        "fake-credential-7f3a9c",
+        "model-x-1017",
+        "example-router-api-key-0001",
+        "short",
+    )
+    assert _canary_values_outside_own_identity(values, identity) == (
+        "fake-credential-7f3a9c",
+        "example-router-api-key-0001",
+        "short",
+    )
+    assert _canary_values_outside_own_identity(values, ()) == values
 
 
 @pytest.mark.asyncio

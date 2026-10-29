@@ -92,6 +92,46 @@ EVENT_REVISED = "revised"
 #: everywhere.
 EVENT_WITHDRAWN = "withdrawn"
 
+#: THE RELAY EVENTS (issue #2520). A watcher session W that re-raises another
+#: session S's pending ask records a REFERENCE here rather than a copy: ``S``'s
+#: log stays the single source of truth and W's row status is DERIVED from it
+#: (``AskQueue._apply_relay_derivation``), so one answer settles both by
+#: construction.
+#:
+#: * :data:`EVENT_RELAYED` is appended to the WATCHER's log and names ``(
+#:   session_id, ask_id)`` in the ORIGIN's log. Its own ``ask_id`` is the relay's
+#:   new id in W.
+#: * :data:`EVENT_RELAY_SURFACED` is appended to the ORIGIN's log so S can show
+#:   "also raised in W". Its ``ask_id`` is the ORIGIN's ask; ``by`` names the
+#:   watcher and the relay row. It never changes S's fold (it is not a status
+#:   event), which is why the source of truth stays S's own rows.
+#:
+#: Both are ADDITIVE under this module's "unknown kind is ignored" contract
+#: (stated at :data:`EVENT_WITHDRAWN`): an older fold skips a kind it does not
+#: branch on, so a log carrying these rows stays readable everywhere. The relay
+#: row itself is only produced by a fold that knows the kind — which is the
+#: correct degradation, because an old reader cannot derive a status it has no
+#: origin-reader for.
+EVENT_RELAYED = "relayed"
+EVENT_RELAY_SURFACED = "relay-surfaced"
+
+#: FOLDED CONTEXT (``asks/dedupe.py``): a same-topic ``notify`` update that was
+#: NOT posted as its own inbox item because this ask already notifies the
+#: operator — its title and body ride the ask instead, so the operator reads
+#: them with the question. Not a status event: it never changes the fold's
+#: status, so the update settles exactly when the ask settles, and an older
+#: fold that does not know the kind ignores it (the additive contract above).
+#: Carries ``title``, ``body`` and ``source`` (``notify`` for a suppressed
+#: call, ``merged`` for an earlier update folded on ask) plus ``item_id`` for
+#: the merged case.
+EVENT_CONTEXT = "context"
+
+#: Caps on folded context, so a chatty agent cannot grow one ask's row on every
+#: surface without bound: the newest entries win, each body truncated to the
+#: notify store's own body cap.
+CONTEXT_MAX_ENTRIES = 5
+CONTEXT_BODY_MAX = 4000
+
 #: Every status a folded ask can hold (design §2.2, §4).
 STATUS_OPEN = "open"
 STATUS_ANSWERED = "answered"
@@ -140,6 +180,11 @@ LAPSED_STATUSES = frozenset({STATUS_TIMED_OUT})
 #: a crash can lose.
 RESPONSE_ROW_PREFIX = "ask-response-"
 TIMEOUT_ROW_PREFIX = "ask-timeout-"
+#: The one-line note the WATCHER session gets when its relay settles (#2520).
+#: Its own prefix so ``has_entry`` can tell the three ask-engine rows apart and
+#: so the note can never be mistaken for a response row belonging to the relay
+#: id (the relay's model was told nothing; the note is about the ORIGIN).
+RELAY_ROW_PREFIX = "ask-relay-"
 
 #: How long past its deadline an ask can still be answered and ATTRIBUTED, and
 #: how long a timeout notice or response is still worth injecting. Defined HERE
@@ -337,6 +382,17 @@ def timeout_row_id(ask_id: str) -> str:
     return f"{TIMEOUT_ROW_PREFIX}{ask_id}"
 
 
+def relay_row_id(ask_id: str) -> str:
+    """The watcher's settle note for the relay row ``ask_id`` (#2520).
+
+    The row IS the delivery marker, exactly like the response/timeout rows: a
+    relay that settles twice (it cannot, but a crash between hand-off and append
+    can re-plan it) is deduped by ``transcript.has_entry`` rather than by a flag
+    a crash could lose.
+    """
+    return f"{RELAY_ROW_PREFIX}{ask_id}"
+
+
 #: The separator in a MIRROR request id (design §4, "legacy mirror"): the
 #: single-slot ``pending_gate``/``pending`` card carries
 #: ``"<ask_id>.<qidx>"`` so an old client's per-question answer can be mapped
@@ -375,6 +431,18 @@ def parse_mirror_request_id(value: str) -> tuple[str, int] | None:
     return head, int(tail)
 
 
+#: The operator's reasons for dismissing an ask (design §15): the same two words
+#: ``ask_withdraw`` takes, so the vocabulary is one in both directions.
+DISMISS_REASONS = ("answered_in_chat", "moot")
+DISMISS_REASON_DEFAULT = "moot"
+
+
+def normalize_dismiss_reason(value: Any) -> str:
+    """A recorded reason, or ``moot`` for a missing/unknown one (older clients)."""
+    text = str(value or "")
+    return text if text in DISMISS_REASONS else DISMISS_REASON_DEFAULT
+
+
 def expected_row_ids(record: Mapping[str, Any]) -> list[str]:
     """The transcript row ids THIS status requires, in delivery order.
 
@@ -404,12 +472,23 @@ def expected_row_ids(record: Mapping[str, Any]) -> list[str]:
         return [response_row_id(ask_id)]
     if status == STATUS_TIMED_OUT:
         return [timeout_row_id(ask_id)]
+    if status == STATUS_DISMISSED and record.get("response_owed"):
+        # D1 (design §15): a dismissal stamped BEFORE the deadline tells the agent
+        # through the same response row a decline uses; the deadline notice is not
+        # owed for it (``notice_owed`` needs ``dismissed_at >= expires_at``).
+        return [response_row_id(ask_id)]
     if status == STATUS_DISMISSED and record.get("notice_owed"):
         return [timeout_row_id(ask_id)]
     return []
 
 
-def delivered_hint(ask_id: str, present_ids: Iterable[str], status: str) -> bool:
+def delivered_hint(
+    ask_id: str,
+    present_ids: Iterable[str],
+    status: str,
+    *,
+    response_required: bool = False,
+) -> bool:
     """Whether the row(s) THIS status requires are DURABLE in the transcript.
 
     CONSUMPTION, not handoff (design §2.2/§4, amended 2026-10-04): a row is
@@ -428,6 +507,11 @@ def delivered_hint(ask_id: str, present_ids: Iterable[str], status: str) -> bool
     sanctioned exception is the `timed_out`→`late` flip above.
     """
     present = set(present_ids)
+    if status == STATUS_DISMISSED and response_required:
+        # A PRE-DEADLINE dismissal (D1, design §15) is delivered only by its own
+        # response row. Any-row would let a deadline notice that landed first
+        # (the timeout-first race) read as "the agent was told".
+        return response_row_id(ask_id) in present
     if status in (STATUS_ANSWERED, STATUS_DECLINED, STATUS_LATE):
         # The row that pins what the model was told. A LATE ask's deadline
         # notice is NOT the delivery of its answer; the response is.
@@ -526,12 +610,51 @@ def fold(
     folds to ``withdrawn``. The check sits below every user-act branch (and
     above the deadline branches, which must never judge a retracted ask).
     """
+    # ``relay-surfaced`` rows are collected ONCE (one pass) rather than per ask:
+    # the fold runs for every ask on every refresh, and an O(n*m) scan here would
+    # grow with the number of relays a session has ever seen. Keyed by the
+    # ORIGIN ask id, which is the id those rows carry.
+    surfaced_by_ask: dict[str, list[dict[str, Any]]] = {}
+    context_by_ask: dict[str, list[dict[str, Any]]] = {}
+    for event in events:
+        if event.get("kind") == EVENT_CONTEXT:
+            context_by_ask.setdefault(str(event.get("ask_id") or ""), []).append(
+                {
+                    "title": str(event.get("title") or ""),
+                    "body": str(event.get("body") or "")[:CONTEXT_BODY_MAX],
+                    "source": str(event.get("source") or "notify"),
+                    "at": int(event.get("at") or 0),
+                }
+            )
+            continue
+        if event.get("kind") != EVENT_RELAY_SURFACED:
+            continue
+        by = event.get("by")
+        if not isinstance(by, Mapping):
+            continue
+        surfaced_by_ask.setdefault(str(event.get("ask_id") or ""), []).append(
+            {
+                "session_id": str(by.get("session_id") or ""),
+                "ask_id": str(by.get("ask_id") or ""),
+                "at": int(event.get("at") or 0),
+            }
+        )
     records: list[dict[str, Any]] = []
     for ask_id in _asks_in_order(events):
         queued = _first(events, ask_id, EVENT_QUEUED)
         if queued is None:
-            # An answer for an ask whose `queued` row is missing (a truncated
-            # log) is not reconstructible: skip rather than invent a question.
+            # A relay row has no ``queued`` event by design: the watcher records
+            # only the REFERENCE (#2520), because a copy would be a second truth
+            # and answering one would never settle the other. Anything else
+            # without a ``queued`` row (a truncated log, an answer for an ask
+            # whose question is gone) is not reconstructible: skip rather than
+            # invent one.
+            relayed = _first(events, ask_id, EVENT_RELAYED)
+            if relayed is None:
+                continue
+            relay_row = _relay_record(ask_id, relayed, events, session_id=session_id)
+            if relay_row is not None:
+                records.append(relay_row)
             continue
         answered = _first(events, ask_id, EVENT_ANSWERED)
         declined = _first(events, ask_id, EVENT_DECLINED)
@@ -598,7 +721,12 @@ def fold(
                 dict(q) for q in (queued.get("questions") or ()) if isinstance(q, Mapping)
             ],
             "status": status,
-            "delivered": delivered_hint(ask_id, present_ids, status),
+            "delivered": delivered_hint(
+                ask_id,
+                present_ids,
+                status,
+                response_required=bool(dismissed_at and expires_at and dismissed_at < expires_at),
+            ),
         }
         if dismissed is not None:
             # A DISMISSAL DOES NOT CANCEL A NOTICE THE MODEL NEVER GOT (fork A,
@@ -623,6 +751,22 @@ def fold(
             # answer the model already has, which the notice's own N8 rule lets
             # stand.
             record["dismissed_at"] = dismissed_at
+            # The reason feeds the receipt and the response text; an older client
+            # sent none, which reads as ``moot`` (design §15).
+            record["dismissed_reason"] = normalize_dismiss_reason(dismissed.get("reason"))
+            dismissed_by = dismissed.get("by")
+            if isinstance(dismissed_by, Mapping):
+                record["dismissed_by"] = dict(dismissed_by)
+            # D1: the row a dismissal owes is decided by TIMING, not by reason. One
+            # stamped before the deadline owes the response row; at/after it, the
+            # §14 notice path below is untouched.
+            record["response_owed"] = bool(
+                dismissed_at
+                and expires_at
+                and dismissed_at < expires_at
+                and now <= window_end
+                and not record["delivered"]
+            )
             record["notice_owed"] = bool(
                 dismissed_at
                 and expires_at
@@ -630,6 +774,21 @@ def fold(
                 and now <= window_end
                 and not record["delivered"]
             )
+        folded = context_by_ask.get(ask_id)
+        if folded:
+            # ABSENT, never empty (the ``surfaced_in`` rule): an ask with no
+            # folded update keeps the exact record shape older builds wrote.
+            record["context"] = folded[-CONTEXT_MAX_ENTRIES:]
+            # The cap is VISIBLE (review m3): how many older entries it dropped,
+            # so a surface can say "+N earlier" instead of losing them silently.
+            if len(folded) > CONTEXT_MAX_ENTRIES:
+                record["context_dropped"] = len(folded) - CONTEXT_MAX_ENTRIES
+        surfaced = surfaced_by_ask.get(ask_id)
+        if surfaced:
+            # ABSENT, never empty (the ``attachments`` rule below): an ordinary
+            # ask's record stays byte-identical, and a reader that has never
+            # heard of relays never sees the key.
+            record["surfaced_in"] = surfaced
         if answered is not None:
             answers = answered.get("answers")
             record["answers"] = {
@@ -666,6 +825,72 @@ def fold(
                     }
         records.append(record)
     return records
+
+
+def _relay_record(
+    ask_id: str,
+    relayed: Mapping[str, Any],
+    events: Sequence[Mapping[str, Any]],
+    *,
+    session_id: str,
+) -> dict[str, Any] | None:
+    """The fold's record for a watcher's relay row (#2520), or ``None``.
+
+    Minimal ON PURPOSE: a relay has no deadline, no questions and no answers of
+    its own — those are the ORIGIN's and are filled in by the queue's derivation
+    (``AskQueue._apply_relay_derivation``), which is the only reader allowed to
+    open another session's log. The base status is ``open`` and the queue
+    replaces it from the origin's fold, so an unresolvable reference settles
+    rather than lingering as a question nobody can answer.
+
+    THE WATCHER'S OWN SETTLES ARE FOLDED HERE (#2673, R1-2/R1-3), for every
+    reader and not just the queue: ``withdrawn`` is the asker retracting its
+    relay, ``dismissed`` the user closing a lapsed card. They are LOCAL and are
+    the only status this log can state about a relay — ``store.fold`` never
+    reads the origin — so without them ``_has_open_asks`` would see a settled
+    relay as permanently open and the session directory would never be prunable,
+    while ``asks/dismiss.py``'s cold door would disagree with the live one about
+    a card the user had already closed. A DISMISSAL OUTRANKS A WITHDRAWAL, the
+    same order §12 fixes for an ordinary ask. Both are only the BASE: the
+    queue's derivation re-reads the origin on every fold, where a USER ACT
+    ORIGIN-side outranks them (``_RELAY_USER_ACT_TERMINALS``).
+
+    A malformed ``relay`` reference contributes no row: the same tolerance the
+    module promises every reader, and the honest answer for a hand-edited line.
+    """
+    ref = relayed.get("relay")
+    if not isinstance(ref, Mapping):
+        return None
+    origin_session = str(ref.get("session_id") or "")
+    origin_ask = str(ref.get("ask_id") or "")
+    if not origin_session or not origin_ask:
+        return None
+    record: dict[str, Any] = {
+        "ask_id": ask_id,
+        "session_id": session_id,
+        "created_at": int(relayed.get("at") or 0),
+        # No deadline of its own: the ORIGIN owns it (the derivation copies its
+        # ``expires_at``), and a relay must never put the watcher's deadline
+        # machinery in charge of a question it does not own.
+        "expires_at": 0,
+        "timeout_s": 0,
+        "urgent": False,
+        "tool_call_id": "",
+        "questions": [],
+        "status": STATUS_OPEN,
+        "delivered": False,
+        "relay": {"session_id": origin_session, "ask_id": origin_ask},
+    }
+    dismissed = _first(events, ask_id, EVENT_DISMISSED)
+    withdrawn = _first(events, ask_id, EVENT_WITHDRAWN)
+    if dismissed is not None:
+        record["relay_dismissed_at"] = int(dismissed.get("at") or 0)
+        record["status"] = STATUS_DISMISSED
+    if withdrawn is not None:
+        record["relay_withdrawn_at"] = int(withdrawn.get("at") or 0)
+        if dismissed is None:
+            record["status"] = STATUS_WITHDRAWN
+    return record
 
 
 def is_outstanding(status: Any) -> bool:
@@ -706,6 +931,71 @@ def lapsed_hidden(
     return now - int(expires_at) > max(0, int(lapsed_visible_ms))
 
 
+def dismissed_hidden(
+    status: Any,
+    dismissed_at: int | None,
+    expires_at: int,
+    now: int,
+    *,
+    relay: bool = False,
+) -> bool:
+    """Whether a DISMISSED row has left every list (decision SA-D8).
+
+    The ONE rule, shared by the index readers (:func:`_shown_rows`) and the live
+    projection (``AskQueue.projection``), so the phone's sheet, the desktop
+    fleet and a running session's own bar agree about a dismissed row at the
+    same instant. TIMING decides, which is what keeps the original
+    "put it away" contract beside the new receipt one:
+
+    * **Dismissed BEFORE the deadline** (``dismissed_at < expires_at`` — the
+      open-ask dismissal of design §15) is a SETTLED RECEIPT and stays shown for
+      the same 7 d horizon an answered row gets, counted from ``expires_at``.
+      Strictly past it, like the horizon beside it: ``now - expires_at > 7 d``.
+      It deliberately IGNORES ``asks.lapsed_visible_for``: that setting is the
+      display window for rows settled by the deadline ALONE, and with
+      ``at_expiry`` or an hour it would delete this receipt at (or an hour
+      after) the ask's own deadline — shorter than any answered ask's.
+    * **Dismissed AT OR AFTER the deadline** keeps leaving every list: that is
+      the lapsed row's Dismiss, whose whole effect is to clear the row (design
+      §13), and a receipt there would turn it into a relabel.
+    * **No ``dismissed_at``** (an index row written by a build before this key)
+      is hidden, exactly as today. Absence means the old behaviour: a row that
+      cannot prove it was dismissed early has not earned a receipt.
+    * **A RELAY row** stays hidden when dismissed. It is a pointer to another
+      conversation's ask, and its own card lives where the question was asked —
+      a receipt for somebody else's dismissal in this conversation's list is a
+      row the reader cannot act on. Passed IN rather than inferred from the
+      fields, because ``expires_at`` is 0 on a relay record until a derivation
+      copies the origin's and an index row can carry any shape: the rule must
+      not depend on which keys happen to be absent.
+
+    Takes the raw field values rather than a record, for the reason
+    :func:`lapsed_hidden` gives: its readers hold a dict on one surface and a
+    model on another, and the only things they share are the fields.
+    """
+    if str(status or "") != STATUS_DISMISSED:
+        return False
+    if relay:
+        return True
+    # FALSY IS ABSENT, and the two readers must agree on that (review round 1,
+    # m3). ``fold`` records ``int(at or 0)``, so a damaged or hand-written event
+    # yields 0; the projection read that 0 as an early stamp and SHOWED the row,
+    # while ``pending_row`` omits a falsy stamp from the index row and the index
+    # reader HID it. One row, two answers — the drift this predicate exists to
+    # stop. Absence and zero are the same statement here: "this row cannot prove
+    # it was dismissed before the deadline".
+    if not dismissed_at:
+        return True
+    try:
+        stamp = int(dismissed_at)
+        deadline = int(expires_at or 0)
+    except (TypeError, ValueError):
+        return True
+    if stamp >= deadline:
+        return True
+    return now - deadline > LATE_WINDOW_S * _MILLIS
+
+
 def outstanding_asks(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Records still waiting on the user: ``open`` only (a ``timed_out`` ask
     is settled, #2388).
@@ -741,13 +1031,28 @@ def ask_ids(events: Sequence[Mapping[str, Any]]) -> list[str]:
     return _asks_in_order(events)
 
 
-def pending_row(record: Mapping[str, Any], draft: Iterable[str] | None = None) -> dict[str, Any]:
+def pending_row(
+    record: Mapping[str, Any],
+    draft: Iterable[str] | None = None,
+    *,
+    user_messages_since: int | None = None,
+    last_user_message_at: int | None = None,
+) -> dict[str, Any]:
     """One folded record as the wire's ``PendingAsk`` (design §4, frozen).
 
     Secret answers hold the KEY ONLY (``[<key>]``) because they are stored that
     way in the log — this function copies, it never resolves. ``delivered`` is
     carried rather than derived so a surface reads one field instead of
     re-implementing the sticky rule.
+
+    ``user_messages_since``/``last_user_message_at`` are the ask CARD'S CONTEXT
+    pair (SA-D7): how many operator messages were admitted after this ask was
+    asked, and when the latest one was. Both are ADDED KEYS, never defaults: a
+    row for an ask this runtime cannot count keeps exactly the shape every older
+    writer produces, and a surface shows no line rather than a zero it would have
+    to disbelieve. `asks/queue.py` is the one caller that supplies them (it holds
+    the session's stamp), and the aggregate index and every wire reader take the
+    row from there.
     """
     row: dict[str, Any] = {
         "ask_id": str(record.get("ask_id") or ""),
@@ -771,13 +1076,56 @@ def pending_row(record: Mapping[str, Any], draft: Iterable[str] | None = None) -
         row["attachments"] = {
             str(qid): [dict(ref) for ref in group] for qid, group in dict(refs).items()
         }
+    relay = record.get("relay")
+    if isinstance(relay, Mapping) and relay:
+        # The provenance a surface needs to name WHERE the question lives and HOW
+        # it settled (#2520). ``origin_status`` is written by the queue's
+        # derivation; the fold's own record has only the reference, so this is
+        # copied key-by-key rather than exposed by reference.
+        row["relay"] = {
+            key: relay[key]
+            for key in ("session_id", "ask_id", "origin_status", "origin_gone")
+            if key in relay
+        }
+    surfaced = record.get("surfaced_in")
+    if surfaced:
+        row["surfaced_in"] = [dict(item) for item in surfaced]
+    folded = record.get("context")
+    if folded:
+        # Folded update text (``EVENT_CONTEXT``). Added, never defaulted, so the
+        # frozen wire stays byte-identical for every ask without it and older
+        # readers (``extra="allow"`` / unknown-key-tolerant) ignore it.
+        row["context"] = [dict(item) for item in folded]
+        dropped = record.get("context_dropped")
+        if dropped:
+            row["context_dropped"] = int(dropped)
     by = record.get("answered_by")
     if by:
         row["answered_by"] = dict(by)
     answered_at = record.get("answered_at")
     if answered_at:
         row["answered_at"] = int(answered_at)
+    if str(row["status"]) == STATUS_DISMISSED:
+        # SA-D8: WHY a dismissal took the ask, so a settled row can say it. The
+        # pair is ADDED, never defaulted, and only on a dismissed row — every
+        # other status's row stays byte-identical, which is also what makes the
+        # keys additive on the wire (the phone's ``PendingAskWire`` and the
+        # desktop's ``PendingAskState`` both gained them as optionals).
+        # ``dismissed_at`` is what the shared visibility rule reads, so a reader
+        # can apply :func:`dismissed_hidden` without the log; ``dismissed_reason``
+        # is the operator's own word (``moot`` | ``answered_in_chat``), absent
+        # only for a log written before the field existed.
+        dismissed_at = record.get("dismissed_at")
+        if dismissed_at:
+            row["dismissed_at"] = int(dismissed_at)
+        dismissed_reason = record.get("dismissed_reason")
+        if dismissed_reason:
+            row["dismissed_reason"] = str(dismissed_reason)
     drafted = sorted(str(qid) for qid in (draft or ()))
+    if user_messages_since is not None:
+        row["user_messages_since"] = int(user_messages_since)
+    if last_user_message_at is not None:
+        row["last_user_message_at"] = int(last_user_message_at)
     if drafted:
         # THE LEGACY DRAFT (design §4, A2 addendum). The old single-slot client
         # answers a queued ask ONE QUESTION AT A TIME, so between its taps the
@@ -966,10 +1314,25 @@ def _shown_rows(
     rows: list[dict[str, Any]] = []
     for ask in _entry_asks(entry):
         status = str(ask.get("status") or "")
-        if status in (STATUS_EXPIRED, STATUS_DISMISSED):
+        if status == STATUS_EXPIRED:
             continue
         expires_at = int(ask.get("expires_at") or 0)
         if expires_at and stamp - expires_at > horizon_ms:
+            continue
+        # SA-D8: a row dismissed BEFORE its deadline is a settled receipt and
+        # rides this list for the answered row's own 7 d; one dismissed at or
+        # after the deadline still leaves, and an index row from a build before
+        # ``dismissed_at`` stayed hidden. The rule lives in
+        # :func:`dismissed_hidden` because ``AskQueue.projection`` applies the
+        # same one — a second spelling here is the drift ``OUTSTANDING_STATUSES``
+        # exists to stop.
+        if dismissed_hidden(
+            status,
+            ask.get("dismissed_at"),
+            expires_at,
+            stamp,
+            relay=bool(ask.get("relay")),
+        ):
             continue
         row = dict(ask)
         # THE DEADLINE IS JUDGED HERE, NOT TAKEN FROM THE FILE. The index holds
@@ -1087,6 +1450,8 @@ __all__ = [
     "EVENT_DECLINED",
     "EVENT_DISMISSED",
     "EVENT_QUEUED",
+    "EVENT_RELAYED",
+    "EVENT_RELAY_SURFACED",
     "EVENT_WITHDRAWN",
     "INJECTING_STATUSES",
     "DEFAULT_LAPSED_VISIBLE_FOR",
@@ -1108,6 +1473,7 @@ __all__ = [
     "asks_dir",
     "asks_log_path",
     "delivered_hint",
+    "dismissed_hidden",
     "entry_is_stale",
     "entry_path",
     "expected_row_ids",
@@ -1123,6 +1489,7 @@ __all__ = [
     "read_entry",
     "read_events",
     "read_index",
+    "relay_row_id",
     "remove_entry",
     "response_row_id",
     "session_dir",

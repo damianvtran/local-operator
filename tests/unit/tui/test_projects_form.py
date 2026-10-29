@@ -464,7 +464,9 @@ class _EffortProjectSession(_ProjectSession):
     def model_label(self) -> str:
         return f"{self._spec.provider}/{self._spec.model_id}"
 
-    def set_model(self, model: Any, *, explicit: bool = False) -> None:
+    def set_model(
+        self, model: Any, *, explicit: bool = False, effort_choice: object = None
+    ) -> None:
         self._spec = model
 
 

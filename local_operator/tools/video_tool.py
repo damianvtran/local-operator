@@ -71,6 +71,7 @@ from local_operator.video.jobs import (
     finish_video_result,
     make_video_job_runner,
     make_video_watcher_runner,
+    request_naming,
     video_job_label,
 )
 from local_operator.video.models import (
@@ -143,6 +144,14 @@ class GenerateVideoParams(BaseModel):
     model: str | None = Field(
         default=None,
         description=("Provider model id; omit to let the provider pick its default."),
+    )
+    filename: str | None = Field(
+        default=None,
+        max_length=120,
+        description=(
+            "Filename stem: a short lowercase hyphenated description of the request, "
+            "no extension (e.g. `kite-over-cliffs`); omit to derive it from the prompt."
+        ),
     )
     duration_s: int | None = Field(
         default=None,
@@ -419,6 +428,7 @@ async def execute_generate_video(
         audio=params.audio,
         seed=params.seed,
         model=params.model,
+        filename=params.filename,
         config_dir=cfg,
         journal=journal,
         wake_scheduler=scheduler,
@@ -786,6 +796,7 @@ async def _cold_follow(
             details={"job_id": job_id, "state": "running", "provider": record.get("provider")},
         )
     if outcome.state == "completed" and outcome.result is not None:
+        request_prompt, request_filename = request_naming(record)
         receipt, text = finish_video_result(
             record_job_id=job_id,
             route=str(record.get("provider") or ""),
@@ -794,6 +805,8 @@ async def _cold_follow(
             cost_usd=outcome.result.cost_usd,
             cost_source=outcome.result.cost_source,
             billing_basis=outcome.result.billing_basis,
+            prompt=request_prompt,
+            filename=request_filename,
         )
         await _write_settle(context, job_id, record, state="completed", result=receipt)
         await VideoWakeHandle(getattr(context, "wake_scheduler", None), job_id).cancel()
@@ -933,6 +946,7 @@ async def _answer_terminal(
         except Exception:  # noqa: BLE001 — the record's own answer stands
             outcome = None
         if outcome is not None and outcome.state == "completed" and outcome.result is not None:
+            request_prompt, request_filename = request_naming(record)
             receipt, text = finish_video_result(
                 record_job_id=job_id,
                 route=str(record.get("provider") or ""),
@@ -941,6 +955,8 @@ async def _answer_terminal(
                 cost_usd=outcome.result.cost_usd,
                 cost_source=outcome.result.cost_source,
                 billing_basis=outcome.result.billing_basis,
+                prompt=request_prompt,
+                filename=request_filename,
             )
             await _write_settle(context, job_id, record, state="completed", result=receipt)
             return _text(tool_call_id, "video_status", text, details=receipt)

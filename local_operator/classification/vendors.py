@@ -115,7 +115,12 @@ from local_operator.classification.types import (
     Question,
 )
 from local_operator.clients._http import scrub_secrets
-from local_operator.clients.radient_cost import cost_from_payload
+from local_operator.clients.radient_cost import RadientCost, cost_from_payload
+from local_operator.decision_models import (
+    CANONICAL_DECISIONS_MODEL,
+    OPENROUTER_DECISIONS_MODEL,
+    PINNED_DECISIONS_MODEL,
+)
 from local_operator.providers.registry import get_provider_definition
 from local_operator.session.channel_spend import BASIS_NOT_TRACKED
 
@@ -138,9 +143,12 @@ that names the alpha path, so moving the leg onto the chat route "to simplify"
 turns every OpenRouter call into a fall-through (§3).
 """
 
-RADIENT_MODEL = "jev-1.13"
-TYPESAFE_MODEL = "jev-1.13.0"
-OPENROUTER_MODEL = "typesafe/jev-1.13"
+#: Wire ids the three legs request. The canonical/pinned/catalogue distinction
+#: and the alias registry live in ``local_operator.decision_models``; these names stay
+#: because they are what each vendor's request body must carry verbatim.
+RADIENT_MODEL = CANONICAL_DECISIONS_MODEL
+TYPESAFE_MODEL = PINNED_DECISIONS_MODEL
+OPENROUTER_MODEL = OPENROUTER_DECISIONS_MODEL
 
 #: How long a resolved credential is reused before it is resolved again.
 #: Matches the agent-server's auth cache TTL (``internal/cache/auth_cache.go``,
@@ -458,16 +466,38 @@ async def auth_store_api_key(config_dir: "Path | None", provider: str) -> str | 
     longer closes what it did not open. It still degrades identically on
     failure: a dead store raises inside the call and lands on the ``None``
     below, exactly as a dead per-call store did.
+
+    WHEN THE LOCAL STORE HAS NOTHING, ONE BORROW RUNG IS TRIED last
+    (:func:`local_operator.network.credentials.borrowed_provider_key`):
+    the provider login may live on the mesh head and be lent to this device.
+    That rung is itself a no-op on a zero-peer device, and every failure —
+    local or borrowed — still lands on ``None``. The value is never logged.
     """
     from local_operator.providers.auth_store import shared_auth_store
 
+    # The registry alias may raise (a broken import in a caller-supplied tree);
+    # the leg id is then still the right borrow key, so initialise to it rather
+    # than let a registry fault turn "this tier said nothing" into a raise.
+    storage = provider
     try:
+        storage = storage_provider_id(provider)
         store = shared_auth_store(
             (config_dir / "auth.db") if config_dir is not None else None, config_dir=config_dir
         )
-        return await store.get_api_key(storage_provider_id(provider), read_only=True)
+        local = await store.get_api_key(storage, read_only=True)
+        if local:
+            return local
     except Exception:  # noqa: BLE001 — a leg that cannot resolve is not this leg
         logger.warning("classification: %s auth store unavailable", provider, exc_info=True)
+    # The borrow helper catches its own failures; the local ``except`` above and
+    # this one both keep the "advisory, never fails a turn" contract even when a
+    # test double (or a future implementation) raises through it.
+    try:
+        from local_operator.network.credentials import borrowed_provider_key
+
+        return await borrowed_provider_key(storage, config_dir)
+    except Exception:  # noqa: BLE001 — a leg that cannot resolve is not this leg
+        logger.debug("classification: %s provider borrow unavailable", provider, exc_info=True)
         return None
 
 
@@ -844,6 +874,12 @@ def _parse_response(
     usage_map: Mapping[str, Any] = usage if isinstance(usage, Mapping) else {}
     raw_cost = usage_map.get("cost")
     usage_cost = _reported_cost(raw_cost)
+    # Parse the top-level object ONCE: its amount/basis feed the ledger row and
+    # its ``model`` is the id agent-server says the amount was priced from.
+    # That priced-from id, not the vendor's echo below, is the row's billing
+    # identity (``accounting.answered_record``); parsing it twice would let a
+    # future edit read two different objects for the two facts.
+    server_cost = cost_from_payload(payload)
     if usage_cost is not None:
         # The leg stated its own charge inline (OpenRouter and TypeSafe both do).
         # It wins, and it carries no basis: a `usage.cost` is the request's own
@@ -855,7 +891,7 @@ def _parse_response(
         # — measured on the wire 2026-10-16 — which this parser used to drop on
         # the floor, so a priced inference row sat beside a `$—` classification
         # row tagged "price not stated" for every Radient decision call.
-        cost_usd, cost_basis = _server_cost_usd(payload)
+        cost_usd, cost_basis = _server_cost_usd(server_cost)
     return DecisionResponse(
         vendor=vendor,
         model=str(payload.get("model") or model),
@@ -864,12 +900,13 @@ def _parse_response(
         output_tokens=_count(usage_map.get("output_tokens")),
         cost_usd=cost_usd,
         cost_basis=cost_basis,
+        cost_model=(server_cost.model or None) if server_cost is not None else None,
         latency_s=latency_s,
     )
 
 
-def _server_cost_usd(payload: Mapping[str, Any]) -> tuple[float | None, str | None]:
-    """The top-level ``cost`` object's charge as ``(usd, basis)``, or ``(None, None)``.
+def _server_cost_usd(parsed: RadientCost | None) -> tuple[float | None, str | None]:
+    """A parsed top-level ``cost`` object's charge as ``(usd, basis)``, or ``(None, None)``.
 
     WHY A VENDOR-REPORTED AMOUNT WINS OVER ANY DERIVED PRICE
     -------------------------------------------------------
@@ -930,7 +967,6 @@ def _server_cost_usd(payload: Mapping[str, Any]) -> tuple[float | None, str | No
       it, dropping a genuinely billed amount into ``not_tracked_micro``. It is
       mapped to ``None`` here so the caller's honest default applies.
     """
-    parsed = cost_from_payload(payload)
     if parsed is None or parsed.amount_micro is None:
         return None, None
     if not 0 <= parsed.amount_micro <= (1 << 63) - 1:

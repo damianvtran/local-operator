@@ -383,7 +383,7 @@ async def test_publish_does_not_truncate_an_over_long_instruction_body(
     never wrote, published under their name.
     """
     agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
-    dummy_registry.set_agent_system_prompt(agent.id, "x" * 9000)
+    dummy_registry.set_agent_system_prompt(agent.id, "x" * 10_001)
 
     with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
         response = await test_app_client.post(f"/v1/agents/{agent.id}/publish", json={})
@@ -392,7 +392,7 @@ async def test_publish_does_not_truncate_an_over_long_instruction_body(
     detail = response.json()["detail"]
     assert detail["code"] == "invalid_instruction_set"
     assert detail["details"]["field"] == "instructions"
-    assert detail["details"]["rule"] == "must be at most 8000 characters"
+    assert detail["details"]["rule"] == "must be at most 10000 characters"
     mock_client.assert_not_called()
 
 

@@ -11,11 +11,19 @@ The arms therefore take ``client_for_tenant(tenant_id)`` and pick per item, and
 the tenant a row was pulled from comes from its baseline record — never from the
 remote. A 404 is "unavailable / hub-item-missing" and is NEVER read as "the hub
 removed it, delete locally": removal and lost membership are indistinguishable.
+
+THE SKILL READ IS CONDITIONAL (client half of agent-server #175). The skill arm
+sends the revision the link already holds as ``If-None-Match``, so an unchanged
+row answers ``304`` and transfers headers instead of the whole manifest. A
+``304`` means exactly what "remote equals baseline" means everywhere below --
+unchanged, no body, no merge, no revision advance -- and is NEVER a failed
+check. See :func:`check_hub_skills`.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Sequence
@@ -81,6 +89,14 @@ class ItemCheck:
     local: Mapping[str, Any] | None = None
     remote: Mapping[str, Any] | None = None
     base: Mapping[str, Any] | None = None
+    #: The publisher a bundle row NAMED (``published_by``), when it named one.
+    #: Carried so an apply can compare it with the link's persisted pin without a
+    #: second fetch; ``None`` when the row named none.
+    publisher: Mapping[str, Any] | None = None
+    #: The record's explicit content state. ``absent`` means this link has no
+    #: managed copy (subscribe-without-pull, or an unpulled copy): the check has
+    #: no local side, and the runner/apply must never treat a merge as possible.
+    content_state: Literal["present", "absent"] = "present"
     #: B4.3 failure class when ``verdict == "unavailable"``.
     reason: str = ""
     detail: str = ""
@@ -358,7 +374,113 @@ def team_fields_of(team: Any) -> dict[str, Any]:
     )
 
 
-def _team_confirmed_gone(registry: Any, team_id: str) -> bool:
+def agent_inventory_complete(registry: Any) -> bool:
+    """Whether an AGENT listing is authoritative enough to PRUNE status rows.
+
+    ``AgentRegistry`` answers "no agents" for BOTH "there are none" and "I could not
+    read them": a row whose ``agent.yml`` is unreadable is skipped and recorded in
+    ``_incomplete_agent_dirs``, and a vanished ``agents_dir`` scans as empty. Pruning
+    on either would delete the row of an item that still exists -- its retry
+    schedule, timestamps and backup pointer with it -- so the caller asks this first
+    and skips the prune when the answer is no.
+
+    A MISSING ``agents_dir`` is not authoritative here, unlike an empty listing: the
+    registry CREATES that directory when it is constructed, so a live registry that
+    cannot see it is looking at a directory that vanished between the scan and this
+    question, not at a profile that never had agents.
+
+    The row twin of what ``prune``'s ``confirmed_absent`` guard already does for
+    baselines: a listing that could not read an item never authorizes destroying
+    what that item owned.
+    """
+
+    if getattr(registry, "_metadata_complete", True) is False:
+        return False
+    directory = getattr(registry, "agents_dir", None)
+    if directory is None:
+        return False
+    try:
+        # The directory must also be READABLE: ``Path.is_dir`` succeeds on an
+        # unreadable one, and ``Path.exists`` below swallows EACCES, which would
+        # turn "cannot list" into "nothing there".
+        with os.scandir(directory):
+            return True
+    except OSError:  # noqa: BLE001 - an unreadable directory is not an authoritative one
+        return False
+
+
+def _absent(path: Path) -> bool:
+    """True only when ``path`` does not exist (ENOENT).
+
+    ``Path.exists()`` answers False on EACCES as of Python 3.14 -- the runtime this
+    ships on -- so an ``agents/`` or ``hub/baselines`` directory a process may READ
+    but not TRAVERSE makes every item under it look deleted, and its row pruned
+    (round-3 m1). ``Path.exists`` also cannot tell that case from a real absence on
+    older interpreters, so the decision is made here instead: only FileNotFoundError
+    is absence; every other OSError -- and a path that cannot exist at all, such as
+    a stored id carrying a NUL byte (round-4 m1) -- is UNKNOWN, which the callers
+    answer by keeping the row.
+    """
+
+    try:
+        os.stat(path)
+        return False
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        # ValueError covers an id that can never be a path at all -- ``os.stat``
+        # raises "embedded null character" for a stored ``local_id`` carrying a NUL
+        # byte, before any syscall. A corrupted or hand-edited ``status.json`` can
+        # hold one, and crashing here would abort EVERY full check and every runner
+        # tick that retries it (round-4 m1). Keep is the conservative answer.
+        return False
+
+
+def agent_confirmed_gone(registry: Any, agent_id: str) -> bool:
+    """True when the agent is DELETED, or still on disk but NO LONGER LINKED.
+
+    The directory, not the baseline, is what proves an agent deleted: a delete
+    removes the directory and KEEPS the baseline (round-1 E5), so a
+    baseline-based answer would call a deleted agent live forever.
+
+    A PRESENT directory can still be gone as a LINK. The desktop Tags editor lets
+    a person remove ``hub:<id>``/``hub_sha256:<hex>`` like any other tag, and
+    ``check_hub_agents`` enumerates only rows that still carry the marker; an
+    unlinked row would otherwise never be listed, never confirmed gone, and keep
+    its ``local-only`` row advertising unpublished changes for ever (round-3 M1).
+    A definition the registry can READ and that names no hub origin is positive
+    evidence of that state -- the same evidence ``check_hub_agents`` needs to stop
+    listing it, so the two answers cannot disagree.
+
+    Any doubt answers False: an unreadable definition (``get_agent`` raises), an
+    id that cannot be a path segment, or a tree that cannot be listed.
+    """
+
+    agents_dir = getattr(registry, "agents_dir", None)
+    if agents_dir is None or not agent_id or "/" in agent_id or agent_id.startswith("."):
+        return False
+    try:
+        if not agents_dir.is_dir():
+            return False
+        if _absent(agents_dir / agent_id):
+            # Confirmed gone from a tree that must also be LISTABLE: a directory
+            # whose entries we may not enumerate cannot report an absence.
+            with os.scandir(agents_dir):
+                return True
+    except OSError:
+        return False
+    try:
+        row = registry.get_agent(agent_id)
+    except Exception:  # noqa: BLE001 - an unreadable definition is unknown, never gone
+        return False
+    if row is None:
+        return False
+    from local_operator.agents import hub_origin
+
+    return hub_origin(row) is None
+
+
+def team_confirmed_gone(registry: Any, team_id: str) -> bool:
     """True only when ``teams/<id>`` is absent AND no swap-in-progress sibling exists.
 
     Any doubt (an unreadable directory, a hidden ``.<id>.*`` staging/backup entry
@@ -370,10 +492,25 @@ def _team_confirmed_gone(registry: Any, team_id: str) -> bool:
     if teams_dir is None or not team_id or "/" in team_id or team_id.startswith("."):
         return False
     try:
-        if not teams_dir.is_dir() or (teams_dir / team_id).exists():
+        if not teams_dir.is_dir() or not _absent(teams_dir / team_id):
             return False
         return not any(child.name.startswith(f".{team_id}.") for child in teams_dir.iterdir())
     except OSError:
+        return False
+
+
+def skill_confirmed_gone(config_dir: Path, local_id: str) -> bool:
+    """True only when a skill link has NO baseline FILE (existence, not readability).
+
+    ``iter_baselines`` skips a record it cannot read, which looks exactly like a
+    link that is gone. The file still existing is the proof that it is not; only its
+    ABSENCE -- from a directory the caller has already proved listable -- confirms
+    the link was removed.
+    """
+
+    try:
+        return _absent(prov.baseline_path(config_dir, "skill", local_id))
+    except prov.BaselineError:
         return False
 
 
@@ -405,7 +542,7 @@ def check_hub_teams(
         config_dir,
         "team",
         {t.id for t in teams},
-        confirmed_absent=lambda team_id: _team_confirmed_gone(registry, team_id),
+        confirmed_absent=lambda team_id: team_confirmed_gone(registry, team_id),
     )
     checks: list[ItemCheck] = []
     for meta in teams:
@@ -453,7 +590,11 @@ def check_hub_teams(
             )
             continue
         try:
-            document = client.get_team(record.hub_id, timeout=REQUEST_TIMEOUT_S)
+            # Public baselines select the anonymous client. Optional-auth detail
+            # reads must explicitly omit credentials rather than demanding a key.
+            document = client.get_team(
+                record.hub_id, timeout=REQUEST_TIMEOUT_S, with_credential=bool(tenant)
+            )
         except Exception as error:  # noqa: BLE001
             reason, detail = _failure_reason(error)
             checks.append(
@@ -573,8 +714,17 @@ def check_hub_skills(
     ``adapters.SkillAdapter.canonical_fields`` so a check and an outbound
     projection exclude the same local-only bytes. A skill with no baseline was
     never linked (or was made locally) and is not touched.
+
+    A link whose record says ``content_state: absent`` has NO local side: the
+    check still FETCHES the remote (that is the whole point of subscribing) and
+    reports it as a normal ``available`` item, with no three-way comparison and
+    no local fingerprint, instead of erroring on the missing directory. The
+    absence is read from the record, never inferred from the filesystem -- a
+    directory that is genuinely lost keeps the ``local-concurrent-edit`` error
+    it always had.
     """
 
+    from local_operator.clients.radient import NotModified
     from local_operator.hub_sync.adapters import SkillAdapter
     from local_operator.hub_sync.skill_storage import ManagedSkillStorage
 
@@ -591,25 +741,59 @@ def check_hub_skills(
         if only_ids is not None and record.local_id not in only_ids:
             continue
         tenant = record.tenant_id
-        try:
-            snapshot = storage.snapshot(record.local_id)
-        except Exception as error:  # noqa: BLE001
-            checks.append(
-                ItemCheck(
-                    "skill",
-                    record.local_id,
-                    alias,
-                    record.hub_id,
-                    tenant,
-                    "unavailable",
-                    reason="local-concurrent-edit",
-                    detail=f"could not read the local skill: {error}",
-                    link_id=record.identity.link_id if record.identity is not None else None,
-                )
-            )
-            continue
-        local = adapter.canonical_fields(snapshot.document.to_json())
-        local_fp = prov.fingerprint_snapshot("skill", local)
+        absent = record.content_state == "absent"
+        # FORM: a bundle link's baseline stores the archive manifest, and its
+        # local reading is the managed directory's tree hash. The adapter already
+        # dispatches on exactly this key, so the check reuses it instead of
+        # re-reading a bundle as a text document (which would refuse every file
+        # byte) -- design §8.2's fingerprints ARE those values.
+        is_bundle = "bundle" in (record.fields or {})
+        local: Mapping[str, Any] | None = None
+        local_fp: str | None = None
+        snapshot: Any = None
+        if not absent:
+            try:
+                if is_bundle:
+                    local = dict(adapter.snapshot(config_dir, record.local_id).fields)
+                    local_fp = prov.fingerprint_snapshot("skill", local)
+                else:
+                    snapshot = storage.snapshot(record.local_id)
+            except Exception as error:  # noqa: BLE001
+                # A crashed unpull is settled from its own durable evidence. When
+                # that settles the record to absent this is a normal absent check;
+                # when it does not, the missing directory IS the error it has
+                # always been (an unknown loss is never re-labelled as absence).
+                try:
+                    storage.recover_unpull(local_id=record.local_id)
+                except Exception:  # noqa: BLE001 - one item's recovery never ends the tick
+                    # A config-lock timeout or an unreadable marker is THIS
+                    # item's failure: keep the original error and let the rest
+                    # of the checks proceed.
+                    logger.warning("could not settle unpull for %s", record.local_id, exc_info=True)
+                settled = prov.read_baseline(config_dir, "skill", record.local_id)
+                if settled is None or settled.content_state != "absent":
+                    checks.append(
+                        ItemCheck(
+                            "skill",
+                            record.local_id,
+                            alias,
+                            record.hub_id,
+                            tenant,
+                            "unavailable",
+                            reason="local-concurrent-edit",
+                            detail=f"could not read the local skill: {error}",
+                            link_id=(
+                                record.identity.link_id if record.identity is not None else None
+                            ),
+                        )
+                    )
+                    continue
+                record = settled
+                absent = True
+            else:
+                if not is_bundle and snapshot is not None:
+                    local = adapter.canonical_fields(snapshot.document.to_json())
+                    local_fp = prov.fingerprint_snapshot("skill", local)
         client = client_for_tenant(tenant)
         if client is None:
             checks.append(
@@ -625,12 +809,38 @@ def check_hub_skills(
                     reason="no-credential",
                     detail="skills need `lop login radient` (organization sign-in)",
                     link_id=record.identity.link_id if record.identity is not None else None,
+                    content_state=record.content_state,
                 )
             )
             continue
         fetcher = fetch or _fetch_skill
+        conditional_match = False
+        matched_revision: str | None = None
+        # CONDITIONAL READ (client half of agent-server #175): revalidate against
+        # the revision this link already holds -- the same baseline
+        # ``remote_revision`` the push CAS sends as ``If-Match`` -- so an unchanged
+        # row costs headers instead of the whole manifest (~55 KiB each across the
+        # catalogue, hourly, per client). ``None`` (a first pull, or a legacy
+        # baseline that recorded no revision) sends NO header: there is nothing to
+        # revalidate against, and an unconditional 200 is the only honest read.
         try:
-            document = fetcher(client, record.hub_id, timeout=REQUEST_TIMEOUT_S)
+            document = fetcher(
+                client,
+                record.hub_id,
+                timeout=REQUEST_TIMEOUT_S,
+                if_none_match=record.remote_revision,
+            )
+        except NotModified as not_modified:
+            # THE HUB SAYS THE REPRESENTATION WE HOLD IS STILL CURRENT, which is
+            # the "remote equals baseline" case with zero bytes on the wire.
+            # Continuing with the baseline fields as R takes the SAME downstream
+            # path a 200 carrying identical bytes takes -- canonical projection,
+            # name-space comparison, classification, merge, apply -- so a 304 can
+            # never read as a change; `matched_revision` below keeps the revision
+            # from advancing. It is emphatically NOT a failed check.
+            document = dict(record.fields)
+            conditional_match = True
+            matched_revision = record.remote_revision or not_modified.etag
         except Exception as error:  # noqa: BLE001
             reason, detail = _failure_reason(error)
             checks.append(
@@ -647,6 +857,7 @@ def check_hub_skills(
                     detail=detail,
                     link_id=record.identity.link_id if record.identity is not None else None,
                     served_by=_served_by(client),
+                    content_state=record.content_state,
                 )
             )
             continue
@@ -671,8 +882,50 @@ def check_hub_skills(
                     detail=str(error)[:200],
                     link_id=record.identity.link_id if record.identity is not None else None,
                     served_by=_served_by(client),
+                    content_state=record.content_state,
                 )
             )
+            continue
+        remote_fp = prov.fingerprint_snapshot("skill", remote)
+        revision, sync_contract = _remote_meta(document)
+        if conditional_match:
+            # A 304 has no body, so no ``revision``/``sync_contract`` keys to read.
+            # The revision is the one the hub just CONFIRMED as current -- the
+            # value we already held, never an advance -- and a contract can only be
+            # observed in a body, so this response records none (the per-source
+            # attestation stays exactly as the last real response left it).
+            revision = matched_revision
+        publisher = _document_publisher(document)
+        if absent:
+            # NO LOCAL SIDE TO COMPARE. The remote is reported as AVAILABLE, which
+            # is the action the operator still has to take (an explicit pull);
+            # calling it up-to-date would hide that nothing is installed.
+            checks.append(
+                ItemCheck(
+                    "skill",
+                    record.local_id,
+                    alias,
+                    record.hub_id,
+                    tenant,
+                    "available",
+                    local_fp=None,
+                    remote_fp=remote_fp,
+                    local=None,
+                    remote=remote,
+                    base=None,
+                    link_id=record.identity.link_id if record.identity is not None else None,
+                    remote_revision=revision,
+                    sync_contract=sync_contract,
+                    served_by=_served_by(client),
+                    content_state="absent",
+                    publisher=publisher,
+                )
+            )
+            continue
+        if local is None or local_fp is None:
+            # Unreachable by construction: an absent row continued above, and a
+            # present row loaded its snapshot. The guard is what keeps the
+            # compare/merge path from ever running without a local side.
             continue
         # Source-name space: the local alias is display-only, but the manifest
         # name is part of the document the engine fingerprints and merges. Rename
@@ -680,16 +933,14 @@ def check_hub_skills(
         # alias rename is not an eternal both-changed, and so the merge/write
         # layer speaks one name; the write re-renders the alias (see _apply_skill).
         remote_name = str(document.get("name") or "")
-        if remote_name and str(local.get("name") or "") != remote_name:
+        if not is_bundle and remote_name and str(local.get("name") or "") != remote_name:
             from local_operator.hub_sync.skill_document import SkillDocument
 
             local = SkillDocument.from_json(dict(local)).with_name(remote_name).to_json()
             local_fp = prov.fingerprint_snapshot("skill", local)
-        remote_fp = prov.fingerprint_snapshot("skill", remote)
         known = record.recorded_by != prov.UNKNOWN_BASELINE
         base_fp = prov.fingerprint_fields("skill", record.fields) if known else None
         classification = classify(base_fp, local_fp, remote_fp, baseline_known=known)
-        revision, sync_contract = _remote_meta(document)
         checks.append(
             ItemCheck(
                 "skill",
@@ -712,12 +963,46 @@ def check_hub_skills(
                 remote_revision=revision,
                 sync_contract=sync_contract,
                 served_by=_served_by(client),
+                content_state=record.content_state,
+                publisher=publisher,
             )
         )
     return checks
 
 
-def _fetch_skill(client: Any, skill_id: str, *, timeout: float) -> Mapping[str, Any]:
+def _document_publisher(document: Mapping[str, Any]) -> dict[str, str] | None:
+    """The publisher a hub row NAMED (``published_by``), or None when it named none.
+
+    ``published_by.account_id`` is the binding value (design §6.2); a display
+    name is user-controlled and therefore optional. A missing object is None and
+    the CALLERS refuse or skip -- this never falls back to a top-level
+    ``account_id``, which in some envelopes is the requester's.
+    """
+
+    raw = document.get("published_by")
+    if not isinstance(raw, Mapping):
+        return None
+    account_id = raw.get("account_id")
+    if not isinstance(account_id, str) or not account_id.strip():
+        return None
+    name = raw.get("name")
+    if not isinstance(name, str) or not name.strip():
+        metadata = document.get("account_metadata")
+        candidate = metadata.get("name") if isinstance(metadata, Mapping) else None
+        name = candidate if isinstance(candidate, str) else ""
+    publisher = {"id": account_id.strip()}
+    if name.strip():
+        publisher["name"] = name.strip()
+    return publisher
+
+
+def _fetch_skill(
+    client: Any,
+    skill_id: str,
+    *,
+    timeout: float,
+    if_none_match: str | None = None,
+) -> Mapping[str, Any]:
     """Default skill fetch: the client's manifest pull, through the tested seam.
 
     PUBLIC skill rows are readable UNAUTHENTICATED -- the server registers
@@ -726,10 +1011,17 @@ def _fetch_skill(client: Any, skill_id: str, *, timeout: float) -> Mapping[str, 
     the signed-in client still carries its bearer (an org row answers 404 to
     anyone who cannot prove membership). Before this, a public skill link was
     'unavailable: Radient API key is required' with zero requests (round-2 QN3).
+
+    ``if_none_match`` is the validator the caller holds (this link's baseline
+    revision). The client turns a match into ``NotModified`` -- HTTP 304, no
+    body -- and this seam passes that through untouched: translating it here
+    would hide the one fact the caller needs, that the row did not move.
     """
 
     send_bearer = bool(getattr(client, "api_key", None))
-    return client.get_skill(skill_id, timeout=timeout, **{"with_credential": send_bearer})
+    return client.get_skill(
+        skill_id, timeout=timeout, if_none_match=if_none_match, **{"with_credential": send_bearer}
+    )
 
 
 def list_links(agent_registry: Any, team_registry: Any) -> list[Link]:

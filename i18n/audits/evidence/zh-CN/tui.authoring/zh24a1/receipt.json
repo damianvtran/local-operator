@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "audit_id": "zh24a1",
+  "locale": "zh-CN",
+  "namespace": "tui.authoring",
+  "record": "i18n/audits/evidence/zh-CN/tui.authoring/zh24a1/record.json",
+  "provenance": "Bundle receipt for the independent zh-CN audit session 3d1df2689651, actual model deepseek/deepseek-flash; this manifest is not another audit.",
+  "hashes": {
+    "audit.log": "15c9b3a1c9c3b4ee5fdc0ef92c5a2a65fcf7b80706539b886f19e0449823d001",
+    "mechanical-raw.json": "d9e4a8aee88d800ae808d0260a03cb86960d351afc48cc6edbb98da54ae30cda",
+    "pseudo-evidence.json": "5119a9657c5d08dbc8ffb481f83ab2605ae0ff395afa0c928b5f727c3b447e1c",
+    "report.md": "8fb17c9963af109d33ebeab2ae78690bc436116d7c8c55769a53c54ae1a2b156",
+    "runtime-mechanical.json": "0a3aaad1c84735385e95e72576165dc9210d5ab55ac9e859c787a715e6b37c0f",
+    "tui.authoring.compact.txt": "755904f4b00fb5264f250f45c367ba4d9adcd812304d47d8c500af21f1f9c1e9",
+    "tui.authoring.pairs.txt": "36f7b59a167441b40f6077bbeebe34d743ad98a1b2bb14c3c09a0c46691a0131",
+    "record.json": "2dce741a6914ebbec9e9c7f33dda86e7ba0903f5b302ccdff38d9aa343057f37"
+  }
+}

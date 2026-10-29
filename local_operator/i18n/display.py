@@ -106,7 +106,12 @@ def isolated_status_text(record: RenderedMessage, technical: Sequence[TechnicalS
             or span.start < previous
             or not isinstance(span.expected, str)
             or not span.expected
-            or not all(0x21 <= ord(c) <= 0x7E for c in span.expected)
+            # ASCII, but a declared COMMAND may carry arguments
+            # (`/network new <name>`); the whole command must be one island or
+            # bidi re-orders its words. Spaces are allowed INSIDE the span;
+            # the boundary checks below still forbid a partial token.
+            or not all(0x20 <= ord(c) <= 0x7E for c in span.expected)
+            or span.expected != span.expected.strip()
             or text[span.start : span.end] != span.expected
         ):
             raise ValueError("invalid or overlapping technical status span")
@@ -117,7 +122,10 @@ def isolated_status_text(record: RenderedMessage, technical: Sequence[TechnicalS
         if span.start and not text[span.start - 1].isspace():
             raise ValueError("technical status span must include its whole prefix")
         suffix = span.end
-        while suffix < len(text) and text[suffix] in ".,;:!?":
+        # Urdu/Arabic sentence punctuation belongs to the PROSE that follows
+        # the token, exactly as ASCII . , ; : ! ? does. Without these the
+        # native `… /update۔` copy failed the whole-suffix rule (B-1).
+        while suffix < len(text) and text[suffix] in ".,;:!?۔؟،":
             suffix += 1
         if suffix < len(text) and not text[suffix].isspace():
             raise ValueError("technical status span must include its whole suffix")

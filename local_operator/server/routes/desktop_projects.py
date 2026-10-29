@@ -70,6 +70,7 @@ from pydantic import ValidationError
 from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.projects import (
     MilestoneEdit,
+    PageCounts,
     Project,
     ProjectDoneGateError,
     ProjectEdit,
@@ -221,6 +222,25 @@ def _live_counts(registry: ProjectRegistry, projects: list[Project]) -> dict[str
     }
 
 
+def _page_fields(registry: ProjectRegistry, counts: PageCounts | None = None) -> dict[str, Any]:
+    """The page declaration every listing-shaped answer carries (M1).
+
+    ONE reading of the registry's counts, so the listing, its search sibling and
+    the timeline cannot describe one store three ways. The numbers come from the
+    SAME snapshot the rows did (``page_counts`` is replaced whole by every load):
+    ``total_rows`` is the addressable set, ``loaded_rows`` what this answer
+    could see, and ``truncated`` says rows are beyond the page. A row past the
+    page is still addressable — ``GET /v1/desktop/projects/{key}`` resolves
+    through the disk-backed by-id/by-name lookups.
+    """
+    page = registry.page_counts if counts is None else counts
+    return {
+        "total_rows": page.total_rows,
+        "loaded_rows": page.loaded,
+        "truncated": page.truncated,
+    }
+
+
 def _listing_order(rows: list[Project]) -> list[Project]:
     """The listing's own order — status rank, then newest first.
 
@@ -248,7 +268,7 @@ async def projects(request: Request) -> CRUDResponse[Any]:
                 )
                 for project in listed
             ]
-            return ProjectList(projects=rows)
+            return ProjectList(projects=rows, **_page_fields(registry))
 
         return reply(await asyncio.to_thread(read))
 
@@ -285,6 +305,7 @@ async def search(
         def read() -> ProjectSearchResults:
             registry = _registry(request)
             rows = registry.list_projects()
+            counts = registry.page_counts
             if not q.strip():
                 hits = [
                     ProjectSearchHit(
@@ -302,7 +323,32 @@ async def search(
                     )
                     for match in search_projects(rows, q, limit=limit)
                 ]
-            return ProjectSearchResults(projects=hits, query=q, count=len(hits))
+                # An EXACT name past the page must survive a page FUZZY hit: a
+                # client searching "hiring" must not be handed "hiring-2026"
+                # while the exact row is invisible (M3). Only a PARTIAL page can
+                # need this — on a whole store the ranking already saw every
+                # row, so the disk scan could add nothing and is skipped (M4).
+                # The fuzzy tiers stay page-scoped: ranking the whole store per
+                # keystroke is the cost the page exists to avoid.
+                exact_name = q.strip().casefold()
+                if counts.truncated and not any(
+                    hit.name.strip().casefold() == exact_name for hit in hits
+                ):
+                    found = registry.get_project_by_name(q.strip())
+                    if found is not None and all(hit.id != found.id for hit in hits):
+                        # Appended FIRST: an exact match leads the ranking.
+                        hits = [
+                            ProjectSearchHit(
+                                id=found.id,
+                                name=display_name(found),
+                                score=1.0,
+                                fields=["name"],
+                            ),
+                            *hits,
+                        ][:limit]
+            return ProjectSearchResults(
+                projects=hits, query=q, count=len(hits), **_page_fields(registry, counts)
+            )
 
         return reply(await asyncio.to_thread(read))
 
@@ -322,7 +368,10 @@ async def timeline(request: Request) -> CRUDResponse[Any]:
         def read() -> ProjectTimeline:
             registry = _registry(request)
             listed = _listing_order(registry.list_projects())
-            return ProjectTimeline(projects=[project_timeline_entry(project) for project in listed])
+            return ProjectTimeline(
+                projects=[project_timeline_entry(project) for project in listed],
+                **_page_fields(registry),
+            )
 
         return reply(await asyncio.to_thread(read))
 

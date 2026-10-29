@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""Read-only Urdu catalogue audit probe; all outputs stay in this session's scratchpad."""
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import re
+import unicodedata
+from collections import Counter
+from pathlib import Path
+
+REPO = Path('/Users/damian/local-operator/.worktrees/i18n-ur-core')
+OUT = Path('/Users/damian/.local-operator/sessions/3e0f499dc2ee/scratchpad/ur-core-second-audit')
+ROOT = REPO / 'local_operator/i18n/catalogues'
+EN = ROOT / 'en'
+UR = ROOT / 'ur'
+OUT.mkdir(parents=True, exist_ok=True)
+
+
+def sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def load(path: Path) -> dict:
+    return json.loads(path.read_text(encoding='utf-8'))
+
+
+def cells(text: str) -> int:
+    total = 0
+    for char in text:
+        if char in '\n\r':
+            continue
+        if unicodedata.combining(char) or unicodedata.category(char) == 'Cf':
+            continue
+        total += 2 if unicodedata.east_asian_width(char) in {'W', 'F'} else 1
+    return total
+
+
+def balanced_tokens(text: str) -> list[str]:
+    """Return exact balanced {...} tokens, including nested ICU branches."""
+    tokens = []
+    starts = []
+    quote = None
+    escaped = False
+    for i, char in enumerate(text):
+        if escaped:
+            escaped = False
+            continue
+        if char == '\\':
+            escaped = True
+            continue
+        if quote:
+            if char == quote:
+                quote = None
+            continue
+        if char in {'\"', "'"}:
+            quote = char
+        elif char == '{':
+            starts.append(i)
+        elif char == '}':
+            if not starts:
+                tokens.append('UNMATCHED_CLOSING_BRACE')
+            else:
+                start = starts.pop()
+                tokens.append(text[start:i + 1])
+    if starts:
+        tokens.append('UNMATCHED_OPENING_BRACE')
+    return tokens
+
+
+def icu_signature(text: str) -> list[str]:
+    """Retain ordered argument occurrences, ICU kinds/skeletons and plural categories.
+
+    Branch prose can contain arbitrary braces and must not be mistaken for an argument.
+    A real argument starts with an identifier immediately followed by `}` or by a comma
+    and one of the supported ICU kinds.
+    """
+    signatures = []
+    argument = re.compile(
+        r'\{([A-Za-z_]\w*)\s*(?:\}|,\s*(plural|select|number|date|time)\s*([,}]))'
+    )
+    for match in argument.finditer(text):
+        name, kind, delimiter = match.groups()
+        signature = [name, kind or 'interpolation']
+        if kind in {'plural', 'select'}:
+            remainder = text[match.end():]
+            signature.append(re.findall(
+                r'(?:^|[}\s])(=\d+|zero|one|two|few|many|other)\s*\{', remainder
+            ))
+        elif delimiter == ',':
+            # Preserve an inline number/date/time skeleton through its closing brace.
+            end = text.find('}', match.end())
+            signature.append(text[match.end():end] if end >= 0 else 'UNCLOSED')
+        signatures.append(json.dumps(signature, ensure_ascii=False))
+    return signatures
+
+
+def literal_tokens(text: str) -> list[str]:
+    patterns = [
+        r'`[^`]*`',
+        r'%[0-9.]*[a-zA-Z%]',
+        r'(?<![:/\w{])/[\w~][\w./~:-]*',
+        r'(?<![\w{])--[\w-]+(?:=[\w{}.-]+)?',
+        r'\b(?:https?://|file://)[^\s،؛۔]+',
+    ]
+    found = []
+    for pattern in patterns:
+        found.extend(re.findall(pattern, text))
+    # Sentence punctuation is not part of a URL/path token. Urdu sentence marks
+    # receive the same treatment as their ASCII counterparts.
+    return [token.rstrip('.،؛۔') if not token.startswith('`') else token for token in found]
+
+
+def pseudo_width(text: str) -> int:
+    """A deterministic 30% expansion stress probe, preserving zero-width controls."""
+    return math.ceil(cells(text) * 1.30)
+
+
+urdu_re = re.compile(r'[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff]')
+latin_re = re.compile(r'[A-Za-z]+')
+latin_phrase_re = re.compile(r'\b[A-Za-z][A-Za-z0-9_.-]*(?:\s+[A-Za-z][A-Za-z0-9_.-]*){1,}\b')
+manual_bidi = set('\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069')
+forbidden_punctuation = set('।!')
+
+rows = []
+namespace_rows = []
+latin_tokens = Counter()
+latin_contexts = {}
+for ur_path in sorted(UR.glob('*.json')):
+    if ur_path.name.endswith('.context.json'):
+        continue
+    en_path = EN / ur_path.name
+    if not en_path.exists():
+        continue
+    ns = ur_path.stem
+    en = load(en_path)
+    ur = load(ur_path)
+    context_path = EN / f'{ns}.context.json'
+    context = load(context_path) if context_path.exists() else {}
+    missing = sorted(set(en) - set(ur))
+    extra = sorted(set(ur) - set(en))
+    workbook = []
+    ns_counts = Counter()
+    for key in en:
+        source = en[key]
+        target = ur.get(key)
+        ctx = context.get(key, {})
+        row = {
+            'namespace': ns,
+            'key': key,
+            'en': source,
+            'ur': target,
+            'context': ctx,
+            'en_cells': cells(source),
+            'ur_cells': cells(target) if isinstance(target, str) else None,
+            'pseudo_30pct_cells': pseudo_width(target) if isinstance(target, str) else None,
+        }
+        issues = []
+        if not isinstance(target, str):
+            issues.append('missing_or_non_string')
+        else:
+            if balanced_tokens(source) != balanced_tokens(target):
+                # Exact tokens include translated branch prose, so this is only a lead;
+                # icu_signature below is the parity decision.
+                if icu_signature(source) != icu_signature(target):
+                    issues.append('icu_signature_mismatch')
+            if literal_tokens(source) != literal_tokens(target):
+                issues.append('literal_token_order_or_content_mismatch')
+            controls = sorted(set(target) & manual_bidi)
+            if controls:
+                issues.append('manual_bidi:' + ','.join(f'U+{ord(c):04X}' for c in controls))
+            bad_punct = sorted(set(target) & forbidden_punctuation)
+            if bad_punct:
+                issues.append('forbidden_punctuation:' + ''.join(bad_punct))
+            # `تو` is also the extremely common conjunction "then"; only `تم` is a
+            # useful automatic candidate. Informal `تو` address is adjudicated manually.
+            if re.search(r'(?<![\w])تم(?![\w])', target):
+                issues.append('informal_address_candidate')
+            max_cells = ctx.get('maxCells')
+            if isinstance(max_cells, int):
+                if cells(target) > max_cells:
+                    issues.append(f'actual_overflow:{cells(target)}>{max_cells}')
+                if pseudo_width(target) > max_cells:
+                    issues.append(f'pseudo_30pct_overflow:{pseudo_width(target)}>{max_cells}')
+            if len(target) > max(20, len(source) * 1.5):
+                issues.append(f'materially_longer:{len(target)}>{len(source)}')
+            if not urdu_re.search(target) and latin_re.search(target):
+                issues.append('all_latin_candidate')
+            if urdu_re.search(target):
+                for phrase in latin_phrase_re.findall(target):
+                    # Ignore phrases wholly inside backticks; workbook review adjudicates rest.
+                    if any(phrase in token for token in re.findall(r'`[^`]*`', target)):
+                        continue
+                    issues.append('latin_phrase:' + phrase)
+            for token in latin_re.findall(target):
+                latin_tokens[token] += 1
+                latin_contexts.setdefault(token, []).append(key)
+        row['mechanical_flags'] = issues
+        ns_counts.update(issue.split(':', 1)[0] for issue in issues)
+        rows.append(row)
+        workbook.append(json.dumps(row, ensure_ascii=False, separators=(',', ':')))
+    (OUT / f'{ns}.jsonl').write_text('\n'.join(workbook) + ('\n' if workbook else ''), encoding='utf-8')
+    namespace_rows.append({
+        'namespace': ns,
+        'key_count': len(en),
+        'ur_key_count': len(ur),
+        'en_sha256': sha(en_path),
+        'ur_sha256': sha(ur_path),
+        'context_sha256': sha(context_path) if context_path.exists() else None,
+        'missing_keys': missing,
+        'extra_keys': extra,
+        'flag_counts': dict(ns_counts),
+    })
+
+plural_rows = [r for r in rows if isinstance(r['ur'], str) and ', plural,' in r['en']]
+format_rows = [r for r in rows if re.search(r',\s*(?:number|date|time)\s*[,}]', r['en'])]
+fit_rows = [r for r in rows if isinstance(r['context'], dict) and 'maxCells' in r['context']]
+flagged = [r for r in rows if r['mechanical_flags']]
+summary = {
+    'commit': '2189b61739e08b5f219d317ead68b4a5f4cf709f',
+    'namespace_count': len(namespace_rows),
+    'key_count': len(rows),
+    'translated_nonempty_key_count': sum(1 for r in rows if r['ur']),
+    'plural_key_count': len(plural_rows),
+    'number_date_time_key_count': len(format_rows),
+    'maxCells_key_count': len(fit_rows),
+    'flagged_key_count': len(flagged),
+    'flag_counts': dict(Counter(flag.split(':', 1)[0] for r in rows for flag in r['mechanical_flags'])),
+    'namespaces': namespace_rows,
+}
+(OUT / 'mechanical-summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+(OUT / 'flagged.json').write_text(json.dumps(flagged, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+(OUT / 'plurals.json').write_text(json.dumps(plural_rows, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+(OUT / 'formats.json').write_text(json.dumps(format_rows, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+(OUT / 'fit.json').write_text(json.dumps(fit_rows, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+(OUT / 'latin-tokens.json').write_text(json.dumps([
+    {'token': token, 'count': count, 'keys': sorted(set(latin_contexts[token]))}
+    for token, count in sorted(latin_tokens.items(), key=lambda item: item[0].lower())
+], ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps({k: v for k, v in summary.items() if k != 'namespaces'}, ensure_ascii=False, indent=2))
+print('workbook:', OUT)

@@ -368,6 +368,48 @@ def test_init_in_an_isolated_home_explains_the_missing_launchagent(
     assert json.loads(capsys.readouterr().out)["relay"] == ""
 
 
+def test_init_port_is_the_port_serve_binds(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-INIT-PORT: `init --port N` advertised N but never saved it, so `serve`
+    (which reads ``network.port``) tried the default and failed "address in use".
+    The port the record publishes and the port the relay resolves must be one."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    args = Namespace(
+        name="port-net",
+        listen_address="",
+        port=47811,
+        advertise_hosts=[],
+        no_start=True,
+        json=True,
+    )
+    assert net_cli._cmd_init(args) == 0  # noqa: SLF001
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["listen"]["port"] == 47811
+
+    # The serve/autostart path's own resolver, read fresh from the config store.
+    assert relay.NetworkSettings.from_config().port == 47811
+
+
+def test_init_without_port_writes_no_port_setting(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Negative control: no `--port` leaves ``network.port`` unset (still the default)."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    args = Namespace(
+        name="default-net",
+        listen_address="",
+        port=0,
+        advertise_hosts=[],
+        no_start=True,
+        json=True,
+    )
+    assert net_cli._cmd_init(args) == 0  # noqa: SLF001
+    capsys.readouterr()
+    assert store.read_config(("network", "port"), None, root=root) is None
+    assert relay.NetworkSettings.from_config().port == relay.DEFAULT_PORT
+
+
 # ---------------------------------------------------------------------------
 # R7 — the audit bounds are real config keys
 # ---------------------------------------------------------------------------
@@ -1717,3 +1759,88 @@ def _publish_live_record_for(root: Path, session_id: str) -> None:
         ),
         root,
     )
+
+
+def test_a_handler_refusal_is_recorded_locally_with_its_code(root: Path) -> None:
+    """Round-2 MAJOR: the refusing device kept NO trace of the refusal.
+
+    The peer's receipt is the sender's view; the device that said no must also be
+    able to answer "why is memory sync stuck" from its own audit file. `bad_memory`
+    is a registered cause, so the row names the real refusal instead of `internal`.
+    """
+    from local_operator.network import audit
+
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    frame = {"op": "net_memory", "req": 11}
+
+    def _handler(_link: object, _frame: dict[str, object]) -> None:
+        raise types.MeshRefusal(
+            "bad_memory",
+            "Memory move refused: resolve the conflict on this device. Memory sync "
+            "retries automatically after about 30 minutes; restarting this device picks the "
+            "retry up sooner.",
+        )
+
+    link: Any = Namespace(device_id="d_" + "b" * 32, network_id=NETWORK, epoch=2)
+    reply = server._run_handler(  # noqa: SLF001 — the one place a handler's reply is shaped
+        link,
+        frame,
+        _handler,
+        None,  # type: ignore[arg-type] — the refusal branch never reads it
+    )
+    assert reply["code"] == "bad_memory"
+    rows = [row for row in server.audit.tail(limit=20) if row["event"] == "authorisation_refused"]
+    assert rows, "the refusal left no local audit record"
+    assert rows[-1]["outcome"] == "refused"
+    assert rows[-1]["cause"] == "bad_memory"
+    assert "bad_memory" in audit.CAUSES
+
+
+def _network_main(argv: list[str]) -> int:
+    """``lop network <argv>`` through the real parser and dispatcher."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="lop")
+    net_cli.add_parser(parser.add_subparsers(dest="subcommand"))
+    return net_cli.main(parser.parse_args(["network", *argv]))
+
+
+@pytest.mark.parametrize("json_mode", [True, False])
+def test_init_out_of_range_port_is_a_refusal_not_a_traceback(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    json_mode: bool,
+) -> None:
+    """Review m3 / QA Q1: through the CLI's own dispatcher, so the rendering is real."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    argv = ["init", "bad-net", "--port", "70000", "--no-start"] + (["--json"] if json_mode else [])
+    rc = _network_main(argv)
+    out, err = capsys.readouterr()
+    assert rc == 1
+    assert "Traceback" not in out + err and "Stack Trace" not in out + err
+    assert "65535" in err
+    if json_mode:
+        body = json.loads(out)
+        assert body["ok"] is False and body["code"] == "bad_request"
+    assert store.list_networks(root) == []
+
+
+def test_init_port_refuses_to_move_the_relay_under_an_existing_network(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Review m2: ``network.port`` is device-wide; a second network's --port would
+    strand the first network's peers on a closed port after the next restart."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    assert _network_main(["init", "a-net", "--no-start", "--json"]) == 0
+    capsys.readouterr()
+    rc = _network_main(["init", "b-net", "--port", "47811", "--no-start", "--json"])
+    body = json.loads(capsys.readouterr().out)
+    assert rc == 1 and body["code"] == "bad_request"
+    assert "a-net" in body["message"]
+    # Review round 2, n1: the refusal names the deliberate command.
+    assert "lop config edit network.port 47811" in body["message"]
+    assert [record.name for record in store.list_networks(root)] == ["a-net"]
+    assert store.read_config(("network", "port"), None, root=root) is None

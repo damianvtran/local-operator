@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Measure actual rendered Urdu fit strings through the core ICU runtime."""
+from __future__ import annotations
+
+import json
+import math
+import re
+import sys
+import unicodedata
+from pathlib import Path
+
+REPO = Path('/Users/damian/local-operator/.worktrees/i18n-ur-core')
+sys.path.insert(0, str(REPO))
+from local_operator.i18n.runtime import render_message  # noqa: E402
+
+ROOT = REPO / 'local_operator/i18n/catalogues'
+OUT = Path('/Users/damian/.local-operator/sessions/3e0f499dc2ee/scratchpad/ur-core-second-audit')
+
+
+def cells(text: str) -> int:
+    return sum(
+        0 if unicodedata.combining(c) or unicodedata.category(c) == 'Cf' or c in '\n\r'
+        else 2 if unicodedata.east_asian_width(c) in {'W', 'F'} else 1
+        for c in text
+    )
+
+
+def arguments(source: str) -> set[str]:
+    return set(re.findall(r'\{([A-Za-z_]\w*)\s*(?:\}|,)', source))
+
+
+rows = []
+for context_path in sorted((ROOT / 'en').glob('*.context.json')):
+    ns = context_path.name.removesuffix('.context.json')
+    ur_path = ROOT / 'ur' / f'{ns}.json'
+    en_path = ROOT / 'en' / f'{ns}.json'
+    if not ur_path.exists():
+        continue
+    contexts = json.loads(context_path.read_text())
+    en = json.loads(en_path.read_text())
+    ur = json.loads(ur_path.read_text())
+    for key, context in contexts.items():
+        budget = context.get('maxCells')
+        if not isinstance(budget, int):
+            continue
+        names = arguments(en[key])
+        variants = []
+        counts = [1, 2] if 'count' in names or 'amount' in names else [None]
+        for count in counts:
+            params = {}
+            for name in names:
+                if name in {'count', 'amount'}:
+                    params[name] = count
+                elif name == 'time':
+                    params[name] = '19:36'
+                elif name == 'key':
+                    # Sidecar's 32-cell template budget excludes the substitution.
+                    params[name] = ''
+                elif name == 'login':
+                    params[name] = 'Radient'
+                else:
+                    params[name] = 'X'
+            rendered = render_message(ur[key], params, 'ur')
+            width = cells(rendered)
+            variants.append({
+                'params': params,
+                'rendered': rendered,
+                'cells': width,
+                'pseudo_30pct_cells': math.ceil(width * 1.30),
+                'fits_maxCells': width <= budget,
+                'pseudo_fits_maxCells': math.ceil(width * 1.30) <= budget,
+            })
+        worst_case = None
+        if 'key' in names:
+            worst_params = {'key': 'x' * 25}
+            worst = render_message(ur[key], worst_params, 'ur')
+            worst_case = {'params': worst_params, 'rendered': worst, 'cells': cells(worst), 'fits_57': cells(worst) <= 57}
+        rows.append({
+            'key': key,
+            'maxCells': budget,
+            'note': context.get('note'),
+            'en': en[key],
+            'ur': ur[key],
+            'variants': variants,
+            'worst_case_key': worst_case,
+        })
+
+result = {
+    'method': 'core render_message(locale=ur); count/amount=1,2; time=19:36; login=Radient; keyed template measured with empty key per sidecar and separately with 25-cell worst-case key; Unicode combining/Cf zero cells; pseudo=ceil(rendered cells*1.30)',
+    'key_count': len(rows),
+    'actual_overflow_count': sum(any(not v['fits_maxCells'] for v in r['variants']) for r in rows),
+    'pseudo_30pct_overflow_count': sum(any(not v['pseudo_fits_maxCells'] for v in r['variants']) for r in rows),
+    'worst_case_key_overflow_count': sum(bool(r['worst_case_key'] and not r['worst_case_key']['fits_57']) for r in rows),
+    'rows': rows,
+}
+(OUT / 'fit-rendered.json').write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps({k: v for k, v in result.items() if k != 'rows'}, ensure_ascii=False, indent=2))
+for row in rows:
+    if any(not v['fits_maxCells'] or not v['pseudo_fits_maxCells'] for v in row['variants']) or (row['worst_case_key'] and not row['worst_case_key']['fits_57']):
+        print(row['key'], 'budget', row['maxCells'], [(v['cells'], v['pseudo_30pct_cells'], v['rendered']) for v in row['variants']], 'worst', row['worst_case_key'])

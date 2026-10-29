@@ -1,0 +1,27 @@
+tui.tags.added | Added “{name}”. | 已添加“{name}”。
+tui.tags.applied | applied | 已应用
+tui.tags.cap_applied | 8 tags applied. Remove one before adding another. | 已应用8个标签。移除一个才能再添加。
+tui.tags.cap_registry | 32 tags exist. Use an existing tag or manage tags to remove one. | 已有32个标签。使用现有标签，或管理标签以移除一个。
+tui.tags.create | Create and apply “{name}” | 创建并应用“{name}”
+tui.tags.create_help | Creates a shared tag and applies it here. | 创建一个共享标签并在此应用。
+tui.tags.created_applied | Created and applied “{name}”. | 已创建并应用“{name}”。
+tui.tags.current | current | 当前
+tui.tags.empty | No tags yet. Type a name to create and apply one. | 尚无标签。输入名称即可创建并应用。
+tui.tags.failed | Couldn't update tags: {error} | 无法更新标签：{error}
+tui.tags.grouping_off | Sidebar tag groups off — sections are flat again. | 侧边栏标签分组已关闭 — 各区块恢复平铺。
+tui.tags.grouping_on | Sidebar tag groups on — sections now split by primary tag. | 侧边栏标签分组已开启 — 各区块现按主标签拆分。
+tui.tags.header | Tags for this conversation · {count}/8 applied | 本会话的标签 · 已应用{count}/8
+tui.tags.invalid | Tag names are 1–24 characters, with no control characters; Untagged is reserved. | 标签名为1–24个字符，不含控制字符；“未标记”为保留名称。
+tui.tags.none_applied | No tags applied to this conversation. | 本会话尚未应用任何标签。
+tui.tags.not_applied | not applied | 未应用
+tui.tags.off | off | 关闭
+tui.tags.on | on | 开启
+tui.tags.partial_create | Tag created, but couldn't apply it. Retry applying. | 标签已创建，但未能应用。重试应用。
+tui.tags.primary | Primary | 主标签
+tui.tags.removed | Removed “{name}”. | 已移除“{name}”。
+tui.tags.slash_tag | Tag this conversation; Enter toggles a tag | 为此会话添加标签；Enter切换标签
+tui.tags.slash_tags | Group the sidebar by primary tag (on/off) | 按主标签对侧边栏分组（开启/关闭）
+tui.tags.status | Sidebar tag groups: {state} — /tags on or /tags off | 侧边栏标签分组：{state} — /tags on或/tags off
+tui.tags.unavailable | Tags aren't available for this conversation. | 此会话无法使用标签。
+tui.tags.untagged | Untagged | 未标记
+tui.tags.usage | Use /tags on or /tags off | 使用/tags on或/tags off

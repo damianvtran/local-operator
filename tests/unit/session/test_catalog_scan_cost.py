@@ -62,6 +62,7 @@ import pytest
 
 import local_operator.session.catalog as session_catalog
 import local_operator.session.retention as retention
+from local_operator.asks.visibility import lapsed_visible_ms
 from local_operator.resume import _recent_sessions_with_origin
 from local_operator.session.catalog import CatalogueScope, catalogue_page, load_catalog
 from local_operator.session.creation import ensure_session_created_at
@@ -375,7 +376,19 @@ class TestAScopedPageIsTheSameScan:
         # The hidden population still costs nothing: the skip is armed by the
         # inode the scandir batch already carried, and 200 hidden directories add
         # no per-directory stat to any shape.
-        assert scoped["lstat"] == small["lstat"] == large["lstat"]
+        #
+        # THE MESSAGE CARRIES THE WHOLE PICTURE BECAUSE THIS CELL WENT RED IN CI
+        # AND NOWHERE ELSE: `scoped` counted 18 lstats against `small`'s 6 on a
+        # Linux shard while the same bytes passed here, in the shard's own replay
+        # order, and on a neighbouring head. A bare `18 == 6` cannot say whether
+        # the WALK moved, the CENSUS moved, or the store's lapsed window did, so
+        # on failure the three profiles, the configured window and the wall clock
+        # the visibility rule read all travel with the assertion.
+        lapsed_ms = lapsed_visible_ms()
+        assert scoped["lstat"] == small["lstat"] == large["lstat"], (
+            f"walk moved: small={small} large={large} scoped={scoped} "
+            f"lapsed_ms={lapsed_ms} now={time.time():.3f} root={tmp_path}"
+        )
 
     def test_a_scoped_page_adds_exactly_one_stat_per_visible_session(self, tmp_path: Path) -> None:
         """The census is bounded by the STORE, not by the page.
@@ -1055,10 +1068,20 @@ class TestTheRevalidationWindow:
         Six hidden directories and one user session, so the two answers differ
         by exactly the marker stats the skip suppresses — the number a CLI
         invocation pays per hidden directory today and stops paying inside the
-        window. The base four are the one user session's own checks: its own
-        marker probe, the archived-index probe, and its two activity files
-        (transcript, inbox). The final +1 is the save's own ``is_dir`` probe on
-        an existing cache directory, paid by any scan that writes.
+        window. The base six are the one user session's own checks: its own
+        marker probe, the archived-index probe, and its FOUR activity files
+        (transcript, inbox, and the two transcript-archive names that joined
+        ``retention._ACTIVITY_FILES`` with transcript compression). The final
+        +1 is the save's own ``is_dir`` probe on an existing cache directory,
+        paid by any scan that writes.
+
+        RUN THIS ON AN ISOLATED ``HOME``. The root ``conftest.py``'s real-store
+        guard wraps ``os.replace`` and resolves both paths on every call — four
+        extra stats on the cache save — but only while the operator's real store
+        exists for it to guard. Measured on this host: the same branch reports 17
+        here and 13 under ``env -i HOME=<mktemp>`` (CI's shape, and the shape the
+        numbers above describe). The delta is identical on ``origin/main``'s base,
+        so it is the harness and not this scan; do NOT raise the numbers for it.
         """
         from local_operator import resume as resume_mod
 
@@ -1077,8 +1100,8 @@ class TestTheRevalidationWindow:
             _recent_sessions_with_origin(tmp_path)
 
         assert armed.counts["scandir"] == revalidating.counts["scandir"] == 1
-        assert armed.counts["stat"] == 4
-        assert revalidating.counts["stat"] == 4 + 6 + 1
+        assert armed.counts["stat"] == 6
+        assert revalidating.counts["stat"] == 6 + 6 + 1
 
     def test_the_boundary_is_the_window_and_future_stamps_are_distrusted(
         self, tmp_path: Path
@@ -1182,12 +1205,12 @@ class TestTheRevalidationWindow:
         resume_mod._SCAN_COUNT.pop(str(tmp_path), None)
         with _counting() as armed:
             _recent_sessions_with_origin(tmp_path)
-        assert armed.counts["stat"] == 4, "the window is honoured: the skip stays armed"
+        assert armed.counts["stat"] == 6, "the window is honoured: the skip stays armed"
 
         resume_mod._SCAN_COUNT.pop(str(tmp_path), None)
         with _counting() as forced:
             _recent_sessions_with_origin(tmp_path, None, revalidate=True)
-        assert forced.counts["stat"] == 4 + 6 + 1, "forced: the slow path regardless"
+        assert forced.counts["stat"] == 6 + 6 + 1, "forced: the slow path regardless"
 
         refreshed = json.loads(cache.read_text(encoding="utf-8"))["revalidated_at"]
         assert time.time() - refreshed < 5, "a completed revalidation moves the stamp"
@@ -1210,7 +1233,7 @@ class TestTheRevalidationWindow:
         resume_mod._SCAN_COUNT[str(tmp_path)] = resume_mod.REVALIDATE_EVERY
         with _counting() as epoch:
             _recent_sessions_with_origin(tmp_path)
-        assert epoch.counts["stat"] == 4 + 6 + 1
+        assert epoch.counts["stat"] == 6 + 6 + 1
 
     def test_an_armed_write_preserves_the_stamp(self, tmp_path: Path) -> None:
         """A write an ARMED scan makes — the entry set moved, a new session

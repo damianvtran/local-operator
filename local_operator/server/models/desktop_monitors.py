@@ -76,12 +76,13 @@ class MonitorRow(BaseModel):
     #: Seconds since ``last_check_at``, or ``None`` when it has not run yet.
     last_check_age_s: float | None = None
     #: ``"dormant"`` (the session is stopped), ``"disabled"`` (the failure
-    #: ladder gave up), ``"expired"`` (``until_at`` has passed), else
-    #: ``"armed"`` — the CLI's precedence (``cli._monitor_state_word``:
-    #: dormancy wins over disabled so a failure word cannot point a reader at
-    #: the wrong remedy; disabled wins over the clock so a watch that does not
-    #: tick never reads as merely late), with the rendered clock left to the
-    #: client.
+    #: ladder gave up), ``"expired"`` (``until_at`` has passed), ``"blind"``
+    #: (armed and ticking, but its full result cannot be compared so nothing it
+    #: sees is reported), else ``"armed"`` — the CLI's precedence
+    #: (``cli._monitor_state_word``: dormancy wins over disabled so a failure
+    #: word cannot point a reader at the wrong remedy; disabled wins over the
+    #: clock so a watch that does not tick never reads as merely late), with the
+    #: rendered clock left to the client.
     state: str = "armed"
     #: When an unavailable episode began (epoch ms; 0 = none). An episode is a
     #: tool that is temporarily out of reach — an MCP server reconnecting — and
@@ -93,6 +94,15 @@ class MonitorRow(BaseModel):
     #: CLI, the agent tool and the TUI band read the same sentence, so one
     #: monitor cannot read as healthy here and stalled there.
     health: str | None = None
+    #: The blind state: the watch is armed and its call still runs, but the
+    #: FULL result could not be compared (its spill is gone or was stored
+    #: incompletely), so nothing it sees reaches the operator. ``state`` names
+    #: it too; the reason rides here for a client that wants the sentence.
+    blind: bool = False
+    blind_reason: str = ""
+    #: Per-class suppression counts from the counters file, so a client can say
+    #: "changes were suppressed" without opening the session.
+    suppressed: dict[str, int] = Field(default_factory=dict)
 
 
 class MonitorEntry(BaseModel):

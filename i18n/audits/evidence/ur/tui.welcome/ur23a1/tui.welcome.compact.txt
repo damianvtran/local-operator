@@ -1,0 +1,30 @@
+tui.welcome.hint.all_commands | all commands | تمام کمانڈز
+tui.welcome.hint.command_picker | command picker | کمانڈ کا انتخاب
+tui.welcome.hint.other_provider | another provider, including API keys | کوئی اور پرووائیڈر، API کلیدوں سمیت
+tui.welcome.hint.quit | quit | باہر نکلیں
+tui.welcome.hint.sign_in | sign in — recommended, no key to paste | سائن ان کریں — تجویز کردہ، کلید پیسٹ نہیں کرنی
+tui.welcome.status.login_required | not logged in — /login {provider} | آپ لاگ ان نہیں ہیں — /login {provider}
+tui.welcome.status.login_required.short | not logged in | آپ لاگ ان نہیں ہیں
+tui.welcome.status.update | latest is v{version} — /update | تازہ ترین v{version} ہے — /update
+tui.welcome.status.update.short | latest is v{version} | تازہ ترین v{version} ہے
+tui.welcome.step.full | 1 connect an account  ·  2 sign in or paste a key  ·  3 {aida} says hello | 1 اکاؤنٹ جوڑیں  ·  2 سائن ان کریں یا کلید پیسٹ کریں  ·  3 {aida} سلام کہے
+tui.welcome.step.medium | 1 connect  ·  2 sign in or paste a key  ·  3 {aida} says hello | 1 جوڑیں  ·  2 سائن ان کریں یا کلید پیسٹ کریں  ·  3 {aida} سلام کہے
+tui.welcome.step.short | 1 connect  ·  2 sign in  ·  3 {aida} says hello | 1 جوڑیں  ·  2 سائن ان کریں  ·  3 {aida} سلام کہے
+tui.welcome.tip.approvals | /approvals <ask|auto> sets whether tools ask first | ٹولز کا پہلے پوچھنا: /approvals <ask|auto>
+tui.welcome.tip.classification_login | lop login <radient|typesafe|openrouter> enables hints | اشارے چالو — lop login <radient|typesafe|openrouter>
+tui.welcome.tip.classification_off | lop config edit classification.auto false turns hints off | اشارے بند — lop config edit classification.auto false
+tui.welcome.tip.cmux | Under cmux, Where it opens sets workspace or surface | cmux میں “کہاں کھلے” سے ورک اسپیس یا سرفیس مقرر ہوتا ہے
+tui.welcome.tip.esc | esc stops the agent without ending the session | esc ایجنٹ روکتا ہے، سیشن ختم کیے بغیر
+tui.welcome.tip.fork | /fork branches; /fork <message> starts divergent work | /fork شاخ بناتا ہے؛ /fork <message> الگ کام شروع کرتا ہے
+tui.welcome.tip.fork_placement | /settings → Fork → Where a fork opens sets placement | /settings → Fork → “فورک کہاں کھلے” سے مقام طے ہوتا ہے
+tui.welcome.tip.hotkeys | /settings → Hotkeys remaps these keys | /settings → Hotkeys سے یہ کلیدیں بدلیں
+tui.welcome.tip.key_new_session | '{key}' starts a new conversation | '{key}' سے نئی گفتگو شروع ہوتی ہے
+tui.welcome.tip.key_resume | '{key}' reopens a recent conversation | '{key}' سے حالیہ گفتگو کھولیں
+tui.welcome.tip.mesh | /network new <name> makes a mesh other devices can join | /network new <name> سے دوسرے ڈیوائسز کا میش بنائیں
+tui.welcome.tip.model | /model <provider>/<id> switches this session only | /model <provider>/<id> صرف اسی سیشن پر لاگو ہوتا ہے
+tui.welcome.tip.paste | ctrl+v attaches an image from the system clipboard | ctrl+v سسٹم کلپ بورڈ سے تصویر منسلک کرتا ہے
+tui.welcome.tip.resume | /resume picks up a recent session where you left off | /resume سے حالیہ سیشن وہیں سے جاری رکھیں
+tui.welcome.tip.setup | New here? {login} is one browser sign-in; no key to paste | نئے ہیں؟ {login} براؤزر سائن ان ہے؛ کلید پیسٹ نہیں کرنی
+tui.welcome.tip.shell | ! on an empty composer runs a shell command | خالی کمپوزر میں ! شیل کمانڈ چلاتا ہے
+tui.welcome.tip.subagents | Ask for parallel work and the agent fans out subagents | متوازی کام کہیں؛ ایجنٹ کام ذیلی ایجنٹس میں بانٹ دیتا ہے
+tui.welcome.tip.team | /team <name> <message> sends work to the manager | /team <name> <message> مینیجر کو کام بھیجتا ہے

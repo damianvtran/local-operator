@@ -41,7 +41,6 @@ count.
 
 from __future__ import annotations
 
-import string
 from enum import Enum
 from typing import Any, Callable, NamedTuple, Sequence
 
@@ -55,14 +54,16 @@ from textual.widgets import Static
 
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.text import tr
-from local_operator.sigils import SlashContext, at_token, is_boundary, split_token
-from local_operator.tui import theme as theme_mod
-from local_operator.tui.autocomplete import (
-    ArgumentChoice,
-    SlashCommand,
-    match_choices,
-    match_commands,
+from local_operator.sigils import (
+    SlashContext,
+    is_boundary,
+    skill_name_spans,
+    split_token,
 )
+from local_operator.tui import theme as theme_mod
+from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
+from local_operator.tui.autocomplete import file_completion_token as at_token
+from local_operator.tui.autocomplete import match_choices, match_commands
 
 # The project has exactly ONE cell-accurate truncator and it lives in
 # tool_card. Importing it across widget modules is deliberate: a local copy is
@@ -331,12 +332,11 @@ def _skill_argument_floor(
 ) -> int | None:
     """Column at or after which a boundary ``$`` may open inside a claim, else ``None``.
 
-    THE one definition of "past the name slot", read both by :func:`skill_token`
-    (deciding whether a token opens at all) and by
-    :func:`_skill_argument_region` (deciding what a reassembly rebuilds), for
-    the same non-drift reason :func:`skill_token_is_leading` is one definition:
-    two copies of this rule is how the gate and the edit end up disagreeing
-    about which half of a line belongs to the command.
+    THE one definition of "past the name slot", read by :func:`skill_token` to
+    decide whether a token opens at all, and named once so every surface that
+    asks the question gets the same answer: two copies of this rule is how the
+    picker and the submit path end up disagreeing about which half of a line
+    belongs to the command.
 
     The claim in :func:`_claiming_command` is now PARTIAL. It is lifted only
     where the argument is free text destined for the model
@@ -368,47 +368,100 @@ def _skill_argument_floor(
         # splits on the first of two spaces and reports a terminated name that
         # was never typed; a blank token is an open slot, not a finished name.
         return None
-    if word in ("team", "teams") and first.lower() == "chart":
+    if word in ("team", "teams") and first.lower() in {"chart", "new", "edit"}:
         # `/team chart <name>`'s second slot is another name list, not free
         # text, so the claim stands whole through both levels.
         return None
     return arg_start + len(first) + 1
 
 
-def _skill_argument_region(
-    text: str,
-    cursor: int | None,
-    commands: frozenset[str],
-    prompt_commands: frozenset[str],
-    name_commands: frozenset[str],
-) -> tuple[int, int] | None:
-    """Buffer span a ``$`` reassembly rebuilds inside a claim, or ``None``.
+#: The prompt commands whose request tail actually reaches
+#: :meth:`OperatorApp._submit_command_prompt`, and therefore the only leading
+#: slash commands inside which a ``$name`` can attach a skill. Kept here beside
+#: the floor because it is the other half of "which part of this line is free
+#: text": ``/btw`` opens the aside and returns, ``/loop`` and ``/fork`` start
+#: their own flows, and every other command is dispatched — none of them
+#: expands a skill, so the ink must not claim one will.
+#:
+#: ``aida`` is here because its request is a real user turn through the same
+#: submit (``_cmd_aida`` forwards to ``_submit_command_prompt``). Its reserved
+#: words (``pause``/``resume``/``status``/``rename``) are parsed from the whole
+#: argument, so a request that happens to contain a ``$name`` still expands.
+SKILL_SUBMIT_COMMANDS = frozenset({"team", "teams", "agent", "agents", "goal", "aida"})
 
-    The buffer-offset projection of :func:`_skill_argument_floor`, shaped like
-    :func:`slash_token_span`. ``[region_start, region_end)`` STARTS at the floor
-    so it cannot drift from the gate that let the token open in the first place
-    — one helper answers both questions — and ENDS at the line end per the
-    inline contract stated verbatim in :func:`slash_argument_context`'s own
-    docstring: "the argument is the text from the word-terminating space to the
-    END OF THE LINE the command is on".
 
-    Deliberately does NOT use :func:`slash_argument_context`. That parser is
-    gated on ``ArgumentMode``, which states whether a command offers a VALUE
-    LIST and says nothing about whether its argument is free text;
-    ``consumes_prompt`` is that statement. Reading the wrong flag would leave
-    the four prompt commands that offer no list — ``/goal``, ``/loop``,
-    ``/btw``, ``/fork`` — with a token that opens but no region to rebuild, and
-    they would fall through to the whole-buffer reassembly that puts the skill
-    in FRONT of the command word.
+class SkillScanRegion(NamedTuple):
+    """The cells a submit would scan for ``$name``, and who claims them.
+
+    ``command`` is the leading slash word that owns the region (``None`` for a
+    plain message), so a caller can tell "the whole buffer is prose" from
+    "this is the argument tail of ``/team``" without re-parsing the line.
     """
-    line, line_start, column = _line_of_cursor(text, cursor)
-    claim = _claiming_command(line, commands)
-    if claim is None or column <= claim:
+
+    start: int
+    end: int
+    command: str | None
+
+
+def skill_scan_region(
+    text: str,
+    commands: frozenset[str] = frozenset(),
+    prompt_commands: frozenset[str] = frozenset(),
+    name_commands: frozenset[str] = frozenset(),
+    *,
+    shell: bool = False,
+    argument: bool = False,
+) -> SkillScanRegion | None:
+    """The part of ``text`` a submit expands ``$name`` in, or ``None`` for none.
+
+    THE surface rule, in one function so the composer's ink and the submit path
+    cannot disagree about whether a token will fire. It mirrors
+    ``OperatorApp.on_editor_submitted``'s exits:
+
+    - SHELL — bang mode or a recalled ``!`` line — runs a command, never a
+      prompt, so nothing is scannable.
+    - A leading slash word that is not a dispatchable command is prose
+      (``/tmp/test``); the whole buffer is scanned, exactly as submit does.
+    - A leading command is scanned ONLY inside its request tail, and only for
+      the commands whose handler hands that tail to
+      :meth:`OperatorApp._submit_command_prompt` (:data:`SKILL_SUBMIT_COMMANDS`).
+      ``/btw``, ``/loop``, ``/fork`` and every non-prompt command expand no
+      skill, so they return ``None``.
+    - ``argument=True`` means the caller already holds that request tail (the
+      argument path), so the whole string is the region and its first token is
+      leading.
+
+    Pure: reads its arguments and the two rules above, consults no widget.
+    """
+    if shell:
         return None
-    floor = _skill_argument_floor(line, claim, prompt_commands, name_commands)
+    if argument:
+        return SkillScanRegion(0, len(text), None)
+    stripped = text.lstrip()
+    word = stripped.split(maxsplit=1)[0] if stripped else ""
+    if not word.startswith("/"):
+        return SkillScanRegion(0, len(text), None)
+    command = word[1:].lower()
+    if command not in commands:
+        # `_dispatchable_slash` refuses it, so the line is an ordinary prompt.
+        return SkillScanRegion(0, len(text), None)
+    if command not in SKILL_SUBMIT_COMMANDS:
+        return None
+    claim = len(text) - len(stripped)
+    # The line the claim sits on, not line 0: a draft may open with blank lines
+    # (`"\n/goal fix $research"`), and submit dispatches that command all the
+    # same. Reading line 0 made the ink answer "no region" for a message that
+    # expands (review round 2, n1).
+    line_start = text.rfind("\n", 0, claim) + 1
+    line_end = text.find("\n", claim)
+    line = text[line_start : line_end if line_end != -1 else len(text)]
+    floor = _skill_argument_floor(line, claim - line_start, prompt_commands, name_commands)
     if floor is None:
         return None
-    return line_start + floor, line_start + len(line)
+    # END is the whole tail, not the line: `/team`'s request is everything after
+    # the name slot, newlines included, and `_submit_command_prompt` receives
+    # exactly that.
+    return SkillScanRegion(line_start + floor, len(text), command)
 
 
 def slash_context(
@@ -663,31 +716,15 @@ def skill_token_is_leading(text: str, token: SlashContext) -> bool:
     """Whether ``token`` opens ``text``, ignoring leading whitespace.
 
     THE definition of "leading" for the ``$`` grammar, in one place because two
-    separate decisions turn on it and they must not drift: whether the fuzzy
-    matcher may run (:func:`skill_suggestions`) and whether accepting a row has
-    to reassemble the buffer (:func:`_reassembled_skill`). Both are asking the
-    same question — is this token already the prefix the anchored submit-side
-    parser reads? — so both read the same answer.
+    decisions turn on it and they must not drift: whether the fuzzy matcher may
+    run (:func:`skill_suggestions`) and how the submit-side trigger treats
+    case — a leading token keeps the legacy case-insensitive rule, an inline one
+    needs lowercase evidence.
 
-    Whitespace-only lead, matching ``parse_invocation``'s ``lstrip``: an
-    indented ``  $research`` is still the buffer's first token.
+    Whitespace-only lead, matching the submit-side trigger's rule: an indented
+    ``  $research`` is still the buffer's first token.
     """
     return not text[: token.start].strip()
-
-
-#: The RESOLVER's name class — an alphanumeric head, then alphanumerics, dots,
-#: underscores and hyphens — read off the submit-side
-#: ``_INVOCATION_RE`` (``local_operator/skills/invoke.py``) rather than imported
-#: from it, deliberately: that module pulls ``skills.discovery`` in, and this
-#: one is on the TUI boot path (the app imports the widget tree at start). The
-#: same one-way-dependency reason ``Editor._command_names`` reproduces the
-#: registry's membership test.  ``tests/unit/tui/test_skill_highlight.py`` pins
-#: the agreement against the real regex, so the two cannot drift silently.
-#: Letters and digits EXPLICITLY, not ``str.isalnum``: the regex is
-#: ASCII-classed, and a span that read a Unicode letter the resolver will not
-#: is a span that inks a token which can never fire.
-_SKILL_NAME_HEAD = frozenset(string.ascii_letters + string.digits)
-_SKILL_NAME_TAIL = _SKILL_NAME_HEAD | frozenset("._-")
 
 
 def skill_token_spans(line: str) -> list[tuple[int, int, str]]:
@@ -699,47 +736,19 @@ def skill_token_spans(line: str) -> list[tuple[int, int, str]]:
     needs "the token the CARET is in" (one answer), while the composer's
     ``$`` ink needs "every token this LINE names" (all of them), so a draft
     holding two tokens can be painted without the caret deciding which one
-    goes dark. It reads the same boundary rule (:func:`_is_boundary`) as
-    every other tokenizer here, so the spans cannot disagree with the
-    picker's about where a token starts.
+    goes dark.
 
-    The EXTENT is the resolver's own name class (``_SKILL_NAME_HEAD`` /
-    ``_SKILL_NAME_TAIL``) — ``$`` then ``[A-Za-z0-9][A-Za-z0-9._-]*`` — NOT
-    the picker's to-whitespace one, and the two differ exactly where the
-    reader cares: ``$research,`` is a token that WILL fire (the comma is
-    outside the class and stays request text), while ``$research.`` parses the
-    name ``research.`` and will NOT.  Inking to whitespace would paint the
-    comma as part of the name (a claim the resolver contradicts) and would
-    paint ``$research.`` as ``research`` (a claim it contradicts the other
-    way).
+    A thin delegate to :func:`local_operator.sigils.skill_name_spans`, which
+    owns the boundary rule and the name class for every reader. Two copies of
+    "where does a `$name` run end" is exactly the drift that module exists to
+    prevent — and it is host-free, so the widget tree can import it.
 
-    A bare ``$`` opens no span, mirroring the resolver's "a ``$`` followed by
-    nothing usable does not match at all"; a ``$`` whose head is not
-    alphanumeric (``$_private``, ``$ßeta``) likewise opens none, which
-    UNDER-promises rather than over-promises — the submit-side parser is
-    ASCII-headed, so such a token is prose and gets no ink at all.
-
-    Pure and host-free: reads its argument and the two rules above, consults
-    no vocabulary and no widget.  Whether a span is worth painting — resolved,
-    inert, or nothing — is the caller's question, not the grammar's.
+    The extent is UNTRIMMED: ``$research.`` spans ``research.`` even though the
+    resolver trims the dot and fires on ``research``. The ink needs the
+    characters, the resolver needs the name; :func:`skill_mentions` is the
+    latter.
     """
-    spans: list[tuple[int, int, str]] = []
-    index = 0
-    while index < len(line):
-        if line[index] != "$" or not _is_boundary(line, index):
-            index += 1
-            continue
-        end = index + 1
-        if end < len(line) and line[end] in _SKILL_NAME_HEAD:
-            end += 1
-            while end < len(line) and line[end] in _SKILL_NAME_TAIL:
-                end += 1
-        if end > index + 1:
-            spans.append((index, end, line[index + 1 : end]))
-        # ``max`` so a bare ``$`` (no usable name) still advances, and a token
-        # ending where it starts cannot stall the scan.
-        index += max(end - index, 1)
-    return spans
+    return skill_name_spans(line)
 
 
 def _active_sigil(line: str, column: int, sigil: str) -> int | None:
@@ -821,39 +830,12 @@ def completion_for(
         token = skill_token(text, caret, known, prompt_commands, name_commands)
         if token is None:
             return None
-        # INSIDE a prompt command's argument the token must become the
-        # ARGUMENT's prefix, not the buffer's. The submit-side parser is
-        # anchored at offset 0 of the ARGUMENT string, and `_reassembled_skill`
-        # below moves to the BUFFER start, which here would produce
-        # `$gitlab /team delivery …` — a line neither parser can read. So when
-        # a region exists and holds the token, that path is the only one
-        # allowed to run: a `None` from it falls through to the span
-        # replacement, never to the whole-buffer reassembly.
-        region = _skill_argument_region(text, caret, known, prompt_commands, name_commands)
-        if region is not None and region[0] <= token.start < region[1]:
-            reassembled = _reassembled_skill_argument(text, token, row_name, region)
-            if reassembled is not None:
-                return reassembled
-            return _skill_span_replacement(text, token, row_name)
-        # INLINE ENGAGE, modelled exactly as NAME_ARGUMENT models it below. A
-        # `$` is inline now, so a draft can survive OUTSIDE the token — either
-        # before it (`fix this $res`) or on another line — and the submit-side
-        # parser is still ANCHORED at the buffer start on purpose (see
-        # `local_operator.skills.invoke`: an anchored parser is what keeps a
-        # pasted document whose line 3 reads `$research …` from firing a skill
-        # nobody asked for). Reassembly is what bridges the two: the token moves
-        # to the FRONT with the surviving draft as its request, so the anchored
-        # parser sees exactly the shape it was written for.
-        #
-        # Modelled HERE rather than only in `Editor._complete_skill` because the
-        # composer's inline GHOST is derived from this same call; a renderer-side
-        # exception would reintroduce the two-implementations drift this helper
-        # exists to prevent (the B1 note below). As there, the result is NOT an
-        # append, so `ghost_for`'s `startswith` rule withholds the ghost of its
-        # own accord — the honest outcome for a whole-buffer reordering.
-        reassembled = _reassembled_skill(text, token, row_name)
-        if reassembled is not None:
-            return reassembled
+        # ONE edit, wherever the token sits: the token's own span is replaced and
+        # everything outside it survives verbatim. There is no reassembly any
+        # more because the trigger is no longer limited to the start of the
+        # message, so moving the token would be a rewrite the user did not ask
+        # for — and this same arithmetic serves the picker, the ghost and the
+        # editor's accept path.
         return _skill_span_replacement(text, token, row_name)
     if mode is CompletionMode.FILE:
         token = at_token(text, caret)
@@ -906,19 +888,15 @@ def completion_for(
 def _file_span_replacement(text: str, token: SlashContext, row_name: str) -> tuple[str, int]:
     """Replace just the ``@`` token's span with ``row_name`` — the whole of FILE.
 
-    The simplest completion in this module, and deliberately so. ``$`` needs
-    :func:`_reassembled_skill` because its submit-side parser is ANCHORED at
-    offset 0, so an inline token has to be moved to the front before that parser
-    can read it. ``@`` has no anchored parser — a reference is resolved wherever
-    it sits in the text — so there is nothing to reassemble and the span
-    replacement is the entire operation.
+    The same shape ``$`` uses: only the token's own span is rewritten, and
+    everything outside it survives byte-for-byte — a reference is resolved
+    wherever it sits, so there is nothing to move.
 
     NO trailing space, unlike the skill and command words. A path segment may
     continue (``@src/`` → ``@src/app.py``) and a space would terminate the token
-    and close the list the user is still navigating. For the same reason the
-    tail is preserved verbatim rather than ``lstrip``-ed as the ``$`` path does:
-    there is no request tail to open here, so removing the user's spacing would
-    be an edit nobody asked for.
+    and close the list the user is still navigating. The tail is preserved
+    verbatim too: there is no request tail to open here, so removing the user's
+    spacing would be an edit nobody asked for.
 
     The token's DIRECTORY PART survives; only the last segment is replaced.
     ``scan_directory`` returns BARE entry names — ``app.py``, not
@@ -944,129 +922,33 @@ def _file_span_replacement(text: str, token: SlashContext, row_name: str) -> tup
     directory = token.query[: token.query.rfind("/") + 1]
     path = f"{directory}{row_name}"
     quoted = f'"{path}"' if " " in path else path
-    completed = f"{text[: token.start]}@{quoted}{text[token.end :]}"
-    return completed, token.start + len(quoted) + 1
+    sigil = "@" if text[token.start : token.start + 1] == "@" else ""
+    completed = f"{text[: token.start]}{sigil}{quoted}{text[token.end :]}"
+    return completed, token.start + len(quoted) + len(sigil)
 
 
 def _skill_span_replacement(text: str, token: SlashContext, row_name: str) -> tuple[str, int]:
-    """Replace just the ``$`` token's span with ``row_name`` \u2014 the plain path.
+    """Replace just the ``$`` token's span with ``$<row_name>`` — the whole edit.
 
-    Factored out because :func:`completion_for` now reaches it from TWO places:
-    the ordinary inline case, and the argument case where the token already
-    leads its region and :func:`_reassembled_skill_argument` declines. One
-    definition so the two cannot drift into producing different buffers for
-    what the user experiences as the same keystroke.
+    NOTHING outside ``[token.start, token.end)`` is rewritten. An earlier version
+    ``lstrip``-ed the tail to open the request, which joined ``fix $re\nthe bug``
+    into one line: a completion must never reformat prose the user typed. A space
+    goes in only when the next character is not whitespace, because that space is
+    the token terminator the list close depends on; when the user already typed
+    whitespace, that is the separator and it stays exactly as it was.
 
-    Same trailing-space contract as the command word: it terminates the token,
-    closes the list, and opens the request. The suffix beyond the token is
-    preserved because a user can complete a ``$skill`` typed in front of a
-    request they already wrote. ``token.start`` is the ``$``, which is not
-    column 0 when the draft is indented; the leading run is preserved rather
-    than normalised away so completing never silently reformats what the user
-    typed.
+    The caret lands one cell past whatever separator terminated the token — the
+    inserted space, or the user's own whitespace — so it sits where the request
+    continues without the completion moving any character.
     """
-    lead = text[: token.start]
-    completed = f"{lead}${row_name} {text[token.end :].lstrip()}"
+    tail = text[token.end :]
+    separator = " " if not tail or not tail[0].isspace() else ""
+    completed = f"{text[: token.start]}${row_name}{separator}{tail}"
+    # A NEWLINE terminates the token but is not a place to park the caret: the
+    # request continues on the line the token is on, so stop after the name.
+    if tail[:1] and tail[0] in "\r\n":
+        return completed, token.start + len(row_name) + 1
     return completed, token.start + len(row_name) + 2
-
-
-def _reassembled_skill_argument(
-    text: str, token: SlashContext, row_name: str, region: tuple[int, int]
-) -> tuple[str, int] | None:
-    """Move a ``$`` token to the front of a prompt command's ARGUMENT.
-
-    The argument-scoped mirror of :func:`_reassembled_skill`, and it exists
-    because that one moves the token to the BUFFER start. Inside a command
-    argument that is the wrong destination: the submit-side parser
-    (:mod:`local_operator.skills.invoke`) is anchored at offset 0 of the
-    ARGUMENT string, so the token has to become the ARGUMENT's prefix.
-    Reassembling to the buffer start instead would produce
-    ``$gitlab /team delivery \u2026``, which neither the command dispatcher nor the
-    skill parser can read.
-
-    The command word and any name slot sit BEFORE ``region[0]`` by
-    construction \u2014 the region starts at :func:`_skill_argument_floor`, which is
-    past the name slot \u2014 so ``/team delivery`` is untouched here rather than
-    preserved by an extra rule. ``region`` comes from
-    :func:`_skill_argument_region`, which deliberately does not consult
-    :func:`slash_argument_context`; see there for why ``ArgumentMode`` is the
-    wrong flag to gate this on.
-
-    ``None`` whenever nothing but whitespace precedes the token INSIDE the
-    region, which is the only case this is for: the token already leads the
-    argument, so the caller's span replacement is the whole and correct answer
-    for both sub-cases — ``/team delivery $gi`` gains the separator the user
-    has not typed yet, and ``/team delivery $gi fix this`` does NOT gain a
-    trailing one, because the separator before the request is already there and
-    a space after the user's own sentence is a stray character no other
-    completion in this codebase appends.
-
-    The caret parks immediately after the ``$<name> `` separator rather than at
-    the end of the text, which is where :func:`_reassembled_skill` parks. Two
-    completion paths reach THIS slot — span replacement when no prose precedes
-    the ``$``, reassembly when some does — and which one runs depends on
-    something the user cannot see; parking them differently would move Tab's
-    caret by the length of their own prose for no visible reason. Consistency
-    within the slot outranks consistency across slots, and in the bare case the
-    two conventions coincide anyway.
-    """
-    region_start, region_end = region
-    if not text[region_start : token.start].strip():
-        return None
-    # One adjoining separator goes with the token, the same rule
-    # :func:`_reassembled_skill` and :func:`_reassembled_completion` use, so the
-    # gap the token used to occupy does not survive the move. The PRECEDING
-    # separator is preferred; the following one is taken only when the token
-    # opens the rebuilt region.
-    start, end = token.start, token.end
-    if start > region_start and text[start - 1] in " \t\n":
-        start -= 1
-    elif end < region_end and text[end] in " \t\n":
-        end += 1
-    rest = (text[region_start:start] + text[end:region_end]).strip()
-    assembled = f"${row_name} {rest} " if rest else f"${row_name} "
-    new_text = text[:region_start] + assembled + text[region_end:]
-    return new_text, region_start + len(row_name) + 2
-
-
-def _reassembled_skill(text: str, token: SlashContext, row_name: str) -> tuple[str, int] | None:
-    """Move an inline ``$`` token to the FRONT, surviving draft as its request.
-
-    ``None`` whenever nothing but whitespace precedes the token, which is the
-    ONLY case reassembly is for. A token that already opens the draft is already
-    the prefix the submit parser wants, so the span replacement in
-    :func:`completion_for` is the whole answer — for the bare ``$res`` and
-    equally for ``$res fix bug``, whose request already sits in the right place
-    and must be preserved verbatim rather than rebuilt. What inline detection
-    newly allows is prose BEFORE the token (``fix this $res``, or a ``$``
-    opening line 2), and that is exactly the shape an anchored parser cannot
-    read. Testing the text before the token, rather than "any draft outside it",
-    is what keeps this branch to the case it exists for.
-
-    Computed from the ORIGINAL text rather than from a filled buffer (the way
-    :func:`_reassembled_completion` has to be): the ``$`` token's span is known
-    before the name is inserted, since ``row_name`` replaces the token whole and
-    cannot move its start. One derivation, no re-parse.
-
-    The trailing space leaves the caret in the request with its separator
-    already typed — the same place ``$research `` parks it on the bare path — so
-    continuing to type the request is the same gesture whether or not a draft
-    was reassembled into it. It costs nothing downstream: ``parse_invocation``
-    strips the request.
-    """
-    if skill_token_is_leading(text, token):
-        return None
-    # One adjoining separator goes with the token, the same rule the slash
-    # splice and reassembly use, so ``msg $res`` and ``$res\nmsg`` both collapse
-    # to just ``msg`` instead of leaving the gap the token used to occupy.
-    start, end = token.start, token.end
-    if start > 0 and text[start - 1] in " \t\n":
-        start -= 1
-    elif end < len(text) and text[end] in " \t\n":
-        end += 1
-    rest = (text[:start] + text[end:]).strip()
-    assembled = f"${row_name} {rest} "
-    return assembled, len(assembled)
 
 
 def _reassembled_completion(

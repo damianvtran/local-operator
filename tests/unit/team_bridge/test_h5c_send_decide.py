@@ -80,6 +80,65 @@ async def test_a_send_carries_the_caller_ref_and_the_named_destination() -> None
     }
 
 
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"account_id": "acc_2", "kind": "agent"},
+        {"endpoint_id": "bep_9", "kind": "agent"},
+        {"account_id": "acc_2", "typo": "ignored-before"},
+        {"account_id": "acc_2", "endpoint_id": ""},
+        {"account_id": "acc_2", "endpoint_id": "bep_9"},
+        {"account_id": "   "},
+        {"account_id": 42},
+        # The bare-string form is an ACCOUNT ID or nothing: a guessed name is
+        # never resolved here, and an empty or padded id is not an id.
+        {"name": "Ada Lovelace"},
+        "",
+        "   ",
+        " acc_2",
+        "acc_2 ",
+        "Ada Lovelace",
+        {},
+    ],
+)
+async def test_send_recipient_is_closed_before_http(target) -> None:
+    """A destination typo must refuse, never become a different successful send."""
+    requests: list[httpx.Request] = []
+    client = _make_client(_capture(requests))
+    with pytest.raises(ValueError) as refusal:
+        await client.send(
+            tenant_id=TENANT, to=target, type="note", text="synthetic", client_ref=REF
+        )
+    assert getattr(refusal.value, "code", None) == "invalid_request"
+    assert requests == []
+
+
+async def test_a_bare_account_id_target_reaches_the_wire_as_the_pair() -> None:
+    """The wire client shares the SAME mapping as the tool: one rule, two doors.
+
+    A caller that hands this client a bare id — the tool's pre-admission guard, a
+    recovered outbox intent, any future caller — must not be able to post a
+    string where the server reads the pair object, and must not lose a field
+    either. Normalizing here is what keeps the two entry points from drifting.
+    """
+    requests: list[httpx.Request] = []
+    client = _make_client(_capture(requests))
+    result = await client.send(
+        tenant_id=TENANT,
+        to="acc_2",
+        type="note",
+        text="hello there",
+        client_ref=REF,
+    )
+    assert result == {"message": {"id": "bmsg_1"}}
+    assert json.loads(requests[0].content) == {
+        "to": {"account_id": "acc_2"},
+        "type": "note",
+        "body": {"text": "hello there"},
+        "client_ref": REF,
+    }
+
+
 async def test_a_request_send_carries_the_request_block_only() -> None:
     requests: list[httpx.Request] = []
     client = _make_client(_capture(requests))

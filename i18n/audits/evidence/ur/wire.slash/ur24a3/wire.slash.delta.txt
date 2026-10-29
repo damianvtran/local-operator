@@ -1,0 +1,4 @@
+wire.slash.hub
+EN Open Hub links — per-link subscribe and auto-push policy
+OLD Hub روابط کھولیں — فی ربط رکنیت اور خودکار push پالیسی
+NEW Hub روابط کھولیں — فی ربط سبسکرپشن اور خودکار push پالیسی

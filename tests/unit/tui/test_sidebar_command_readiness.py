@@ -25,7 +25,7 @@ class ControlSession(FakeSession):
     def abort(self, reason="interrupted"):
         raise MutationAttempt("unready abort reached the owner facade")
 
-    def set_model(self, model, *, explicit=False):
+    def set_model(self, model, *, explicit=False, effort_choice=None):
         raise MutationAttempt("unready model mutation reached the owner facade")
 
 

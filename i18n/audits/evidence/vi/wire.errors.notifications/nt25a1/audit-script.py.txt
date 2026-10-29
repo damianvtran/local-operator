@@ -1,0 +1,27 @@
+import json, pathlib, hashlib, unicodedata, sys
+from local_operator.i18n.runtime import parse_message, message_arguments, plural_selectors, render_message
+# NFC Vietnamese/ASCII here contains no wide/combining characters; derive cells
+# from Unicode properties rather than installing a scratch dependency.
+def wcswidth(text):
+ assert all(not unicodedata.combining(c) and unicodedata.category(c)[0]!='C' for c in text)
+ return sum(2 if unicodedata.east_asian_width(c) in ('W','F') else 1 for c in text)
+root=pathlib.Path('/Users/damian/workspace/repos/lo-notifications-l1')
+ns=sys.argv[1]
+expected={'wire.errors.notifications':'f02bf1bc28f9c9e549a3ad8c34ead880315f4b39d25c36a869a1b3c5110f362c','wire.slash.notifications_page':'9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594'}
+def load(loc,suffix='.json'):
+ p=root/f'local_operator/i18n/catalogues/{loc}/{ns}{suffix}'
+ h=hashlib.sha256(p.read_bytes()).hexdigest();print('SHA256',str(p.relative_to(root)),h)
+ if loc=='en' and suffix=='.json':assert h==expected[ns]
+ return json.loads(p.read_text())
+en=load('en'); vi=load('vi'); ctx=load('en','.context.json')
+assert set(en)==set(vi)==set(ctx)
+for k,s in en.items():
+ parse_message(s);parse_message(vi[k]);assert sorted(message_arguments(s))==sorted(message_arguments(vi[k]));assert unicodedata.normalize('NFC',vi[k])==vi[k]
+ print('PASS',k,'arguments=',message_arguments(vi[k]),'plurals=',plural_selectors(vi[k]))
+ print('RENDER',render_message(vi[k],{'where':'/synthetic/config'},'vi'))
+ if 'maxCells' in ctx[k]:
+  width=wcswidth(vi[k]); print('WIDTH',width,'maxCells',ctx[k]['maxCells']);assert width<=ctx[k]['maxCells'];assert 'read' in vi[k]
+print(f'PASS namespace={ns}; keys={len(en)}; parsed={2*len(en)}; exact placeholder parity; source pin verified; NFC')
+if ns=='wire.slash.notifications_page':
+ proposed='Câu hỏi, cập nhật; read: đánh dấu tất cả đã đọc'
+ print('PROPOSED repair width',wcswidth(proposed),'maxCells=50',proposed)

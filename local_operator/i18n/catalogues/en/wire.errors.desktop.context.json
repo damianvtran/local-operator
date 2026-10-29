@@ -1,0 +1,26 @@
+{
+  "wire.errors.desktop.skill_not_editable": {
+    "role": "API refusal text shown in the Skills tab",
+    "tone": "plain, calm, tells the user the next step",
+    "width": "one sentence, shown inline under a skill editor or in a toast",
+    "note": "409; the skill lives in a read-only folder (built-in, another tool's, or a project's). 'Copy it to your skills' is the Skills tab's Copy action; no placeholders"
+  },
+  "wire.errors.desktop.skill_alias_occupied": {
+    "role": "API refusal text shown in the Skills tab",
+    "tone": "plain, calm, tells the user the next step",
+    "width": "one sentence, shown inline under a skill editor or in a toast",
+    "note": "409; creating a skill whose name is taken by a folder or a hub-linked skill. 'name' = the skill's folder name; no placeholders"
+  },
+  "wire.errors.desktop.skill_local_changes_unpublished": {
+    "role": "API refusal text shown in the Skills tab",
+    "tone": "plain, calm, tells the user the next step",
+    "width": "two sentences, shown in a confirm dialog",
+    "note": "409; removing a hub-linked skill whose local edits were never published; the remove removes only the local copy and the edits are not kept. 'Publish' = the Skills tab's Publish action; no placeholders"
+  },
+  "wire.errors.desktop.skill_stale": {
+    "role": "API refusal text shown in the Skills tab",
+    "tone": "plain, calm, tells the user the next step",
+    "width": "one sentence, shown inline under a skill editor or in a toast",
+    "note": "409; the saved fingerprint no longer matches the folder (edited elsewhere); the editor reloads; no placeholders"
+  }
+}

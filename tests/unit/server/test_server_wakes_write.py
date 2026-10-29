@@ -31,6 +31,7 @@ from httpx import ASGITransport, AsyncClient
 from local_operator.config import ConfigManager
 from local_operator.server.routes import desktop_wakes
 from local_operator.wakes.store import read_entry
+from tests.unit.legacy_skill_payload import legacy_skill_payload
 
 TOKEN = "desktop-wakes-write-token"
 
@@ -91,24 +92,13 @@ def _request_id(n: int) -> str:
 
 
 def _skill_payload(typed: str) -> str:
-    """A ``$skill`` invocation as a CLIENT sends it: the expanded payload.
+    """A ``$skill`` invocation in the LEGACY persisted form.
 
-    Expansion is the client's duty, so a schedule whose prompt invokes a skill
-    stores and posts the payload — the shape this title is derived from.
+    The reader is kept forever (old transcripts never migrate), so this pins the
+    shape it must keep reading; ``legacy_skill_payload`` reproduces the deleted
+    writer's attribute escaping.
     """
-    from local_operator.skills.discovery import Skill
-    from local_operator.skills.invoke import parse_invocation, render_invocation
-
-    skill = Skill(
-        name="research",
-        description="research things",
-        file_path=Path("/skills/research/SKILL.md"),
-        base_dir=Path("/skills/research"),
-        source="user",
-    )
-    invocation = parse_invocation(typed, {"research": skill})
-    assert invocation is not None
-    return render_invocation(invocation, "# Research\n\nSKILL_BODY_MARKER\n")
+    return legacy_skill_payload(typed)
 
 
 def _snapshot_count(directory: Path) -> int:
@@ -756,8 +746,13 @@ async def test_a_refused_schedule_on_the_create_shape_is_a_typed_refusal(
     assert detail["code"] == code
     assert detail["message"], "the validator's sentence travels with the code"
     # ROLLED BACK, not left behind: a draft with no wake in it is a phantom
-    # conversation in the sidebar.
-    assert not (root / "sessions").exists() or list((root / "sessions").iterdir()) == []
+    # conversation in the sidebar. The rollback now writes its receipt into
+    # ``sessions/.cleanup-log.jsonl``, so only DIRECTORIES are absent — the
+    # log file is the evidence the rollback happened.
+    assert (
+        not (root / "sessions").exists()
+        or [entry for entry in (root / "sessions").iterdir() if entry.is_dir()] == []
+    )
 
 
 @pytest.mark.asyncio
@@ -1150,3 +1145,31 @@ async def test_concurrent_arms_through_the_route_leave_one_row_each(
     assert sorted(row["id"] for row in rows) == sorted(handles)
     entry = read_entry(root, "aaaaaaaaaaaa")
     assert entry is not None and len(entry["schedules"]) == 5
+
+
+def test_the_rollback_records_a_wake_rollback_receipt(tmp_path: Path) -> None:
+    """A create that arms nothing must not remove its draft unlogged.
+
+    Before this, ``_rollback_created`` called ``shutil.rmtree`` directly: the
+    draft vanished with no row in the store's cleanup log, which is the
+    deletion class no audit could see.
+    """
+    from local_operator.server.utils.desktop_sessions import write_desktop_marker
+
+    session_id = "wake12345678"
+    directory = tmp_path / "sessions" / session_id
+    directory.mkdir(parents=True)
+    write_desktop_marker(directory, tmp_path)
+
+    assert desktop_wakes._rollback_created(tmp_path, session_id) is True
+
+    assert not directory.exists()
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "sessions" / ".cleanup-log.jsonl").read_text().splitlines()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["policy"] == "wake-rollback"
+    assert rows[0]["session"] == session_id
+    assert rows[0]["actor"] == "desktop-wakes"
+    assert rows[0]["path"] == str(directory.resolve())

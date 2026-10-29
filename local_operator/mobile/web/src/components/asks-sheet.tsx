@@ -49,7 +49,7 @@ import {
 	orderedForDisplay,
 	questionTally,
 } from "../lib/asks";
-import { useAsksRevision, useProjection, useSessions } from "../store";
+import { messageRuntime, useAsksRevision, useProjection, useSessions } from "../store";
 import type { PendingAsk } from "../types";
 
 /** How often the open sheet re-reads the aggregate as a deadline backstop. */
@@ -71,10 +71,25 @@ const READ_TIMEOUT_MS = 8000;
  *  landed, so a crossing could be stated up to 20 s late). */
 const TICK_MS = 15000;
 
+/** The sentence a dismissal receipt shows, per reason.
+
+    A LOOKUP RATHER THAN A TEMPLATE. This used to be
+    `` `relay.ask.dismiss.receipt_${reason}` `` — a key no static check can
+    verify (a renamed or missing key would surface as the key text on screen)
+    and a shape the relay copy gate counts as unextracted literals. Spelling
+    each key here keeps them greppable and type-checked against the generated
+    key union; ``lapsed`` is the door with no recorded reason, so it names the
+    generic receipt. */
+const RECEIPT_KEY = {
+	lapsed: "relay.ask.dismiss.receipt",
+	moot: "relay.ask.dismiss.receipt_moot",
+	answered_in_chat: "relay.ask.dismiss.receipt_answered_in_chat",
+} as const;
+
 function failureText(error: unknown): string {
-	if (error instanceof TypeError) return "could not reach the daemon";
+	if (error instanceof TypeError) return messageRuntime.t("relay.asks.error.reach_failed");
 	const message = error instanceof Error ? error.message : String(error);
-	if (message === "" || /^\d{3}$/.test(message)) return "the daemon did not say why";
+	if (message === "" || /^\d{3}$/.test(message)) return messageRuntime.t("relay.asks.error.no_reason");
 	return message;
 }
 
@@ -85,12 +100,34 @@ export function AsksSheet({
 }: {
 	open: boolean;
 	onClose: () => void;
-	/** The conversation this sheet was opened from: the only one whose asks it
-	    lists (see the module note). */
+	/** The conversation this sheet was opened from, or empty for the
+	    cross-conversation view the navigation drawer's Questions destination
+	    opens (UX review round 1, U1). */
 	currentSessionId: string;
 }) {
+	/* EMPTY MEANS ALL CONVERSATIONS, and that is a real mode rather than a
+	   missing argument: the drawer's destination is machine-wide. Passing "" into
+	   the per-conversation filter matched no row at all, so a destination that
+	   exists to show what is waiting painted "nothing waiting" over three
+	   outstanding asks. In this mode every row carries its own conversation's
+	   name, so an answer is never attributed to the wrong conversation. */
+	const crossConversation = currentSessionId === "";
 	const [allRows, setRows] = useState<PendingAsk[]>([]);
 	const [loaded, setLoaded] = useState(false);
+	/** The receipt for a dismissal this sheet has just seen, KEYED TO THE ASK it
+	    was about (agent review round 2, M1 = UX round 2, U9).
+
+	    The daemon answers `{"ok": true, "detail": "dismissed"}`, and the card
+	    leaves the aggregate — so the receipt is the only trace of the act. Two
+	    things the first cut got wrong, both fixed here: it rendered only when the
+	    sheet was EMPTY (so the ordinary multi-ask queue acknowledged nothing), and
+	    it survived the operator's NEXT act (answering a second ask left "Dismissed
+	    — no longer needed" over an answer, which is the class of claim this lane
+	    exists to remove). The ask id is kept so a later dismissal replaces this
+	    one rather than being confused with it. */
+	const [receipt, setReceipt] = useState<
+		{ askId: string; reason: "moot" | "answered_in_chat" | "lapsed" } | null
+	>(null);
 	const [error, setError] = useState("");
 	const [nowMs, setNowMs] = useState(() => Date.now());
 	const revision = useAsksRevision();
@@ -99,7 +136,14 @@ export function AsksSheet({
 	   frame's `asks_open` does not (a timed-out ask is not counted, #2388), so
 	   a dismissal or a late answer on another surface would otherwise wait for
 	   the backstop. */
-	const rowsSignature = askRowsSignature(useProjection(currentSessionId).projection?.asks);
+	/* THE HOOK IS UNCONDITIONAL (code review round 2, C2-3). It used to be
+	   `crossConversation ? undefined : useProjection(...)`, which changes the hook
+	   count if one mounted sheet ever moved between the two modes. Today's callers
+	   pass a fixed mode, so nothing breaks now — but a rules-of-hooks violation
+	   that is currently unreachable is still a trap for the next caller, and the
+	   cost of obeying the rule is one discarded value. */
+	const ownProjection = useProjection(currentSessionId).projection;
+	const rowsSignature = askRowsSignature(crossConversation ? undefined : ownProjection?.asks);
 
 	const load = useCallback(async () => {
 		/* THE READ IS BOUNDED (U6). `AbortSignal.timeout` is the platform's own
@@ -116,7 +160,7 @@ export function AsksSheet({
 			setError("");
 		} catch (failure) {
 			if (failure instanceof DOMException && failure.name === "TimeoutError") {
-				setError("the read timed out — the daemon is not answering");
+				setError(messageRuntime.t("relay.asks.error.read_timeout"));
 				return;
 			}
 			/* The daemon's sentence, or the plainest honest line when it gave
@@ -134,7 +178,12 @@ export function AsksSheet({
 	   triggers: two effects keyed on `open` would each fire on the opening
 	   transition and fetch the aggregate twice for one tap. */
 	useEffect(() => {
-		if (!open) return;
+		if (!open) {
+			/* A RECEIPT BELONGS TO ONE OPENING: reopening later must not present
+			   a dismissal from the last visit as though it just happened. */
+			setReceipt(null);
+			return;
+		}
 		void load();
 	}, [open, revision, rowsSignature, load]);
 
@@ -158,20 +207,87 @@ export function AsksSheet({
 	/* Only the ended/not-running strip reads the session list now: whether the
 	   opening conversation has ended changes the strip's wording. */
 	const ended = useMemo(
-		() => sessions.some((session) => session.session_id === currentSessionId && session.ended === true),
-		[sessions, currentSessionId],
+		() =>
+			!crossConversation &&
+			sessions.some((session) => session.session_id === currentSessionId && session.ended === true),
+		[sessions, currentSessionId, crossConversation],
 	);
 
 	/* THIS CONVERSATION'S ROWS ONLY, before anything orders or counts them, so
 	   the title, the empty state and the list all describe the same set. */
 	const rows = useMemo(
-		() => allRows.filter((row) => String(row.session_id) === currentSessionId),
-		[allRows, currentSessionId],
+		() =>
+			crossConversation
+				? allRows
+				: allRows.filter((row) => String(row.session_id) === currentSessionId),
+		[allRows, currentSessionId, crossConversation],
 	);
 
 	/* THE HEAD FIRST, then the wire's own order (`orderedForDisplay`) — the
 	   order the minimized chip names (UX round 1, U8). */
 	const listed = useMemo(() => orderedForDisplay(rows), [rows]);
+	/* ONE HEADER PER CONVERSATION, NOT ONE PER ASK (UX review round 2, U6). In the
+	   cross-conversation view each row used to repeat its conversation's name AND
+	   the three-line not-running notice, so two asks from one conversation cost a
+	   full repeated block for the second. Rows are grouped into blocks in their
+	   FIRST-APPEARANCE order (so the head ask still leads), and the name and the
+	   wait are stated once, above that conversation's cards. The single-conversation
+	   view is one block, which renders exactly as before. */
+	const blocks = useMemo(() => {
+		const order: string[] = [];
+		const grouped = new Map<string, PendingAsk[]>();
+		for (const row of listed) {
+			const key = crossConversation ? String(row.session_id) : currentSessionId;
+			const bucket = grouped.get(key);
+			if (bucket) bucket.push(row);
+			else {
+				grouped.set(key, [row]);
+				order.push(key);
+			}
+		}
+		return order.map((key) => ({
+			sessionId: key,
+			rows: grouped.get(key) as PendingAsk[],
+			/* The wait is a fact about the CONVERSATION, so it is decided once, from
+			   the first row the tap could actually answer: the same per-row predicate
+			   the strip used, applied to the block's first answerable member. */
+			waits: (grouped.get(key) as PendingAsk[]).some(
+				(row) =>
+					isAnswerable(String(row.status || "open")) &&
+					!isLapsed(row) &&
+					!isDeadConversation(row) &&
+					(ended || row.runtime_live === false),
+			),
+			name:
+				sessions.find((session) => session.session_id === key)?.conversation_name || key,
+		}));
+	}, [listed, crossConversation, currentSessionId, ended, sessions]);
+	/* THE RECEIPT IS THE INSTANT ECHO, AND IT STANDS DOWN WHEN ITS ROW HAS
+	   SETTLED (SA-D8, design D1 = UX U2; review round 2, M2). Since §17 a
+	   dismissal taken before the ask's deadline KEEPS the row as a settled
+	   receipt, so once that row is here the sheet would state one fact twice:
+	   this unattributed line above the list, and the same catalogue sentence on
+	   the card below it — two type sizes, two ink tokens, one `gap-3` apart, and
+	   the upper one reads as a status of whatever sits directly under it.
+
+	   PRESENCE OF THE ID IS NOT THE TEST. The read that follows a tap is a round
+	   trip, and until it lands `rows` is the OLD list, which still carries the
+	   ask as `open` — the exact gap this line exists to cover. Suppressing on the
+	   id alone hid the acknowledgement precisely when it was needed and left a
+	   live-looking card after a successful dismissal, so the test is the ROW's
+	   own status: only a row that says `dismissed` replaces the sentence.
+
+	   THE LAPSED DOOR FALLS OUT OF THAT RULE rather than needing its own: a
+	   dismissal at or after the deadline removes the row (case 2 of §17), so the
+	   read either omits it or still shows it as `timed_out` — never `dismissed` —
+	   and the receipt stays as that door's only acknowledgement. */
+	const shownReceipt =
+		receipt &&
+		!listed.some(
+			(row) => row.ask_id === receipt.askId && String(row.status) === "dismissed",
+		)
+			? receipt
+			: null;
 	/* QUESTIONS, the same unit the bar and the header entry state (agent review
 	   round 1, R3): three surfaces answering "how much is waiting" in two units is
 	   the defect. All three now count this one conversation's rows.
@@ -192,10 +308,10 @@ export function AsksSheet({
 	const { waiting, lapsed } = questionTally(rows.filter((row) => !isDeadConversation(row)));
 	const title =
 		waiting > 0
-			? `asks · ${waiting} question${waiting === 1 ? "" : "s"}`
+			? messageRuntime.t("relay.asks.sheet.title_waiting", { count: waiting })
 			: lapsed > 0
-				? `asks · ${lapsed} timed out`
-				: "asks";
+				? messageRuntime.t("relay.asks.sheet.title_lapsed", { count: lapsed })
+				: messageRuntime.t("relay.asks.sheet.title_plain");
 
 	return (
 		<Sheet open={open} onClose={onClose} title={title}>
@@ -208,9 +324,9 @@ export function AsksSheet({
 						<button
 							type="button"
 							onClick={() => void load()}
-							className="flex min-h-11 items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated"
+							className="flex min-h-11 items-center rounded-sm px-3 text-body-sm text-ink-muted active:bg-elevated"
 						>
-							try again
+							{messageRuntime.t("relay.asks.sheet.retry")}
 						</button>
 					</div>
 				) : null}
@@ -219,60 +335,80 @@ export function AsksSheet({
 				    is shown about an answer that has not arrived yet. It is one line and
 				    it disappears the moment the read settles. */}
 				{!loaded && !error ? (
-					<p className="text-body-sm text-ink-muted">reading asks…</p>
+					<p className="text-body-sm text-ink-muted">{messageRuntime.t("relay.asks.sheet.loading")}</p>
 				) : null}
-				{loaded && rows.length === 0 && !error ? (
-					<p className="text-body-sm text-ink-muted">
-						nothing waiting — questions the agent asks will appear here.
+				{/* THE RECEIPT IS NOT THE EMPTY STATE (agent review round 2, M1 = UX
+				    round 2, U9). It used to render only when the list was empty, so a
+				    dismissal from a queue of two acknowledged nothing at all; it now
+				    sits above whatever remains — the place the card left — with the
+				    empty state below it saying only that nothing is waiting.
+
+				    AND IT STANDS DOWN ONCE ITS OWN ROW ARRIVES (SA-D8): the settled
+				    card below states the same sentence, so keeping both would say one
+				    thing twice. See `shownReceipt`. */}
+				{shownReceipt ? (
+					<p className="text-body-sm text-ink-muted" data-testid="ask-receipt">
+						{messageRuntime.t(RECEIPT_KEY[shownReceipt.reason])}
 					</p>
 				) : null}
-				{listed.map((row) => {
-					const sessionId = currentSessionId;
-					return (
-						<div key={`${sessionId}:${row.ask_id}`} className="flex flex-col gap-1">
-							{/* THE WAIT IS STATED BEFORE THE TAP, AND ONLY WHERE THERE IS ONE
-							    (design round 1, D4 = UX U4; the two gates are the round-2 corrections).
+				{loaded && rows.length === 0 && !error && !shownReceipt ? (
+					<p className="text-body-sm text-ink-muted" data-testid="ask-sheet-empty">
+						{messageRuntime.t("relay.asks.sheet.empty")}
+					</p>
+				) : null}
+				{blocks.map((block) => (
+					<div key={block.sessionId} className="flex flex-col gap-2">
+						{/* Data, not copy: the projection's own conversation name, once per
+						    conversation (UX round 2, U6). */}
+						{crossConversation ? (
+							<p className="truncate px-1 text-meta font-medium text-ink-dim">{block.name}</p>
+						) : null}
+						{/* THE WAIT IS STATED BEFORE THE TAP, AND ONLY WHERE THERE IS ONE
+						    (design round 1, D4 = UX U4; round-2 corrections below).
 
-							    ANSWERABLE, because a settled receipt offers nothing to answer, so
-							    a wait stated above it is noise about a tap that does not exist
-							    (UX round 2, U6). This strip used to render only for an `ended` row
-							    with copy naming a manual remedy the relay now performs itself;
-							    `runtime_live` widened it to the merely-not-running conversation
-							    the operator actually hits.
+						    ANSWERABLE, because a settled receipt offers nothing to answer, so
+						    a wait stated above it is noise about a tap that does not exist
+						    (UX round 2, U6). `runtime_live` widened it from `ended` alone to
+						    the merely-not-running conversation the operator actually hits.
 
-							    DURABILITY, because `runtime_live === false` is ALSO true of a
-							    conversation with no transcript at all — where the op is a
-							    terminal refusal and the promise of a ~30 s bring-up is a claim
-							    about a backend that does not exist (design round 2, D6). On
-							    those rows the strip goes silent and the card states the truth
-							    it already knows, so the sheet and the card cannot contradict
-							    each other one element apart. It is `isDeadConversation`, the
-							    CONJUNCTION of the two fields — not `durable` alone, which would
-							    silence the strip on a live conversation that answers fine
-							    (design round 3, D7).
+						    DURABILITY, because `runtime_live === false` is ALSO true of a
+						    conversation with no transcript at all — where the op is a
+						    terminal refusal and the promise of a ~30 s bring-up is a claim
+						    about a backend that does not exist (design round 2, D6). It is
+						    `isDeadConversation`, the CONJUNCTION of the two fields — not
+						    `durable` alone, which would silence the strip on a live
+						    conversation that answers fine (design round 3, D7).
 
-							    NOT LAPSED, because a lapsed card offers no answer (`isLapsed`),
-							    so "answering will bring it up" would promise a tap the card one
-							    element below does not have. */}
-							{isAnswerable(String(row.status || "open")) &&
-							!isLapsed(row) &&
-							!isDeadConversation(row) &&
-							(ended || row.runtime_live === false) ? (
-								<p className="text-meta text-ink-dim">
-									{ended
-										? "this conversation has ended — answering will reopen it (this can take up to ~30 s)"
-										: "this conversation is not running — answering will bring it up (this can take up to ~30 s)"}
-								</p>
-							) : null}
+						    NOT LAPSED, because a lapsed card offers no answer (`isLapsed`),
+						    so "answering will bring it up" would promise a tap the card one
+						    element below does not have. */}
+						{block.waits ? (
+							<p className="text-meta text-ink-dim">
+								{ended
+									? messageRuntime.t("relay.asks.sheet.ended_wait")
+									: messageRuntime.t("relay.asks.sheet.not_running_wait")}
+							</p>
+						) : null}
+						{block.rows.map((row) => (
 							<AskCard
+								key={`${block.sessionId}:${row.ask_id}`}
 								row={row}
-								sessionId={sessionId}
+								sessionId={block.sessionId}
 								nowMs={nowMs}
-								onSettled={() => void load()}
+								onSettled={(kind) => {
+									/* A NON-DISMISSAL SETTLEMENT RETIRES THE RECEIPT (M1): after
+									   answering, an unretired "Dismissed — …" would describe the
+									   operator's previous act as though it were their last. */
+									if (kind !== "dismiss") setReceipt(null);
+									void load();
+								}}
+								onDismissed={(askId, reason) =>
+									setReceipt({ askId, reason: reason ?? "lapsed" })
+								}
 							/>
-						</div>
-					);
-				})}
+						))}
+					</div>
+				))}
 			</div>
 		</Sheet>
 	);

@@ -164,3 +164,24 @@ def png(width: int = 8, height: int = 6, seed: int = 7) -> bytes:
         + chunk(b"IDAT", zlib.compress(raw))
         + chunk(b"IEND", b"")
     )
+
+
+def wav(seconds: float = 0.2, rate: int = 8000) -> bytes:
+    """A tiny real WAV, so miniaudio decodes it (a fake header would 404)."""
+    import io
+    import math
+    import struct
+    import wave
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(
+            b"".join(
+                struct.pack("<h", int(12000 * math.sin(2 * math.pi * 440 * n / rate)))
+                for n in range(int(seconds * rate))
+            )
+        )
+    return buffer.getvalue()

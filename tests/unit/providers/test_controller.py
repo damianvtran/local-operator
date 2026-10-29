@@ -2765,6 +2765,9 @@ class TestQwenCloudTicketFromSecretStore:
     # -- the guards --------------------------------------------------------
 
     @pytest.mark.asyncio
+    # This cell's SUBJECT is the product guard, so it must reach the real
+    # ``ensure_broker``; its own ``_spawn_broker`` spy is what asserts no spawn.
+    @pytest.mark.allow_secret_broker
     async def test_no_secret_store_spawns_no_daemon(
         self, controller, store, monkeypatch, tmp_path
     ) -> None:
@@ -3567,6 +3570,27 @@ async def test_the_picker_ttl_is_the_only_ttl_override(controller, store, monkey
 
 
 @pytest.mark.asyncio
+async def test_successful_live_refresh_invalidates_derived_model_metadata(
+    controller, store, monkeypatch
+) -> None:
+    """A picker refresh cannot leave old model capabilities in process memos."""
+    store.upsert_credential("openai", {"access": "synthetic", "type": "oauth"})
+    calls = _spy_available_models(monkeypatch, live={"openai": ["gpt-6.1-sol"]})
+    cleared: list[str] = []
+    monkeypatch.setattr(
+        "local_operator.model.configure.invalidate_model_info_cache",
+        lambda: cleared.append("memo"),
+    )
+
+    entries, statuses = await controller.live_catalogue(providers={"openai"}, ttl_s=0)
+
+    assert statuses == {"openai": "ok"}
+    assert [entry.selector for entry in entries] == ["openai/gpt-6.1-sol"]
+    assert calls == [("openai", 0)]
+    assert cleared == ["memo"]
+
+
+@pytest.mark.asyncio
 async def test_usable_providers_suppresses_secondary_flavour_when_oauth_active(
     controller, store
 ) -> None:
@@ -3606,6 +3630,9 @@ def test_no_login_flavour_is_in_the_chat_registry() -> None:
         "zai-oauth",
         "radient-key",
         "alibaba-token-plan-oauth",
+        # A second Kimi LOGIN ENTRY, not a second credential: both sign-ins
+        # write the one `kimi` slot (providers/oauth/kimi.py).
+        "kimi-wechat",
         # First-run onboarding: the chat API-key logins for the two providers
         # whose own login is a subscription sign-in (audit Q1).
         "openai-api-key",
@@ -4116,6 +4143,45 @@ class TestProviderView:
         multi = self._row(controller, "xai")
         assert multi.identity is None, "two accounts: no single label"
         assert multi.account_count == 2
+
+    @pytest.mark.parametrize(
+        ("auth_host", "active", "sibling"),
+        [
+            ("https://auth.kimi.ai", "kimi", "kimi-wechat"),
+            ("https://auth.kimi.com", "kimi-wechat", "kimi"),
+            (None, "kimi-wechat", "kimi"),
+        ],
+    )
+    def test_shared_kimi_oauth_names_only_the_recorded_sign_in(
+        self, store, monkeypatch, auth_host, active, sibling
+    ) -> None:
+        """One account is not two green sign-ins; env never rewrites its issuer."""
+        monkeypatch.setenv("KIMI_OAUTH_HOST", "https://auth.kimi.ai")
+        data = {"type": "oauth", "access": "synthetic", "refresh": "synthetic"}
+        if auth_host is not None:
+            data["auth_host"] = auth_host
+        store.upsert_credential("kimi", data)
+        controller = ProviderController(store)
+        active_row = self._row(controller, active)
+        sibling_row = self._row(controller, sibling)
+        assert active_row.state == sibling_row.state == "logged_in"
+        assert active_row.state_detail is None
+        assert sibling_row.state_detail == "shared Kimi login"
+        logout = controller.logout_rows()
+        # ``logout_rows`` is ``list | None``: ``None`` is the documented
+        # "store unreadable" answer, not an empty result, so narrow it here
+        # instead of iterating the optional.
+        assert logout is not None
+        assert [
+            (row.definition.id, row.definition.name, row.credential_types, row.identity)
+            for row in logout
+        ] == [("kimi", "Kimi (Moonshot)", ("oauth",), None)]
+
+    def test_kimi_api_key_keeps_ordinary_login_state(self, store) -> None:
+        store.upsert_credential("kimi", {"type": "api_key", "key": "synthetic"})
+        controller = ProviderController(store)
+        assert self._row(controller, "kimi").state_detail is None
+        assert self._row(controller, "kimi-wechat").state_detail is None
 
     def test_local_states_come_from_the_configured_endpoint(
         self, store, monkeypatch, tmp_path

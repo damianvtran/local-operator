@@ -1,0 +1,31 @@
+Attestation verifier output — newly executed for this record; no historical claim.
+Original catalogue check, run in the worktree at c4ba95919dbea27fcf990101f9e48ed21e977e10:
+$ .venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit_code=0
+
+$ python build_evidence.py --verify wire.errors.desktop
+namespace=wire.errors.desktop
+prior_ledger_status=passed
+prior_auditor=i18n-auditor date=2026-10-19 model=openai/gpt-6.1-sol result=passed findings=0
+prior_row_source_sha256=30312c2052a41da6f580f00dce8daf9babbc0b25c0462c1f2658817cd51f391c
+held_source_sha256=30312c2052a41da6f580f00dce8daf9babbc0b25c0462c1f2658817cd51f391c
+current_source_sha256=9a164be42a80d9bf0f60ad2a9f1d76fd1601855a4d19ffac3bf35d6bef11f76d
+source_equal=false
+prior_row_target_sha256=<not recorded by the held-candidate ledger schema>
+held_target_sha256=cf2fbad491db3452ce9ef80f9764e1e4937a352ed66eb2f99cc1d151e2f2daf1
+current_target_sha256=a8cb0db6bbc8a33ef041c082d68b9c06dd0b3168a303e447e0f40e0334fc89f4
+target_equal=false
+context_sidecar_held_sha256=<absent>
+context_sidecar_current_sha256=<absent>
+context_sidecar_equal=true
+key_count_en=84 key_count_zh=84
+key_set_equal=true key_order_equal=true
+duplicate_keys_en=0 duplicate_keys_zh=0
+icu_messages_checked=84 parse_or_argument_failures=0
+plural_category_failures=0
+technical_token_failures=0 kept_english_missing=0 emphasis_rendered_lexically=0
+icu_number_date_skeleton_keys_checked=1 skeleton_failures=0
+sample_keys_read=0 (not sampled: namespace is not attestable)
+verdict=not_carried
+exit_code=0

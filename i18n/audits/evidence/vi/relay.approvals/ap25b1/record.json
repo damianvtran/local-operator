@@ -1,0 +1,76 @@
+{
+ "schema": 1,
+ "audit_id": "ap25b1",
+ "audit_kind": "re_attestation_after_key_split",
+ "locale": "vi",
+ "namespace": "relay.approvals",
+ "audit_date": "2026-10-25",
+ "audited_revision": "3d0f77762a",
+ "audited_revision_note": "The seven locale catalogues took their five clause keys in 3d0f77762a; the en source they are judged against took its split in 4b40d82512 and has not changed since.",
+ "key_count": {
+  "en": 21,
+  "target": 21
+ },
+ "verdict": "passed",
+ "verdict_reason": "The five keys were read as one composed sentence against en: scope restriction, contrast and both blast-radius units survive, both bold runs are complete noun phrases, and the component's single-space seams were inspected character by character.",
+ "composed_sentence": "Hai lựa chọn đầu chỉ đổi **phiên này** mà thôi; lựa chọn cuối đổi **mặc định cho mọi phiên** sau đó.",
+ "bold_units": {
+  "session_clause": "phiên này",
+  "default_clause": "mặc định cho mọi phiên"
+ },
+ "seam_verdict": "clean at all four joins; 'mà thôi;' keeps the restrictive particle ahead of the semicolon",
+ "findings": [
+  {
+   "id": "VI-1",
+   "severity": "nit",
+   "status": "accepted",
+   "where": "before / between (verb repetition)",
+   "summary": "'đổi' repeats in both clauses; 'thay đổi' in the first would read better. Preference only."
+  }
+ ],
+ "unresolved_blocker_major": 0,
+ "confidence": "medium (Vietnamese read, not native)",
+ "auditor": {
+  "agent": "translation-auditor (lopdev team) - re-attestation pass by translation-reviewer",
+  "session": "402ebc67c9ec",
+  "model": "deepseek/deepseek-flash",
+  "actual_model_source": "this session's own model header",
+  "date": "2026-10-25",
+  "independence": "Independent agent/context from the 2026-10-25 first pass, but the SAME model (deepseek/deepseek-flash), so independence is agent/context, not model diversity - disclosed, not closed. No native speaker and no different-model pass has run for hi/ur or for any locale."
+ },
+ "translator": {
+  "agent": "implementation session (clause split authored in commit 3d0f77762a; no translator job id recorded)",
+  "model": "unrecorded",
+  "date": "2026-10-25"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/relay.approvals.json",
+   "sha256": "5efd5d666d1c498de506541c8bbd339204b5919950395934bfcf188476030ce0",
+   "matches_ledger_source_sha256": true
+  },
+  "en_context_sidecar": {
+   "path": "local_operator/i18n/catalogues/en/relay.approvals.context.json",
+   "sha256": "1a595de0049de2b02d27e00fc57c3fa14cb191cdde917bd54045b64a36664e75"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/vi/relay.approvals.json",
+   "sha256": "4fbb9b5ea403c7c0422a28ffec9bc3d97815c2b0be607b376232cf0542e6e4d0"
+  }
+ },
+ "artifacts": [
+  "report.md",
+  "mechanical.log",
+  "recheck.py.txt",
+  "record.json"
+ ],
+ "audit_log": {
+  "path": "mechanical.log",
+  "state": "present",
+  "note": "Actual stdout of the mechanical recheck (key parity, placeholder parity, whitespace, per-seam codepoints, guide rules, en recomposition). The composed-sentence reading itself is judgement, recorded in report.md and the ledger note."
+ },
+ "rendered_artifact": {
+  "captured": false,
+  "reason": "No frame was captured. The zh-CN spacing defect follows from the component's join rule and the explicit U+0020 seams, not from a rendering measurement; an RTL frame for ur was also not captured, so no layout claim is made."
+ }
+}

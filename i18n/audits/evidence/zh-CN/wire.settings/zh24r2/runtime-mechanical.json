@@ -1,0 +1,5806 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.settings",
+  "revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "generated_utc": "2026-10-25T00:46:00Z",
+  "renderer": "local_operator.i18n.runtime.render_message (in-house ICU subset)",
+  "plural_categories": {
+    "zh-CN": [
+      "other"
+    ],
+    "en": [
+      "one",
+      "other"
+    ]
+  },
+  "arguments": {
+    "keys_checked": 818,
+    "mismatches": []
+  },
+  "plural_selector_parity": {
+    "rows": [],
+    "errors": []
+  },
+  "plural_render_samples": [],
+  "plural_render_failures": [],
+  "static_render_samples": [
+    {
+      "key": "wire.settings.agents.description",
+      "zh_render": "已安装的初始角色（reviewer、coder、aida等）未被修改时，是否在启动时自动更新为随包文本。关闭时仍会报告更新；用'lop agents sync'应用。",
+      "en_render": "Whether installed starter roles (reviewer, coder, aida, ...) update themselves to the packaged text at launch when you have not edited them. Off = updates are still reported; apply them with 'lop agents sync'.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.agents.title",
+      "zh_render": "智能体",
+      "en_render": "Agents",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.agents_auto_update_seeds.choice.false.description",
+      "zh_render": "只告知；由我应用",
+      "en_render": "only tell me; I apply them",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.agents_auto_update_seeds.choice.true.description",
+      "zh_render": "让未修改的内置角色保持最新",
+      "en_render": "keep unedited built-ins current",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.agents_auto_update_seeds.help",
+      "zh_render": "启动时更新未修改的内置角色；工具变更仍会询问。",
+      "en_render": "At launch, update unedited built-ins; tool changes still ask.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.agents_auto_update_seeds.label",
+      "zh_render": "自动更新内置角色",
+      "en_render": "Auto-update built-in roles",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida.description",
+      "zh_render": "你的幕僚长：她的显示名称，以及主动节奏——何时问候、可升级的幅度，以及暂停开关。名称随处即时生效；修改会在她下次动作时读取，/aida pause|resume则立即生效。",
+      "en_render": "Your chief of staff: her display name, and the proactive cadence — when she checks in, how much she may escalate, and the pause switch. The name applies everywhere at once; edits are read at her next action, and /aida pause|resume act immediately.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida.title",
+      "zh_render": "Aida",
+      "en_render": "Aida",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_cadence_at.help",
+      "zh_render": "本地壁钟时间HH:MM。无效值会在下次调度时回退为08:30。",
+      "en_render": "Local wall-clock HH:MM. An invalid value falls back to 08:30 at the next arm.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_cadence_at.label",
+      "zh_render": "每日问候时间",
+      "en_render": "Daily check-in time",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_cadence_at.placeholder",
+      "zh_render": "08:30",
+      "en_render": "08:30",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_cadence_max_extra_per_day.help",
+      "zh_render": "她每天可安排多少次升级问候。0表示禁用升级。",
+      "en_render": "How many escalation check-ins she may arm per day. 0 disables escalation.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_cadence_max_extra_per_day.label",
+      "zh_render": "每日额外问候次数",
+      "en_render": "Extra check-ins / day",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_cadence_min_gap_minutes.help",
+      "zh_render": "她两次唤醒之间的最小间隔；更近的请求会被拒绝。",
+      "en_render": "Minimum spacing between her wakes; closer requests are refused.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_cadence_min_gap_minutes.label",
+      "zh_render": "最小间隔（分钟）",
+      "en_render": "Minimum gap (minutes)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_cadence_paused.choice.false.description",
+      "zh_render": "运行中",
+      "en_render": "running",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_cadence_paused.choice.true.description",
+      "zh_render": "已暂停",
+      "en_render": "paused",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_cadence_paused.help",
+      "zh_render": "由/aida pause|resume写入，这两个命令也会暂缓她的唤醒；在此处修改会在她下次触发时同样生效。",
+      "en_render": "Written by /aida pause|resume, which also hold her wakes; editing it here works the same way at her next tick.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_cadence_paused.label",
+      "zh_render": "节奏已暂停",
+      "en_render": "Cadence paused",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_enabled.choice.false.description",
+      "zh_render": "已禁用",
+      "en_render": "disabled",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_enabled.choice.true.description",
+      "zh_render": "已启用",
+      "en_render": "enabled",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_enabled.help",
+      "zh_render": "启动时及/aida读取；禁用状态下的安装不会创建她的会话。",
+      "en_render": "Read at boot and by /aida; a disabled install never creates her session.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_enabled.label",
+      "zh_render": "启用幕僚长",
+      "en_render": "Chief of staff enabled",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_name.help",
+      "zh_render": "她在各处的称呼。重命名她的对话或执行/aida rename <name>都会更新它。",
+      "en_render": "What she is called everywhere. Renaming her conversation or /aida rename <name> updates it.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_name.label",
+      "zh_render": "显示名称",
+      "en_render": "Display name",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_name.placeholder",
+      "zh_render": "Aida",
+      "en_render": "Aida",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_onboarding_nudge_days.help",
+      "zh_render": "她可以间隔多少天才提醒一次设置集成。从新手引导配置段读取。",
+      "en_render": "How rarely she may nudge about setting up an integration. Read from the onboarding slice.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.aida_onboarding_nudge_days.label",
+      "zh_render": "集成提醒间隔（天）",
+      "en_render": "Integration nudge interval (days)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.appearance.description",
+      "zh_render": "主题，以及TUI可以使用的终端功能。",
+      "en_render": "Theme and the terminal features the TUI is allowed to use.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.appearance.title",
+      "zh_render": "外观",
+      "en_render": "Appearance",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.approvals.description",
+      "zh_render": "写入类与命令类工具是否在每个运行中的会话里弹出询问。一次配置写入会同时收紧所有运行中的会话；要放宽某个会话，需要从该会话自身进程写入（在其中执行/approvals auto，或在该进程的/settings页面操作）。",
+      "en_render": "Whether write and command tools prompt, in every running session. A config write tightens every running session at once; loosening one needs a write from that session's own process (/approvals auto in it, or a /settings page in that process).",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.approvals.title",
+      "zh_render": "审批",
+      "en_render": "Approvals",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.asks.description",
+      "zh_render": "智能体为你排队提交的问题。更改会立即在终端、桌面应用和手机上生效。",
+      "en_render": "Questions an agent queues for you. A change applies at once in the terminal, the desktop app and on your phone.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.asks.title",
+      "zh_render": "提问",
+      "en_render": "Asks",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.choice.1h.description",
+      "zh_render": "截止时间过后1小时隐藏",
+      "en_render": "hidden 1 hour after its deadline",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.choice.1h.label",
+      "zh_render": "1小时",
+      "en_render": "1 hour",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.choice.24h.description",
+      "zh_render": "截止时间过后24小时隐藏",
+      "en_render": "hidden 24 hours after its deadline",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.choice.24h.label",
+      "zh_render": "24小时",
+      "en_render": "24 hours",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.choice.7d.description",
+      "zh_render": "截止时间过后7天隐藏（默认）",
+      "en_render": "hidden 7 days after its deadline (default)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.choice.7d.label",
+      "zh_render": "7天",
+      "en_render": "7 days",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.choice.at_expiry.description",
+      "zh_render": "超时即隐藏",
+      "en_render": "hidden as soon as it times out",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.choice.at_expiry.label",
+      "zh_render": "到期即隐藏",
+      "en_render": "gone at expiry",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.help",
+      "zh_render": "未回答的提问在截止时间过后继续显示多久。",
+      "en_render": "How long an unanswered ask stays shown past its deadline.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.label",
+      "zh_render": "超时提问显示时长",
+      "en_render": "Show timed-out asks for",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.auto_save_conversation.choice.false.description",
+      "zh_render": "按需保存",
+      "en_render": "save on request",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.auto_save_conversation.choice.true.description",
+      "zh_render": "自动保存",
+      "en_render": "save automatically",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.auto_save_conversation.help",
+      "zh_render": "仅适用于无界面REPL启动；TUI运行时不会读取此项。",
+      "en_render": "Headless REPL launches only; the TUI's runtime does not read it.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.auto_save_conversation.label",
+      "zh_render": "自动保存对话",
+      "en_render": "Auto-save conversation",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_memory_enabled.choice.false.description",
+      "zh_render": "无上限",
+      "en_render": "no ceiling",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_memory_enabled.choice.true.description",
+      "zh_render": "限制命令内存",
+      "en_render": "cap command memory",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_memory_enabled.help",
+      "zh_render": "为每条bash命令设置内存上限。进程组超过上限的命令会被终止（只终止其进程组，绝不终止lop），以免拖垮设备；模型会被告知改用更少内存。",
+      "en_render": "Give every bash command a RAM ceiling. A command whose process group crosses it is killed (its group only, never lop) so it cannot take the device down; the model is told to use less memory.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_memory_enabled.label",
+      "zh_render": "命令内存限制",
+      "en_render": "Command memory limit",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_memory_limit_mb.help",
+      "zh_render": "选中'manual'时使用的上限。0表示改用自动上限，因此保持为0不会禁用防护。",
+      "en_render": "The ceiling when 'manual' is selected above. 0 means use the auto ceiling instead, so leaving this at 0 never disables the guard.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_memory_limit_mb.label",
+      "zh_render": "手动上限（MB）",
+      "en_render": "Manual ceiling (MB)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_memory_mode.choice.auto.description",
+      "zh_render": "根据可用内存推导（默认）",
+      "en_render": "derive from available memory (default)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_memory_mode.choice.auto.label",
+      "zh_render": "auto",
+      "en_render": "auto",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_memory_mode.choice.manual.description",
+      "zh_render": "使用下方的limit_mb",
+      "en_render": "use the limit_mb below",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_memory_mode.choice.manual.label",
+      "zh_render": "manual",
+      "en_render": "manual",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_memory_mode.help",
+      "zh_render": "'auto'根据本设备当前空闲内存推导上限，机器繁忙时会自行收紧。'manual'则固定为下方的数值。",
+      "en_render": "'auto' derives the ceiling from the memory this device has free right now, so it tightens on its own when the machine is busy. 'manual' pins it to the number below.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_memory_mode.label",
+      "zh_render": "上限来源",
+      "en_render": "Ceiling source",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_memory_soft_fraction.help",
+      "zh_render": "输出那行建议时所处的上限占比。它只是建议——用户态无法减缓内存分配——所以只在终止前警告，并不能阻止终止。",
+      "en_render": "Fraction of the ceiling at which one advisory line is emitted. It is only an advisory — userspace cannot slow an allocation — so it warns before the kill, it does not prevent it.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_memory_soft_fraction.label",
+      "zh_render": "建议阈值",
+      "en_render": "Advisory threshold",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_query_budget_enabled.choice.false.description",
+      "zh_render": "无预算",
+      "en_render": "no budget",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_query_budget_enabled.choice.true.description",
+      "zh_render": "为shell查询设定时限",
+      "en_render": "time-box shell queries",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_query_budget_enabled.help",
+      "zh_render": "为读取文件系统（而非限定文件）的shell `grep`/`find`/`du`遍历设定时限：10秒时给出一行建议，达到下方预算后停止。构建、安装与测试运行不受影响。",
+      "en_render": "Time-box a shell `grep`/`find`/`du` walk that reads the filesystem rather than a scoped file: one advisory at 10 s, then a stop at the budget below. Builds, installs and test runs are never affected.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_query_budget_enabled.label",
+      "zh_render": "shell查询预算",
+      "en_render": "Shell query budget",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_query_budget_seconds.help",
+      "zh_render": "单次shell查询的壁钟预算。无论此值如何，建议都会在10秒时触发；这里设定的是停止时间。以LOCAL_OPERATOR_ALLOW_SLOW_QUERY=1作为单条命令的前缀，可为有正当理由的运行跳过停止。",
+      "en_render": "Wall-clock budget for one shell query. The advisory fires at 10 s whatever this says; this is the stop. A per-command prefix of LOCAL_OPERATOR_ALLOW_SLOW_QUERY=1 skips the stop for a justified run.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_query_budget_seconds.label",
+      "zh_render": "预算（秒）",
+      "en_render": "Budget (seconds)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_query_budget_stop.choice.false.description",
+      "zh_render": "仅建议",
+      "en_render": "advisory only",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_query_budget_stop.choice.true.description",
+      "zh_render": "停止查询",
+      "en_render": "stop the query",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_query_budget_stop.help",
+      "zh_render": "开：超出预算的查询会被终止并说明原因。关：查询运行到底，只显示建议，便于操作员先观察再强制执行。",
+      "en_render": "On: a query that crosses the budget is killed and told why. Off: it runs to completion and only the advisory is shown, so an operator can watch before enforcing.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_query_budget_stop.label",
+      "zh_render": "……停止而非警告",
+      "en_render": "...stop rather than warn",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_shell.help",
+      "zh_render": "bash工具的解释器。留空使用PATH里的bash，否则使用/bin/sh。",
+      "en_render": "Interpreter for the bash tool. Empty uses bash on PATH, else /bin/sh.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_shell.help.windows",
+      "zh_render": "bash工具的解释器。留空：PATH里的bash，否则Git的bash.exe。",
+      "en_render": "Interpreter for the bash tool. Empty: bash on PATH, else Git's bash.exe.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bash_shell.label",
+      "zh_render": "bash解释器",
+      "en_render": "Bash interpreter",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bool.off",
+      "zh_render": "关",
+      "en_render": "off",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.bool.on",
+      "zh_render": "开",
+      "en_render": "on",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification.description",
+      "zh_render": "决策模型可为每条消息建议的辅助技能、指南与MCP服务器。关闭时提示词保持不变。",
+      "en_render": "Advisory skills, guides and MCP servers a decision model may suggest per message. Off keeps the prompt unchanged.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification.title",
+      "zh_render": "智能提示",
+      "en_render": "Smart hints",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_auto.choice.false.description",
+      "zh_render": "提示词完全保持原样",
+      "en_render": "the prompt stays exactly as it is",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_auto.choice.true.description",
+      "zh_render": "决策模型可以添加建议性资源",
+      "en_render": "a decision model may add advisory resources",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_auto.help",
+      "zh_render": "开：决策模型可以添加建议性资源。关：提示词保持不变。",
+      "en_render": "On: a decision model may add advisory resources. Off: the prompt is unchanged.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_auto.label",
+      "zh_render": "智能提示",
+      "en_render": "Smart hints",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_maxcandidates.help",
+      "zh_render": "需开启智能提示。每种类型的候选数；0表示用12。",
+      "en_render": "Needs recommendations on. Candidates per kind; 0 uses 12.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_maxcandidates.label",
+      "zh_render": "↳ 候选数上限",
+      "en_render": "↳ max candidates",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_maxrecommendations.help",
+      "zh_render": "需开启智能提示。每条消息的资源数；0表示用3。",
+      "en_render": "Needs recommendations on. Per-message resources; 0 uses 3.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_maxrecommendations.label",
+      "zh_render": "↳ 推荐数上限",
+      "en_render": "↳ max recommendations",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_maxstatechars.help",
+      "zh_render": "需开启智能提示。状态上限；0表示用6000字符。",
+      "en_render": "Needs recommendations on. State cap; 0 uses 6000 chars.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_maxstatechars.label",
+      "zh_render": "↳ 状态字符上限",
+      "en_render": "↳ max state chars",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_model.help",
+      "zh_render": "需开启智能提示。提供商的模型ID；留空使用其默认值。",
+      "en_render": "Needs recommendations on. Vendor model id; empty uses its default.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_model.label",
+      "zh_render": "↳ 模型",
+      "en_render": "↳ model",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_notice.help",
+      "zh_render": "已弃用。智能提示在对话中静默；调用记录见日志。",
+      "en_render": "Deprecated. Smart hints is silent in the chat; the call is in the log.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_notice.label",
+      "zh_render": "智能提示通知",
+      "en_render": "Smart hints notice",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_timeoutms.help",
+      "zh_render": "需开启智能提示。每次调用的截止时间；0表示用1500毫秒。",
+      "en_render": "Needs recommendations on. Per-call deadline; 0 uses 1500 ms.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_timeoutms.label",
+      "zh_render": "↳ 截止时间（毫秒）",
+      "en_render": "↳ deadline (ms)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.auto.description",
+      "zh_render": "第一个拥有可用凭据的环节",
+      "en_render": "first leg with a usable credential",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.auto.label",
+      "zh_render": "auto",
+      "en_render": "auto",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.openrouter.description",
+      "zh_render": "OpenRouter的alpha决策路由",
+      "en_render": "OpenRouter's alpha decisions route",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.openrouter.label",
+      "zh_render": "openrouter",
+      "en_render": "openrouter",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.radient.description",
+      "zh_render": "Radient的决策路由",
+      "en_render": "Radient's decision route",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.radient.label",
+      "zh_render": "radient",
+      "en_render": "radient",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.typesafe.description",
+      "zh_render": "TypeSafe的Jev endpoint",
+      "en_render": "TypeSafe's Jev endpoint",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_vendor.choice.typesafe.label",
+      "zh_render": "typesafe",
+      "en_render": "typesafe",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_vendor.help",
+      "zh_render": "需开启智能提示。固定一个环节；auto优先Radient。",
+      "en_render": "Needs recommendations on. Pin one leg; auto prefers Radient.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_vendor.label",
+      "zh_render": "↳ 厂商",
+      "en_render": "↳ vendor",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_waitms.help",
+      "zh_render": "需开启智能提示。一个回合的等待时长；0表示用50毫秒。",
+      "en_render": "Needs recommendations on. How long a turn waits; 0 uses 50 ms.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.classification_waitms.label",
+      "zh_render": "↳ 等待预算（毫秒）",
+      "en_render": "↳ wait budget (ms)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction.description",
+      "zh_render": "何时对对话做摘要以回收上下文。",
+      "en_render": "When the conversation is summarised to reclaim context.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction.title",
+      "zh_render": "压缩",
+      "en_render": "Compaction",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_auto_continue.choice.false.description",
+      "zh_render": "这次压缩后停止",
+      "en_render": "stop after the pass",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_auto_continue.choice.true.description",
+      "zh_render": "自动继续",
+      "en_render": "continue automatically",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_auto_continue.help",
+      "zh_render": "回合后压缩成功时，安排一条继续提示词。",
+      "en_render": "Schedule a continuation prompt after a successful post-turn pass.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_auto_continue.label",
+      "zh_render": "压缩后继续",
+      "en_render": "Continue after compaction",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_enabled.choice.false.description",
+      "zh_render": "从不压缩",
+      "en_render": "never compact",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_enabled.choice.true.description",
+      "zh_render": "自动压缩",
+      "en_render": "compact automatically",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_enabled.help",
+      "zh_render": "上下文占满时对较早历史做摘要。",
+      "en_render": "Summarise older history when the context fills.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_enabled.label",
+      "zh_render": "压缩",
+      "en_render": "Compaction",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_keep_recent_tokens.help",
+      "zh_render": "每次压缩时原样保留的近期历史。",
+      "en_render": "Recent history kept verbatim across a pass.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_keep_recent_tokens.label",
+      "zh_render": "保留最近token",
+      "en_render": "Keep recent tokens",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_mid_turn_enabled.choice.false.description",
+      "zh_render": "仅在回合之间",
+      "en_render": "only between turns",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_mid_turn_enabled.choice.true.description",
+      "zh_render": "在回合中途压缩",
+      "en_render": "compact mid-turn",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_mid_turn_enabled.help",
+      "zh_render": "允许在工具循环的安全边界处压缩，而不仅限回合之间。",
+      "en_render": "Allow a pass at safe tool-loop boundaries, not only between turns.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_mid_turn_enabled.label",
+      "zh_render": "回合中压缩",
+      "en_render": "Mid-turn compaction",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.auto.description",
+      "zh_render": "视觉模型用snapcompact，否则用context-full",
+      "en_render": "snapcompact for vision models, else context-full",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.auto.label",
+      "zh_render": "auto",
+      "en_render": "auto",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.context_full.description",
+      "zh_render": "对整个上下文做摘要",
+      "en_render": "summarise the whole context",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.context_full.label",
+      "zh_render": "context-full",
+      "en_render": "context-full",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.off.description",
+      "zh_render": "禁用压缩",
+      "en_render": "disable the pass",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.off.label",
+      "zh_render": "关闭",
+      "en_render": "off",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.snapcompact.description",
+      "zh_render": "基于快照，排除图像",
+      "en_render": "snapshot-based, keeps images out",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_strategy.choice.snapcompact.label",
+      "zh_render": "snapcompact",
+      "en_render": "snapcompact",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_strategy.help",
+      "zh_render": "使用哪种压缩机制。auto按模型选择。",
+      "en_render": "Which mechanism compacts. Auto picks per model.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_strategy.label",
+      "zh_render": "策略",
+      "en_render": "Strategy",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_threshold_percent.help",
+      "zh_render": "百分比触发条件。0.80和80都表示80%。",
+      "en_render": "Percentage trigger. 0.80 and 80 both mean 80%.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_threshold_percent.label",
+      "zh_render": "阈值（窗口百分比）",
+      "en_render": "Threshold (% of window)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_threshold_tokens.help",
+      "zh_render": "绝对触发条件。此值与百分比中较小者生效。",
+      "en_render": "Absolute trigger. The smaller of this and the percentage wins.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_threshold_tokens.label",
+      "zh_render": "阈值（token）",
+      "en_render": "Threshold (tokens)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_wire_bytes_budget.help",
+      "zh_render": "请求的硬性上限。为保持在限内，较早的截图会从上下文中丢弃（绝不从记录中丢弃）。0表示禁用。",
+      "en_render": "Hard ceiling on the request. Older screenshots are dropped from the context (never from the transcript) to stay under it. 0 disables.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_wire_bytes_budget.label",
+      "zh_render": "请求大小上限（字节）",
+      "en_render": "Request size limit (bytes)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_wire_bytes_trigger.help",
+      "zh_render": "请求超过此大小即压缩，让截图密集的会话提早摘要，而不是丢弃画面。0表示禁用。",
+      "en_render": "Compact once the request passes this size, so a screenshot-heavy session summarises early instead of dropping frames. 0 disables.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.compaction_wire_bytes_trigger.label",
+      "zh_render": "请求大小触发值（字节）",
+      "en_render": "Request size trigger (bytes)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.conversation_length.help",
+      "zh_render": "已弃用。已被压缩引擎取代。",
+      "en_render": "Deprecated. Superseded by the compaction engine.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.conversation_length.label",
+      "zh_render": "对话长度",
+      "en_render": "Conversation length",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.desktop.description",
+      "zh_render": "桌面应用未运行时，点击通知会把你送到哪里。",
+      "en_render": "Where a notification click sends you when the desktop app is not running.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.desktop.title",
+      "zh_render": "桌面应用",
+      "en_render": "Desktop app",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.desktop_launch_command.help",
+      "zh_render": "留空则自动发现应用（先local-operator-ui，再macOS应用）。{session}为会话ID。",
+      "en_render": "Empty = discover the app (local-operator-ui, then the macOS app). {session} is the session id.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.desktop_launch_command.label",
+      "zh_render": "启动命令",
+      "en_render": "launch command",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.desktop_launch_command.placeholder",
+      "zh_render": "local-operator-ui --open-session {session}",
+      "en_render": "local-operator-ui --open-session {session}",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.detail_length.help",
+      "zh_render": "已弃用。已被压缩引擎取代。",
+      "en_render": "Deprecated. Superseded by the compaction engine.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.detail_length.label",
+      "zh_render": "详情长度",
+      "en_render": "Detail length",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_comfortable_rows.choice.false.description",
+      "zh_render": "紧凑，可容纳更多历史",
+      "en_render": "compact, more history",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_comfortable_rows.choice.true.description",
+      "zh_render": "留白更多，更易点击",
+      "en_render": "padded, easier to click",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_comfortable_rows.help",
+      "zh_render": "为工具行与提示词行增加留白，使其更易点击。",
+      "en_render": "Pad tool and prompt rows so they are easier to click.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_comfortable_rows.label",
+      "zh_render": "宽松的操作行",
+      "en_render": "Comfortable action rows",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_band.choice.false.description",
+      "zh_render": "隐藏",
+      "en_render": "hide it",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_band.choice.true.description",
+      "zh_render": "显示状态栏",
+      "en_render": "show the band",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_band.help",
+      "zh_render": "也包括常驻告警。模型、目录、上下文、费用、速率、耗时。",
+      "en_render": "Also the standing alerts. Model, dir, context, cost, rate, elapsed.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_band.label",
+      "zh_render": "状态栏",
+      "en_render": "Status band",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_chevron.choice.false.description",
+      "zh_render": "隐藏",
+      "en_render": "hide it",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_chevron.choice.true.description",
+      "zh_render": "显示标记",
+      "en_render": "show the mark",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_chevron.help",
+      "zh_render": "输入行左缘的提示符标记。",
+      "en_render": "The prompt mark at the left edge of the input row.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_chevron.label",
+      "zh_render": "提示符箭头",
+      "en_render": "Prompt chevron",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_context.choice.false.description",
+      "zh_render": "隐藏",
+      "en_render": "hide it",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_context.choice.true.description",
+      "zh_render": "显示上下文用量",
+      "en_render": "show context usage",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_context.help",
+      "zh_render": "状态栏中的上下文用量段。",
+      "en_render": "The context-usage segment in the status band.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_context.label",
+      "zh_render": "状态栏：上下文",
+      "en_render": "Band: context",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_cost.choice.false.description",
+      "zh_render": "隐藏",
+      "en_render": "hide it",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_cost.choice.true.description",
+      "zh_render": "显示费用",
+      "en_render": "show the cost",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_cost.help",
+      "zh_render": "状态栏中的会话费用段。",
+      "en_render": "The session-cost segment in the status band.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_cost.label",
+      "zh_render": "状态栏：会话费用",
+      "en_render": "Band: session cost",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_cwd.choice.false.description",
+      "zh_render": "隐藏",
+      "en_render": "hide it",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_cwd.choice.true.description",
+      "zh_render": "显示目录",
+      "en_render": "show the directory",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_cwd.help",
+      "zh_render": "状态栏中的工作目录段。",
+      "en_render": "The working-directory segment in the status band.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_cwd.label",
+      "zh_render": "状态栏：工作目录",
+      "en_render": "Band: working dir",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_duration.choice.false.description",
+      "zh_render": "隐藏",
+      "en_render": "hide it",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_duration.choice.true.description",
+      "zh_render": "显示耗时",
+      "en_render": "show the elapsed time",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_duration.help",
+      "zh_render": "状态栏中的耗时段。",
+      "en_render": "The elapsed-time segment in the status band.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_duration.label",
+      "zh_render": "状态栏：耗时",
+      "en_render": "Band: elapsed",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_model.choice.false.description",
+      "zh_render": "隐藏",
+      "en_render": "hide it",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_model.choice.true.description",
+      "zh_render": "显示模型",
+      "en_render": "show the model",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_model.help",
+      "zh_render": "状态栏中的模型名称段。",
+      "en_render": "The model-label segment in the status band.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_model.label",
+      "zh_render": "状态栏：模型",
+      "en_render": "Band: model",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_rate.choice.false.description",
+      "zh_render": "隐藏",
+      "en_render": "hide it",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_rate.choice.true.description",
+      "zh_render": "显示速率",
+      "en_render": "show the rate",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_rate.help",
+      "zh_render": "tok/s段：最近一次完成调用的吞吐量。",
+      "en_render": "The tok/s segment — the last completed call's throughput.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_composer_rate.label",
+      "zh_render": "状态栏：解码速率",
+      "en_render": "Band: decode rate",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_dock.choice.full.description",
+      "zh_render": "每个子智能体一行，最新在前",
+      "en_render": "one row per child, newest first",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_dock.choice.full.label",
+      "zh_render": "完整",
+      "en_render": "full",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_dock.choice.hidden.description",
+      "zh_render": "不显示",
+      "en_render": "not shown",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_dock.choice.hidden.label",
+      "zh_render": "隐藏",
+      "en_render": "hidden",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_dock.choice.summary.description",
+      "zh_render": "一行计数",
+      "en_render": "a one-line count",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_dock.choice.summary.label",
+      "zh_render": "摘要",
+      "en_render": "summary",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_dock.help",
+      "zh_render": "会话启动时子智能体面板占多大空间；ctrl+g循环切换。",
+      "en_render": "How much room the subagent panel takes when a session starts; ctrl+g cycles it.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_dock.label",
+      "zh_render": "子智能体面板",
+      "en_render": "Subagent dock",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_heading_markers.choice.false.description",
+      "zh_render": "仅靠颜色与字重",
+      "en_render": "colour and weight only",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_heading_markers.choice.true.description",
+      "zh_render": "显示###标记",
+      "en_render": "show ### markers",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_heading_markers.help",
+      "zh_render": "在标题前显示字面量###，即markdown源码的写法。",
+      "en_render": "Show the literal ### before a heading, as the markdown source writes it.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_heading_markers.label",
+      "zh_render": "标题标记",
+      "en_render": "Heading markers",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_hide_cross_session.choice.false.description",
+      "zh_render": "显示新内容；重新打开以重读",
+      "en_render": "show new; reopen to re-read",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_hide_cross_session.choice.true.description",
+      "zh_render": "隐藏新内容；重新打开以重读",
+      "en_render": "hide new; reopen to re-read",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_hide_cross_session.help",
+      "zh_render": "从会话记录中隐藏lop send流量与入站对等消息。",
+      "en_render": "Hide lop send traffic and inbound peer messages from transcripts.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_hide_cross_session.label",
+      "zh_render": "隐藏跨会话流量",
+      "en_render": "Hide cross-session traffic",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_images.choice.false.description",
+      "zh_render": "仅文字回执",
+      "en_render": "text receipts only",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_images.choice.true.description",
+      "zh_render": "绘制图像",
+      "en_render": "draw images",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_images.help",
+      "zh_render": "截图与附件会绘制在会话记录中。",
+      "en_render": "Screenshots and attachments drawn in the transcript.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_images.label",
+      "zh_render": "内嵌图像",
+      "en_render": "Inline images",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_narration.choice.false.description",
+      "zh_render": "工具运行后隐藏叙述",
+      "en_render": "hide narration once tools run",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_narration.choice.true.description",
+      "zh_render": "保留叙述",
+      "en_render": "keep narration",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_narration.help",
+      "zh_render": "智能体的工具调用运行后，在会话记录中保留其回合中叙述。",
+      "en_render": "Keep the agent's mid-turn narration in the transcript after its tool calls run.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_narration.label",
+      "zh_render": "回合中叙述",
+      "en_render": "Mid-turn narration",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_nerd_icons.choice.false.description",
+      "zh_render": "强制使用普通图标",
+      "en_render": "force plain icons",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_nerd_icons.choice.false.label",
+      "zh_render": "关",
+      "en_render": "off",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_nerd_icons.choice.none.description",
+      "zh_render": "由终端模拟器决定",
+      "en_render": "decide from the terminal emulator",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_nerd_icons.choice.none.label",
+      "zh_render": "auto",
+      "en_render": "auto",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_nerd_icons.choice.true.description",
+      "zh_render": "强制启用字形",
+      "en_render": "force glyphs on",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_nerd_icons.choice.true.label",
+      "zh_render": "开",
+      "en_render": "on",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_nerd_icons.help",
+      "zh_render": "展开的工具行图标。auto读取终端模拟器的标记。",
+      "en_render": "Expanded tool-row icons. Auto reads the terminal emulator's markers.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_nerd_icons.label",
+      "zh_render": "Nerd Font字形",
+      "en_render": "Nerd Font glyphs",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_notification_session_name.choice.false.description",
+      "zh_render": "横幅上不出现名称",
+      "en_render": "keep names off banners",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_notification_session_name.choice.true.description",
+      "zh_render": "在横幅中标注会话名",
+      "en_render": "name the session",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_notification_session_name.help",
+      "zh_render": "会话名称、最后一行与错误原因会出现在横幅上，锁屏界面也包括在内。",
+      "en_render": "A session's name, last line and error causes appear on banners, including the lock screen.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_notification_session_name.label",
+      "zh_render": "通知中的会话名称",
+      "en_render": "Notification session names",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_notifications.choice.false.description",
+      "zh_render": "从不通知",
+      "en_render": "never notify",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_notifications.choice.true.description",
+      "zh_render": "未聚焦时通知",
+      "en_render": "notify when unfocused",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_notifications.help",
+      "zh_render": "仅在终端未聚焦时触发。",
+      "en_render": "Fires only while the terminal is unfocused.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_notifications.label",
+      "zh_render": "桌面通知",
+      "en_render": "Desktop notifications",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_rail.choice.false.description",
+      "zh_render": "无竖线",
+      "en_render": "no rail",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_rail.choice.true.description",
+      "zh_render": "只为回答画线",
+      "en_render": "rail the answer only",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_rail.help",
+      "zh_render": "细线标记“回答”：即结束回合的那条消息。回合中叙述不画线。",
+      "en_render": "A rule marks the ANSWER: the message that ends the turn. Mid-turn narration takes no rail.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_rail.label",
+      "zh_render": "助手侧边线",
+      "en_render": "Assistant gutter rail",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_reasoning.choice.false.description",
+      "zh_render": "隐藏推理",
+      "en_render": "hide reasoning",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_reasoning.choice.true.description",
+      "zh_render": "实时显示推理",
+      "en_render": "show live reasoning",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_reasoning.help",
+      "zh_render": "模型流式输出时实时显示其内部思考；思考结束后即消失。",
+      "en_render": "Show the model's private thinking while it streams; it vanishes once the thinking ends.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_reasoning.label",
+      "zh_render": "实时模型推理",
+      "en_render": "Live model reasoning",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_shimmer.choice.false.description",
+      "zh_render": "静态工作行",
+      "en_render": "static working line",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_shimmer.choice.true.description",
+      "zh_render": "为工作行添加动画",
+      "en_render": "animate the working line",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_shimmer.help",
+      "zh_render": "工作行上的动态光泽。",
+      "en_render": "The animated sheen on the working line.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_shimmer.label",
+      "zh_render": "流光动画",
+      "en_render": "Shimmer animation",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_terminal_title.choice.false.description",
+      "zh_render": "不修改标题",
+      "en_render": "leave the title alone",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_terminal_title.choice.true.description",
+      "zh_render": "设置窗口标题",
+      "en_render": "set the window title",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_terminal_title.help",
+      "zh_render": "通过OSC 0设置窗口标题，携带会话名称与运行状态。",
+      "en_render": "OSC 0 window title carrying the session name and run state.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_terminal_title.label",
+      "zh_render": "终端标题",
+      "en_render": "Terminal title",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_time_format.choice.12h.description",
+      "zh_render": "7:52 PM PDT",
+      "en_render": "7:52 PM PDT",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_time_format.choice.12h.label",
+      "zh_render": "12小时制",
+      "en_render": "12-hour",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_time_format.choice.24h.description",
+      "zh_render": "19:52 PDT",
+      "en_render": "19:52 PDT",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_time_format.choice.24h.label",
+      "zh_render": "24小时制",
+      "en_render": "24-hour",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_time_format.help",
+      "zh_render": "定时唤醒时间使用你的本地时区。选择12或24小时制。",
+      "en_render": "Scheduled wake times use your local timezone. Choose a 12- or 24-hour clock.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_time_format.label",
+      "zh_render": "唤醒时间格式",
+      "en_render": "Wake time format",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_turn_answer_rail.choice.false.description",
+      "zh_render": "回答旁不画线",
+      "en_render": "no rule beside the answer",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_turn_answer_rail.choice.true.description",
+      "zh_render": "在收尾回答旁画线",
+      "en_render": "rule beside the closing answer",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_turn_answer_rail.help",
+      "zh_render": "在结束回合的回答旁画一条细线（桌面应用）。",
+      "en_render": "Draw a thin rule beside the answer that closes a turn (desktop app).",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.display_turn_answer_rail.label",
+      "zh_render": "标记回合回答",
+      "en_render": "Mark the turn answer",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.failover.description",
+      "zh_render": "提供商调用失败或配额用尽时会发生什么。",
+      "en_render": "What happens when a provider call fails or a quota runs out.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.failover.title",
+      "zh_render": "故障转移与重试",
+      "en_render": "Failover and retry",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.fork.description",
+      "zh_render": "/fork在哪里打开分叉出的对话。",
+      "en_render": "Where /fork opens the branched conversation.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.fork.title",
+      "zh_render": "分叉",
+      "en_render": "Fork",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.fork_cmux_placement.choice.surface.description",
+      "zh_render": "当前工作区中的一个标签页",
+      "en_render": "a tab in the current workspace",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.fork_cmux_placement.choice.surface.label",
+      "zh_render": "新surface",
+      "en_render": "new surface",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.fork_cmux_placement.choice.workspace.description",
+      "zh_render": "侧边栏中独立的一行",
+      "en_render": "a sidebar row of its own",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.fork_cmux_placement.choice.workspace.label",
+      "zh_render": "新工作区",
+      "en_render": "new workspace",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.fork_cmux_placement.help",
+      "zh_render": "在cmux下，分叉是获得自己的新工作区，还是在此处作为一个surface打开。",
+      "en_render": "Under cmux, whether a fork gets its own workspace or a surface here.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.fork_cmux_placement.label",
+      "zh_render": "在cmux下的打开位置",
+      "en_render": "Where it opens under cmux",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.fork_mode.choice.switch.description",
+      "zh_render": "在此处跟随分叉；用/resume返回",
+      "en_render": "follow the fork here; return with /resume",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.fork_mode.choice.switch.label",
+      "zh_render": "此终端",
+      "en_render": "this terminal",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.fork_mode.choice.window.description",
+      "zh_render": "在别处打开分叉；本会话继续运行",
+      "en_render": "open the fork elsewhere; this session keeps running",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.fork_mode.choice.window.label",
+      "zh_render": "新窗口",
+      "en_render": "new window",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.fork_mode.help",
+      "zh_render": "选择分叉打开的位置；未完成的工作保留在原处。",
+      "en_render": "Choose where the fork opens; unfinished work stays in the original.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.fork_mode.label",
+      "zh_render": "分叉打开位置",
+      "en_render": "Where a fork opens",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hooks.description",
+      "zh_render": "运行原生与转发的Claude Code / Codex PostToolUse钩子。",
+      "en_render": "Run native and forwarded Claude Code / Codex PostToolUse hooks.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hooks.title",
+      "zh_render": "钩子",
+      "en_render": "Hooks",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hooks_forward_claude.help",
+      "zh_render": "每次工具调用后，运行来自~/.claude与插件的PostToolUse钩子。",
+      "en_render": "Run PostToolUse hooks from ~/.claude and plugins after each tool call.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hooks_forward_claude.label",
+      "zh_render": "转发Claude Code钩子",
+      "en_render": "Forward Claude Code hooks",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hooks_forward_codex.help",
+      "zh_render": "每次工具调用后，运行~/.codex/hooks.json中的PostToolUse钩子。",
+      "en_render": "Run PostToolUse hooks from ~/.codex/hooks.json after each tool call.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hooks_forward_codex.label",
+      "zh_render": "转发Codex钩子",
+      "en_render": "Forward Codex hooks",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hooks_native.help",
+      "zh_render": "每次工具调用后，运行lop配置目录中hooks.json里的钩子。",
+      "en_render": "Run hooks from hooks.json in the lop config dir after each tool call.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hooks_native.label",
+      "zh_render": "原生钩子",
+      "en_render": "Native hooks",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hosting.help",
+      "zh_render": "新对话使用的提供商。/model saved会把它采纳到此处。",
+      "en_render": "Provider for new conversations. /model saved adopts it here.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hosting.label",
+      "zh_render": "默认提供商",
+      "en_render": "Default provider",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hub.description",
+      "zh_render": "让你从Agent Hub pull来的智能体与团队保持最新：更新是否自动merge、多久检查一次hub、由哪个模型解决冲突。你的修改与删除会被merge，绝不会被覆盖。",
+      "en_render": "Keep agents and teams you pulled from the Agent Hub current: whether updates are merged in automatically, how often the hub is checked, and which model resolves a conflict. Your edits and deletions are merged, never overwritten.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hub.title",
+      "zh_render": "Agent Hub",
+      "en_render": "Agent Hub",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hub_auto_update_agents.choice.false.description",
+      "zh_render": "只告知；由我应用",
+      "en_render": "only tell me; I apply them",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hub_auto_update_agents.choice.true.description",
+      "zh_render": "自动merge hub更新",
+      "en_render": "merge hub updates automatically",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hub_auto_update_agents.help",
+      "zh_render": "自动把hub更新merge进已pull的智能体。",
+      "en_render": "Merge hub updates into pulled agents automatically.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hub_auto_update_agents.label",
+      "zh_render": "自动更新智能体",
+      "en_render": "Auto-update agents",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hub_auto_update_teams.choice.false.description",
+      "zh_render": "只告知；由我应用",
+      "en_render": "only tell me; I apply them",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hub_auto_update_teams.choice.true.description",
+      "zh_render": "自动merge hub更新",
+      "en_render": "merge hub updates automatically",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hub_auto_update_teams.help",
+      "zh_render": "自动把hub更新merge进已pull的团队。",
+      "en_render": "Merge hub updates into pulled teams automatically.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hub_auto_update_teams.label",
+      "zh_render": "自动更新团队",
+      "en_render": "Auto-update teams",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hub_check_interval_min.help",
+      "zh_render": "两次hub更新检查之间的分钟数（两种模式）。",
+      "en_render": "Minutes between hub update checks (both modes).",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.hub_check_interval_min.label",
+      "zh_render": "检查间隔（分钟）",
+      "en_render": "Check interval (minutes)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.keymap.description",
+      "zh_render": "用于开始与恢复对话的按键。在一行上按enter，然后按下你想要的键。",
+      "en_render": "Keys for starting and resuming conversations. Press enter on a row, then press the key you want.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.keymap.title",
+      "zh_render": "快捷键",
+      "en_render": "Hotkeys",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.language.help",
+      "zh_render": "界面语言。auto跟随操作系统，回退为英语。",
+      "en_render": "Interface language. auto follows your operating system, falling back to English.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.language.label",
+      "zh_render": "语言",
+      "en_render": "Language",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian.description",
+      "zh_render": "Librarian负责整理所有会话共享的长期资料库：在此设置她的显示名称、每日整理和暂停开关。",
+      "en_render": "The Librarian keeps the global Library organised: her display name, the daily pass, and the pause switch. The Library is long-term and shared by every conversation.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian.title",
+      "zh_render": "Librarian",
+      "en_render": "Librarian",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian_cadence_at.help",
+      "zh_render": "本地时间，格式为HH:MM。值无效时，下次安排定时任务会回退到03:30。",
+      "en_render": "Local wall-clock HH:MM. An invalid value falls back to 03:30 at the next arm.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian_cadence_at.label",
+      "zh_render": "每日整理时间",
+      "en_render": "Daily pass time",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian_cadence_at.placeholder",
+      "zh_render": "03:30",
+      "en_render": "03:30",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian_cadence_max_extra_per_day.help",
+      "zh_render": "她每天可请求的额外整理次数。0表示禁用额外整理。",
+      "en_render": "How many extra passes she may request per day. 0 disables extra passes.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian_cadence_max_extra_per_day.label",
+      "zh_render": "每日额外整理次数",
+      "en_render": "Extra passes / day",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian_cadence_min_gap_minutes.help",
+      "zh_render": "两次整理之间的最短间隔；间隔不足的请求会被拒绝。",
+      "en_render": "Minimum spacing between her passes; closer requests are refused.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian_cadence_min_gap_minutes.label",
+      "zh_render": "最短间隔（分钟）",
+      "en_render": "Minimum gap (minutes)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian_cadence_paused.choice.false.description",
+      "zh_render": "运行中",
+      "en_render": "running",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian_cadence_paused.choice.true.description",
+      "zh_render": "已暂停",
+      "en_render": "paused",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian_cadence_paused.help",
+      "zh_render": "暂停会移除她的定时任务条目；恢复会重新安排下次整理。桌面应用和/librarian写入同一配置键。",
+      "en_render": "Pausing removes her scheduled rows; resuming re-arms the next pass. The desktop and /librarian write the same key.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian_cadence_paused.label",
+      "zh_render": "暂停每日整理",
+      "en_render": "Daily pass paused",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian_enabled.choice.false.description",
+      "zh_render": "已禁用",
+      "en_render": "disabled",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian_enabled.choice.true.description",
+      "zh_render": "已启用",
+      "en_render": "enabled",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian_enabled.help",
+      "zh_render": "启动时及/v1/desktop/librarian会读取此设置；禁用后绝不会创建她的会话。",
+      "en_render": "Read at boot and by /v1/desktop/librarian; a disabled install never creates her session.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian_enabled.label",
+      "zh_render": "启用Librarian",
+      "en_render": "Librarian enabled",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian_name.help",
+      "zh_render": "她的置顶会话和所有回执使用的名称。",
+      "en_render": "The name her pinned conversation and every receipt use.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian_name.label",
+      "zh_render": "显示名称",
+      "en_render": "Display name",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.librarian_name.placeholder",
+      "zh_render": "Librarian",
+      "en_render": "Librarian",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.local_providers.base_url.help",
+      "zh_render": "HTTP(S) API根地址。变更服务器需要经/login获取新令牌；现有令牌绝不会转发到其他endpoint。",
+      "en_render": "HTTP(S) API root. Changing servers requires a new token through /login; existing tokens are never forwarded to another endpoint.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.local_providers.base_url.label",
+      "zh_render": "release-notes的endpoint",
+      "en_render": "release-notes endpoint",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.local_providers.description",
+      "zh_render": "服务器endpoint与精确模型元数据。用/login连接；用/model saved重新选择以应用模型变更。",
+      "en_render": "Server endpoints and exact-model metadata. Use /login to connect; reselect with /model saved to apply model changes.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.local_providers.models.help",
+      "zh_render": "JSON：{\"model-id\":{\"context_window\":8192}}；仍受服务器限制。",
+      "en_render": "JSON: {\"model-id\":{\"context_window\":8192}}; server limits still apply.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.local_providers.models.label",
+      "zh_render": "release-notes的模型覆盖",
+      "en_render": "release-notes model overrides",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.local_providers.title",
+      "zh_render": "本地服务器",
+      "en_render": "Local servers",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.max_learnings_history.help",
+      "zh_render": "已弃用。已被压缩引擎取代。",
+      "en_render": "Deprecated. Superseded by the compaction engine.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.max_learnings_history.label",
+      "zh_render": "学习历史上限",
+      "en_render": "Max learnings history",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.memory_guard.description",
+      "zh_render": "逐命令的内存上限，让某条过大命令被终止，而不是拖垮整台设备。",
+      "en_render": "A per-command RAM ceiling, so one oversized command is killed instead of taking the whole device down.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.memory_guard.title",
+      "zh_render": "命令内存限制",
+      "en_render": "Command memory limit",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.mesh_updates.description",
+      "zh_render": "本地更新后进行的滚动：`lop update`将本设备移到较新构建后，会请其他每个活跃成员也移到同一构建——一次一个，各自等待该成员空闲，绝不强制。未向本设备授予`update`的成员会被按名称跳过，并给出补救办法。立即生效：下一次更新使用新设置；已在进行的滚动会在下一个成员之前停止——已经开始的安装会完成。",
+      "en_render": "The roll that follows a local update: after `lop update` moves this device to a newer build, every other active member is asked to move to the same build — one at a time, each waiting for that member to go idle, never forced. A member that has not granted this device `update` is skipped, by name, with the remedy. Takes effect at once: the next update uses the new setting, and a roll already running stops before its next member — an install already begun finishes.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.mesh_updates.title",
+      "zh_render": "mesh更新",
+      "en_render": "Mesh updates",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.model.description",
+      "zh_render": "新对话的提供商、模型与推理强度。现有会话保留各自的模型；/model saved会采用这里的默认设置。",
+      "en_render": "Provider, model and reasoning effort for new conversations. Existing sessions keep their model; /model saved adopts the default here.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.model.title",
+      "zh_render": "模型",
+      "en_render": "Model",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.model_effort.choice.high.description",
+      "zh_render": "深度推理",
+      "en_render": "deep reasoning",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.model_effort.choice.low.description",
+      "zh_render": "轻度推理",
+      "en_render": "light reasoning",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.model_effort.choice.max.description",
+      "zh_render": "模型最深的推理",
+      "en_render": "the model's deepest reasoning",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.model_effort.choice.medium.description",
+      "zh_render": "中等推理",
+      "en_render": "moderate reasoning",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.model_effort.choice.minimal.description",
+      "zh_render": "模型提供的最少推理",
+      "en_render": "the least reasoning the model offers",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.model_effort.choice.none.description",
+      "zh_render": "关闭推理",
+      "en_render": "reasoning off",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.model_effort.choice.unset.description",
+      "zh_render": "模型自身的默认值",
+      "en_render": "the model's own default",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.model_effort.choice.unset.label",
+      "zh_render": "auto",
+      "en_render": "auto",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.model_effort.choice.xhigh.description",
+      "zh_render": "极深推理",
+      "en_render": "very deep reasoning",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.model_effort.help",
+      "zh_render": "新对话的推理强度。未设置：用模型默认值。",
+      "en_render": "Effort for new conversations. Unset: the model's default.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.model_effort.label",
+      "zh_render": "默认推理强度",
+      "en_render": "Default reasoning effort",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.model_name.help",
+      "zh_render": "新对话使用的模型。执行/model saved可让当前会话采用此默认模型。",
+      "en_render": "Model for new conversations. /model saved adopts it here.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.model_name.label",
+      "zh_render": "默认模型",
+      "en_render": "Default model",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor.description",
+      "zh_render": "监视增量变化的监控：多久检查一次、保留多少内容、何时放弃。",
+      "en_render": "Delta-watching monitors: how often they check, how much they keep, and when they give up.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor.title",
+      "zh_render": "监控",
+      "en_render": "Monitors",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_classifymaxchars.help",
+      "zh_render": "重要性检查可接收的变更行上限（监控名称与用途一同传入，单独截断）。",
+      "en_render": "Bound on the changed lines the materiality check receives (the monitor's name and purpose ride along, clipped separately).",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_classifymaxchars.label",
+      "zh_render": "分类器状态（字符）",
+      "en_render": "Classifier state (chars)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_defaultintervals.help",
+      "zh_render": "省略'every'时每N秒检查一次；下限30秒。",
+      "en_render": "Checks every N seconds when 'every' is omitted; floor 30s.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_defaultintervals.label",
+      "zh_render": "默认间隔（秒）",
+      "en_render": "Default interval (s)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_deltamaxchars.help",
+      "zh_render": "每条投递消息的增量文本总量。",
+      "en_render": "Total delta text per delivery message.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_deltamaxchars.label",
+      "zh_render": "增量预算（字符）",
+      "en_render": "Delta budget (chars)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_maxconsecutivefailures.help",
+      "zh_render": "监控被禁用前允许的连续检查失败次数。",
+      "en_render": "Consecutive check failures before a monitor is disabled.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_maxconsecutivefailures.label",
+      "zh_render": "连续失败后禁用",
+      "en_render": "Disable after failures",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_maxdeliveriesperhour.help",
+      "zh_render": "每个监控；超过上限后，变更会被暂存并计数。",
+      "en_render": "Per monitor; over the cap, changes are held and counted.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_maxdeliveriesperhour.label",
+      "zh_render": "每小时投递数",
+      "en_render": "Deliveries per hour",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_maxdeltalines.help",
+      "zh_render": "每次投递摘要的变更行数。",
+      "en_render": "Changed lines summarised per delivery.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_maxdeltalines.label",
+      "zh_render": "变更行上限",
+      "en_render": "Max delta lines",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_maxmonitors.help",
+      "zh_render": "超过N个时拒绝新增；请先取消一个。",
+      "en_render": "Refuses arms past N; cancel one first.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_maxmonitors.label",
+      "zh_render": "每会话上限",
+      "en_render": "Max per session",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_normalizetimestamps.choice.false.description",
+      "zh_render": "时间戳按普通文本参与比对",
+      "en_render": "timestamps diff like any text",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_normalizetimestamps.choice.true.description",
+      "zh_render": "时间戳不计为变更",
+      "en_render": "timestamps do not count as changes",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_normalizetimestamps.help",
+      "zh_render": "比对前把时间戳当作噪声，以免时钟字段触发告警。",
+      "en_render": "Treat timestamps as noise before diffing, so clock fields do not alarm.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_normalizetimestamps.label",
+      "zh_render": "忽略时间戳变动",
+      "en_render": "Ignore timestamp churn",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_runtimeoutms.help",
+      "zh_render": "每次检查的截止时间；0表示用120000毫秒。",
+      "en_render": "Per-check deadline; 0 uses 120000 ms.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_runtimeoutms.label",
+      "zh_render": "运行超时（毫秒）",
+      "en_render": "Run timeout (ms)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_snapshotmaxchars.help",
+      "zh_render": "存储的规范化输出；限定磁盘占用与比对输入大小。",
+      "en_render": "Stored normalized output; bounds disk and diff input.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.monitor_snapshotmaxchars.label",
+      "zh_render": "快照上限（字符）",
+      "en_render": "Snapshot cap (chars)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network.description",
+      "zh_render": "本设备在哪里监听、告诉对等设备拨号到哪里，以及`lop network`的各项边界：审计保留、中继同时持有多少未认证连接、会话副本的节奏、借用登录的有效期。全部在中继重启后生效。",
+      "en_render": "Where this device listens, what it tells peers to dial, and the bounds for `lop network`: audit retention, how many unauthenticated connections the relay will hold at once, session-copy cadence and how long a borrowed login lives. All take effect when the relay restarts.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network.title",
+      "zh_render": "mesh网络",
+      "en_render": "Mesh network",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_advertise_hosts.help",
+      "zh_render": "留空则自动检测。其他情况：host:port，例如203.0.113.7:4097",
+      "en_render": "Empty = detected. Others: host:port, e.g. 203.0.113.7:4097",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_advertise_hosts.label",
+      "zh_render": "对外公布的endpoint",
+      "en_render": "Advertised endpoints",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_advertise_hosts.placeholder",
+      "zh_render": "203.0.113.7:4097, tunnel.example.com:4100",
+      "en_render": "203.0.113.7:4097, tunnel.example.com:4100",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_audit_generations.help",
+      "zh_render": "轮转文件保留数：到达上限后最旧的被清除，清除动作会被记录。",
+      "en_render": "Rotated files kept before the oldest is pruned and that pruning is recorded.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_audit_generations.label",
+      "zh_render": "审计保留代数",
+      "en_render": "Audit generations kept",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_audit_max_age_days.help",
+      "zh_render": "时间和大小都会触发轮转：使用较少的实例受时间上限约束，使用频繁的实例受大小上限约束。清除前用`lop network log --export`导出。",
+      "en_render": "Age and size both rotate, because age binds on a quiet install and size on a busy one. Export with `lop network log --export` before pruning.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_audit_max_age_days.label",
+      "zh_render": "审计时间上限（天）",
+      "en_render": "Audit age cap (days)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_audit_max_bytes.help",
+      "zh_render": "轮转后每代的字节数。8 MiB的gzip压缩JSONL约合55000条记录；五代的封顶因此约为40 MiB。",
+      "en_render": "Bytes per generation, after rotation. 8 MiB of gzipped JSONL is roughly 55k records; the five-generation ceiling is therefore ~40 MiB.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_audit_max_bytes.label",
+      "zh_render": "每代审计大小",
+      "en_render": "Audit size per generation",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_credentials_github_repositories.help",
+      "zh_render": "被代理的GitHub令牌可访问的owner/repo条目（留空：无）",
+      "en_render": "owner/repo entries a brokered GitHub token may touch (empty: none)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_credentials_github_repositories.label",
+      "zh_render": "GitHub仓库",
+      "en_render": "GitHub repositories",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_credentials_github_repositories.placeholder",
+      "zh_render": "damianvtran/scratch, damianvtran/sandbox",
+      "en_render": "damianvtran/scratch, damianvtran/sandbox",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_credentials_grant_ttl_s.help",
+      "zh_render": "设备借用所有者的登录后、在再次请求之前可使用的最长时间；也是被撤销或离线的所有者的登录在别处继续可用的时长。绝不会超过令牌本身。",
+      "en_render": "The longest a device may use a login it borrowed from its owner before asking again, and so how long a revoked or offline owner's login keeps working elsewhere. Never longer than the token itself.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_credentials_grant_ttl_s.label",
+      "zh_render": "借用登录有效期（秒）",
+      "en_render": "Borrowed login lifetime (s)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_listen_address.help",
+      "zh_render": "127.0.0.1表示只拨出；0.0.0.0表示全部；或填一个地址。",
+      "en_render": "127.0.0.1 = dial-only; 0.0.0.0 = all; or one address.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_listen_address.label",
+      "zh_render": "监听地址",
+      "en_render": "Listen address",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_max_handshakes.help",
+      "zh_render": "本中继同时持有的未认证连接数。配对过程会占用一个连接，直到配对码被输入为止；超过上限的连接在accept时即被丢弃，不回任何应答帧。",
+      "en_render": "Unauthenticated connections this relay will hold at once. A pairing holds one for the seconds until the code is typed; anything past the cap is dropped at accept, with no reply frame.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_max_handshakes.label",
+      "zh_render": "并发握手数",
+      "en_render": "Concurrent handshakes",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_port.help",
+      "zh_render": "对等设备拨号的端口；不带端口的endpoint默认使用它。",
+      "en_render": "The port peers dial; endpoints without one use it.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_port.label",
+      "zh_render": "mesh端口",
+      "en_render": "Mesh port",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_rollout_on_update.choice.auto.description",
+      "zh_render": "更新移到较新构建时滚动",
+      "en_render": "roll when an update moves to a newer build",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_rollout_on_update.choice.auto.label",
+      "zh_render": "auto",
+      "en_render": "auto",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_rollout_on_update.choice.off.description",
+      "zh_render": "只有`lop network update`会滚动",
+      "en_render": "only `lop network update` rolls",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_rollout_on_update.choice.off.label",
+      "zh_render": "off",
+      "en_render": "off",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_rollout_on_update.help",
+      "zh_render": "`lop update`在此安装较新构建后，请本设备的mesh成员也移到该构建：一次一个、各自等待空闲、绝不强制。关：只有`lop network update`会滚动。未向本设备授予`update`的成员会被跳过，并附上在那里授予的补救办法。",
+      "en_render": "After `lop update` installs a newer build here, ask this device's mesh members to move to it: one at a time, each waiting for idle, never forced. Off: only `lop network update` rolls. A member that has not granted this device `update` is skipped, with the remedy to grant it there.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_rollout_on_update.label",
+      "zh_render": "更新后滚动升级mesh",
+      "en_render": "Roll the mesh after an update",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_sync_debounce_s.help",
+      "zh_render": "会话记录需要保持多少秒不变，其所有者才会通知持有副本的设备来pull。会话进入空闲时会立即push，因此最后一条消息绝不会被此项拖延。",
+      "en_render": "Seconds a session's transcript must stay unchanged before its owner tells devices holding a copy to pull. A session going idle pushes at once, so its final message is never held back by this.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_sync_debounce_s.label",
+      "zh_render": "同步静默期（秒）",
+      "en_render": "Sync quiet period (s)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_sync_tick_s.help",
+      "zh_render": "所有者多久检查一次被复制的会话是否有变更：每个文件一次stat。",
+      "en_render": "How often the owner checks copied sessions for changes: one file stat each.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.network_sync_tick_s.label",
+      "zh_render": "同步检查间隔（秒）",
+      "en_render": "Sync check interval (s)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.openrouter.description",
+      "zh_render": "OpenRouter如何挑选主机；未设置时保持粘性路由。",
+      "en_render": "How OpenRouter picks a host; unset = sticky routing.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.openrouter.title",
+      "zh_render": "OpenRouter路由",
+      "en_render": "OpenRouter routing",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.proactive.description",
+      "zh_render": "主动类智能体的各项边界：隐藏的耐心等待默认多久、重试之间如何退避、一个周期何时必须结束。在等待被设置或触发的那一刻读取。",
+      "en_render": "Bounds for the proactive agent class: how long a hidden patience wait defaults to, how it backs off across re-attempts, and when a cycle must end. Read at the moment a wait is armed or fires.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.proactive.title",
+      "zh_render": "主动类智能体",
+      "en_render": "Proactive class",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.proactive_patience_backoff.help",
+      "zh_render": "同一周期中，每次后续等待至少是第一次的这么多倍——默认按5/15/45分钟递增。",
+      "en_render": "Each later wait in a cycle is at least this many times the first — the default 5/15/45-minute progression.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.proactive_patience_backoff.label",
+      "zh_render": "耐心退避系数",
+      "en_render": "Patience backoff factor",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.proactive_patience_default_ms.help",
+      "zh_render": "智能体未指定时长时，隐藏等待的默认长度（毫秒；300000即5分钟）。限制在60秒至24小时之间。",
+      "en_render": "How long a hidden wait defaults to when the agent does not size one (milliseconds; 300000 = 5 min). Clamped 60 s..24 h.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.proactive_patience_default_ms.label",
+      "zh_render": "默认耐心等待（毫秒）",
+      "en_render": "Default patience wait (ms)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.proactive_patience_episode_ttl_ms.help",
+      "zh_render": "无论各次等待如何设定，一个周期的硬性截止（毫秒；7200000即2小时）。超期触发会静默作废。",
+      "en_render": "Hard stop for one cycle however the waits were sized (milliseconds; 7200000 = 2 h). A fire past it retires silently.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.proactive_patience_episode_ttl_ms.label",
+      "zh_render": "耐心周期TTL（毫秒）",
+      "en_render": "Patience cycle TTL (ms)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.proactive_patience_max_attempts.help",
+      "zh_render": "一个周期在必须结束前可以持有多少次对外等待。",
+      "en_render": "How many outbound waits one cycle may hold before it must end.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.proactive_patience_max_attempts.label",
+      "zh_render": "耐心最大尝试次数",
+      "en_render": "Patience max attempts",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.proactive_patience_max_pending.help",
+      "zh_render": "单个会话同时最多可以挂起多少个隐藏等待。",
+      "en_render": "How many hidden waits may be pending at once for one session.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.proactive_patience_max_pending.label",
+      "zh_render": "每会话挂起等待数",
+      "en_render": "Pending waits per session",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.projects.description",
+      "zh_render": "项目记录：被跟踪的项目多久没有进度更新就会被视为停滞、值得检查一次。在下一次停滞计算时读取。",
+      "en_render": "Project records: how long a tracked project may go without a progress line before it reads stale and is worth a check-in. Read at the next staleness computation.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.projects.title",
+      "zh_render": "项目",
+      "en_render": "Projects",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.projects_stale_after_hours.help",
+      "zh_render": "进度更新时间早于此时长的项目即视为停滞、值得检查一次。1-168小时。",
+      "en_render": "A project whose progress is older than this reads stale and is worth a check-in. 1–168 hours.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.projects_stale_after_hours.label",
+      "zh_render": "停滞阈值（小时）",
+      "en_render": "Stale after (hours)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers.description",
+      "zh_render": "如何建立提供商直连：API接口与缓存TTL。",
+      "en_render": "How direct provider connections are made: API surface and cache TTL.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers.title",
+      "zh_render": "通信协议",
+      "en_render": "Wire protocol",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.help",
+      "zh_render": "上下文达到此规模后，Anthropic的请求将使用1小时提示词缓存TTL（写入成本2倍，可跨越超过5分钟的空闲间隔）。0表示禁用。",
+      "en_render": "Context size from which Anthropic requests use the 1-hour prompt-cache TTL (2x write cost, survives idle gaps over 5 minutes). 0 disables.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label",
+      "zh_render": "Anthropic 1h缓存阈值（token）",
+      "en_render": "Anthropic 1h cache above (tokens)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openai_api.choice.chat_completions.description",
+      "zh_render": "为兼容性显式退出",
+      "en_render": "explicit compatibility opt-out",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openai_api.choice.chat_completions.label",
+      "zh_render": "chat_completions",
+      "en_render": "chat_completions",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openai_api.choice.responses.description",
+      "zh_render": "公开的Responses API（默认）",
+      "en_render": "the public Responses API (default)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openai_api.choice.responses.label",
+      "zh_render": "responses",
+      "en_render": "responses",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openai_api.help",
+      "zh_render": "直连OpenAI的GPT-5调用默认使用Responses API，除非显式退出。",
+      "en_render": "Direct OpenAI GPT-5 calls use the Responses API unless opted out.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openai_api.label",
+      "zh_render": "OpenAI API接口",
+      "en_render": "OpenAI API surface",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openai_use_max_context_window.help",
+      "zh_render": "关：用提供商默认值。开：用支持的最大值。下一次请求生效；压缩行为不变。",
+      "en_render": "Off: provider default. On: supported max. Applies next request; compaction unchanged.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openai_use_max_context_window.label",
+      "zh_render": "使用OpenAI最大上下文",
+      "en_render": "Use maximum OpenAI context",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.description",
+      "zh_render": "宁可失败，也不切换",
+      "en_render": "fail rather than fall through",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.false.label",
+      "zh_render": "false",
+      "en_render": "false",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.description",
+      "zh_render": "无偏好——OpenRouter的默认（会切换）",
+      "en_render": "no preference — OpenRouter's default (fall through)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label",
+      "zh_render": "default",
+      "en_render": "default",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+      "zh_render": "'default'不发送任何内容（首选主机失败时，OpenRouter会切换到另一台主机）；'false'则宁可失败，也不切换到你的偏好之外的主机。",
+      "en_render": "'default' sends nothing (OpenRouter falls through to another host when the preferred one fails); 'false' fails rather than fall through to a host outside your preferences.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.label",
+      "zh_render": "回退",
+      "en_render": "fallbacks",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.description",
+      "zh_render": "主机可以收集数据",
+      "en_render": "hosts may collect data",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.allow.label",
+      "zh_render": "allow",
+      "en_render": "allow",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.description",
+      "zh_render": "排除会收集数据的主机",
+      "en_render": "exclude hosts that collect data",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.deny.label",
+      "zh_render": "deny",
+      "en_render": "deny",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.unset.description",
+      "zh_render": "不发送偏好",
+      "en_render": "no preference sent",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.choice.unset.label",
+      "zh_render": "default",
+      "en_render": "default",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.help",
+      "zh_render": "'deny'排除可能用你的提示词训练或留存的主机。'default'不发送偏好（OpenRouter默认：allow）。",
+      "en_render": "'deny' excludes hosts that may train on or retain your prompts. 'default' sends no preference (OpenRouter's default: allow).",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_data_collection.label",
+      "zh_render": "数据收集",
+      "en_render": "data collection",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.description",
+      "zh_render": "仅限可蒸馏文本的endpoint",
+      "en_render": "distillable-text endpoints only",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label",
+      "zh_render": "true",
+      "en_render": "true",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.description",
+      "zh_render": "不发送偏好",
+      "en_render": "no preference sent",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label",
+      "zh_render": "default",
+      "en_render": "default",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.help",
+      "zh_render": "'true'：仅限文本输出可被蒸馏的endpoint。'default'：不发送任何内容。",
+      "en_render": "'true': restrict to endpoints whose text output may be distilled. 'default': nothing sent.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_enforce_distillable_text.label",
+      "zh_render": "可蒸馏文本",
+      "en_render": "distillable text",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_ignore.help",
+      "zh_render": "留空则不表态（粘性路由保持）。逗号分隔的主机slug阻止列表，用于排除主机（如当前正在故障的主机）——可能让你失去热提示词缓存。",
+      "en_render": "Empty = no opinion (sticky routing stays). Comma-separated block-list of host slugs to omit (e.g. a host that is failing right now) — may cost you the warm prompt cache.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_ignore.label",
+      "zh_render": "忽略的主机",
+      "en_render": "ignored hosts",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_ignore.placeholder",
+      "zh_render": "deepseek, groq, mistral, …",
+      "en_render": "deepseek, groq, mistral, …",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_max_price.help",
+      "zh_render": "{\"prompt\": 1, \"completion\": 2}——美元/百万token",
+      "en_render": "{\"prompt\": 1, \"completion\": 2} — USD / million tokens",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_max_price.label",
+      "zh_render": "最高价格",
+      "en_render": "max price",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_max_price.placeholder",
+      "zh_render": "{\"prompt\": 1, \"completion\": 2}",
+      "en_render": "{\"prompt\": 1, \"completion\": 2}",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_only.help",
+      "zh_render": "留空则不表态（粘性路由保持）。逗号分隔的主机slug允许列表；其他所有主机都被排除——若热主机不在其中，将被迫冷启动。",
+      "en_render": "Empty = no opinion (sticky routing stays). Comma-separated allow-list of host slugs; every other host is excluded — a forced cold start if the warm host is not on it.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_only.label",
+      "zh_render": "允许的主机",
+      "en_render": "allowed hosts",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_only.placeholder",
+      "zh_render": "deepseek, groq, mistral, …",
+      "en_render": "deepseek, groq, mistral, …",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_order.help",
+      "zh_render": "留空则不表态（粘性路由保持）。逗号分隔的主机slug，按此确切顺序尝试。",
+      "en_render": "Empty = no opinion (sticky routing stays). Comma-separated host slugs tried in this exact order.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_order.label",
+      "zh_render": "主机顺序",
+      "en_render": "host order",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_order.placeholder",
+      "zh_render": "deepseek, groq, mistral, …",
+      "en_render": "deepseek, groq, mistral, …",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_order.warning",
+      "zh_render": "禁用粘性路由——提示词缓存会变冷",
+      "en_render": "disables sticky routing — prompt cache goes cold",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_preferred_max_latency.help",
+      "zh_render": "优先选择首token时间低于此秒数的主机（p50）。0表示不发送偏好。高于标准的主机会被降级，可能让你失去热提示词缓存。",
+      "en_render": "Prefer hosts whose time-to-first-token stays under this many seconds (p50). 0 sends no preference. A host above the bar is deprioritised, which may cost you a warm prompt cache.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_preferred_max_latency.label",
+      "zh_render": "最大延迟（秒）",
+      "en_render": "max latency (s)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_preferred_min_throughput.help",
+      "zh_render": "优先选择输出token/秒不低于此值的主机（p50）。0表示不发送偏好。低于标准的主机会被降级，可能让你失去热提示词缓存。",
+      "en_render": "Prefer hosts serving at least this many output tokens/sec (p50). 0 sends no preference. A host below the bar is deprioritised, which may cost you a warm prompt cache.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_preferred_min_throughput.label",
+      "zh_render": "最低吞吐量（tok/s）",
+      "en_render": "min throughput (tok/s)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_provider_affinity.help",
+      "zh_render": "会复用服务上一回合的主机，让提示词缓存保持温热。关闭时用OpenRouter按价格加权的负载均衡。",
+      "en_render": "Reuses the host that served the previous turn so the prompt cache stays warm. Off = OpenRouter's price-weighted load balancing.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_provider_affinity.label",
+      "zh_render": "缓存亲和",
+      "en_render": "cache affinity",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_quantizations.help",
+      "zh_render": "留空则不表态。逗号分隔的量化级别，供所服务的模型使用（如int8、fp8、mxfp4）。",
+      "en_render": "Empty = no opinion. Comma-separated quantization levels the served model may use (e.g. int8, fp8, mxfp4).",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_quantizations.label",
+      "zh_render": "量化级别",
+      "en_render": "quantizations",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_quantizations.placeholder",
+      "zh_render": "int8, fp8, mxfp4, …",
+      "en_render": "int8, fp8, mxfp4, …",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.true.description",
+      "zh_render": "仅限支持所有参数的主机",
+      "en_render": "only hosts that support every parameter",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.true.label",
+      "zh_render": "true",
+      "en_render": "true",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.description",
+      "zh_render": "无偏好——不支持的参数可能被丢弃",
+      "en_render": "no preference — unsupported parameters may be dropped",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.choice.unset.label",
+      "zh_render": "default",
+      "en_render": "default",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.help",
+      "zh_render": "'true'仅限支持你发送的每个参数（工具、结构化输出）的主机；'default'则任由OpenRouter静默丢弃不支持的参数。",
+      "en_render": "'true' restricts to hosts that support every parameter you send (tools, structured output); 'default' lets OpenRouter silently drop unsupported ones.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_require_parameters.label",
+      "zh_render": "要求参数支持",
+      "en_render": "require parameters",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.choice.latency.description",
+      "zh_render": "响应延迟最低者优先",
+      "en_render": "lowest response latency first",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.choice.latency.label",
+      "zh_render": "延迟",
+      "en_render": "latency",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.choice.price.description",
+      "zh_render": "最便宜的主机优先",
+      "en_render": "cheapest host first",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.choice.price.label",
+      "zh_render": "价格",
+      "en_render": "price",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.choice.throughput.description",
+      "zh_render": "token/秒最高者优先",
+      "en_render": "highest tokens/sec first",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.choice.throughput.label",
+      "zh_render": "吞吐量",
+      "en_render": "throughput",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.choice.unset.description",
+      "zh_render": "无偏好——保持粘性路由（缓存最热）",
+      "en_render": "no preference — sticky routing stays on (warmest cache)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.choice.unset.label",
+      "zh_render": "default",
+      "en_render": "default",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.help",
+      "zh_render": "OpenRouter如何为本次调用给主机排序。可能路由离开持有热提示词缓存的主机（长对话上会冷启动）；'default'完全不发送偏好。",
+      "en_render": "How OpenRouter ranks hosts for this call. May route away from the host holding your warm prompt cache (a cold start on long conversations); 'default' sends no preference at all.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_sort.label",
+      "zh_render": "路由策略",
+      "en_render": "routing policy",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.choice.true.description",
+      "zh_render": "仅限零数据留存的endpoint",
+      "en_render": "zero-data-retention endpoints only",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.choice.true.label",
+      "zh_render": "true",
+      "en_render": "true",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.choice.unset.description",
+      "zh_render": "不发送偏好",
+      "en_render": "no preference sent",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.choice.unset.label",
+      "zh_render": "default",
+      "en_render": "default",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.help",
+      "zh_render": "'true'：仅限零数据留存的endpoint。'default'：不发送任何内容。",
+      "en_render": "'true': restrict to zero-data-retention endpoints. 'default': nothing sent.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.providers_openrouter_zdr.label",
+      "zh_render": "零数据留存",
+      "en_render": "zero data retention",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.query_budget.description",
+      "zh_render": "shell查询的时间预算——针对grep/find/du遍历，而非构建或安装：10秒时给出建议，到达预算即停止，让一次搜索不至于在单个回合里耗掉几分钟。",
+      "en_render": "Time budget for a shell query — a grep/find/du walk rather than a build or an install: an advisory at 10 s, and a stop at the budget so one search cannot spend minutes of a turn.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.query_budget.title",
+      "zh_render": "shell查询预算",
+      "en_render": "Shell query budget",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.remote_compute.description",
+      "zh_render": "预览：在Radient托管的计算资源上运行智能体工作，并绑定到你的一个mesh网络。",
+      "en_render": "Preview: run agent work on Radient-hosted compute, bound to one of your mesh networks.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.remote_compute.title",
+      "zh_render": "远程计算",
+      "en_render": "Remote compute",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.remote_compute_enabled.choice.false.description",
+      "zh_render": "仅本地",
+      "en_render": "local only",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.remote_compute_enabled.choice.true.description",
+      "zh_render": "允许远程运行",
+      "en_render": "remote runs allowed",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.remote_compute_enabled.help",
+      "zh_render": "预览：将工作发送到Radient计算资源，并绑定到一个mesh网络。",
+      "en_render": "Preview: sends work to Radient compute, bound to one mesh network.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.remote_compute_enabled.label",
+      "zh_render": "远程计算",
+      "en_render": "Remote compute",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retired.description",
+      "zh_render": "仍会被读取、但不再起作用的键。",
+      "en_render": "Keys that are read but no longer do anything.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retired.title",
+      "zh_render": "已停用",
+      "en_render": "Retired",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_basedelayms.help",
+      "zh_render": "退避的第一步；后续尝试以此递增。",
+      "en_render": "First backoff step; later attempts grow from it.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_basedelayms.label",
+      "zh_render": "基础延迟（毫秒）",
+      "en_render": "Base delay (ms)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_connectivitybackoffcapms.help",
+      "zh_render": "连接性重试之间的最长等待。",
+      "en_render": "Longest wait between connectivity retries.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_connectivitybackoffcapms.label",
+      "zh_render": "连接性退避上限（毫秒）",
+      "en_render": "Connectivity backoff cap (ms)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_connectivitymaxretries.help",
+      "zh_render": "针对离线机器的耐心预算；与最大重试次数不同。",
+      "en_render": "Patient budget for a machine that went offline; distinct from max retries.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_connectivitymaxretries.label",
+      "zh_render": "连接性重试次数",
+      "en_render": "Connectivity retries",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_enabled.choice.false.description",
+      "zh_render": "首次出错即失败",
+      "en_render": "fail on the first error",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_enabled.choice.true.description",
+      "zh_render": "带退避地重试",
+      "en_render": "retry with backoff",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_enabled.help",
+      "zh_render": "提供商调用失败时先重试，再浮现错误。",
+      "en_render": "Retry a failed provider call before surfacing the error.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_enabled.label",
+      "zh_render": "重试失败的调用",
+      "en_render": "Retry failed calls",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_fallbackchains.help",
+      "zh_render": "调用持续失败时按顺序尝试的provider/model跳转。",
+      "en_render": "Ordered provider/model hops tried when a call keeps failing.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_fallbackchains.label",
+      "zh_render": "故障转移级联",
+      "en_render": "Failover cascade",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_maxretries.help",
+      "zh_render": "针对可达提供商的快速预算（5xx、超时）。",
+      "en_render": "Fast budget against a reachable provider (5xx, timeout).",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_maxretries.label",
+      "zh_render": "最大重试次数",
+      "en_render": "Max retries",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_modelfallback.choice.false.description",
+      "zh_render": "留在所选模型",
+      "en_render": "stay on the chosen model",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_modelfallback.choice.true.description",
+      "zh_render": "回退到下一跳",
+      "en_render": "fall back to the next hop",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_modelfallback.help",
+      "zh_render": "模型持续失败时，移到级联中的下一跳。",
+      "en_render": "Move to the next hop in the cascade when a model keeps failing.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_modelfallback.label",
+      "zh_render": "模型回退",
+      "en_render": "Model fallback",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_pinnedfallback.choice.cross_family.description",
+      "zh_render": "任何厂商",
+      "en_render": "any vendor",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_pinnedfallback.choice.cross_family.label",
+      "zh_render": "允许跨厂商",
+      "en_render": "allow cross-vendor",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_pinnedfallback.choice.same_family.description",
+      "zh_render": "仅同一厂商",
+      "en_render": "same vendor only",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_pinnedfallback.choice.same_family.label",
+      "zh_render": "仅同一系列",
+      "en_render": "same family only",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_pinnedfallback.help",
+      "zh_render": "固定的子智能体可以回退到什么：仅同一系列的跳转，或任何厂商（会公告）。",
+      "en_render": "What a pinned child may fall back to: same-family hops only, or any vendor (announced).",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_pinnedfallback.label",
+      "zh_render": "固定子智能体回退",
+      "en_render": "Pinned child fallback",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_usageawareaccountpick.choice.false.description",
+      "zh_render": "仅按会话哈希分散",
+      "en_render": "spread by session hash only",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_usageawareaccountpick.choice.true.description",
+      "zh_render": "优先负载最轻的账户",
+      "en_render": "prefer the least-loaded account",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_usageawareaccountpick.help",
+      "zh_render": "在剩余配额最多的同提供商账户上启动新会话，数据来自缓存的/usage报告。仅适用于会话。",
+      "en_render": "Start new sessions on the same-provider account with the most quota left, read from the cached /usage report. Applies to sessions only.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_usageawareaccountpick.label",
+      "zh_render": "用量感知账户选择",
+      "en_render": "Usage-aware account pick",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_usageawarefallback.choice.false.description",
+      "zh_render": "仅对失败做出反应",
+      "en_render": "only react to failures",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_usageawarefallback.choice.true.description",
+      "zh_render": "在消息边界检查配额",
+      "en_render": "check quota at message boundaries",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_usageawarefallback.help",
+      "zh_render": "在配额耗尽之前切换。每条用户消息花费一次配额请求。",
+      "en_render": "Switch before a quota runs out. Costs one quota request per user message.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_usageawarefallback.label",
+      "zh_render": "用量感知回退",
+      "en_render": "Usage-aware fallback",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_usagereservepercent.help",
+      "zh_render": "低于此余量时账户视为低额；正在运行的会话仍留在其上。",
+      "en_render": "Headroom below which an account counts as low; a running session stays on it.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.retry_usagereservepercent.label",
+      "zh_render": "用量保留（%）",
+      "en_render": "Usage reserve (%)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.runtime.description",
+      "zh_render": "离开会话后如何处理。保活运行时的设置会在运行时下次确定保活时间窗口时读取。",
+      "en_render": "How sessions behave when you leave them. The warm-runtime knobs are read when a runtime next draws its window.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.runtime.title",
+      "zh_render": "运行时",
+      "en_render": "Runtime",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.runtime_background_on_resume.choice.false.description",
+      "zh_render": "离开会话时停止该回合",
+      "en_render": "stop the turn when you leave the session",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.runtime_background_on_resume.choice.true.description",
+      "zh_render": "让回合在后台继续运行",
+      "en_render": "keep the turn running in the background",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.runtime_background_on_resume.help",
+      "zh_render": "切换离开某个会话时，让其运行中的回合继续工作。",
+      "en_render": "Leave a running turn working when you switch away from its session.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.runtime_background_on_resume.label",
+      "zh_render": "/resume后继续工作",
+      "en_render": "Keep working after /resume",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.runtime_keep_alive_max.help",
+      "zh_render": "本安装中保活运行时的上限；关闭时间最早的先退出。",
+      "en_render": "Cap on warm runtimes in this install; the least recently closed exits first.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.runtime_keep_alive_max.label",
+      "zh_render": "保活会话上限",
+      "en_render": "Max warm conversations",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.runtime_keep_alive_seconds.help",
+      "zh_render": "在此窗口内重新打开会接续到仍然存活的运行时。0表示不保活任何内容。",
+      "en_render": "Re-opening inside this window attaches to the live runtime. 0 keeps nothing warm.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.runtime_keep_alive_seconds.label",
+      "zh_render": "已关闭会话保活时长（秒）",
+      "en_render": "Keep closed conversations warm (s)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.runtime_unattended_gate_timeout.help",
+      "zh_render": "你不在时，一个问题会等待多久。0表示从不超时。",
+      "en_render": "How long a question waits when you are away. 0 never times out.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.runtime_unattended_gate_timeout.label",
+      "zh_render": "无人值守提问超时（小时）",
+      "en_render": "Unattended question timeout (h)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.send_journal_unconfirmed.help",
+      "zh_render": "`send`未被确认时在会话记录中写入一条提示。工具结果总会有报告；此项还会留下持久的条目。",
+      "en_render": "Write a transcript notice when a `send` is not acknowledged. The tool result always reports it; this keeps a durable row too.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.send_journal_unconfirmed.label",
+      "zh_render": "记录未确认的send",
+      "en_render": "Journal unacknowledged sends",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session.description",
+      "zh_render": "自动保存。清理策略在下面有各自的小节。",
+      "en_render": "Autosave. The cleanup policies have their own sections below.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session.title",
+      "zh_render": "会话存储",
+      "en_render": "Session storage",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup.description",
+      "zh_render": "针对你发起的对话与侧边栏工作流的会话清理。默认关闭；在你开启之前，这里的一切都不会运行。",
+      "en_render": "Session cleanup for the conversations you started and the workstreams in your sidebar. Off by default; nothing here runs until you switch it on.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup.title",
+      "zh_render": "你的对话",
+      "en_render": "Your conversations",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_delegated_enabled.choice.false.description",
+      "zh_render": "保留所有委托工作",
+      "en_render": "keep all delegated work",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_delegated_enabled.choice.true.description",
+      "zh_render": "按下方时长清除委托工作",
+      "en_render": "remove delegated work after the age below",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_delegated_enabled.help",
+      "zh_render": "按下方时长清除子智能体与后台会话的记录；绝不涉及你的对话或任何使用中的内容。",
+      "en_render": "Remove subagent and background-session transcripts after the age below; never your conversations or anything in use.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_delegated_enabled.label",
+      "zh_render": "委托工作清理",
+      "en_render": "Delegated cleanup",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_delegated_max_age_hours.help",
+      "zh_render": "空闲多少小时后清除：2至720（30天）。默认48。",
+      "en_render": "Hours idle before removal: 2 to 720 (30 days). Default 48.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_delegated_max_age_hours.label",
+      "zh_render": "↳ 多少小时后清除",
+      "en_render": "↳ remove after (hours)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_enabled.choice.false.description",
+      "zh_render": "任何内容都不会被清除",
+      "en_render": "nothing is ever removed",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_enabled.choice.true.description",
+      "zh_render": "启动时执行各项限制；保留最新10个与运行中的",
+      "en_render": "limits run at launch; newest 10 + live kept",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_enabled.help",
+      "zh_render": "关：任何内容都不会被清除。开：启动时执行下方限制，保留最新10个与运行中的。",
+      "en_render": "Off: nothing is ever removed. On: limits below run at launch, sparing the newest 10 + live.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_enabled.label",
+      "zh_render": "会话清理",
+      "en_render": "Session cleanup",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_max_inactive_days.help",
+      "zh_render": "需开启清理。空闲达到这么多天的会话会被清除；0表示从不。",
+      "en_render": "Needs cleanup on. Remove sessions idle this many days; 0 = never.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_max_inactive_days.label",
+      "zh_render": "↳ 最大空闲天数",
+      "en_render": "↳ max inactive days",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_max_sessions.help",
+      "zh_render": "需开启清理。保留最新的N个/resume会话；0表示无上限。",
+      "en_render": "Needs cleanup on. Keep N newest /resume sessions; 0 = no cap.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_max_sessions.label",
+      "zh_render": "↳ 会话数上限",
+      "en_render": "↳ max sessions",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_max_total_bytes.help",
+      "zh_render": "需开启清理。超过此字节数后修剪最旧的；0表示无上限。",
+      "en_render": "Needs cleanup on. Trim oldest past this many bytes; 0 = no cap.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_max_total_bytes.label",
+      "zh_render": "↳ 总字节数上限",
+      "en_render": "↳ max total bytes",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_remove_empty.choice.false.description",
+      "zh_render": "保留",
+      "en_render": "keep them",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_remove_empty.choice.true.description",
+      "zh_render": "清除没有记录的目录",
+      "en_render": "remove transcript-less directories",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_remove_empty.help",
+      "zh_render": "需开启清理。清除从未产生记录的目录。",
+      "en_render": "Needs cleanup on. Remove dirs that never got a transcript.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_cleanup_remove_empty.label",
+      "zh_render": "↳ 清除空目录",
+      "en_render": "↳ remove empty",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_compression.description",
+      "zh_render": "历史完整保留；较早的记录以压缩形式存储，读取时自动还原。关闭时：每条记录都保存为普通文件。",
+      "en_render": "History is kept in full; old transcripts are stored compressed and read back automatically. Off: every transcript stays as a plain file.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_compression.title",
+      "zh_render": "记录压缩",
+      "en_render": "Transcript compression",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_compression_after_days.help",
+      "zh_render": "需要开启压缩。记录闲置多少天后压缩；1至3650。默认30。",
+      "en_render": "Needs compression on. Days idle before a transcript is compressed; 1 to 3650. Default 30.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_compression_after_days.label",
+      "zh_render": "↳ 闲置多少天后压缩",
+      "en_render": "↳ compress after (days)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_compression_enabled.choice.false.description",
+      "zh_render": "所有记录保持原样",
+      "en_render": "leave every transcript as it is",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_compression_enabled.choice.true.description",
+      "zh_render": "压缩超过下方时长的记录",
+      "en_render": "compress transcripts older than the age below",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_compression_enabled.help",
+      "zh_render": "关闭：记录保持普通文件；已压缩的会话仍可读取。开启：启动时压缩较早的记录。",
+      "en_render": "Off: transcripts stay plain; compressed sessions stay readable. On: old transcripts compress at launch.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_compression_enabled.label",
+      "zh_render": "压缩较早的记录",
+      "en_render": "Compress old transcripts",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_delegated.description",
+      "zh_render": "委托工作：子智能体与后台会话的记录及其暂存文件夹。默认开启：它们会在下方时长之后被清除。你的对话、侧边栏工作流、任何运行中、等待唤醒或监控、关联到未关闭项目、仍被活跃父级使用，或含有未push或未commit的git工作的内容，都会保留。",
+      "en_render": "Delegated work: subagent and background-session transcripts and their scratch folders. On by default: they are removed after the age below. Your conversations, sidebar workstreams, anything running, waiting on a wake or monitor, linked to an open project, still in use by an active parent, or holding unpushed or uncommitted git work are kept.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_delegated.title",
+      "zh_render": "委托工作",
+      "en_render": "Delegated work",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_scratchpad.description",
+      "zh_render": "单个会话自己的暂存区可保存的内容。上限在每次写入时检查，并立即生效。",
+      "en_render": "What one session's own scratch area may hold. The cap is checked on every write and applies immediately.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_scratchpad.title",
+      "zh_render": "暂存区",
+      "en_render": "Scratchpad",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_scratchpad_max_bytes.help",
+      "zh_render": "单个会话的暂存区可占用的字节数：16 MiB至8 GiB。默认256 MiB。",
+      "en_render": "Bytes a session's scratchpad may hold: 16 MiB to 8 GiB. Default 256 MiB.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.session_scratchpad_max_bytes.label",
+      "zh_render": "暂存区上限（字节）",
+      "en_render": "Scratchpad size cap (bytes)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.shell_environment.description",
+      "zh_render": "智能体运行的命令能看到什么。每个会话只解析一次，所以在此修改会在下次启动时生效，也无法削弱已在运行的会话。",
+      "en_render": "What a command the agent runs can see. Resolved once per session, so an edit here applies at the next launch and cannot weaken a session that is already running.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.shell_environment.title",
+      "zh_render": "智能体shell",
+      "en_render": "Agent shell",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.shell_environment_exclude.help",
+      "zh_render": "留空则不移除任何变量。无论哪种模式，这些名称都不会交给智能体运行的命令——包括会话凭据存储自身的注入，因此这也是彻底拒给某个变量的方式。仅覆盖bash与eval子进程；MCP服务器与harness自身的进程不受其约束。",
+      "en_render": "Empty = nothing removed. Names never handed to a command the agent runs, in either mode — including the session credential store's own injections, so this is how a variable is denied outright. Covers the bash and eval children only; MCP servers and the harness's own processes are not governed by it.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.shell_environment_exclude.label",
+      "zh_render": "……在两种模式下移除",
+      "en_render": "…removed in both modes",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.shell_environment_exclude.placeholder",
+      "zh_render": "OPENROUTER_API_KEY, …",
+      "en_render": "OPENROUTER_API_KEY, …",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.shell_environment_inherit.help",
+      "zh_render": "留空则只有安全集。allowlist模式在安全集之外额外保留的名称——例如需要继续解析$(lop secret get NAME)的shell所用的LOCAL_OPERATOR_CONFIG_DIR，或LANG。inherit模式下无效。",
+      "en_render": "Empty = the safe set alone. Names the allowlist mode keeps ON TOP of the safe set — e.g. LOCAL_OPERATOR_CONFIG_DIR for a shell that must still resolve $(lop secret get NAME), or LANG. Inert in inherit mode.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.shell_environment_inherit.label",
+      "zh_render": "……在allowlist模式下保留",
+      "en_render": "…kept in allowlist mode",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.shell_environment_inherit.placeholder",
+      "zh_render": "LOCAL_OPERATOR_CONFIG_DIR, LANG, …",
+      "en_render": "LOCAL_OPERATOR_CONFIG_DIR, LANG, …",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.description",
+      "zh_render": "安全集加下方列表，别无其他",
+      "en_render": "the safe set plus the lists below, nothing else",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.allowlist.label",
+      "zh_render": "allowlist",
+      "en_render": "allowlist",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.inherit.description",
+      "zh_render": "你的环境，同现状（默认）",
+      "en_render": "your environment, as today (default)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.choice.inherit.label",
+      "zh_render": "inherit",
+      "en_render": "inherit",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.help",
+      "zh_render": "'inherit'让智能体运行的命令看到你的环境（gh、aws、npm保持其令牌）。'allowlist'只传递PATH/HOME/SHELL/TERM/USER/LOGNAME，加上旁边这两个列表，因此本会话启动时用的提供商密钥不会交给模型编写的命令。每个会话只读取一次：修改后下次启动才生效。",
+      "en_render": "'inherit' lets a command the agent runs see your environment (gh, aws, npm keep their tokens). 'allowlist' passes only PATH/HOME/SHELL/TERM/USER/LOGNAME plus the two lists beside this, so the provider key this session launched with is not handed to a command the model writes. Read once per session: changing it takes effect at the next launch.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.shell_environment_mode.label",
+      "zh_render": "智能体shell环境",
+      "en_render": "Agent shell environment",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech.description",
+      "zh_render": "助手朗读时的声音。描述会发送到hub，由hub映射到实际服务的语音提供商；提供商无法表达的字段会带一条说明降级，而不是报错。在下一条朗读消息时读取。",
+      "en_render": "How the assistant sounds when it speaks aloud. The descriptor is sent to the hub, which maps it onto whichever voice provider serves; fields a provider cannot express degrade with a note rather than failing. Read on the next spoken message.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech.title",
+      "zh_render": "语音朗读",
+      "en_render": "Speech voicing",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.auto.description",
+      "zh_render": "优先原生清理，否则使用客户端规则。",
+      "en_render": "Native, else client rules.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.auto.label",
+      "zh_render": "auto",
+      "en_render": "auto",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.client.description",
+      "zh_render": "使用客户端规则；请求原始文本。",
+      "en_render": "Client rules; request raw copy.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.client.label",
+      "zh_render": "client",
+      "en_render": "client",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.description",
+      "zh_render": "逐字保留；不移除语气词或非语音提示。",
+      "en_render": "Verbatim; no filler or cue removal.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+      "zh_render": "off",
+      "en_render": "off",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.provider.description",
+      "zh_render": "仅在支持时使用原生清理。",
+      "en_render": "Native only where offered.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.provider.label",
+      "zh_render": "provider",
+      "en_render": "provider",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.help",
+      "zh_render": "听写如何移除语气词和非语音提示。auto在提供商支持时使用原生清理，否则使用保守的客户端规则；provider和client各自仅使用其中一种机制；off保留逐字转录。单次请求中的`cleanup`字段仍优先。",
+      "en_render": "How dictation strips filler words and non-speech cues. auto uses the provider's native cleanup where available and the conservative client rules elsewhere; provider and client each use only one of the two mechanisms; off keeps the verbatim transcript. A per-request `cleanup` field still wins.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.label",
+      "zh_render": "转录清理",
+      "en_render": "Transcription cleanup",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_accent.help",
+      "zh_render": "区域标签，如en-GB，或留空。会以指令文本送达提供商。",
+      "en_render": "A region tag such as en-GB, or empty. Reaches the provider as instructions text.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_accent.label",
+      "zh_render": "口音",
+      "en_render": "Accent",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.high.description",
+      "zh_render": "活泼而有表现力。",
+      "en_render": "Lively and expressive.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.high.label",
+      "zh_render": "high",
+      "en_render": "high",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.low.description",
+      "zh_render": "克制而平淡。",
+      "en_render": "Restrained and plain.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.low.label",
+      "zh_render": "low",
+      "en_render": "low",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+      "zh_render": "当前固定使用的值。",
+      "en_render": "Today's constant.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.choice.medium.label",
+      "zh_render": "medium",
+      "en_render": "medium",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.help",
+      "zh_render": "朗读的生动程度。设置ElevenLabs的稳定性；在OpenAI上则是一句提示。",
+      "en_render": "How animated the delivery is. Sets ElevenLabs stability; a phrase on OpenAI.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_expressiveness.label",
+      "zh_render": "表现力",
+      "en_render": "Expressiveness",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.auto.description",
+      "zh_render": "按智能体分类（推荐）。",
+      "en_render": "Classify per agent (recommended).",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.auto.label",
+      "zh_render": "auto",
+      "en_render": "auto",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.female.description",
+      "zh_render": "始终使用女声。",
+      "en_render": "Always use a female voice.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.female.label",
+      "zh_render": "female",
+      "en_render": "female",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.male.description",
+      "zh_render": "始终使用男声。",
+      "en_render": "Always use a male voice.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.choice.male.label",
+      "zh_render": "male",
+      "en_render": "male",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.help",
+      "zh_render": "auto按智能体选择；固定值会覆盖分类器。",
+      "en_render": "auto picks per agent; a fixed value overrides the classifier.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_gender.label",
+      "zh_render": "声音性别",
+      "en_render": "Voice gender",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_instructions.help",
+      "zh_render": "描述朗读应如何呈现的自由文本（仅限OpenAI）。留空则不发送任何自有内容。",
+      "en_render": "Free text for how speech should sound (OpenAI only). Empty sends none of our own.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_instructions.label",
+      "zh_render": "朗读指令",
+      "en_render": "Delivery instructions",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_language.help",
+      "zh_render": "auto由提供商检测；两位字母代码（如es）则固定。",
+      "en_render": "auto lets the provider detect; a two-letter code (e.g. es) pins it.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_language.label",
+      "zh_render": "语言",
+      "en_render": "Language",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_pace.help",
+      "zh_render": "语速，1.0为正常。自身范围更窄的提供商会钳制到其范围内。",
+      "en_render": "Speaking rate, 1.0 being normal. A provider whose own range is narrower clamps.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_pace.label",
+      "zh_render": "语速",
+      "en_render": "Pace",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.authoritative.description",
+      "zh_render": "自信而笃定。",
+      "en_render": "Confident and assured.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.authoritative.label",
+      "zh_render": "authoritative",
+      "en_render": "authoritative",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.bright.description",
+      "zh_render": "明快而充满活力。",
+      "en_render": "Upbeat and energetic.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.bright.label",
+      "zh_render": "bright",
+      "en_render": "bright",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.calm.description",
+      "zh_render": "从容而沉稳。",
+      "en_render": "Unhurried and steady.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.calm.label",
+      "zh_render": "calm",
+      "en_render": "calm",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.neutral.description",
+      "zh_render": "平稳而不带色彩。",
+      "en_render": "Even and unmarked.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.neutral.label",
+      "zh_render": "neutral",
+      "en_render": "neutral",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.warm.description",
+      "zh_render": "友好而亲切。",
+      "en_render": "Friendly and approachable.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.choice.warm.label",
+      "zh_render": "warm",
+      "en_render": "warm",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.help",
+      "zh_render": "朗读的温暖感。会作为语音行被遵循，或在指令中模拟。",
+      "en_render": "Warmth of delivery. Honoured as a voice row or emulated in instructions.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.speech_voice_tone.label",
+      "zh_render": "语气",
+      "en_render": "Tone",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.static.description",
+      "zh_render": "本地服务器可以提供图像、音频、视频与HTML预览的额外目录。智能体主目录、会话文件夹、上传内容，以及你的智能体与运行中会话的工作目录始终包含在内。",
+      "en_render": "Extra directories the local server may serve image, audio, video and HTML previews from. The agent home, session folders, uploads and the working directories of your agents and running sessions are always included.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.static.title",
+      "zh_render": "文件预览",
+      "en_render": "File previews",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.static_roots.help",
+      "zh_render": "留空则只用内置根目录。仅在回退形态（非环回连接）下启用：正常环回预览可以服务任何可读文件。逗号分隔的绝对目录；根目录下的点目录从不对外提供。",
+      "en_render": "Empty = only the built-in roots. Consulted only by the fallback posture (a connection that is not loopback): normal loopback previews can serve any readable file. Comma-separated absolute directories; dot-directories below a root are never served.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.static_roots.label",
+      "zh_render": "额外预览根目录",
+      "en_render": "Extra preview roots",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.static_roots.placeholder",
+      "zh_render": "~/Documents, /Volumes/data/reports",
+      "en_render": "~/Documents, /Volumes/data/reports",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.static_roots.warning",
+      "zh_render": "仅适用于回退（非环回）形态",
+      "en_render": "only applies to the fallback (non-loopback) posture",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents.description",
+      "zh_render": "并发上限、子智能体知识精简、由谁选择子智能体模型，以及各档位运行的模型。",
+      "en_render": "Concurrency cap, child knowledge slimming, who picks a child's model, and the model each tier runs on.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents.title",
+      "zh_render": "子智能体",
+      "en_render": "Subagents",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_max_running.help",
+      "zh_render": "并发子智能体与后台bash的上限，二者共用一个池。",
+      "en_render": "Ceiling on concurrent subagents and backgrounded bash, which share one pool.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_max_running.label",
+      "zh_render": "后台任务上限",
+      "en_render": "Max background jobs",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_max_team_depth.help",
+      "zh_render": "运行团队的树中允许的最深启动层级。1即顶层的直接子级。",
+      "en_render": "Deepest launch allowed in a tree that runs a team. 1 is the top's children.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_max_team_depth.label",
+      "zh_render": "嵌套团队最大深度",
+      "en_render": "Max nested-team depth",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_model_choice.choice.model.description",
+      "zh_render": "可以让子智能体运行在更贵的模型上",
+      "en_render": "may run the subagent on a costlier model",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_model_choice.choice.model.label",
+      "zh_render": "模型",
+      "en_render": "the model",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_model_choice.choice.operator.description",
+      "zh_render": "继承会话模型",
+      "en_render": "inherits the session model",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_model_choice.choice.operator.label",
+      "zh_render": "操作员",
+      "en_render": "the operator",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_model_choice.help",
+      "zh_render": "由谁选择子智能体的档位；操作员可在其配置档中固定。",
+      "en_render": "Who picks a subagent's tier; the operator pins one in its profile.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_model_choice.label",
+      "zh_render": "由谁选择子智能体模型",
+      "en_render": "Who picks a subagent's model",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_models_hi.help",
+      "zh_render": "按该模型的费率计费；'default'：用会话模型；留空则删除该档位",
+      "en_render": "Bills at that model's rates; 'default': session; empty removes the tier",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_models_hi.label",
+      "zh_render": "子智能体模型：hi",
+      "en_render": "Subagent model: hi",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_models_lo.help",
+      "zh_render": "按该模型的费率计费；'default'：用会话模型；留空则删除该档位",
+      "en_render": "Bills at that model's rates; 'default': session; empty removes the tier",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_models_lo.label",
+      "zh_render": "子智能体模型：lo",
+      "en_render": "Subagent model: lo",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_models_med.help",
+      "zh_render": "按该模型的费率计费；'default'：用会话模型；留空则删除该档位",
+      "en_render": "Bills at that model's rates; 'default': session; empty removes the tier",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_models_med.label",
+      "zh_render": "子智能体模型：med",
+      "en_render": "Subagent model: med",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_slim_child_knowledge.choice.false.description",
+      "zh_render": "原样继承父级知识块",
+      "en_render": "inherit the parent block as-is",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_slim_child_knowledge.choice.true.description",
+      "zh_render": "保留名称，裁掉其余",
+      "en_render": "keep names, trim the rest",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_slim_child_knowledge.help",
+      "zh_render": "保留技能/指南名称；裁剪描述与父级附加内容。",
+      "en_render": "Keep skill/guide names; trim descriptions and parent extras.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.subagents_slim_child_knowledge.label",
+      "zh_render": "精简子智能体知识",
+      "en_render": "Slim child knowledge",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements.description",
+      "zh_render": "回答之后，指出它生成的文件；开启后，还会为其中出现的数字绘制图表。可通过环境关闭：LOP_SUPPLEMENTS=0。",
+      "en_render": "After an answer, point out the files it produced and, when you turn it on, draw a chart of numbers it showed. Off by environment: LOP_SUPPLEMENTS=0.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements.title",
+      "zh_render": "亮点",
+      "en_render": "Highlights",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_denyprefixes.help",
+      "zh_render": "需开启亮点。逗号分隔的文件夹，其中的文件绝不会被列出或发送给决策模型；在存有客户数据的机器上使用。",
+      "en_render": "Needs Highlights on. Comma-separated folders whose files are never listed or sent to a decision model; use it on a machine holding customer data.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_denyprefixes.label",
+      "zh_render": "↳ 绝不列出",
+      "en_render": "↳ never list under",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_denyprefixes.placeholder",
+      "zh_render": "~/clients, ~/Documents/private",
+      "en_render": "~/clients, ~/Documents/private",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_enabled.choice.false.description",
+      "zh_render": "回答下方不添加任何内容",
+      "en_render": "nothing is added under an answer",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_enabled.choice.true.description",
+      "zh_render": "在回答下方指出它生成的文件",
+      "en_render": "files an answer produced are pointed out under it",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_enabled.help",
+      "zh_render": "开：回答下方可以跟一行，指出它生成的文件。",
+      "en_render": "On: an answer can be followed by a line pointing at the files it made.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_enabled.label",
+      "zh_render": "亮点",
+      "en_render": "Highlights",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_files.choice.false.description",
+      "zh_render": "从不列出文件",
+      "en_render": "files are never listed",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_files.choice.true.description",
+      "zh_render": "列出可交付文件",
+      "en_render": "deliverable files are listed",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_files.help",
+      "zh_render": "需开启亮点。指出回答生成的报告与导出文件。",
+      "en_render": "Needs Highlights on. Point out reports and exports an answer produced.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_files.label",
+      "zh_render": "↳ 文件",
+      "en_render": "↳ files",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_graphics.choice.false.description",
+      "zh_render": "从不生成图表",
+      "en_render": "no chart is ever generated",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_graphics.choice.true.description",
+      "zh_render": "可以生成图表（消耗token）",
+      "en_render": "a chart may be generated (spends tokens)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_graphics.help",
+      "zh_render": "需开启亮点。回答中出现数字时绘制图表。消耗模型token。",
+      "en_render": "Needs Highlights on. Draw a chart when an answer shows numbers. Spends model tokens.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_graphics.label",
+      "zh_render": "↳ 图表",
+      "en_render": "↳ graphics",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_maxcostusd.help",
+      "zh_render": "需开启图表。单个任务花费的软上限。",
+      "en_render": "Needs graphics on. Soft cap on one job's spend.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_maxcostusd.label",
+      "zh_render": "↳ 费用上限（$）",
+      "en_render": "↳ cost cap ($)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_maxfeatured.help",
+      "zh_render": "需开启亮点。先点名的文件之外的其余文件折叠为'N more'。",
+      "en_render": "Needs Highlights on. Files named before the rest fold into 'N more'.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_maxfeatured.label",
+      "zh_render": "↳ 显示文件数",
+      "en_render": "↳ files shown",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_maxoutputtokens.help",
+      "zh_render": "需开启图表。每次生成器回合的输出预算。",
+      "en_render": "Needs graphics on. Output budget per generator turn.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_maxoutputtokens.label",
+      "zh_render": "↳ 输出token上限",
+      "en_render": "↳ max output tokens",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_maxturns.help",
+      "zh_render": "需开启图表。每张图表的模型回合数，含一次修复。",
+      "en_render": "Needs graphics on. Model turns per chart, including one repair.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_maxturns.label",
+      "zh_render": "↳ 回合数上限",
+      "en_render": "↳ max turns",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_model.help",
+      "zh_render": "需开启图表。auto挑选便宜快速的模型；session使用本会话的模型。",
+      "en_render": "Needs graphics on. auto picks a cheap fast model; session uses this session's.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_model.label",
+      "zh_render": "↳ 图表模型",
+      "en_render": "↳ graphics model",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_timeouts.help",
+      "zh_render": "需开启亮点。整个任务超过此时长即放弃。",
+      "en_render": "Needs Highlights on. Give up on a whole job after this long.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.supplements_timeouts.label",
+      "zh_render": "↳ 时间上限（秒）",
+      "en_render": "↳ time limit (s)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.team_bridge.description",
+      "zh_render": "你的智能体可与组织内其他成员的智能体交换消息。默认关闭；你可以随时暂停或关闭。",
+      "en_render": "Your agent can exchange messages with other members' agents in your organization. Off by default; you can pause or turn it off at any time.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.team_bridge.title",
+      "zh_render": "智能体消息",
+      "en_render": "Agent messages",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.team_bridge_enabled.help",
+      "zh_render": "默认关闭。还需要登录Radient并加入符合条件的组织。",
+      "en_render": "Off by default. Also needs a Radient sign-in and an eligible organization.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.team_bridge_enabled.label",
+      "zh_render": "在本机启用",
+      "en_render": "Enabled on this machine",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.team_bridge_session.help",
+      "zh_render": "可因新消息而被唤醒的会话；留空则仅显示角标。",
+      "en_render": "Session that may be woken for new messages; empty = badge only.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.team_bridge_session.label",
+      "zh_render": "CoS会话",
+      "en_render": "CoS session",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tool_approval_mode.choice.ask.description",
+      "zh_render": "写入/执行工具前先询问",
+      "en_render": "prompt before write/exec tools",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tool_approval_mode.choice.ask.label",
+      "zh_render": "ask",
+      "en_render": "ask",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tool_approval_mode.choice.auto.description",
+      "zh_render": "不经询问直接运行",
+      "en_render": "run them without asking",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tool_approval_mode.choice.auto.label",
+      "zh_render": "auto",
+      "en_render": "auto",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tool_approval_mode.help",
+      "zh_render": "放宽需要在本会话内写入——/approvals auto。",
+      "en_render": "Loosening needs a write in this session — /approvals auto.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tool_approval_mode.label",
+      "zh_render": "工具审批模式",
+      "en_render": "Tool approval mode",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tools.description",
+      "zh_render": "内置工具如何执行。",
+      "en_render": "How the built-in tools execute.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tools.title",
+      "zh_render": "工具",
+      "en_render": "Tools",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tools_defer.help",
+      "zh_render": "把罕用工具的schema排除在每次请求之外，直到智能体读取tool://<name>或调用其一。两种情况下工具都可调用。关闭则每次请求都发送全部schema。",
+      "en_render": "Keep rarely used tools' schemas out of every request until the agent reads tool://<name> or calls one. The tools stay callable either way. Off sends every schema on every request.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tools_defer.label",
+      "zh_render": "按需加载罕用工具的schema",
+      "en_render": "Load rarely used tool schemas on demand",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tools_search_interception_block.help",
+      "zh_render": "开：命令会被拒绝并给出建议。关：照常运行，并记录拦截情况，便于操作员先观察再强制执行。",
+      "en_render": "On: the command is refused with a suggestion. Off: it runs anyway and the interception is logged, so an operator can watch before enforcing.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tools_search_interception_block.label",
+      "zh_render": "……拒绝而非警告",
+      "en_render": "...refuse rather than warn",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tools_search_interception_enabled.help",
+      "zh_render": "拒绝从仓库根目录或vendor/构建目录递归的shell `grep`/`rg`/`find`，并引导智能体改用`grep`工具。限定范围或单文件搜索绝不受影响。关则禁用该检查。",
+      "en_render": "Refuse a shell `grep`/`rg`/`find` that recurses from a repository root or a vendor/build tree, and point the agent at the `grep` tool. A scoped or single-file search is never touched. Off disables the check.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tools_search_interception_enabled.label",
+      "zh_render": "拦截无界搜索",
+      "en_render": "Block unbounded searches",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tools_search_interception_rg_excludes.help",
+      "zh_render": "为ripgrep生成配置，跳过node_modules/.git/out等目录，让未被守卫拦截的`rg`依然快速。仅适用于ripgrep。",
+      "en_render": "Give ripgrep a generated config that skips node_modules/.git/out etc., so an `rg` the guard does not block is still fast. Applies to ripgrep only.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tools_search_interception_rg_excludes.label",
+      "zh_render": "……为ripgrep裁剪vendor目录",
+      "en_render": "...prune vendor trees for ripgrep",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tui_sidebar_position.choice.left.description",
+      "zh_render": "会话位于对话左侧",
+      "en_render": "sessions to the left of the conversation",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tui_sidebar_position.choice.left.label",
+      "zh_render": "左侧",
+      "en_render": "left",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tui_sidebar_position.choice.right.description",
+      "zh_render": "会话位于对话右侧",
+      "en_render": "sessions to the right of the conversation",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tui_sidebar_position.choice.right.label",
+      "zh_render": "右侧",
+      "en_render": "right",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tui_sidebar_position.help",
+      "zh_render": "会话侧边栏位于对话的哪一侧。",
+      "en_render": "Which side of the conversation holds the session sidebar.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tui_sidebar_position.label",
+      "zh_render": "侧边栏位置",
+      "en_render": "Sidebar position",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tui_sidebar_show_subagents.choice.false.description",
+      "zh_render": "只显示你自己的会话",
+      "en_render": "show only your own sessions",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tui_sidebar_show_subagents.choice.true.description",
+      "zh_render": "列出最近的子智能体运行",
+      "en_render": "list recent subagent runs",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tui_sidebar_show_subagents.help",
+      "zh_render": "在你自己的会话下方列出最近的子智能体运行。侧边栏获得焦点时，Ctrl+A切换该层显示。",
+      "en_render": "List recent subagent runs below your own sessions. Ctrl+A toggles the layer while the sidebar has focus.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tui_sidebar_show_subagents.label",
+      "zh_render": "侧边栏子智能体层",
+      "en_render": "Sidebar subagent layer",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tui_sidebar_visible.choice.false.description",
+      "zh_render": "保持对话全宽",
+      "en_render": "keep the full conversation width",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tui_sidebar_visible.choice.true.description",
+      "zh_render": "显示侧边栏",
+      "en_render": "show the sidebar",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tui_sidebar_visible.help",
+      "zh_render": "活跃与最近的对话。Ctrl+B切换侧边栏。",
+      "en_render": "Active and recent conversations. Ctrl+B toggles the sidebar.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tui_sidebar_visible.label",
+      "zh_render": "会话侧边栏",
+      "en_render": "Session sidebar",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tui_theme.help",
+      "zh_render": "配色方案。/theme配合方向键预览实时切换。",
+      "en_render": "Colour ramp. /theme switches it live with an arrow-key preview.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.tui_theme.label",
+      "zh_render": "主题",
+      "en_render": "Theme",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.wakes.description",
+      "zh_render": "当被监控的条件长时间无变化时，唤醒助手去检查，而不是让它一直等到每日例行：总开关、每日预算与间隔、以及哪些来源可以触发。在下一次评估时读取。",
+      "en_render": "When a watched condition goes stale, the assistant is woken to check in rather than left to wait for the daily cadence: the master switch, the per-day budget and spacing, and which sources may fire. Read at the next evaluation pass.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.wakes.title",
+      "zh_render": "唤醒触发器",
+      "en_render": "Wake triggers",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.wakes_triggers_enabled.choice.false.description",
+      "zh_render": "已禁用",
+      "en_render": "disabled",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.wakes_triggers_enabled.choice.true.description",
+      "zh_render": "已启用",
+      "en_render": "enabled",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.wakes_triggers_enabled.help",
+      "zh_render": "触发唤醒的总开关；关闭意味着永远不创建检查。",
+      "en_render": "Master switch for trigger wakes; off means no check-in is ever created.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.wakes_triggers_enabled.label",
+      "zh_render": "已启用",
+      "en_render": "Enabled",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.wakes_triggers_max_per_day.help",
+      "zh_render": "每个目标的24小时滚动预算，用于触发唤醒。0表示禁用触发唤醒，不影响上方开关。",
+      "en_render": "Per-target rolling 24 h budget for trigger wakes. 0 disables trigger wakes without touching the switch above.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.wakes_triggers_max_per_day.label",
+      "zh_render": "每日检查唤醒上限",
+      "en_render": "Max check-in wakes per day",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.wakes_triggers_min_gap_minutes.help",
+      "zh_render": "同一目标的触发唤醒之间的最小间隔。",
+      "en_render": "Minimum spacing between trigger wakes to the same target.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.wakes_triggers_min_gap_minutes.label",
+      "zh_render": "最小间隔（分钟）",
+      "en_render": "Minimum gap (minutes)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.wakes_triggers_project_staleness_enabled.choice.false.description",
+      "zh_render": "关",
+      "en_render": "off",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.wakes_triggers_project_staleness_enabled.choice.true.description",
+      "zh_render": "监视中",
+      "en_render": "watching",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.wakes_triggers_project_staleness_enabled.help",
+      "zh_render": "项目进度停滞时唤醒去检查。已结项（done/paused/archived）的项目从不监视。",
+      "en_render": "Wake to check in on projects whose progress went stale. Settled (done/paused/archived) projects are never watched.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.wakes_triggers_project_staleness_enabled.label",
+      "zh_render": "项目停滞触发器",
+      "en_render": "Project staleness trigger",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch.description",
+      "zh_render": "fetch工具的限制与渲染。",
+      "en_render": "Limits and rendering for the fetch tool.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch.title",
+      "zh_render": "网页抓取",
+      "en_render": "Web fetch",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_allow_private.choice.false.description",
+      "zh_render": "阻止私有目标",
+      "en_render": "block private targets",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_allow_private.choice.true.description",
+      "zh_render": "允许私有目标",
+      "en_render": "allow private targets",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_allow_private.help",
+      "zh_render": "SSRF防护。开启时允许环回、私有与链路本地目标。",
+      "en_render": "SSRF guard. On permits loopback, private and link-local targets.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_allow_private.label",
+      "zh_render": "允许私有地址",
+      "en_render": "Allow private addresses",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_blocked_retry.choice.false.description",
+      "zh_render": "保持自我标识",
+      "en_render": "stay self-identifying",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_blocked_retry.choice.true.description",
+      "zh_render": "对拒绝重试一次",
+      "en_render": "retry refusals once",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_blocked_retry.help",
+      "zh_render": "被拒绝后，改用浏览器风格请求头重试一次。",
+      "en_render": "After a refusal, retry once with browser-shaped headers.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_blocked_retry.label",
+      "zh_render": "模拟浏览器重试",
+      "en_render": "Browser-profile retry",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_cache_ttl_seconds.help",
+      "zh_render": "0表示完全禁用URL缓存。",
+      "en_render": "0 disables the URL cache entirely.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_cache_ttl_seconds.label",
+      "zh_render": "缓存TTL（秒）",
+      "en_render": "Cache TTL (s)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_enabled.choice.false.description",
+      "zh_render": "fetch已禁用",
+      "en_render": "fetch disabled",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_enabled.choice.true.description",
+      "zh_render": "fetch可用",
+      "en_render": "fetch available",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_enabled.help",
+      "zh_render": "提供fetch工具与read <url>；关闭则拒绝所有调用。",
+      "en_render": "Offer the fetch tool and read <url>; off refuses every call.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_enabled.label",
+      "zh_render": "网页抓取",
+      "en_render": "Web fetch",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_enrich.choice.false.description",
+      "zh_render": "直接抓取HTML",
+      "en_render": "scrape HTML directly",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_enrich.choice.true.description",
+      "zh_render": "先尝试更干净的来源",
+      "en_render": "try cleaner sources first",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_enrich.help",
+      "zh_render": "抓取HTML之前，先尝试.md、llms.txt与内容协商。",
+      "en_render": "Try .md, llms.txt and content negotiation before scraping HTML.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_enrich.label",
+      "zh_render": "抓取前先增强",
+      "en_render": "Enrich before scraping",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_max_attempts.help",
+      "zh_render": "重试共享该调用的超时，因此更多尝试不会花更长时间。",
+      "en_render": "Retries share the call's timeout, so more attempts never take longer.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_max_attempts.label",
+      "zh_render": "每跳尝试次数",
+      "en_render": "Attempts per hop",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_max_bytes.help",
+      "zh_render": "在流式传输中执行，因此超大页面会被截断而不是整体缓冲。",
+      "en_render": "Enforced during streaming, so a huge page is cut off rather than buffered.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_max_bytes.label",
+      "zh_render": "下载上限（字节）",
+      "en_render": "Download ceiling (bytes)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_max_redirects.help",
+      "zh_render": "放弃前跟随的重定向跳数。",
+      "en_render": "Redirect hops followed before giving up.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_max_redirects.label",
+      "zh_render": "重定向上限",
+      "en_render": "Max redirects",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.choice.auto.description",
+      "zh_render": "有markdownify就用，否则用stdlib",
+      "en_render": "markdownify if available, else stdlib",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.choice.auto.label",
+      "zh_render": "auto",
+      "en_render": "auto",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.choice.stdlib.description",
+      "zh_render": "始终使用内置渲染器",
+      "en_render": "always the bundled renderer",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.choice.stdlib.label",
+      "zh_render": "stdlib",
+      "en_render": "stdlib",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.help",
+      "zh_render": "安装[fetch] extra后，auto会使用markdownify。",
+      "en_render": "Auto uses markdownify when the [fetch] extra is installed.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.label",
+      "zh_render": "HTML渲染器",
+      "en_render": "HTML renderer",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_timeout_seconds.help",
+      "zh_render": "每个请求的超时。",
+      "en_render": "Per-request timeout.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_fetch_timeout_seconds.label",
+      "zh_render": "超时（秒）",
+      "en_render": "Timeout (s)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search.description",
+      "zh_render": "search工具的提供商与负载均衡。",
+      "en_render": "Providers and load balancing for the search tool.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search.title",
+      "zh_render": "网页搜索",
+      "en_render": "Web search",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_deepseek_evidence.help",
+      "zh_render": "在DeepSeek搜索后，为每个页面附加摘录与相关性评分。",
+      "en_render": "Adds a per-page quote and relevance score after a DeepSeek search.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_deepseek_evidence.label",
+      "zh_render": "DeepSeek页面证据",
+      "en_render": "DeepSeek page evidence",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_enabled.choice.false.description",
+      "zh_render": "search已禁用",
+      "en_render": "search disabled",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_enabled.choice.true.description",
+      "zh_render": "search可用",
+      "en_render": "search available",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_enabled.help",
+      "zh_render": "提供search工具并允许运行；关闭则拒绝所有调用。",
+      "en_render": "Offer the search tool and let it run; off refuses every call.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_enabled.label",
+      "zh_render": "网页搜索",
+      "en_render": "Web search",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_excluded_providers.help",
+      "zh_render": "从不使用，自动链中也不例外。逗号分隔；留空则不排除任何提供商。",
+      "en_render": "Never used, even in the automatic chain. Comma-separated; empty = none excluded.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_excluded_providers.label",
+      "zh_render": "排除的提供商",
+      "en_render": "Excluded providers",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_providers.help",
+      "zh_render": "逗号分隔，按优先级顺序；先于自动的免费提供商尝试。",
+      "en_render": "Comma-separated, in priority order; tried before the automatic free providers.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_providers.label",
+      "zh_render": "提供商",
+      "en_render": "Providers",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_read_enabled.help",
+      "zh_render": "提供web_read：从搜索已获取的页面作答，不重新抓取。",
+      "en_render": "Offer web_read: answer from pages a search already retrieved, no refetch.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_read_enabled.label",
+      "zh_render": "从搜索读取",
+      "en_render": "Read from search",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_searxng_endpoint.help",
+      "zh_render": "自托管SearXNG实例的基础URL。",
+      "en_render": "Base URL of a self-hosted SearXNG instance.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_searxng_endpoint.label",
+      "zh_render": "SearXNG endpoint",
+      "en_render": "SearXNG endpoint",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.ordered.description",
+      "zh_render": "列表顶部优先，逐级回退",
+      "en_render": "top of the list first, fall through",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.ordered.label",
+      "zh_render": "ordered",
+      "en_render": "ordered",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.round_robin.description",
+      "zh_render": "在提供商之间轮换",
+      "en_render": "rotate across providers",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_strategy.choice.round_robin.label",
+      "zh_render": "round_robin",
+      "en_render": "round_robin",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_strategy.help",
+      "zh_render": "提供商列表的使用方式。",
+      "en_render": "How the provider list is consumed.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_strategy.label",
+      "zh_render": "负载均衡",
+      "en_render": "Load balancing",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_timeout_seconds.help",
+      "zh_render": "每个提供商的请求超时。读取时钳制在1-120之间。",
+      "en_render": "Per-provider request timeout. Clamped to 1-120 when read.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_search_timeout_seconds.label",
+      "zh_render": "超时（秒）",
+      "en_render": "Timeout (s)",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_tools.description",
+      "zh_render": "是否提供search与fetch工具并允许运行。",
+      "en_render": "Whether the search and fetch tools are offered and allowed to run.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "wire.settings.web_tools.title",
+      "zh_render": "网页工具",
+      "en_render": "Web tools",
+      "zh_error": null,
+      "en_error": null
+    }
+  ],
+  "select_render_samples": [],
+  "direction_punctuation": {
+    "locale_dir": "ltr",
+    "rtl_controls": 0,
+    "checks": [
+      "full-width punctuation inventory (，。：；！？、；“”（）)",
+      "ellipsis form (…… vs three dots)",
+      "ASCII punctuation adjacent to CJK prose",
+      "quote form (mainland “ ”; no 「」)",
+      "embedded Latin/digit runs adjacent to CJK without a space"
+    ],
+    "note": "zh-CN is LTR: the ur bundle's RTL-specific punctuation-placement, direction-token and embedded-Latin-isolation checks have no counterpart. The punctuation inventory was still scanned and is recorded in mechanical-raw.json (bidi_controls, cjk_latin_space, fullwidth_latin_or_digits)."
+  },
+  "technical_tokens": {
+    "patterns": {
+      "backtick_span": "`[^`\\n]+`",
+      "long_flag": "(?<![\\w/])--[a-zA-Z][a-zA-Z0-9_-]*",
+      "slash_command": "(?<![\\w/])/[a-zA-Z][a-zA-Z0-9_-]*",
+      "env_or_constant": "(?<![A-Za-z0-9_])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?![A-Za-z0-9_])",
+      "url_scheme": "(?:https?|ssh)://[^\\s，。；：]+",
+      "ipv4": "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b",
+      "ipv6_loopback": "::1(?![\\w:])",
+      "hostname": "\\blocalhost\\b",
+      "home_path": "~/[\\w./-]+",
+      "abs_path": "/(?:bin|Users|Volumes|tmp|var|etc)/[\\w./-]*[\\w/-]",
+      "percent_token": "%[sdif]"
+    },
+    "literals": [
+      "lop",
+      "lop-update",
+      "Radient",
+      "Local Operator",
+      "Git",
+      "JSON",
+      "ASCII",
+      "MiB",
+      "SHA",
+      "API",
+      "URL",
+      "TUI"
+    ],
+    "missing": []
+  },
+  "width": {
+    "over_budget": [],
+    "checked_keys_with_budget": 7
+  },
+  "review_disposition": {
+    "mechanical_status": "passed",
+    "note": "Mechanical only: no native terminal, relay SPA or rendered-frame pass is claimed by this document. Semantic findings are in report.md."
+  }
+}

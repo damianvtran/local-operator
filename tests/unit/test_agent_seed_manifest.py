@@ -220,7 +220,7 @@ def test_the_seed_version_key_rides_the_installed_row_as_a_stamp(tmp_path):
 
     registry = AgentRegistry(tmp_path / "config")
     for name in list_seeds():
-        installed = install_seed(name, registry=registry)
+        installed = install_seed(name, registry=registry, scope="global")
         assert installed is not None, name
         profile, already_installed = installed
         assert already_installed is False, name
@@ -244,7 +244,7 @@ def test_the_seed_version_key_rides_the_installed_row_as_a_stamp(tmp_path):
         assert seed is not None
         assert seed_divergence(profile, seed) == (), name
         before = list(row.tags)
-        install_seed(name, registry=registry)
+        install_seed(name, registry=registry, scope="global")
         again = registry.get_agent_by_name(name)
         assert again is not None
         assert again.tags == before, name
@@ -261,3 +261,38 @@ def test_the_installed_version_stamp_matches_the_published_manifest(manifest, tm
     published = {entry["name"]: entry["version"] for entry in manifest["seeds"]}
     for name in list_seeds():
         assert load_seed_version(name) == published[name], name
+
+
+def test_the_packaged_coder_seed_carries_the_inherit_pin(manifest, tmp_path):
+    """The coder role's PUBLISHED definition carries the inherit pin.
+
+    The seed file IS the published definition of a built-in role — the Agent
+    Hub serves these names straight from the packaged files — so the rule has
+    to live in the SEED and not in one machine's config: a teammate who pulls
+    the coder role gets the same rule the operator has, and a local config
+    edit would travel to nobody.
+
+    The pin is the inherit SENTINEL (``default``), not a tier name: it says
+    "always run on the launching session's model", and it is ABSOLUTE — a
+    delegating model's tier argument, its explicit model pick, and a roster
+    slot's tier all lose to it, because every one of those is reachable by a
+    delegating model and a pin they could move would not be a pin. A role's
+    ordinary TIER pin keeps its documented meaning (the role's DEFAULT, which
+    a launch may still override), which is exactly why this is spelled the
+    sentinel and not a tier.
+    """
+    seed = load_seed("coder")
+    assert seed is not None
+    assert seed.effort == "default"
+
+    entry = next(item for item in manifest["seeds"] if item["name"] == "coder")
+    assert entry["effort"] == "default"
+    assert "effort:default" in entry["tags"]
+
+    # And it survives the install: the row a pull produces carries the pin, so
+    # the rule is in force for the installed role and not only for the file.
+    registry = AgentRegistry(tmp_path / "agents")
+    assert install_seed("coder", registry=registry, scope="global") is not None
+    row = registry.get_agent_by_name("coder")
+    assert row is not None
+    assert "effort:default" in [str(tag) for tag in (row.tags or [])]

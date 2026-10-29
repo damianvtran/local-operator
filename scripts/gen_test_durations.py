@@ -187,8 +187,17 @@ def _classname_to_path(classname: str, repo: Path) -> str | None:
     name (``tests.unit.x.test_y.TestThing``). There is no ``file`` attribute
     to rely on across pytest versions, so trailing components are trimmed
     until the remainder names a file that exists.
+
+    Empty components are dropped first, because ``Path`` cannot name one and
+    does not fail loudly when asked: ``classname`` of ``""`` or ``"."`` splits
+    to nothing but empty strings, and ``Path(*parts).with_suffix(".py")`` on
+    the resulting ``.`` raises ``ValueError: PosixPath('.') has an empty
+    name``. Guarding on the empty STRING alone leaves that whole class open --
+    ``"."`` reaches the same line by the other route. A dotted module path
+    never contains an empty component, so dropping them cannot change which
+    file a real classname resolves to.
     """
-    parts = classname.split(".")
+    parts = [part for part in classname.split(".") if part]
     while parts:
         candidate = Path(*parts).with_suffix(".py")
         if (repo / candidate).is_file():
@@ -204,9 +213,21 @@ def aggregate(xml_paths: list[Path], repo: Path = REPO) -> dict[str, float]:
         root = ET.parse(xml_path).getroot()
         for case in root.iter("testcase"):
             classname = case.get("classname") or ""
-            path = _classname_to_path(classname, repo)
+            # A MODULE-level skip (`pytest.skip(..., allow_module_level=True)`)
+            # is reported with an EMPTY `classname` and the module's dotted path
+            # in `name` -- pytest 8, observed on CI 2026-10-19 with
+            # `tests/unit/tui/test_hub_links_capture.py`. The empty string used
+            # to reach `Path(*parts).with_suffix`, which raises
+            # `ValueError: PosixPath('.') has an empty name` and took the whole
+            # documented CI regeneration route down with it.
+            source = classname or case.get("name") or ""
+            path = _classname_to_path(source, repo)
             if path is None:
-                unresolved.add(classname)
+                # The string actually TRIED, not the raw `classname`: on the
+                # empty-classname path above the two differ, and recording the
+                # empty one printed `['']`, which names nothing a reader could
+                # act on.
+                unresolved.add(source)
                 continue
             per_file[path] += float(case.get("time") or 0.0)
     if unresolved:

@@ -372,26 +372,13 @@ def _flatten_output(*chunks: str) -> str:
 
 
 def _install_generation(version: str, *, runner: Any, update_mod: Any) -> None:
-    """``install_into_generation`` plus its retention tail and output capture.
+    """Install a generation and capture failures, without automatic collection.
 
-    THE PRUNE IS NOT OPTIONAL DECORATION (agent review round 1, M1):
-    ``install_into_generation``'s own docstring says "PRUNING IS THE CALLER'S",
-    every other generation install prunes immediately after it
-    (``perform_upgrade``, the CLI tail), and a member the mesh rolls is one
-    that gets re-rolled — without this it grows one whole venv per rollout,
-    unbounded (``DEFAULT_KEEP_GENERATIONS`` = 2 exists for exactly this). Run
-    best-effort, exactly as ``perform_upgrade`` runs it: a failed prune may not
-    fail a settled install, it only logs its own line.
-
-    SEQUENCED WITH #2181 (``fix/prune-running-generation``, MERGED 2026-10-10):
-    that fix is what makes the eviction pick safe for the calling process's own
-    tree, and this branch is rebased on it; the call shape below is
-    ``perform_upgrade``'s own (``prune_generations(referenced=…,
-    actor=ACTOR_UPGRADE)`` plus the notice lines), so the guard is the merged
-    one rather than a second-guess here.
-
-    ``_CapturedInstall`` carries uv's output onto the failure path (QA Q-3);
-    an injected runner replaces it, as upstream.
+    Match the PyPI/snapshot promotion freeze: discovery is a census, not a
+    lifetime lease. An absent record cannot prove that a live process will
+    never read another resource from its loaded generation, so promotion must
+    not trigger destructive collection. Retention is an explicit
+    ``lop install prune``, not a tail of this install.
     """
     capture = _CapturedInstall()
     try:
@@ -402,15 +389,6 @@ def _install_generation(version: str, *, runner: Any, update_mod: Any) -> None:
                 f"{' '.join(str(exc).split())} — installer output: {capture.output}"
             ) from exc
         raise
-    try:
-        plan = update_mod.prune_generations(
-            referenced=update_mod.referenced_install_roots(), actor=update_mod.ACTOR_UPGRADE
-        )
-    except Exception:  # noqa: BLE001 — see the docstring
-        logger.debug("the generation prune after the install did not run", exc_info=True)
-    else:
-        for line in update_mod.prune_notice_lines(plan):
-            logger.info("%s", line)
 
 
 def _install_classic(
@@ -524,8 +502,11 @@ def _version_tuple(value: str) -> tuple[int, int, int] | None:
 # ---------------------------------------------------------------------------
 
 
-def busy_sessions(root: Path) -> tuple[int, str]:
+def busy_sessions(root: Path, *, include_names: bool = False) -> tuple[int, str]:
     """``(count, detail)`` for the member's live BUSY sessions — its own registry.
+
+    ``include_names`` is the relay-recovery read: a restart refusal must name the
+    work it protects. The default keeps the update receipt byte-compatible.
 
     THE PREDICATE IS THE FLEET TOOL'S OWN (RU §4.3, note Q1): a live session
     record with ``busy`` set, which is the bit ``RuntimeServer._publish_busy``
@@ -551,7 +532,50 @@ def busy_sessions(root: Path) -> tuple[int, str]:
     busy = [record for record, state in rows if state == "live" and bool(record.busy)]
     if not busy:
         return 0, ""
-    return len(busy), f"{len(busy)} session(s) are busy"
+    detail = f"{len(busy)} session(s) are busy"
+    if include_names:
+        detail += ": " + name_busy_records(busy)
+    return len(busy), detail
+
+
+def name_busy_records(busy: Sequence[Any]) -> str:
+    """``name (id[, waiting for <pending>]); …`` for at most three busy records.
+
+    Shared by the relay-restart refusal and the generation-layout update
+    receipt, the two places that must say WHICH work they protected or left
+    behind. The ``pending`` marker is what tells an operator reading a receipt
+    that a session is not working but parked on a person (an approval nobody
+    can answer on a headless node is the measured case), so "busy" alone would
+    send them looking for a turn that is not running.
+    """
+    names = []
+    for record in busy[:3]:
+        name = (getattr(record, "conversation_name", "") or "unnamed session")[:80]
+        label = f"{name} ({str(getattr(record, 'session_id', ''))[:80]}"
+        pending = str(getattr(record, "pending", "") or "")
+        if pending:
+            label += f", waiting for {pending[:20]}"
+        names.append(label + ")")
+    if len(busy) > 3:
+        names.append(f"and {len(busy) - 3} more")
+    return "; ".join(names)
+
+
+def busy_records(root: Path) -> list[Any] | None:
+    """The member's live busy records, or ``None`` when the registry cannot be read.
+
+    The NAMING read for the generation-layout pass (see ``_execute_validated``):
+    it gates nothing, so an unreadable registry is reported as "could not say"
+    rather than refused — the refusal reading of a failed read belongs to the
+    in-place shape's :func:`busy_sessions`.
+    """
+    try:
+        from local_operator.session.runtime import registry
+
+        rows = registry.scan(root, reap=False, check_zombie=False)
+    except Exception:  # noqa: BLE001 — a naming read; the caller says it could not read
+        return None
+    return [record for record, state in rows if state == "live" and bool(record.busy)]
 
 
 @contextmanager
@@ -783,6 +807,201 @@ def _engage_successor(record: Any, *, root: Path, deadline_s: float) -> str:
     except (TimeoutError, RuntimeError, ConnectionError, OSError) as exc:
         return " ".join(str(exc).split())[:200]
     return ""
+
+
+#: The command a stale serve daemon's receipt names: the verb that moves serve
+#: in place and keeps its conversations (``services.restart_services``).
+SERVE_REMEDY = "lop services restart"
+
+
+def move_serve(*, budget: float | None = None) -> dict[str, Any]:
+    """Move this device's ``lop serve`` daemons onto the new build; say what is true after.
+
+    WHY THE PASS DOES THIS ITSELF (2026-10-28, lop-remote-node-2, rollouts
+    ro_dac9209751ea 0.91.0→0.91.1 and ro_906691b0cd04 0.91.1→0.91.2): the pass
+    installed, audited ``update_completed`` and restarted the relay, and
+    ``lop services status`` then read ``serve daemon … STALE: serving 0.91.0,
+    current is 0.91.1`` — twice. ``lop update`` on the same node moved serve in
+    place. A remote node has no operator watching it, so a serve left behind
+    runs pre-fix code silently until somebody happens to look.
+
+    ONE PATH, NOT A COPY: ``update.move_serve_after_upgrade`` is ``lop
+    update``'s own services stage with the supervised half deferred — the same
+    refusal (a checkout or foreign install moves nothing), the same rolling
+    reload that keeps conversations running. Serve moves BEFORE the supervised
+    units here, where ``lop update`` moves them after: the supervised roll
+    restarts the relay this pass runs in, so it has to wait for the reply
+    (``roll_services_after_reply``), and serve cannot.
+
+    THE VERDICT IS READ, NEVER INFERRED: ``state`` comes from the fleet as it
+    stands afterwards (``services.stale_serve_daemons`` — the predicate ``lop
+    services status`` prints ``STALE:`` from), so a refused, failed or
+    timed-out move reads ``stale`` with the remedy and can never read
+    ``moved``. ``moved`` lists only daemons whose instance changed under the
+    stage. States: ``moved`` (something moved, nothing stale), ``current``
+    (nothing needed moving), ``none`` (no serve running), ``stale`` (at least
+    one still on an older build) and ``unknown`` (no build to compare against,
+    or a daemon that is alive but not serving its address).
+
+    A STUCK DAEMON IS NEVER "none" (QA round 1 on #3093, Q1; review m3): a serve
+    that stopped heartbeating is not ``live`` to the registry, so a verdict read
+    from the live set alone said "no serve running" about a process still
+    holding the old build — while ``lop services status`` flagged it. The stuck
+    set is read from ``services.serve_daemon_reports`` (the reports that status
+    renders its rows from), carried as ``stuck`` and given status's own remedy
+    (``lop services reclaim <pid>``); a report that answers as its own instance
+    is SERVING and joins the stale check like any live daemon.
+
+    NEVER RAISES, THE WHOLE BODY (Q2; review m1): the install already succeeded
+    and ``update_completed`` is written from this fact, so anything raised here
+    — prologue included — would turn a promoted build into ``failed`` and lose
+    that row. It reads ``unknown`` with the remedy instead.
+
+    ``budget`` is the tail's remaining time (None = the reload's own nominal
+    wait); the wait is clamped to it so the receipt still lands inside the op's
+    deadline, and a move that has not settled by then reads ``stale``.
+    """
+    try:
+        return _move_serve(budget)
+    except Exception:  # noqa: BLE001 — the install already succeeded; see Q2 above
+        logger.warning("the serve move after the update could not be judged", exc_info=True)
+        return {"state": "unknown", "moved": [], "stale": [], "remedy": SERVE_REMEDY}
+
+
+def _move_serve(budget: float | None) -> dict[str, Any]:
+    """:func:`move_serve`'s body; it may raise, and its caller turns that into ``unknown``."""
+    from local_operator import services
+    from local_operator import update as update_mod
+
+    wait_s = services.RELOAD_WAIT_S if budget is None else min(services.RELOAD_WAIT_S, budget)
+    report = update_mod.move_serve_after_upgrade(wait_s=max(0.0, wait_s))
+    moved = [move.pid for move in report.serve if move.moved]
+    try:
+        reports = services.serve_daemon_reports()
+        # A ``stale`` report's pid is gone (nothing to move or reclaim) and a
+        # SERVING one is judged by the stale check below, so the stuck set is
+        # exactly the rows status prints a `reclaim` remedy for.
+        stuck_reports = [r for r in reports if r.verdict not in (services.SERVING, services.STALE)]
+        answering = [r.record for r in reports if r.verdict == services.SERVING]
+        fleet = _union_by_pid(services.live_serve_daemons(), answering)
+        stale_records = services.stale_serve_daemons(fleet) if fleet else []
+    except Exception:  # noqa: BLE001 — an unreadable fleet is "unknown", not "current"
+        logger.debug("serve fleet unreadable after the move", exc_info=True)
+        fleet, stuck_reports, stale_records = [None], [], None
+    stale = [
+        {"pid": int(record.pid), "version": str(getattr(record, "version", "") or "")}
+        for record in (stale_records or [])
+    ]
+    stuck = [{"pid": int(r.record.pid), "verdict": str(r.verdict)} for r in stuck_reports]
+    if stale_records is None:
+        state = "unknown"
+    elif stale:
+        state = "stale"
+    elif stuck:
+        state = "unknown"
+    elif moved:
+        state = "moved"
+    elif fleet:
+        state = "current"
+    else:
+        state = "none"
+    fact: dict[str, Any] = {"state": state, "moved": moved, "stale": stale}
+    if stuck:
+        fact["stuck"] = stuck
+        # THE STUCK DAEMON DECIDES THE REMEDY, whatever the stale set says (review
+        # round 2 on #3093, m5). A restart cannot move a daemon that is alive but
+        # not serving its address — the stage reports it "cannot be asked to move"
+        # — so naming `restart` for a pool that contains one sends the operator to
+        # a command that will not fix it, while `lop services status` prints this
+        # very `reclaim` on the row above. Stale-only pools keep the restart.
+        fact["remedy"] = f"lop services reclaim {stuck[0]['pid']}"
+    elif state in ("stale", "unknown"):
+        fact["remedy"] = SERVE_REMEDY
+    return fact
+
+
+def _union_by_pid(*groups: Sequence[Any]) -> list[Any]:
+    """Records from several reads, one per pid, first read wins, in pid order."""
+    seen: dict[int, Any] = {}
+    for group in groups:
+        for record in group:
+            seen.setdefault(int(record.pid), record)
+    return [seen[pid] for pid in sorted(seen)]
+
+
+def serve_clause(serve: Mapping[str, Any]) -> str:
+    """The receipt reason's serve clause: silent when there is nothing to say.
+
+    Only ``moved``, ``stale`` and ``unknown`` speak: ``current`` and ``none``
+    are the ordinary outcomes, and a sentence on every receipt would train the
+    reader to skip the one that matters.
+
+    SHORT AND PLACED FIRST (QA round 1 on #3093, Q4): the origin keeps
+    ``rollouts.DETAIL_CAP`` characters of the reason, and a clause appended
+    after named busy sessions was cut mid-word through its own remedy. The
+    receipt puts this clause straight after the version sentence, it names at
+    most :data:`SERVE_NAMED` pids (the structured ``stale``/``stuck`` lists
+    carry every one), and "when checked" is literal: with no tail budget left a
+    signalled daemon may still move after the receipt (review n1).
+    """
+    state = str(serve.get("state") or "")
+    remedy = str(serve.get("remedy") or SERVE_REMEDY)
+    if state == "moved":
+        return f"; serve moved onto the new build ({len(serve.get('moved') or [])} daemon(s))"
+    if state == "stale":
+        named = _name_pids(
+            serve.get("stale") or [],
+            lambda row: f"pid {row.get('pid')} on {row.get('version') or 'an older build'}",
+        )
+        return f"; serve is STALE ({named}), not moved when checked — run `{remedy}`"
+    if state == "unknown" and serve.get("stuck"):
+        named = _name_pids(serve.get("stuck") or [], lambda row: f"pid {row.get('pid')}")
+        return f"; serve {named} is not serving and was not moved — run `{remedy}`"
+    if state == "unknown":
+        return f"; serve could not be checked against the new build — run `{remedy}`"
+    return ""
+
+
+#: How many pids the serve clause names before "+N more" (Q4: the sentence is
+#: capped; the structured lists are not).
+SERVE_NAMED = 2
+
+
+def _name_pids(rows: Sequence[Any], name: Callable[[Mapping[str, Any]], str]) -> str:
+    """``a, b`` for the first :data:`SERVE_NAMED` rows, then ``+N more``."""
+    shown = [name(row) for row in rows[:SERVE_NAMED] if isinstance(row, Mapping)]
+    extra = len(rows) - SERVE_NAMED
+    return ", ".join(shown) + (f" +{extra} more" if extra > 0 else "")
+
+
+def serve_audit(serve: Mapping[str, Any]) -> dict[str, Any]:
+    """A serve fact as the audit log's flat keys (its values are scalars and lists).
+
+    Shared by the member's ``update_completed`` row and the origin's
+    ``update_member_state`` row, so the two read the same. ``{}`` for an empty
+    fact: an older member reported none, and the row must not invent one.
+    """
+    state = str(serve.get("state") or "")
+    if not state:
+        return {}
+    fields: dict[str, Any] = {"serve": state}
+    stale = [
+        f"{row.get('pid')}@{row.get('version') or '?'}"
+        for row in serve.get("stale") or []
+        if isinstance(row, Mapping)
+    ]
+    if stale:
+        fields["serve_stale"] = stale
+    stuck = [
+        f"{row.get('pid')}@{row.get('verdict') or '?'}"
+        for row in serve.get("stuck") or []
+        if isinstance(row, Mapping)
+    ]
+    if stuck:
+        fields["serve_stuck"] = stuck
+    if serve.get("remedy"):
+        fields["serve_remedy"] = str(serve["remedy"])
+    return fields
 
 
 def roll_services_after_reply() -> None:
@@ -1029,8 +1248,29 @@ def _execute_validated(
     # re-engage candidates come from (agent review n1 — the call used to sit
     # after the install while its docstring said "at the start of a pass").
     snapshot = live_session_targets(root)
+    # THE BUSY GATE IS THE IN-PLACE SHAPE'S, NOT EVERY SHAPE'S. On the immutable
+    # generation layout the install writes a NEW tree and flips a pointer; a
+    # running runtime keeps importing from its own tree, prune keeps any
+    # generation a live record names, and the refresh tail below asks each
+    # runtime and keeps a busy one where it is. That is the install contract
+    # (docs/INSTALL_TRANSACTIONS.md, "Admission is separate from mutual
+    # exclusion": immutable generations do NOT take this gate) and it is what a
+    # local `lop update` already does — only this mesh path was stricter. The
+    # cost of the stricter rule was measured on a headless worker: a wake-spawned
+    # Librarian parked on an approval nobody could answer held `busy` for a day
+    # and refused every rolling update meanwhile. So on generation layout the
+    # pass proceeds and NAMES what it left on the old build (the receipt is the
+    # only place the operator learns that a session is still on it). The
+    # in-place shape rewrites the tree a running turn imports from, so there
+    # the gate stays exactly as it was.
+    left_behind: list[Any] | None = []
+    shape = install_shape()
     with update_lock(root, target):
-        count, detail = busy_sessions(root)
+        if shape == METHOD_GENERATION:
+            left_behind = busy_records(root)
+            count, detail = 0, ""
+        else:
+            count, detail = busy_sessions(root)
         if count != 0:
             reason = (
                 f"{detail}; the update waits — nothing has been touched"
@@ -1103,14 +1343,6 @@ def _execute_validated(
             "sessions": {"moved": 0, "kept": 0},
             "updated_at": time.time(),
         }
-    _audit_member(
-        server,
-        link,
-        "update_completed",
-        target=target,
-        rollout=rollout,
-        detail={"method": method, "from": current, "version": target_version},
-    )
     # Convergence is outside the installation transaction. Reconcile current
     # AFTER it: the promoted generation and this relay's serving image are not
     # necessarily what a fresh process will load when the receipt is composed.
@@ -1124,6 +1356,35 @@ def _execute_validated(
     # (agent review round 1, M2).
     tail_budget = None if remaining is None else max(0.0, remaining - TAIL_RESERVE_S)
     tail_started = time.monotonic()
+    # THE SERVE DAEMON MOVES IN THE PASS, BEFORE THE RECEIPT (2026-10-28). It
+    # rides the update_completed row, so the row that says "installed" also says
+    # whether `lop serve` came along; see `move_serve`.
+    #
+    # THE TAIL IS NOW serve -> sweep -> re-engage, ONE BUDGET (review m2). Serve
+    # takes at most `services.RELOAD_WAIT_S` (45 s) of it, first, so on an
+    # install that lands near the deadline the runtimes get what is left. That is
+    # a deliberate order, not a partition: the stage's wait is clamped to the tail,
+    # a sweep short of time degrades to its notes, and a per-phase reservation
+    # would be a budget design of its own (deferred).
+    #
+    # WHAT THE BUDGET DOES NOT COVER (review round 2 on #3093, n3): `move_serve`
+    # also probes each serve daemon's address afterwards, and those probes are NOT
+    # charged to `tail_budget` — a bounded per-daemon cost (the identity probe's
+    # own timeout, ~1 s each), not a share of the deadline. "Fits by construction"
+    # holds for the STAGE's wait only, so the receipt can land a second or two
+    # later than the arithmetic above suggests.
+    serve = move_serve(budget=tail_budget)
+    _audit_member(
+        server,
+        link,
+        "update_completed",
+        target=target,
+        rollout=rollout,
+        detail={"method": method, "from": current, "version": target_version} | serve_audit(serve),
+    )
+    if tail_budget is not None:
+        tail_budget = max(0.0, tail_budget - (time.monotonic() - tail_started))
+        tail_started = time.monotonic()
     outcomes, sweep_note = refresh_runtimes(root, budget=tail_budget)
     moved, kept = count_pass_outcomes(outcomes)
     left = (
@@ -1139,6 +1400,9 @@ def _execute_validated(
             f"this pass promoted {target_version}; current is now "
             f"{now_current or 'unconfirmed'}; serving relay is {serving or 'unconfirmed'}"
         )
+    # Serve's clause FIRST, before the session clauses (Q4): the origin caps the
+    # reason, and the remedy is the part a reader of a remote node must not lose.
+    reason += serve_clause(serve)
     if outcomes:
         reason += f"; {moved} session(s) retired for the new build, {kept} kept"
         if other > 0:
@@ -1148,6 +1412,13 @@ def _execute_validated(
     for note in (sweep_note, engage_note):
         if note:
             reason += f" ({note})"
+    if left_behind:
+        reason += (
+            f"; {len(left_behind)} busy session(s) stay on {current or 'the previous build'} "
+            f"until they settle: {name_busy_records(left_behind)}"
+        )
+    elif left_behind is None:
+        reason += "; this device could not read its session registry to name busy sessions"
     receipt = {
         "state": "done",
         "code": "",
@@ -1158,6 +1429,19 @@ def _execute_validated(
         "now_current": now_current,
         "serving": serving,
         "sessions": {"moved": moved, "kept": kept},
+        # Structured twin of the reason's "stay on … until they settle" clause,
+        # for a `--json` reader: the ids the pass deliberately did not wait for.
+        "left_busy": [
+            {
+                "session_id": str(getattr(r, "session_id", "")),
+                "name": str(getattr(r, "conversation_name", "") or ""),
+                "pending": str(getattr(r, "pending", "") or ""),
+            }
+            for r in (left_behind or [])
+        ],
+        # Structured twin of the reason's serve clause: whether `lop serve` on
+        # this device is on the new build, and the remedy when it is not.
+        "serve": serve,
         "updated_at": time.time(),
     }
     # THE RECEIPT VALUE IS COMPOSED BEFORE THE ROLL IS STARTED (agent review
@@ -1390,6 +1674,16 @@ def update_peer(server: "RelayServer", device_id: str, *, rollout: str = "") -> 
         "method": str(detail_out.get("method") or ""),
         "version": str(detail_out.get("version") or ""),
         "sessions": detail_out.get("sessions") or {"moved": 0, "kept": 0},
+        # The member's serve fact (2026-10-28): whether `lop serve` there came
+        # along. Absent from an older member's answer — `{}` then, never a guess.
+        "serve": (
+            dict(detail_out["serve"]) if isinstance(detail_out.get("serve"), Mapping) else {}
+        ),
+        # The member's structured twin of its "stay on … until they settle"
+        # clause (QA round 1 on #3028, Q2): rebuilt field by field above, this
+        # answer dropped it, so no `--json` reader and no rollout record ever
+        # saw which sessions a generation-layout update left behind.
+        "left_busy": list(detail_out.get("left_busy") or []),
         "device_id": device_id,
         "name": label,
     }

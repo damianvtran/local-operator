@@ -1,0 +1,17 @@
+wire.memory.title | Memory | 记忆
+wire.memory.command | Inspect, search, correct or forget scoped memory | 查看、搜索、纠正或遗忘限定范围内的记忆
+wire.memory.description | Bounded local recall and best-effort compaction capture; retrieved facts are untrusted. | 有界本地召回与尽力而为的压缩采集；检索出的事实不可信。
+wire.memory.enabled.label | Scoped memory | 限定范围的记忆
+wire.memory.enabled.help | Enable the bounded SQLite memory bank. Turning this off does not erase retained facts. | 启用有界SQLite记忆库。关闭不会清除已保留的事实。
+wire.memory.capture.label | Compaction capture | 压缩采集
+wire.memory.capture.help | Capture decisions, goals and progress after committed compactions; context-full also reuses its existing summary. Explicit stores remain the guaranteed route for goals and decisions. | 每次压缩提交后采集决策、目标和进展；context-full还会复用其已有摘要。显式存储仍是保留目标和决策的保障途径。
+wire.memory.capture.locators.label | Capture locator context | 采集定位符上下文
+wire.memory.capture.locators.help | Also keep paths, URLs and ids, but only as context attached to a captured decision, goal or progress note in the same section; never as facts of their own. Off by default. Turning this off leaves existing facts untouched. | 还会保留路径、URL和ID，但仅作为同一区块中所采集的决策、目标或进展笔记的附加上下文，绝不作为独立事实。默认关闭。关闭后不影响已有事实。
+wire.memory.suggest.label | Recall suggestions | 召回建议
+wire.memory.suggest.help | Suggest up to three untrusted titles from the current user message, within a separate 180-token cap. No network or embedding request. | 根据当前用户消息建议最多三个不可信标题，使用单独的180-token上限。不发起网络或嵌入请求。
+wire.memory.sync.label | Trusted-peer memory sync | 受信任对等设备记忆同步
+wire.memory.sync.help | Incrementally share selected scopes with existing paired receiver-admin peers supporting memory-sync-v1. This includes session memories without copying transcripts. | 向已配对、在接收端具有admin权限且支持memory-sync-v1的现有对等设备增量共享所选范围。包括会话记忆，但不复制会话记录。
+wire.memory.scopes.label | Memory scopes to sync | 要同步的记忆范围
+wire.memory.scopes.help | Only these namespaces are shared. Session, team and agent owners remain exact registry/session IDs; all four scopes are supported. | 仅共享这些命名空间。会话、团队和智能体所有者仍使用精确的注册表/会话ID；支持全部四种范围。
+wire.memory.exclude.label | Excluded memory peers | 排除的记忆对等设备
+wire.memory.exclude.help | Device IDs excluded from memory replication. This does not change pairing, trust or enrollment grants. | 不参与记忆复制的设备ID。这不会更改配对、信任或加入授权。

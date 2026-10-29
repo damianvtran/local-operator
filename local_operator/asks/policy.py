@@ -165,6 +165,17 @@ OPEN_ASK_CAP = 8
 #: it is a product call for the owner, flagged in the disposition.
 BRIDGE_ASK_CAP = 8
 
+#: THE RELAY BOUND (#2520): how many open relays ONE watcher session may hold.
+#:
+#: Deliberately SEPARATE from ``OPEN_ASK_CAP`` above: relays are not the model's
+#: own asking capacity — the model asked nothing, it is pointing at questions
+#: another session owns — so they must neither consume that budget nor be
+#: squeezed by it. The bound exists for the same reason the ask cap does (a
+#: relay loop is attention the human pays), and it is kept small because each
+#: open relay is a card that can settle under the user from a session they are
+#: not looking at.
+RELAY_CAP = 8
+
 #: The session's earliest-deadline timer ticks at most this often
 #: (``harness/wake.py MAX_ARM_MS``): a deadline hours out re-checks the wall
 #: clock every minute rather than arming one long asyncio timeout, so a
@@ -252,6 +263,7 @@ __all__ = [
     "OPEN_ASK_CAP",
     "BRIDGE_ASK_CAP",
     "PROJECTION_CAP",
+    "RELAY_CAP",
     "URGENT_MAX_S",
     "enabled",
     "is_urgent",

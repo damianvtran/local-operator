@@ -1,0 +1,9 @@
+{
+  "cli.refresh_help.refresh": "请求运行中的会话在下一个边界切换至磁盘上的构建（不发信号）",
+  "cli.refresh_help.target": "conversation-name / session-id / pid / cwd子串（不区分大小写）",
+  "cli.refresh_help.pid": "按确切pid指定目标",
+  "cli.refresh_help.session": "按确切会话ID指定目标",
+  "cli.refresh_help.all": "请求此机器上的每个活动会话（无需确认：不会结束任何会话）",
+  "cli.refresh_help.json": "每个目标的机器可读结果",
+  "cli.refresh_help.timeout": "等待各会话回复的时间（默认10）"
+}

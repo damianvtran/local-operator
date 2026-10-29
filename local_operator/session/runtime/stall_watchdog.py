@@ -1423,6 +1423,7 @@ class _Armed:
         "due_at",
         "due_seconds",
         "registered_signal",
+        "fatal_report",
         "evidence_size",
         "evidence_callbacks",
         "held_fires",
@@ -1593,6 +1594,13 @@ class _Armed:
         #: reachable by signal" — NEVER so it can be unregistered: see
         #: :func:`_register_evidence_signal` on why nothing here touches the slot again.
         self.registered_signal: int | None = None
+        #: Whether THIS arm installed faulthandler's FATAL-SIGNAL handler on the
+        #: dump handle. Only the entry point asks for it (:func:`arm`'s
+        #: ``fatal_report`` argument), so an in-process host that arms to test the
+        #: bound does not take over the pytest process's crash reporting. When true,
+        #: :func:`disarm` disables it before closing the handle; a fatal signal then
+        #: leaves a stack instead of a bare rc=-11.
+        self.fatal_report = False
         #: The dump file's size as of the last look that could tell a signal dump apart
         #: (:func:`_note_evidence_dump`) — separate from ``arm_size``, which the held-fire
         #: policy re-baselines, so an observation here cannot disturb that policy.
@@ -2076,6 +2084,7 @@ def arm(
     pid: int | None = None,
     probe: "ProgressProbe | None" = None,
     busy: "BusyProbe | None" = None,
+    fatal_report: bool = False,
 ) -> bool:
     """Arm the process's stall bound. Returns whether it is now armed.
 
@@ -2095,6 +2104,18 @@ def arm(
     out 900 s); an explicit ``seconds=`` is a statement about THIS process's whole
     arming and therefore stands as both bounds unless ``boot_seconds=`` says
     otherwise.
+
+    ``fatal_report`` installs CPython's fatal-signal handler (SIGSEGV/SIGBUS/
+    SIGABRT/SIGFPE/SIGILL) ON THIS DUMP, so a native crash of an armed runtime
+    leaves the thread and the frame it died in beside the stall evidence instead
+    of a bare ``rc=-11`` with an empty stderr. It is OPT-IN and passed by the
+    entry point alone: the handler is process-global, and an in-process host that
+    calls this to exercise the bound (every mechanism cell, the whole suite) must
+    not take over pytest's own crash reporting or leave a handler pointing at a
+    temp file after the test. When the process ALREADY has faulthandler enabled
+    (``PYTHONFAULTHANDLER=1``, which several spawned-child rigs set) this leaves
+    it alone rather than repointing it: the crash still lands in that rig's
+    captured stderr, and there is no supported way to restore the previous file.
 
     Never raises. A diagnostic that cannot be armed must leave the runtime
     otherwise untouched: an unwritable log directory is a reading of "no dump
@@ -2268,6 +2289,8 @@ def arm(
             # to and only after the deadline is settled: a runtime that cannot run
             # Python has no leg of this module left, and this is the one way in.
             _register_evidence_signal(to_arm)
+            if fatal_report:
+                _enable_fatal_report(to_arm)
         except (OSError, ValueError, OverflowError, RuntimeError):
             logger.warning("stall watchdog could not arm; no dump will be written", exc_info=True)
             # The header this call just wrote would otherwise read as evidence of
@@ -2498,6 +2521,61 @@ def _register_evidence_signal(armed: "_Armed") -> None:
         logger.warning("stall watchdog could not register its evidence signal", exc_info=True)
         return
     armed.registered_signal = signum
+
+
+def _enable_fatal_report(armed: "_Armed") -> bool:
+    """Point CPython's fatal-signal handler at this armed dump.
+
+    WHY THIS EXISTS, measured: a real runtime child died ``rc=-11`` (SIGSEGV)
+    before it published its session (CI run 39411075050, job 118592852441,
+    Python 3.12.15) with an EMPTY stderr and no stack anywhere. The boot
+    watchdog had armed, so the one artifact a reader opens after a runtime
+    death existed — and it held only the header, because nothing had installed
+    faulthandler's fatal-signal handler. A native death was indistinguishable
+    from a kill with no reading.
+
+    The report goes to the SAME handle the stall dump uses, under the module's
+    existing file policy, so the stack survives the process and is found by the
+    reader that already looks there.
+
+    ``all_threads=False`` IS A REVIEW CORRECTION, not a cost choice. An earlier
+    revision asked for every thread, which is the without-GIL
+    ``_Py_DumpTracebackThreads`` walk python/cpython#116008 names; its thread list
+    is head-inserted, so the faulting main thread can be dumped LAST and a second
+    fault loses the very stack this path exists to keep. A fatal signal's handler
+    runs on the thread the signal is DELIVERED to: the faulting thread for a
+    hardware fault, and the kernel's chosen thread for a kill-sent signal. For the
+    class this path exists for — a hardware fault — that is the thread that
+    faulted, so one thread is both the safe and the sufficient dump; the witness
+    cell asserts its frame.
+
+    NEVER RAISES. A diagnostic that cannot install its leg leaves the runtime
+    otherwise untouched; the caller's arm still succeeds.
+    """
+    if faulthandler.is_enabled():
+        logger.info(
+            "faulthandler already enabled; a fatal signal will not be written to %s",
+            armed.path,
+        )
+        return False
+    try:
+        faulthandler.enable(file=armed.handle, all_threads=False)
+    except (OSError, RuntimeError, ValueError, MemoryError):
+        # A partial enable can leave fatal handlers installed on the handle this
+        # arm is about to close. The arm did not agree to own them, so clear them
+        # here rather than leave a stale descriptor behind the failure.
+        try:
+            faulthandler.disable()
+        except (OSError, RuntimeError, ValueError):  # pragma: no cover — best effort
+            pass
+        logger.warning(
+            "stall watchdog could not install the fatal-signal report on %s",
+            armed.path,
+            exc_info=True,
+        )
+        return False
+    armed.fatal_report = True
+    return True
 
 
 def notify_on_evidence_signal(callback: "Callable[[], object]") -> None:
@@ -3686,6 +3764,14 @@ def disarm() -> None:
         # records. The signal leg is left installed: it would write into a file this call
         # is unlinking (so a stray signal after a clean exit produces nothing a reader can
         # find) and it dies with the process, which is the only moment it needs to.
+        #
+        # THE FATAL HANDLER IS DIFFERENT: it holds a bare descriptor, so disabling it
+        # BEFORE the close is what keeps a later crash from writing into a reused fd.
+        # Only the arm that installed it clears it (``fatal_report``), never one that
+        # inherited an enabled handler from its environment.
+        if armed.fatal_report:
+            faulthandler.disable()
+            armed.fatal_report = False
         try:
             armed.handle.close()
         except OSError:
@@ -3720,6 +3806,23 @@ def is_armed() -> bool:
     """Whether THIS process holds an armed stall bound through this module."""
     with _LOCK:
         return _ARMED is not None
+
+
+def evidence_signal() -> int | None:
+    """The signal this process's armed dump can be pulled with, or ``None``.
+
+    THE HANDLER, NOT THE BOUND, and review round 2 found the difference: ``arm``
+    can succeed while :func:`_register_evidence_signal` failed (it warns and leaves
+    ``registered_signal`` unset). A readiness line that said "installed" from
+    :func:`is_armed` alone was false in exactly that case — the signal still had
+    its default fatal disposition — and a later probe trusting it would kill the
+    child. This accessor is the fact such a line must read.
+
+    ``None`` also covers Windows (no SIGUSR1) and a process that never armed.
+    """
+    with _LOCK:
+        armed = _ARMED
+        return None if armed is None else armed.registered_signal
 
 
 def announce() -> None:

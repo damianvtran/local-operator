@@ -1,0 +1,19 @@
+# cli.mobile_help — sampled en/zh pairs for attestation zhca1
+# 4/15 keys; all >120 chars and all plurals included
+
+## cli.mobile_help.daemon_action  [85 chars]
+EN: {action, select, start{Start} stop{Stop} restart{Restart} other{{action}}} the daemon
+ZH: {action, select, start{启动} stop{停止} restart{重启} other{{action}}}守护进程
+
+## cli.mobile_help.install  [44 chars]
+EN: Install the daemon, password and LaunchAgent
+ZH: 安装守护进程、密码和LaunchAgent
+
+## cli.mobile_help.logs  [40 chars]
+EN: Tail the daemon's and the runtimes' logs
+ZH: 跟踪守护进程和运行时的日志末尾
+
+## cli.mobile_help.status  [37 chars]
+EN: Daemon health, gate and live sessions
+ZH: 守护进程健康状态、访问关卡和活动会话
+

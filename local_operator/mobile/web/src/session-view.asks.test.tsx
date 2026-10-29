@@ -148,8 +148,12 @@ describe("SessionScreen and queued asks", () => {
 		render(<SessionScreen sessionId="s1" />);
 		expect(screen.getByTestId("ask-dock")).toBeTruthy();
 		expect(screen.queryByTestId("pending-card")).toBeNull();
-		expect(screen.getByRole("button", { name: /approvals in this session/ })).toBeTruthy();
+		/* The header no longer duplicates the ask door: the dock is the labelled
+		   entry, and a queued ask is not a gate, so no approvals control either. */
+		expect(screen.queryByRole("button", { name: /queued asks in this session/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /approvals in this session/ })).toBeNull();
 		expect(screen.queryByText("needs you")).toBeNull();
+		expect(screen.getByRole("button", { name: "session menu" })).toBeTruthy();
 	});
 
 	it("still renders the mirrored card when the runtime predates asks (the skew window)", () => {
@@ -179,7 +183,7 @@ describe("SessionScreen and queued asks", () => {
 		   1, D1) and is `aria-hidden` + disabled, so the ACTIONABLE field is the
 		   one without the marker. */
 		const field = screen
-			.getAllByPlaceholderText("Message…")
+			.getAllByPlaceholderText("Ask anything…")
 			.find((el) => !el.hasAttribute("aria-hidden")) as HTMLElement;
 		fireEvent.change(field, { target: { value: "an ordinary message" } });
 		fireEvent.keyDown(field, { key: "Enter" });
@@ -195,15 +199,14 @@ describe("SessionScreen and queued asks", () => {
 		);
 	});
 
-	it("opens the answer surface from the header entry", async () => {
+	it("opens the answer surface from the dock, the screen's only ask door", async () => {
 		render(<SessionScreen sessionId="s1" />);
 		slot = { projection: projection({ asks: [ask()], asks_open: 1 }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
-		/* The label states the UNIT the bar states (agent review round 1, R3 =
-		   design round 1, N3): the outstanding set, counted in QUESTIONS. */
-		fireEvent.click(
-			screen.getByRole("button", { name: /queued asks in this session \(1 question waiting\)/ }),
-		);
+		/* The `? N` header entry is gone; the dock above the composer was already
+		   the labelled door ("1 question waiting · <question>") and remains it. */
+		expect(screen.queryByRole("button", { name: /queued asks in this session/ })).toBeNull();
+		fireEvent.click(screen.getByTestId("ask-dock"));
 		await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
 	});
 
@@ -251,22 +254,25 @@ describe("SessionScreen and queued asks", () => {
 		expect(dialog.querySelector('[data-ask-id="mine-1"]')).not.toBeNull();
 	});
 
-	it("gives a lapsed-only queue a quiet header entry that does not say waiting", () => {
+	it("keeps a lapsed-only queue on the quiet dock, not in the header", () => {
 		render(<SessionScreen sessionId="s1" />);
 		slot = {
 			/* #2388: the runtime counts a timed-out ask settled, so the tally is 0 while
-			   the row rides; the entry is gated on the ROWS, so the Dismiss door stays. */
+			   the row rides; the dock is gated on the ROWS, so the Dismiss door stays. */
 			projection: projection({ asks: [ask({ status: "timed_out" })], asks_open: 0 }),
 			connected: true,
 		};
 		render(<SessionScreen sessionId="s1" />);
-		const entry = screen.getByRole("button", { name: "queued asks in this session (1 timed out)" });
-		expect(entry.textContent).toBe("? 1");
-		expect(entry.className).not.toMatch(/text-accent/);
-		expect(screen.queryByRole("button", { name: /waiting/ })).toBeNull();
+		const dock = screen.getByTestId("ask-dock");
+		expect(dock.textContent).toContain("1 question timed out");
+		/* The quiet register is the dock's own: no accent border for a queue with
+		   nothing to answer. */
+		expect(dock.className).toContain("bg-surface");
+		expect(screen.queryByRole("button", { name: /queued asks in this session/ })).toBeNull();
+		expect(screen.queryByText("? 1")).toBeNull();
 	});
 
-	it("counts only the offered questions in the header when lapsed ones sit beside them", () => {
+	it("counts only the offered questions on the dock when lapsed ones sit beside them", () => {
 		render(<SessionScreen sessionId="s1" />);
 		slot = {
 			projection: projection({
@@ -276,9 +282,15 @@ describe("SessionScreen and queued asks", () => {
 			connected: true,
 		};
 		render(<SessionScreen sessionId="s1" />);
-		expect(
-			screen.getByRole("button", { name: "queued asks in this session (1 question waiting)" }),
-		).toBeTruthy();
+		/* The tray's pill is the COMPACT form (operator finding B: the long
+		   sentence pushed the tray past one line). Both forms still count only
+		   the OFFERED question: the visible `1 question`, and the accessible
+		   name, which keeps the full existing sentence. */
+		const dock = screen.getByTestId("ask-dock");
+		expect(dock.getAttribute("aria-label")).toBe("1 question waiting");
+		expect(dock.textContent).toContain("1 question");
+		expect(dock.textContent).not.toContain("2 question");
+		expect(screen.queryByRole("button", { name: /queued asks in this session/ })).toBeNull();
 	});
 
 	it("collapses the sheet on Back instead of leaving the conversation", async () => {
@@ -296,4 +308,47 @@ describe("SessionScreen and queued asks", () => {
 		back.mockRestore();
 	});
 
+});
+
+describe("SessionScreen header", () => {
+	it("is back, title and the menu — nothing else at rest", () => {
+		slot = { projection: projection(), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+		const header = document.querySelector("header") as HTMLElement;
+		expect(header.textContent).toContain("Asks");
+		/* The title block itself is the third button — the status dot's control,
+		   named by its visible words (no `aria-label`), which opens the health
+		   sheet. It adds no control to the row: it IS the title. */
+		expect(
+			Array.from(header.querySelectorAll("button")).map((button) =>
+				button.getAttribute("aria-label") ?? `health:${button.getAttribute("data-health")}`,
+			),
+		).toEqual(["Back to conversations", "health:live", "session menu"]);
+		/* The removed controls stay removed: the star pinned, `? N` duplicated the
+		   dock, and `[wide]` was an unlabelled bordered toggle. */
+		expect(screen.queryByRole("button", { name: "wide view" })).toBeNull();
+		expect(screen.queryByText("needs you")).toBeNull();
+	});
+
+	it("shows `needs you` only while a gate actually blocks", () => {
+		const blocking = {
+			request_id: "req-1",
+			kind: "approval" as const,
+			title: "bash",
+			detail: "rm -rf build",
+			options: [],
+			secret: false,
+			question_index: 0,
+			question_total: 1,
+		};
+		slot = {
+			projection: projection({ pending: blocking, pending_count: 1 }),
+			connected: true,
+		};
+		render(<SessionScreen sessionId="s1" />);
+		const needs = screen.getByRole("button", {
+			name: "Approve — a request is waiting for you",
+		});
+		expect(needs.textContent).toBe("Approve");
+	});
 });

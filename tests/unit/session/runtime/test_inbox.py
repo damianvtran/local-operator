@@ -561,6 +561,10 @@ async def test_a_twice_spooled_owner_row_steers_once_inside_the_first_turn(tmp_p
         )
 
     session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    # PRODUCTION SHAPE: the drain runs at a turn boundary. An idle session would
+    # let `steer`'s idle arm open a rival turn whose opening drain takes the row,
+    # which is a test artifact rather than the mid-turn fold this cell names.
+    session._is_streaming = True
     await session._drain_spooled_peer_inbox()
 
     queued = session.queued_steering()
@@ -614,6 +618,8 @@ async def test_a_spooled_harness_continuation_steers_with_its_stamp(tmp_path: Pa
     )
 
     session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    # PRODUCTION SHAPE: this drain is the turn-boundary fold, not an idle arm.
+    session._is_streaming = True
     await session._drain_spooled_peer_inbox()
 
     queued = session.queued_steering()

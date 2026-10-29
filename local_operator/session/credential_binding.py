@@ -125,6 +125,17 @@ def _as_float(value: Any) -> float:
         return 0.0
 
 
+def identity_label_for(identity: Mapping[str, str] | None) -> str:
+    """The public spelling of :func:`_identity_label`, for callers outside this module.
+
+    The mesh client names a resting borrowed account by this label
+    (``MeshCredentialClient._cool_lent_row``), and it must be the SAME label the
+    binding row records, so an operator reading the incident and the binding
+    notice sees one name for one account.
+    """
+    return _identity_label(identity)
+
+
 def _identity_label(identity: Mapping[str, str] | None) -> str:
     """The operator-facing account string from a grant's identity dict.
 
@@ -162,6 +173,15 @@ class CredentialBinding:
     policy: str = POLICY_LOCAL_FIRST
     bound_at: float = field(default_factory=time.time)
     writer: str = ""
+    #: A STABLE account identity, independent of the store row id — today only
+    #: ``mesh:<owner_device>:<key>`` for a row that is a mesh COPY (read off its
+    #: origin marker). WHY: a sync re-copy replaces the row (insert new, sweep
+    #: old), so ``credential_id`` changes while the account does not; keyed on
+    #: the id, every re-copy read as an account switch and journaled a notice
+    #: (the live mesh showed one per 15 s tick). ``""`` means "no stable
+    #: identity known" and the id stays the comparison, exactly as before.
+    #: Optional in the schema: omitted when empty, so older rows read unchanged.
+    account: str = ""
 
     def __post_init__(self) -> None:
         """Refuse the three shapes that must never reach a transcript row.
@@ -208,6 +228,8 @@ class CredentialBinding:
         }
         if self.identity_label:
             details["identity_label"] = self.identity_label
+        if self.account:
+            details["account"] = self.account
         return details
 
     @classmethod
@@ -249,6 +271,7 @@ class CredentialBinding:
                 policy=policy,
                 bound_at=_as_float(details.get("bound_at")),
                 writer=str(details.get("writer") or ""),
+                account=str(details.get("account") or "")[:256],
             )
         except ValueError:
             # Defensive: every field above is pre-validated, so this only fires
@@ -330,12 +353,55 @@ def _binding_changed(previous: CredentialBinding, candidate: CredentialBinding) 
     ``policy``. ``bound_at``/``writer``/``owner_device_name`` are provenance,
     not identity, so a rename or a retry never appends a row.
     """
+    if previous.account and candidate.account and previous.account == candidate.account:
+        # THE SAME ACCOUNT ON A REPLACED ROW (a sync re-copy): the row id is a
+        # storage fact, not an identity, so it is not news here.
+        return (
+            previous.owner_device != candidate.owner_device
+            or previous.identity_label != candidate.identity_label
+            or previous.policy != candidate.policy
+        )
     return (
         previous.owner_device != candidate.owner_device
         or previous.credential_id != candidate.credential_id
         or previous.identity_label != candidate.identity_label
         or previous.policy != candidate.policy
+        or previous.account != candidate.account
     )
+
+
+def is_same_account(previous: CredentialBinding, candidate: CredentialBinding) -> bool:
+    """Whether an appended change row still names the SAME account (no notice due).
+
+    Both snapshots must carry a positive, equal stable identity on the same
+    recording device. An empty historical account may be an ordinary local
+    login, not a pre-upgrade mesh copy. The recorder resolves that old row's
+    provenance when available; absence alone must never suppress a real switch.
+    """
+    if previous.owner_device != candidate.owner_device or not candidate.account:
+        return False
+    return bool(previous.account) and previous.account == candidate.account
+
+
+def mesh_copy_account(row: Any) -> str:
+    """``mesh:<owner>:<key>`` for a store row that is a mesh copy, else ``""``.
+
+    Read off the origin marker the sync engine stamps on every applied copy
+    (``sync.MESH_ORIGIN_KEY``, spelled literally here because this module must
+    not import the network package at load). Duck-typed and never raising: an
+    unreadable row simply has no stable identity.
+    """
+    try:
+        origin = (getattr(row, "data", None) or {}).get("mesh_origin")
+    except AttributeError:
+        return ""
+    if not isinstance(origin, Mapping):
+        return ""
+    owner = str(origin.get("owner_device") or "")
+    key = str(origin.get("key") or "")
+    if not owner or not key:
+        return ""
+    return f"mesh:{owner}:{key}"[:256]
 
 
 class CredentialBindingRecorder:
@@ -386,6 +452,10 @@ class CredentialBindingRecorder:
         #: (:meth:`set_change_handler`); ``None`` — every other construction
         #: site — journals nothing.
         self._on_change = on_change
+        #: ``credential_id -> stable account`` for a LOCAL serve (see
+        #: :attr:`CredentialBinding.account`), installed at attach time from the
+        #: session's auth store; ``None`` keeps the id as the only identity.
+        self._account_for: Callable[[int], str] | None = None
         #: The newest candidate per provider, waiting for the flush.
         self._observed: dict[str, CredentialBinding] = {}
         #: The newest KNOWN row per provider; membership of this dict answers
@@ -394,6 +464,17 @@ class CredentialBindingRecorder:
         self._rows: dict[str, CredentialBinding | None] = {}
         self._task: asyncio.Task[None] | None = None
         self._dirty = False
+        #: ``credential_id -> sign-in label`` for a LOCAL serve, installed at
+        #: attach time beside :attr:`_account_for`. Read ONLY to word the
+        #: account-change notice (see :meth:`_labelled`); it never reaches the
+        #: row, so a row's write rule and its bytes are unchanged by it.
+        self._label_for: Callable[[int], str] | None = None
+        #: Set by the first failed row write. WHY A LATCH: the write runs after
+        #: every serve that carries news, and a full disk fails every one of
+        #: them; a warning per resolve is a log flood on exactly the machine
+        #: that has no room for one. One warning per recorder says it; the
+        #: in-memory state still advances so the same account is not retried.
+        self._write_failure_warned = False
 
     def set_change_handler(
         self,
@@ -407,6 +488,45 @@ class CredentialBindingRecorder:
         nothing. Same best-effort contract as the constructor's ``on_change``.
         """
         self._on_change = handler
+
+    def set_account_resolver(self, resolver: Callable[[int], str] | None) -> None:
+        """Install the local row -> stable account lookup (best effort, never raises)."""
+        self._account_for = resolver
+
+    def set_label_resolver(self, resolver: Callable[[int], str] | None) -> None:
+        """Install the local row -> sign-in label lookup (best effort, never raises)."""
+        self._label_for = resolver
+
+    def _labelled(self, binding: CredentialBinding) -> CredentialBinding:
+        """``binding`` with its sign-in label filled in, for the NOTICE only.
+
+        A local row carries no label (see :meth:`_local_binding`), so before
+        this every local account change rendered the same sentence — "now
+        using the <provider> login on <device>" — whichever account it named,
+        and a real switch could not be told from a spurious one. The label is
+        resolved here, at notice time, from the row it names; the stored row
+        is untouched, so its write rule (and every existing transcript) reads
+        exactly as before. A borrow already carries the grant's label.
+        """
+        resolver = self._label_for
+        if binding.identity_label or resolver is None or binding.owner_device != self.device_id:
+            return binding
+        try:
+            label = str(resolver(binding.credential_id) or "")
+        except Exception:  # noqa: BLE001 — a notice's wording must not fail the write
+            logger.debug("credential binding label lookup failed", exc_info=True)
+            return binding
+        return replace(binding, identity_label=label) if label else binding
+
+    def _account(self, credential_id: int) -> str:
+        resolver = self._account_for
+        if resolver is None:
+            return ""
+        try:
+            return str(resolver(credential_id) or "")[:256]
+        except Exception:  # noqa: BLE001 — a bookkeeping read must not fail a serve
+            logger.debug("credential binding account lookup failed", exc_info=True)
+            return ""
 
     def recall_for(self, provider: str) -> CredentialBinding | None:
         """The newest row this session carries for ``provider``, read FRESH.
@@ -428,6 +548,7 @@ class CredentialBindingRecorder:
         provider: str,
         owner_device: str,
         credential_id: int | None,
+        session_id: str = "",
         owner_device_name: str = "",
         identity: Mapping[str, str] | None = None,
     ) -> None:
@@ -437,9 +558,20 @@ class CredentialBindingRecorder:
         store answered): the owner is then this device. A borrow passes the
         grant ref's owner and its identity dict.
 
+        ``session_id`` is the session whose resolve served, and a report for
+        any OTHER session is dropped. The sink is one slot on a store that the
+        session SHARES with its in-process subagents (``SessionStreamFn.fork``
+        reuses the parent's store), so without this filter a child pinned to
+        another account wrote that account into the parent's binding and the
+        parent's next resolve wrote its own back — thousands of alternating
+        rows, each announced as an account change, while the parent never moved.
+        A report without an id cannot be attributed and is dropped too.
+
         Never raises and never blocks: a malformed report is debug-logged and
         dropped, because this runs inside a serve that must not fail with it.
         """
+        if not session_id or session_id != self.session_id:
+            return
         try:
             if owner_device:
                 if credential_id is None:
@@ -502,6 +634,7 @@ class CredentialBindingRecorder:
             owner_device=self.device_id,
             owner_device_name=self.device_name,
             credential_id=credential_id,
+            account=self._account(credential_id),
         )
 
     # -- coalescing (the spend ledger's persist discipline) ------------------
@@ -545,6 +678,13 @@ class CredentialBindingRecorder:
                 else:
                     previous = recall_for(self._transcript, provider)
                 if previous is not None:
+                    if not previous.account:
+                        # An empty historical field proves NOTHING about account
+                        # identity. Only upgrade it when its actual store row is
+                        # still readable and carries the same stable provenance.
+                        # If sync already swept that row, prefer one honest
+                        # change signal to silently swallowing a local→mesh switch.
+                        previous = replace(previous, account=self._account(previous.credential_id))
                     # Replacement state: the new snapshot carries the existing
                     # policy forward. This build cannot EMIT ``owner`` (D2); it
                     # must not DROP one a mixed fleet wrote.
@@ -554,8 +694,31 @@ class CredentialBindingRecorder:
                         continue
                 await record(self._transcript, candidate)
                 self._rows[provider] = candidate
+            except OSError:
+                # ENOSPC, EROFS, a vanished directory: the row is lost, the turn
+                # is not. The newest state still advances IN MEMORY, so the
+                # same account served again is no news and is not re-written on
+                # every resolve; only a genuinely different account tries the
+                # disk again. Surfaced once per recorder (see the latch), and
+                # never announced — a notice for a change that could not be
+                # recorded would be journaled onto the same full disk.
+                self._rows[provider] = candidate
+                if not self._write_failure_warned:
+                    self._write_failure_warned = True
+                    logger.warning(
+                        "could not record the credential binding for session %s; "
+                        "account changes will not be journaled until the write succeeds",
+                        self.session_id,
+                        exc_info=True,
+                    )
+                continue
             except Exception:  # noqa: BLE001 — a lost row is not a failed turn
                 logger.debug("credential binding record write failed", exc_info=True)
+                continue
+            if previous is not None and is_same_account(previous, candidate):
+                # Recorded (the row carries the stable identity forward), never
+                # ANNOUNCED: the operator directive is that a re-copy of the
+                # same account must not surface in the conversation at all.
                 continue
             self._notify_change(candidate, previous)
 
@@ -571,7 +734,10 @@ class CredentialBindingRecorder:
         if callback is None:
             return
         try:
-            callback(binding, previous)
+            callback(
+                self._labelled(binding),
+                self._labelled(previous) if previous is not None else None,
+            )
         except Exception:  # noqa: BLE001 — a notice must never fail the write
             logger.debug("credential binding change callback failed", exc_info=True)
 

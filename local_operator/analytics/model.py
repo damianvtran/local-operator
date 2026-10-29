@@ -262,6 +262,12 @@ class CallSnapshot:
     #: rather than being relabelled here.
     billing_basis: str = "not_tracked"
     cost_source: str = "none"
+    #: Anthropic cache-diagnostics verdict for the call (see
+    #: ``StreamStartEvent.cache_miss_type``) and the input tokens the API says
+    #: the divergence cost. '' / 0 = not diagnosed. Chained last so the
+    #: positional writer keeps its existing field order.
+    cache_miss_type: str = ""
+    cache_missed_tokens: int = 0
 
 
 def price_snapshot(snapshot: "CallSnapshot") -> tuple[int, bool]:
@@ -1070,7 +1076,8 @@ class SessionRequest:
 class SessionReport:
     """One consistent exact-ID ledger snapshot, not a transcript-derived bill.
 
-    Every field EXCEPT ``descendants_aggregate``/``descendant_ids`` is scoped to
+    Every field EXCEPT ``descendants_aggregate``/``descendant_ids``/
+    ``descendants_by_basis`` is scoped to
     the exact ID: no copied fork history is joined, a resumed ID sees its
     retained rows, and queued recorder writes and pruned history cannot be
     recovered. ``available=False`` is distinct from an available report with
@@ -1092,6 +1099,7 @@ class SessionReport:
     available: bool = True
     aggregate: UsageAggregate = field(default_factory=UsageAggregate)
     by_model: dict[tuple[str, str], UsageAggregate] = field(default_factory=dict)
+    by_model_basis: dict[tuple[str, str, str], UsageAggregate] = field(default_factory=dict)
     # Consumption grouped by the ``purpose`` column (``turn``, ``compaction``,
     # ``aside``, ``naming``, ``compaction_advisor``). Distinct from
     # ``by_purpose_outcome``, which is COUNT(*) only: a count cannot answer
@@ -1121,6 +1129,7 @@ class SessionReport:
     #: zeroed aggregate meaning "walked, and this session has no children":
     #: the first must not be rendered as "$0.00 subagents".
     descendants_aggregate: UsageAggregate | None = None
+    descendants_by_basis: dict[str, UsageAggregate] = field(default_factory=dict)
     #: The descendant session IDs the walk reached, nearest-first. Carried so a
     #: caller can say "20 subagents" without a second query, and so a test can
     #: assert the walk's REACH rather than only its sums.

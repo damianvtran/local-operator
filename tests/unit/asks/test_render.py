@@ -8,7 +8,10 @@ than left to whoever writes the next renderer.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
+
+import pytest
 
 from local_operator.asks import render, store
 
@@ -406,8 +409,115 @@ def test_the_receipts_state_what_happens_next():
     assert "a-7f3" in chat and "response arrives" in chat
 
 
+def test_the_chat_receipt_counts_the_questions_it_closed_unanswered():
+    """§16/SA-D1: an empty cell is a question the message does not cover, so
+    the ask closes it with the rest — and the receipt says how many, singular
+    and plural, because only the model can re-ask them. ``moot`` has no cells,
+    so the count never applies there."""
+    one = render.withdraw_receipt("a-7f3", "answered_in_chat", unanswered=1)
+    assert "1 question closed unanswered; re-ask any you still need." in one
+    two = render.withdraw_receipt("a-7f3", "answered_in_chat", unanswered=2)
+    assert "2 questions closed unanswered; re-ask any you still need." in two
+    moot = render.withdraw_receipt("a-7f3", "moot", unanswered=2)
+    assert "closed unanswered" not in moot
+    assert render.withdraw_receipt("a-7f3", "answered_in_chat") == render.withdraw_receipt(
+        "a-7f3", "answered_in_chat", unanswered=0
+    )
+
+
 def test_the_op_constants_are_the_sentences_the_queue_emits():
     assert render.WITHDRAW_BAD_REASON == "reason must be 'moot' or 'answered_in_chat'."
     assert "no answers" in render.WITHDRAW_MOOT_TAKES_NO_ANSWERS
     assert "secret" in render.WITHDRAW_SECRET_REFUSAL
     assert "card" in render.WITHDRAW_SECRET_REFUSAL
+
+
+# ---------------------------------------------------------------------------
+# Operator dismissal of an OPEN ask (design §15)
+# ---------------------------------------------------------------------------
+
+
+def _dismiss_record(status: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "ask_id": "a-9",
+        "status": status,
+        "questions": [{"id": "q1", "prompt": "Which?", "options": []}],
+        **extra,
+    }
+
+
+def test_the_refusal_table():
+    from local_operator.asks import store
+
+    assert render.dismiss_refusal(_dismiss_record(store.STATUS_TIMED_OUT)) == ""
+    # SA-D4: an OPEN ask is accepted in EVERY runtime state — there is no
+    # ``agent_running`` fact left for a caller to pass, and none could decide
+    # anything if it did.
+    assert render.dismiss_refusal(_dismiss_record(store.STATUS_OPEN)) == ""
+    assert not hasattr(render, "DISMISS_AGENT_RUNNING")
+    assert render.dismiss_refusal(_dismiss_record(store.STATUS_DISMISSED)) == (
+        render.DISMISS_ALREADY_DISMISSED
+    )
+    assert (
+        render.dismiss_refusal(_dismiss_record(store.STATUS_LATE))
+        == "this ask was already answered."
+    )
+    assert (
+        render.dismiss_refusal(_dismiss_record(store.STATUS_DECLINED))
+        == "you already declined this."
+    )
+    assert render.dismiss_refusal(None) == render.refusal_copy(None)
+    assert not hasattr(render, "DISMISS_NOT_LAPSED")
+    signature = inspect.signature(render.dismiss_refusal)
+    assert list(signature.parameters) == [
+        "record"
+    ], "the retired ``agent_running`` parameter must not linger as an inert one"
+
+
+def test_a_bridge_request_is_dismissible_only_after_it_times_out():
+    from local_operator.asks import store
+
+    bridge = {"ask_id": "a-9", "questions": [{"id": "q1", "question_id": "qid-1"}]}
+    assert render.dismiss_refusal({**bridge, "status": store.STATUS_OPEN}) == (
+        render.DISMISS_BRIDGE_OPEN
+    )
+    assert render.dismiss_refusal({**bridge, "status": store.STATUS_TIMED_OUT}) == ""
+
+
+@pytest.mark.parametrize(
+    ("reason", "needle"),
+    [
+        ("answered_in_chat", "settled in the conversation"),
+        ("moot", "no longer needed"),
+        (None, "no longer needed"),
+    ],
+)
+def test_the_dismissal_text_per_reason(reason: str | None, needle: str):
+    text = render.response_text(_dismiss_record("dismissed", dismissed_reason=reason))
+    assert needle in text
+    assert "a-9" in text
+    # Never the answer report: a dismissal has no answers to render.
+    assert "answered" not in text.lower().replace("answered_in_chat", "")
+    assert "Which?" not in text
+
+
+@pytest.mark.parametrize("reason", ["answered_in_chat", "moot"])
+def test_the_secret_dismissal_names_no_value(reason: str):
+    record = _dismiss_record("dismissed", dismissed_reason=reason)
+    record["questions"] = [{"id": "q1", "prompt": "Key?", "secret": True}]
+    text = render.response_text(record)
+    assert text.startswith("The user dismissed the credential ask a-9 without entering a value")
+    assert render.DISMISS_REASON_LABELS[reason] in text
+    assert "Key?" not in text
+
+
+def test_an_open_relay_is_dismissible_only_after_it_times_out():
+    """#2520 relays stay timed-out-only: an open one is answered at its origin, and a
+    timed-out one is the user closing a lapsed card, as on main."""
+    from local_operator.asks import store
+
+    relay = {"ask_id": "a-r", "questions": [], "relay": {"session_id": "s", "ask_id": "a"}}
+    assert render.dismiss_refusal({**relay, "status": store.STATUS_OPEN}) == (
+        render.DISMISS_RELAY_OPEN
+    )
+    assert render.dismiss_refusal({**relay, "status": store.STATUS_TIMED_OUT}) == ""

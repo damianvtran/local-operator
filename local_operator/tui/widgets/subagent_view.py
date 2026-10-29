@@ -91,7 +91,6 @@ from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
     ENTRY_CUSTOM,
     ENTRY_MESSAGE,
-    TRANSCRIPT_FILENAME,
     TranscriptEntry,
     TranscriptPage,
 )
@@ -2352,7 +2351,12 @@ class SubagentView(Vertical):
         if not directory:
             return False
         try:
-            return (Path(directory) / TRANSCRIPT_FILENAME).exists()
+            # Both forms: a compressed transcript is a transcript, and the plain
+            # name answering "absent" put the "history unavailable" footer under
+            # a child whose whole trajectory was sitting in an archive.
+            from local_operator.session import compression
+
+            return compression.has_transcript(Path(directory))
         except OSError:
             return False
 

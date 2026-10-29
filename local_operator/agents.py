@@ -751,20 +751,35 @@ class AgentRegistry:
     _refresh_interval: float
     _incomplete_agent_dirs: List[Path]
 
-    def __init__(self, config_dir: Path, refresh_interval: float = 5.0) -> None:
+    def __init__(
+        self,
+        config_dir: Path,
+        refresh_interval: float = 5.0,
+        *,
+        initialize: bool = True,
+        migrate: bool = True,
+    ) -> None:
         """
         Initialize the AgentRegistry, loading metadata from agent.yml files.
 
         Args:
             config_dir (Path): Directory containing the agents directory
             refresh_interval (float): Time in seconds between refreshes of agent data from disk
+            initialize (bool): Create ``config_dir``/``agents`` when absent. A
+                SESSION-SCOPED registry passes ``False``: reading a scope must
+                not litter a conversation directory, and ``save_agent`` makes
+                the tree on the first real write.
+            migrate (bool): Run the legacy-store migrations. Those belong to
+                the machine-wide store only; a session scope has no legacy
+                layout to migrate.
         """
         self.config_dir = config_dir
-        if not self.config_dir.exists():
-            self.config_dir.mkdir(parents=True, exist_ok=True)
+        if initialize:
+            if not self.config_dir.exists():
+                self.config_dir.mkdir(parents=True, exist_ok=True)
 
         self.agents_dir = self.config_dir / "agents"
-        if not self.agents_dir.exists():
+        if initialize and not self.agents_dir.exists():
             self.agents_dir.mkdir(parents=True, exist_ok=True)
 
         # For backward compatibility
@@ -786,8 +801,9 @@ class AgentRegistry:
         self._refresh_interval = refresh_interval
 
         # Migrate old agents if needed
-        self.migrate_agents_dir()
-        self.migrate_legacy_agents()
+        if migrate:
+            self.migrate_agents_dir()
+            self.migrate_legacy_agents()
 
         # Load agent metadata
         self._load_agents_metadata()
@@ -1525,6 +1541,17 @@ class AgentRegistry:
             "delegate": profile.may_delegate,
             "action_class": _normalize(profile.action_class),
         }
+
+    def agent_dir(self, agent_id: str) -> Path:
+        """The directory holding ``agent_id`` in THIS store.
+
+        A seam for readers that need a row's definition path (the semantic
+        agent-hint index). It must come from the registry rather than
+        ``config_dir / "agents"`` because a session-scoped registry is rooted
+        at ``<session>/roles``; callers that derive the path themselves would
+        point at the global tree.
+        """
+        return self.agents_dir / str(agent_id)
 
     def get_agent(self, agent_id: str) -> AgentData:
         """
@@ -2693,25 +2720,49 @@ class AgentRegistry:
             )
             outcome = self.import_agent(zip_path, auth_store=auth_store)
         stamped = self._stamp_hub_provenance(outcome.agent, agent_id)
-        self._record_hub_baseline(stamped, agent_id, tenant_id)
+        self._record_hub_baseline(stamped, agent_id, tenant_id, radient_client)
         return AgentImport(
             agent=stamped,
             renamed_from=outcome.renamed_from,
             model_notice=outcome.model_notice,
         )
 
-    def _record_hub_baseline(self, agent: AgentData, hub_id: str, tenant_id: str | None) -> None:
+    def _record_hub_baseline(
+        self,
+        agent: AgentData,
+        hub_id: str,
+        tenant_id: str | None,
+        client: Any = None,
+    ) -> None:
         """Write the TEXT baseline a later three-way merge diffs against.
 
         Best-effort by contract: a pull must not fail over bookkeeping, and a row
         without a record simply degrades to baseline-unknown (check-only). Lazy
         import keeps ``hub_sync`` off the registry's import graph.
+
+        The pull also records the ORIGIN it was served under: the arm that
+        fetched the row decides the scope (an organization pull names its
+        organization, a public pull names none), and ``hub_source`` is the base
+        the client that served the pull addressed. That base is the one the
+        check reports as ``served_by`` and the one the integration and push
+        gates compare the link's source against, so it is the only value that
+        can be recorded truthfully. Without it the row is a hub id with no
+        source, which the links inventory reports as "source unresolved".
         """
 
         if hub_origin(agent) != hub_id:
             return  # the stamp refused a non-conforming id; nothing truthful to record
-        from local_operator.hub_sync.provenance import record_agent_baseline
+        from local_operator.hub_sync.identity import link_origin
+        from local_operator.hub_sync.provenance import (
+            record_agent_baseline,
+            serving_base,
+        )
 
+        origin = link_origin(
+            serving_base(client, self.config_dir) or "",
+            "org" if tenant_id else "public",
+            tenant_id or None,
+        )
         record_agent_baseline(
             self.config_dir,
             local_id=agent.id,
@@ -2719,6 +2770,7 @@ class AgentRegistry:
             instructions=self.get_agent_system_prompt(agent.id),
             description=agent.description,
             tenant_id=tenant_id,
+            origin=origin,
         )
 
     def _stamp_hub_provenance(self, agent: AgentData, hub_id: str) -> AgentData:

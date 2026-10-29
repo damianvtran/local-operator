@@ -1,0 +1,9 @@
+{
+  "key": "wire.slash.hub",
+  "method": "Approximate /help comparison only; no hard maxCells or rendered pass is claimed.",
+  "en_cells": 56,
+  "ur_cells": 57,
+  "delta": 1,
+  "over_55_cells": true,
+  "over_english_plus_10": false
+}

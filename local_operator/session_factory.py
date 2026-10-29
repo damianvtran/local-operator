@@ -68,6 +68,14 @@ from local_operator.paths import config_dir as app_config_dir
 from local_operator.resume import ResumeNotFound, resume_dir
 from local_operator.voice import slot as voice_slot
 
+# The conversation's own approval record, also a stdlib-only module (its
+# docstring states why it must stay that way): read here so a resumed
+# conversation's gate starts in the mode its human left it in. Aliased so the
+# call site reads as a policy question rather than a bare ``read_override``.
+from local_operator.session.approval_policy import (
+    read_override as read_approval_override,
+)
+
 if TYPE_CHECKING:
     # Type-only imports: this module's whole discipline is that the heavy
     # engine, registry and provider modules load lazily inside the functions
@@ -145,6 +153,34 @@ _OVERLAP_MIN_CHARS = 200
 #: here — imported lazily by the factory or by something it calls, and never at
 #: module scope (see ``test_import_graph.py``, which pins that importing this
 #: module stays off these stacks).
+#:
+#: ``teams`` is the OPEN's cost rather than the factory's, and it is named here
+#: deliberately instead of relying on the closure that happens to pull it today:
+#: a cold open of a team-bound conversation resolves the manager's identity from
+#: the registry (``AttachedSession._cold_team_manager`` -> ``team_registry``),
+#: and ``import local_operator.teams`` measured 148.3 ms cold, 0.2 ms once
+#: resident (2026-10-27, a fresh interpreter, a loaded 10-core box). It is
+#: covered transitively by ``local_operator.tools.registry`` below — via
+#: ``tools/team_tool.py``'s module-scope import — which is exactly why it must
+#: ALSO be named: otherwise the open of a conversation that has no tools in play
+#: depends on another entry's incidental closure, and the first tool module that
+#: drops its team import silently re-opens the stall.
+#:
+#: THE REST OF THE OPEN-PATH GROUP below is the same shape of finding, measured
+#: the same way: a real cold open (``AttachedSession.cold`` over a 10,376-row
+#: transcript whose checkpoint names an active team) imports these modules for
+#: the first time — the prices and monitors tables, the mesh identity/placement
+#: a peer row is rendered from, and the tail anchor the page joins on — and each
+#: cost 5-10 ms cold against 0.0 ms warm. They qualify for this list by the rule
+#: the docstring states: no module-scope side effect (checked with an AST scan
+#: of every one), no heavy dependency chain, and no path that imports them at
+#: module scope (``test_import_graph.py``'s guards stay green).
+#:
+#: DELIBERATELY NOT warmed, and the reason is the rule rather than the cost: the
+#: cold open's ``local_operator.secrets.*`` group (~44 ms including the crypto
+#: stack), and the reveal path's `local_operator.tunnels.gateway` + ``jwt``
+#: (~500 ms cumulative). Both are heavy chains, and the tunnels one is a layering
+#: defect worth fixing where it is imported rather than paying for at every boot.
 _WARM_IMPORTS: tuple[str, ...] = (
     "mcp",
     "httpx",
@@ -155,9 +191,15 @@ _WARM_IMPORTS: tuple[str, ...] = (
     "local_operator.mcp.manager",
     "local_operator.model.configure",
     "local_operator.model.discovery",
+    "local_operator.model.prices",
+    "local_operator.monitors.store",
+    "local_operator.network.credentials.placement",
+    "local_operator.network.identity",
     "local_operator.providers.auth_store",
     "local_operator.session.session",
+    "local_operator.session.tail_anchor",
     "local_operator.skills.discovery",
+    "local_operator.teams",
     "local_operator.tools.registry",
 )
 
@@ -1167,18 +1209,39 @@ def _latest_compaction_id(transcript: Any) -> str | None:
     return None
 
 
-def _env_details(cwd: str | None = None) -> str:
+def _env_details(cwd: str | None = None, session_id: str = "") -> str:
     """Volatile environment facts for the env block (date rides there too,
     added by ``build_system_blocks``). Kept tiny and byte-stable within a
     run: no timestamps, no process ids. ``cwd`` comes from the session's
-    working directory, never the process-global value at call time."""
+    working directory, never the process-global value at call time.
+
+    ``session_id`` is the session's own directory name, and it rides HERE for
+    one reason: it is byte-stable for the life of the run, so an agent can
+    recognise its own row in ``sessions(op='list')`` output instead of reading
+    that row as another session working the same topic. It is the same id the
+    listing prints, so the comparison is exact string equality.
+
+    The session NAME is deliberately NOT here. Auto-naming runs mid-session and
+    a user rename can land at any time, so a name in the prefix would either
+    anchor a stale name for the whole run or force a stable-prefix rebuild on
+    every rename — both reprice the cached prompt for something the model does
+    not need to act on. The id is stable; the name is not.
+
+    Empty ``session_id`` renders the original three-line shape, which is what a
+    caller with no transcript directory to name gets. The benchmark harness is
+    NOT such a caller: ``scripts/bench_context_budget.py`` hand-builds its own
+    env text rather than calling here, which is why the ratchet does not price
+    the extra line."""
     import platform
 
-    return (
+    text = (
         f"Platform: {platform.system()} {platform.release()} ({platform.machine()})\n"
         f"Python: {platform.python_version()}\n"
         f"Working directory: {cwd if cwd is not None else os.getcwd()}"
     )
+    if session_id:
+        text += f"\nSession ID: {session_id}"
+    return text
 
 
 #: The SERVER-OWNED shape of a configuration run: the preamble a run is built
@@ -1203,7 +1266,16 @@ def _env_details(cwd: str | None = None) -> str:
 #: named -- and that is deliberate on the product's side too: no desktop op and no
 #: page control deletes a profile or a team today, so a conversational delete
 #: would be the first delete in the product.
-AGENTS_CONFIG_TOOLS: tuple[str, ...] = ("agent", "team")
+#:
+#: ``skill`` is the run's skill editor (``tools/skill_tool.py``). Unlike the other
+#: two it is NOT a default tool: the factory never builds it, so naming it here is
+#: only half of reaching it -- :func:`apply_config_run_shape` merges it in after
+#: the declaration is set. ``edit`` is its anchored-replacement op (a long file
+#: reaches the run in pages, so it is changed by exact replacements, never
+#: rewritten whole). Its ops stop at create/update/edit for the same reason
+#: ``team_delete`` is unnamed, and it has no publish/pull op for the reason
+#: ``agent sync`` is excluded.
+AGENTS_CONFIG_TOOLS: tuple[str, ...] = ("agent", "team", "skill")
 
 #: The ops of :data:`AGENTS_CONFIG_TOOLS` a configuration run may reach, per tool
 #: name. Every declared tool is listed: an omission would mean "every op this
@@ -1212,6 +1284,7 @@ AGENTS_CONFIG_TOOLS: tuple[str, ...] = ("agent", "team")
 AGENTS_CONFIG_TOOL_OPS: dict[str, tuple[str, ...]] = {
     "agent": ("list", "show", "search", "install", "create", "update"),
     "team": ("list", "show", "create", "update"),
+    "skill": ("list", "show", "create", "update", "edit"),
 }
 
 #: The preamble injected as the run's ``<configuration-run>`` system block.
@@ -1229,9 +1302,9 @@ AGENTS_CONFIG_TOOL_OPS: dict[str, tuple[str, ...]] = {
 #: is nevertheless ENFORCED by the inventory and not by these sentences -- a
 #: prompt is a statement, and the declaration is the mechanism.
 AGENTS_CONFIG_PREAMBLE = """This session is a CONFIGURATION RUN: the operator started it from the
-Agents page to author reusable agents and teams by conversation. It is not their
-conversation with you -- they watch this run on that page, and nothing here
-reaches any other chat.
+Agents page to author reusable agents, teams and skills by conversation. It is
+not their conversation with you -- they watch this run on that page, and nothing
+here reaches any other chat.
 
 What you do here: find, create and update agent profiles and teams with the
 `agent` and `team` tools, then say plainly what you changed.
@@ -1239,12 +1312,59 @@ What you do here: find, create and update agent profiles and teams with the
 What you cannot do here, and must not promise: reset or sync an agent profile
 (`agent reset` / `agent sync` overwrite instructions the operator wrote or fetch
 from the hub with their credentials), delete a team, run shell commands, or read
-and write files. Those tools are genuinely unreachable in this session, not
-merely discouraged -- if a call is refused, say so and offer the manual path
+and write arbitrary files. Those tools are genuinely unreachable in this session,
+not merely discouraged -- if a call is refused, say so and offer the manual path
 instead of retrying.
+
+Do not pass `scope`; everything you write is saved to the operator's account.
+
+You can also revise the operator's own skills with the `skill` tool. `show` a
+skill before you change it and pass the `expected_fingerprint` it returned.
+`show` returns one page of a file; follow its MORE line until you have read every
+part you change. Change text with `edit` (exact `old_text` copied from `show`,
+unique in the file); `update` replaces or removes only short whole files, and
+files you do not name are kept. Never write `[redacted]`: it masks text hidden
+from you. Built-in, external and project skills are read-only here: say so and
+point the operator to Copy to my skills on the Skills tab; never create a
+same-named copy. Edit only the skill the operator's message names unless they ask
+for more. You cannot publish, pull or delete skills: say what you changed and
+leave publishing to the operator.
 
 Prefer the smallest change that answers the request, and prefer reporting what
 you did over asking permission you cannot be given."""
+
+
+def is_config_run_dir(session_dir: Path) -> bool:
+    """Whether ``session_dir`` is a CONFIGURATION RUN, by its two durable witnesses.
+
+    A purpose marker of ``agents-config`` OR an origin of ``agent-config``: either
+    one is enough, which is what makes every reader FAIL CLOSED on a damaged
+    marker (see :func:`apply_config_run_shape` for why the origin is the second
+    witness rather than a fallback). ONE predicate for both halves of the run's
+    boundary the composition root applies -- the registry scoping in ``_prepare``
+    and the tool declaration after construction -- because two copies of the
+    test would let a run be bounded by one and not the other.
+
+    NOT read by the viewer: ``session/attached.py``'s lazy registries still wrap
+    a run's registries in the conversation scope. That is deliberately left
+    alone and harmless: the run's own registries are unscoped, so ``<run>/roles``
+    is never written and the scoped view equals the account view, while the
+    page's own writes name ``scope='global'``. Routing the viewer through this
+    predicate is a viewer change with its own surface (``/agent`` and ``/team`` on
+    a cold session), not part of this fix.
+
+    Reads two small sidecars and never raises: both readers are tolerant by
+    contract, and an ordinary session (neither record) answers ``False``.
+    """
+    from local_operator.resume import ORIGIN_AGENT_CONFIG, session_origin
+    from local_operator.session.retention import (
+        AGENTS_CONFIG_PURPOSE,
+        read_desktop_purpose,
+    )
+
+    if read_desktop_purpose(session_dir) == AGENTS_CONFIG_PURPOSE:
+        return True
+    return session_origin(session_dir) == ORIGIN_AGENT_CONFIG
 
 
 def apply_config_run_shape(session: Any) -> bool:
@@ -1281,17 +1401,15 @@ def apply_config_run_shape(session: Any) -> bool:
     directory = getattr(getattr(session, "transcript", None), "directory", None)
     if not directory:
         return False
-    from local_operator.resume import ORIGIN_AGENT_CONFIG, session_origin
     from local_operator.session.retention import (
         AGENTS_CONFIG_PURPOSE,
         read_desktop_purpose,
     )
 
     session_dir = Path(directory)
-    recorded = read_desktop_purpose(session_dir)
-    if recorded != AGENTS_CONFIG_PURPOSE:
-        if session_origin(session_dir) != ORIGIN_AGENT_CONFIG:
-            return False
+    if not is_config_run_dir(session_dir):
+        return False
+    if read_desktop_purpose(session_dir) != AGENTS_CONFIG_PURPOSE:
         # The origin says run, the marker does not carry (or no longer parses to)
         # the purpose. Shapes the run anyway, and says so: the alternative is the
         # fail-OPEN direction, where the same damage silently hands the run the
@@ -1303,6 +1421,12 @@ def apply_config_run_shape(session: Any) -> bool:
         )
     session.set_run_preamble(AGENTS_CONFIG_PREAMBLE)
     session.set_tool_inventory(AGENTS_CONFIG_TOOLS, ops=AGENTS_CONFIG_TOOL_OPS)
+    # `skill` is opt-in (absent from DEFAULT_TOOL_NAMES), so the factory built
+    # none to keep: build it NOW, after the declaration, through the one merge
+    # that re-filters by name and op scope -- so it can never enter a session
+    # whose declaration does not name it. A name subset, so this cannot rescue
+    # any other capability tool the declaration already dropped.
+    session._merge_capability_tools(("skill",))
     return True
 
 
@@ -2001,7 +2125,12 @@ def _registered_agent_hints(agent_registry: AgentRegistry) -> list[Skill]:
         return []
 
     hints: list[Skill] = []
-    agents_dir = Path(agent_registry.config_dir) / "agents"
+    # The registry, not ``config_dir / "agents"``: a session-scoped registry is
+    # rooted at ``<session>/roles``, and deriving the path here would point the
+    # hint row at the global tree for a row that does not live there. Older
+    # callers and tests pass a duck-typed registry without the seam; keep the
+    # historical global path for those rather than failing hint enrichment.
+    agent_dir_method: Callable[[str], Path] | None = getattr(agent_registry, "agent_dir", None)
     for agent in agents:
         semantic_parts = [
             sanitize_prompt_line(str(agent.description or "")),
@@ -2011,14 +2140,18 @@ def _registered_agent_hints(agent_registry: AgentRegistry) -> list[Skill]:
         semantic = " ".join(part for part in semantic_parts if part).strip()
         if not semantic:
             continue
-        agent_dir = agents_dir / str(agent.id)
+        agent_dir: Path
+        if agent_dir_method is not None:
+            agent_dir = agent_dir_method(agent.id)
+        else:
+            agent_dir = Path(agent_registry.config_dir) / "agents" / agent.id
         hints.append(
             Skill(
                 name=f"registered-agent-{agent.id}",
                 description=f"{sanitize_prompt_line(str(agent.name))}: {semantic}"[:512],
                 file_path=agent_dir / "agent.yml",
                 base_dir=agent_dir,
-                source=str(agents_dir),
+                source=str(agent_dir.parent),
                 resource_type="agent_hint",
             )
         )
@@ -2371,6 +2504,13 @@ def _projects_fingerprint(hooks: _KnowledgeHooks) -> tuple[int, float] | None:
     ``updated_at``, a delete moves at least one of the two — while an update the
     store itself refused as a no-op (identical text on a fresh record) writes
     nothing and correctly changes nothing here.
+
+    PAGE-SCOPED, deliberately: ``list_projects`` is the registry's recency page,
+    so this signal watches the rows a session can currently see. A change to a
+    row that has aged off the page is not detected here — but a write to that
+    row moves its mtime and promotes it back, which changes this pair on the
+    next read, and a delete of an invisible row changes nothing a session could
+    have been told about. The signal is an optimisation, never a gate (m2).
     """
     registry = hooks.project_registry
     if registry is None:
@@ -2625,6 +2765,7 @@ _TOOL_ROSTER_NAMES: tuple[str, ...] = (
     "generate_voiceover",
     "generate_sound_effect",
     "code_requests",
+    "secret",
 )
 
 #: One tool row's description bound — the same scannable-row precedent the
@@ -3614,6 +3755,7 @@ def _make_system_blocks_provider(
     language_line: str = "",
     variable_store: "VariableStore | None" = None,
     voice_probe: Callable[[], bool] | None = None,
+    session_id: str = "",
 ) -> Callable[..., Awaitable[list[str]]]:
     """Build the per-turn system-prompt closure.
 
@@ -3641,9 +3783,25 @@ def _make_system_blocks_provider(
     settings change takes effect at the next session (or the next stable-prefix
     rebuild), never mid-session — rewriting it mid-session would reprice the
     cached prefix from a settings edit nobody asked to be prompt-interrupting.
+
+    ``session_id`` is captured ONCE, like the two strings above and for the
+    same reason: it rides the env block, so re-reading it per turn could not
+    produce a different answer anyway.
+
+    A FORK passes its own id here like any other session — ``_prepare`` has no
+    fork branch. What differs is the INHERITED prefix: a fork loads the
+    parent's frozen ``system_prefix`` byte-for-byte (``session/session.py``),
+    so the wire block keeps the PARENT's ``Session ID`` line (and the parent's
+    provider cache still hits), while the fork's own id reaches the same
+    request as a ``[session-state] ## Environment`` delta. That residual is
+    deliberate and pinned by
+    ``test_a_fork_keeps_the_parent_id_in_its_prefix_and_journals_its_own``:
+    until the next prefix epoch the authoritative block names the parent while
+    ``sessions`` marks the fork's own row, and the state record is the newer
+    authority — it is in context before the first model call.
     """
 
-    environment = _env_details(cwd)
+    environment = _env_details(cwd, session_id)
     # The HOST capability answer, taken ONCE at construction and passed to every
     # render (see ``prompts_api.host_capability_probes`` for the measured
     # incident). It is read here for the same reason ``user_instructions`` and
@@ -3661,6 +3819,11 @@ def _make_system_blocks_provider(
 
     async def provider(model_label: str = "") -> list[str]:
         nonlocal cached_key, cached_blocks
+        # notify is wired only after Session construction. The factory's warm
+        # roster lacks its door; inventory reconciliation cannot repair block
+        # zero. Ask the owning Session, never infer from host type or a stub.
+        notify_probe = getattr(provider, "notify_available", None)
+        has_notify = bool(notify_probe()) if callable(notify_probe) else None
         # ``model_label`` is passed live by the Session on each provider step, so
         # a deliberate ``set_model`` or a failover fallback is reflected in the
         # env block at the next safe call boundary without rebuilding this
@@ -3735,6 +3898,15 @@ def _make_system_blocks_provider(
                 voice = bool(voice_probe())
             except Exception:  # noqa: BLE001 — an unreadable slot reads as voice off
                 voice = False
+        # The open-asks reminder (design §16/SA-D3), rendered by the session off
+        # its own live queue. Read HERE, per provider step, because that is the
+        # only cadence at which an ask raised or settled mid-turn can reach the
+        # next request. ``None`` is the reminder's third state — this host has no
+        # queue and cannot answer — and it renders NOTHING, exactly like the known
+        # empty ``""``; the difference is decided in ``Session._system_state_delta``
+        # (unknown must not ship as a removal), because only that layer can see the
+        # section the model is already reading (QA round 1, Q2).
+        open_asks = goal_state.open_asks() if goal_state is not None else None
         key = (
             knowledge_block,
             date_str,
@@ -3748,7 +3920,9 @@ def _make_system_blocks_provider(
             interactive,
             channel,
             voice,
+            open_asks or "",
             tuple((tool.name, tool.description) for tool in tools),
+            has_notify,
         )
         # ``deferred_tools`` is deliberately NOT passed here and NOT part of
         # ``key``: this render is the CACHED head only, and the session
@@ -3778,6 +3952,8 @@ def _make_system_blocks_provider(
             # tri-state note above and ``GoalState.interactivity``.
             interactive=interactive,
             channel=channel,
+            open_asks=open_asks or "",
+            has_notify=has_notify,
             host_has_browser=host_has_browser,
             host_has_console=host_has_console,
             voice=voice,
@@ -3789,6 +3965,7 @@ def _make_system_blocks_provider(
     # semantics. Production providers opt into Session's persisted-prefix
     # protocol explicitly; benchmarks can still call this builder read-only.
     setattr(provider, "append_only_state", True)
+    setattr(provider, "session_notify_membership", True)
     setattr(provider, "repo_guidance", repo_guidance)
     setattr(provider, "knowledge_hooks", hooks)
     # The frozen host answer, for the session's own re-render of block 1. Two
@@ -3925,10 +4102,31 @@ _STORE_MAINTENANCE_LOCK_RETRY_MAX_SECONDS = 1.0
 _STORE_MAINTENANCE_LOCK_NAME = ".store-maintenance.lock"
 _STORE_MAINTENANCE_STAMP_NAME = ".store-maintenance.json"
 _STORE_MAINTENANCE_STAMP_SCHEMA = 1
-_STORE_MAINTENANCE_STAMP_VERSION = 1
+#: Bumped for the session-store census pass: the pass set and its order changed,
+#: which the freshness check already catches through ``passes``; the version is
+#: the explicit signal, so an older build reading a newer stamp (or the reverse)
+#: retries once instead of reasoning about a half-known sequence.
+#:
+#: 3: the transcript-compression pass joined the sequence, after cleanup. A stamp
+#: written by a build that DOES compress therefore must not be reused by one
+#: whose ``passes`` list has no compression pass — and the reverse, where a
+#: build that compresses would skip a store a previous build already swept,
+#: would leave the new pass unrun until the stamp expired. The bump makes the
+#: first maintenance run after an upgrade walk the store once under the new
+#: sequence.
+_STORE_MAINTENANCE_STAMP_VERSION = 3
 _STORE_MAINTENANCE_STAMP_TTL_SECONDS = 60.0
 _STORE_MAINTENANCE_PASS_NAMES = (
+    # FIRST, deliberately: the census diffs what the store held at the end of
+    # the PREVIOUS pass against the disk, so a cleanup pass in this one shows up
+    # as a recorded removal in the census that follows it — not as an
+    # unaccounted disappearance the same sequence caused.
+    "session store census",
     "session cleanup policy",
+    # AFTER cleanup, deliberately: a session this pass's cleanup removes makes a
+    # compression row it would have written pointless, and a transcript cleanup
+    # has just freed is not worth compressing.
+    "session transcript compression",
     "orphan process-group sweep",
     "session origin backfill",
     "session title backfill",
@@ -4102,7 +4300,7 @@ def _run_store_maintenance(
     *,
     stop_event: threading.Event | None = None,
 ) -> bool:
-    """Run the six idempotent store passes under one daemon-owned lock.
+    """Run the eight idempotent store passes under one daemon-owned lock.
 
     Separate runtime processes can start more than the 0.75-second idle delay
     apart, so mutual exclusion alone does not suppress their duplicate walks.
@@ -4110,7 +4308,7 @@ def _run_store_maintenance(
     and orphan-group reaping may consequently wait up to 60 seconds after a
     completed sweep. A crash or any failed pass writes no fresh stamp, so the
     next launch retries — and so does a pass that STOOD DOWN mid-walk because
-    this process is leaving: the four store-walking passes check the stop once
+    this process is leaving: the five store-walking passes check the stop once
     per directory and RETURN their partial count rather than raising, so what
     refuses the stamp is the guard on the sequence below
     (``all_passes_succeeded and not stop.is_set()``). That is the same event
@@ -4151,7 +4349,9 @@ def _run_store_maintenance(
             backfill_session_origins,
             backfill_session_titles,
         )
+        from local_operator.session.census import run_store_census
         from local_operator.session.cleanup import cleanup_from_config
+        from local_operator.session.compression import compress_from_config
         from local_operator.tools.group_reaper import sweep_orphan_groups
 
         # NO pass here deletes a session directory on its own judgement. The
@@ -4160,8 +4360,31 @@ def _run_store_maintenance(
         # those store-wide decisions with other runtime processes.
         passes: list[tuple[str, Callable[[], Any]]] = [
             (
+                "session store census",
+                # Read-only over the store; appends only unaccounted-* rows and
+                # its own census file. FIRST in the sequence so this pass's own
+                # cleanup is accounted for by the NEXT census rather than
+                # reported by this one — and it runs whatever the cleanup
+                # switch says, because it is the record of what retention did,
+                # not a retention feature.
+                lambda: run_store_census(config_dir, should_stop=stop.is_set),
+            ),
+            (
                 "session cleanup policy",
                 lambda: cleanup_from_config(config_manager, config_dir, live_dir=live_dir),
+            ),
+            (
+                "session transcript compression",
+                # RETURNS a result and never raises (``compress_from_config``
+                # catches its own failures), and stands down at its next
+                # directory when this process is leaving — the same shape as
+                # every other store-walking pass here.
+                lambda: compress_from_config(
+                    config_manager,
+                    config_dir,
+                    live_dir=live_dir,
+                    should_stop=stop.is_set,
+                ),
             ),
             ("orphan process-group sweep", lambda: sweep_orphan_groups(config_dir)),
             (
@@ -4209,7 +4432,7 @@ def _run_store_maintenance(
                 _write_store_maintenance_stamp(config_dir, pass_names)
             except OSError:
                 # Fail closed: without a trustworthy completion record, do
-                # not let each later process repeat the six store-wide walks.
+                # not let each later process repeat the eight store-wide walks.
                 logger.debug(
                     "store maintenance completion stamp write failed; skipping", exc_info=True
                 )
@@ -4288,6 +4511,8 @@ def _run_delegated_sweeps(
             config_dir,
             live_policy_provider(config_manager, config_dir),
             live_dir=live_dir,
+            actor="startup",
+            trigger="session-startup",
             should_stop=stop_event.is_set,
             wait=stop_event.wait,
         )
@@ -4393,6 +4618,12 @@ async def _prepare(
         resolve_birth
     )
     yolo = bool(getattr(args, "yolo", False))
+    # The BIRTH SPEED DIAL (ui#1265): its viewer's choice for a conversation that
+    # did not exist yet, read exactly as ``birth_effort`` above is. A separate
+    # name because no CLI flag sets it -- only a viewer can pick a tier before a
+    # session exists -- so every other caller (the CLI, the TUI, ``exec``) leaves
+    # the attribute off and is constructed on the bytes it always was.
+    birth_fast = bool(getattr(args, "birth_fast", False))
 
     transcript_dir, agent_id, is_new = _transcript_dir_and_agent_id(agent, args, agent_registry)
 
@@ -4544,6 +4775,16 @@ async def _prepare(
         )
     )
     spec = model_configuration.spec
+    # THE BIRTH DIAL, clamped on the route's own ``supports_fast_mode`` -- the
+    # same conjunction the journal restore (``model_selection.fast_dial_from_row``)
+    # and the spawn environment (``launch._spawn_runtime``) apply, and for the
+    # same reason: a stored pick can outlive the catalogue that offered it, and
+    # putting the speed key on a request the provider refuses would fail the very
+    # turn this construction exists to open. CLAMPED rather than raised because
+    # the refusal belongs to the moment the user picks (the create/preview 422);
+    # by the time a birth record reaches here it is a decision already taken.
+    if birth_fast and spec.supports_fast_mode:
+        spec = spec.model_copy(update={"fast_mode": True})
 
     # ONE CONSTRUCTION SITE, and ``build_auth_store`` returns the very same
     # ``AuthStore`` on a device that borrows nothing — no network, no placement, or
@@ -4574,6 +4815,34 @@ async def _prepare(
         session_id=transcript_dir.name,
         cache_lineage_id=fork_parent(transcript_dir) or None,
     )
+
+    # --- session-scoped roles (LOH-9) ---------------------------------------
+    # A role authored FOR this conversation lives in <session>/roles, not in
+    # the global store, so it appears in this session's pickers and nowhere
+    # else. The composite is built ONCE here and inherited by subagents (their
+    # ``create_session`` receives this registry and the helper returns it
+    # unchanged), which is what keeps a child's creations in the parent's
+    # conversation scope. Writes still delegate to the global store in S1.
+    # Teams are scoped beside their creation below, because that registry is
+    # built later and may legitimately be None.
+    #
+    # EXCEPT A CONFIGURATION RUN. Its whole job is to author the operator's
+    # ACCOUNT catalogue from the Agents page, which reads an unscoped registry
+    # (``desktop_profiles``), so a scoped run refuses every account ``update``
+    # (no host installs ``authorize_durable_write``, so the durable-write consent
+    # answers ``no_seam``) and files every ``create`` in ``<run>/roles``, a store
+    # no picker ever reads. The run's conversation scope is a dead store: it is
+    # hidden from every list and has no ``task`` tool, so no child inherits it.
+    # Its authority is the one it had before LOH-9 S2 scoped every session: the
+    # operator's own typed request, the server-owned op-scoped declaration
+    # (``AGENTS_CONFIG_TOOL_OPS``: no reset, sync or delete) and the page's settle
+    # summary. Decided from the same two witnesses that shape the run, so the
+    # registries and the declaration can never disagree about what it is.
+    from local_operator.profile_scope import scope_agent_registry
+
+    config_run = is_config_run_dir(transcript_dir)
+    if not config_run:
+        agent_registry = scope_agent_registry(agent_registry, transcript_dir)
 
     # --- tools + lazy knowledge (streams A and C) --------------------------
     from local_operator.harness.types import ToolContext
@@ -4607,7 +4876,29 @@ async def _prepare(
     # exec-launched headless session (the 2026-09-28 incident's addendum), and
     # the posture surfaces had to carve an exception around a gate that ignored
     # the file they report against.
-    request_approval = _make_request_approval(yolo or _approval_mode_is_auto(config_manager))
+    #
+    # THE CONVERSATION'S OWN RECORDED CHOICE OUTRANKS THE FILE, in BOTH
+    # directions (2026-10-23). ``transcript_dir`` is this run's session
+    # directory, so a ``--resume`` reads the resumed conversation's
+    # ``approvals.json`` and starts in the mode its human left it in —
+    # including a recorded ``ask`` that must beat a config ``auto``. A fresh
+    # run's directory has no such file, which is exactly why reading it here
+    # keeps the config default for new conversations without a separate
+    # resume branch: the sidecar IS the choice, and its absence is the absence
+    # of one.
+    #
+    # Degrading to ``ask`` is preserved: an unreadable record reads as ``ask``
+    # (``approval_policy.read_override`` fails closed), and the config read
+    # itself still falls back to ``ask`` on an odd or missing file.
+    _persisted_approval, _approval_warning = read_approval_override(transcript_dir)
+    if _approval_warning:
+        print(f"\033[1;33mWarning: {_approval_warning}\033[0m", file=sys.stderr)
+    _approval_auto = (
+        _persisted_approval == "auto"
+        if _persisted_approval is not None
+        else _approval_mode_is_auto(config_manager)
+    )
+    request_approval = _make_request_approval(yolo or _approval_auto)
     # The variables surface behind list_variables/read_variable: config
     # overrides ride above the project file and process environment, and
     # values stay out of the system prompt (read on demand, not baked).
@@ -4651,6 +4942,15 @@ async def _prepare(
             f"\033[1;33mWarning: teams are unavailable this session: {exc}\033[0m",
             file=sys.stderr,
         )
+    else:
+        # LOH-9: teams are conversation-scoped too -- except in a configuration
+        # run, for the reason given at ``scope_agent_registry`` above. A None
+        # registry keeps the existing degrade-one-feature behaviour (the tool is
+        # not advertised).
+        from local_operator.profile_scope import scope_team_registry
+
+        if not config_run:
+            team_registry = scope_team_registry(team_registry, transcript_dir)
     # The projects registry gets the same degrade-one-feature handling, for the
     # same reason: a store the user may never have touched must not take down
     # the whole boot. `ProjectRegistry` construction is read-only (it creates
@@ -4699,10 +4999,11 @@ async def _prepare(
         web_search_settings=config_manager.get_config_value("web_search", None),
         web_fetch_settings=config_manager.get_config_value("web_fetch", None),
     )
-    tools = create_tools(tool_context)
     # The classification roster's ``tool`` kind is deliberately NOT populated
-    # here: this context carries none of the session-owned ``createIf`` gates,
-    # so a snapshot would miss ``sessions``/``task``/``wait``/``jobs``/``hub``
+    # here: this context carries none of the session-owned ``createIf`` gates
+    # (``bridge_runtime`` is the exception — it is installed above because the
+    # tool table is built from this context), so a snapshot would miss
+    # ``sessions``/``task``/``wait``/``jobs``/``hub``
     # (agent review round 1, PR #1863). ``Session.set_knowledge_hooks``
     # refreshes the roster from the session's FINAL inventory instead.
 
@@ -4723,6 +5024,30 @@ async def _prepare(
         transcript_dir,
         defer_materialise=os.environ.get("LOP_RUNTIME_DEFER_MATERIALISE") == "1",
     )
+    # H5d: the bridge runtime must be resolved BEFORE the tool table is built,
+    # because `build_bridge_tool` is createIf — it returns None unless
+    # ``tool_context.bridge_runtime`` is PRESENT — so building the table first
+    # drops the `bridge` tool from every session that has a bridge. Before this
+    # fix the resolution sat ~150 lines below this point: enrollment was
+    # committed, the runtime was attached to the Session, the executor would
+    # have worked, and the model had no tool to call. Nothing outside observed
+    # the gap.
+    #
+    # The resolution needs the transcript (the designation is the session
+    # directory name), which is why it lives here and not beside the
+    # ToolContext it feeds. A session that cannot use the bridge pays no schema:
+    # a gate miss leaves the field None and the createIf behaves as before.
+    from local_operator.team_bridge.host import bridge_runtime_for_session
+
+    bridge_runtime = bridge_runtime_for_session(
+        config_manager=config_manager,
+        session_id=transcript.directory.name,
+    )
+    # One value, both roles: the table assembled below inspects this context for
+    # PRESENCE, and the Session executes against the same runtime. Two
+    # resolutions here would be two answers waiting to disagree.
+    tool_context.bridge_runtime = bridge_runtime
+    tools = create_tools(tool_context)
     # The mesh credential binding recorder: created with the transcript in hand
     # (it appends the durable rows), gated on THIS root holding a credential
     # placement document plus an identity — deliberately NOT on
@@ -4780,12 +5105,17 @@ async def _prepare(
     # Repo guidance (AGENTS.md/CLAUDE.md ancestors) joins the same read-once
     # contract: the head block must stay byte-stable for the session, so the
     # filesystem is consulted here and never again.
-    from local_operator.context_files import load_repo_guidance
+    from local_operator.context_files import load_repo_guidance_with_record
 
+    # The record names the guidance files this prompt ACTUALLY carries (path +
+    # head digest), so the read tool can say "already in your prompt" only
+    # when that is true — never from a later look at the disk (review R1-1).
     try:
-        repo_guidance = load_repo_guidance(effective_cwd, boundary=world_root)
+        repo_guidance, injected_guidance = load_repo_guidance_with_record(
+            effective_cwd, boundary=world_root
+        )
     except Exception:  # noqa: BLE001 — never block session construction
-        repo_guidance = ""
+        repo_guidance, injected_guidance = "", ()
 
     system_blocks_provider = _make_system_blocks_provider(
         tools,
@@ -4798,7 +5128,16 @@ async def _prepare(
         language_line=language_line,
         variable_store=variable_store,
         voice_probe=lambda: voice_slot.is_voice_session(config_dir, transcript_dir.name),
+        # ``transcript_dir.name`` IS the session id (the directory is named for
+        # it, and every other ``session_id=`` below reads the same field), so
+        # the id a listing prints and the id the prompt carries are the same
+        # bytes — exact equality is what lets a row be recognised as this one.
+        session_id=transcript_dir.name,
     )
+    # Beside ``repo_guidance`` and for the same reason: a child inherits the
+    # parent's prompt block, so it must inherit the record of what that block
+    # holds (read by ``Session._build_tool_context`` and ``launch_subagent``).
+    setattr(system_blocks_provider, "injected_guidance", injected_guidance)
 
     # The MONITOR gate's callable (``docs/design/monitor-tool.md`` §8): the
     # scheduler asks it for one materiality class per changed monitor, and a
@@ -4864,21 +5203,17 @@ async def _prepare(
         # path's kwargs dict cannot drift from what existing callers built;
         # see local_operator.tools.confinement for the mechanism and limits.
         session_kwargs["confinement_root"] = str(world_root)
-    # H5 (Team Bridge): attach the bridge runtime ONLY to the persisted,
-    # account-bound designated session. The decision is the HOST's, taken at
-    # the ONE construction seam, and a gate miss adds NO key at all (the
-    # ordinary kwargs dict cannot drift from what existing callers built).
-    # The helper is import-light and NETWORK-FREE: it reads local
-    # enrollment/settings/availability state and constructs the runtime — no
-    # fetch, no spawn; the client stays cheap until its first request.
-    # Subagent children are built elsewhere and never receive it (see the
-    # parameter's comment on ``Session``).
-    from local_operator.team_bridge.host import bridge_runtime_for_session
-
-    bridge_runtime = bridge_runtime_for_session(
-        config_manager=config_manager,
-        session_id=transcript.directory.name,
-    )
+    # H5 (Team Bridge): the runtime resolved above is the same object the tool
+    # table was built against. It is attached to EVERY writer session of the
+    # enrolled owner: the collaboration surface (directory/dm/channel_post and
+    # the endpoint-addressed room reads) belongs to any of them, while the
+    # inbound mailbox and the owner-shared reads are gated per call by the
+    # strict authority fence (``not_designated``). The designation is therefore
+    # no longer what decides whether a session has the tool, so an enrolled
+    # machine pays the bridge schema in each session — that is the cost of the
+    # capability, stated here rather than left to be inferred from the diff
+    # (review round 1 MAJOR 1/2). Subagent children are built elsewhere and
+    # never receive it (see the parameter's comment on ``Session``).
     if bridge_runtime is not None:
         session_kwargs["bridge_runtime"] = bridge_runtime
     return _SessionPlan(
@@ -5695,6 +6030,31 @@ def attach_credential_binding(
     sink = getattr(auth_store, "set_serve_sink", None)
     if callable(sink):
         sink(recorder.observe_serve)
+    get_credential = getattr(auth_store, "get_credential", None)
+    install_account = getattr(recorder, "set_account_resolver", None)
+    if callable(get_credential) and callable(install_account):
+        # A LOCAL serve's stable identity is read off the row it served (a
+        # mesh copy's origin marker), so a sync re-copy that replaces the row
+        # does not read as an account switch. One in-process row read, and only
+        # when a binding row is being built.
+        from local_operator.session.credential_binding import mesh_copy_account
+
+        install_account(lambda credential_id: mesh_copy_account(get_credential(credential_id)))
+    install_label = getattr(recorder, "set_label_resolver", None)
+    if callable(get_credential) and callable(install_label):
+        # The account-change NOTICE names the account by its sign-in label (the
+        # one ``credential_identity`` derivation the borrow listing and the
+        # login receipt use), so two logins on one device no longer render the
+        # same sentence. Read only when a notice is about to be journaled.
+        from local_operator.providers.auth_store import credential_identity
+
+        def _label(credential_id: int) -> str:
+            # ``get_credential`` is duck-typed here (``getattr``); the identity
+            # derivation is too — it accepts any row with a ``.data`` mapping.
+            row: Any = get_credential(credential_id)
+            return (credential_identity(row) or "") if row is not None else ""
+
+        install_label(_label)
     reader = getattr(auth_store, "set_binding_reader", None)
     if callable(reader):
         reader(recorder.recall_for)

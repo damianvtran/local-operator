@@ -1,0 +1,28 @@
+tui.palette.kind_agent
+EN "agent"
+ZH "智能体"
+CX {"maxCells": 12, "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments.", "role": "type tag beside a command-palette hit", "tone": "plain, lowercase fragment"}
+tui.palette.kind_command
+EN "command"
+ZH "命令"
+CX {"maxCells": 12, "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments.", "role": "type tag beside a command-palette hit", "tone": "plain, lowercase fragment"}
+tui.palette.kind_session
+EN "session"
+ZH "会话"
+CX {"maxCells": 12, "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments.", "role": "type tag beside a command-palette hit", "tone": "plain, lowercase fragment"}
+tui.palette.kind_setting
+EN "setting"
+ZH "设置"
+CX {"maxCells": 12, "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments.", "role": "type tag beside a command-palette hit", "tone": "plain, lowercase fragment"}
+tui.palette.kind_team
+EN "team"
+ZH "团队"
+CX {"maxCells": 12, "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments. If 'command' and 'team' would share one word, qualify the team tag rather than the command tag.", "role": "type tag beside a command-palette hit", "tone": "plain, lowercase fragment"}
+tui.palette.no_matches
+EN "No matches found"
+ZH "未找到匹配项"
+CX {"maxCells": 24, "note": "Shown centred in the palette's list when the typed query matches nothing. A complete standalone sentence fragment in the framework's own phrasing, not an instruction: it states the result, it does not tell the user to retry. Zero ICU arguments.", "role": "empty state in the command palette", "tone": "plain, factual"}
+tui.palette.placeholder
+EN "Search commands, settings, sessions, agents…"
+ZH "搜索命令、设置、会话、智能体……"
+CX {"maxCells": 48, "note": "Grey placeholder inside the palette's search field, naming what a query can reach: slash commands, settings sections, past conversations, and the names of agents and teams. The ellipsis is a single character, not three dots. Must fit the field at a 60-column terminal, so keep it as one short clause; do not add the key that opens the palette. Zero ICU arguments.", "role": "command-palette input placeholder", "tone": "plain, instructional"}

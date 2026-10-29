@@ -10,19 +10,18 @@ the one the code's own comment identifies as able to discard a row an appender
 wrote between the read and the truncate. At-most-once where the module's
 documented contract is at-least-once.
 
-**What is patched, and why it is faithful.** ``os.name`` is set to ``"nt"`` for
-exactly the duration of the drain call, so the code under test takes the branch
-a Windows process takes. That patch is deliberately narrow: ``pathlib`` reads
-``os.name`` when it constructs a path, so leaving it set would turn the next
-``Path(...)`` in this process into a ``WindowsPath`` and fail with
-``UnsupportedOperation``. The session directory is built before the patch, and
-``Path`` instances already created keep their own flavour.
+**What is patched, and why it is faithful.** The drain's ``_NonBlockingLock`` is
+replaced for the duration of the call with one that never acquires, which is the
+branch a Windows process takes (there is no ``fcntl`` there). Faking ``os.name``
+is no longer possible: the drain now also takes the persistent inbox locks, and
+``pathlib`` reads ``os.name`` when it constructs a path, so a faked platform
+would fabricate a ``WindowsPath`` on a POSIX host. This is an unlocked-branch
+test on POSIX, not a claim of Windows coverage.
 """
 
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -80,9 +79,20 @@ def test_an_unlocked_drain_keeps_a_row_appended_while_it_ran(
 
     monkeypatch.setattr(inbox, "_read_all", _read_then_race)
 
-    with monkeypatch.context() as windows:
-        windows.setattr(os, "name", "nt")
-        lines = inbox.drain_inbox(session_dir)
+    class Unlocked:
+        """The Windows shape: the data-file lock is never acquired."""
+
+        def __init__(self, _fd: int) -> None:
+            self.acquired = False
+
+        def __enter__(self) -> "Unlocked":
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    monkeypatch.setattr(inbox, "_NonBlockingLock", Unlocked)
+    lines = inbox.drain_inbox(session_dir)
 
     # THE PROPERTY THIS TEST EXISTS FOR: the racing row is delivered, not
     # truncated away.

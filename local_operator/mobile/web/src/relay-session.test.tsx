@@ -51,6 +51,25 @@ afterEach(() => {
 	document.documentElement.dir = "ltr";
 });
 
+/** The keys the redesigned list ACTUALLY renders (sentence case, O1). The
+    superseded `relay.session.*` values above stay frozen and unused — the
+    catalogue freeze forbids editing an existing English value, so a changed
+    string is a new `relay.chrome.*` key and both are asserted. */
+const CHROME = {
+	"relay.chrome.list.no_matches": "No matching conversations",
+	"relay.chrome.list.new": "New",
+	"relay.chrome.list.new_label": "New session",
+	"relay.chrome.list.starting": "Starting…",
+} as const;
+
+describe("relay.chrome list copy the redesign renders", () => {
+	it("paints the sentence-case English the list surfaces use", () => {
+		for (const [key, text] of Object.entries(CHROME)) {
+			expect(messageRuntime.t(key as keyof typeof CHROME)).toBe(text);
+		}
+	});
+});
+
 describe("relay.session extraction", () => {
 	it("renders byte-identical English for every owned session key", () => {
 		for (const [key, text] of Object.entries(BEFORE)) {
@@ -58,12 +77,13 @@ describe("relay.session extraction", () => {
 		}
 	});
 
-	it("keeps the document EN/LTR under a French backend, because the copy is English", () => {
+	it("follows the actual owned-copy language, not the backend preference", () => {
 		// The contract from #2297: lang/dir describe the ACTUAL rendered owned-copy
-		// language (uiLocale), not the backend preference. With only English owned
-		// bundles, a French (or Urdu) backend still paints EN/LTR.
+		// language (uiLocale), not the backend preference. French has no owned
+		// relay bundle, so it still paints EN/LTR; Urdu's audited relay bundle is
+		// shipped, so an Urdu backend paints ur/RTL.
 		expect(messageRuntime.uiLocaleFor("fr")).toBe("en");
-		expect(messageRuntime.uiLocaleFor("ur")).toBe("en");
+		expect(messageRuntime.uiLocaleFor("ur")).toBe("ur");
 		const { result, unmount } = renderHook(() => useLocaleSnapshot());
 		expect(result.current.uiLocale).toBe("en");
 		expect(result.current.direction).toBe("ltr");

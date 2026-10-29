@@ -5037,33 +5037,51 @@ def test_muse_spark_listing_no_longer_overflows_its_window(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_fast_mode_refusal_is_narrated_once_and_forwarded_to_the_session() -> None:
-    """The stream fn's half of review F1: the provider's own words reach the
-    user as a warning, the session bridge is called so the dial comes off,
-    and `forget_fast_refusal` re-opens the latch for an explicit `/fast on`."""
-    stream = create_stream_fn(MagicMock(), None)
-    notices: list[str] = []
-    forwarded: list[tuple[str, str]] = []
-    stream.set_notice_handler(lambda text, kind: notices.append(f"{kind}:{text}"))
-    stream.set_fast_refused_handler(lambda sel, msg: forwarded.append((sel, msg)))
+async def test_a_fast_mode_refusal_is_narrated_by_whoever_owns_the_dial() -> None:
+    """The stream fn's half of review F1, in the two shapes it now has.
 
-    state = stream._route_state
-    assert state.on_fast_refused is not None
-    first = await state.record_fast_refusal(
+    With a SESSION bridged (the production shape) the stream forwards and stays
+    quiet: the session is the side that can tell a first refusal from a latched
+    one on an already-standard route, and it narrates with a catalogue code
+    (``Session._on_fast_refused``). Without a bridge — a bare stream fn in a
+    harness or a subagent — the stream speaks for itself, or the provider's own
+    words would reach nobody. Either way one line per refusal, and
+    `forget_fast_refusal` re-opens the latch for an explicit `/fast on`.
+    """
+    bridged = create_stream_fn(MagicMock(), None)
+    bridged_notices: list[str] = []
+    forwarded: list[tuple[str, str]] = []
+    bridged.set_notice_handler(lambda text, kind: bridged_notices.append(f"{kind}:{text}"))
+    bridged.set_fast_refused_handler(lambda sel, msg: forwarded.append((sel, msg)))
+
+    bridged_state = bridged._route_state
+    assert bridged_state.on_fast_refused is not None
+    first = await bridged_state.record_fast_refusal(
         "anthropic/claude-opus-5", "Usage credits are required for fast mode."
     )
-    second = await state.record_fast_refusal("anthropic/claude-opus-5", "again")
+    second = await bridged_state.record_fast_refusal("anthropic/claude-opus-5", "again")
 
     assert (first, second) == (True, False), "latched: the second report is silent"
+    assert bridged_notices == [], "the session narrates; a second line is a duplicate"
+    assert forwarded == [("anthropic/claude-opus-5", "Usage credits are required for fast mode.")]
+    assert bridged_state.fast_refused_for("anthropic/claude-opus-5")
+
+    bridged.forget_fast_refusal()
+    assert not bridged_state.fast_refused_for("anthropic/claude-opus-5")
+
+    bare = create_stream_fn(MagicMock(), None)
+    notices: list[str] = []
+    bare.set_notice_handler(lambda text, kind: notices.append(f"{kind}:{text}"))
+
+    bare_state = bare._route_state
+    assert bare_state.on_fast_refused is not None
+    assert await bare_state.record_fast_refusal(
+        "anthropic/claude-opus-5", "Usage credits are required for fast mode."
+    )
     assert notices == [
         "warning:fast mode: refused by anthropic/claude-opus-5 — Usage credits are "
         "required for fast mode; switched off, serving at standard speed"
     ]
-    assert forwarded == [("anthropic/claude-opus-5", "Usage credits are required for fast mode.")]
-    assert state.fast_refused_for("anthropic/claude-opus-5")
-
-    stream.forget_fast_refusal()
-    assert not state.fast_refused_for("anthropic/claude-opus-5")
 
 
 class TestTheConfiguredEffortClamp:
@@ -6044,3 +6062,96 @@ async def test_genuine_historical_paid_wire_requires_trustworthy_refresh(
         await stream.close()
         peer.close()
         store.close()
+
+
+# ---------------------------------------------------------------------------
+# Model listing: a provider login lent by a mesh owner
+# ---------------------------------------------------------------------------
+
+OWNER_DEVICE = "d_00000000000000000000000000000001"
+
+
+@pytest.fixture
+def holder_root(tmp_path, monkeypatch):
+    """A config root where ANOTHER device owns ``radient`` and lends it here."""
+    from local_operator.network.credentials import placement as placement_mod
+    from local_operator.network.identity import mint
+
+    root = tmp_path / "holder"
+    root.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    identity = mint(root, name="node")
+    document = placement_mod.PlacementDocument(
+        "n_model_listing_borrow", root=root, written_by=OWNER_DEVICE
+    )
+    document.declare(
+        "radient",
+        owner_device=OWNER_DEVICE,
+        owner_device_name="head",
+        provider="radient",
+        identity_label="damian@example.test",
+        by=OWNER_DEVICE,
+    )
+    document.grant("radient", identity.device_id, by=OWNER_DEVICE)
+    document.save()
+    return root
+
+
+def test_the_listing_borrows_a_provider_login_from_an_owner(holder_root, monkeypatch) -> None:
+    """The model picker's path had the same gap as classification (design §7)."""
+    from local_operator.model import configure as configure_mod
+    from local_operator.network import credentials as credentials_pkg
+
+    calls: list[tuple[str, object]] = []
+
+    async def fake_borrow(provider: str, config_dir=None) -> str:
+        calls.append((provider, config_dir))
+        return "lent-listing-token"
+
+    monkeypatch.setattr(credentials_pkg, "borrowed_provider_key", fake_borrow)
+
+    assert configure_mod._oauth_listing_token("radient", base=holder_root) == (
+        "lent-listing-token",
+        False,
+        None,
+    )
+    assert calls == [("radient", holder_root)]
+
+
+def test_the_listing_does_not_construct_a_mesh_store_without_placement(
+    tmp_path, monkeypatch
+) -> None:
+    from local_operator.model import configure as configure_mod
+    from local_operator.network.credentials import store as mesh_store
+
+    root = tmp_path / "bare"
+    root.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+
+    def explode(*args, **kwargs):
+        raise AssertionError("a zero-peer device must not construct a mesh store")
+
+    monkeypatch.setattr(mesh_store, "build_auth_store", explode)
+
+    assert configure_mod._oauth_listing_token("radient", base=root) == ("", False, None)
+
+
+@pytest.mark.asyncio
+async def test_the_listing_bridge_does_not_wait_forever_in_a_running_loop(
+    holder_root, monkeypatch
+) -> None:
+    """F5: the thread branch caps the caller's wait; the daemon finishes on its own."""
+    from local_operator.model import configure as configure_mod
+    from local_operator.network import credentials as credentials_pkg
+
+    async def slow_borrow(provider: str, config_dir=None) -> str:
+        await asyncio.sleep(5.0)
+        return "late-token"
+
+    monkeypatch.setattr(credentials_pkg, "borrowed_provider_key", slow_borrow)
+
+    started = time.monotonic()
+    assert configure_mod._oauth_listing_token("radient", base=holder_root) == ("", False, None)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 3.0, "the running-loop branch must not wait out the borrow"

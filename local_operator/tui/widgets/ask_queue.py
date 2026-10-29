@@ -52,6 +52,7 @@ accent).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Iterable, Mapping, Sequence
 
 from rich.cells import cell_len
@@ -67,12 +68,19 @@ from local_operator.asks import store
 # i18n: the ask bar's and list header's counts are user-facing copy, extracted
 # so a locale can carry them. `_t` is bound BELOW the whole import block (a
 # binding between imports makes every later import read as not-at-top, E402).
+from local_operator.i18n.keys import tui_asks as _asks
 from local_operator.i18n.keys import tui_small as _x
 from local_operator.i18n.text import tr
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.widgets.ask_picker import TAB_HINT_KEY
 
 _t = tr("tui.small")
+
+#: The dismiss door's OWN namespace (R5, SA-D7). A new namespace rather than keys
+#: added to ``tui.small``: a new key in a namespace a locale has not carried yet
+#: GROWS the shrink-only coverage allowance (docs/I18N.md), while a complete new
+#: namespace needs no allowance at all.
+_a = tr("tui.asks")
 
 #: The one glyph the ask surfaces share. ``?`` is the question mark the
 #: composer chip vocabulary already leaves free (``!`` is the sidebar's
@@ -264,6 +272,40 @@ DELIVERING_MARK = "▸"
 IN_FLIGHT_MARK = "…"
 
 
+#: The dismiss chooser's two reasons, in the order the chooser offers them, each
+#: with the keys that NAME it and EXPLAIN it. The first element is the queue's
+#: own vocabulary (``asks/store.DISMISS_REASONS``), never a translated word — the
+#: copy is this surface's, the recorded reason is the log's, and letting the
+#: label decide what gets written is how a locale change becomes a data change.
+#: Functions rather than resolved strings: this table is built at import, and a
+#: module constant would freeze the locale it was imported under.
+DISMISS_CHOICES: tuple[tuple[str, Any, Any], ...] = (
+    (store.DISMISS_REASON_DEFAULT, _asks.dismiss_moot, _asks.dismiss_moot_note),
+    ("answered_in_chat", _asks.dismiss_answered_in_chat, _asks.dismiss_answered_in_chat_note),
+)
+
+#: The cells the context line and the chooser rows are INDENTED by: the width of
+#: the row's own two leading columns (``❯ ``) plus the status glyph cell, so a
+#: sub-line reads as belonging to the ask above it rather than as another ask.
+SUB_LINE_INDENT = 4
+
+#: The connector a context line leads with (design round 1, D6). The same indent
+#: is where a LAPSED ask's collapsed row sits, and that row carries no marker of
+#: its own, so without a cue the slot read as two different things at once ("a
+#: child line of the row above" and "another ask"). ``└`` is this surface's
+#: existing parent/child glyph — the sidebar's tree sections and the analytics
+#: panel both use it — and no ask row is ever painted with it.
+CONTEXT_CUE = "└ "
+
+#: The hints that can be spent as their KEY ALONE when the header runs out of
+#: cells (design round 2, D7). Only `x dismiss`: a single letter with no other
+#: `x` binding on this surface, and its verb is carried by the chooser it opens.
+#: `enter answer`/`enter view` cannot be shortened to `enter` (the row's own
+#: primary key would become ambiguous) and `esc collapse` to `esc` would collide
+#: with the chooser's `esc cancel`.
+KEY_ONLY_HINTS = {"x dismiss": "x"}
+
+
 @dataclass(frozen=True)
 class AskRow:
     """One wire ask, flattened to what a surface actually draws.
@@ -294,10 +336,42 @@ class AskRow:
     #: The row's own working directory, fleet scope only — what the scope line
     #: names when two conversations share a title.
     cwd: str = ""
+    #: SA-D7's card context, straight off the wire (`asks/store.pending_row`):
+    #: operator messages admitted after this ask was raised, and when the latest
+    #: one was (epoch ms). ``None`` means the writing runtime could not count them
+    #: — an older runtime, an ask older than its retained window — and ABSENCE IS
+    #: THE CONTRACT: no line is drawn rather than a zero the surface would have to
+    #: disbelieve. A zero is a fact (the ask is newer than every message) and draws
+    #: no line either, because there is nothing stale to report.
+    user_messages_since: int | None = None
+    last_user_message_at: int | None = None
+    #: WHY and WHEN this ask was dismissed (SA-D8, design §17), straight off the
+    #: wire (`asks/store.pending_row` adds the pair on a dismissed row only).
+    #: ``dismissed_reason`` picks the row's detail sentence (``moot`` /
+    #: ``answered_in_chat``); ``None`` is an older writer, which keeps the existing
+    #: "no reply was sent" sentence rather than inventing a reason.
+    dismissed_at: int | None = None
+    dismissed_reason: str | None = None
 
     @property
     def question_count(self) -> int:
         return len(self.questions)
+
+    @property
+    def context_stamp(self) -> tuple[int, int] | None:
+        """``(count, last_ms)`` for an OPEN row with something to say, else ``None``.
+
+        Open only: a settled ask has no staleness to report, and the line is the
+        one thing this surface spends a row on that is not the ask itself. Both
+        halves are required — the writer sends the pair together or not at all
+        (`AskQueue._card_context`), so a count without a clock is a payload this
+        surface has no sentence for.
+        """
+        if self.status != STATUS_OPEN or not self.user_messages_since:
+            return None
+        if not self.last_user_message_at:
+            return None
+        return int(self.user_messages_since), int(self.last_user_message_at)
 
     @property
     def head_question(self) -> str:
@@ -368,6 +442,22 @@ def _value(row: Any, key: str) -> Any:
     return getattr(row, key, None)
 
 
+def _optional_int(value: Any) -> int | None:
+    """A count/epoch an older runtime omitted, kept ABSENT rather than zeroed.
+
+    ``None`` is the wire's own spelling for "this writer could not count it"
+    (``asks/store.pending_row`` only adds the key when it has one), so coercing
+    it to ``0`` here would turn "unknown" into "nothing has happened since" and
+    the surface would state the opposite of the truth.
+    """
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def ask_rows(rows: Iterable[Any] | None) -> list[AskRow]:
     """Flatten the wire's asks into the surface view-model, settled rows included.
 
@@ -402,6 +492,14 @@ def ask_rows(rows: Iterable[Any] | None) -> list[AskRow]:
                 delivered=bool(_value(row, "delivered")),
                 session_id=str(_value(row, "session_id") or ""),
                 cwd=str(_value(row, "cwd") or ""),
+                user_messages_since=_optional_int(_value(row, "user_messages_since")),
+                last_user_message_at=_optional_int(_value(row, "last_user_message_at")),
+                dismissed_at=_optional_int(_value(row, "dismissed_at")),
+                dismissed_reason=(
+                    str(_value(row, "dismissed_reason"))
+                    if _value(row, "dismissed_reason")
+                    else None
+                ),
             )
         )
     return out
@@ -821,6 +919,51 @@ class AskBar(Widget):
         return text
 
 
+def _wrap_cells(text: str, room: int, *, max_lines: int = 2) -> list[str]:
+    """``text`` split into at most ``max_lines`` lines of ``room`` cells, on spaces.
+
+    The wrap side of :func:`_clip_cells`, for the two sub-lines that must stay
+    readable on a narrow panel (UX round 1, U4). A space is the only break: a
+    clause cut MID-WORD is what made the chooser's explanation unreadable at 60
+    cells, and a second line costs nothing — the block already scrolls.
+
+    The LAST line is clipped, never wrapped again: a bounded line count is what
+    keeps the painted sequence (and so the pointer's row map) a function of the
+    width rather than of the text's length.
+    """
+    if room <= 0:
+        return [""]
+    if cell_len(text) <= room:
+        return [text]
+    lines: list[str] = []
+    rest = text
+    while rest and len(lines) < max_lines - 1:
+        cut = -1
+        #: A space that OPENS a parenthetical wins over the last space: the
+        #: context line's "(last 14:14)" is one fact, and splitting it printed
+        #: `14:14)` alone on the second row (UX round 1, U4's own complaint in a
+        #: new place).
+        paren = -1
+        used = ""
+        for index, char in enumerate(rest):
+            if cell_len(used + char) > room:
+                break
+            used += char
+            if char == " ":
+                cut = index
+                if rest[index + 1 : index + 2] == "(":
+                    paren = index
+        if paren > 0:
+            cut = paren
+        if cut <= 0:
+            break
+        lines.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip()
+    if rest:
+        lines.append(_clip_cells(rest, room))
+    return lines or [""]
+
+
 def _clip_cells(text: str, room: int) -> str:
     """``text`` clipped to ``room`` cells with an ellipsis, cheaply.
 
@@ -903,11 +1046,19 @@ class AskQueueList(Widget):
             self.ask_id = ask_id
 
     class Dismiss(Message):
-        """The user dismissed one TIMED-OUT ask from the view."""
+        """The user dismissed one ask from the view.
 
-        def __init__(self, ask_id: str) -> None:
+        ``reason`` is the operator's word for WHY, and it is only ever set on an
+        OPEN ask: a lapsed one was walked past by the agent already, so its
+        dismissal carries no reason and the queue records its own default
+        (``asks/store.DISMISS_REASON_DEFAULT``). The chooser is this widget's,
+        because the list is where the gesture and the row both live.
+        """
+
+        def __init__(self, ask_id: str, *, reason: str | None = None) -> None:
             super().__init__()
             self.ask_id = ask_id
+            self.reason = reason
 
     BINDINGS = [
         Binding("escape", "collapse", "Collapse", show=False),
@@ -957,6 +1108,15 @@ class AskQueueList(Widget):
         "enter view",
         PASSIVE_TAB_HINT,
         "esc collapse",
+        # THE CHOOSER'S OWN TWO (R5), last because they are live only while it is
+        # up: `header_hints` filters by what the CURRENT view can honour, so the
+        # list's hints and the chooser's never mix — and the order here is the
+        # order they paint in when it is up. `esc cancel` and not `esc back`
+        # (design N1): with no chooser up Esc collapses the whole surface, so one
+        # word cannot name two exits — the chooser's footer is the only place
+        # either key set is painted while it is up (`header_hints` returns none).
+        "enter dismiss",
+        "esc cancel",
     )
 
     #: The cells between the scope clause and the filter control, and between
@@ -1023,6 +1183,17 @@ class AskQueueList(Widget):
         #: surface — the cwd's last segment is only the fallback for a session the
         #: catalogue no longer carries (round 2: U8/U6).
         self._session_titles: dict[str, str] = dict(session_titles or {})
+        #: The OPEN ask whose dismiss reason is being chosen, or ``None``. The
+        #: chooser is a MODE of this list rather than a second surface: the
+        #: gesture and the row it acts on are here, `x` already belongs to the
+        #: list, and a separate widget would have to re-derive which row the
+        #: user meant on both sides of the swap.
+        self._dismiss_for: str | None = None
+        #: The highlighted reason of that chooser (an index into
+        #: ``DISMISS_CHOICES``). `moot` is the default for the same reason the
+        #: queue records it when a caller omits the reason: it is the reading
+        #: that commits the agent to nothing.
+        self._dismiss_index = 0
 
     # -- the view-model ------------------------------------------------------
 
@@ -1060,9 +1231,23 @@ class AskQueueList(Widget):
         return filter_counts(self._rows)
 
     def set_filter(self, value: str) -> None:
-        """Select one half. The highlight follows the ROW, not the index."""
+        """Select one half. The highlight follows the ROW, not the index.
+
+        THE KEYBOARD PATH IS CLOSED WHILE A CHOOSER IS UP (agent review round 1,
+        m2): `1`/`2`/`3`/`[`/`]` and a click on a segment are inert, exactly like
+        `d`, `x`, `enter` and the arrows, because the chooser owns the keyboard
+        until a reason is chosen or Escaped out of. The earlier rule — a filter
+        key silently CANCELS the chooser — was defensible on paper and advertised
+        nowhere: the header named only `enter dismiss`/`esc`, so a reader who
+        pressed `2` lost their unconfirmed reason without being told.
+
+        This method stays the programmatic door (a caller re-pointing the slice
+        from outside the keyboard loop), and it closes the chooser rather than
+        letting it hover over a slice that may not draw its row.
+        """
         if value not in FILTER_LABELS or value == self._filter:
             return
+        self._dismiss_for = None
         current = self.current()
         self._filter = value
         self._reindex(current.ask_id if current else "")
@@ -1159,6 +1344,22 @@ class AskQueueList(Widget):
         self._open_count = open_count
         self._truncated = truncated
         self._reindex(current.ask_id if current else "")
+        # A CHOOSER FOR A ROW THAT IS GONE IS A DOOR TO NOTHING: the ask was answered
+        # on the phone, expired, or was dismissed elsewhere while the reason was
+        # on screen, and the next Enter would post a dismissal for an id this list
+        # no longer draws — or, worse, for a row it no longer draws in THIS slice
+        # (the Pending filter drops a row the moment it times out). The chooser
+        # closes with the row it belongs to, and the row must be BOTH visible and
+        # still answerable: a row that settled to `answered` or `timed_out` keeps
+        # its id but has left the door the reason belongs to (agent review round
+        # 1, m1 — Enter used to be live on a state the reader never saw).
+        if self._dismiss_for is not None:
+            keeper = next(
+                (row for row in self.visible_rows if row.ask_id == self._dismiss_for),
+                None,
+            )
+            if keeper is None or not keeper.answerable:
+                self._dismiss_for = None
         self.refresh(layout=True)
 
     def set_now(self, now_ms: int) -> None:
@@ -1195,7 +1396,25 @@ class AskQueueList(Widget):
 
     # -- keys ----------------------------------------------------------------
 
+    @property
+    def choosing(self) -> bool:
+        """Whether the dismiss reason chooser is up (this list's second mode)."""
+        return self._dismiss_for is not None
+
+    def dismiss_choice(self) -> str | None:
+        """The reason currently highlighted in the chooser, or ``None``. The QUEUE's
+        word, not the painted label — that is what the dismissal will record."""
+        if self._dismiss_for is None:
+            return None
+        return DISMISS_CHOICES[self._dismiss_index][0]
+
     def action_move(self, delta: int) -> None:
+        if self.choosing:
+            # Clamped like the row cursor: two choices, and a wrap under a held
+            # arrow would look like the list re-ordering itself.
+            self._dismiss_index = max(0, min(len(DISMISS_CHOICES) - 1, self._dismiss_index + delta))
+            self.refresh()
+            return
         visible = self.visible_rows
         if not visible:
             return
@@ -1230,38 +1449,93 @@ class AskQueueList(Widget):
         return True
 
     def action_pick(self) -> None:
+        if self.choosing:
+            self._choose_dismiss_reason()
+            return
         row = self.current()
         if row is not None and _openable(row) and row.ask_id not in self._in_flight:
             self.post_message(self.Picked(row.ask_id))
 
     def action_collapse(self) -> None:
+        if self.choosing:
+            self._cancel_dismiss_reason()
+            return
         self.post_message(self.Collapse())
 
     def action_decline(self) -> None:
+        if self.choosing:
+            # The chooser owns the keyboard until it is answered or escaped: a
+            # `d` typed while a reason is on screen would decline a question the
+            # user was in the middle of putting away, which is irreversible.
+            return
         row = self.current()
         if row is not None and row.answerable and row.ask_id not in self._in_flight:
             self.post_message(self.Decline(row.ask_id))
 
     def action_dismiss(self) -> None:
-        # LAPSED rows only (D11): dismiss is the queue's `timed_out`-only op, so
-        # offering it over an open row could only collect a refusal.
+        """`x`: put the row under the cursor away — OPEN asks ask WHY first.
+
+        A TIMED-OUT row has already been walked past by the agent (its deadline
+        fired, design §14), so its dismissal stays one key and records the
+        queue's default reason. An OPEN one is still owed by the agent, and the
+        reason is what it acts on: `moot` closes the question, `answered_in_chat`
+        tells it the answer is already in the conversation (SA-D7/R5). So the
+        key opens the two-choice reason card instead of dismissing outright.
+        """
+        if self.choosing:
+            return
         row = self.current()
-        if row is not None and row.lapsed and row.ask_id not in self._in_flight:
+        if row is None or row.ask_id in self._in_flight:
+            return
+        if row.lapsed:
             self.post_message(self.Dismiss(row.ask_id))
+            return
+        if not row.answerable:
+            return
+        self._dismiss_for = row.ask_id
+        self._dismiss_index = 0
+        self.refresh(layout=True)
+
+    def _choose_dismiss_reason(self) -> None:
+        """Enter in the chooser: post the dismissal with the highlighted reason."""
+        ask_id = self._dismiss_for
+        if ask_id is None:
+            return
+        reason = DISMISS_CHOICES[self._dismiss_index][0]
+        self._dismiss_for = None
+        self.refresh(layout=True)
+        self.post_message(self.Dismiss(ask_id, reason=reason))
+
+    def _cancel_dismiss_reason(self) -> None:
+        """Esc in the chooser: close it and leave the ask exactly where it was."""
+        if self._dismiss_for is None:
+            return
+        self._dismiss_for = None
+        self.refresh(layout=True)
 
     def action_filter_all(self) -> None:
+        if self.choosing:
+            return
         self.set_filter(FILTER_ALL)
 
     def action_filter_outstanding(self) -> None:
+        if self.choosing:
+            return
         self.set_filter(FILTER_OUTSTANDING)
 
     def action_filter_settled(self) -> None:
+        if self.choosing:
+            return
         self.set_filter(FILTER_SETTLED)
 
     def action_filter_next(self) -> None:
+        if self.choosing:
+            return
         self.cycle_filter(1)
 
     def action_filter_prev(self) -> None:
+        if self.choosing:
+            return
         self.cycle_filter(-1)
 
     # -- the pointer ---------------------------------------------------------
@@ -1283,6 +1557,64 @@ class AskQueueList(Widget):
         except Exception:  # noqa: BLE001 — pre-layout, when there is nothing to hit
             return 0
 
+    def _line_owners(self, width: int) -> list[tuple[str, int] | None]:
+        """What each painted line BELOW THE HEADER belongs to.
+
+        ``("row", i)`` — a visible ask's own line; ``("detail", i)`` — the row's
+        sub-line (a stale-ask context line, or a dismissed row's reason — the two
+        are mutually exclusive by status), one entry per PAINTED line so a wrapped
+        detail block owns all of its lines; ``("reason", k)`` — a choice in the
+        dismiss
+        reason block (the label line and its note line both belong to that
+        reason); ``None`` — a line that answers no click (the empty-half sentence
+        and the chooser's heading and hint).
+
+        ONE definition of the geometry, read by the painter's own sequence and by
+        the pointer hit test. The two used to be the same arithmetic by luck: the
+        row renderer emitted one line per ask and `_row_at` assumed it, which is
+        how round 3's wrap defect opened the ask below the pointer. A line that is
+        painted but unowned is exactly as visible here as one that is not painted,
+        so the chooser and the context line cannot silently shift the rows below
+        them.
+
+        ``width`` is the painted width the caller is laying out for: the context
+        line WRAPS to two lines on a narrow panel (UX round 1, U4 — clipping it
+        mid-sentence lost the countdown, which is the half that says how stale the
+        ask is), so its line count is a function of the width it was given. The
+        painter and the hit test pass the same number, which is why this takes it
+        rather than reading `content_size` twice.
+        """
+        visible = self.visible_rows
+        owners: list[tuple[str, int] | None] = []
+        if not visible and self._empty_slice():
+            owners.append(None)
+        for index, row in enumerate(visible):
+            owners.append(("row", index))
+            owners.extend([("detail", index)] * self._detail_line_count(row, width))
+            if self._dismiss_for == row.ask_id:
+                owners.append(None)  # the heading
+                for k in range(len(DISMISS_CHOICES)):
+                    owners.append(("reason", k))  # the label
+                    owners.append(("reason", k))  # its note, one line down
+                owners.append(None)  # the key hints
+        return owners
+
+    @staticmethod
+    def _detail_line_count(row: AskRow, width: int) -> int:
+        """How many painted lines ``row``'s detail block takes at ``width``."""
+        context = detail_text(row)
+        if not context:
+            return 0
+        return len(_wrap_cells(CONTEXT_CUE + context, max(1, width - SUB_LINE_INDENT)))
+
+    def _line_at(self, y: int) -> tuple[str, int] | None:
+        """The owned thing under a widget-relative y, or ``None``."""
+        index = y - self._top_inset() - self.HEADER_ROWS
+        owners = self._line_owners(max(1, int(self.content_size.width)))
+        if 0 <= index < len(owners):
+            return owners[index]
+        return None
+
     def _row_at(self, y: int) -> int | None:
         """The VISIBLE-row index under a widget-relative y, or ``None``.
 
@@ -1291,10 +1623,21 @@ class AskQueueList(Widget):
         ``HEADER_HINTS`` is spent rather than broken mid-phrase). The index is
         into ``visible_rows`` — the rows the current filter draws — so a filtered
         view can never open a row the user cannot see.
+
+        A row's DETAIL line belongs to that row: clicking the sentence under an
+        ask selects the ask, not the one below it (``_line_owners`` is the single
+        statement of that).
         """
-        index = y - self._top_inset() - self.HEADER_ROWS
-        if 0 <= index < len(self.visible_rows):
-            return index
+        owner = self._line_at(y)
+        if owner is not None and owner[0] in {"row", "detail"}:
+            return owner[1]
+        return None
+
+    def _reason_at(self, y: int) -> int | None:
+        """The chooser choice index under a widget-relative y, or ``None``."""
+        owner = self._line_at(y)
+        if owner is not None and owner[0] == "reason":
+            return owner[1]
         return None
 
     def _segment_at(self, x: int, y: int) -> str | None:
@@ -1345,6 +1688,18 @@ class AskQueueList(Widget):
             self._passive = False
             self.refresh(layout=True)
         y = int(event.y)
+        if self.choosing:
+            # THE CHOOSER TAKES THE CLICKS IT DRAWS: a tap on a choice sends THAT
+            # reason — the pointer has already said which, so asking for a second
+            # tap to confirm the row it is on would be a dead press. Every other
+            # line in the block is inert, the same rule the keys follow — and that
+            # now includes the header's filter segments (agent review round 1,
+            # m2), which used to cancel the chooser from under the pointer.
+            choice = self._reason_at(y)
+            if choice is not None:
+                self._dismiss_index = choice
+                self._choose_dismiss_reason()
+            return
         segment = self._segment_at(int(event.x), y)
         if segment is not None:
             self.set_filter(segment)
@@ -1394,7 +1749,19 @@ class AskQueueList(Widget):
 
     def on_mouse_move(self, event: events.MouseMove) -> None:  # type: ignore[override]
         """Hover moves the highlight, so the row under the pointer is the one
-        a click would take — the picker card's own rule."""
+        a click would take — the picker card's own rule.
+
+        While the chooser is up the LIST's highlight does not move: the rows are
+        not what a click acts on any more, and a highlight sliding under a choice
+        would say the pointer had chosen an ask.
+        """
+        if self.choosing:
+            choice = self._reason_at(int(event.y))
+            if choice is None or choice == self._dismiss_index:
+                return
+            self._dismiss_index = choice
+            self.refresh()
+            return
         row = self._row_at(int(event.y))
         if row is None or row == self._index:
             return
@@ -1421,14 +1788,24 @@ class AskQueueList(Widget):
         absent where they are live.
 
         So the set is derived from the row under the cursor and the keys' own
-        objects: `enter answer`/`d` need an ANSWERABLE row, `enter view`/`x` a
-        lapsed one (dismiss is only ever offered on a timed-out ask, so
-        advertising it over open rows names a key the row would refuse), and
+        objects: `enter answer`/`d` need an ANSWERABLE row, `enter view` a lapsed
+        one, and `x dismiss` EITHER — an open ask can be put away too since R5
+        (it is asked its reason first; a timed-out one goes at once, §14), so
+        hiding the hint over open rows would name a key the row now honours.
         `esc` needs nothing — it is how a reader leaves any view, including an
         empty half. Order is still ``HEADER_HINTS``' own.
         """
         visible = self.visible_rows
         live = {"esc collapse"}
+        if self.choosing:
+            # THE CHOOSER OWNS THE KEYBOARD, AND ITS OWN BLOCK NAMES ITS KEYS.
+            # Every key the list advertises is inert until a reason is chosen or
+            # Escaped out of, and the block under the row paints `enter dismiss ·
+            # esc cancel` one line below the choices — so a second copy in the
+            # header was the same string twice within seven lines (design N2/n2).
+            # A hint for a key this mode ignores is the dead-end affordance this
+            # method exists to prevent; the header paints none at all.
+            return ()
         if self.passive:
             # A PASSIVE list owns no key: the composer holds the caret, so `enter`,
             # `d` and `x` would type into the composer, not act on a row. It names
@@ -1443,11 +1820,12 @@ class AskQueueList(Widget):
         # `enter answer · d decline` while the cursor sat on the timed-out one,
         # where Enter could not answer. A lapsed row takes `enter view` (the
         # read-only card, U1) and `x dismiss`; an answerable one takes the two
-        # answer keys. A row in flight takes nothing until its reply lands.
+        # answer keys and `x dismiss` (R5). A row in flight takes nothing until
+        # its reply lands.
         row = self.current()
         if row is not None and row.ask_id not in self._in_flight:
             if row.answerable:
-                live |= {"enter answer", "d decline"}
+                live |= {"enter answer", "d decline", "x dismiss"}
             elif row.lapsed:
                 live |= {"enter view", "x dismiss"}
         return tuple(hint for hint in self.HEADER_HINTS if hint in live)
@@ -1522,40 +1900,73 @@ class AskQueueList(Widget):
         # nothing; the drawer count goes first because the three segments below
         # it already carry those numbers.
         head: list[HeaderAtom] = []
-        # THE FIRST HINT OUTBIDS THE DRAWER CLAUSE (U3). The clause's own rung
-        # already argues it is expendable at a narrow width ("the segments carry
-        # the three counts"), but the ladder used to spend it WITHOUT leaving
-        # room for a single hint: at 80 columns — the repo's own default
-        # assumption — the auto-opened surface named no key at all. The rungs
-        # below therefore measure with the first hint RESERVED, so the clause
-        # yields to the hint the way it already yields to the numbers.
+        # THE CLAUSE YIELDS TO THE WHOLE LIVE HINT SET (design D2 = UX U1). It
+        # used to yield to the FIRST hint only, so at the default 100-column
+        # terminal an OPEN row reserved room for `enter answer` and then shed
+        # `d decline` and `x dismiss` — the one key R5 adds was never named at the
+        # widths this repo is used at, while a NARROWER window still named two of
+        # them. The clause repeats what the segments below already count, and the
+        # dock prints the same sentence in full one line away, so the clause is
+        # the thing that goes; the hints are what the ladder exists to keep.
         hints = self.header_hints()
-        reserve = [HeaderAtom("  ·  " + hints[0], "muted")] if hints else []
-        current = self.current()
-        if current is not None and current.lapsed and "enter view" in hints:
-            # A LAPSED row has two keys and neither is guessable: `x` is the only
-            # one that changes anything (U8) and `enter view` is the only way to
-            # read the whole question (U1). The clause yields to BOTH, so the look
-            # is discoverable at the default 80 columns (#2481 UX round 2, U10) —
-            # the segments already carry the counts the clause would repeat.
-            reserve = [HeaderAtom("  ·  " + hint, "muted") for hint in hints[:2]]
+        live_hints = [HeaderAtom("  ·  " + hint, "muted") for hint in hints]
         if clause:
             with_clause = [HeaderAtom(subject, "fg")] if subject else []
             with_clause.append(HeaderAtom(f"{' · ' if subject else ''}{clause}", "fg"))
-            if _atoms_width([*atoms, *with_clause, *_seg_block(True), *reserve]) <= width:
+            if _atoms_width([*atoms, *with_clause, *_seg_block(True), *live_hints]) <= width:
                 head = with_clause
         if not head and subject:
             candidate = [HeaderAtom(subject, "fg")]
-            if _atoms_width([*atoms, *candidate, *_seg_block(True), *reserve]) <= width:
+            if _atoms_width([*atoms, *candidate, *_seg_block(True), *live_hints]) <= width:
                 head = candidate
         atoms.extend(head)
         atoms.extend(_seg_block(bool(head)))
-        kept: list[HeaderAtom] = []
-        for hint in hints:
-            prefix = "  ·  "
-            if _atoms_width([*atoms, *kept, HeaderAtom(prefix + hint, "muted")]) > width:
-                break
-            kept.append(HeaderAtom(prefix + hint, "muted"))
+
+        def shed(prefix: str, *, key_fallback: bool = False) -> list[HeaderAtom]:
+            """As many hints as fit, in order, from the left.
+
+            ``key_fallback`` spends the hint that would otherwise BREAK the row as
+            its key alone — the rung design round 2's D7 asked for. The counts are
+            part of the header, so a tenth ask (or any three-digit count) spends the
+            cell the three-key row had and `x dismiss` vanished again at exactly the
+            width it had just been restored to; `x` still names the key that opens
+            the chooser. The fallback applies only to that breaking hint: every
+            earlier one keeps its verb, and nothing is abbreviated to prettify.
+            """
+            kept: list[HeaderAtom] = []
+            for hint in hints:
+                candidate = HeaderAtom(prefix + hint, "muted")
+                if _atoms_width([*atoms, *kept, candidate]) > width:
+                    short = KEY_ONLY_HINTS.get(hint) if key_fallback else None
+                    if short is None:
+                        break
+                    candidate = HeaderAtom(prefix + short, "muted")
+                    if _atoms_width([*atoms, *kept, candidate]) > width:
+                        break
+                kept.append(candidate)
+            return kept
+
+        # THE SEPARATOR COMPACTS BEFORE A HINT IS DROPPED (design D2/UX U1). The
+        # measured case is the repo's own 80-column default: the three live hints
+        # need 80 cells with the roomy `  ·  ` separator and fit in 78 with the
+        # dock's own ` · ` — and 78 is exactly the content width that terminal
+        # leaves. A rung, not a second vocabulary: both separators are already in
+        # this header, and the compact one is only used when it keeps MORE hints
+        # than the roomy one does (never to prettify).
+        #
+        # THE KEY-ONLY RUNG COMES LAST (design D7): it keeps three hints where the
+        # full set keeps two, but it costs the verb, so it only wins when it wins a
+        # hint — `max` takes the first of equal-length candidates, which keeps the
+        # spelled-out form on a tie.
+        kept = max(
+            (
+                shed("  ·  "),
+                shed(" · "),
+                shed("  ·  ", key_fallback=True),
+                shed(" · ", key_fallback=True),
+            ),
+            key=len,
+        )
         atoms.extend(kept)
         if _atoms_width(atoms) > width:
             # The floor: not even the control fits. CUT rather than wrap — a
@@ -1627,8 +2038,27 @@ class AskQueueList(Widget):
         text.append_text(header)
         visible = self.visible_rows
         sentence = self._empty_slice()
+        # ONE PLACE THAT KNOWS WHAT A LINE IS. The list paints the header, then
+        # for every ask its own row PLUS (on a stale OPEN ask) the context line
+        # SA-D7 added, then the chooser's block while a reason is being picked.
+        # `_line_owners` below is the same sequence as data, and the pointer hit
+        # test reads IT rather than re-deriving the geometry: this surface already
+        # paid for two copies of that arithmetic once (round 3: a click opened the
+        # ask below the one under the pointer).
+        #
+        # `painted` starts TRUE because the header is already in the buffer: this
+        # helper only decides the separators AFTER it, and starting false emitted
+        # one blank row before the first ask.
+        painted = True
+
+        def start_line() -> None:
+            nonlocal painted
+            if painted:
+                text.append("\n")
+            painted = True
+
         if visible or sentence:
-            text.append("\n")
+            start_line()
         if not visible and sentence:
             # AN EMPTY SLICE OWES A LINE (design round 1, D1 = UX U2): a blank
             # pane under a live filter reads as "there are no asks" over a queue
@@ -1643,6 +2073,8 @@ class AskQueueList(Widget):
             # (design round 2, D1).
             text.append(sentence, style=muted)
         for index, row in enumerate(visible):
+            if index:
+                start_line()
             # A PASSIVE list marks no row: `❯` says "Enter acts on this one", and the
             # keyboard is not here. The column is kept (two blank cells) so a row's
             # question starts where it will once the list takes the caret, and the
@@ -1733,9 +2165,152 @@ class AskQueueList(Widget):
                 else:
                     line.append(tail, style=chip_warning if row.urgent else muted)
             text.append(line)
-            if index + 1 < len(visible):
-                text.append("\n")
+            # THE ROW'S DETAIL LINE — SA-D7's stale-ask context on an OPEN row,
+            # SA-D8's reason on a DISMISSED one — on the row it belongs to and
+            # nowhere else: indented under the question, in the muted register —
+            # it is about the question, never a second ask. It leads with a
+            # `└` connector (design D6): the same indent is also where a LAPSED
+            # ask's collapsed row sits, so without a cue of its own the slot meant
+            # two things at once. `└` is this surface's existing "child of the row
+            # above" glyph (the tree sections and the analytics panel use it), and
+            # no ask row ever starts with it.
+            context = detail_text(row)
+            if context:
+                for number, piece in enumerate(
+                    _wrap_cells(f"{CONTEXT_CUE}{context}", max(1, width - SUB_LINE_INDENT))
+                ):
+                    start_line()
+                    sub = Text(no_wrap=True, overflow="ellipsis")
+                    sub.append(" " * SUB_LINE_INDENT, style=muted)
+                    if number:
+                        # The continuation lines align under the words, not under
+                        # the connector: the cue marks the block once.
+                        sub.append(" " * cell_len(CONTEXT_CUE), style=muted)
+                    sub.append(piece, style=muted)
+                    text.append(sub)
+            # THE CHOOSER SITS UNDER THE ROW IT IS ABOUT, never at the foot of the
+            # list: with three asks on screen a reason card painted below the last
+            # one reads as a question about THAT ask, and the operator has to hunt
+            # for which row it belongs to. It is a sub-block of one row for the
+            # same reason the context line is.
+            if self._dismiss_for == row.ask_id:
+                for line in self._chooser_lines(width, fg, muted, bold):
+                    start_line()
+                    text.append(line)
         return text
+
+    def _chooser_lines(self, width: int, fg: Style, muted: Style, bold: Style) -> list[Text]:
+        """The dismiss reason block: its heading, two choices, its key hints.
+
+        No question text in the heading: the block sits DIRECTLY under the row it
+        is about (`render`), so repeating the question one line below the row
+        that asks it would be the same sentence twice — the distinction §5's
+        preamble draws between stating a fact and padding a screen.
+
+        THE NOTES ARE PAINTED RATHER THAN LEFT TO THE READER'S MEMORY: `moot` and
+        `answered_in_chat` both end the agent's wait and differ only in what the
+        agent is told, which is precisely the distinction a bare label cannot
+        carry (design D2's own argument for `x dismiss` over the row's glyph).
+
+        EACH CHOICE IS TWO PAINTED LINES — the label, then its note in the muted
+        register one line down (design round 1, U4 = D1's shape). They used to
+        share one row (`Answered in chat — you already replied in the conversation`)
+        and clipped MID-WORD against a panel with the sidebar up, cutting the
+        clause that carries the distinction. Two lines also give the geometry one
+        fixed shape at every width, which is what lets `_line_owners` stay a
+        function of the width alone.
+        """
+        head = _a(_asks.dismiss_title())
+        out = [
+            Text(
+                " " * SUB_LINE_INDENT + _clip_cells(head, max(1, width - SUB_LINE_INDENT)),
+                style=fg,
+                no_wrap=True,
+                overflow="ellipsis",
+            )
+        ]
+        room = max(1, width - SUB_LINE_INDENT - 2)
+        for index, (_, label, note) in enumerate(DISMISS_CHOICES):
+            selected = index == self._dismiss_index
+            line = Text(no_wrap=True, overflow="ellipsis")
+            line.append(" " * SUB_LINE_INDENT, style=muted)
+            line.append("❯ " if selected else "  ", style=bold if selected else muted)
+            line.append(
+                _clip_cells(_a(label()), room),
+                style=(bold + fg) if selected else muted,
+            )
+            out.append(line)
+            explanation = Text(no_wrap=True, overflow="ellipsis")
+            explanation.append(" " * (SUB_LINE_INDENT + 2), style=muted)
+            explanation.append(_clip_cells(_a(note()), room), style=muted)
+            out.append(explanation)
+        out.append(
+            Text(
+                " " * SUB_LINE_INDENT + _a(_asks.dismiss_hint()),
+                style=muted,
+                no_wrap=True,
+                overflow="ellipsis",
+            )
+        )
+        return out
+
+
+def context_text(row: AskRow) -> str:
+    """The stale-ask context line for ``row``, or ``""`` when it has none.
+
+    SA-D7's line ("3 messages from you since this was asked (last 19:36)"),
+    drawn under an OPEN row that has admitted operator messages since it was
+    asked. It is the ONE thing on this surface that says a question may already
+    have been answered in chat, so it is painted as its own line rather than
+    competing with the question and its countdown for the same row.
+
+    The clock is the CLIENT's, formatted here and passed as a finished string:
+    ICU has no business reformatting a wall-clock time, and a locale that wants
+    a different position for it reorders the sentence in its own catalogue (the
+    time lives inside both plural arms for exactly that reason).
+    """
+    stamp = row.context_stamp
+    if stamp is None:
+        return ""
+    count, last_ms = stamp
+    when = datetime.fromtimestamp(last_ms / 1000).astimezone().strftime("%H:%M")
+    return _a(_asks.context_messages(count=count, time=when))
+
+
+def dismiss_reason_text(row: AskRow) -> str:
+    """The reason line under a DISMISSED row (SA-D8, design §17), or ``""``.
+
+    A dismissal before the ask's deadline keeps a settled row for the answered
+    row's own 7 d (``store.dismissed_hidden``), and the row is only worth keeping
+    if it can state WHY the ask was put away — the chip says ``dismissed`` and
+    that word alone cannot tell "you already replied in the conversation" from
+    "you stopped waiting". The sentences are the ones the dismissal receipt
+    already uses (``tui.asks.dismiss.notice_moot`` / ``notice_answered_in_chat``,
+    #2841's catalogue), so no new copy and no second wording of one act.
+
+    ``None`` — a row written by a build that recorded no reason — falls back to
+    the existing no-reply sentence rather than guessing one. That sentence is
+    FALSE for an open ask dismissed since §15 (the agent IS told), which is why
+    it is only ever reached when nothing better is known.
+    """
+    if row.status != STATUS_DISMISSED:
+        return ""
+    if row.dismissed_reason == "answered_in_chat":
+        return _a(_asks.dismiss_notice_answered_in_chat())
+    if row.dismissed_reason == "moot":
+        return _a(_asks.dismiss_notice_moot())
+    return _a(_asks.dismiss_notice_no_reply())
+
+
+def detail_text(row: AskRow) -> str:
+    """The one sub-line ``row`` owes under itself, or ``""`` when it owes none.
+
+    TWO SOURCES, ONE SLOT: an open ask can carry SA-D7's staleness line, and a
+    dismissed one carries its reason. They are mutually exclusive by status, so
+    the slot never holds two sentences and the painted geometry stays one line
+    per row plus at most one wrapped detail block.
+    """
+    return dismiss_reason_text(row) or context_text(row)
 
 
 def expiry_text(row: AskRow, now_ms: int) -> str:

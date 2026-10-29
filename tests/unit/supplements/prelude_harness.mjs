@@ -16,7 +16,7 @@
 //   `script` runs a component's inline script as the browser would: a throw is NOT fatal to
 //   the page, it becomes the window `error` event ("Uncaught <error>"). That is how a
 //   component that fails during parse -- before the host's theme push -- is reproduced.
-// output   = {posts:[...], texts:[{text,x,y,anchor,left,right,top,bottom}...], svgW}
+// output   = {posts:[...], texts:[{text,x,y,anchor,left,right,top,bottom}...], svgW, svgH, svgAttrW, svgAttrH}
 import fs from "node:fs";
 import vm from "node:vm";
 
@@ -53,9 +53,31 @@ const dataEl = new Node("script");
 dataEl._text = JSON.stringify(scenario.data ?? {});
 const target = new Node("div");
 target.clientWidth = scenario.width ?? 620;
+// The resize report is the body's natural height, not the root's current box. Model it as
+// the drawn SVG height plus the stylesheet's 8 px top/bottom padding; the browser frames
+// measure the real layout (including the 810x373 feedback lock this guards).
+const body = new Node("body");
+body.offsetWidth = 0;
+body.clientWidth = 0;
+const bodyHeight = () => {
+  let h = 0;
+  const find = (n) => {
+    if (n.tag === "svg") {
+      const b = (n.attrs.viewBox || "0 0 0 0").split(" ");
+      h = +b[3];
+    }
+    for (const c of n.children) if (typeof c === "object") find(c);
+  };
+  find(target);
+  return h + 16;
+};
+for (const key of ["offsetHeight", "scrollHeight"]) {
+  Object.defineProperty(body, key, { get: bodyHeight });
+}
 
 const document = {
   documentElement: root,
+  body,
   getElementById: (id) => (id === "lo-data" ? dataEl : id === "c" ? target : null),
   createElement: (tag) =>
     tag === "canvas"
@@ -104,7 +126,7 @@ const texts = [];
 // class ttl and the dataset title is nowhere in the drawn output".
 const nodes = [];
 const walkNodes = (n) => {
-  if (n.tag) nodes.push({ tag: n.tag, cls: n.attrs.class || "", text: n._text || "" });
+  if (n.tag) nodes.push({ tag: n.tag, cls: n.attrs.class || "", text: n._text || "", attrs: n.attrs });
   for (const c of n.children) if (typeof c === "object") walkNodes(c);
 };
 walkNodes(target);
@@ -125,7 +147,7 @@ const walk = (n, dx, dy) => {
   for (const c of n.children) if (typeof c === "object") walk(c, dx, dy);
 };
 walk(target, 0, 0);
-let svgW = 0;
-const findSvg = (n) => { if (n.tag === "svg") svgW = +n.attrs.viewBox.split(" ")[2]; for (const c of n.children) if (typeof c === "object") findSvg(c); };
+let svgW = 0, svgH = 0, svgAttrW = 0, svgAttrH = 0;
+const findSvg = (n) => { if (n.tag === "svg") { const b = n.attrs.viewBox.split(" "); svgW = +b[2]; svgH = +b[3]; svgAttrW = +(n.attrs.width || 0); svgAttrH = +(n.attrs.height || 0); } for (const c of n.children) if (typeof c === "object") findSvg(c); };
 findSvg(target);
-process.stdout.write(JSON.stringify({ posts, texts, nodes, calls, svgW }));
+process.stdout.write(JSON.stringify({ posts, texts, nodes, calls, svgW, svgH, svgAttrW, svgAttrH }));

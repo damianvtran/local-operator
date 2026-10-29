@@ -1,0 +1,21 @@
+{
+  "relay.transcript.turn.condensed": "Turno resumido",
+  "relay.transcript.turn.took": "{duration}",
+  "relay.transcript.turn.actions": "{label, select, other {{count, plural, one {{label} acción} many {{label} de acciones} other {{label} acciones}}}}",
+  "relay.transcript.turn.completed": "completado",
+  "relay.transcript.fold.unit": "{kind, select, files {{count, plural, one {# archivo} many {# de archivos} other {# archivos}}} searches {{count, plural, one {# búsqueda} many {# de búsquedas} other {# búsquedas}}} web {{count, plural, one {# búsqueda web} many {# de búsquedas web} other {# búsquedas web}}} shell {{count, number} shell} python {{count, number} python} edits {{count, plural, one {# edición} many {# de ediciones} other {# ediciones}}} tasks {{count, plural, one {# tarea} many {# de tareas} other {# tareas}}} incoming {{count, plural, one {# mensaje entrante} many {# de mensajes entrantes} other {# mensajes entrantes}}} wakes {{count, plural, one {# recibo de despertar} many {# de recibos de despertar} other {# recibos de despertar}}} other {{count, number} {name}}}",
+  "relay.transcript.fold.shell": "{count, plural, one {# shell} many {# shell} other {# shell}}",
+  "relay.transcript.fold.python": "{count, plural, one {# python} many {# python} other {# python}}",
+  "relay.transcript.fold.more": "{count, plural, one {y # acción más} many {y # de acciones más} other {y # acciones más}}",
+  "relay.transcript.fold.failed_label": "Incluye una acción fallida",
+  "relay.transcript.fold.partial_label": "{count, plural, one {Al menos # acción — los mensajes anteriores aún no se han cargado} many {Al menos # de acciones — los mensajes anteriores aún no se han cargado} other {Al menos # acciones — los mensajes anteriores aún no se han cargado}}",
+  "relay.transcript.older.failed": "No se pudieron cargar los mensajes anteriores",
+  "relay.transcript.label.steered": "Redirigido",
+  "relay.transcript.label.wake": "Despertar",
+  "relay.transcript.label.peer": "Mensaje de otra sesión",
+  "relay.transcript.label.job": "Resultado de trabajo",
+  "relay.transcript.label.ask": "Pregunta",
+  "relay.transcript.label.messages": "Mensajes",
+  "relay.transcript.composer.queued": "{count, plural, one {# en cola} many {# en cola} other {# en cola}}",
+  "relay.transcript.session.unread_refused": "No se pudo leer lo que está sin leer; no se borró nada. Inténtalo de nuevo."
+}

@@ -448,11 +448,16 @@ async def test_the_cursor_starts_on_the_first_answerable_row():
 
 
 async def test_the_header_hints_follow_the_row_under_the_cursor():
-    """UX U3: no `enter answer · d decline` over a lapsed row."""
+    """UX U3: no `enter answer · d decline` over a lapsed row.
+
+    R5 adds `x dismiss` to the ANSWERABLE row's hints too: an open ask can be put
+    away since SA-D4, so the hint the lapsed row has always carried is now
+    truthful over both — hiding it there would name a key the row honours.
+    """
     rows = ask_rows([_row("a1", "Deploy now?"), _row("t1", "Old one?", status="timed_out")])
     listing = AskQueueList(rows)
     assert _current_id(listing) == "a1"
-    assert listing.header_hints() == ("enter answer", "d decline", "esc collapse")
+    assert listing.header_hints() == ("enter answer", "d decline", "x dismiss", "esc collapse")
     listing.action_move(1)
     assert _current_id(listing) == "t1"
     assert listing.header_hints() == ("x dismiss", "enter view", "esc collapse")

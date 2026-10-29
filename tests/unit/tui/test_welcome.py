@@ -331,7 +331,14 @@ def test_update_row_is_absent_when_none() -> None:
     assert "/update" not in rows
 
 
-def test_update_row_copy_and_narrow_drop() -> None:
+def test_update_row_copy_and_narrow_wrap() -> None:
+    """Narrow terminals WRAP the instruction rather than dropping it (D2).
+
+    The old rule printed the short sentence and no command below the full
+    sentence's width. That made the same width behave differently per locale —
+    Urdu's full sentence is longer, so it lost ``/update`` while English kept
+    it. Wrapping keeps every row whole (no ``/upd…``) and the command present.
+    """
     info = WelcomeInfo(
         version="0.27.0",
         model_label="test/model",
@@ -340,10 +347,42 @@ def test_update_row_copy_and_narrow_drop() -> None:
     )
     wide = plain(build_welcome_lines(info, ROOMY_W, ROOMY_H))
     assert "! latest is v0.28.0 — /update" in wide
-    narrow = plain(build_welcome_lines(info, 22, ROOMY_H))
+    narrow_lines = build_welcome_lines(info, 22, ROOMY_H)
+    narrow = plain(narrow_lines)
     assert "latest is v0.28.0" in narrow
-    assert "/update" not in narrow
-    assert "/upd" not in narrow
+    assert "/update" in narrow
+    update_rows = [line.plain for line in narrow_lines if "/update" in getattr(line, "plain", "")]
+    assert update_rows, "the wrapped update row disappeared"
+    for line in update_rows:
+        assert "…" not in line, line
+        assert cell_len(line) <= 22, line
+
+
+@pytest.mark.parametrize("height", [1, 2, 3])
+def test_wrapped_update_group_is_whole_or_absent(height: int) -> None:
+    """R2-1: the wrapped sentence is atomic in the height ladder.
+
+    At tiny heights the ladder used to shed one wrapped line at a time and keep
+    the contextless tail (`/update` with no sentence). The group now leaves or
+    stays whole.
+    """
+    info = WelcomeInfo(
+        version="0.27.0",
+        model_label="test/model",
+        cwd="/tmp/project",
+        update_available="0.28.0",
+    )
+    rendered = plain(build_welcome_lines(info, 24, height))
+    lines = rendered.splitlines()
+    has_command = any("/update" in line for line in lines)
+    has_sentence = any("latest is" in line for line in lines)
+    # A wrapped tail that survives without its sentence is the defect; a whole
+    # group whose last line happens to BE "/update" is the correct render.
+    assert has_command == has_sentence, lines
+    if has_command:
+        assert any("v0.28.0" in line for line in lines), lines
+    if height == 1:
+        assert not has_command, lines
 
 
 def test_update_sheds_before_harness_notice_and_login() -> None:
@@ -577,7 +616,9 @@ class FakeSession:
     def effective_model_label(self) -> str:
         return self.model_label
 
-    def set_model(self, model: Any, *, explicit: bool = False) -> None:
+    def set_model(
+        self, model: Any, *, explicit: bool = False, effort_choice: object = None
+    ) -> None:
         pass
 
     @property
@@ -1190,8 +1231,11 @@ def test_stylesheet_region_has_no_literal_hex() -> None:
     The region runs to EOF, so every section added after the welcome block is
     checked here whether or not it belongs to this view — which is why a border
     STYLE keyword (`none`, `tall`, `solid`) has to be a legal part of a border
-    value and not a violation: it is not a colour. `color` and `background` stay
-    strict — a keyword there would be a mistake, not a spelling.
+    value and not a violation: it is not a colour. `background` additionally
+    learns Textual's `transparent` keyword — it means "paint no ground", the
+    deliberate choice where the themed screen already supplies one (the
+    Library's full-page form), rather than a colour spelling. `color` stays
+    strict: a keyword there would be a mistake.
     """
     text = TCSS.read_text()
     marker = "/* ---- welcome view"
@@ -1215,6 +1259,12 @@ def test_stylesheet_region_has_no_literal_hex() -> None:
             # a hand-copied list would be a second source that drifts silently
             # when a version adds a style.
             parts = [part for part in parts if part not in VALID_BORDER]
+        if prop == "background":
+            # Textual's `transparent` is a KEYWORD for "no ground", not a
+            # colour: the Library view relies on it so a themed or transparent
+            # terminal is never painted over with an opaque rectangle. `color`
+            # stays strict — transparent ink is a mistake, not a spelling.
+            parts = [part for part in parts if part != "transparent"]
         for part in parts:
             assert part.startswith("$lo-"), f"non-token color in welcome region: {prop}: {value!r}"
 

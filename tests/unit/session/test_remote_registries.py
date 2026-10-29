@@ -197,6 +197,21 @@ async def test_every_session_attribute_the_tui_reads_exists_on_the_viewer(
         # could not be re-resolved on resume. A viewer performs no restore, so
         # it has nothing to report; `app.py` reads it with a "" default.
         "attachment_restore_notice",
+        # The conversation's HELD reasoning level: an OWNER-side fact the
+        # facade cannot serve. ``Session.chosen_effort`` is the level the
+        # operator chose for THIS conversation, held BESIDE the serving spec
+        # so a route that cannot express it cannot erase it. A viewer learns
+        # the DISPLACEMENT from the owner's canonical state
+        # (``effort_displacement`` — the visible "falls back to high while on
+        # sonnet" form), but a displacement is ABSENT when the serving level
+        # IS the chosen one, so the facade's ``None`` would claim "this
+        # conversation holds no choice" — indistinguishable from the truth,
+        # which is exactly the confusion a no-op stub creates. The TUI's three
+        # reads are the owner-only getattr probe shared with
+        # `tests/unit/session/test_viewer_protocol.py`'s exclusion set, where
+        # absence means "no level held" and the two "already <level>" paths
+        # fall through to the plain no-op.
+        "chosen_effort",
         # The monitor scheduler is IN-PROCESS only (contract §10.4): a viewer
         # holds no scheduler to project, and the stop-path reader
         # (`_mark_own_monitors_dormant`) sits in `_stop_local_session`, which

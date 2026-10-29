@@ -36,6 +36,11 @@ THE FLEET-SCOPE MODES (design §4/§11: settled rows, the three-way filter):
 
     list-settled       the list with the SETTLED half showing — newest-first
                  chips in place of the countdown, no answerable row at all
+    list-dismissed     the SETTLED half over a queue whose log really holds two
+                 PRE-DEADLINE dismissals (SA-D8): each row's reason line under
+                 its `dismissed` chip. The before half of the pair runs this
+                 script on the base tree, where both readers drop a dismissed
+                 row by name and the half paints its empty sentence instead
     filter-all         the list, All selected, a mixed queue
     filter-outstanding the middle half selected: only what is still owed
     filter-settled     the third half selected
@@ -437,6 +442,80 @@ def _withdrawn_fixture_rows() -> list[dict[str, Any]]:
     return [dict(row) for row in queue.projection()]
 
 
+def _dismissed_fixture_rows() -> list[dict[str, Any]]:
+    """The wire rows for [a1 open, a4 open, a2 DISMISSED moot, a3 DISMISSED
+    answered_in_chat] — a REAL fold (SA-D8, design §17).
+
+    A hand-made wire list would prove nothing here: the widget renders whatever
+    rows it is given, so the difference this pair exists to show is the ENGINE's
+    — on the base tree both readers drop a dismissed row by name, and the same
+    log paints the Settled half empty. The fold is therefore the real
+    ``store.fold`` over a real seeded log, exactly the rule's home.
+
+    TWO asks stay open so the list mounts on BOTH builds: ``_expand_asks`` sends
+    a queue with one outstanding ask straight to its card, and a frame pair that
+    compared a list with a card would compare two surfaces instead of one rule.
+    """
+    from local_operator.asks import store
+    from local_operator.asks.queue import AskQueue
+    from local_operator.paths import config_dir as _resolve_config_dir
+
+    config = Path(_resolve_config_dir())
+    session_directory = store.session_dir(config, "shot-dismissed")
+    session_directory.mkdir(parents=True, exist_ok=True)
+    now = int(time.time() * 1000)
+
+    def queued(ask_id: str, question: str, *, expires_in_min: int) -> None:
+        store.append_event(
+            session_directory,
+            {
+                "v": store.EVENT_SCHEMA,
+                "kind": store.EVENT_QUEUED,
+                "ask_id": ask_id,
+                "at": now - 60_000,
+                "expires_at": now + expires_in_min * 60_000,
+                "timeout_s": 3600,
+                "urgent": False,
+                "tool_call_id": f"call-{ask_id}",
+                "questions": [
+                    {
+                        "id": "q1",
+                        "question": question,
+                        "options": [],
+                        "multi": False,
+                        "secret": False,
+                        "persist": False,
+                        "recommended": None,
+                    }
+                ],
+            },
+        )
+
+    queued("a1", "Which rollout should the stale-row migration take?", expires_in_min=42)
+    queued("a4", "Which alert channel should the cutover page?", expires_in_min=25)
+    queued("a2", "Rotate the deploy key before the cutover?", expires_in_min=30)
+    queued("a3", "Backfill from the audit log or drop the column?", expires_in_min=20)
+    # BOTH dismissals are stamped BEFORE their deadlines, which is the case §17
+    # keeps as a receipt; an at/after-deadline dismissal still leaves and is not
+    # what this frame is about.
+    for ask_id, reason in (("a2", "moot"), ("a3", "answered_in_chat")):
+        store.append_event(
+            session_directory,
+            {
+                "v": store.EVENT_SCHEMA,
+                "kind": store.EVENT_DISMISSED,
+                "ask_id": ask_id,
+                "at": now - 10_000,
+                "by": {"surface": "phone"},
+                "reason": reason,
+            },
+        )
+    queue = AskQueue(
+        _AnswerableSession(), config_dir=config, session_id="shot-dismissed", cwd=str(Path.cwd())
+    )
+    return [dict(row) for row in queue.projection()]
+
+
 async def main() -> None:
     out = sys.argv[1]
     size = (100, 30)
@@ -563,6 +642,12 @@ async def main() -> None:
                 app._expand_asks()
                 await pilot.pause()
                 app.query_one(AskQueueList).set_filter(FILTER_SETTLED)
+        elif mode == "list-dismissed":
+            app._sync_ask_surface(ask_rows(_dismissed_fixture_rows()))
+            await pilot.pause()
+            app._expand_asks()
+            await pilot.pause()
+            app.query_one(AskQueueList).set_filter(FILTER_SETTLED)
         elif mode in (
             "list-settled",
             "filter-all",

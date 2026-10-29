@@ -9,20 +9,43 @@ START-UP ORDER (each step exists because getting it wrong is a real failure):
 3. Resolve the committed owner (full namespace) and take the machine-wide
    connector lock BEFORE any network call. Two connectors on one account is
    the defect the lock exists to refuse; the loser exits quietly with its
-   own message.
+   own message. With NO owner yet the process WAITS in-process (the loop's
+   owner watch: a ``stat`` per poll, an owner read per bounded interval)
+   instead of exiting: an exit 0 under ``KeepAlive: true`` was a whole
+   interpreter relaunch about every 10 s (D2b).
 4. Run the loop. The access provider is the H1 client's own ``current_access``
    (the owner-pinned OAuth row — the ordinary sign-in path; never a
-   model-key cascade).
+   model-key cascade). When the loop hands back a DIFFERENT committed owner
+   (a re-enrolment while running), re-arm on it in-process under the same
+   lock with a client pinned to the new credential: no restart needed, and
+   none of the refusal codes ever end the process (review R4).
+5. Hand the loop the config-rooted credential store. Screening runs a model,
+   and the model runner resolves its provider key from this store (rows,
+   then process env). Starting with none held every message as
+   ``provider_error`` before any screen (live E2E F4).
 
-This entry point does NOT install services and does NOT touch the operator's
-launchd/systemd/schtasks (see connector/install.py's contract).
+6. Stop CLEANLY on SIGTERM/SIGHUP (see ``_supervise``). launchd sends
+   SIGTERM on a bootout, a logout and a reboot; with no handler the default
+   action killed the process mid-spine, the spine's ``finally:
+   release_claim`` never ran, and the message's claim stayed ``held`` for
+   the whole lease (PR #3038 review R2-3).
+
+This entry point does NOT install services; that is connector/install.py's
+separate, guarded lifecycle (D2a), never a connector's own start path.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
+import logging
+import os
+import signal
 from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger("local_operator.team_bridge.connector")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -36,36 +59,131 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def _main_async(args: argparse.Namespace) -> int:
+#: How long a stop signal lets the in-flight iteration finish on its own (a
+#: spine already past screening usually completes and releases in well under
+#: this) before the work is cancelled. Cancellation is what bounds the rest:
+#: the spine's ``finally: release_claim`` runs on ``CancelledError``.
+STOP_GRACE_S = 5.0
+#: How long the cancelled work gets to unwind before the process exits
+#: regardless. GRACE + CANCEL stays well inside launchd's default
+#: ``ExitTimeOut`` (20 s), after which launchd SIGKILLs — the very state the
+#: handler exists to avoid. Both are asyncio timers, so the real bound is
+#: GRACE + CANCEL plus the longest SYNCHRONOUS step running on the loop thread
+#: when they fire (a SQLite busy wait, ≤ 2 s); every such step is bounded. A
+#: claim still held at exit is the loop's ``stale_claim`` park to recover.
+STOP_CANCEL_S = 5.0
+#: The stop signals: SIGTERM (launchd/systemd stop, reboot) and SIGHUP (the
+#: controlling terminal went away). SIGINT keeps Python's KeyboardInterrupt.
+_STOP_SIGNALS = tuple(
+    sig for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGHUP", None)) if sig
+)
+
+#: One rotating file is bounded at (BACKUP_COUNT + 1) x MAX_BYTES = 1.5 MiB.
+_LOG_MAX_BYTES = 256 * 1024
+_LOG_BACKUP_COUNT = 5
+
+
+class _ClassNameOnlyFormatter(logging.Formatter):
+    """Persist an exception as its CLASS name, never its message or traceback.
+
+    Several connector sites log ``exc_info=True``; a traceback carries
+    ``str(exception)`` (which can echo a body, a name or a token) and frame
+    paths under the user's home. The records are therefore only content-free
+    if this file's formatter enforces it. The record is cloned so other
+    handlers (and the cached ``exc_text``) still see the full exception.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        clone = copy.copy(record)
+        clone.exc_text = None
+        clone.stack_info = None
+        return super().format(clone)
+
+    def formatException(self, ei: Any) -> str:  # noqa: N802 - logging.Formatter API
+        return f"exc={ei[0].__name__}" if ei and ei[0] is not None else ""
+
+
+def _configure_logging(config_dir: Path) -> logging.Handler | None:
+    """Send the ``local_operator.team_bridge`` loggers to a bounded private file.
+
+    WHY: this process runs under launchd with stdout/stderr on ``/dev/null`` and
+    configured no handler, so every ``logger.warning`` in the receive path went
+    to Python's last-resort stderr handler and vanished. A receive outage ran
+    for hours with nothing to read. The records are already content-free by
+    construction at most call sites (closed codes, stage names, exception CLASS
+    names), and the formatter ENFORCES it for the ones that log ``exc_info``;
+    this gives them somewhere to land. Attached to the package logger rather than
+    the root so no third-party record (httpx request lines carrying URLs) is
+    captured. Returns the handler (for teardown/tests), or ``None`` when the
+    file cannot be opened: no log is a degraded connector, a traceback at start
+    is a dead one.
+    """
+
+    from local_operator.logger import DEFAULT_LOG_FORMAT, _PrivateRotatingFileHandler
+    from local_operator.team_bridge.connector.install import log_path
+
+    target = log_path(config_dir)
+    try:
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        handler = _PrivateRotatingFileHandler(
+            target, maxBytes=_LOG_MAX_BYTES, backupCount=_LOG_BACKUP_COUNT, encoding="utf-8"
+        )
+    except OSError:
+        return None
+    handler.setFormatter(_ClassNameOnlyFormatter(DEFAULT_LOG_FORMAT))
+    package_logger = logging.getLogger("local_operator.team_bridge")
+    package_logger.addHandler(handler)
+    if package_logger.level == logging.NOTSET or package_logger.level > logging.INFO:
+        package_logger.setLevel(logging.INFO)
+    return handler
+
+
+async def _main_async(args: argparse.Namespace, stop: asyncio.Event | None = None) -> int:
+    from local_operator.providers.auth_store import AuthStore
     from local_operator.team_bridge.client import (
         DEFAULT_RADIENT_API_BASE_URL,
         TeamBridgeClient,
     )
+    from local_operator.team_bridge.connector import loop as _loop
     from local_operator.team_bridge.connector.lock import (
         ConnectorLock,
         ConnectorLockBusy,
     )
-    from local_operator.team_bridge.connector.loop import run_forever
     from local_operator.team_bridge.store import Store
 
     config_dir = Path(args.config_dir)
+    _configure_logging(config_dir)
     # Restart-scoped transport root: read HERE, once.
     base_url = args.base_url or DEFAULT_RADIENT_API_BASE_URL
 
     store = Store(config_dir)
     if args.credential_id and args.account_id and args.tenant_id and args.endpoint_id:
-        owner = store.resolve_owner(
-            credential_id=args.credential_id,
-            account_id=args.account_id,
-            tenant_id=args.tenant_id,
-            endpoint_id=args.endpoint_id,
-            canonical_base_url=base_url,
-        )
+        # A pinned namespace stays pinned across re-arms: only that exact
+        # owner's generation can move under it (a credential or endpoint
+        # change is a different namespace this invocation was not given).
+        def owner_source() -> Any:
+            return store.resolve_owner(
+                credential_id=args.credential_id,
+                account_id=args.account_id,
+                tenant_id=args.tenant_id,
+                endpoint_id=args.endpoint_id,
+                canonical_base_url=base_url,
+            )
+
     else:
-        owner = store.active_owner()
+        owner_source = store.active_owner
+    owner = owner_source()
     if owner is None:
-        print("no committed bridge enrollment for this config dir; nothing to poll")
-        return 0
+        # Content-free and once: the state persists until an enrolment
+        # commits, and the watch below re-checks it without logging per tick.
+        logger.info("bridge connector idle: stage=idle code=no_owner")
+    while owner is None:
+        if stop is not None and stop.is_set():
+            return 0
+        await _loop.idle_until_owner_changes(
+            None, config_dir=config_dir, owner_source=owner_source, stop=stop
+        )
+        owner = owner_source()
 
     lock = ConnectorLock(config_dir)
     try:
@@ -74,32 +192,122 @@ async def _main_async(args: argparse.Namespace) -> int:
         print(str(busy))
         return 0
 
+    # F4 (live E2E): the store the screener reads its provider key from. The
+    # explicit ``db_path`` is load-bearing — ``config_dir`` alone feeds only
+    # the env-override tier and would leave the DATABASE at the ambient home,
+    # so a desktop login under this config root would be invisible. A PLAIN
+    # store, not the mesh-aware ``build_auth_store``: the same instance backs
+    # the screening cycle's live-identity check, and the bridge client is
+    # deliberately never served a bearer lent by a paired device (see
+    # ``TeamBridgeClient._auth_store``). Values are never read or logged here.
+    auth_store = AuthStore(db_path=config_dir / "auth.db", config_dir=config_dir)
     try:
-        client = TeamBridgeClient(
-            config_dir,
-            base_url=base_url,
-            credential_id=owner.credential_id,
-            store=None,
-        )
+        while owner is not None:
+            # A fresh client per owner: it pins ``credential_id``, so a
+            # re-enrolment onto a new credential row must not keep serving
+            # the old row's bearer.
+            client = TeamBridgeClient(
+                config_dir,
+                base_url=base_url,
+                credential_id=owner.credential_id,
+                # The connector's own store: a private one per client leaked an
+                # auth.db connection per message (see TeamBridgeClient._auth_store).
+                store=auth_store,
+            )
 
-        async def access_provider():
-            return await client.current_access()
+            async def access_provider(client: TeamBridgeClient = client) -> Any:
+                return await client.current_access()
 
-        await run_forever(
-            owner,
-            config_dir=config_dir,
-            auth_store=None,
-            access_provider=access_provider,
-        )
+            owner = await _loop.run_forever(
+                owner,
+                config_dir=config_dir,
+                auth_store=auth_store,
+                access_provider=access_provider,
+                owner_source=owner_source,
+                # Set by a stop signal: no NEW iteration starts, and every
+                # pause/idle wakes at once. Returns ``None``, ending this loop.
+                stop=stop,
+            )
     finally:
+        auth_store.close()
         lock.release()
     return 0
+
+
+def _install_stop_handlers(loop: asyncio.AbstractEventLoop, stop: asyncio.Event) -> list[int]:
+    """Route the stop signals to ``stop``; return the ones actually installed.
+
+    ``add_signal_handler`` runs the callback ON the loop (never inside an
+    arbitrary frame the way a ``signal.signal`` handler would), so setting an
+    ``asyncio.Event`` from it is safe. It is UNIX-only: a platform that refuses
+    it keeps the old default behaviour, which the ``stale_claim`` park still
+    recovers — one claim lease later, and at-least-once (see loop.py).
+    """
+
+    installed: list[int] = []
+    for sig in _STOP_SIGNALS:
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except (NotImplementedError, RuntimeError, ValueError):
+            continue
+        installed.append(sig)
+    return installed
+
+
+async def _supervise(args: argparse.Namespace) -> int:
+    """Run the connector until it returns or a stop signal arrives.
+
+    THE STOP SEQUENCE (R2-3): the signal sets ``stop`` — the loop starts no
+    new iteration and its pauses wake. The in-flight iteration gets
+    ``STOP_GRACE_S`` to finish on its own (its spine reaches its ``finally``
+    and releases its claim), then it is CANCELLED, which runs that same
+    ``finally`` from the ``await`` it is parked on (screening, the long poll,
+    the handoff). The machine lock and the credential store close in
+    ``_main_async``'s own ``finally``. Exit is 0: a requested stop is not a
+    failure, and ``KeepAlive`` should not read it as a crash.
+    """
+
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    installed = _install_stop_handlers(loop, stop)
+    work = asyncio.create_task(_main_async(args, stop))
+    stopped = asyncio.create_task(stop.wait())
+    try:
+        await asyncio.wait({work, stopped}, return_when=asyncio.FIRST_COMPLETED)
+        if work.done():
+            return work.result()
+        logger.info("bridge connector stopping: stage=stop code=signal")
+        await asyncio.wait({work}, timeout=STOP_GRACE_S)
+        if not work.done():
+            work.cancel()
+            await asyncio.wait({work}, timeout=STOP_CANCEL_S)
+        if not work.done():
+            # The cancellation never landed: something is awaiting outside
+            # the task's reach (an executor future, or a callee swallowing
+            # ``CancelledError``). Waiting longer only ends in launchd's
+            # SIGKILL; leave now — the kernel drops the flock and the loop's
+            # stale-claim park recovers any claim still held.
+            logger.warning("bridge connector stopping: stage=stop code=unwind_timeout")
+            logging.shutdown()
+            os._exit(0)
+        if not work.cancelled() and work.exception() is not None:
+            # Content-free, like every connector line: the class name only.
+            logger.warning(
+                "bridge connector stopping: stage=stop code=%s",
+                type(work.exception()).__name__,
+            )
+        logger.info("bridge connector stopped: stage=stop code=clean")
+        return 0
+    finally:
+        stopped.cancel()
+        for sig in installed:
+            loop.remove_signal_handler(sig)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
-        return asyncio.run(_main_async(args))
+        return asyncio.run(_supervise(args))
     except KeyboardInterrupt:
         return 0
 

@@ -223,14 +223,30 @@ class SkillAdapter(_SharedIdentity):
         """Read a managed skill through its storage (recovering a crashed transaction first).
 
         ``row`` is the managed skill's opaque local id; the alias and the content
-        live in ``ManagedSkillStorage``/``SkillDocument``. Going through the
-        storage (never a raw directory read) keeps the journal/recovery discipline
-        the pull path relies on, so a snapshot is never taken mid-swap.
+        live in the managed skills root. Going through the storage (never a raw
+        directory read) keeps the journal/recovery discipline the pull path
+        relies on, so a snapshot is never taken mid-swap.
+
+        The baseline record decides the FORM: a bundle link's content is an
+        installed directory whose identity is its tree hash, so it is read by
+        ``ManagedBundleStorage``; everything else keeps the text path byte for
+        byte.
         """
 
-        from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+        from local_operator.hub_sync import provenance as prov
 
         local_id = str(row)
+        record = prov.read_baseline(config_dir, "skill", local_id)
+        if record is not None and "bundle" in record.fields:
+            from local_operator.hub_sync.skill_bundle_storage import (
+                ManagedBundleStorage,
+            )
+
+            bundle = ManagedBundleStorage(config_dir).snapshot(local_id)
+            fields = bundle.manifest.to_json()
+            return Snapshot(self.kind, local_id, bundle.alias, fields, bundle.fingerprint)
+        from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+
         storage = ManagedSkillStorage(config_dir)
         snapshot = storage.snapshot(local_id)
         fields = snapshot.document.to_json()
@@ -243,17 +259,19 @@ class SkillAdapter(_SharedIdentity):
         )
 
     def canonical_fields(self, raw: Mapping[str, Any]) -> Mapping[str, Any]:
-        from local_operator.hub_sync.skill_document import SkillDocument
+        from local_operator.hub_sync.skill_document import skill_manifest_from_remote
 
         # TOLERANT ENVELOPE, STRICT MANIFEST: a hub DETAIL response carries
         # metadata beside the manifest (revision/sync_contract/id/...), so the
-        # manifest is built from the manifest subset only (round-2 QN1).
-        return SkillDocument.from_remote(dict(raw)).to_json()
+        # manifest is built from the manifest subset only (round-2 QN1). The two
+        # forms are disjoint; the dispatch helper is the single place that knows
+        # the discriminator.
+        return skill_manifest_from_remote(dict(raw)).to_json()
 
     def validate(self, fields: Mapping[str, Any]) -> None:
-        from local_operator.hub_sync.skill_document import SkillDocument
+        from local_operator.hub_sync.skill_document import skill_manifest_from_json
 
-        SkillDocument.from_json(dict(fields))
+        skill_manifest_from_json(dict(fields))
 
 
 def publish_document(
@@ -305,11 +323,12 @@ def publish_document(
         }
         return hub_team_document(row, agent_registry=agent_registry, overrides=overrides)
     if kind == "skill":
-        from local_operator.hub_sync.skill_document import SkillDocument
+        from local_operator.hub_sync.skill_document import skill_manifest_from_json
 
         # A skill's canonical merged fields ARE its wire manifest; validating it
-        # here (again) is the last refusal point before a paid preview.
-        return SkillDocument.from_json(dict(fields)).to_json()
+        # here (again) is the last refusal point before a paid preview. A bundle
+        # manifest is published as-is -- its archive is a separate upload.
+        return skill_manifest_from_json(dict(fields)).to_json()
     raise LinkError("unsupported-kind", f"{kind} publication is not implemented")
 
 

@@ -343,3 +343,24 @@ be charged.
   `basis: ["not_tracked"]` until then.
 - Analytics HTTP `channels` sections, mobile relay (PR-2).
 - TTS/STT route wiring (PR-3).
+
+## Per-call payment basis (additive v1)
+
+`Usage.billing_basis` records the dispatched credential's relationship, not a
+provider-wide guess: OAuth is `subscription_api_equivalent`; an API key is
+`billed` unless its provider is plan-only. Unset stamps are omitted on the wire
+and legacy/direct calls retain their historical provider defaults. The plan
+bucket is labelled **included**: API list-price equivalent, not money charged.
+
+`children.by_basis` publishes micro-USD buckets `billed`,
+`subscription_api_equivalent`, `estimated`, and `not_tracked_micro`, summing to
+`children.total_micro`. Absent means an old producer. Child accounting retains
+basis in its grouping key; one pricing walk determines both total and split.
+Unknown/legacy residuals stay not tracked. Global `by_basis` includes both own
+and child money and still reconciles to `total_micro`.
+
+Session reports expose own-scope `by_model_basis` as
+`{provider, model_id, billing_basis, aggregate}[]` and descendant-scope
+`descendants_by_basis` as `{billing_basis, aggregate}[]`. Both are read on the
+same pinned transaction as their corresponding aggregates; old ledgers without
+the basis column leave the descendant split empty rather than guessing.

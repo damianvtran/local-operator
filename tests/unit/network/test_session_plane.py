@@ -38,10 +38,10 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -50,6 +50,7 @@ from local_operator.network import dial as session_dial
 from local_operator.network import projection, relay, store
 from local_operator.session.cleanup import mark_store
 from tests.unit.network import conftest as net_fixtures
+from tests.unit.network.test_model_choice_frontdoor import _hold_api_key
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by import
     _init_network,
     _pair,
@@ -2079,6 +2080,184 @@ def test_stopping_the_relay_closes_the_page_loop_it_shelved(
         ), "stop() returned while the page-loop thread was still running"
     finally:
         link.close("test")
+
+
+class _StubPageLoop:
+    """Enough of the page loop for the stop path: only the stop request."""
+
+    def __init__(self) -> None:
+        self.stop_requested = False
+
+    def stop(self) -> None:
+        self.stop_requested = True
+
+    def call_soon_threadsafe(self, callback: Any, *args: object) -> None:
+        callback(*args)
+
+
+class _PageLoopThreadThatIgnoresTheStop(threading.Thread):
+    """A loop thread whose bounded join returns while it keeps running.
+
+    ``stop()`` can only learn whether its join succeeded by asking
+    ``is_alive()``, so the failing branch is answered directly: a real wedged
+    thread would need a sleep and would still race the assertion.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(name="page-loop-still-running", daemon=True)
+        self.join_timeout: float | None = None
+        #: Flipped by a test to model the survivor finally dying.
+        self.alive = True
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_timeout = timeout
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+
+class _PageLoopThreadThatStops(threading.Thread):
+    """The clean arm: the join returns and the thread is already gone."""
+
+    def __init__(self) -> None:
+        super().__init__(name="page-loop-clean", daemon=True)
+        self.join_timeout: float | None = None
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_timeout = timeout
+
+    def is_alive(self) -> bool:
+        return False
+
+
+def _page_loop_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.name == relay.logger.name and record.levelno == logging.WARNING
+    ]
+
+
+def test_stop_reports_a_page_loop_thread_that_will_not_stop(
+    root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A shelved loop whose thread survives the bounded join is REPORTED.
+
+    The handle used to be nulled with the loop, before the join, so a page loop
+    that ignored its stop left no trace: the shelved fence made new reads build
+    a fresh loop and nothing named the survivor. ``Thread.join(timeout)``
+    returns nothing either way, so the outcome is read from ``is_alive()``; the
+    handle must still be there afterwards so the condition stays observable.
+    """
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    loop = _StubPageLoop()
+    thread = _PageLoopThreadThatIgnoresTheStop()
+    server._page_loop = cast(Any, loop)
+    server._page_loop_thread = thread
+    with caplog.at_level(logging.WARNING, logger=relay.logger.name):
+        server.stop()
+    assert loop.stop_requested, "the loop was not asked to stop"
+    assert server._page_loop is None, "a stopped relay must shelve its loop"
+    assert server._page_loop_shelved is True
+    assert server._page_loop_thread is thread, "a live page loop must stay reachable"
+    assert thread.join_timeout == relay.PAGE_LOOP_STOP_JOIN_S
+    warnings = _page_loop_warnings(caplog)
+    assert len(warnings) == 1, caplog.text
+    message = warnings[0].getMessage()
+    assert f"{relay.PAGE_LOOP_STOP_JOIN_S:.1f}s" in message, message
+    assert "still running" in message, message
+
+
+def test_stop_clears_the_page_loop_thread_and_stays_silent_when_it_stopped(
+    root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The normal path: the loop thread stopped, the handle goes, no warning."""
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    loop = _StubPageLoop()
+    thread = _PageLoopThreadThatStops()
+    server._page_loop = cast(Any, loop)
+    server._page_loop_thread = thread
+    with caplog.at_level(logging.WARNING, logger=relay.logger.name):
+        server.stop()
+    assert loop.stop_requested
+    assert server._page_loop is None
+    assert server._page_loop_thread is None
+    assert thread.join_timeout == relay.PAGE_LOOP_STOP_JOIN_S
+    assert _page_loop_warnings(caplog) == [], caplog.text
+
+
+class _PageLoopThreadThatStopsAndInstallsAReplacement(_PageLoopThreadThatStops):
+    """A dying loop thread whose join installs its successor on the server.
+
+    The identity check must notice that the field is no longer this thread and
+    must not clear the newcomer (R1-3).
+    """
+
+    def __init__(self, install: "Callable[[], None]") -> None:
+        super().__init__()
+        self._install = install
+
+    def join(self, timeout: float | None = None) -> None:
+        super().join(timeout)
+        self._install()
+
+
+def test_stop_does_not_clear_a_page_loop_thread_that_replaced_it(
+    root: Path,
+) -> None:
+    """The identity check is load-bearing: a successor must survive the clear (R1-3)."""
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    replacement = _PageLoopThreadThatIgnoresTheStop()
+
+    def install() -> None:
+        server._page_loop_thread = replacement
+
+    thread = _PageLoopThreadThatStopsAndInstallsAReplacement(install)
+    server._page_loop = cast(Any, _StubPageLoop())
+    server._page_loop_thread = thread
+    server.stop()
+    assert (
+        server._page_loop_thread is replacement
+    ), "stop() cleared the page-loop thread that replaced the one it joined"
+
+
+def test_stop_warns_once_per_survivor_episode(root: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """Repeated stops re-check but do not re-warn, and a new survivor can (R1-1).
+
+    The third stop is the only thing that observes the survivor's death and
+    clears the handle, which is why re-entry must not become an early return.
+    """
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    thread = _PageLoopThreadThatIgnoresTheStop()
+    server._page_loop = cast(Any, _StubPageLoop())
+    server._page_loop_thread = thread
+    with caplog.at_level(logging.WARNING, logger=relay.logger.name):
+        server.stop()
+        server.stop()
+        assert server._page_loop_thread is thread
+        assert len(_page_loop_warnings(caplog)) == 1
+
+        thread.alive = False
+        server.stop()
+        assert server._page_loop_thread is None, "the clearing re-check must still run"
+        assert len(_page_loop_warnings(caplog)) == 1
+
+        replacement = _PageLoopThreadThatIgnoresTheStop()
+        server._page_loop = cast(Any, _StubPageLoop())
+        server._page_loop_thread = replacement
+        server.stop()
+    assert server._page_loop_thread is replacement
+    warnings = _page_loop_warnings(caplog)
+    assert len(warnings) == 2, caplog.text
+    assert "still running" in warnings[-1].getMessage()
 
 
 def test_a_read_racing_a_stop_submits_under_the_lock_that_shelves_the_loop(
@@ -4851,3 +5030,296 @@ def test_a_promptless_create_answers_before_its_runtime_has_joined(
     finally:
         released.set()
         link.close("test")
+
+
+def test_listing_rows_carry_the_sessions_own_team_binding(root: Path) -> None:
+    """The peer stamps WHO answers each session onto its listing row.
+
+    Operator report, 2026-10-21: a remote session started under a team drew no
+    team badge in the origin's sidebar, because the row a peer publishes never
+    said which team the session was attached to — and the origin cannot read
+    the sidecar, which lives on the peer. Both the LIVE half and the STORED half
+    must carry it (a cold session under a team is still that team's), read from
+    the same ``attachment.json`` the local listing reads; an unattached session
+    is the explicit no-claim ``None``/``None``.
+    """
+    import os
+
+    from local_operator.harness.types import Message
+    from local_operator.resume import write_session_attachment
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+    from local_operator.session.transcript import (
+        ENTRY_MESSAGE,
+        TranscriptEntry,
+        encode_message_payload,
+    )
+
+    def _typed_journal(session_id: str) -> Path:
+        directory = root / "sessions" / session_id
+        directory.mkdir(parents=True)
+        message = Message.user("a typed prompt")
+        entry = TranscriptEntry(
+            message.id, 1789400000.0, ENTRY_MESSAGE, encode_message_payload(message)
+        )
+        (directory / "transcript.jsonl").write_text(entry.to_json() + "\n", encoding="utf-8")
+        return directory
+
+    live, cold, bare = "1ea41ea41ea4", "c01dc01dc01d", "ba5eba5eba5e"
+    write_session_attachment(_typed_journal(live), team="lopdev", agent="", goal="")
+    write_session_attachment(_typed_journal(cold), team="", agent="coder", goal="")
+    _typed_journal(bare)
+    registry.publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="tui",
+            session_id=live,
+            conversation_name="live under a team",
+            cwd=str(root),
+            model_label="test/model",
+            control_port=0,
+            control_key="",
+        ),
+        root,
+    )
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    rows = {item["session_id"]: item for item in server.local_session_rows()}
+
+    assert rows[live]["state"] == "live", "the cell needs a live row to mean anything"
+    assert rows[live]["binding"] == {"agent": None, "team": "lopdev"}
+    assert rows[cold]["state"] == "stored", "the cell needs a stored row to mean anything"
+    assert rows[cold]["binding"] == {"agent": "coder", "team": None}
+    assert rows[bare]["binding"] == {"agent": None, "team": None}, "no sidecar is no claim"
+
+
+def test_a_promptless_team_create_carries_its_team_and_level_across_the_link(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The desktop's remote ``/new`` over a REAL two-relay mesh: team and effort both land.
+
+    Operator report, 2026-10-21, two halves of one create: a session started from
+    the desktop on a peer under team ``lopdev`` at effort ``max`` showed no team
+    badge and showed ``High``. The desktop create sends NO first prompt and spells
+    the level ``model.reasoning_effort``; this cell sends exactly that frame from
+    A to B over the live link and requires:
+
+    * the create REPLY names the team (the promptless branch omitted it, so the
+      origin recorded ``binding.team = null``);
+    * B's runtime is asked for the chosen level (the hop read only ``effort``);
+    * B's listing row, and A's sidebar producer reading it across the link,
+      carry the team binding (the listing never did).
+    """
+    from local_operator.server.utils.desktop_mesh import remote_session_rows
+    from local_operator.session.peer_rows import clear_cache
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    levels: list[tuple[str, str, str]] = []
+
+    async def set_model_effort(self: Any, provider: str, model_id: str, effort: str) -> str:
+        levels.append((provider, model_id, effort))
+        return f"model: {provider}/{model_id}"
+
+    monkeypatch.setattr(_Handle, "set_model_effort", set_model_effort, raising=False)
+    server_a, server_b, _host_a, _port_a = peer_pair
+    for device_root in (server_a.root, server_b.root):
+        TeamRegistry(device_root).create_team(
+            TeamEditFields(
+                name="lopdev",
+                description="Development team.",
+                manager="manager",
+                members=[TeamMember(role="coder")],
+                instructions="Ship reviewed work.",
+                project="local-operator",
+            )
+        )
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    _hold_api_key(server_b.root, "deepseek")
+    host_b, port_b = _listen(server_b)
+    served = _serve(monkeypatch, server_b.root)
+    try:
+        link = _dial_to(server_a, record, host_b, port_b)
+        reply = link.request(
+            {
+                "op": "net_session_create",
+                "req": 11,
+                "locality": "remote",
+                "cwd": str(server_b.root),
+                "prompt": "",
+                "team": "lopdev",
+                "model": {
+                    "provider": "deepseek",
+                    "model_id": "deepseek-flash",
+                    "reasoning_effort": "max",
+                },
+            },
+            timeout=60.0,
+        )
+        assert reply is not None and reply["op"] == "ack", reply
+        detail = reply["detail"]
+        session_id = detail["session_id"]
+        assert detail["warming"] is True, "the cell needs the desktop's promptless branch"
+        assert (detail.get("team") or {}).get("name") == "lopdev", detail
+
+        assert net_fixtures.wait_for(lambda: bool(levels), 60.0), "set_model never reached B"
+        assert levels[0] == ("deepseek", "deepseek-flash", "max"), levels
+
+        own = next(row for row in server_b.local_session_rows() if row["session_id"] == session_id)
+        assert own["binding"] == {"agent": None, "team": "lopdev"}, own
+
+        payload = _call(server_a.root, "peer_session_rows")["detail"]
+        crossed = next(row for row in payload["sessions"] if row["session_id"] == session_id)
+        assert crossed["binding"] == {"agent": None, "team": "lopdev"}, crossed
+
+        clear_cache()
+        desktop = [
+            row for row in remote_session_rows(server_a.root, pins=set()) if row["id"] == session_id
+        ]
+        assert desktop and desktop[0]["binding"] == {"agent": None, "team": "lopdev"}, desktop
+        link.close("test")
+    finally:
+        _stop_all(served)
+
+
+def _preindex_tail_conversation() -> list[Any]:
+    """Two settled turns, then a LIVE run whose head the index calls out of reach.
+
+    The tail run is 110 tool calls, each followed by its ``session_spend.v1``
+    receipt (the ordinary shape of a live run: one receipt per provider round),
+    so its opening user row is ~220 JOURNAL rows above the end — past
+    ``tail_head_reachable``'s ``limit + 101`` at both limit 20 and limit 100 —
+    but only ~110 PAINTABLE rows, which a hunt left running reaches. That gap is
+    exactly where a frame built without the index and a frame built with it
+    used to disagree (#3037 QA, O1).
+    """
+    from local_operator.session.transcript import ENTRY_MESSAGE, TranscriptEntry
+
+    rows: list[Any] = []
+    ts = 1000.0
+
+    def add(id_: str, type_: str, payload: dict[str, Any]) -> None:
+        nonlocal ts
+        ts += 1
+        rows.append(TranscriptEntry(id_, ts, type_, payload))
+
+    def message(role: str, text: str) -> dict[str, Any]:
+        return {"kind": "message", "role": role, "content": [{"text": text}]}
+
+    for turn in range(3):
+        add(f"user{turn:02d}", ENTRY_MESSAGE, message("user", f"turn {turn}"))
+        calls = 110 if turn == 2 else 2
+        for call in range(calls):
+            add(f"tool{turn:02d}{call:04d}", ENTRY_MESSAGE, message("tool", "output"))
+            add(
+                f"spend{turn:02d}{call:04d}",
+                "custom",
+                {"custom_type": "session_spend.v1", "details": {}},
+            )
+        if turn < 2:  # the last run is still LIVE: no closing answer yet
+            add(f"ans{turn:02d}", ENTRY_MESSAGE, message("assistant", f"answer {turn}"))
+            add(
+                f"ckpt{turn:02d}",
+                "custom",
+                {
+                    "custom_type": "frontend_state_checkpoint_v1",
+                    "details": {"state": {"session_id": "seed", "sequence": turn}},
+                },
+            )
+    return rows
+
+
+async def _append_preindex_case(directory: Path, case: str) -> None:
+    """Grow the journal through the REAL writer, in the three shapes QA measured."""
+    from local_operator.harness.types import Message, TextContent
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(directory)
+    if case == "new_run":
+        # Close the live run, then open a new one: the tail head is the last row.
+        await transcript.append_message(
+            Message(role="assistant", content=[TextContent(text="done")])
+        )
+        await transcript.append_message(Message(role="user", content=[TextContent(text="next")]))
+        return
+    for call in range(1 if case == "one" else 50):
+        await transcript.append_message(
+            Message(role="tool", content=[TextContent(text="output")], tool_call_id=f"x{call}")
+        )
+
+
+def _canonical_frame_digest(frame: dict[str, Any]) -> str:
+    """The frame's sha256 with the per-build identity fields stripped.
+
+    ``epoch`` and ``journal_generation`` are minted per index build and ``cwd`` is
+    the host's; everything else is what a client paints or acts on.
+    """
+    import hashlib
+
+    stripped = {k: v for k, v in frame.items() if k not in {"epoch", "journal_generation", "cwd"}}
+    return hashlib.sha256(json.dumps(stripped, sort_keys=True).encode()).hexdigest()
+
+
+@pytest.mark.parametrize("limit", [20, 100])
+@pytest.mark.parametrize("case", ["one", "fifty", "new_run"])
+def test_the_owner_open_frame_before_the_index_lands_is_the_frame_after_it(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, case: str, limit: int
+) -> None:
+    """The phone's first frame after a restart IS the frame it gets a moment later.
+
+    #3037 QA (O1): a relay read whose index is not resident at attempt 0 (the
+    refresh is only scheduled) ran the head hunt to its budget, and then the
+    final index fetch — the refresh having landed meanwhile — labelled that
+    over-long page ``ready``. Measured on the real fixture at limit 20 with 50
+    appends: 102 rows, ``head_cut: false`` first; 20 rows, ``head_cut: true``
+    on every read after. A ``ready`` frame is final by contract, so the client
+    painted the first and then replaced it.
+
+    The pre-index state is held still: the first ``_stored_frame_index`` call
+    answers ``None`` (the real cold branch's answer at attempt 0) and every later
+    call is the real one over a resident index — the refresh landing during the
+    hunt, deterministically.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    _write_frame_journal(server_b.root, SESSION, _preindex_tail_conversation())
+    _warm_frame_index(server_b.root, SESSION)
+    asyncio.run(_append_preindex_case(server_b.root / "sessions" / SESSION, case))
+    _warm_frame_index(server_b.root, SESSION)
+
+    original = server_b._stored_frame_index  # noqa: SLF001 — the seam under test
+    calls: list[int] = []
+
+    def _lands_during_the_hunt(session_id: str) -> Any:
+        calls.append(1)
+        return None if len(calls) == 1 else original(session_id)
+
+    monkeypatch.setattr(server_b, "_stored_frame_index", _lands_during_the_hunt)
+    first = _owner_frame(server_b, limit=limit)
+    assert len(calls) >= 2, "the read never re-asked for the index"
+    monkeypatch.setattr(server_b, "_stored_frame_index", original)
+    server_b._frame_memo.clear()  # noqa: SLF001 — the steady read must BUILD, not replay
+    steady = _owner_frame(server_b, limit=limit)
+
+    assert steady["runs_state"] == "ready", steady
+    assert first["runs_state"] == "ready", first
+    assert (len(first["entries"]), first["head_cut"]) == (
+        len(steady["entries"]),
+        steady["head_cut"],
+    )
+    assert _canonical_frame_digest(first) == _canonical_frame_digest(steady)
+
+
+def test_the_owner_open_frame_whose_index_never_lands_says_building(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no index at any point the frame is labelled ``building``, never ``ready``.
+
+    The other half of the first-paint contract: a frame the owner could not
+    check against the index promises a replacement, so the client does not
+    treat the over-long hunt as final.
+    """
+    _server_a, server_b, _h, _p = peer_pair
+    _write_frame_journal(server_b.root, SESSION, _preindex_tail_conversation())
+    monkeypatch.setattr(server_b, "_stored_frame_index", lambda session_id: None)
+    frame = _owner_frame(server_b, limit=20)
+    assert frame["runs_state"] == "building" and frame["runs"] == [], frame

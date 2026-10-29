@@ -1,0 +1,2 @@
+tui.welcome.tip.fork_placement | /settings → Fork → Where a fork opens sets placement | /settings → فورک → “فورک کہاں کھلے” سے مقام طے ہوتا ہے
+tui.welcome.tip.hotkeys | /settings → Hotkeys remaps these keys | /settings → ہاٹ کیز سے یہ کلیدیں بدلیں

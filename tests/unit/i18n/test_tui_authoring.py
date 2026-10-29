@@ -1,0 +1,63 @@
+"""P3a authoring copy is complete in every requested locale, not fallback."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from local_operator.i18n import catalogues, runtime
+from local_operator.i18n.keys import tui_authoring
+
+
+@pytest.mark.parametrize("locale", ["en", "es", "fr", "hi", "ru", "vi"])
+def test_authoring_catalogue_is_complete_and_renderable(locale: str) -> None:
+    source = catalogues.load_catalogue("en", "tui.authoring")
+    translated = catalogues.load_catalogue(locale, "tui.authoring")
+    # 41 at S2 (which added scope_conversation); 49 at S4: five promote keys,
+    # then the round-1 copy change split the one receipt into created/replaced/
+    # keeps and added the mixed plan (46 - 1 + 3 + 1), translated in every
+    # carried locale in the same slice.
+    assert len(source) == 49
+    assert set(translated) == set(source)
+    for key, value in translated.items():
+        assert value
+        rendered = runtime.render_message(
+            value,
+            {
+                "name": "writer",
+                "reason": "test",
+                "command": "/agent promote",
+                "names": "one",
+                "replaced": "one",
+                "created": "two",
+            },
+            locale,
+        )
+        assert rendered
+        assert "{name}" not in rendered
+        assert "{reason}" not in rendered
+        function = getattr(tui_authoring, key.removeprefix("tui.authoring."))
+        params = {
+            key: "test"
+            for key in ("name", "reason", "command", "names", "replaced", "created")
+            if "{" + key + "}" in value
+        }
+        assert function(**params).code == key
+
+
+def test_authoring_context_and_zero_literal_activation() -> None:
+    context = json.loads(
+        (catalogues.catalogue_root() / "en/tui.authoring.context.json").read_text()
+    )
+    assert set(context) == set(catalogues.load_catalogue("en", "tui.authoring"))
+    assert all(row["note"] and row["role"] and row["tone"] for row in context.values())
+    root = Path(__file__).resolve().parents[3]
+    baseline = json.loads((root / "i18n/baseline.json").read_text())
+    for path in (
+        "local_operator/tui/agent_authoring.py",
+        "local_operator/tui/widgets/agent_form.py",
+    ):
+        assert path in baseline["enforced"]
+        assert baseline["files"].get(path, 0) == 0

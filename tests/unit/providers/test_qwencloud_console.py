@@ -1020,6 +1020,9 @@ def test_rm_reports_nothing_stored_only_when_both_stores_are_empty(
     assert other.describe("UNRELATED_SECRET") is not None
 
 
+# The cell's subject is the product's store-existence guard, so it must reach
+# the real ``ensure_broker``; its own ``_spawn_broker`` boom is the detector.
+@pytest.mark.allow_secret_broker
 def test_no_store_means_no_daemon(
     store: AuthStore, secret_base: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

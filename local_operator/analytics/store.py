@@ -645,6 +645,8 @@ _CALL_COLUMNS = (
     *_DECODE_MEASURE_COLUMNS,
     "billing_basis",
     "cost_source",
+    "cache_miss_type",
+    "cache_missed_tokens",
 )
 
 #: Columns added AFTER the first shipped schema. A database created by an older
@@ -712,6 +714,17 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     # from a mapping that did not exist when it was written.
     ("billing_basis", "TEXT NOT NULL DEFAULT 'not_tracked'"),
     ("cost_source", "TEXT NOT NULL DEFAULT 'none'"),
+    # Anthropic cache diagnostics: WHY a call's prompt prefix diverged from the
+    # conversation's previous request (``system_changed``, ``tools_changed``,
+    # ``messages_changed``, ...), plus the API's estimate of the input tokens
+    # that divergence cost, or the non-break states ``baseline`` / ``unchanged``
+    # / ``pending``. '' = not diagnosed, which is the truth for every row
+    # recorded before this column and for every non-Anthropic call. Raw-ledger
+    # only (same scope as ``cache_write_1h_tokens``): it explains individual
+    # cache writes, and summing a reason across days answers nothing a GROUP BY
+    # over the 90-day ledger cannot.
+    ("cache_miss_type", "TEXT NOT NULL DEFAULT ''"),
+    ("cache_missed_tokens", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 #: Columns added to the ``session_daily`` ROLLUP after it first shipped, in the
@@ -1236,6 +1249,8 @@ def _row_values(
         snapshot.decode_calls,
         snapshot.billing_basis,
         snapshot.cost_source,
+        snapshot.cache_miss_type,
+        int(snapshot.cache_missed_tokens),
     )
 
 
@@ -3800,7 +3815,7 @@ class AnalyticsStore:
         SCAN ECONOMY. The report's fields come from three statements, not the ~9
         it used to walk: one flat totals scan (which also carries the
         missing/unknown/first/last figures, because they read the same rows), ONE
-        combined ``GROUP BY purpose, outcome, provider, model_id`` that the three
+        combined ``GROUP BY purpose, outcome, provider, model_id, billing_basis`` that the three
         breakdowns are re-derived from, and the recent-rows tail. The merge is
         safe because every measure is an additive integer: summing the finest
         grouping's counts per (provider, model_id) or per purpose gives exactly
@@ -3902,6 +3917,7 @@ class AnalyticsStore:
                 )
             purpose = col("purpose", "'unknown'")
             outcome = col("outcome", "'unknown'")
+            billing_basis = col("billing_basis", "'not_tracked'")
             # ONE scan for all three breakdowns. Each of the separate GROUP BYs
             # this replaces walked the session's rows again with the same WHERE
             # clause — measured as the single largest cost of the read — and each
@@ -3911,12 +3927,13 @@ class AnalyticsStore:
             # old queries returned them, so the route's serialised lists are
             # unchanged as well as their contents.
             grouped = conn.execute(
-                f"SELECT {purpose}, {outcome}, provider, model_id, {measures}"
+                f"SELECT {purpose}, {outcome}, provider, model_id, {billing_basis}, {measures}"
                 + scope
-                + " GROUP BY 1, 2, 3, 4",
+                + " GROUP BY 1, 2, 3, 4, 5",
                 params,
             ).fetchall()
             model_sums: dict[tuple[str, str], list[int]] = {}
+            basis_sums: dict[tuple[str, str, str], list[int]] = {}
             purpose_sums: dict[str, list[int]] = {}
             groups: dict[tuple[str, str], int] = {}
 
@@ -3937,10 +3954,11 @@ class AnalyticsStore:
             for row in grouped:
                 # ``measures`` opens with COUNT(*), so the same tuple both feeds
                 # the accumulated measures and answers ``by_purpose_outcome``.
-                values = [int(value or 0) for value in row[4:]]
+                values = [int(value or 0) for value in row[5:]]
                 pair = (str(row[0]), str(row[1]))
                 groups[pair] = groups.get(pair, 0) + values[0]
                 accumulate(model_sums, (str(row[2]), str(row[3])), values)
+                accumulate(basis_sums, (str(row[2]), str(row[3]), str(row[4])), values)
                 accumulate(purpose_sums, str(row[0]), values)
             by_model = {
                 key: _aggregate_from_row(value) for key, value in sorted(model_sums.items())
@@ -3997,14 +4015,32 @@ class AnalyticsStore:
             descendants, descendant_ids = self._descendant_usage(
                 conn, session_id, columns, measures
             )
+            # Reuse the canonical descendant ids and pinned transaction. This
+            # split qualifies the same child amount as descendants_aggregate;
+            # it must not walk a different tree or observe a newer WAL state.
+            descendants_by_basis = {}
+            if descendant_ids and "billing_basis" in columns:
+                placeholders = ", ".join("?" for _ in descendant_ids)
+                descendants_by_basis = {
+                    str(row[0]): _aggregate_from_row(row[1:])
+                    for row in conn.execute(
+                        f"SELECT billing_basis, {measures} FROM calls "
+                        f"WHERE session_id IN ({placeholders}) GROUP BY billing_basis",
+                        descendant_ids,
+                    )
+                }
             tool_calls = self._tool_call_stats(conn, session_id)
             channel_rows = self._session_channel_rows(conn, session_id) if channels else ()
             return SessionReport(
                 session_id=session_id,
                 aggregate=aggregate,
                 descendants_aggregate=descendants,
+                descendants_by_basis=descendants_by_basis,
                 descendant_ids=descendant_ids,
                 by_model=by_model,
+                by_model_basis={
+                    key: _aggregate_from_row(value) for key, value in sorted(basis_sums.items())
+                },
                 by_purpose=by_purpose,
                 by_purpose_outcome=groups,
                 missing_usage_calls=int(missing or 0),

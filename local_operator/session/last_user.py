@@ -143,7 +143,12 @@ def last_user_at(session_dir: Path) -> float | None:
     unreadable transcript answers ``None``, as does a scan that hit
     :data:`COLD_SCAN_CAP_BYTES` without finding a typed row.
     """
-    path = session_dir / TRANSCRIPT_FILENAME
+    # ``transcript_for_read`` resolves an archive to its bounded decompressed
+    # copy, so this tail scan answers for a compressed session too. The plain
+    # name would answer ``None`` — "no claim" — for a conversation that has one.
+    from local_operator.session import compression
+
+    path = compression.transcript_for_read(session_dir) or (session_dir / TRANSCRIPT_FILENAME)
     try:
         info = os.stat(path)
     except OSError:

@@ -87,8 +87,8 @@ the user-visible gate win is delivered by the click ladder instead.
 
 | Constant | Value | Why |
 |---|---|---|
-| `DOORBELL_INTERVAL_S` | 0.10 | two stats per tick, no SQL; the detection floor the design's latency target is built on |
-| `CATALOGUE_PROBE_INTERVAL_S` | 1.0 | the invalidation token needs one `readdir`; running it at 10 Hz would spend the doorbell's whole budget on a page of rows |
+| `DOORBELL_INTERVAL_S` | 0.10 | eight stats per tick, no SQL unless a fingerprint moved: attention.db and its two sidecars, notifications.db and its two sidecars, run/mobile, config.yml. The detection floor the design's latency target is built on. |
+| `CATALOGUE_PROBE_INTERVAL_S` | 1.0 | the invalidation token needs one `readdir`; running it at 10 Hz would spend the doorbell's whole budget on a page of rows. The asks-index probe shares this cadence: one directory scan + stat per entry, never a log read on the 100 ms tick (`notifications-inbox.md` §5.3). |
 | `HEARTBEAT_INTERVAL_S` | 15.0 | the client's silence watchdog is 3x this, so a half-open socket is detectable |
 | `BURST_LIMIT` | 3 | shared with the TUI's per-tick cap and asserted equal by a test |
 | `PRESENCE_TTL_S` / `PRESENCE_BEAT_S` | 45 / 15 | the same pair `WATCH_TTL`, `DESKTOP_WATCH_LEASE_S` and `VIEWER_HEARTBEAT_TIMEOUT_S` use |

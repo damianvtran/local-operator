@@ -158,6 +158,26 @@ export interface TranscriptEntry {
 	videos?: TranscriptVideoRef[];
 	/** Assistant rows stream: `final` flips true on message_end. */
 	final: boolean;
+	/* --- CONDENSATION FACTS (sparse: absent unless set) ---------------------
+	   Four facts the desktop's condensation model reads and this wire did not
+	   carry. They are TOP LEVEL rather than in `details` because the frame cap
+	   empties `details` under pressure, and the daemon omits each one at its
+	   default, so absence is the normal case: every reader treats it as the
+	   desktop's "unknown is absent" (see `lib/condense-records.ts`). */
+	/** The provider's phase declaration on an assistant row (`toolUse`/`stop`/
+	    `refusal`). Separates a lead-in frame from a settled answer. */
+	stop_reason?: string;
+	/** This assistant row carried tool calls of its own. Not derivable from the
+	    rows around it: live tool ids are `tc-<call>`, durable ids `<msg>:<call>`,
+	    and the fold legitimately drops some call rows. */
+	calls_tools?: boolean;
+	/** The verbatim `custom_type` of the `CustomMessage` this notice came from:
+	    the receipt family the fold groups by (`job_result`, `monitor_prompt`,
+	    `hub_message`, `wake_prompt`, `session_incident`). */
+	custom_type?: string;
+	/** This notice ENDS the turn (the `:stop` notice, a live error, a session
+	    incident). An explicit flag, never inferred from severity. */
+	terminal?: boolean;
 }
 
 /** A reference to one image block on a user turn. The bytes live in the
@@ -276,6 +296,15 @@ export interface AskQuestion {
 	persist: boolean;
 }
 
+/** The effective approval mode a conversation is running under. */
+export type ApprovalMode = "ask" | "auto";
+
+/** Where that mode came from. `global` is `tool_approval_mode` in the machine's
+    config (every conversation that follows it); `session` is this
+    conversation's own saved choice; `pin` is a `--yolo`-style flag on THIS run,
+    which outlives no restart and outranks both. */
+export type ApprovalProvenance = "global" | "session" | "pin";
+
 export interface PendingRequest {
 	request_id: string;
 	kind: "approval" | "ask";
@@ -290,6 +319,21 @@ export interface PendingRequest {
 	    can show "Question 1 of 2" and the user knows more follow (U1). */
 	question_index: number;
 	question_total: number;
+	/** The mode IN FORCE for this conversation, and where it came from. Both are
+	    OPTIONAL and absent (or empty) on an older owner — a phone talking to a
+	    runtime that predates them must render no policy line rather than a
+	    guessed one (`lib/approval-policy.approvalPolicyLine`). They ride the
+	    projection, so the card states the runtime's answer, never the phone's
+	    memory of the last gesture it made from this screen. */
+	approval_mode?: ApprovalMode | "";
+	approval_provenance?: ApprovalProvenance | "";
+	/** The MACHINE default (`tool_approval_mode`) as the runtime resolves it, so a
+	    session override can state the mode it overrides without deriving it.
+	    Optional/empty on an older owner; `approvalPolicyLine` then drops that
+	    clause rather than negating the session mode into a claim about the
+	    machine (UX round 2, U4: global=ask + a session `ask` override rendered
+	    "overrides global Auto" because the runtime never sent this). */
+	approval_global_mode?: ApprovalMode | "";
 }
 
 export interface CompletionAttention {
@@ -389,6 +433,27 @@ export interface PendingAsk {
 	    advance past them, and the log still holds nothing until the last question
 	    lands. Absent on every ask answered the atomic way. */
 	draft_question_ids?: string[];
+	/** THE CARD'S CONTEXT LINE (SA-D7), the pair the ask card draws as
+	    "3 messages from you since this was asked (last 19:36)": operator messages
+	    admitted after this ask was raised, and when the latest one was (epoch ms).
+
+	    ABSENT IS NOT ZERO. The runtime omits both when it cannot count them — an
+	    older daemon, an ask older than its retained window — and the card then
+	    draws no line at all. A present `0` is a fact (the ask is newer than every
+	    message) and draws no line either: there is nothing stale to report. */
+	user_messages_since?: number;
+	last_user_message_at?: number;
+	/** WHY and WHEN this ask was dismissed (SA-D8, design §17). `dismissed_at` is
+	    the stamp the daemon's shared visibility rule reads — a dismissal BEFORE
+	    the deadline keeps a settled row, one at or after it leaves — and
+	    `dismissed_reason` is the operator's own word (`moot` |
+	    `answered_in_chat`), which the settled card states under its badge.
+
+	    ABSENT on every other status, and absent on a dismissal recorded by an
+	    older runtime: the card then keeps the sentence it always had rather than
+	    inventing a reason. */
+	dismissed_at?: number;
+	dismissed_reason?: string;
 }
 
 /** One aggregated row of the published `spend_channels` object
@@ -479,6 +544,20 @@ export interface SessionProjection {
 	ended: boolean;
 	/** Record fresh but socket unreachable. */
 	degraded: boolean;
+	/** The relay's "owner has gone quiet" verdict (`SessionProjection.
+	    heartbeat_stale` in `mobile/types.py`): true once BOTH the runtime's
+	    heartbeat and its frames are older than the daemon's one health window
+	    (`SESSION_HEALTH_WINDOW_S`), false while either is fresh. OPTIONAL and
+	    absent on an older daemon and on a disk rebuild — absence is "not
+	    reported", never stale (`lib/session-health.ts`). */
+	heartbeat_stale?: boolean | null;
+	/** Whether `transcript[0]` is the conversation's opening user message PINNED
+	    ahead of a disjoint tail (`SessionProjection.transcript_head_pinned`).
+	    The first history cursor must be the oldest TAIL row, and the pinned
+	    opener is not it. OPTIONAL: absent on an older daemon and on an uncapped
+	    projection, both of which mean false. Length is not a proxy — the frame
+	    cap can publish a pinned tail of 16 rows. */
+	transcript_head_pinned?: boolean;
 	transcript: TranscriptEntry[];
 	/** Todos grouped into phases. One implicit `"Todos"` phase carries a flat
 	    list and renders without a header. */
@@ -555,6 +634,38 @@ export interface SessionOpenedBy {
 	session: string | null;
 }
 
+/** One category ASSIGNED to a conversation, as every local row carries it.
+    The name comes from ONE registry snapshot per listing, so two rows in the
+    same frame cannot spell one category two ways; `id` is what a write sends
+    (desired state), and the pair is what a row renders. */
+export interface TagRef {
+	id: string;
+	name: string;
+}
+
+/** One row of `GET /api/tags`, the SHARED registry (read only here).
+    `order` is the registry's own ordering field and `conversations` its count
+    of distinct existing session directories — the phone displays it but never
+    derives it, and there is deliberately no catalogue write on this surface. */
+export interface TagCatalogueEntry {
+	id: string;
+	name: string;
+	order: number;
+	conversations: number;
+}
+
+export interface TagsResponse {
+	tags: TagCatalogueEntry[];
+}
+
+/** The canonical answer to `PUT /api/sessions/{id}/tags`: the state the store
+    READ BACK, which is what a client paints rather than its own request. */
+export interface SessionTagsResponse {
+	session_id: string;
+	tags: TagRef[];
+	primary: string | null;
+}
+
 export interface SessionSummary {
 	session_id: string;
 	section: "active" | "previous";
@@ -604,6 +715,16 @@ export interface SessionSummary {
 	    The string `degraded` is the daemon's own name for the state
 	    (`types.py`); the row renders it as the word the reader needs. */
 	degraded?: boolean;
+	/** The categories assigned to this conversation, in ASSIGNMENT order, and
+	    the one the row marks as primary. A relay that serves the routes always
+	    sends both — untagged is `[]` and `null`, not an absence check. An OLDER
+	    relay omits them, which this client reads as untagged; the capability
+	    (`Capabilities.session_tags`) is what decides whether assignment controls
+	    exist, so a missing field can never be mistaken for a writable empty
+	    assignment. Remote/mesh rows carry them empty explicitly because their
+	    assignment lives in the other device's store. */
+	tags?: TagRef[];
+	primary?: string | null;
 	/** How many of this session's OWN delegated children are RUNNING. `null`
 	    means the daemon did not report a count, and MUST NOT be read as zero: a
 	    row that could not be asked must not be told "no subagents". The daemon
@@ -692,6 +813,11 @@ export interface PastSession {
 	    — same name, same age — so the list tags it, exactly as the TUI's
 	    /resume picker does. Clears the moment the fork names itself. */
 	forked?: boolean;
+	/** Same additive/defaulted contract as `SessionSummary.tags`/`primary`:
+	    the relay always sends them, an older one omits them, and absence reads
+	    as untagged. */
+	tags?: TagRef[];
+	primary?: string | null;
 }
 
 export interface Directories {
@@ -740,6 +866,21 @@ export interface Capabilities {
 	    relay app serves catalogues. Consumers must require both bits. */
 	i18n?: { catalogues: number };
 	stt?: SttCapability;
+	/** The relay serves `/api/library*` and the asset catalog. `1` when present;
+	    absent on an older relay, which must hide the destination rather than
+	    render a screen whose requests would 404. */
+	library?: number;
+	/** The organizing agent exists on this build. Additive to `library`. */
+	librarian?: number;
+	/** The relay serves the conversation-tag catalogue and the per-session
+	    assignment route. A RELAY capability like `i18n`, deliberately not
+	    `features.session_tags` (core's build fact, which is `1` on released
+	    relays that have none of these routes). Absent on an older relay, which
+	    must HIDE the action rather than offer a control whose request would 404. */
+	session_tags?: { available: boolean };
+	/** Creation keys are safe to replay only when this versioned contract is
+	    advertised. Older relays silently ignore unknown start-body fields. */
+	session_start?: { version: number; durable_idempotency: boolean; receipt_capacity: number };
 }
 
 export type CommandOp =
@@ -787,8 +928,14 @@ export type CommandOp =
 	/* Dismiss is VIEW-ONLY: it removes the row from the queue's front end and asks
 	   the model nothing — no turn is bought HERE. The one thing it can still owe is
 	   the deadline notice that ask never got (design `ask-nonblocking.md` §14),
-	   delivered on the conversation's next run. */
-	| { op: "ask_dismiss"; ask_id: string }
+	   delivered on the conversation's next run.
+
+	   `reason` (R5) is the operator's word for WHY an OPEN ask is going away:
+	   `moot` says the question stopped mattering, `answered_in_chat` says it was
+	   already answered in the conversation. It is OPTIONAL because a lapsed ask's
+	   one-key door sends the body it always did — the queue then records its own
+	   default, and an older daemon sees exactly the frame it always accepted. */
+	| { op: "ask_dismiss"; ask_id: string; reason?: "moot" | "answered_in_chat" }
 	| { op: "snapshot" }
 	/* THE TURN-SUPPLEMENT FAMILY (memo §2.7). Additive ops the runtime's dispatch
 	   answers with its own receipt (`cancelled` / `steering` / `restarting` / the
@@ -924,4 +1071,223 @@ export interface ProjectLinkedSession {
 	subagents: { running: number; settled: number; names: string[] } | null;
 	/** ``null`` means UNKNOWN (no persisted snapshot), never zero. */
 	todos: { open: number; total: number } | null;
+}
+
+/* ---------------------------------------------------------------------------
+ * Library (design §6.3, frozen backend contract at 98d7d3471d)
+ *
+ * The wire row is the shared service's projection with `display=True`: `ref.path`
+ * is always null on this plane and `display_path` is the only spelling the phone
+ * ever sees. Types mirror the row exactly — the screen derives nothing the
+ * service did not decide (ordering, origin group, effective name).
+ * ------------------------------------------------------------------------- */
+
+export type LibraryTag = {
+	id: string;
+	name: string;
+	category: string;
+	/** Assigned-asset count, present on the tag list but not on a row's tags. */
+	count?: number;
+};
+
+export type LibraryOccurrence = {
+	session_id: string;
+	session_title: string;
+	origin: string;
+	tool: string;
+	at: number;
+	intent: string | null;
+	first_seq: number;
+	last_seq: number;
+	child_id: string | null;
+	label: string | null;
+};
+
+export type LibraryChatLink = {
+	session_id: string;
+	title: string;
+	updated_at: number;
+};
+
+export type LibraryPreview = {
+	state: "ready" | "unsupported";
+	mime_type: string;
+	pages: number | null;
+};
+
+export interface LibraryAsset {
+	id: string;
+	ref: {
+		type: "path" | "artifact";
+		/** Always null on the phone projection. Kept in the type so a bug that
+		    starts serving it is visible rather than silently accepted. */
+		path: string | null;
+		display_path: string;
+		digest: string | null;
+		content_type: string;
+	};
+	name: string;
+	derived_name: string;
+	description: string;
+	kind: string;
+	category: string;
+	origin: string;
+	origin_group: "generated" | "created" | "mentioned";
+	origins: string[];
+	tags: LibraryTag[];
+	primary_tag: string | null;
+	size_bytes: number | null;
+	width: number | null;
+	height: number | null;
+	duration_s: number | null;
+	created_at: number;
+	modified_at: number;
+	last_seen_at: number;
+	exists: boolean;
+	highlighted: boolean;
+	highlight_why: string | null;
+	occurrences: LibraryOccurrence[];
+	session_count: number;
+	chat: LibraryChatLink | null;
+	preview: LibraryPreview;
+	organized: { at: number; by: string | null; confidence: number | null } | null;
+	locked: boolean;
+	favorite: boolean;
+	archived: boolean;
+}
+
+export interface LibraryListing {
+	state: "ready" | "building";
+	revision: number;
+	total: number;
+	counts: {
+		category: Record<string, number>;
+		origin_group: Record<string, number>;
+		kind: Record<string, number>;
+	};
+	tags: LibraryTag[];
+	rows: LibraryAsset[];
+	next_cursor: string | null;
+	cursor_reset: boolean;
+	scan: { sessions_total: number; sessions_scanned: number };
+}
+
+export interface LibraryFacets {
+	state: "ready" | "building";
+	revision: number;
+	total: number;
+	counts: LibraryListing["counts"];
+	tags: LibraryTag[];
+	scan: LibraryListing["scan"];
+}
+
+/* ------------------------------------------------------------------ */
+/* Notifications inbox (docs/design/notifications-inbox.md §5.4)        */
+/* ------------------------------------------------------------------ */
+
+/** The list frame's `notifications` block: the inbox badge, read per frame.
+
+    THREE STATES, and the difference is load-bearing (decision D16: "a missing
+    or unknown count renders nothing, never 0"):
+    - key ABSENT on the frame: this relay predates the inbox routes. The store
+      keeps `undefined`, and the drawer offers no destination at all.
+    - `{}`: the relay serves the inbox but could not read its store this frame.
+      The destination stays (its screen says why), the badge shows nothing.
+    - the four numbers: the desktop's own `notifications.items.counts`. */
+export interface NotificationsBlock {
+	unread_count?: number;
+	waiting_count?: number;
+	waiting_unread_count?: number;
+	high_water?: number;
+}
+
+export interface NotificationSessionFacts {
+	id: string;
+	title: string;
+	agent_id: string;
+	live: boolean;
+	live_state: string;
+	/** Detail answers only. */
+	cwd?: string;
+}
+
+export interface NotificationProjectFacts {
+	key: string;
+	name: string;
+	status: string;
+}
+
+/** One reel row, the normalized item shape (contract §2.2) as #2939 serves it.
+    Timestamps are epoch MILLISECONDS (unlike the session list's seconds). */
+export interface NotificationItem {
+	/** `n_<16 base32>` for a notify item, `ask:<session_id>:<ask_id>` for an ask. */
+	id: string;
+	source: "notify" | "ask";
+	priority: "high" | "normal" | "low";
+	title: string;
+	excerpt: string;
+	created_at: number;
+	updated_at: number;
+	seq: number;
+	/** The ack token every write must echo (an ask is always 1). */
+	revision: number;
+	read: boolean;
+	read_via: string | null;
+	dismissed: boolean;
+	repeat_count: number;
+	key?: string;
+	anchor_id?: string;
+	session: NotificationSessionFacts | null;
+	projects: NotificationProjectFacts[] | null;
+	ask: {
+		ask_id: string;
+		status: string;
+		deadline_at: number;
+		question_count: number;
+		dismissible: boolean;
+	} | null;
+	actions: { dismiss: boolean; answer: boolean; read: boolean };
+	/** Relay-only, like `/api/asks`: can the relay reach that conversation now. */
+	runtime_live?: boolean;
+	durable?: boolean;
+	/** Detail answers only. */
+	body_md?: string;
+	links?: { label: string; url: string }[];
+}
+
+/** A `{id, revision}` pair: what the reader saw, and so what a write may touch. */
+export interface NotificationToken {
+	id: string;
+	revision: number;
+}
+
+export interface NotificationsPage {
+	items: NotificationItem[];
+	/** Live asks, first page only (asks are not paged). */
+	waiting?: NotificationItem[];
+	/** Every token this page rendered; bulk writes echo the union they loaded. */
+	observed: NotificationToken[];
+	next_cursor: string | null;
+	unread_count: number;
+	waiting_count: number;
+	waiting_unread_count: number;
+	/** The conservative `through_seq` boundary for a bulk write over this read. */
+	high_water: number;
+}
+
+export interface NotificationDetail {
+	item: NotificationItem;
+	history: { revision: number; at: number; title: string; excerpt: string }[];
+	session: NotificationSessionFacts;
+	anchor: { id: string; excerpt: string } | null;
+	projects: NotificationProjectFacts[] | null;
+	asks: PendingAsk[];
+}
+
+export type NotificationSkipReason = "live_ask" | "stale_revision" | "unknown" | "already";
+
+/** `PATCH /api/notifications`: per-id verdicts plus the badge after the write. */
+export interface NotificationsReceipt extends NotificationsBlock {
+	changed: string[];
+	skipped: { id: string; reason: NotificationSkipReason | string }[];
 }

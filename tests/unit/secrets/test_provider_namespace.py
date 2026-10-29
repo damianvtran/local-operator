@@ -513,7 +513,14 @@ def test_provider_env_key_ignores_a_decoy_plaintext_file(sandbox: Path) -> None:
     assert provider_env_key("openrouter", base=sandbox) in (None, "")
 
 
-def test_a_provider_key_read_on_a_store_less_host_creates_no_store(sandbox: Path) -> None:
+# The cell's SUBJECT is the product's store-existence guard, so it must reach the
+# real ``ensure_broker``; its own ``_spawn_broker`` spy is the detector. Without
+# the marker the suite gate short-circuits the path under test and the cell passes
+# vacuously (review round 1, F-1).
+@pytest.mark.allow_secret_broker
+def test_a_provider_key_read_on_a_store_less_host_creates_no_store(
+    sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A READ must not spawn a broker daemon or create ``secrets/`` (R1).
 
     ``retrieve_secret`` reaches ``ensure_broker`` BEFORE it asks whether a store
@@ -531,6 +538,12 @@ def test_a_provider_key_read_on_a_store_less_host_creates_no_store(sandbox: Path
         provider_env_key,
         provider_secret_value,
     )
+    from local_operator.secrets import client as secrets_client
+
+    spawned: list[object] = []
+    # The spy does not spawn, so a regression is observable without leaving a
+    # daemon behind. If the guard is deleted this list is non-empty.
+    monkeypatch.setattr(secrets_client, "_spawn_broker", lambda base: spawned.append(base))
 
     root = sandbox / "config"
     root.mkdir()
@@ -540,6 +553,7 @@ def test_a_provider_key_read_on_a_store_less_host_creates_no_store(sandbox: Path
     # Through the cascade reader too, which is how the defect was reached.
     assert provider_env_key("openrouter", base=root) in (None, "")
 
+    assert spawned == [], f"a store-less read reached the broker spawn: {spawned!r}"
     assert not (root / "secrets").exists(), "a pure read created the secrets dir"
 
 

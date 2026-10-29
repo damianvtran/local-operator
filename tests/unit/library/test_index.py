@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
+import time
+from pathlib import Path
+from typing import Any
 
-from local_operator.library import index
+import pytest
+
+from local_operator import resume
+from local_operator.library import identity, index
 from local_operator.session.attachments import cache_media
 
 from ._fixtures import (
@@ -224,3 +231,517 @@ def test_a_roster_only_change_refreshes_the_family(monkeypatch) -> None:
         "parent.txt",
         "child-one.txt",
     }
+
+
+def test_a_second_build_on_an_unchanged_index_does_not_write(tmp_path, monkeypatch) -> None:
+    """The aggregate is derived from the index; an unchanged index costs no dump.
+
+    ``state == "ready"`` used to force an 11 MB rewrite on every request, which
+    was most of the measured 5.3 s warm build on the operator's corpus.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1, tmp_path / "a.txt"))
+    first = index.build_catalog(root, budget_s=None)
+
+    writes: list[object] = []
+    monkeypatch.setattr(index, "_write", lambda *args, **kwargs: writes.append(args))
+    second = index.build_catalog(root, budget_s=None)
+
+    assert writes == []
+    assert second is first
+
+
+def test_a_warm_request_path_serves_the_cache_without_a_sweep(tmp_path, monkeypatch) -> None:
+    """Inside the freshness window a poll touches neither journals nor assets."""
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1, tmp_path / "a.txt"))
+    first = index.build_catalog(root, budget_s=None)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("a warm poll must not scan or rebuild")
+
+    monkeypatch.setattr(index, "_visible_sessions", boom)
+    monkeypatch.setattr(index, "_build_assets", boom)
+
+    assert index.build_catalog(root) is first
+
+
+def test_a_partial_merge_keeps_complete_sessions_from_disk(tmp_path, monkeypatch) -> None:
+    """A budget-limited build must not truncate another process's progress.
+
+    The desktop backend, the mobile relay and ``lop serve`` all build this
+    index; a partial build from one used to overwrite the others' complete rows
+    (observed collapsing 490 sessions to 1).
+    """
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1, tmp_path / "a.txt"))
+    session(root, OTHER, write_rows("w2", 2, tmp_path / "b.txt"))
+    index.build_catalog(root, budget_s=None)
+    disk = index._load(index.index_path(root))["sessions"]
+    assert {SESSION, OTHER} <= set(disk)
+
+    # What a partial build that only reached SESSION would hand to the writer.
+    incoming = {SESSION: disk[SESSION]}
+    merged = index._merge_sessions(disk, incoming, keep={SESSION, OTHER})
+
+    assert set(merged) == {SESSION, OTHER}
+    assert merged[OTHER]["complete"] is True
+    # Where both sides have an entry, this build's scan wins regardless of the
+    # revision comparison (a retraction lowers it below the stale disk copy).
+    stale = {"complete": True, "revision": 99.0}
+    fresh = {"complete": True, "revision": 1.0}
+    assert index._merge_sessions({"s": stale}, {"s": fresh}, keep={"s"})["s"] is fresh
+
+
+def _payload_with_extra(root, extra: Path) -> dict[str, Any]:
+    """A newer index written by "another process": one session, one asset row."""
+    record = {
+        "key": identity.key_for(str(extra), None),
+        "path": str(extra),
+        "digest": None,
+        "name": extra.name,
+        "kind": "document",
+        "content_type": "text/plain",
+        "size": 1,
+        "width": None,
+        "height": None,
+        "duration_s": None,
+        "origin": "written",
+        "tool": "write",
+        "call_id": None,
+        "intent": None,
+        "first_seq": 1,
+        "last_seq": 1,
+        "first_ts": 1.0,
+        "last_ts": 1.0,
+        "touches": 1,
+        "highlighted": False,
+    }
+    return {
+        "version": index.INDEX_SCHEMA,
+        "built_at": 2.0,
+        "revision": 1,
+        "complete": True,
+        "sessions": {
+            OTHER: {
+                "sig": {"size": 0, "mtime": 0.0, "inode": 0},
+                "roster_sig": None,
+                "parent_revision": 1.0,
+                "revision": 1.0,
+                "title": "extra",
+                "cwd": str(extra.parent),
+                "complete": True,
+                "entries": [record],
+                "children": {},
+            }
+        },
+    }
+
+
+def test_catalog_for_read_never_caches_assets_under_a_newer_file_stat(
+    tmp_path, monkeypatch
+) -> None:
+    """A write landing between the read and the stat must not be cached as ours.
+
+    Reproduced two-process: the aggregate built from the older payload was
+    recorded under the newer stat, so ``refresh=True`` took the "unchanged"
+    early return and served the old catalog — the new session's asset was
+    absent and ``get_asset`` raised ``AssetNotFound``.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1, tmp_path / "a.txt"))
+    index.build_catalog(root, budget_s=None)
+    index._CACHE.clear()
+
+    extra = tmp_path / "extra.txt"
+    extra.write_text("x")
+    # The session is real so a later refresh can scan it; the synthetic entry
+    # only stands in for the file the other process wrote.
+    session(root, OTHER, write_rows("w2", 2, extra))
+    newer = _payload_with_extra(root, extra)
+    newer["sessions"] = {
+        **index._load(index.index_path(root))["sessions"],
+        **newer["sessions"],
+    }
+    real_load = index._load
+    calls: list[int] = []
+
+    def racing_load(target):
+        payload = real_load(target)
+        if not calls:
+            calls.append(1)
+            index._write(target, newer)
+        return payload
+
+    monkeypatch.setattr(index, "_load", racing_load)
+    catalog = index.catalog_for_read(root)
+    asset_id = identity.asset_id(identity.key_for(str(extra), None))
+    assert any(asset.id == asset_id for asset in catalog.assets)
+
+    refreshed = index.build_catalog(root, refresh=True)
+    assert any(asset.id == asset_id for asset in refreshed.assets)
+    # The observer is the catalog, not ``service.get_asset``: the service reads
+    # the SQLite index now (``library/store.py``) and no longer consults this
+    # JSON aggregate at all, so asserting through it would test a path that no
+    # longer exists. What this test pins — the rebuilt aggregate contains the
+    # extra asset with its derived name — is unchanged.
+    served = next(asset for asset in refreshed.assets if asset.id == asset_id)
+    assert served.derived_name == "extra.txt"
+
+
+def test_a_retracted_child_survives_a_partial_merge(tmp_path, monkeypatch) -> None:
+    """A fresh parent entry must beat the stale disk entry despite its revision.
+
+    Retracting a child LOWERS the parent's aggregate revision, so the old
+    revision tie-break kept the disk copy and the retraction never landed.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    parent = session(root, SESSION, write_rows("p1", 1, tmp_path / "parent.txt"))
+    child = session(root, CHILD, write_rows("c1", 2, tmp_path / "child.txt"))
+    (child / "origin.json").write_text(json.dumps({"origin": "subagent"}))
+    (parent / "subagent-roster.v1.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "generation": 1,
+                "jobs": [],
+                "accounting": {},
+                "records": [
+                    {
+                        "job_id": "j1",
+                        "label": "scout",
+                        "agent_role": "scout",
+                        "depth": 1,
+                        "session_dir": str(child),
+                    }
+                ],
+            }
+        )
+    )
+    first = index.build_catalog(root, budget_s=None)
+    assert "child.txt" in {asset.derived_name for asset in first.assets}
+
+    # The merge rule itself: the fresh entry wins for a key this build scanned,
+    # even though retracting the child made its revision LOWER than disk's.
+    stale = {"complete": True, "revision": 100.0, "children": {"child": {"revision": 5.0}}}
+    fresh = {"complete": True, "revision": 50.0, "children": {}}
+    merged = index._merge_sessions({SESSION: stale}, {SESSION: fresh}, keep={SESSION})
+    assert merged[SESSION] is fresh
+
+    # An INCOMPLETE fresh scan (budget exhausted mid-session) must not replace
+    # a complete disk entry: that would drop rows and lower sessions_scanned.
+    partial = {"complete": False, "revision": 999.0}
+    complete = {"complete": True, "revision": 1.0}
+    assert index._merge_sessions({"s": complete}, {"s": partial}, keep={"s"})["s"] is complete
+
+    # Retract the record: the parent revision drops below the disk entry's.
+    (parent / "subagent-roster.v1.json").write_text(
+        json.dumps({"version": 1, "generation": 2, "jobs": [], "accounting": {}, "records": []})
+    )
+    path = index.index_path(root)
+    old = time.time() - 60
+    os.utime(path, (old, old))
+
+    refreshed = index.build_catalog(root, budget_s=1.5, refresh=True)
+    assert "child.txt" not in {asset.derived_name for asset in refreshed.assets}
+    saved = index._load(path)["sessions"][SESSION]
+    assert saved["children"] == {}
+
+
+def test_persist_rate_limits_revision_only_churn(tmp_path, monkeypatch) -> None:
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1, tmp_path / "a.txt"))
+    index.build_catalog(root, budget_s=None)
+    path = index.index_path(root)
+    before = path.read_bytes()
+    os.utime(path, None)
+    entry = dict(index._load(path)["sessions"][SESSION])
+    entry["revision"] = float(entry.get("revision") or 0.0) + 1000.0
+
+    result = index._persist(path, {SESSION: entry}, visible={SESSION})
+
+    assert result is not None and result[2] is False
+    assert path.read_bytes() == before
+
+
+def test_persist_writes_a_new_session_despite_the_rate_limit(tmp_path, monkeypatch) -> None:
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1, tmp_path / "a.txt"))
+    index.build_catalog(root, budget_s=None)
+    path = index.index_path(root)
+    os.utime(path, None)
+    entry = index._load(path)["sessions"][SESSION]
+
+    result = index._persist(path, {SESSION: entry, OTHER: entry}, visible={SESSION, OTHER})
+
+    assert result is not None and result[2] is True
+    assert OTHER in index._load(path)["sessions"]
+
+
+def test_persist_writes_a_first_completion(tmp_path, monkeypatch) -> None:
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1, tmp_path / "a.txt"))
+    index.build_catalog(root, budget_s=None)
+    path = index.index_path(root)
+    payload = index._load(path)
+    incomplete = {**payload["sessions"][SESSION], "complete": False}
+    index._write(
+        path,
+        {
+            "version": index.INDEX_SCHEMA,
+            "built_at": 1.0,
+            "revision": 1,
+            "sessions": {SESSION: incomplete},
+        },
+    )
+    os.utime(path, None)
+    complete = {**incomplete, "complete": True}
+
+    result = index._persist(path, {SESSION: complete}, visible={SESSION})
+
+    assert result is not None and result[2] is True
+    assert index._load(path)["sessions"][SESSION]["complete"] is True
+
+
+def test_persist_writes_a_removal(tmp_path, monkeypatch) -> None:
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1, tmp_path / "a.txt"))
+    session(root, OTHER, write_rows("w2", 2, tmp_path / "b.txt"))
+    index.build_catalog(root, budget_s=None)
+    path = index.index_path(root)
+    os.utime(path, None)
+
+    result = index._persist(
+        path, {SESSION: index._load(path)["sessions"][SESSION]}, visible={SESSION}
+    )
+
+    assert result is not None and result[2] is True
+    assert OTHER not in index._load(path)["sessions"]
+
+
+def test_persist_returns_none_when_the_lock_is_held(tmp_path, monkeypatch) -> None:
+    fcntl = pytest.importorskip("fcntl")
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1, tmp_path / "a.txt"))
+    index.build_catalog(root, budget_s=None)
+    path = index.index_path(root)
+    entry = index._load(path)["sessions"][SESSION]
+    handle = path.with_name("index.lock").open("a+")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    try:
+        assert index._persist(path, {SESSION: entry}, visible={SESSION}) is None
+    finally:
+        handle.close()
+
+
+def test_catalog_for_read_calls_a_partial_index_building(tmp_path, monkeypatch) -> None:
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1, tmp_path / "a.txt"))
+    index.build_catalog(root, budget_s=None)
+    path = index.index_path(root)
+    payload = index._load(path)
+    payload["sessions"][SESSION] = {**payload["sessions"][SESSION], "complete": False}
+    index._write(path, payload)
+    index._CACHE.clear()
+
+    catalog = index.catalog_for_read(root)
+
+    assert catalog.state == "building"
+
+
+def test_catalog_for_read_reloads_after_another_process_writes(tmp_path, monkeypatch) -> None:
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1, tmp_path / "a.txt"))
+    index.build_catalog(root, budget_s=None)
+    extra = tmp_path / "extra.txt"
+    extra.write_text("x")
+    newer = _payload_with_extra(root, extra)
+    newer["sessions"] = {
+        **index._load(index.index_path(root))["sessions"],
+        **newer["sessions"],
+    }
+    index._write(index.index_path(root), newer)
+
+    catalog = index.catalog_for_read(root)
+
+    asset_id = identity.asset_id(identity.key_for(str(extra), None))
+    assert any(asset.id == asset_id for asset in catalog.assets)
+
+
+def test_build_never_caches_assets_under_a_stat_from_a_racing_writer(tmp_path, monkeypatch) -> None:
+    """A writer landing during ``_build_assets`` must not poison the cache.
+
+    ``_persist`` releases the lock before the aggregate is built, so the stat
+    captured under the lock is the only identity the assets can be trusted
+    under. Reproduced: the newer file's stat was recorded with the older asset
+    set, and ``refresh=True``/``get_asset`` kept serving the stale one.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1, tmp_path / "a.txt"))
+    index.build_catalog(root, budget_s=None)
+    index._CACHE.clear()
+
+    raced = tmp_path / "raced.txt"
+    raced.write_text("x")
+    newer = _payload_with_extra(root, raced)
+    newer["sessions"] = {
+        **index._load(index.index_path(root))["sessions"],
+        **newer["sessions"],
+    }
+    real_build_assets = index._build_assets
+    fired: list[int] = []
+
+    def racing_build_assets(sessions):
+        assets = real_build_assets(sessions)
+        if not fired:
+            fired.append(1)
+            index._write(index.index_path(root), newer)
+        return assets
+
+    monkeypatch.setattr(index, "_build_assets", racing_build_assets)
+    index.build_catalog(root, budget_s=None)
+
+    assert fired, "the racing writer must have fired"
+    assert index._cached(index._cache_key(root)) is None, "stale assets must not be cached"
+    raced_id = identity.asset_id(identity.key_for(str(raced), None))
+    served = [asset for asset in index.catalog_for_read(root).assets if asset.id == raced_id]
+    # Same observer rule as above: the service no longer reads this aggregate.
+    assert served and served[0].derived_name == "raced.txt"
+
+
+def test_a_truncated_partial_index_is_not_ready_even_when_its_rows_are(
+    tmp_path, monkeypatch
+) -> None:
+    """A budget-limited build can persist only complete entries and stop early.
+
+    ``sessions_scanned == sessions_total`` is not proof of completeness; the
+    top-level flag is. An index predating the flag is treated as building too,
+    so it gets rebuilt rather than served as ready.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    session(root, SESSION, write_rows("w1", 1, tmp_path / "a.txt"))
+    session(root, OTHER, write_rows("w2", 2, tmp_path / "b.txt"))
+    index.build_catalog(root, budget_s=None)
+    index._CACHE.clear()
+    path = index.index_path(root)
+    payload = index._load(path)
+    payload["sessions"] = {SESSION: payload["sessions"][SESSION]}
+    payload["complete"] = False
+    index._write(path, payload)
+
+    assert index.catalog_for_read(root).state == "building"
+
+    payload.pop("complete")
+    index._write(path, payload)
+    index._CACHE.clear()
+    assert index.catalog_for_read(root).state == "building"
+
+
+#: The opening user line from the operator's report: a long request that is
+#: emphatically not the session's name. The Library used to label every
+#: occurrence with it, because ``scan.title`` is ``sanitize_prompt_line(texts[0])``
+#: and the index let it beat the stored title.
+OPENING = (
+    "Can you review Victor's message in non-urgent-tech-support, and delegate to a minervadev team"
+)
+
+
+def test_a_stored_title_beats_the_opening_line(tmp_path, monkeypatch) -> None:
+    """The occurrence's conversation reference is the session's NAME.
+
+    Regression: a session whose transcript opens with a long request and whose
+    sidecar holds a generated name was shown under the opening line, so the
+    Library read as a transcript excerpt rather than a conversation reference.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    saved = tmp_path / "brief.md"
+    saved.write_text("# hi")
+    directory = session(root, SESSION, [user_row("u0", 0.5, OPENING), *write_rows("w1", 1, saved)])
+    resume.write_session_title(directory, "Victor support triage", user_set=False, past_names=[])
+
+    catalog = index.build_catalog(root, budget_s=None)
+
+    (occurrence,) = catalog.assets[0].occurrences
+    assert occurrence.title == "Victor support triage"
+
+
+def test_an_untitled_session_keeps_the_opening_line_fallback(tmp_path, monkeypatch) -> None:
+    """No stored title anywhere: the scan's opening-line capture is the label.
+
+    The fallback exists for sessions written before titles were journalled, and
+    dropping it would leave those occurrences with no conversation reference.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    saved = tmp_path / "brief.md"
+    saved.write_text("# hi")
+    opening = "Please review Victor's message"
+    session(root, SESSION, [user_row("u0", 0.5, opening), *write_rows("w1", 1, saved)])
+
+    catalog = index.build_catalog(root, budget_s=None)
+
+    assert catalog.assets[0].occurrences[0].title == opening
+
+
+def test_a_rename_refreshes_a_cached_entry_without_a_transcript_change(
+    tmp_path, monkeypatch
+) -> None:
+    """``/rename`` must reach the Library on the next build, not the next turn.
+
+    A rename writes the sidecar and deliberately leaves the transcript and the
+    directory mtime alone, so the cached entry's journal signature still matches
+    and only the title comparison can notice. Before the fix this build served
+    the cached opening-line title indefinitely.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    saved = tmp_path / "brief.md"
+    saved.write_text("# hi")
+    opening = "Please review Victor's message"
+    directory = session(root, SESSION, [user_row("u0", 0.5, opening), *write_rows("w1", 1, saved)])
+    first = index.build_catalog(root, budget_s=None)
+    assert first.assets[0].occurrences[0].title == opening
+
+    before = (directory / "transcript.jsonl").stat()
+    directory_mtime = directory.stat().st_mtime_ns
+    resume.write_session_title(
+        directory, "Victor support triage", user_set=True, past_names=[opening]
+    )
+    # The point of the test: nothing the journal signature reads moved. (The
+    # sidecar write restores the directory mtime only at whole-second precision
+    # — it saves ``st_mtime`` as a float — and the signature never reads it.)
+    after = (directory / "transcript.jsonl").stat()
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+    assert int(directory.stat().st_mtime) == int(directory_mtime / 1_000_000_000)
+
+    second = index.build_catalog(root, budget_s=None)
+
+    assert second.assets[0].occurrences[0].title == "Victor support triage"
+
+
+def test_an_index_written_under_the_old_schema_is_rebuilt_with_the_stored_title(
+    tmp_path, monkeypatch
+) -> None:
+    """The schema bump, exercised the way a real store meets it.
+
+    A pre-fix ``index.json`` carries the opening-line capture under the old
+    version; the persisted payload must be discarded rather than served, and the
+    rebuild must land the stored title.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    saved = tmp_path / "brief.md"
+    saved.write_text("# hi")
+    opening = "Please review Victor's message"
+    directory = session(root, SESSION, [user_row("u0", 0.5, opening), *write_rows("w1", 1, saved)])
+    resume.write_session_title(directory, "Victor support triage", user_set=False, past_names=[])
+    index.build_catalog(root, budget_s=None)
+
+    path = index.index_path(root)
+    payload = index._load(path)
+    payload["version"] = index.INDEX_SCHEMA - 1
+    payload["sessions"][SESSION]["title"] = opening
+    index._write(path, payload)
+    index._CACHE.clear()
+    assert index._load(path) == {}, "an older schema must be discarded, not read"
+
+    rebuilt = index.build_catalog(root, budget_s=None)
+
+    assert rebuilt.assets[0].occurrences[0].title == "Victor support triage"

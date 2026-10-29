@@ -17,8 +17,8 @@ resident, how it is signalled, or what a stop does. Lifetime and residency stay
 exactly where they are (``process._should_exit`` and ``docs/design-idle-reap.md``);
 what changes is that a death can now be NAMED instead of inferred.
 
-TWO ARTIFACTS, ONE STORY
-------------------------
+FOUR ARTIFACTS, ONE STORY
+-------------------------
 * **The turn journal** (``registry.turn_journal_path``, in the conversation
   directory) — the runtime's own statement that turn N was in flight, written
   at turn start and closed at turn end. An OPEN row is the positive evidence the
@@ -31,6 +31,19 @@ TWO ARTIFACTS, ONE STORY
   the missing link in the chain ``app -> backend -> runtime -> runtimes``: every
   process in that chain could be taken away by a restart, an install or a
   sweep, and none of them could report the loss afterwards.
+* **The exit record** (``sessions/<id>/runtime-exit.json``, added 2026-10-21) —
+  "I am leaving NOW, for this reason, and nobody asked me to". The boot record's
+  withdrawal says the exit ordering RAN; it cannot say why, so an idle policy
+  exit and a SIGKILL were the same ``stored`` row in every listing. This is the
+  durable half: the ``_clean_exit`` reason and the sentence the exit path
+  already composed, with the run key that keeps an older departure from
+  explaining a newer death. Read by ``info.collect`` for a STORED row's STOPPED
+  age/reason and by ``rescue`` so a policy departure is never re-engaged.
+* **The run record** (``sessions/<id>/runtime-run.json``) — the exit record's
+  counterpart, written at boot and removed by that run's own clean exit. It is
+  what lets a listing tell "the record on disk is the last thing that happened"
+  from "an earlier run exited, and the one after it was killed"; without it a
+  row borrowed its predecessor's departure (review round 1, MAJOR-1).
 
 Why a row and not a log line: the questions asked afterwards are asked from a
 DIFFERENT process, on a machine whose log may have rotated, and the answer has
@@ -51,6 +64,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -515,6 +529,526 @@ def prune_boot_records(root: Path | None = None, *, now: float | None = None) ->
         except OSError:
             continue
     return removed
+
+
+# ---------------------------------------------------------------------------
+# The exit record
+# ---------------------------------------------------------------------------
+
+#: One runtime's statement about WHY its own exit path was reached, in the
+#: conversation directory.
+#:
+#: THE GAP THIS CLOSES is the same one the boot record's asymmetry leaves open.
+#: A boot record that survives its process says "this pid stopped without running
+#: its own exit ordering" — which is a true and useful sentence, and also the
+#: sentence a SIGKILL crash and an ordinary idle exit both produce when the exit
+#: is the runtime's own POLICY: ``process._clean_exit`` withdrew the boot record
+#: and logged one INFO line, so nothing durable distinguished "left because it was
+#: idle for 3 s" from "was killed". ``lop sessions --all`` then showed both as
+#: ``stored``, and the operator's question — when did it stop, and was it asked to
+#: — had no answer anywhere in the store.
+#:
+#: WHY THE CONVERSATION DIRECTORY and not ``run/host``: this is evidence about a
+#: SESSION's runtime, it must outlive the pid-keyed namespaces (a scan reaps and
+#: an exit unpublishes those), and every reader that asks the question already
+#: has the session directory in hand. It is also the shape ``registry``'s stop
+#: marker uses, for the same durability reason.
+#:
+#: A NEW BOOT DELIBERATELY DOES NOT DELETE IT. The record is HISTORY — the last
+#: departure of this session's runtime — and the listing shows it only for a row
+#: with no live runtime, so the next run overwrites it at ITS exit and no reader
+#: ever sees a live row carrying a stale stop. A session that has never exited
+#: cleanly has no file, which is what keeps "unknown" distinguishable from "it
+#: stopped at time T".
+EXIT_RECORD_NAME = "runtime-exit.json"
+
+#: What an exit record says it is. Namespaced like the boot record: this
+#: directory also holds the transcript, roster and lease, so a reader must be
+#: able to tell one artifact from another by its own contents.
+EXIT_RECORD_KIND = "runtime-exit"
+
+#: Schema version. A reader that does not know a version must not guess at its
+#: fields — ``ExitRecord.from_json`` refuses an unknown one rather than
+#: half-reading a future row.
+EXIT_RECORD_VERSION = 1
+#: The largest magnitude a pressure byte count may carry before the record is
+#: refused. Not a policy about disks: it is the bound that keeps a hostile
+#: 400-digit literal from reaching a float coercion (review round 3, R3-1).
+#: One exabyte is far beyond any real store and far below ``float`` overflow.
+_MAX_PRESSURE = 10**18
+
+#: How far an exit record's ``started_at`` may differ from a run key read from
+#: another artifact, in seconds. Same allowance (and the same reasoning — the key
+#: is written by two processes from the same clock, so this only absorbs
+#: rounding) as ``attention._RUN_KEY_TOLERANCE_S``, restated here rather than
+#: imported because this module sits on the runtime's boot path and must stay
+#: stdlib-only apart from ``update``.
+EXIT_RUN_KEY_TOLERANCE_S = 1.0
+
+
+def exit_record_path(conversation_dir: Path) -> Path:
+    """Where one conversation's exit record lives.
+
+    A RESOLVER: it names the file and never creates the directory, on the same
+    rule ``registry.record_path`` states — readers that only want to ask whether
+    a record exists must not bring a session directory into being.
+    """
+    return Path(conversation_dir) / EXIT_RECORD_NAME
+
+
+@dataclass
+class ExitRecord:
+    """One runtime's durable account of reaching its own exit path.
+
+    ``reason`` is the exact string ``process._clean_exit`` was given, and
+    ``detail`` is the human sentence that path already computed — carried here
+    rather than re-derived, because a reader re-deriving it from the reason would
+    be inventing a second vocabulary for a fact the runtime already knew.
+
+    ``requested`` is the answer to "did a person ask for this": True only when a
+    durable stop marker covers THIS run (pid + start time). A policy exit is
+    False, and so is a signal nobody staged — which is what makes the field
+    worth carrying at all: after 2026-09-30 an unattributed SIGTERM and a
+    ``lop stop`` were indistinguishable in the store.
+
+    ``pressure`` is context, not a cause: free disk bytes at the store's root and
+    the host's 1-minute load when the runtime left. Both come from cheap,
+    fork-free reads, and either is ``None`` when it could not be answered —
+    never 0, because a zero would read as "the disk was full".
+    """
+
+    session_id: str
+    pid: int
+    started_at: float
+    at: float
+    reason: str
+    detail: str = ""
+    requested: bool = False
+    build: str = ""
+    free_disk_bytes: int | None = None
+    load_1m: float | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "v": EXIT_RECORD_VERSION,
+            "kind": EXIT_RECORD_KIND,
+            "session_id": self.session_id,
+            "pid": self.pid,
+            "started_at": self.started_at,
+            "at": self.at,
+            "reason": self.reason,
+            "detail": self.detail,
+            "requested": self.requested,
+            "build": self.build,
+            # ALWAYS PRESENT, with nulls inside, even when nothing was measured:
+            # a consumer that reads ``pressure`` must not have to branch on the
+            # key's existence, and the two readings are a pair.
+            "pressure": {"free_disk_bytes": self.free_disk_bytes, "load_1m": self.load_1m},
+        }
+
+    @classmethod
+    def from_json(cls, data: Any) -> "ExitRecord | None":
+        """A stored record, or ``None`` for anything a reader cannot trust.
+
+        Tolerant by contract: this is read on a LISTING path and by the rescue
+        pass, and a torn or future row means "no evidence", never an exception.
+        A record with no ``reason`` is refused rather than read as an empty
+        reason — the reason is the one field the file exists for.
+
+        NON-FINITE AND NON-POSITIVE STAMPS ARE REFUSED, not tolerated (review
+        round 1, minor): the listing renders an age from ``at``, and ``inf``
+        renders as a fabricated ``20747d`` while a zero renders a departure before
+        the epoch. ``int('inf')``-typed payloads raise ``OverflowError``, which is
+        caught here — a numeric field a reader cannot use is the same answer as a
+        missing one, and neither may escape as an exception on a listing path.
+
+        THE SAME RULE COVERS ``pressure`` (review round 2, MINOR-1), and it is a
+        correction rather than a widening: ``json.loads`` accepts the bare
+        ``Infinity``/``NaN``/``-Infinity`` literals, so ``free_disk_bytes: Infinity``
+        reached ``int()`` and raised ``OverflowError`` OUT of this reader — one
+        corrupt field took ``lop sessions --all`` down, which is precisely the
+        failure the tolerant contract exists to prevent. A pressure reading a
+        reader cannot trust is corruption of the record, so the record reads as
+        "no record": degrading the pair to nulls would keep a row alive that can
+        no longer say whether it was even written by this build.
+        """
+        if not isinstance(data, dict):
+            return None
+        try:
+            version = int(data.get("v") or 0)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if version != EXIT_RECORD_VERSION:
+            return None
+        try:
+            pid = int(data["pid"])
+            started_at = float(data.get("started_at") or 0.0)
+            at = float(data.get("at") or 0.0)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(started_at) or not math.isfinite(at):
+            return None
+        # A RUN HAS A POSITIVE PID AND A REAL DEPARTURE TIME; ``started_at`` may be
+        # 0.0 only where the writer had no record to read it from, which
+        # ``covers_run`` treats as "no run key" rather than as 1970.
+        if pid <= 0 or at <= 0 or started_at < 0:
+            return None
+        reason = str(data.get("reason") or "")
+        if not reason:
+            return None
+        pressure = data.get("pressure")
+        free: int | None = None
+        load: float | None = None
+        if isinstance(pressure, dict):
+            raw_free = pressure.get("free_disk_bytes")
+            raw_load = pressure.get("load_1m")
+            try:
+                # One try for both: whichever field is corrupt, the record is.
+                free = None if raw_free is None else int(raw_free)
+                load = None if raw_load is None else float(raw_load)
+                # AND THE FINITENESS CHECKS LIVE INSIDE IT (review round 3,
+                # R3-1). ``math.isfinite`` coerces its argument to a float, and a
+                # 400-digit integer literal — accepted by ``json.loads`` and by
+                # ``int()`` — raises OverflowError there, OUT of this reader.
+                # ``free`` is an int, so finiteness is trivially true for every
+                # value that survives ``int()``; the check is kept only for the
+                # float reading, and the int is bounded by the coercion catch.
+                if load is not None and not math.isfinite(load):
+                    return None
+                if free is not None and not -_MAX_PRESSURE <= free <= _MAX_PRESSURE:
+                    return None
+            except (TypeError, ValueError, OverflowError):
+                return None
+        return cls(
+            session_id=str(data.get("session_id") or ""),
+            pid=pid,
+            started_at=started_at,
+            at=at,
+            reason=reason,
+            detail=str(data.get("detail") or ""),
+            # ``is True`` rather than ``bool(...)``: a payload carrying the STRING
+            # "false" would otherwise read as a requested stop, which is the one
+            # direction this field must never err in — it would narrate a crash as
+            # the user's own act (the wrong-verdict class QA round 1 found in the
+            # marker path). Anything that is not a JSON true is "not requested".
+            requested=data.get("requested") is True,
+            build=str(data.get("build") or ""),
+            free_disk_bytes=free,
+            load_1m=load,
+        )
+
+    def covers_run(self, pid: int, started_at: float) -> bool:
+        """Whether this record attests to the run ``(pid, started_at)``.
+
+        The same run-key rule every other durable artifact applies, and for the
+        same reason: a session can exit cleanly and be resumed, and the record of
+        that PREVIOUS departure must not explain a later, unexplained death.
+
+        BOTH STAMPS ARE REQUIRED, WHICH IS THE MARKER RUNG'S RULE (review round
+        1, NIT-2). ``attention._stop_marker_covers_run`` refuses when the dead
+        record carries no start stamp — ``abs(marker_start - 0.0)`` is never
+        inside the tolerance — and this accepts nothing weaker. An earlier
+        revision returned True on the pid alone in that case; the two run-key
+        rules then disagreed, and the disagreement's direction was the bad one:
+        ``rescue._exit_record_explains`` is the rung whose false positive HIDES a
+        crash, so a record it cannot fully key must fall through to the ladder
+        (which fires) rather than explain the death. A caller comparing two
+        stamps it wrote itself with a real start (every runtime) is unaffected;
+        so is the ``0.0``-vs-``0.0`` case (a reduced host comparing its own
+        writings), because the difference is zero.
+        """
+        if int(pid) != self.pid:
+            return False
+        return abs(self.started_at - float(started_at)) < EXIT_RUN_KEY_TOLERANCE_S
+
+
+def _exit_pressure() -> tuple[int | None, float | None]:
+    """``(free disk bytes at the config root, 1-minute load)``, or nulls.
+
+    CHEAP AND FORK-FREE BY CONSTRUCTION, because this runs on the exit path the
+    reaper's own tests time to a 40 ms spread. ``os.statvfs`` and
+    ``os.getloadavg`` are single syscalls; neither spawns anything, and the
+    ``statvfs`` is spelled ``getattr`` because Windows has no such call — an
+    unsupported reading is ``None`` there, which is the same answer as a store
+    whose root cannot be stat'ed.
+    """
+    free: int | None = None
+    load: float | None = None
+    try:
+        statvfs = getattr(os, "statvfs", None)
+        if statvfs is not None:
+            stats = statvfs(str(config_dir()))
+            free = int(stats.f_bavail) * int(stats.f_frsize)
+    except (OSError, ValueError, AttributeError):
+        free = None
+    try:
+        load = float(os.getloadavg()[0])
+    except (OSError, AttributeError):
+        load = None
+    return free, load
+
+
+def write_exit_record(
+    session_id: str,
+    *,
+    conversation_dir: Path | None,
+    pid: int | None = None,
+    started_at: float = 0.0,
+    reason: str = "",
+    detail: str = "",
+    requested: bool = False,
+    build: str = "",
+) -> Path | None:
+    """Publish this run's exit record. Returns where it landed, or ``None``.
+
+    NEVER RAISES: every caller is an exit path, and a runtime that cannot write
+    its own account must still leave. Absence of the file is the same answer as
+    "no record" to every reader, so a failed write degrades to today's behaviour
+    rather than to a wedged exit.
+
+    The write is ``registry._staged_write`` — one temp file in the same
+    directory, 0600, ``os.replace`` — so a concurrent listing sees the old row or
+    the new one and never a torn one. The directory is NOT created: a runtime
+    that never had a session directory has nothing to report about, and
+    inventing one would make an empty session appear in every listing.
+
+    ``pid``/``started_at`` identify the RUN, not the session: they are what
+    later lets a reader (and the rescue pass) prove this record describes the
+    death it is being read for. ``started_at`` unknown is 0.0, which
+    ``ExitRecord.covers_run`` treats as "no run key", never as a match for 1970.
+    """
+    if conversation_dir is None or not str(reason):
+        return None
+    directory = Path(conversation_dir)
+    try:
+        if not directory.is_dir():
+            return None
+        free, load = _exit_pressure()
+        record = ExitRecord(
+            session_id=str(session_id),
+            pid=os.getpid() if pid is None else int(pid),
+            started_at=float(started_at or 0.0),
+            at=time.time(),
+            reason=str(reason),
+            detail=str(detail),
+            requested=bool(requested),
+            build=str(build),
+            free_disk_bytes=free,
+            load_1m=load,
+        )
+        target = exit_record_path(directory)
+        registry._staged_write(target, record.to_json(), prefix=f".{EXIT_RECORD_NAME}.")
+        return target
+    except Exception:  # noqa: BLE001 — an exit path never fails over an instrument
+        logger.debug("session runtime: could not write its exit record", exc_info=True)
+        return None
+
+
+def read_exit_record(conversation_dir: Path | None) -> "ExitRecord | None":
+    """One conversation's last exit record, or ``None`` when there is none.
+
+    ONE SMALL READ, and that bound is the contract the listing relies on: the
+    stored half of ``lop sessions --all`` calls this once per row it actually
+    shows, never over the whole store. A malformed file is ``None`` (see
+    ``ExitRecord.from_json``), so an unreadable artifact degrades to "unknown"
+    rather than to a failed listing.
+
+    THE DIRECTORY IS THE AUTHORITY ON WHICH SESSION THIS IS (review round 1,
+    nit): a record whose own ``session_id`` disagrees with the directory it sits
+    in describes some other conversation — a hand-copied file, a torn write from
+    a tool that renamed a directory — and its time must not be attached to this
+    row. A mismatch is refused as no evidence.
+    """
+    if conversation_dir is None:
+        return None
+    directory = Path(conversation_dir)
+    try:
+        data = json.loads(exit_record_path(directory).read_text())
+    except (OSError, ValueError):
+        return None
+    record = ExitRecord.from_json(data)
+    if record is None:
+        return None
+    if record.session_id and record.session_id != directory.name:
+        return None
+    return record
+
+
+# ---------------------------------------------------------------------------
+# The run record
+# ---------------------------------------------------------------------------
+
+#: WHICH RUN THIS SESSION'S LAST DEPARTURE BELONGS TO — written at boot, removed
+#: by that run's own clean exit.
+#:
+#: WHY A SECOND ARTIFACT, when the exit record already carries ``pid`` and
+#: ``started_at``: a stored row has to be able to tell "the exit record on disk
+#: IS the last thing that happened here" from "an earlier run exited cleanly and
+#: the one after it was killed". The listing has no record of the dead run at all
+#: — its record file was reaped — so without a statement about the LATEST run it
+#: would borrow the previous departure's time and reason, which is the
+#: wrong-history defect review round 1 measured: idle-exit run A, resume, SIGKILL
+#: run B, and the row still reports A's ``idle-exit`` at A's time.
+#:
+#: The boot record's asymmetry is the same shape, one namespace over, but
+#: ``run/host`` is pid-keyed and PRUNED — a later boot removes a dead pid's
+#: record, so it cannot answer a question asked days later. This one lives in the
+#: conversation directory, is overwritten by the next boot (so it always names
+#: the latest run), and is removed only by that run's own clean exit.
+#:
+#: ABSENT IS "NO RUN TO COMPARE" and is what a session that exited cleanly looks
+#: like; PRESENT with a key that differs from the exit record's is a death nobody
+#: has an exit record for, and the listing reads it as unknown.
+RUN_RECORD_NAME = "runtime-run.json"
+RUN_RECORD_KIND = "runtime-run"
+RUN_RECORD_VERSION = 1
+
+
+def run_record_path(conversation_dir: Path) -> Path:
+    """Where one conversation's run record lives. A resolver: never creates."""
+    return Path(conversation_dir) / RUN_RECORD_NAME
+
+
+@dataclass
+class RunRecord:
+    """The latest run of this session: pid, start, and when it was announced.
+
+    Deliberately smaller than a boot record: it answers exactly one question
+    ("which run is the newest here") and is compared, not narrated.
+    """
+
+    session_id: str
+    pid: int
+    started_at: float
+    at: float = field(default_factory=_now)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "v": RUN_RECORD_VERSION,
+            "kind": RUN_RECORD_KIND,
+            "session_id": self.session_id,
+            "pid": self.pid,
+            "started_at": self.started_at,
+            "at": self.at,
+        }
+
+    @classmethod
+    def from_json(cls, data: Any) -> "RunRecord | None":
+        """A stored row, or ``None`` for anything that cannot identify a run."""
+        if not isinstance(data, dict):
+            return None
+        try:
+            if int(data.get("v") or 0) != RUN_RECORD_VERSION:
+                return None
+            pid = int(data["pid"])
+            started_at = float(data.get("started_at") or 0.0)
+            at = float(data.get("at") or 0.0)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(started_at) or not math.isfinite(at):
+            return None
+        if pid <= 0 or started_at < 0:
+            return None
+        return cls(
+            session_id=str(data.get("session_id") or ""),
+            pid=pid,
+            started_at=started_at,
+            at=at,
+        )
+
+    def covers_run(self, pid: int, started_at: float) -> bool:
+        """Whether this row names the run ``(pid, started_at)``.
+
+        Both stamps are required, the same rule ``ExitRecord.covers_run`` applies
+        (and through it the marker rung's): a comparison that cannot be keyed is
+        no evidence, and this one feeds a listing that must not borrow a
+        departure.
+        """
+        if int(pid) != self.pid:
+            return False
+        return abs(self.started_at - float(started_at)) < EXIT_RUN_KEY_TOLERANCE_S
+
+
+def write_run_record(
+    session_id: str,
+    *,
+    conversation_dir: Path | None,
+    pid: int | None = None,
+    started_at: float = 0.0,
+) -> Path | None:
+    """Publish this run's run record at boot. Returns where it landed, or ``None``.
+
+    NEVER RAISES, on the same rule as the boot record: a runtime that cannot
+    write its own account must still run. The write is ``registry._staged_write``
+    so a concurrent listing sees the old row or the new one, and the directory is
+    not created (a runtime with no session directory has nothing to report).
+    """
+    if conversation_dir is None:
+        return None
+    directory = Path(conversation_dir)
+    try:
+        if not directory.is_dir():
+            return None
+        record = RunRecord(
+            session_id=str(session_id),
+            pid=os.getpid() if pid is None else int(pid),
+            started_at=float(started_at or 0.0),
+        )
+        target = run_record_path(directory)
+        registry._staged_write(target, record.to_json(), prefix=f".{RUN_RECORD_NAME}.")
+        return target
+    except Exception:  # noqa: BLE001 — boot must not fail over an instrument
+        logger.debug("session runtime: could not write its run record", exc_info=True)
+        return None
+
+
+def read_run_record(conversation_dir: Path | None) -> "RunRecord | None":
+    """The latest run this session announced, or ``None`` when none is on disk.
+
+    Tolerant and one small read, exactly like ``read_exit_record``. The
+    directory's name is the authority on the session, so a row naming another
+    conversation is refused.
+    """
+    if conversation_dir is None:
+        return None
+    directory = Path(conversation_dir)
+    try:
+        data = json.loads(run_record_path(directory).read_text())
+    except (OSError, ValueError):
+        return None
+    record = RunRecord.from_json(data)
+    if record is None:
+        return None
+    if record.session_id and record.session_id != directory.name:
+        return None
+    return record
+
+
+def clear_run_record(
+    conversation_dir: Path | None, *, pid: int | None = None, started_at: float = 0.0
+) -> None:
+    """Remove THIS run's run record on a clean exit. Best-effort.
+
+    ONLY ITS OWN, compared by run key: this is called before the dispose releases
+    the lease, so a successor cannot normally exist yet, but a reduced host
+    without a lease could race one — and deleting a successor's marker would make
+    its eventual death read as a clean exit.
+
+    Unlink rather than a write: an absent file is the state a clean exit means,
+    and it leaves nothing for a later reader to misread as a live run.
+    """
+    if conversation_dir is None:
+        return
+    directory = Path(conversation_dir)
+    try:
+        record = read_run_record(directory)
+        if record is None:
+            return
+        if not record.covers_run(os.getpid() if pid is None else int(pid), started_at):
+            return
+        run_record_path(directory).unlink()
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------

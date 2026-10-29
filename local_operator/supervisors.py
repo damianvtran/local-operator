@@ -327,6 +327,49 @@ def output_redirect_lines(log: Path) -> list[str]:
     return [f"StandardOutput=append:{log}", f"StandardError=append:{log}"]
 
 
+def systemd_path() -> str:
+    """The executable search path every rendered Linux user unit carries.
+
+    A user manager does not inherit the installer's shell PATH: it hands a unit
+    its own default (measured on an Amazon Linux node:
+    ``/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin``), so the uv the
+    official installer puts in ``~/.local/bin`` is invisible to a supervised
+    update. User-local bin first, then the system directories the manager's
+    default would have supplied (``/bin`` and ``/sbin`` for hosts without a
+    merged ``/usr``) — the Linux counterpart of ``relay._launchd_path``.
+
+    DELIBERATELY A FIXED LIST, with no ``os.environ`` input. Every installer
+    compares the installed unit to a fresh render by content (the relay's
+    ``refresh_unit_if_stale``, the wakes ``ensure_supervisor_installed`` on
+    every arm, the browser's ``_systemd_unit_is_current``), so a value copied
+    from the caller's PATH made the render depend on WHO rendered it: two
+    sessions with different PATHs rewrote and ``daemon-reload``ed the wakes
+    unit on every alternation (review round 1, M1), and a caller's activated
+    venv, session scratchpad shim or relative entry was frozen into a
+    long-lived unit ahead of the system directories. The same reasoning is
+    recorded for the wakes LaunchAgent at ``wakes/supervisor.py`` ("a PATH baked
+    into the plist render would vary per calling session").
+
+    The cost, accepted: a unit-level ``Environment=PATH=`` overrides any PATH the
+    user manager supplies through ``DefaultEnvironment=`` or ``environment.d``,
+    so directories configured only there (NixOS profiles, Linuxbrew) are not
+    seen by a supervised daemon. Determinism and keeping callers' directories
+    out of long-lived units outweigh that; such a host can still add a PATH
+    drop-in.
+    """
+    return os.pathsep.join(
+        [
+            str(Path.home() / ".local" / "bin"),
+            "/usr/local/bin",
+            "/usr/local/sbin",
+            "/usr/bin",
+            "/usr/sbin",
+            "/bin",
+            "/sbin",
+        ]
+    )
+
+
 def render_systemd_unit(
     *,
     description: str,
@@ -336,7 +379,9 @@ def render_systemd_unit(
     post_lines: Sequence[str] = (),
     restart: str = "on-failure",
     restart_sec: int = 5,
+    restart_prevent_exit_status: int | None = None,
     kill_mode: str | None = None,
+    oom_score_adjust: int | None = None,
     separate_sections: bool = True,
     wanted_by: str = "default.target",
 ) -> str:
@@ -355,6 +400,16 @@ def render_systemd_unit(
     caller today, and the reasoning for its value lives at the use site
     (``network/relay.render_systemd``) and beside the emit below.
 
+    ``oom_score_adjust`` follows the same rule: emitted only when a daemon names
+    one (the relay, today), so every other unit renders byte-identically.
+
+    ``restart_prevent_exit_status`` too. It is the other half of a
+    ``restart="always"`` opt-out from the default above: the status a DELIBERATE
+    exit uses, emitted as both ``RestartPreventExitStatus`` (that exit stays
+    down) and ``SuccessExitStatus`` (and is recorded as clean rather than as a
+    failed unit). The relay is its one caller; the reasoning lives at
+    ``network/relay.render_systemd``.
+
     ``separate_sections=False`` exists for the tunnel unit, whose layout
     predates this function; blank lines between sections are cosmetic to
     systemd, and rewriting a unit that is already correct is the thing worth
@@ -367,6 +422,10 @@ def render_systemd_unit(
         lines.append("")
     lines += ["[Service]", *pre_lines, f"ExecStart={exec_start}", f"Restart={restart}"]
     lines.append(f"RestartSec={restart_sec}")
+    if restart_prevent_exit_status is not None:
+        status = int(restart_prevent_exit_status)
+        lines.append(f"RestartPreventExitStatus={status}")
+        lines.append(f"SuccessExitStatus={status}")
     if kill_mode is not None:
         # RESTART-VS-STOP SEMANTICS, stated here so nobody "fixes" the line
         # below into the defect it removes. ``KillMode=process`` kills only the
@@ -390,7 +449,21 @@ def render_systemd_unit(
         # this line removes. A stop/kill leaves the runtimes alive by design;
         # sessions are ended through their own verbs.
         lines.append(f"KillMode={kill_mode}")
-    lines += list(post_lines)
+    if oom_score_adjust is not None:
+        # The value's reasoning lives at the use site (``network/relay.py``'s
+        # ``RELAY_OOM_SCORE_ADJUST``): under a USER manager only values at or
+        # above the manager's ``oom_score_adj_min`` take effect, and a lower one
+        # is dropped by systemd without failing the unit.
+        lines.append(f"OOMScoreAdjust={int(oom_score_adjust)}")
+    # THE CLEAN-NODE INCIDENT (2026-10-25): on a fresh Amazon Linux node uv
+    # lived in ``~/.local/bin`` and the relay unit inherited the manager's PATH,
+    # which lacked it, so the first supervised self-update (``lop network
+    # update``) refused with ``[Errno 2] No such file or directory: 'uv'`` until
+    # a hand-written drop-in restored the directory. Every unit carries the
+    # PATH so each daemon resolves tools the same way. It must stay a
+    # deterministic render (see :func:`systemd_path`): the installers'
+    # content comparisons turn any caller-dependent byte into a rewrite loop.
+    lines += [f"Environment={quoted(f'PATH={systemd_path()}')}", *post_lines]
     if separate_sections:
         lines.append("")
     lines += ["[Install]", f"WantedBy={wanted_by}"]
@@ -470,6 +543,37 @@ def is_bus_failure(text: str) -> bool:
     rather than on the exit status, which is non-zero for both.
     """
     return any(marker in (text or "") for marker in _NO_BUS_MARKERS)
+
+
+def linger_enabled() -> bool:
+    """Read durability independently of whether a user service answers now.
+
+    An enabled unit without linger only follows the login session; a successful
+    start is not evidence it will survive logout or return after reboot.
+    """
+    binary = shutil.which("loginctl")
+    if binary is None:
+        return False
+    user = os.environ.get("USER")
+    if not user:
+        # `getuid` is POSIX-only. This function is reached from the Linux arm,
+        # but the cross-platform probe reads every module on Windows and a bare
+        # attribute access here is a real import-time hazard if a future caller
+        # widens the path. An absent uid is "cannot ask", not a crash.
+        getuid = getattr(os, "getuid", None)
+        user = str(getuid()) if getuid is not None else ""
+    if not user:
+        return False
+    try:
+        result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            [binary, "show-user", user, "-p", "Linger"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and "Linger=yes" in result.stdout.splitlines()
 
 
 def enable_linger() -> bool:

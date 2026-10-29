@@ -1,0 +1,44 @@
+wire.settings.hub_defaults.agents.help
+EN "Off pauses updates for all agent/skill links; on subscribes new ones."
+ZH "关闭会暂停所有智能体/技能链接的更新；开启会订阅新链接。"
+CX {"maxCells": 72, "note": "Creation default for new agent and skill links, and a ceiling on existing ones: turning it off also pauses automatic updates for agent and skill links whose own subscribe is on, while an explicit per-link subscribe still governs when the switch is on. Config identifier unchanged. Does not govern team links; teams have their own switch. The \"skill\" scope is INTERIM: these strings name skills because no ``auto_skills`` key exists yet (policies.py records the same plan); when that key lands, the coupling must be revisited — the copy narrows back to agents and this note's ceiling wording must be re-justified, never left to go false. Hub-specific model override is deprecated, not editable. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.", "role": "help text", "tone": "plain, precise"}
+
+wire.settings.hub_defaults.agents.label
+EN "Auto-update agent/skill links"
+ZH "自动更新智能体/技能链接"
+CX {"note": "Creation default for new agent and skill links, and a ceiling on existing ones: turning it off also pauses automatic updates for agent and skill links whose own subscribe is on, while an explicit per-link subscribe still governs when the switch is on. Config identifier unchanged. Does not govern team links; teams have their own switch. The \"skill\" scope is INTERIM: these strings name skills because no ``auto_skills`` key exists yet (policies.py records the same plan); when that key lands, the coupling must be revisited — the copy narrows back to agents and this note's ceiling wording must be re-justified, never left to go false. Hub-specific model override is deprecated, not editable. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.", "role": "control label", "tone": "plain, precise"}
+
+wire.settings.hub_defaults.agents.off.description
+EN "pause updates for all agent and skill links"
+ZH "暂停所有智能体和技能链接的更新"
+CX {"note": "Creation default for new agent and skill links, and a ceiling on existing ones: turning it off also pauses automatic updates for agent and skill links whose own subscribe is on, while an explicit per-link subscribe still governs when the switch is on. Config identifier unchanged. Does not govern team links; teams have their own switch. The \"skill\" scope is INTERIM: these strings name skills because no ``auto_skills`` key exists yet (policies.py records the same plan); when that key lands, the coupling must be revisited — the copy narrows back to agents and this note's ceiling wording must be re-justified, never left to go false. Hub-specific model override is deprecated, not editable. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.", "role": "help text", "tone": "plain, precise"}
+
+wire.settings.hub_defaults.agents.on.description
+EN "subscribe new agent and skill links"
+ZH "订阅新的智能体和技能链接"
+CX {"note": "Creation default for new agent and skill links, and a ceiling on existing ones: turning it off also pauses automatic updates for agent and skill links whose own subscribe is on, while an explicit per-link subscribe still governs when the switch is on. Config identifier unchanged. Does not govern team links; teams have their own switch. The \"skill\" scope is INTERIM: these strings name skills because no ``auto_skills`` key exists yet (policies.py records the same plan); when that key lands, the coupling must be revisited — the copy narrows back to agents and this note's ceiling wording must be re-justified, never left to go false. Hub-specific model override is deprecated, not editable. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.", "role": "help text", "tone": "plain, precise"}
+
+wire.settings.hub_defaults.model_default.note
+EN "Hub merges use your current default model. The old hub model override is ignored."
+ZH "hub的merge使用当前默认模型，旧的hub模型覆盖设置会被忽略。"
+CX {"note": "Creation default only, config identifier unchanged. Existing explicit per-link values always win. Never translate as a master enable/disable switch. Hub-specific model override is deprecated, not editable. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.", "role": "help text", "tone": "plain, precise"}
+
+wire.settings.hub_defaults.teams.help
+EN "Default for new team links; existing links keep their own policies."
+ZH "新团队链接的默认策略；现有链接保留各自策略。"
+CX {"maxCells": 72, "note": "Creation default only, config identifier unchanged. Existing explicit per-link values always win. Never translate as a master enable/disable switch. Hub-specific model override is deprecated, not editable. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.", "role": "help text", "tone": "plain, precise"}
+
+wire.settings.hub_defaults.teams.label
+EN "Subscribe new team links"
+ZH "订阅新团队链接"
+CX {"note": "Creation default only, config identifier unchanged. Existing explicit per-link values always win. Never translate as a master enable/disable switch. Hub-specific model override is deprecated, not editable. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.", "role": "control label", "tone": "plain, precise"}
+
+wire.settings.hub_defaults.teams.off.description
+EN "pause incoming updates for new team links"
+ZH "暂停接收新团队链接的更新"
+CX {"note": "Creation default only, config identifier unchanged. Existing explicit per-link values always win. Never translate as a master enable/disable switch. Hub-specific model override is deprecated, not editable. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.", "role": "help text", "tone": "plain, precise"}
+
+wire.settings.hub_defaults.teams.on.description
+EN "subscribe new team links"
+ZH "订阅新团队链接"
+CX {"note": "Creation default only, config identifier unchanged. Existing explicit per-link values always win. Never translate as a master enable/disable switch. Hub-specific model override is deprecated, not editable. Placeholders retain their exact names; private visibility must remain explicit. Wrap explanatory copy rather than truncating it.", "role": "help text", "tone": "plain, precise"}

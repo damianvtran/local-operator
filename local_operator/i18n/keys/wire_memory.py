@@ -18,6 +18,14 @@ def capture_label() -> Msg:
     return Msg("wire.memory.capture.label", {})
 
 
+def capture_locators_help() -> Msg:
+    return Msg("wire.memory.capture.locators.help", {})
+
+
+def capture_locators_label() -> Msg:
+    return Msg("wire.memory.capture.locators.label", {})
+
+
 def command() -> Msg:
     return Msg("wire.memory.command", {})
 

@@ -385,3 +385,50 @@ def test_a_host_without_the_decoder_writes_no_sidecar_but_keeps_the_audio(
     assert block.attachment is not None
     assert AttachmentStore(_isolate_attachments).get_peaks(block.attachment) is None
     assert not list(_isolate_attachments.glob("*.peaks.json"))
+
+
+def test_cache_media_fills_a_missing_duration_from_the_bytes(_isolate_attachments, monkeypatch):
+    """A caller that does not know the length (BYOK) gets one from the bytes.
+
+    This is the fix's contract at the registration point: the block that rides
+    the tool result must carry a duration even when the vendor stated none,
+    because the player cannot draw without it.
+    """
+    from local_operator.audiogen import peaks as peaks_module
+    from local_operator.session.attachments import cache_media
+
+    monkeypatch.setattr(peaks_module, "compute_peaks", lambda raw: [0.0] * peaks_module.PEAK_BARS)
+    monkeypatch.setattr(peaks_module, "compute_duration", lambda raw: 0.522449)
+
+    block = cache_media(b"byok-audio", "audio/mpeg", kind="audio")
+    assert block is not None
+    assert block.duration_s == pytest.approx(0.522449)
+
+
+def test_cache_media_prefers_the_bytes_and_says_so_on_a_mismatch(
+    _isolate_attachments, monkeypatch, caplog
+):
+    """A provider's duration is a cross-check, never the source.
+
+    Radient states a duration; the bytes are what the player draws against, so a
+    disagreement has to be VISIBLE (logged with the digest) and resolved toward
+    the bytes - silently preferring either one is how a waveform ends up
+    describing a different length than the clock.
+    """
+    from local_operator.audiogen import peaks as peaks_module
+    from local_operator.session.attachments import cache_media
+
+    monkeypatch.setattr(peaks_module, "compute_peaks", lambda raw: [0.0] * peaks_module.PEAK_BARS)
+    monkeypatch.setattr(peaks_module, "compute_duration", lambda raw: 0.522449)
+
+    block = cache_media(b"radient-audio", "audio/mpeg", kind="audio", duration_s=1.044898)
+    assert block is not None
+    assert block.duration_s == pytest.approx(0.522449), "the bytes win"
+    assert any("keeping the bytes" in record.message for record in caplog.records)
+
+    caplog.clear()
+    agree = cache_media(b"radient-agree", "audio/mpeg", kind="audio", duration_s=0.5224)
+    assert agree is not None and agree.duration_s == pytest.approx(
+        0.522449
+    ), "agreement is silent, and the bytes still supply the value"
+    assert not any("keeping the bytes" in record.message for record in caplog.records)

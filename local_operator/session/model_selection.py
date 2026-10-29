@@ -30,6 +30,124 @@ from local_operator.session.transcript import _iter_complete_lines_backward
 SELECTED_MODEL_CUSTOM_TYPE = "selected_model"
 SELECTION_VERSION = 2
 
+#: The byte spellings a selection row's ``custom_type`` member can take: the
+#: compact one :meth:`TranscriptEntry.to_json` writes, and Python's default
+#: ``json.dumps`` separators (``": "``), the only other spelling a Python writer
+#: produces for this all-ASCII member — ``ensure_ascii`` cannot escape it.
+#:
+#: WHY THE BACKWARD READERS FILTER ON THEM rather than on bare ``"custom_type"``:
+#: ``frontend_state_checkpoint_v1`` rows also carry that marker and are by far
+#: the largest rows in a long journal (~0.7 MB each, 160 of them in a measured
+#: real journal), yet neither :func:`_settled_selection` nor
+#: :func:`_read_refusal` can use one — both stop only on a ``selected_model``
+#: row. Decoding them was the whole cost of the settle scan there. The VALUE is
+#: what discriminates: a checkpoint's ``state`` carries ``"selected_model"`` as a
+#: KEY, so a needle on the bare word would match every checkpoint row.
+#:
+#: SOUND ONLY BECAUSE NO WRITER SPELLS IT ANY OTHER WAY. Audited 2026-10-26:
+#: every journal row is serialized by ``TranscriptEntry.to_json``, whose
+#: ``separators=(",", ":")`` date from the file's first commit (381377fe82d),
+#: including ``harness_import``; fork, compression, sync and mesh moves copy row
+#: bytes verbatim and never re-serialize. ``tail_anchor._SELECTION_NEEDLES`` and
+#: ``transcript.find_row_for_custom_type`` already depend on the compact
+#: spelling. The spaced one is accepted too because it is free (one more
+#: substring search on a skipped row) and is what a hand-written or test journal
+#: built with plain ``json.dumps`` contains. The reachable hazard is a NEW
+#: writer with non-standard separators — ``"custom_type" :`` (space before the
+#: colon), a custom ``separators=`` pair, or a pretty-printer's newline — whose
+#: selection rows these readers would skip: route it through ``to_json``. (An
+#: escaped key is not reachable from a JSON library: the member is all-ASCII, so
+#: ``ensure_ascii`` leaves it as is.) A false presence — the spelling inside
+#: some string value — is harmless: the row is decoded and judged exactly as
+#: before (and inside a JSON string the quotes are escaped, so it is rare).
+_SELECTION_ROW_NEEDLES = tuple(
+    b'"custom_type"' + separator + json.dumps(SELECTED_MODEL_CUSTOM_TYPE).encode("utf-8")
+    for separator in (b":", b": ")
+)
+
+
+def _may_be_selection_row(raw: bytes) -> bool:
+    """Whether ``raw`` could be a selection row; ``False`` is a proof it is not."""
+    return any(needle in raw for needle in _SELECTION_ROW_NEEDLES)
+
+
+#: Revision of the RULES that turn journal rows into a ``StoredModelSelection``:
+#: :func:`_selection`, :func:`selection_from_payloads` and :func:`_settled_selection`.
+#:
+#: WHY IT EXISTS: the cold-open metadata record (``cold_metadata.ColdMetadata``)
+#: persists the ANSWER of those rules across processes and upgrades, so a build
+#: whose rules differ must not serve an answer an older build computed. BUMP THIS
+#: whenever a change to any of the three functions could change the answer for
+#: some journal; a stale bump costs one journal scan per open, a missed one serves
+#: the old answer until the journal next moves. The provider registry, which the
+#: rules also read, changes far more often and is covered automatically by
+#: :func:`selection_rules_fingerprint` rather than by this number.
+SELECTION_RULES_REVISION = 1
+
+
+@dataclass(frozen=True)
+class SelectionReading:
+    """A journal's selection answer, tagged with the rules that produced it.
+
+    ``selection`` is ``None`` for PROVED ABSENCE (the rules ran and found no
+    usable selection), which is a real answer and distinct from "no reading" —
+    callers that may have no reading hold ``SelectionReading | None`` and use the
+    outer ``None`` for that. ``rules`` is :func:`selection_rules_fingerprint` at
+    the time of the read, so a persisted reading can be refused by a process whose
+    rules differ (a provider added, removed or reclassified since).
+
+    ``source`` is the PLAIN journal's ``(st_ino, st_size, st_mtime_ns,
+    st_ctime_ns)``, stat'd
+    before the read and again after it, or ``None`` when the two disagreed, the
+    journal is archived, or it could not be stat'd. It is what lets a persister
+    prove the reading describes the journal version it is filed under: the cold
+    record stores a reading only when ``source`` equals its own witness. A reading
+    with no ``source`` is still a correct answer for this call; it just cannot be
+    persisted.
+    """
+
+    selection: StoredModelSelection | None
+    rules: str
+    source: tuple[int, int, int, int] | None = None
+
+
+def selection_rules_fingerprint() -> str:
+    """A short digest of every input to :func:`_selection` besides the row itself.
+
+    The rules read the provider registry (``get_provider_definition`` through the
+    id/alias tables, and the decision/speech/media-only flags), so the digest
+    covers exactly those tables plus :data:`SELECTION_RULES_REVISION`. Computed
+    per call rather than cached — ~100 rows, tens of microseconds — so a registry
+    that differs at run time (a test, a plugin) can never be masked by a stale
+    module-level value.
+    """
+    import hashlib
+
+    from local_operator.providers.registry import (
+        get_provider_definition,
+        known_provider_ids,
+    )
+
+    rows = []
+    # ``known_provider_ids`` includes the aliases, and each is recorded with the id
+    # it resolves to, so re-pointing an alias moves the digest too.
+    for pid in known_provider_ids():
+        definition = get_provider_definition(pid)
+        if definition is None:  # pragma: no cover - every listed id resolves
+            continue
+        rows.append(
+            (
+                pid,
+                definition.id,
+                bool(definition.decision_only),
+                bool(definition.speech_only),
+                bool(definition.media_only),
+            )
+        )
+    material = repr((SELECTION_RULES_REVISION, rows)).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()[:16]
+
+
 #: Memoised answers for :func:`read_model_selection` and
 #: :func:`refused_decision_only_selection`, keyed on the transcript's path plus
 #: its own ``(st_ino, st_size, st_mtime_ns)``: ONE stat per call revalidates.
@@ -51,8 +169,15 @@ SELECTION_VERSION = 2
 #: an answer that costs one stat once warm. The path half of the key is the
 #: path AS GIVEN, not ``realpath``: the budget is one stat per call, and two
 #: spellings of one store cost one extra entry each rather than a wrong answer.
-_SELECTION_MEMO: "OrderedDict[str, tuple[tuple[int, int, int], Any]]" = OrderedDict()
-_SELECTION_REFUSAL_MEMO: "OrderedDict[str, tuple[tuple[int, int, int], Any]]" = OrderedDict()
+#:
+#: The stat key includes ``st_ctime_ns``: the journal writer restores mtime after
+#: a bookkeeping batch, so ``(ino, size, mtime)`` alone can stay equal across a
+#: same-size interior rewrite, and the durable cold record
+#: (``cold_metadata.ColdMetadata.selection``) persists whatever this memo answers.
+#: A stale memo hit would therefore outlive the process. ctime cannot be restored
+#: by an unprivileged writer, and the selection ledger already validates on it.
+_SELECTION_MEMO: "OrderedDict[str, tuple[tuple[int, int, int, int], Any]]" = OrderedDict()
+_SELECTION_REFUSAL_MEMO: "OrderedDict[str, tuple[tuple[int, int, int, int], Any]]" = OrderedDict()
 
 #: Bound on each memo above, in entries. Why a bound: a long-lived daemon can
 #: be asked about every session in a store over its lifetime. Why 128: the
@@ -122,6 +247,42 @@ def test_hosting_rule_waived() -> bool:
     return bool((os.environ.get(ENV_ALLOW_TEST_HOSTING_NOTIFY) or "").strip())
 
 
+def fast_dial_from_row(stored: bool | None, spec: Any) -> bool | None:
+    """The speed dial a journal row states for ``spec``, ``None`` when silent.
+
+    ONE implementation for the two readers that must agree — the owner's restore
+    (``Session._restore_selected_model``) and the runtime-less cold frame
+    (``cold_model.resolve_saved_model``). A second copy is how the frame a
+    reopened pane paints and the spec the first turn sends come to disagree,
+    which is the reported defect (ui#1266) rather than a hypothetical.
+
+    Three answers, and the third is why this is not a ``bool``:
+
+    * ``True`` — the row recorded the dial ON and the route sells the tier;
+    * ``False`` — the row recorded it OFF, OR the route cannot serve it (the
+      clamp below). A row is a SNAPSHOT of a live dial, so an OFF is a DECISION
+      and a restore must CLEAR a spec that arrived switched on: the create path
+      can hand one over (``DraftModel.fast_mode``, ui#1265), and a restore that
+      only ever ORs ``True`` brings a conversation the user turned off back on
+      premium pricing at the next reopen;
+    * ``None`` — the row predates the field (every row written before the dial
+      was journalled) and says NOTHING. Reading absence as OFF would silently
+      disable fast mode on every conversation older than the fix; reading it as
+      ON would arm a premium tier nobody chose. The caller leaves the incoming
+      spec's own answer alone.
+
+    The clamp is the conjunction the failover carry uses
+    (``providers.failover.spec_for_target``) and the OPPOSITE failure mode from
+    the OFF edge: a row that says ``fast`` on a route that does not sell the
+    tier puts the speed key on a request the provider 400s — the turn the
+    restore exists to open. Both halves are read from the spec that will
+    actually serve, never from the pair the row names.
+    """
+    if stored is None:
+        return None
+    return bool(stored) and bool(getattr(spec, "supports_fast_mode", False))
+
+
 @dataclass(frozen=True)
 class StoredModelSelection:
     provider: str
@@ -132,13 +293,28 @@ class StoredModelSelection:
     # This is the conversation's birth selector, not the pair configured while
     # constructing a resumed owner. Existing /effort journalling depends on it.
     boot_selector: str | None = None
+    #: The FAST dial the row recorded, or ``None`` on a row that has no opinion.
+    #:
+    #: ``None`` is "no evidence", never "off". Every row written before the dial
+    #: was journalled carries it, and reading those as a decision to keep the
+    #: dial off would silently disable fast mode on every conversation that
+    #: predates the fix — the same defect one layer down. ``False`` is a real
+    #: snapshot (the user turned it off), so the two spellings cannot collapse.
+    fast: bool | None = None
 
     @property
     def selector(self) -> str:
         return f"{self.provider}/{self.model_id}"
 
 
-def _selection(selector: Any, effort: Any, *, authoritative: bool = False, boot: Any = None):
+def _selection(
+    selector: Any,
+    effort: Any,
+    *,
+    authoritative: bool = False,
+    boot: Any = None,
+    fast: Any = None,
+):
     if not isinstance(selector, str) or "/" not in selector:
         return None
     provider, model_id = selector.split("/", 1)
@@ -183,6 +359,10 @@ def _selection(selector: Any, effort: Any, *, authoritative: bool = False, boot:
         boot_selector=(
             boot if isinstance(boot, str) and "/" in boot and all(boot.split("/", 1)) else None
         ),
+        # Only a real boolean is evidence. A hand-edited row spelling ``"yes"``
+        # says nothing this reader may act on, and the wire's own gate
+        # (``supports_fast_mode``) is what decides whether it may ever be sent.
+        fast=fast if isinstance(fast, bool) else None,
     )
 
 
@@ -203,6 +383,7 @@ def selection_from_payloads(payloads: Iterable[dict[str, Any]]) -> StoredModelSe
                 details.get("effort"),
                 authoritative=version == SELECTION_VERSION,
                 boot=details.get("boot"),
+                fast=details.get("fast"),
             )
             if selected is not None:
                 if selected.authoritative:
@@ -249,8 +430,11 @@ def _forward_payloads(directory: Path) -> Iterable[dict[str, Any]]:
     exactly the journals whose fold here is expensive), and this is the shape it
     must stay in step with.
     """
+    path = _journal_for_read(directory)
+    if path is None:
+        return
     try:
-        with (directory / "transcript.jsonl").open(encoding="utf-8") as handle:
+        with path.open(encoding="utf-8") as handle:
             for line in handle:
                 # Large transcripts mostly contain messages. Do not parse
                 # their payloads just to recover a two-field selector.
@@ -315,7 +499,9 @@ def _settled_selection(directory: Path) -> StoredModelSelection | None:
     Journals this build writes cannot contain such a byte: every append encodes
     the whole row before writing it.
     """
-    path = directory / "transcript.jsonl"
+    path = _journal_for_read(directory)
+    if path is None:
+        return None
     try:
         handle = path.open("rb")
     except OSError:
@@ -325,10 +511,11 @@ def _settled_selection(directory: Path) -> StoredModelSelection | None:
         unusable = False
         for _chunk_start, lines in _iter_complete_lines_backward(handle, handle.tell()):
             for raw in lines:
-                # The same cheap prefilter the forward scan uses, in bytes: a
-                # row without the marker cannot be a selection row, and most
-                # rows are messages that would otherwise be JSON-decoded.
-                if b'"custom_type"' not in raw:
+                # A row without the selection spelling cannot be a selection
+                # row, and the checkpoint rows this skips are most of the bytes
+                # (see _SELECTION_ROW_NEEDLES for why the narrow spelling is
+                # sound). The forward fold stays broad: it folds checkpoints.
+                if not _may_be_selection_row(raw):
                     continue
                 try:
                     row = json.loads(raw.decode("utf-8", errors="replace"))
@@ -355,6 +542,7 @@ def _settled_selection(directory: Path) -> StoredModelSelection | None:
                     details.get("effort"),
                     authoritative=True,
                     boot=details.get("boot"),
+                    fast=details.get("fast"),
                 )
                 if selected is not None:
                     return replace(selected, recovered=unusable)
@@ -366,8 +554,26 @@ def _settled_selection(directory: Path) -> StoredModelSelection | None:
     return None
 
 
+def _journal_for_read(directory: Path) -> Path | None:
+    """A readable journal for ``directory``, archive included, or ``None``.
+
+    THE RESOLVER, so a resumed session keeps the model its journal names: a
+    compressed session stores its selector rows inside the archive, and reading
+    the plain name would answer "no stored selection" and silently resume on the
+    configured hosting instead. Every reader below opens the path this returns,
+    and the memo keys stat it — so the cache stays keyed on the bytes actually
+    read.
+    """
+    from local_operator.session import compression
+
+    try:
+        return compression.transcript_for_read(directory)
+    except (OSError, compression.ArchiveError):
+        return None
+
+
 def _memoised(
-    memo: "OrderedDict[str, tuple[tuple[int, int, int], Any]]",
+    memo: "OrderedDict[str, tuple[tuple[int, int, int, int], Any]]",
     path: Path,
     compute: Callable[[], Any],
 ) -> Any:
@@ -381,13 +587,13 @@ def _memoised(
     file's bytes (the direction ``session_uses_test_hosting`` documents for its
     walk). What IS cached, deliberately: a ``None``, found or folded.
     """
-    stat_key: tuple[int, int, int] | None = None
+    stat_key: tuple[int, int, int, int] | None = None
     try:
         info = path.stat()
     except OSError:
         pass
     else:
-        stat_key = (info.st_ino, info.st_size, info.st_mtime_ns)
+        stat_key = (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
     key = str(path)
     if stat_key is not None:
         with _SELECTION_MEMO_GUARD:
@@ -425,12 +631,52 @@ def read_model_selection(directory: Path) -> StoredModelSelection | None:
     this module's audit measured (see ``_SELECTION_MEMO``'s comment).
     """
     return _memoised(
-        _SELECTION_MEMO, directory / "transcript.jsonl", lambda: _read_selection(directory)
+        _SELECTION_MEMO,
+        _journal_for_read(directory) or (directory / "transcript.jsonl"),
+        lambda: _read_selection(directory),
     )
 
 
+def read_selection_reading(directory: Path) -> SelectionReading:
+    """:func:`read_model_selection`, as a :class:`SelectionReading` with its source.
+
+    The SAME read (memo included), bracketed by two stats of the physical source.
+    An archive is deliberately never a ``source``: the cold record that persists
+    readings refuses archived journals outright (``cold_metadata._journal_still_at``),
+    and the archive's read path materialises a cache copy whose stat is not the
+    archive's, so no single tuple honestly names the bytes that were read.
+    """
+    from local_operator.session import compression
+
+    def stat_key() -> tuple[int, int, int, int] | None:
+        path, codec = compression.transcript_source(Path(directory))
+        if codec is not None:
+            return None
+        try:
+            info = path.stat()
+        except OSError:
+            return None
+        return (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    rules = selection_rules_fingerprint()
+    before = stat_key()
+    selection = read_model_selection(directory)
+    after = stat_key()
+    return SelectionReading(selection, rules, before if before == after else None)
+
+
 def _read_selection(directory: Path) -> StoredModelSelection | None:
-    """The uncached read behind :func:`read_model_selection` (settle, then fold)."""
+    """Read source evidence, falling back to the unchanged settle/fold scans.
+
+    The ledger is registry-independent: re-run the same fold so removed or
+    reclassified providers, recovery flags and legacy birth provenance retain
+    exactly their current meaning. Readers never create or repair the sidecar.
+    """
+    from local_operator.session.tail_anchor import read_selection_payloads
+
+    payloads = read_selection_payloads(directory)
+    if payloads is not None:
+        return selection_from_payloads(payloads)
     settled = _settled_selection(directory)
     if settled is not None:
         return settled
@@ -473,7 +719,9 @@ def refused_decision_only_selection(directory: Path) -> str | None:
     ``_SELECTION_MEMO``).
     """
     return _memoised(
-        _SELECTION_REFUSAL_MEMO, directory / "transcript.jsonl", lambda: _read_refusal(directory)
+        _SELECTION_REFUSAL_MEMO,
+        _journal_for_read(directory) or (directory / "transcript.jsonl"),
+        lambda: _read_refusal(directory),
     )
 
 
@@ -485,7 +733,9 @@ def _read_refusal(directory: Path) -> str | None:
         is_speech_only,
     )
 
-    path = directory / "transcript.jsonl"
+    path = _journal_for_read(directory)
+    if path is None:
+        return None
     try:
         handle = path.open("rb")
     except OSError:
@@ -494,7 +744,8 @@ def _read_refusal(directory: Path) -> str | None:
         handle.seek(0, os.SEEK_END)
         for _chunk_start, lines in _iter_complete_lines_backward(handle, handle.tell()):
             for raw in lines:
-                if b'"custom_type"' not in raw:
+                # In step with _settled_selection: the same rows, the same filter.
+                if not _may_be_selection_row(raw):
                     continue
                 try:
                     row = json.loads(raw.decode("utf-8", errors="replace"))
@@ -635,7 +886,9 @@ def session_uses_test_hosting(directory: Path) -> bool:
         # only direction the escape can move, and the kill switch still wins
         # because every leg asks it first.
         return False
-    path = directory / "transcript.jsonl"
+    path = _journal_for_read(directory)
+    if path is None:
+        return False
     try:
         info = path.stat()
     except OSError:
@@ -708,7 +961,10 @@ def _read_test_hosting(directory: Path) -> bool | None:
     try:
         from local_operator.providers.registry import is_mock_provider
 
-        with (directory / "transcript.jsonl").open("rb"):
+        path = _journal_for_read(directory)
+        if path is None:
+            return None
+        with path.open("rb"):
             pass
         settled = _settled_selection(directory)
         return settled is not None and is_mock_provider(settled.provider)

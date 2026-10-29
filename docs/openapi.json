@@ -19836,7 +19836,7 @@
           },
           "instructions": {
             "type": "string",
-            "maxLength": 8000,
+            "maxLength": 10000,
             "minLength": 1,
             "title": "Instructions"
           },
@@ -19951,7 +19951,7 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 8000
+                "maxLength": 10000
               },
               {
                 "type": "null"

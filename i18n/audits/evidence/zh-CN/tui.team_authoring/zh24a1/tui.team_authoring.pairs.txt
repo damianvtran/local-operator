@@ -1,0 +1,144 @@
+tui.team_authoring.create
+EN "new team"
+ZH "新建团队"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.edit
+EN "edit team · {name}"
+ZH "编辑团队 · {name}"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.name
+EN "name"
+ZH "名称"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.label
+EN "label"
+ZH "标签"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.description
+EN "when to use"
+ZH "使用场景"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.manager
+EN "manager"
+ZH "管理者"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.members
+EN "members"
+ZH "成员"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.aliases
+EN "aliases"
+ZH "别名"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.instructions
+EN "instructions"
+ZH "指令"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.project
+EN "project brief"
+ZH "项目简报"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.members_hint
+EN "comma-separated: coder, coder:2, team:pod"
+ZH "逗号分隔：coder、coder:2、team:pod"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.aliases_hint
+EN "comma-separated names · empty clears aliases"
+ZH "逗号分隔的名称 · 留空即清除别名"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.instructions_hint
+EN "standing team guidance · Tab moves to the next field"
+ZH "常驻团队指引 · Tab跳至下一字段"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.overrides_hint
+EN "Existing member overrides are preserved. Edit overrides on the desktop."
+ZH "现有成员覆盖项将保留。在桌面端编辑覆盖项。"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.legend
+EN "ctrl+s save · tab move · esc cancel"
+ZH "ctrl+s保存 · tab移动 · esc取消"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.discard
+EN "Discard changes? y discard · n keep editing"
+ZH "放弃更改？y放弃 · n继续编辑"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.invalid_name
+EN "Use a team name without spaces or path separators."
+ZH "团队名称不能含空格或路径分隔符。"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.required_manager
+EN "A manager is required."
+ZH "必须指定管理者。"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.required_instructions
+EN "Instructions are required for a new team."
+ZH "新团队必须填写指令。"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.invalid_members
+EN "Use comma-separated role, role:2 or team:pod entries."
+ZH "成员项用逗号分隔，格式为role、role:2或team:pod。"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.invalid_aliases
+EN "Use comma-separated names without spaces or empty entries."
+ZH "别名用逗号分隔，不能含空格或空项。"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.saved
+EN "saved team {name}"
+ZH "已保存团队{name}"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.no_change
+EN "no changes to save"
+ZH "没有更改需要保存"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.revision_changed
+EN "Someone else changed this team; reopen to edit."
+ZH "其他人已修改此团队，重新打开后再编辑。"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.missing
+EN "No installed team named {name}."
+ZH "未安装名为{name}的团队。"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.usage_edit
+EN "Use /team edit <name>."
+ZH "使用/team edit <name>。"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.usage_new
+EN "Use /team new with no extra arguments."
+ZH "使用/team new，不带额外参数。"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.registry_missing
+EN "No team registry is attached to this session."
+ZH "本会话未连接团队注册表。"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.footer
+EN "/team chart <name> · /team new · /team edit <name>"
+ZH "/team chart <name> · /team new · /team edit <name>"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.save_error
+EN "Could not save: {reason}"
+ZH "无法保存：{reason}"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.notice_read_only
+EN "Read-only: this conversation’s runtime is on another device, so team changes are not available here."
+ZH "只读：本会话的运行时位于另一台设备，因此此处无法修改团队。"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.new_hint
+EN "Create a team"
+ZH "创建团队"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.edit_hint
+EN "Edit an installed team"
+ZH "编辑已安装的团队"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.subcommand
+EN "subcommand"
+ZH "子命令"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.talk_hint
+EN "talk to team · {detail}"
+ZH "与团队对话 · {detail}"
+CX {"note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only.", "role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first"}
+tui.team_authoring.promote_hint
+EN "Copy this conversation's team into your account"
+ZH "将本会话的团队复制到你的账户"
+CX {"note": "Describes /team promote in the reserved-verb rows. 'account' is the product word for the everywhere-store; the row is a subcommand, so keep it one line at 60 columns.", "role": "argument-picker row hint", "tone": "brief, verb-first, no jargon"}

@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -256,7 +257,7 @@ def test_the_document_is_written_privately(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("key", ["kimi"])
+@pytest.mark.parametrize("key", ["kimi", "kimi-wechat"])
 def test_a_device_bound_provider_cannot_be_declared(tmp_path: Path, key: str) -> None:
     """Refused on DECLARE and on GRANT, because either one alone leaves a way in."""
     document = _document(tmp_path)
@@ -271,15 +272,24 @@ def test_a_device_bound_row_already_on_disk_is_refused_at_grant(tmp_path: Path) 
     This is why the check is in two places: a file is durable, and the code that wrote
     it may have been an earlier build.
     """
+    for key, provider in (("kimi", "kimi"), ("kimi-wechat", "kimi")):
+        document = _document(tmp_path)
+        entry = document.entry(key)
+        assert entry is None
+        document.entries[key] = placement_mod.CredentialPlacementEntry(
+            key=key, provider=provider, kind="oauth-rotating", owner_device=OWNER
+        )
+        with pytest.raises(MeshRefusal) as refusal:
+            document.grant(key, OTHER, by=OWNER)
+        assert refusal.value.code == "device_bound"
+
+
+def test_an_ordinary_provider_still_declares_and_grants(tmp_path: Path) -> None:
+    """Alias canonicalisation must not turn authorization into a global deny."""
     document = _document(tmp_path)
-    entry = document.entry("kimi")
-    assert entry is None
-    document.entries["kimi"] = placement_mod.CredentialPlacementEntry(
-        key="kimi", provider="kimi", kind="oauth-rotating", owner_device=OWNER
-    )
-    with pytest.raises(MeshRefusal) as refusal:
-        document.grant("kimi", OTHER, by=OWNER)
-    assert refusal.value.code == "device_bound"
+    document.declare("openai", owner_device=OWNER, provider="openai", by=OWNER)
+    document.grant("openai", OTHER, by=OWNER)
+    assert document.is_holder("openai", OTHER)
 
 
 # ---------------------------------------------------------------------------
@@ -1494,9 +1504,442 @@ def test_the_credentials_listing_names_the_owner_and_who_may_borrow(
     assert network_cli.main(args) == 0
     out = capsys.readouterr().out
     assert "owner: damian-mbp (damian@example.test)" in out
-    assert "borrowed: owner_offline" in out
+    assert "borrow: damian-mbp is offline — reconnect it" in out
     # The owner's own row is not a share, and this device is the reader.
     assert "shared with" not in out.split("owner:")[1].split("\n")[0]
+
+
+def _borrow_listing_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, now: float
+) -> tuple[Path, str]:
+    """A borrower with one key per borrow state the listing must tell apart.
+
+    Mesh-lane report item 6: the listing printed a ``borrowed:`` line only for a
+    LIVE refusal, so an ``active`` older than its 30 s TTL, a key never asked for and
+    a key this device is not even a holder of all read the same. ``now`` back-dates
+    the state file so the expired-``active`` case is the real one, not a fresh grant.
+    """
+    from local_operator.network.credentials.state import PlacementState
+    from local_operator.network.identity import mint
+
+    root = tmp_path / "borrower"
+    root.mkdir()
+    _point_config_at(monkeypatch, root)
+    identity = mint(root, name="borrower-laptop")
+    me = identity.device_id
+    document = placement_mod.PlacementDocument(NETWORK, root=root, written_by=OWNER)
+    for key in (
+        "anthropic",
+        "datadog",
+        "evil",
+        "groq",
+        "mistral",
+        "many",
+        "offline",
+        "openai",
+        "secret:SLACK",
+        "xai",
+        "zhipu",
+        "cohere",
+        "together",
+        "linear",
+        "kept",
+        "reshared",
+        "moved",
+        "backrest",
+        "back",
+        "gone",
+        "wiped",
+        "member",
+        "localonly",
+        "localold",
+        "lostmember",
+        "mcp401",
+        "livecopy",
+    ):
+        document.declare(
+            key,
+            owner_device=OWNER,
+            # A hostile owner name: the escape must not reach the terminal.
+            owner_device_name="damian-mbp\x1b[2J",
+            provider=key,
+            # Copy class (QA round 1, Q3): an api key is copied, never granted.
+            kind=(
+                "api-key-static"
+                if key in ("cohere", "together", "wiped", "localonly", "localold")
+                else "oauth-rotating"
+            ),
+            by=OWNER,
+        )
+    for key in (
+        "anthropic",
+        "datadog",
+        "evil",
+        "groq",
+        "mistral",
+        "many",
+        "offline",
+        "openai",
+        "xai",
+        "zhipu",
+        "cohere",
+        "together",
+        "linear",
+        "kept",
+        "reshared",
+        "moved",
+        "backrest",
+        "back",
+        "gone",
+        "member",
+        "localonly",
+        "localold",
+        "mcp401",
+        "livecopy",
+    ):
+        document.grant(key, me, scope="session", by=OWNER)
+    document.save()
+    state = PlacementState(NETWORK, root=root)
+    # borrowed ten minutes ago: ``active`` has long expired, ``last_grant_at`` stays.
+    state.note_grant("openai", "g-1", owner_device=OWNER)
+    state._observations["openai"]["observed_at"] = now - 600  # noqa: SLF001
+    state._observations["openai"]["last_grant_at"] = now - 600  # noqa: SLF001
+    # borrowed five seconds ago: still live.
+    state.note_grant("xai", "g-2", owner_device=OWNER)
+    state._observations["xai"]["observed_at"] = now - 5  # noqa: SLF001
+    state._observations["xai"]["last_grant_at"] = now - 5  # noqa: SLF001
+    # resting (#3066 Q6): the all-resting window — the grant came first, then its only
+    # account hit its limit, so no later grant proves a sibling is serving.
+    state.note_grant("anthropic", "g-3", owner_device=OWNER)
+    state.cool_down(
+        "anthropic",
+        owner_device=OWNER,
+        credential_id=7,
+        block_scope="model:fable",
+        until=now + 1800,
+        label="ops@example.test\x1b]0;x\x07",
+    )
+    # A rest recorded against a PREVIOUS owner: it names a row in another store.
+    state.cool_down("zhipu", owner_device=OTHER, credential_id=3, block_scope="", until=now + 1800)
+    state.observe("datadog", "interactive_required", owner_device=OWNER, retry_after_ms=300_000)
+    # partly resting (review round 1, m2): one account rested, THEN a grant was served,
+    # which can only have come from a sibling (rested rows travel as exclusions).
+    state.cool_down(
+        "groq",
+        owner_device=OWNER,
+        credential_id=4,
+        block_scope="model:fable",
+        until=now + 1800,
+        label="a@example.test",
+        rested_at=now - 60,
+    )
+    state.note_grant("groq", "g-4", owner_device=OWNER)
+    # A hard refusal outranks a rest (review round 1, M2): waiting will not fix it.
+    state.cool_down(
+        "mistral", owner_device=OWNER, credential_id=5, block_scope="", until=now + 1800
+    )
+    state.observe("mistral", "revoked", owner_device=OWNER, retry_after_ms=300_000)
+    # livecopy (design round 3, D13): the same withdrawal code, LIVE: the same words.
+    state.observe("livecopy", "copy_revoked", owner_device=OWNER, retry_after_ms=300_000)
+    # The owner's refusal token is ITS string (review round 1, M1): an escape and a
+    # newline must not reach the terminal, and an unrecognised shape is never printed.
+    state.observe(
+        "evil", "owner_offline\x1b[2J\nFORGED ROW", owner_device=OWNER, retry_after_ms=300_000
+    )
+    state.observe("offline", "owner_offline", owner_device=OWNER, retry_after_ms=300_000)
+    # Bounded (review round 1, m1): five rests with long labels.
+    for row_id in range(1, 6):
+        state.cool_down(
+            "many",
+            owner_device=OWNER,
+            credential_id=row_id,
+            block_scope="",
+            until=now + 1800,
+            label=f"account-{row_id}-" + "x" * 70 + "@example.test",
+        )
+    state.save()
+    # cohere: a copy landed four minutes ago and a session has been reading it since.
+    # together: shared, copy not landed yet.
+    from local_operator.network.credentials import mcp_state
+    from local_operator.network.credentials.sync import mutate as sync_mutate
+
+    with sync_mutate(NETWORK, root) as sync_doc:
+        sync_doc.record_applied(
+            "cohere", gen=3, digest="d", owner_device=OWNER, row_id=9, at=now - 240
+        )
+    # linear: asked six minutes ago, the owner said sign in again; the 300 s
+    # observation is long gone but the durable record stays (QA round 1, Q4).
+    mcp_state.record(NETWORK, "linear", state="expired", code="interactive_required", root=root)
+    # kept: rested, then revoked; the 60 s refusal observation has expired but the rest
+    # has not. The durable record must still outrank the rest (review round 1, M2).
+    rests = PlacementState.load(NETWORK, root)
+    rests.cool_down("kept", owner_device=OWNER, credential_id=6, block_scope="", until=now + 1800)
+    rests.save()
+    mcp_state.record(NETWORK, "kept", state="revoked", code="not_a_holder", root=root)
+    # reshared (review r2, Rm1 a): revoked 10 minutes ago, shared again since — the
+    # holder row's ``granted_at`` (set by the grant above, i.e. now) is newer.
+    mcp_state.record(
+        NETWORK, "reshared", state="revoked", code="not_a_holder", owner_device=OWNER, root=root
+    )
+    # moved (Rm1 b): a sign-in verdict recorded against a PREVIOUS owner.
+    mcp_state.record(
+        NETWORK,
+        "moved",
+        state="expired",
+        code="interactive_required",
+        owner_device=OTHER,
+        root=root,
+    )
+    # backrest (QA r2, R2-Q1 a): rested, then refused owner_offline; the owner has
+    # been seen since. The live rest must show, not "offline".
+    rests = PlacementState.load(NETWORK, root)
+    rests.cool_down(
+        "backrest",
+        owner_device=OWNER,
+        credential_id=8,
+        block_scope="",
+        until=now + 1800,
+        label="zai@example.test",
+    )
+    rests.save()
+    mcp_state.record(
+        NETWORK,
+        "backrest",
+        state="unavailable",
+        code="owner_offline",
+        owner_device=OWNER,
+        root=root,
+    )
+    # back (R2-Q1 b): refused owner_offline, no rest, owner seen since.
+    mcp_state.record(
+        NETWORK, "back", state="unavailable", code="owner_offline", owner_device=OWNER, root=root
+    )
+    # gone (R2-Q1 TTL): refused owner_offline 10 minutes ago, owner never seen since.
+    mcp_state.record(
+        NETWORK, "gone", state="unavailable", code="owner_offline", owner_device=OWNER, root=root
+    )
+    # wiped (QA r2, R2-Q2): a copy-class key the owner explicitly withdrew; this device
+    # is no longer a holder and the owner's wipe recorded ``copy_revoked``.
+    mcp_state.record(
+        NETWORK, "wiped", state="revoked", code="copy_revoked", owner_device=OWNER, root=root
+    )
+    # member (review r2, m1): reconcile found THIS device no longer a member.
+    mcp_state.record(
+        NETWORK,
+        "member",
+        state="revoked",
+        code="member_not_active",
+        owner_device=OWNER,
+        root=root,
+    )
+    # localonly / localold (review round 3, R3-1): a copy-class holder whose owner
+    # refused the copy pull with ``local_only``; the pull writer stores its catch-all
+    # ``unavailable`` state. The owner was seen since (localonly) / it is 400 s old
+    # (localold). Still true either way: never "not copied here yet".
+    for name in ("localonly", "localold"):
+        mcp_state.record(
+            NETWORK, name, state="unavailable", code="local_only", owner_device=OWNER, root=root
+        )
+    # lostmember (review round 3, m2): no longer a holder BECAUSE this device's own
+    # membership is gone; a re-share is not the remedy.
+    mcp_state.record(
+        NETWORK,
+        "lostmember",
+        state="revoked",
+        code="member_not_active",
+        owner_device=OWNER,
+        root=root,
+    )
+    # mcp401 (design round 3, D14): the MCP server refused the lent bearer.
+    mcp_state.record(
+        NETWORK, "mcp401", state="unauthorized", code="http_401", owner_device=OWNER, root=root
+    )
+    # Back-dated after the last ``record``: each write re-reads and rewrites the file.
+    payload = json.loads(mcp_state.mcp_auth_path(NETWORK, root).read_text())
+    payload["entries"]["linear"]["at"] = now - 360
+    payload["entries"]["reshared"]["at"] = now - 600
+    payload["entries"]["backrest"]["at"] = now - 120
+    payload["entries"]["back"]["at"] = now - 120
+    payload["entries"]["gone"]["at"] = now - 600
+    payload["entries"]["localonly"]["at"] = now - 120
+    payload["entries"]["localold"]["at"] = now - 400
+    mcp_state.mcp_auth_path(NETWORK, root).write_text(json.dumps(payload))
+    # The owner's member row: seen 60 s ago, after the two "back" records were written.
+    from local_operator.network import store
+    from local_operator.network.types import MemberRecord, NetworkRecord
+
+    record = NetworkRecord(network_id=NETWORK, name="home", self_device_id=me)
+    record.members.append(MemberRecord(device_id=OWNER, name="damian-mbp", last_seen_at=now - 60))
+    store.save(record, root)
+    return root, me
+
+
+def test_the_credentials_listing_shows_every_borrow_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.network import cli as network_cli
+
+    now = time.time()
+    _borrow_listing_fixture(tmp_path, monkeypatch, now=now)
+    args = _parser().parse_args(["network", "credentials"])
+    assert network_cli.main(args) == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out, "a peer-supplied label reached the terminal raw"
+    # One block per credential: its ``  <name>`` row plus the indented lines under it.
+    blocks: dict[str, str] = {}
+    current = ""
+    for line in out.splitlines():
+        if line.startswith("  ") and not line.startswith("   "):
+            current = line.split()[0]
+            blocks[current] = line
+        elif current and line.startswith("      "):
+            blocks[current] += "\n" + line
+        else:
+            current = ""
+    # Every line leads with usability (design round 1, D7); active/idle is --json only (D3).
+    assert "borrow: last worked 10m ago" in blocks["openai"], out
+    # Seconds, never "just now": the age is the CLI ladder. Matched by shape so a slow
+    # runner a second late is not a failure.
+    assert re.search(r"borrow: last worked [0-9]+s ago$", blocks["xai"]), out
+    until = time.strftime("%H:%M", time.localtime(now + 1800))
+    assert re.search(
+        rf"borrow: rate-limited \(ops@example.test\) — tries again at {until} \(in (29|30)m\);"
+        r" last worked [0-9]+s ago",
+        blocks["anthropic"],
+    ), out
+    assert "borrow: partly rate-limited (a@example.test) — other accounts serving" in blocks["groq"]
+    assert (
+        "borrow: access was revoked — on damian-mbp run: lop network credential share mistral"
+        " --with borrower-laptop --request-approval" in blocks["mistral"]
+    ), out
+    assert (
+        "borrow: access was revoked — on damian-mbp run: lop network credential share livecopy"
+        " --with borrower-laptop --request-approval" in blocks["livecopy"]
+    ), out
+    assert "rate-limited" not in blocks["mistral"], out
+    assert "borrow: refused (unrecognised code)" in blocks["evil"], out
+    assert "FORGED" not in out, out
+    assert "borrow: damian-mbp is offline — reconnect it" in blocks["offline"], out
+    many = blocks["many"].splitlines()[1]
+    # Three accounts, each clipped to 40 characters, then the count of the rest.
+    assert "account-1-" + "x" * 29 + "…, account-2-" in many, many
+    assert "account-4" not in many and " +2 more) — tries again at " in many, many
+    assert "borrow: sign in again on damian-mbp (there: /login datadog)" in blocks["datadog"], out
+    assert (
+        "borrow: not shared with this device — on damian-mbp run: "
+        "lop network credential share secret:SLACK --with borrower-laptop"
+    ) in blocks["secret:SLACK"], out
+    # The previous owner's rest is not this owner's: zhipu was simply never borrowed.
+    assert "borrow: shared, not borrowed yet" in blocks["zhipu"], out
+    assert "borrow: usable here (copy received 4m ago)" in blocks["cohere"], out
+    assert "borrow: shared, not copied here yet" in blocks["together"], out
+    assert (
+        "borrow: sign in again on damian-mbp (there: /login linear); last tried 6m ago"
+        in blocks["linear"]
+    ), out
+    assert (
+        "borrow: no longer shared with this device — ask damian-mbp to share it again;"
+        " last tried 0s ago" in blocks["kept"]
+    ), out
+    # Rm1: a re-share since the revoke, and a verdict about a previous owner, are stale.
+    assert "borrow: shared, not borrowed yet" in blocks["reshared"], out
+    assert "borrow: shared, not borrowed yet" in blocks["moved"], out
+    # R2-Q1: "not now" records never hide a rest and expire once the owner is seen
+    # again (or after 5 min); only hard records persist.
+    assert re.search(
+        r"borrow: rate-limited \(zai@example.test\) — tries again at", blocks["backrest"]
+    )
+    assert "offline" not in blocks["backrest"] and "offline" not in blocks["back"], out
+    assert "borrow: shared, not borrowed yet" in blocks["back"], out
+    assert "borrow: shared, not borrowed yet" in blocks["gone"], out
+    # R2-Q2: an explicitly withdrawn copy-class key reads revoked, with the remedy the
+    # owner accepts after a withdrawal.
+    assert (
+        "borrow: access was revoked — on damian-mbp run: lop network credential share wiped"
+        " --with borrower-laptop --request-approval; last tried 0s ago"
+    ) in blocks["wiped"], out
+    # Membership loss is this device's, not a refusal by the owner, and names no remedy
+    # it cannot back (design round 3, D11) — on the holder AND the non-holder arm (m2).
+    for name in ("member", "lostmember"):
+        assert (
+            "borrow: this device is not an active member of this network — see: lop network"
+            " status; last tried 0s ago"
+        ) in blocks[name], out
+    # R3-1: a catch-all "unavailable" with a hard owner code stays, seen-since or old.
+    for name, age in (("localonly", "2m"), ("localold", "6m")):
+        assert f"borrow: refused by damian-mbp (local_only); last tried {age} ago" in blocks[name]
+    # D14: an MCP 401 gives the sign-in line with its command.
+    assert (
+        "borrow: sign in again on damian-mbp (there: /login mcp401); last tried 0s ago"
+        in blocks["mcp401"]
+    ), out
+    # n1 / D15: never two parentheticals in a row on any line.
+    assert ") (" not in out, out
+
+
+def test_the_credentials_json_adds_borrow_without_changing_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--json`` is additive: ``observation`` keeps its old meaning for scripts."""
+    from local_operator.network import cli as network_cli
+
+    now = time.time()
+    _borrow_listing_fixture(tmp_path, monkeypatch, now=now)
+    args = _parser().parse_args(["network", "credentials", "--json"])
+    assert network_cli.main(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {row["credential_name"]: row for row in payload["networks"][0]["credentials"]}
+    assert rows["openai"]["observation"] == "not_asked"
+    assert "observation" not in rows["secret:SLACK"]
+    assert rows["anthropic"]["observation"] == "active"
+    states = {name: row["borrow"]["state"] for name, row in rows.items()}
+    assert states == {
+        "anthropic": "resting",
+        "datadog": "sign_in_needed",
+        "evil": "refused",
+        "groq": "partly_resting",
+        "mistral": "revoked",
+        "many": "resting",
+        "offline": "refused",
+        "openai": "idle",
+        "secret:SLACK": "not_shared",
+        "xai": "active",
+        "zhipu": "never_borrowed",
+        "cohere": "copied",
+        "together": "not_copied",
+        "linear": "sign_in_needed",
+        "kept": "refused",
+        "reshared": "never_borrowed",
+        "moved": "never_borrowed",
+        "backrest": "resting",
+        "back": "never_borrowed",
+        "gone": "never_borrowed",
+        "wiped": "revoked",
+        "member": "refused",
+        "localonly": "refused",
+        "localold": "refused",
+        "lostmember": "refused",
+        "mcp401": "sign_in_needed",
+        "livecopy": "revoked",
+    }
+    assert rows["wiped"]["borrow"]["refusal"] == "copy_revoked"
+    assert rows["cohere"]["borrow"]["gen"] == 3
+    assert rows["cohere"]["borrow"]["synced_at"] == pytest.approx(now - 240)
+    assert rows["linear"]["borrow"]["last_asked_at"] == pytest.approx(now - 360)
+    assert rows["mistral"]["borrow"]["refusal"] == "revoked"
+    assert rows["offline"]["borrow"]["refusal_recognised"] is True
+    # The hostile token: stripped and flattened in --json, and flagged unrecognised.
+    assert rows["evil"]["borrow"]["refusal_recognised"] is False
+    assert "\x1b" not in rows["evil"]["borrow"]["refusal"]
+    assert "\n" not in rows["evil"]["borrow"]["refusal"]
+    assert len(rows["many"]["borrow"]["resting_labels"]) == 5
+    assert rows["openai"]["borrow"]["last_grant_at"] == pytest.approx(now - 600)
+    assert rows["anthropic"]["borrow"]["resting_until"] == pytest.approx(now + 1800)
+    assert rows["anthropic"]["borrow"]["resting_labels"] == ["ops@example.test\x1b]0;x\x07"]
+    # No field the tool digest would scrub, so the agent reads the same facts.
+    for row in rows.values():
+        for name in row["borrow"]:
+            assert not any(m in name for m in ("secret", "token", "password", "key")), name
 
 
 #: ``10**400`` is the shape the first helper missed (review round 4, R4-M1): ``json``
@@ -2053,3 +2496,22 @@ def test_path_constructors_and_readers_never_initialize_missing_profile(
     PlacementState.load(NETWORK, absent)
     SyncState.load(NETWORK, root=absent)
     assert not absent.parent.exists()
+
+
+def test_a_garbled_rest_start_never_drops_the_routing_rest(tmp_path: Path) -> None:
+    """``rested_at`` is display-only (QA round 2, R2-Q3): a non-numeric value in the
+    file costs the "partly" reading, never the rest the next turn routes around."""
+    root = tmp_path / "garbled"
+    root.mkdir()
+    state = PlacementState(NETWORK, root=root)
+    state.cool_down(
+        "openai", owner_device=OWNER, credential_id=4, block_scope="", until=time.time() + 600
+    )
+    state.save()
+    payload = json.loads(state.path.read_text())
+    payload["cooldowns"][0]["rested_at"] = "garbage"
+    state.path.write_text(json.dumps(payload))
+    loaded = PlacementState.load(NETWORK, root)
+    rests = loaded.cooldowns("openai", "", owner_device=OWNER)
+    assert [row["credential_id"] for row in rests] == [4]
+    assert rests[0]["rested_at"] == 0.0

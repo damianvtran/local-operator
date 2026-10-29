@@ -41,6 +41,10 @@ from tests.conftest import (
     _sweep_session_leftovers,
 )
 
+# These cells start REAL broker daemons and own their teardown; the autouse
+# ``refuse_real_secret_broker_spawn`` gate is for everything else.
+pytestmark = pytest.mark.allow_secret_broker
+
 
 def _start(base: Path) -> int:
     """Start a real broker for ``base`` and return its pid."""
@@ -488,7 +492,13 @@ _INNER_STARTS_A_BROKER = '''
 import os
 from pathlib import Path
 
+import pytest
+
 from local_operator.secrets import client
+
+# The outer suite's autouse gate refuses the production daemon by default; this
+# inner cell exists to start one and prove the OUTER teardown reaps it.
+pytestmark = pytest.mark.allow_secret_broker
 
 
 def test_starts_a_broker(tmp_path, monkeypatch):
@@ -577,6 +587,9 @@ from pathlib import Path
 import pytest
 
 from local_operator.secrets import client
+
+# Same opt-in as the sibling inner cell: it exists to start a real daemon.
+pytestmark = pytest.mark.allow_secret_broker
 
 
 @pytest.fixture

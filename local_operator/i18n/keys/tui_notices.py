@@ -38,6 +38,10 @@ def empty_reply() -> Msg:
     return Msg("tui.notices.empty_reply", {})
 
 
+def fast_mode_refused(*, selector: str, reason: str) -> Msg:
+    return Msg("tui.notices.fast_mode_refused", {"selector": selector, "reason": reason})
+
+
 def image_rejected_history() -> Msg:
     return Msg("tui.notices.image_rejected_history", {})
 

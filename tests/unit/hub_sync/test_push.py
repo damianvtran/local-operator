@@ -945,3 +945,170 @@ def test_a_legacy_record_without_the_streak_reads_zero(tmp_path: Path) -> None:
     path.write_text(json.dumps(legacy), encoding="utf-8")
     record = out.read("op-legacy")
     assert record is not None and record.outage_streak == 0
+
+
+# -- bundle republish ------------------------------------------------------------------
+
+
+def _bundle_fields(*, seed: str = "a", size: int = 100) -> dict[str, Any]:
+    import hashlib
+
+    from local_operator.hub_sync.skill_bundle import SkillBundleRef
+
+    payload = hashlib.sha256(seed.encode()).hexdigest()
+    return {
+        "document_version": 1,
+        "name": "pdf-forms",
+        "description": "Fill and validate PDF forms.",
+        "bundle": SkillBundleRef(
+            format="zip",
+            hash=payload,
+            size=size,
+            uncompressed_size=size * 2,
+            file_count=3,
+            entrypoint="SKILL.md",
+            tree_hash=hashlib.sha256((seed + "tree").encode()).hexdigest(),
+        ).to_json(),
+    }
+
+
+def test_a_bundle_commit_uploads_the_archive_before_it_publishes(tmp_path: Path) -> None:
+    accepted = _bundle_fields()
+    current = _bundle_fields(seed="b")
+    uploaded: list[dict[str, Any]] = []
+
+    def upload(document: Mapping[str, Any]) -> Mapping[str, Any]:
+        # ORDERING IS THE ASSERTION: no publish may have been dispatched yet.
+        assert server.commit_calls == []
+        uploaded.append(dict(document))
+        return {"hash": document["bundle"]["hash"]}
+
+    server = FakeTransport()
+    outcome, _out, server = asyncio.run(
+        _run(
+            tmp_path,
+            transport=server,
+            kind="skill",
+            captured_local=accepted,
+            accepted=accepted,
+            current_local=current,
+            remote_latest=accepted,
+            bundle_attested=True,
+            bundle_upload=upload,
+        )
+    )
+
+    assert outcome.state == "pushed"
+    # The uploaded bytes ARE the manifest the commit sends.
+    assert [doc["bundle"]["hash"] for doc in uploaded] == [current["bundle"]["hash"]]
+    assert server.preview_calls == []
+    assert len(server.commit_calls) == 1
+    assert server.commit_calls[0]["preview_token"] == ""
+    assert server.commit_calls[0]["document"] == current
+
+
+def test_a_bundle_commit_without_an_uploader_never_publishes(tmp_path: Path) -> None:
+    accepted = _bundle_fields()
+    current = _bundle_fields(seed="b")
+    outcome, _out, server = asyncio.run(
+        _run(
+            tmp_path,
+            kind="skill",
+            captured_local=accepted,
+            accepted=accepted,
+            current_local=current,
+            remote_latest=accepted,
+            bundle_attested=True,
+        )
+    )
+
+    assert outcome.state == "refused"
+    assert server.preview_calls == [] and server.commit_calls == []
+
+
+def test_a_failed_bundle_upload_publishes_nothing(tmp_path: Path) -> None:
+    from local_operator.hub_sync.identity import LinkError
+
+    accepted = _bundle_fields()
+    current = _bundle_fields(seed="b")
+
+    def upload(_document: Mapping[str, Any]) -> Mapping[str, Any]:
+        raise LinkError("bundle-local-changes", "the managed bundle changed since the check")
+
+    outcome, _out, server = asyncio.run(
+        _run(
+            tmp_path,
+            kind="skill",
+            captured_local=accepted,
+            accepted=accepted,
+            current_local=current,
+            remote_latest=accepted,
+            bundle_attested=True,
+            bundle_upload=upload,
+        )
+    )
+
+    assert outcome.state == "refused"
+    assert outcome.reason == "bundle-local-changes"
+    assert server.preview_calls == [] and server.commit_calls == []
+
+
+def test_an_upload_outage_is_named_and_retryable(tmp_path: Path) -> None:
+    accepted = _bundle_fields()
+    current = _bundle_fields(seed="b")
+
+    def upload(_document: Mapping[str, Any]) -> Mapping[str, Any]:
+        raise httpx.ConnectError("hub unreachable")
+
+    outcome, out, server = asyncio.run(
+        _run(
+            tmp_path,
+            kind="skill",
+            captured_local=accepted,
+            accepted=accepted,
+            current_local=current,
+            remote_latest=accepted,
+            bundle_attested=True,
+            bundle_upload=upload,
+        )
+    )
+
+    assert outcome.state == "refused"
+    assert outcome.reason == "bundle-upload-failed"
+    assert server.commit_calls == []
+    record = _stored(out, "op1")
+    assert record.next_retry_at is not None
+
+
+def test_a_document_push_never_calls_the_bundle_uploader(tmp_path: Path) -> None:
+    def upload(_document: Mapping[str, Any]) -> Mapping[str, Any]:
+        raise AssertionError("a document must not upload a bundle archive")
+
+    outcome, _out, server = asyncio.run(
+        _run(
+            tmp_path,
+            kind="skill",
+            captured_local=_document_fields(),
+            accepted=_document_fields(),
+            current_local=_document_fields(seed="b"),
+            remote_latest=_document_fields(),
+            bundle_upload=upload,
+        )
+    )
+
+    assert outcome.state == "pushed"
+    assert len(server.commit_calls) == 1
+
+
+def _document_fields(*, seed: str = "a") -> dict[str, Any]:
+    """A REAL document manifest, mutated in its body (frontmatter stays valid)."""
+
+    from local_operator.hub_sync.skill_document import SkillDocument
+
+    from .test_skill_storage import _input
+
+    _name, document, _baseline = _input()
+    data = document.to_json()
+    if seed != "a":
+        data["files"][0]["content"] += f"\n{seed}\n"
+    return SkillDocument.from_json(data).to_json()

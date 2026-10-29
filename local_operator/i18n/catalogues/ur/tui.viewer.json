@@ -1,0 +1,21 @@
+{
+  "tui.viewer.title": "فائل ویور",
+  "tui.viewer.description": "مقامی ٹیکسٹ فائل دیکھیں",
+  "tui.viewer.usage": "استعمال: /view <path>",
+  "tui.viewer.loading": "پڑھا جا رہا ہے…",
+  "tui.viewer.legend": "↑↓←→ · PgUp/PgDn · Home/End\nw سطریں لپیٹیں · r دوبارہ لوڈ کریں · y پاتھ کاپی کریں · o بیرونی ایپ میں کھولیں · esc بند کریں",
+  "tui.viewer.truncated": "پیش نظارہ مختصر کر دیا گیا — حد: 1 MiB / 20,000 سطریں",
+  "tui.viewer.unreadable": "یہ فائل موجود نہیں، پڑھنے کے قابل نہیں، یا اجازت شدہ روٹ ڈائریکٹریوں سے باہر ہے",
+  "tui.viewer.unsupported": "اس قسم کی فائل کے لیے یہاں کوئی پیش نظارہ دستیاب نہیں — اسے بیرونی ایپ میں کھولیں",
+  "tui.viewer.binary": "بائنری فائل کا پیش نظارہ نہیں کیا جا سکتا",
+  "tui.viewer.changed": "یہ فائل فہرست میں دکھائے جانے کے بعد بدل گئی ہے — کھولنے سے پہلے فائلوں کی فہرست دوبارہ دیکھیں",
+  "tui.viewer.copied": "پاتھ کاپی ہو گیا",
+  "tui.viewer.copy_failed": "کلپ بورڈ دستیاب نہیں — پاتھ: {path}",
+  "tui.viewer.open_failed": "یہ فائل بیرونی ایپ میں نہیں کھل سکی",
+  "tui.viewer.kind_code": "کوڈ",
+  "tui.viewer.kind_markdown": "Markdown",
+  "tui.viewer.kind_text": "ٹیکسٹ",
+  "tui.viewer.header": "{path} · {kind} · {size} B",
+  "tui.viewer.wrap_on": "سطریں لپیٹنا چالو",
+  "tui.viewer.wrap_off": "سطریں لپیٹنا بند"
+}

@@ -482,3 +482,107 @@ def test_the_delivery_path_still_routes_ask_timeout_rows():
 
     source = inspect.getsource(session_module.Session._deliver_wake)
     assert "is_ask_timeout_row" in source
+
+
+@pytest.mark.asyncio
+async def test_a_deadline_fire_reads_the_queue_accessor_not_its_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2803: the fire must read the ACCESSOR, not its cache.
+
+    ``Session._ask_queue`` is ``ask_queue()``'s cache, and it is warm by the time
+    a fire can arrive (installing the hook builds the tool context, and that read
+    builds the queue). The deadline path was the one ask path reading the cache
+    instead of the accessor, which made it depend on that side effect surviving.
+    Clearing the cache here pins the contract the accessor exists to state: the
+    fire asks "does this session have a queue", and gets a built one when the
+    engine is on and a hook is installed.
+
+    A REAL session and a REAL ``asks.jsonl``: the row must land on disk, which
+    is the only thing the model ever sees.
+    """
+    import time
+
+    from local_operator.asks import store as ask_store
+    from local_operator.harness.types import ModelSpec
+    from local_operator.harness.wake_types import DueWake
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from tests.e2e.harness import ScriptedStream, text_turn
+
+    ask_id = "a-wakebuild0001"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = tmp_path / "sessions" / "wakebuild0001"
+    directory.mkdir(parents=True)
+    now = int(time.time() * 1000)
+    ask_store.append_event(
+        directory,
+        {
+            "v": ask_store.EVENT_SCHEMA,
+            "kind": ask_store.EVENT_QUEUED,
+            "ask_id": ask_id,
+            "at": now - 600_000,
+            "created_at": now - 600_000,
+            "expires_at": now - 60_000,
+            "timeout_s": 120,
+            "urgent": False,
+            "tool_call_id": "",
+            "questions": [
+                {
+                    "id": "q1",
+                    "question": "still want this?",
+                    "options": [{"label": "yes", "description": ""}],
+                    "multi": False,
+                    "secret": False,
+                    "persist": False,
+                }
+            ],
+        },
+    )
+    session = Session(
+        model=ModelSpec(provider="test", model_id="wake-built", context_window=100_000),
+        model_source="config",
+        stream_fn=ScriptedStream([text_turn("ack") for _ in range(4)]),
+        tools=[],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: [],
+        session_id="wakebuild0001",
+        cwd=str(tmp_path),
+    )
+
+    async def present(questions: list[Any]) -> dict[str, list[str]] | None:
+        return None
+
+    session.set_ask_handler(present)
+    try:
+        # Warm in production; cleared so the cell proves the FIRE reads the
+        # accessor rather than a cache someone else happened to fill.
+        session._ask_queue = None
+
+        await session._deliver_wake(
+            DueWake(
+                schedule=WakeSchedule(
+                    id=ask_store.timeout_row_id(ask_id),
+                    message=f"ask {ask_id} deadline",
+                    next_due_at=now - 1_000,
+                    created_at=now - 600_000,
+                    kind="ask_timeout",
+                    hidden=True,
+                ),
+                occurrence=1,
+            )
+        )
+
+        assert session._ask_queue is not None, "the fire did not build the queue"
+        deadline = asyncio.get_running_loop().time() + 5.0
+        row_id = ask_store.timeout_row_id(ask_id)
+        while asyncio.get_running_loop().time() < deadline:
+            if session._transcript.has_entry(row_id):
+                break
+            await asyncio.sleep(0.02)
+        assert session._transcript.has_entry(row_id), (
+            "the deadline notice never reached the transcript: the fire found no "
+            "queue and dropped the row"
+        )
+    finally:
+        await session.dispose()

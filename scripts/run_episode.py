@@ -641,7 +641,18 @@ def build_config(
         prepare_timeout=120.0,
         reset_timeout=900.0,
         step_timeout=180.0,
-        score_timeout=300.0,
+        # Scoring is the ONE call whose work scales with the episode: it grades
+        # everything the run did. A measured 453-step OSWorld episode spent its
+        # whole 300 s score budget (the fatal named request 478, which is the
+        # parent-wire RPC id, NOT a judge-request count -- the adapter scores
+        # in its own process), so the old 300 s value cut a COMPLETED 2.4 h
+        # episode off at scoring and discarded it (task_005, 2026-10-19,
+        # ``steps: 0``). A 500-step episode is 1.10x that work; 1800 s is ~5.4x
+        # the projected 330 s. The only other time bound, ``--max-wall-s``
+        # (default 18000 s), is a guest-side budget resource and owner lease,
+        # not a deadline on this call. Do not lower this without re-measuring
+        # a long episode's score duration.
+        score_timeout=1800.0,
         cleanup_timeout=120.0,
         handshake_timeout=60.0,
         max_cycle_cost_micros=max_cycle_usd_micros,
@@ -952,6 +963,14 @@ def build_parser(*, internal_test_support: bool = False) -> argparse.ArgumentPar
         "stamped on the manifest either way",
     )
     parser.add_argument(
+        "--progress-guards",
+        action="store_true",
+        help="session arm only: stop the episode, as a scored truncation, when the "
+        "runner's own no-progress guards fire (the same repeated-batch / no-change / "
+        "ask-loop guards and thresholds the reply arm always runs). Off by default so "
+        "existing session-arm runs stay comparable; stamped on the manifest either way",
+    )
+    parser.add_argument(
         "--model-client",
         default="provider",
         choices=("provider", "scripted-finish"),
@@ -1181,6 +1200,7 @@ async def _run_session_arm(
     MUST: MCP discovery is cwd-scoped).
     """
 
+    from local_operator.evaluation.runner.guards import progress_guards
     from local_operator.evaluation.session_arm import EPISODE_TOOL_SURFACE
     from local_operator.evaluation.session_arm import (
         _outcome_json as _session_outcome_json,
@@ -1296,6 +1316,7 @@ async def _run_session_arm(
         # stated residual holes.
         confinement_root=world,
         owner_status=owner_status,
+        progress_guards=progress_guards() if getattr(args, "progress_guards", False) else None,
     )
     if owner_status is not None:
         # The TERMINAL phase is written only here, after the outcome exists
@@ -1865,6 +1886,13 @@ async def run(
     except (ValueError, argparse.ArgumentTypeError) as error:
         print(str(error), file=sys.stderr)
         return EXIT_PREFLIGHT
+    # ``getattr``: programmatic callers hand in a hand-built Namespace (the
+    # owned-process tests do), and an absent flag means the default, off.
+    if getattr(args, "progress_guards", False) and args.engagement != "session":
+        # The reply arm ALWAYS runs these guards (``default_guards``); accepting
+        # the flag there would read as a switch it does not have.
+        print("--progress-guards applies only to --engagement session", file=sys.stderr)
+        return EXIT_PREFLIGHT
     if args.engagement == "session" and (args.owned_host or not args.in_process_host):
         refusal = _managed_input_refusal(args)
         if refusal is not None:
@@ -2015,6 +2043,12 @@ async def run(
             # unconditionally, because a run that did NOT challenge would
             # otherwise be indistinguishable from one whose stamp was lost.
             "completion_gate": not args.no_completion_gate,
+            # Whether the session arm ran the runner's no-progress guards. Like
+            # the completion gate it changes how an episode can END, so a score
+            # must carry it; the reply arm always runs them. Stamped
+            # unconditionally for the same lost-stamp reason.
+            "progress_guards": bool(getattr(args, "progress_guards", False))
+            or args.engagement != "session",
             # The effort the decisions were made at, beside the route they were
             # made on. A score is not comparable across effort levels, and the
             # published numbers this run is read against are at maximum effort,

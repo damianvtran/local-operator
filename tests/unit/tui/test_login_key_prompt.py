@@ -295,6 +295,52 @@ async def test_cancelling_a_login_stores_nothing_and_is_not_an_error(
 
 
 @pytest.mark.asyncio
+async def test_preserved_disabled_signin_is_a_warning_not_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design round 2, D1: the sign-in VERIFIED; only its row stays disabled.
+
+    The old catch-all prefixed a red ``login failed:`` to a sentence saying the
+    sign-in worked, inviting a retry that cannot clear a saved cause. The
+    dedicated branch must keep the outcome out of ``error`` and say what did NOT
+    move.
+    """
+    from local_operator.providers.oauth.radient import RadientLoginDisabled
+
+    controller = _controller(tmp_path)
+
+    async def disabled(self: Any, provider_id: str, **kwargs: Any) -> str:
+        raise RadientLoginDisabled()
+
+    # The app's branch is the subject: the typed outcome is raised here exactly
+    # as ``ProviderController.login`` raises it after a verified completion.
+    monkeypatch.setattr(type(controller), "login", disabled)
+    app = OperatorApp(lambda: _factory(_LoginSession()), provider_controller=controller)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _run_login(pilot, app, "radient")
+        for _ in range(40):
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+            if any("stays disabled" in note for note in _notices(app)):
+                break
+        blocks = [
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+    text = [block._text for block in blocks]
+    assert any(
+        "Sign-in verified. This Radient sign-in stays disabled" in note
+        and "Nothing else changed." in note
+        for note in text
+    ), text
+    assert not any("login failed" in note.lower() for note in text), text
+    matched = [block for block in blocks if "stays disabled" in block._text]
+    assert matched and matched[0].notice_kind == "warning", matched
+
+
+@pytest.mark.asyncio
 async def test_loopback_provider_is_offered_no_prompt(tmp_path: Path) -> None:
     """The other half of the contract, and the reason the blanket omission
     existed: for a loopback provider the callback server is already listening,

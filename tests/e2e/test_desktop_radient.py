@@ -45,7 +45,7 @@ async def test_radient_proxy_real_http(headless_tui_env, monkeypatch):
     calls = []
     refreshes = []
 
-    @fake.post("/token")
+    @fake.post("/auth/oauth/token")
     async def rotate(request: Request):
         body = await request.json()
         assert body["refresh_token"] == refresh
@@ -191,7 +191,11 @@ async def test_radient_proxy_real_http(headless_tui_env, monkeypatch):
 
     async with serve(fake) as upstream_url, serve(app) as desktop_url:
         monkeypatch.setattr(desktop_radient, "base_url", lambda: upstream_url + "/v1")
-        monkeypatch.setattr(oauth, "TOKEN_URL", upstream_url + "/token")
+        # The refresh guard trusts only the declared canonical hub. The stub IS
+        # that hub here: both constants point at it, so the guard stays in force
+        # instead of being bypassed, and refresh is exercised for real.
+        monkeypatch.setattr(oauth, "DEFAULT_RADIENT_API_BASE_URL", upstream_url)
+        monkeypatch.setattr(oauth, "TOKEN_URL", upstream_url + "/auth/oauth/token")
         async with httpx.AsyncClient(base_url=desktop_url, timeout=30) as client:
             route = "/v1/desktop/radient"
             assert (await client.post(route, json={"operation": "account"})).status_code == 401

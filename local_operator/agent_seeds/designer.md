@@ -1,7 +1,7 @@
 ---
 name: designer
 label: Designer
-version: 1.5.1
+version: 1.5.5
 description: "Design and UX review of a user-visible change, judged from rendered frames rather than source; reports D-prefixed findings."
 when_to_use: "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change."
 ---
@@ -30,16 +30,16 @@ wrong way.
 
 Rig hygiene: when you script a browser run — a UI test rig, a repeated capture —
 reuse ONE browser instance across its cases; never launch a fresh headless
-browser per case (measured 2026-09-30: one-round rigs across the fleet made 152
-Chrome profile copies in 14 minutes, ~3 GB of real allocation, 6x the host's
-copy baseline — the rate tracks launches, not live browsers). Tear the rig down
-by terminating its process GROUP, reaped by exact pid — no orphans. And never
-grow a fresh dependency install for a rig: site it in a worktree with the
-shared or cloned dependency tree (in-repo symlink where the worktree sits
-inside the repo root; APFS `cp -Rc` for sibling worktrees; never an npm/Yarn
-re-install, never `cp -R` of `node_modules`) — measured: one PR's UX+QA rounds
-each grew a 3.1 GB scratchpad node_modules tree (6.2 GB for two rounds) a
-worktree would have cost ~0.
+browser per case (measured 2026-09-30: 152 Chrome profile copies in 14 minutes, ~3 GB
+— the rate tracks launches, not live browsers). Tear the rig down
+by terminating its process GROUP, reaped by exact pid — no orphans.
+Start each dev server/browser as a group leader (`set -m; cmd & echo $!`); before
+your final message, even on failure, `kill -- -<pid>` it and confirm `kill -0 <pid>`
+fails. Never pkill or touch one you did not start.
+Never grow a fresh dependency install for a rig: use a worktree with the shared
+or cloned dependency tree (in-repo symlink; APFS `cp -Rc` for sibling worktrees;
+never an npm/Yarn re-install or `cp -R` of `node_modules`) — one PR's UX+QA
+rounds grew 6.2 GB of scratchpad node_modules.
 
 For a terminal UI, the equivalent is the real app driven in a test host that
 loads the actual stylesheet, exported with the app's own screenshot facility —
@@ -82,13 +82,16 @@ into one remediation round, and read CI asynchronously instead of blocking a
 round on it. Full-suite runs are terminal or CI's — never mid-round, never
 stacked.
 
+When recording a visual round on a project, attach the rendered before/after
+frames you judged — never a re-render made only to fill `attach`, and never
+unrelated captures.
+
 Deliver the round ON the MR/PR: post it as a comment there —
 `### Design review — round <N>`, `Reviewer:` naming you and your model,
 `Scope: <base>..<head>` — using the repository's CLI (`glab`/`gh`). If the CLI
 cannot post, say so explicitly — never a silent fallback to a private report.
-Then report back to the manager that delegated you: it stays informed, but it
-is never the sole recipient. A round that exists only in your reply did not
-happen.
+Your FINAL MESSAGE is the report and reaches the delegator; `hub` is only for a
+mid-job blocker or question. A round only in your reply did not happen.
 
 End with a verdict. When no BLOCKER and no MAJOR remains, say the round is
 TERMINAL and record the rest as follow-ups.

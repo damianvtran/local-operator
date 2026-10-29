@@ -588,6 +588,63 @@ def _allocated(path: Path) -> int:
     return path.lstat().st_blocks * 512
 
 
+def test_a_write_below_the_soft_threshold_returns_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Routine scratch stays silent: one byte below 75% has not crossed it."""
+    root = _pad(tmp_path)
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 4096)
+
+    assert check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md", 3071) is None
+
+
+def test_a_write_crossing_the_soft_threshold_returns_the_advisory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exactly 75% is the crossing: the line names usage, headroom and remedy."""
+    root = _pad(tmp_path)
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 4096)
+
+    advisory = check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md", 3072)
+
+    assert advisory == (
+        "[scratch] The pad is 75% full (1,024 bytes left) — remove the biggest file "
+        "first; build/dependency trees belong in a git worktree, not the pad."
+    )
+    assert "\n" not in advisory
+
+
+def test_a_write_already_above_the_soft_threshold_does_not_advise_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A later write above 75% is silent because the CROSSING already happened.
+
+    The real allocated total starts at 80% of the patched cap, leaving enough
+    headroom for this write to succeed; only the missing warning is under test.
+    """
+    root = _pad(tmp_path)
+    held = _allocated(_fill_pad(root, 4096))
+    budget = held + held // 4
+    assert held > 0 and held * 100 >= budget * 75
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", budget)
+
+    assert check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md", 1) is None
+
+
+def test_a_crossing_that_would_exceed_the_hard_cap_still_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The soft line never softens the existing refusal: over-cap raises first."""
+    root = _pad(tmp_path)
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 4096)
+
+    with pytest.raises(ScratchpadContentError) as excinfo:
+        check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md", 4097)
+
+    assert "over the 4,096-byte ceiling" in str(excinfo.value)
+    assert "75%" not in str(excinfo.value)
+
+
 def test_a_write_that_reaches_the_pad_total_exactly_is_allowed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -600,11 +657,13 @@ def test_a_write_that_reaches_the_pad_total_exactly_is_allowed(
     """
     root = _pad(tmp_path)
     filled = _fill_pad(root, 4096)
-    monkeypatch.setattr(
-        scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", _allocated(filled) + 4096
-    )
+    budget = _allocated(filled) + 4096
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", budget)
 
-    assert check_scratchpad_write(root / "x.csv", root, "scratchpad://x.csv", 4096) is None
+    advisory = check_scratchpad_write(root / "x.csv", root, "scratchpad://x.csv", 4096)
+
+    assert advisory is not None
+    assert advisory.startswith("[scratch] The pad is 100% full (0 bytes left)")
 
 
 def test_a_write_one_byte_over_the_pad_total_is_refused(
@@ -1086,3 +1145,74 @@ def test_every_content_refusal_ends_with_the_same_elsewhere_sentence(tmp_path: P
             check_scratchpad_write(target, where, url, size)
 
         assert str(excinfo.value).endswith(SCRATCHPAD_ELSEWHERE), url
+
+
+# ---------------------------------------------------------------------------
+# The configurable total cap (``session.scratchpad.max_bytes``)
+# ---------------------------------------------------------------------------
+
+
+def _write_pad_cap(config: Path, value: object) -> None:
+    """A minimal config.yml carrying only the pad cap."""
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "config.yml").write_text(
+        f"values:\n  session:\n    scratchpad:\n      max_bytes: {value}\n", encoding="utf-8"
+    )
+
+
+def test_a_fresh_config_uses_the_shipped_cap(tmp_path: Path, monkeypatch) -> None:
+    """The default is the module constant, unchanged by the new reader.
+
+    Asserted as a number as well as an identity: the settings row carries a
+    literal, and a default that drifted from 256 MiB would still pass an
+    equality against a constant that drifted with it.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "empty"))
+    assert SCRATCHPAD_TOTAL_BUDGET_BYTES == 256 * 1024 * 1024
+    assert scratchpad_module.scratchpad_budget_bytes() == SCRATCHPAD_TOTAL_BUDGET_BYTES
+
+
+def test_a_configured_cap_wins_over_the_constant(tmp_path: Path, monkeypatch) -> None:
+    """The reader is the authority once the key exists; the constant is only
+    the fallback. The constant is patched DOWN to prove the config value is
+    what comes back, not the patch."""
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 4096)
+    _write_pad_cap(tmp_path / "cfg", 64 * 1024 * 1024)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    assert scratchpad_module.scratchpad_budget_bytes() == 64 * 1024 * 1024
+
+
+def test_an_unusable_configured_cap_falls_back_to_the_constant(tmp_path: Path, monkeypatch) -> None:
+    """A text value is invalid, and the constant (which the fixtures patch) is
+    the answer — this is what keeps every existing budget test in control."""
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 12345)
+    _write_pad_cap(tmp_path / "cfg", "not-a-number")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    assert scratchpad_module.scratchpad_budget_bytes() == 12345
+
+
+def test_a_write_at_the_configured_boundary_is_allowed_and_one_over_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The boundary judgment reads the CONFIGURED cap, not the constant: a pad
+    exactly at it may take the last legitimate write, and one byte more is the
+    first refusal. The floor is patched so the fixture can be kilobytes rather
+    than the shipped 16 MiB; the clamp itself is what makes a configured value
+    below the floor still safe."""
+    pad = _pad(tmp_path)
+    filled = _fill_pad(pad, 4096)
+    held = _allocated(filled)
+    cap = held + 4096
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_MAX_BYTES_FLOOR", 1024)
+    _write_pad_cap(tmp_path / "cfg", cap)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+
+    advisory = check_scratchpad_write(pad / "x.csv", pad, "scratchpad://x.csv", 4096)
+    assert advisory is not None
+    assert "100%" in advisory
+    assert "(0 bytes left)" in advisory
+
+    with pytest.raises(ScratchpadContentError) as excinfo:
+        check_scratchpad_write(pad / "x.csv", pad, "scratchpad://x.csv", 4097)
+
+    assert f"over the {cap:,}-byte ceiling" in str(excinfo.value)

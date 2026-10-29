@@ -1,0 +1,28 @@
+tui.status.agents
+EN "{count, plural, one {# agent} other {# agents}}"
+UR "{count, plural, one {# ایجنٹ} other {# ایجنٹس}}"
+CX {"role": "status band segment", "tone": "plain count", "note": "ICU plural (RFC §2.9 digits policy: Latin numerals): the count is the raw integer of live subagents. Zero never reaches this key — format_agents returns the empty string so the segment disappears rather than reporting '0 agents'. No fixed cell cap: the band's drop ladder (drop_ladder) sheds whole segments by width."}
+tui.status.band.starting
+EN "starting…"
+UR "شروع ہو رہا ہے…"
+CX {"role": "status band activity caption", "tone": "plain, one word", "note": "Rendered only while the runtime is being bound (OperatorApp._push_starting_band); the caption carries the whole meaning and is ALWAYS spelled out. Outranks the working word (UX round 1, U4): a prompt accepted before the viewer attaches must keep saying the attach is pending."}
+tui.status.band.working
+EN "working"
+UR "کام جاری"
+CX {"role": "status band activity caption", "tone": "plain, one word", "note": "Suppressed while the shimmer already shows activity (shimmer_enabled): the accent glyph is the signal and this word is only its caption. One word by design; it rides at the end of the band's left side."}
+tui.status.jobs
+EN "{count, plural, one {# job} other {# jobs}}"
+UR "{count, plural, one {# جاب} other {# جاب}}"
+CX {"role": "status band segment", "tone": "plain count", "note": "ICU plural (RFC §2.9 digits policy: Latin numerals): the count is the raw integer of backgrounded shell jobs. Zero never reaches this key — format_jobs returns the empty string so the segment disappears. A job is a process this session started, distinct from a subagent, which is why the two counters are separate segments."}
+tui.status.model.connecting
+EN "connecting…"
+UR "منسلک ہو رہا ہے…"
+CX {"role": "model row state word", "tone": "plain, one word", "note": "The model row's placeholder while the session factory is still being awaited. The band and the splash MUST answer 'what state is this' with the same word (D1) — both resolve this one key."}
+tui.status.model.setup
+EN "setup"
+UR "ترتیب"
+CX {"role": "model row state word", "tone": "plain, one word", "note": "The model row's word in the first-run SETUP state (no session, parked on /login). Same agreement contract as the connecting word (D1): splash and band resolve this one key so they never disagree on screen."}
+tui.status.tunnel.parked
+EN "remote access off"
+UR "ریموٹ رسائی بند"
+CX {"role": "status band alarm", "tone": "plain, states the fact", "note": "A standing alarm, not a reading: remote access is off until the user acts. Rendered with a danger-coloured glyph while the words stay foreground ink (tinting the words would read as 'the words are wrong'). Un-sheddable by the drop ladder for the same reason — only the fit itself can take it off the row."}

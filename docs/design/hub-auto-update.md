@@ -348,8 +348,9 @@ justified by removal-honoring, otherwise V4 rejects).
 - **V4 drops justified**: an atom in `drops` must be a b-derived atom that one
   side removed/shortened; a `Δ` or added atom may never be dropped.
 - **V5 size**: the assembled field respects the field's cap (agents:
-  `MAX_INSTRUCTIONS_CHARS = 8_000`, `agent_profiles.py:111`; teams:
-  `MAX_TEAM_INSTRUCTIONS_CHARS = 32_768`, `teams.py:89`; team description
+  `MAX_INSTRUCTIONS_CHARS = 10_000` in `agent_profiles`, which
+  `hub_sync.service.AGENT_INSTRUCTIONS_MAX` derives from rather than restating;
+  teams: `MAX_TEAM_INSTRUCTIONS_CHARS = 32_768`, `teams.py:89`; team description
   ≤ `HUB_TEAM_DESCRIPTION_MAX_CHARS = 2000`, `teams.py:384`).
 - **V6 structure**: fenced blocks balanced; headings unchanged (the LLM may not
   rename/reorder regions).
@@ -874,10 +875,10 @@ Strategy, in escalating order (each step only if the previous doesn't fit):
 1. **Only conflicts go to the model, and only their own region text.** Because
    the deterministic core (A4) already resolved every non-conflicting atom, the
    prompt carries just the conflicting *regions* (base/local/remote of that
-   region + removal list), not the whole field. Agent instructions cap at 8 000
-   chars (`agent_profiles.MAX_INSTRUCTIONS_CHARS` `agent_profiles.py:111`) and
-   team briefs at 32 768 (`teams.MAX_TEAM_INSTRUCTIONS_CHARS` `teams.py:89`) —
-   ≈ 2k and 8k tokens: **the common case fits any modern window in one call**.
+   region + removal list), not the whole field. Agent instructions cap at 10 000
+   chars (`agent_profiles.MAX_INSTRUCTIONS_CHARS`) and team briefs at 32 768
+   (`teams.MAX_TEAM_INSTRUCTIONS_CHARS` `teams.py:89`) — ≈ 2.5k and 8k tokens:
+   **the common case fits any modern window in one call**.
 2. **One call per conflicting region** (the plan is the region list from A3; the
    recombination is mechanical concatenation in local order by the core, not by
    the model), so a 30-section brief with 3 conflicts is 3 small calls, each
@@ -942,7 +943,7 @@ literal-dotted `display.*` exception):
 |---|---|---|---|---|
 | `hub.auto_update.agents` | `("hub","auto_update","agents")` | BOOL | `True` | `Merge hub updates into pulled agents automatically.` |
 | `hub.auto_update.teams` | `("hub","auto_update","teams")` | BOOL | `True` | `Merge hub updates into pulled teams automatically.` |
-| `hub.check_interval_min` | `("hub","check_interval_min")` | INT, min 5, max 1440 | `60` | `Minutes between hub update checks (both modes).` |
+| `hub.check_interval_min` | `("hub","check_interval_min")` | INT, min 5, max 1440 | `15` | `Minutes between hub update checks (both modes).` |
 | `hub.merge_model` | `("hub","merge_model")` | TEXT, `empty_unsets=True` | `""` | `provider/model for merges; empty uses your default model.` |
 
 Module-level defaults live NEXT TO THE READER, in `local_operator/hub_sync/settings.py`:
@@ -950,7 +951,7 @@ Module-level defaults live NEXT TO THE READER, in `local_operator/hub_sync/setti
 ```python
 DEFAULT_AUTO_UPDATE_AGENTS = True
 DEFAULT_AUTO_UPDATE_TEAMS = True
-DEFAULT_CHECK_INTERVAL_MIN = 60
+DEFAULT_CHECK_INTERVAL_MIN = 15
 MIN_CHECK_INTERVAL_MIN, MAX_CHECK_INTERVAL_MIN = 5, 1440
 
 @dataclass(frozen=True)
@@ -1029,6 +1030,16 @@ class HubSyncRunner:
 - **No boot blocking**: `run_forever` first `await asyncio.sleep(45 + jitter(0-15))`
   (`reason="startup"`), then loops `tick`, then `sleep(interval_min*60 ±10 %)`.
   Interval re-read each loop (LIVE).
+- **A session start asks for one check** (added after conditional checks made an
+  unchanged tick cheap): the session-create route calls
+  `HubSyncRunner.note_session_start()` once the receipt settled, which schedules
+  `check_now` as a fire-and-forget task and returns immediately. Two throttles,
+  both claimed synchronously before the task exists: one check in flight, and
+  `SESSION_START_CHECK_THROTTLE_S` (120 s) since the last check started by any
+  route. It never merges -- auto-apply stays on the scheduled tick. The interval
+  default moved from 60 to 15 minutes in the same change; the app-focus half of
+  the trigger ("check when the window regains focus") is the desktop client's,
+  which calls the existing `POST /v1/desktop/hub/updates/check`.
 - **Only when a credential resolves**: each tick starts with
   `resolve_radient_credential(config_dir, base_url, store=…)`
   (`providers/radient_credentials.py:147-171`) and, for org items,
@@ -1105,7 +1116,7 @@ plus retry bookkeeping, never a source of truth for content).
       "remote_fingerprint": "<sha256 or null>",
       "local_fingerprint": "<sha256>",
       "baseline": "known | unknown",
-      "classification": "remote-only | both-changed | baseline-unknown | null",
+      "classification": "remote-only | both-changed | baseline-unknown | local-only | null",
       "summary": {"taken-remote": 2, "kept-local": 1, "combined": 0,
                   "removal-honored": 1, "unresolved": 0},
       "attempts": 0,
@@ -1133,6 +1144,39 @@ sentence, ≤ 300 chars, credential-scrubbed (`public_data`/`redact_secrets`
 precedent: `routes/desktop_radient.py:547`, `clients/_http.py` `scrub_details`).
 Items whose local row was deleted or whose baseline link vanished are pruned at
 the next tick.
+
+`classification` is the CHECK's answer about which side moved, and it is stored
+whenever the check reported one the row still needs — NOT only when the row is
+`available`. `local-only` (L≠B, R==B) is the one that rides an `up-to-date` row:
+the verdict answers the PULL (nothing to fetch), while the classification is the
+PUBLISH-side fact (the hub has not seen these bytes). Blanking it with the
+verdict made a locally edited copy read clean-too after one check, so no client
+could show "Modified" / "local changes not published". It stays an `up-to-date`
+row and is NEVER an incoming update: `apply`/`apply-all` select on the VERDICT
+(`available`), `auto_will_apply` requires the `available`/`updating` state, and
+nothing reads this field to decide an action. It is retired when the sentence
+stops being true: an accepted publication of THIS link clears it — a link push
+(the runner tick, `lop skills push`, the desktop `hub.push`) and a manual
+publish/republish (agent publish and republish, team publish, the CLI push
+commands; all through `seed_receipt_after_publish`, and only after its origin
+fence proves the hub row is the one this link names) — as does a pull that WROTE
+the hub's bytes and an unpull, which leaves no local copy to publish. A write
+that KEPT the local side (`prefer=local` / `replace=local`, whether it wrote or
+found nothing to write) stores it again. A full default check prunes the rows of
+items that no longer exist or are NO LONGER LINKED, and only when BOTH hold: that
+kind's inventory could be read completely (an unreadable `agent.yml`, a vanished
+`agents/` directory or an unlistable baselines directory makes the answer
+partial, not empty -- and the gate is PER KIND, so one bystander's broken
+definition does not freeze another kind's prune), AND the item itself is
+CONFIRMED gone -- `agents/<id>` absent from a tree that can be listed, a readable
+agent definition that names no `hub:` origin (the Tags editor can remove the
+marker, which unlinks the row), `teams/<id>` absent with no `.<id>.*` swap
+artifact, a skill with no baseline file at all. A row missing from a listing that
+failed to read its item is KEPT, with its retry schedule, its pull/push cadence
+and its backup pointer: absence from one pass is not evidence, and a permission
+error (EACCES) is unknown, never absence -- only ENOENT is. (The row-level twin
+of `provenance.prune`'s `confirmed_absent` guard, which has always refused to
+drop a baseline on an incomplete listing.)
 
 ### B4.3 Failure classes
 
@@ -1210,10 +1254,18 @@ Feature flag: `features.py:54` gains `"hub_updates": 1`; the UI gates on
 | Method + path | Body | Purpose |
 |---|---|---|
 | `GET /v1/desktop/hub/updates` | — | **Store read, no network, O(items).** The UI polling endpoint. |
-| `POST /v1/desktop/hub/updates/check` | `{request_id, kind?: "agent"\|"team", name?: str}` | Check now (network). Honors `force_refresh`. Applies nothing, even with auto on (user asked to *check*). Runs are single-flight (B3.3): a concurrent runner tick is joined, not doubled. |
-| `POST /v1/desktop/hub/updates/apply` | `{request_id, kind, name, prefer?: "local"\|"remote", acknowledge_unknown_baseline?: bool, replace?: "remote"\|"local", dry_run?: bool}` | Apply ONE item (click-to-update). `dry_run` returns the `ItemMergeReport` without writing (the preview a UI/CLI can show). `replace` requires `confirm_replace: true`. |
+| `POST /v1/desktop/hub/updates/check` | `{request_id, kind?: "agent"\|"team"\|"skill", name?: str, local_id?: str}` (at most one of `name`/`local_id`; `local_id` requires `kind`) | Check now (network). Honors `force_refresh`. Applies nothing, even with auto on (user asked to *check*). Runs are single-flight (B3.3): a concurrent runner tick is joined, not doubled. |
+| `POST /v1/desktop/hub/updates/apply` | `{request_id, kind, name?: str, local_id?: str, prefer?: "local"\|"remote", acknowledge_unknown_baseline?: bool, replace?: "remote"\|"local", dry_run?: bool}` (exactly one of `name`/`local_id`; `resolve_source` is name-only) | Apply ONE item (click-to-update). `dry_run` returns the `ItemMergeReport` without writing (the preview a UI/CLI can show). `replace` requires `confirm_replace: true`. |
 | `POST /v1/desktop/hub/updates/apply-all` | `{request_id, kind?: "agent"\|"team"}` | B4.4 semantics. |
-| `POST /v1/desktop/hub/updates/retry` | `{request_id, kind, name}` | Clears `attempts`/`next_retry_at`/`auto_retry=false`, then check+apply(auto=cfg) for that item. |
+| `POST /v1/desktop/hub/updates/retry` | `{request_id, kind, name?: str, local_id?: str}` (exactly one of `name`/`local_id`) | Clears `attempts`/`next_retry_at`/`auto_retry=false`, then check+apply(auto=cfg) for that item. |
+
+**Addressing (`hub_items_by_id`).** `name` matches display names case-insensitively, and
+display names are not unique (`Coder` and `coder` can both be linked), so a `name` request
+can reach several rows. `local_id` (the registry id, or a skill's link id, as `/hub/links`
+rows carry it) addresses exactly one row of exactly `kind`. An unknown id and an id of
+another kind are both 404, the same shape as an unknown name. A blank or whitespace-only
+id is 422. Renderers send `local_id` only when the capabilities advertise
+`hub_items_by_id`; older cores refuse the field with a 422.
 
 `GET /v1/desktop/hub/updates` → `CRUDResponse.result`:
 
@@ -1221,7 +1273,7 @@ Feature flag: `features.py:54` gains `"hub_updates": 1`; the UI gates on
 {
   "generated_at": "2026-09-29T12:00:00Z",
   "credential": "ok | none",
-  "settings": {"auto_agents": true, "auto_teams": true, "interval_min": 60},
+  "settings": {"auto_agents": true, "auto_teams": true, "interval_min": 15},
   "counts": {"available": 2, "failed": 1, "updating": 0, "up-to-date": 9},
   "items": [
     {"kind":"agent","name":"coder","local_id":"…","hub_id":"…","tenant_id":null,
@@ -1234,11 +1286,15 @@ Feature flag: `features.py:54` gains `"hub_updates": 1`; the UI gates on
 }
 ```
 
-Only items with `state != "up-to-date"` are listed, PLUS any item carrying the
-`no-credential` class — an org-linked row the local session has no login for never
-becomes `available`, and that class is the one fact the sidebar's sign-in sentence
-is drawn from (UX round 2, U11) — plus a `counts` roll-up (the sidebar polls this
-constantly; keep it small). Names are the profile/team
+Only items with `state != "up-to-date"` are listed, PLUS any up-to-date item that
+carries a fact the client cannot get anywhere else: the `no-credential` class (an
+org-linked row the local session has no login for never becomes `available`, and
+that class is the one fact the sidebar's sign-in sentence is drawn from — UX round
+2, U11), and `classification == "local-only"` (up to date to PULL, but the hub has
+not seen the person's edits; listed with its own state and classification so a
+client can say "Modified" / "local changes not published" after a check — never as
+`available`, and `auto_will_apply` stays false for it) — plus a `counts` roll-up
+(the sidebar polls this constantly; keep it small). Names are the profile/team
 **names** because they are the UI's attachment keys ("Names deliberately remain
 the runtime's attachment keys", `server/utils/desktop_profiles.py:1-6`).
 `auto_will_apply` = `auto_update.<kind> && state=="available" &&
@@ -1474,7 +1530,7 @@ Isolated run: fresh `ISO=$(mktemp -d)`, `env -i HOME=$ISO LOCAL_OPERATOR_CONFIG_
 4. **Regrowth via stale baseline.** If a baseline record is lost (manual delete), items degrade to baseline-unknown (safe: check-only). If a baseline is *wrong* (the record says B but the user's L predates it) a deletion could be misattributed. Mitigation: records are only written by pull/publish/merge with fp recorded; tag/record disagreement ⇒ unknown.
 5. **Multi-process races.** `lop serve`, TUI, CLI and scheduler processes can each run a check. Mitigation: store lease (B4.1) + per-row fingerprint re-verify under the registry lock (agents: no lock exists — see Q4).
 6. **Boot cost / import graph.** Guarded by the lazy imports and the import-graph test; runner first tick delayed 60 s.
-7. **Hub-side caps.** A merged team/agent may exceed hub limits on a later push (`teams.py:384-389`, `agent_profiles.py:111`); pull-side enforces local caps, push-side must enforce hub caps.
+7. **Hub-side caps.** A merged team/agent may exceed hub limits on a later push (`teams.py:384-389`, `agent_profiles.MAX_INSTRUCTIONS_CHARS`); pull-side enforces local caps, push-side must enforce hub caps.
 8. **Team semantics.** Hub roster kind is free-form (`teams.py` docstring 552-556); unknown kinds map to `agent` on import (`teams.py:1620-1625`). A merge must not launder an unknown kind into `agent` on the *push* side; A7 keeps the original kind in the record.
 9. **Deleted-on-hub vs membership-lost** are indistinguishable (404); never auto-delete locally.
 

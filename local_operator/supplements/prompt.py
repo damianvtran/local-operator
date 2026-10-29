@@ -46,7 +46,11 @@ GENERATOR_SYSTEM_PROMPT: Final = (
     "forecast, round past the source's precision, or fill gaps. Missing value = gap, "
     "labelled. The helpers print each number at its own precision; an explicit `digits` is "
     "the only way to show fewer decimals.\n"
-    "- Put every plotted value in the component's <data> JSON, copied from evidence; scripts "
+    "- Put every plotted value in the component's <data> JSON as a plain number from evidence, "
+    "not a currency-formatted string. Put the currency/unit in `unit` (value 0.15, "
+    'unit "USD / 1M tokens"). Remove only explicit formatting (commas, currency or percent '
+    'symbols); never invent a scale factor: 45% is 45 with unit "%", not 0.45. '
+    "Ambiguous or missing values stay labelled gaps, never guessed numbers; scripts "
     "read data only via LO.data / LO.col.\n"
     '- Each component has source="…": which evidence block(s) it shows, in plain words.\n'
     "- If the evidence cannot support a graphic, output NONE.\n"

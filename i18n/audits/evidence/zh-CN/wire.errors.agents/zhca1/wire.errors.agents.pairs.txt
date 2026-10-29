@@ -1,0 +1,35 @@
+# wire.errors.agents — sampled en/zh pairs for attestation zhca1
+# 8/44 keys; all >120 chars and all plurals included
+
+## wire.errors.agents.agent_not_found  [15 chars]
+EN: Agent not found
+ZH: 未找到智能体
+
+## wire.errors.agents.agent_not_found_id  [34 chars]
+EN: Agent with ID {agent_id} not found
+ZH: 未找到ID为{agent_id}的智能体
+
+## wire.errors.agents.error_clearing_conversation  [42 chars]
+EN: Error clearing agent conversation: {error}
+ZH: 清除智能体会话时出错：{error}
+
+## wire.errors.agents.error_downloading_agent  [45 chars]
+EN: Error downloading agent from Radient: {error}
+ZH: 从Radient下载智能体时出错：{error}
+
+## wire.errors.agents.error_retrieving_agents  [32 chars]
+EN: Error retrieving agents: {error}
+ZH: 获取智能体列表时出错：{error}
+
+## wire.errors.agents.error_updating_system_prompt  [43 chars]
+EN: Error updating agent system prompt: {error}
+ZH: 更新智能体系统提示词时出错：{error}
+
+## wire.errors.agents.team_ownerless_tenant_check  [111 chars]
+EN: That team does not name an owning organization, so it cannot be verified against {tenant_id}. Check the tenant.
+ZH: 该团队未注明所属组织，因此无法核验其是否属于{tenant_id}。检查租户。
+
+## wire.errors.agents.team_publish_local_failure  [51 chars]
+EN: This team could not be published from this machine.
+ZH: 无法从本机发布此团队。
+

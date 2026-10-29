@@ -3,7 +3,10 @@
  * most prominent element on screen (branding §7: a question for the user is
  * the only thing that needs a decision, and it must be unmissable).
  *
- * Approval: tool name + detail + Approve/Deny (+ remember). Ask: the
+ * Approval: tool name + detail + Approve/Deny (+ remember), plus two
+ * SUBORDINATE mode links beneath them (loosen this session / loosen the global
+ * default) — a mode change is never an answer, see the block at the control.
+ * Ask: the
  * question plus options as tap targets (each with its consequence line, U3),
  * or a paste field — masked when the ask is a secret credential (D1/U2) —
  * when the daemon offered no options. A multi-question ask shows a
@@ -71,7 +74,9 @@ import {
 import { cn } from "../lib/cn";
 import { PENDING_CARD_FRACTION, columnCap } from "../lib/column";
 import { NotPairedError, operatorFieldsFor } from "../lib/operator-device";
+import { setApprovalsPolicy, approvalPolicyLine, globalDefaultReceipt } from "../lib/approval-policy";
 import { PairPromptSheet } from "../screens/pair";
+import { messageRuntime } from "../store";
 import type { PendingRequest } from "../types";
 
 /** Turn a raw command error into copy a phone user can act on. The daemon and
@@ -83,22 +88,34 @@ function humanizeError(message: string): string {
 		/* The picker advanced (usually a terminal answer to this question)
 		   while the tap was in flight; the card is about to repaint to the
 		   current question (U8/U9) — distinct from "already answered". */
-		return "That question moved on — showing the current one.";
+		return messageRuntime.t("relay.asks.error.moved_on");
 	}
 	if (m.includes("already answered")) {
 		/* Stale tap: the question settled on another surface first (U4). */
-		return "Already answered — this question was settled on the terminal.";
+		return messageRuntime.t("relay.asks.error.already_answered_terminal");
 	}
 	if (m.includes("no longer waiting")) {
-		return "Already answered — this question is no longer waiting.";
+		return messageRuntime.t("relay.asks.error.already_answered_waiting");
 	}
 	if (m.includes("not connected") || m.includes("409")) {
-		return "The terminal session went away — reopen it to answer.";
+		return messageRuntime.t("relay.asks.error.session_gone_reopen");
 	}
 	if (m.includes("did not answer") || m.includes("504")) {
-		return "The session didn’t respond in time — try again.";
+		return messageRuntime.t("relay.asks.error.session_timeout");
 	}
 	return message;
+}
+
+/** Make a receipt read as a sentence before the card appends its own.
+
+    The runtime's prose ends variably — "… (this session)", "… keep it",
+    occasionally with a period — and gluing " This call still needs your answer"
+    straight onto "…(this session)" produced a run-on the reader has to
+    re-parse. Terminal punctuation is the join, nothing else. */
+function asSentence(text: string): string {
+	const trimmed = text.trim();
+	if (!trimmed) return trimmed;
+	return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
 /** Whether this refusal is the AUTHORITY one — the runtime saying a signature is
@@ -151,6 +168,17 @@ export function PendingCard({
 	   survived to the next question would offer a pairing for a card nobody is
 	   looking at any more. */
 	const [pairPrompt, setPairPrompt] = useState(false);
+
+	/* THE MODE LINKS' OWN TRANSIENT STATE, deliberately separate from
+	   `busy`/`error` above. Those two belong to the ANSWER, and `error !== ""`
+	   makes every control inert (D7) for the length of a stale-tap refusal. A
+	   mode change is not an answer: a refused policy write must leave the card
+	   answerable, and a policy write in flight must not grey out approve/deny for
+	   a request that is still perfectly answerable on another surface. Sharing
+	   the state would silently give one the other's lifetime. */
+	const [policyBusy, setPolicyBusy] = useState<"auto" | "default auto" | null>(null);
+	const [policyNotice, setPolicyNotice] = useState("");
+	const [policyError, setPolicyError] = useState("");
 
 	/* Whether the body has content below the fold, which drives the bottom fade
 	   (U4). Derived by measurement rather than from the content, because whether
@@ -279,6 +307,72 @@ export function PendingCard({
 			}),
 		);
 
+	/* A MODE CHANGE, NEVER AN ANSWER — and that distinction is the whole reason
+	   these two links exist here instead of sending the reader to the gate sheet.
+	   The card is what stands between a gated call and its execution: leaving it
+	   to find `/approvals` costs the session the decision it is waiting on, and
+	   in practice invites an approve just to get moving. So the policy can be
+	   loosened from the spot. But `approval_answer` is a statement about THIS
+	   request; `/approvals` is a statement about the gate for FUTURE ones. Sending
+	   the latter must not settle the former — the call in front of the reader
+	   still needs a decision, and a card that silently vanished (or a receipt
+	   claiming it was handled) would be the phone answering a question the user
+	   never answered. Hence: no `sendCommand` to `approval_answer` on this path,
+	   the card keeps its request_id pending, and the inline sentence says so
+	   out loud.
+
+	   THE PROOF SEQUENCE IS NOT REPEATED HERE either — `lib/approval-policy` holds
+	   the one implementation both this card and the gate sheet send, so a
+	   challenge minted for `loosen` cannot end up shaped differently on one of
+	   the two surfaces. */
+	const setPolicy = async (mode: "auto" | "default auto") => {
+		if (policyBusy) return;
+		setPolicyBusy(mode);
+		setPolicyError("");
+		setPolicyNotice("");
+		try {
+			const receipt = await setApprovalsPolicy(pid, mode);
+			if (receipt.refused) {
+				/* The routed op can report a refusal in its receipt rather than as an
+				   HTTP failure; it changed nothing, so it must not be confirmed. The
+				   runtime's own sentence goes inline — this line is NOT the card's
+				   `error`, which would grey out the answer controls. */
+				setPolicyError(
+					receipt.detail.trim() ||
+						messageRuntime.t("relay.approvals.gate.refused_nothing_changed"),
+				);
+				return;
+			}
+			/* THE RUNTIME'S SENTENCE IS THE RECEIPT (U1). This used to print a fixed
+			   "auto for all sessions" line whatever the runtime had answered —
+			   including a receipt that said a conversation with its own Ask keeps
+			   Ask, or one that refused. The detail is passed through for both
+			   scopes (the session write's prose names the session), and
+			   `globalDefaultReceipt` covers the global write's own accounting. */
+			const said = asSentence(
+				mode === "auto"
+					? receipt.detail.trim() || messageRuntime.t("relay.approvals.card.notice_session_auto")
+					: globalDefaultReceipt(receipt, messageRuntime.t),
+			);
+			/* THE CARD'S OWN FACT, AND IT MUST NOT BE LOST IN THE RECEIPT. The
+			   runtime's sentence is about the GATE; this card is about a request
+			   that gate has not settled. Without the second sentence a successful
+			   tap reads as "handled", and the reader walks away from a session
+			   that is still blocked (`approval_answer` was never sent — see the
+			   block above `setPolicy`). */
+			setPolicyNotice(`${said} ${messageRuntime.t("relay.approvals.card.still_needs_answer")}`);
+		} catch (failure) {
+			if (failure instanceof NotPairedError) {
+				setPairPrompt(true);
+				setPolicyError(messageRuntime.t("relay.asks.gate.not_paired_error"));
+				return;
+			}
+			setPolicyError(humanizeError(String((failure as Error).message ?? failure)));
+		} finally {
+			setPolicyBusy(null);
+		}
+	};
+
 	/* A multi-question ask advances one question at a time (U1): show which
 	   question this is so the user knows the card is not the whole prompt. */
 	const multiQuestion = pending.question_total > 1;
@@ -290,6 +384,21 @@ export function PendingCard({
 	const inert = busy || error !== "";
 
 	const optionCount = pending.kind === "approval" ? 0 : pending.options.length;
+
+	/* The runtime's own answer about the gate, when it sends one (U2). Empty on
+	   an older owner and on every ask card, which renders no line. When the
+	   effective mode is AUTO the card appends a second sentence: a request can
+	   still be waiting under auto (it was opened before a loosen, or the tool is
+	   one the gate always asks for), and the line must not let a reader read
+	   "runs without asking" as "this card is stale". The GATE SHEET paints the
+	   same `approvalPolicyLine` without that clause — it has no request in hand,
+	   so the sentence would name something that does not exist. */
+	const policyState =
+		pending.kind === "approval" ? approvalPolicyLine(pending, messageRuntime.t) : "";
+	const policyLine =
+		policyState && pending.approval_mode === "auto"
+			? `${policyState} ${messageRuntime.t("relay.approvals.card.request_needs_answer")}`
+			: policyState;
 
 	return (
 		<>
@@ -315,8 +424,12 @@ export function PendingCard({
 			   320x568 state, card 341px fixed, put the composer's bottom at
 			   664 in a 568 column). The `max-height` above still caps it on
 			   tall columns — the two bounds compose (cap when there is room,
-			   shrink when there is not), which neither bound alone does. */
-			className="border-accent bg-accent-wash mx-2 flex min-h-0 flex-col rounded-md border p-2.5"
+			   shrink when there is not), which neither bound alone does.
+
+			   NO OUTER INSET OF ITS OWN: the session view places this card in the
+			   above-composer stack (`components/above-composer.tsx`), whose one
+			   `px-2` lines its edge up with the composer card's. */
+			className="flex min-h-0 flex-col rounded-lg border-s-[3px] border-accent bg-elevated p-2.5"
 		>
 			{/* PINNED meta row (D2). One line, fixed height, cannot outgrow
 			    anything — so pinning it costs no reachability while keeping the
@@ -332,22 +445,27 @@ export function PendingCard({
 			<span className="flex shrink-0 items-center justify-between text-meta text-accent">
 				<span>
 					{pending.kind === "approval"
-						? "approval needed"
+						? messageRuntime.t("relay.asks.pending.kind_approval")
 						: pending.secret
-							? "secret requested"
-							: "question"}
+							? messageRuntime.t("relay.asks.pending.kind_secret")
+							: messageRuntime.t("relay.asks.pending.kind_question")}
 					{optionCount > 0 ? (
-						<span className="text-ink-dim"> · {optionCount} options</span>
+						<span className="text-ink-dim">
+							{" "}
+							{messageRuntime.t("relay.asks.pending.options", { count: optionCount })}
+						</span>
 					) : null}
 				</span>
 				{multiQuestion ? (
 					<span className="font-mono text-mono-sm text-ink-dim">
-						Question {pending.question_index + 1} of{" "}
-						{pending.question_total}
+						{messageRuntime.t("relay.asks.pending.question_of", {
+							index: pending.question_index + 1,
+							total: pending.question_total,
+						})}
 					</span>
 				) : count > 1 ? (
 					<span className="font-mono text-mono-sm text-ink-dim">
-						1 of {count}
+						{messageRuntime.t("relay.asks.pending.one_of", { count })}
 					</span>
 				) : null}
 			</span>
@@ -381,6 +499,15 @@ export function PendingCard({
 			>
 				<div className="flex flex-col gap-0.5">
 					<span className="text-body font-medium">{pending.title}</span>
+					{policyLine ? (
+						/* WHAT THE GATE IS, not what this card will do about it. First line
+						   of the body because it qualifies the decision below it: a reader
+						   about to approve should know the session is already in a mode they
+						   (or an agent) set, and which scope set it. It scrolls with the
+						   question rather than being pinned, because it is context and the
+						   pinned row above already carries the card's identity. */
+						<span className="text-meta text-ink-muted">{policyLine}</span>
+					) : null}
 					{pending.detail ? (
 						<p className="text-body-sm text-ink-muted whitespace-pre-wrap">
 							{pending.detail}
@@ -390,11 +517,19 @@ export function PendingCard({
 
 				{optionCount > 0 ? (
 					<div className="flex flex-col gap-2">
-						{pending.options.map((opt) => (
+						{pending.options.map((opt, index) => (
 							<button
 								key={opt.label}
 								type="button"
 								disabled={inert}
+								/* THE FIRST OPTION IS THIS CARD'S REST TARGET (review R3-1).
+								   An ask that offers options has no pinned answer row, so
+								   without a mark the above-composer slot had nothing to rest
+								   on and an overflowing slot stayed on the question's head,
+								   every option below the fold. The first option's bottom on
+								   the slot's edge shows where the choice starts, with the
+								   question just above it. */
+								data-slot-rest={index === 0 ? "" : undefined}
 								onClick={() => answerAsk(opt.label)}
 								/* Accent-tinted left edge + elevated fill so an option
 								   reads as a tap target, not a static label or a text
@@ -402,7 +537,7 @@ export function PendingCard({
 								   error is shown, so a stale option stops reading as
 								   live under the message (D7). */
 								className={cn(
-									"flex min-h-11 flex-col justify-center rounded-sm border border-l-2 border-control border-l-accent bg-elevated px-3 py-2 text-left active:bg-accent-wash disabled:opacity-50",
+									"flex min-h-11 flex-col justify-center rounded-sm bg-surface px-3 py-2 text-start active:bg-accent-wash disabled:opacity-50",
 								)}
 							>
 								<span className="text-body-sm font-medium text-ink">
@@ -428,40 +563,96 @@ export function PendingCard({
 			    landed ~26px below the fold because it is appended below wherever
 			    the user is standing.
 
-			    `pr-1.5` keeps the rows clear of the overlay scrollbar's paint band
+			    `pe-1.5` keeps the rows clear of the overlay scrollbar's paint band
 			    (D3): the thumb has no layout width, so it painted over the right
 			    edge of `deny` and `send` at `gapToContentEdge = 0`. Only the
 			    control rows carry it — over prose the overlay behaviour is the
 			    app-wide `lo-scroll` idiom and was ruled acceptable, and a gutter
 			    would cost 4px of line length on every card at 360px. */}
+			{/* `data-slot-rest` marks the row that ANSWERS the request (Approve/Deny,
+			    the ask's answer field and Send, or an ask's first option): the above-composer slot rests
+			    on it when it is too short to show the card whole (design D6 =
+			    review R2-1). A behaviour handle, like `data-testid` below. */}
 			{pending.kind === "approval" ? (
-				<div className="mt-2 flex shrink-0 flex-col gap-2 pr-1.5">
+				<div className="mt-2 flex shrink-0 flex-col gap-2 pe-1.5">
 					<label className="flex min-h-11 items-center gap-2 text-body-sm text-ink-muted select-none">
 						<input
 							type="checkbox"
 							checked={remember}
 							onChange={(e) => setRemember(e.target.checked)}
-							className="size-4 accent-accent"
+							className="size-5 accent-accent"
 						/>
-						remember this choice
+						{messageRuntime.t("relay.asks.pending.remember")}
 					</label>
-					<div className="flex gap-2">
+					<div data-slot-rest="" className="flex gap-2">
 						<button
 							type="button"
 							disabled={busy}
 							onClick={() => approve(true)}
 							className="flex min-h-11 flex-1 items-center justify-center rounded-sm bg-accent text-body-sm font-medium text-on-accent active:bg-accent-active disabled:opacity-50"
 						>
-							{busy ? "…" : "approve"}
+							{busy ? "…" : messageRuntime.t("relay.asks.pending.approve")}
 						</button>
 						<button
 							type="button"
 							disabled={busy}
 							onClick={() => approve(false)}
-							className="flex min-h-11 flex-1 items-center justify-center rounded-sm border border-danger-border bg-danger-wash text-body-sm text-danger active:bg-danger-wash disabled:opacity-50"
+							className="flex min-h-11 flex-1 items-center justify-center rounded-sm bg-danger-wash text-body-sm text-danger active:bg-danger-wash disabled:opacity-50"
 						>
-							{busy ? "…" : "deny"}
+							{busy ? "…" : messageRuntime.t("relay.asks.pending.deny")}
 						</button>
+					</div>
+					{/* THE ESCAPE HATCH: a mode change, not an answer.
+
+					    SECONDARY ON PURPOSE, and that is a design constraint rather than
+					    taste. `approve`/`deny` are the decision this card exists to take;
+					    these two are a side door for the reader who wants future calls to
+					    stop asking. Rendered as buttons they would compete with the
+					    decision (one accent, two verdicts, and a third equal-looking
+					    control on a card that must be answerable at a glance), so they are
+					    text links with an underline — a non-colour affordance, so the
+					    distinction survives a monochrome screen — while KEEPING the 44px
+					    target floor the rest of the card holds. Two handles rather than a
+					    menu because the scope is the thing being chosen: "this session"
+					    and "all sessions" must be distinguishable before the tap.
+
+					    THEY DO NOT RESOLVE THE CARD. Sending `/approvals` changes the gate
+					    for future calls; it never answers `request_id`, so the pending
+					    request stays pending and these controls stay independent of
+					    `busy`/`error` (which are the answer's own state). The line below
+					    confirms the mode change AND says the call still needs an answer —
+					    otherwise a successful tap reads as "handled", and the reader walks
+					    away from a session that is still blocked. A refusal stays here
+					    too, in the runtime's words, with approve/deny still live. */}
+					<div className="flex flex-col gap-1">
+						<div className="flex flex-wrap items-center gap-x-4">
+							<button
+								type="button"
+								disabled={policyBusy !== null}
+								onClick={() => void setPolicy("auto")}
+								className="flex min-h-11 items-center text-meta text-ink-muted underline underline-offset-2 disabled:text-ink-disabled"
+							>
+								{messageRuntime.t("relay.approvals.card.set_auto_session")}
+							</button>
+							<button
+								type="button"
+								disabled={policyBusy !== null}
+								onClick={() => void setPolicy("default auto")}
+								className="flex min-h-11 items-center text-meta text-ink-muted underline underline-offset-2 disabled:text-ink-disabled"
+							>
+								{messageRuntime.t("relay.approvals.card.set_auto_all")}
+							</button>
+						</div>
+						{policyNotice ? (
+							<p role="status" className="text-meta text-ink-dim">
+								{policyNotice}
+							</p>
+						) : null}
+						{policyError ? (
+							<p role="alert" className="text-meta break-words text-danger">
+								{policyError}
+							</p>
+						) : null}
 					</div>
 				</div>
 			) : optionCount === 0 ? (
@@ -481,13 +672,13 @@ export function PendingCard({
 				   second divider idiom next to the approval's row is the
 				   competing-patterns bug, and a warning about a credential is one
 				   a user should read BEFORE pasting it, not after. */
-				<div className="mt-2 flex shrink-0 flex-col gap-2 pr-1.5">
+				<div className="mt-2 flex shrink-0 flex-col gap-2 pe-1.5">
 					{pending.secret ? (
 						<p className="text-meta text-ink-dim">
-							secret — sent directly, not shown in the transcript
+							{messageRuntime.t("relay.asks.card.secret_notice")}
 						</p>
 					) : null}
-					<div className="flex gap-2">
+					<div data-slot-rest="" className="flex gap-2">
 						<input
 							/* No per-field remount key needed: the whole card is keyed
 							   on request_id+question_index at the render site, so this
@@ -503,8 +694,12 @@ export function PendingCard({
 							autoCapitalize={pending.secret ? "none" : undefined}
 							autoCorrect={pending.secret ? "off" : undefined}
 							spellCheck={pending.secret ? false : undefined}
-							placeholder={pending.secret ? "paste secret" : "your answer"}
-							className="min-h-11 min-w-0 flex-1 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
+							placeholder={
+								pending.secret
+									? messageRuntime.t("relay.asks.card.placeholder_secret")
+									: messageRuntime.t("relay.asks.card.placeholder_answer")
+							}
+							className="min-h-11 min-w-0 flex-1 rounded-sm  bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 						/>
 						<button
 							type="button"
@@ -512,14 +707,14 @@ export function PendingCard({
 							onClick={() => answerAsk(freeText.trim())}
 							className="flex min-h-11 items-center justify-center rounded-sm bg-accent px-4 text-body-sm font-medium text-on-accent active:bg-accent-active disabled:opacity-50"
 						>
-							{busy ? "…" : "send"}
+							{busy ? "…" : messageRuntime.t("relay.asks.pending.send")}
 						</button>
 					</div>
 				</div>
 			) : null}
 
 			{error ? (
-				<p className="mt-1 shrink-0 pr-1.5 text-body-sm text-danger">{error}</p>
+				<p className="mt-1 shrink-0 pe-1.5 text-body-sm text-danger">{error}</p>
 			) : null}
 			</div>
 		</>

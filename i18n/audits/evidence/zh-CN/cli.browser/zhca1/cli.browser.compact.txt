@@ -1,0 +1,24 @@
+cli.browser.already_paired	a browser is already paired. To pair another, open ITS popup and enter the code that appears here (the code appears once that install''s extension connects). ''lop browser pair --list'' lists every authorised install; ''--reset'' revokes them all.	已有浏览器配对。要配对另一个，打开那个浏览器的扩展弹窗，输入此处显示的配对码（该安装的扩展连接后才会显示）。''lop browser pair --list''列出所有已授权安装；''--reset''撤销全部授权。
+cli.browser.authorised_installs	authorised installs:	已授权安装：
+cli.browser.cleanup_pending	Browser cleanup: pending — nothing was closed ({detail}). Retry the same command once the bridge answers; the generation you copied is still current.	浏览器清理：待处理，未关闭任何内容（{detail}）。桥接响应后重试同一命令；复制的代次仍为当前代次。
+cli.browser.handles_redacted	  Handles are redacted, so these cannot be attributed to a record above.
+  Close an unwanted tab by hand; provenance is unproven.	  句柄已隐藏，无法将这些标签页归属于上方记录。
+  手动关闭不需要的标签页；其来源尚未证实。
+cli.browser.invalid_session	Invalid session id; no action taken.	会话ID无效；未执行操作。
+cli.browser.legacy_note	                     (written by an older build under the shared name;
+                      ''lop browser uninstall'' removes it)	                     （由旧版构建以共享名称写入；
+                      ''lop browser uninstall''可移除）
+cli.browser.logs_missing	no daemon log at {path}.
+The bridge has not run under a service supervisor on this machine. Run `lop browser install`, or `lop browser serve` to run it in the foreground.	{path}处没有守护进程日志。
+此机器上的桥接尚未由服务监督者运行。运行`lop browser install`，或运行`lop browser serve`在前台启动。
+cli.browser.no_changes	No changes. Repeat with --yes to approve this exact session and generation.	未作更改。加上--yes重试，以批准此确切的会话和代次。
+cli.browser.no_tabs_unknown	No ownership records. The bridge did not answer, so open tabs are unknown — run 'lop browser status' to check the daemon.	没有所有权记录。桥接未响应，无法确定已打开的标签页；运行'lop browser status'检查守护进程。
+cli.browser.now_driving	now driving: {id}	当前驱动：{id}
+cli.browser.pairing_code	pairing code: {code}	配对码：{code}
+cli.browser.read_only	
+Read-only. PID absence, age, and localhost URLs never authorize cleanup.	
+只读。PID不存在、记录陈旧或localhost URL均不构成清理授权。
+cli.browser.revoke_no_match	[1;31mno single authorised extension matches ''{target}''.[0m	[1;31m没有唯一的已授权扩展匹配''{target}''。[0m
+cli.browser.supervisor_line	supervisor:          {name}	监督者：             {name}
+cli.browser.usage	usage: lop browser '{install|status|start|stop|restart|pair|drive|logs|uninstall|serve}'	用法：lop browser '{install|status|start|stop|restart|pair|drive|logs|uninstall|serve}'
+cli.browser.waiting_header	waiting:             these installs have asked to pair	等待中：             以下安装已请求配对

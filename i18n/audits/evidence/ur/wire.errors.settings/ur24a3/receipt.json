@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "audit_id": "ur24a3",
+  "locale": "ur",
+  "namespace": "wire.errors.settings",
+  "record": "i18n/audits/evidence/ur/wire.errors.settings/ur24a3/record.json",
+  "provenance": "Bundle receipt for source audit session 5ebbaba9537e, actual model openrouter/moonshotai/kimi-k3.1-pro; this manifest is not another audit.",
+  "hashes": {
+    "audit.log": "2d38423dc5d7b3c97a0ec0892144a1780f74fe1fedef627b05111645739af49d",
+    "help-fit.json": "21ec70667180d7e4b23583d893a103ef8072c071f1e8e0f52138b94f31ea4b41",
+    "pseudo-evidence.json": "7cde8885345f9153612678d013d4fca2b27a4a997bd6f9c31b3177775a5ecde3",
+    "record.json": "db70144524113144b4e45cfae9fc80c74eae7d0d194bd9aa726f8b494006a66b",
+    "report.md": "1f6aea8511b9e8eb3282b7dbe6164f1926c8aee32c3003034557c906f4652cc7",
+    "round2-disposition-summary.json": "4f1fbd04cd89c37d300e432d65883a959d2168c5006aea6f52846a3fb4936124",
+    "round2-dispositions.json": "88aaffa9be599890f100342b82f448c56b7e0f97f2a19ab37dd7efbeaf9e20de",
+    "runtime-mechanical.json": "a63b9bac3001f692b4d335de506d76e982595222ecdbf27c589b05efd87d2f04",
+    "ur-core.round3.findings.md": "b59c934bc3a8429f271a6cfbfa4361e042c916acb9dd50f5fdc5f50cd08aaefd",
+    "ur-core.round3.receipt.json": "fcfc73aabd6277082c77556bfd4f05dc7e678300530266d72472e73419f2fa2f",
+    "ur-core.round3.semantic.json": "fbee46d8c8d08a8d909015678f797ca3cafd3bded5c475177bf31ddb5caecd72",
+    "wire.errors.settings.compact.txt": "b66a981c3e267c36311ec635fdc1deca1dcaee0aa2fe45cf3574fe47acb92ed3",
+    "wire.errors.settings.delta.txt": "5d3914d6ec16697d1b56892a558bd0795b745794e8846ee483e80d0185e7b610"
+  }
+}

@@ -8,7 +8,11 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field
 
-from local_operator.agent_profiles import NameTakenError, install_seed
+from local_operator.agent_profiles import (
+    MAX_INSTRUCTIONS_CHARS,
+    NameTakenError,
+    install_seed,
+)
 from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.env import EnvConfig, get_env_config
@@ -72,7 +76,7 @@ class ProfileEdit(Input):
     expected_definition_revision: str | None = None
     kind: Literal["role", "specialist"] | None = None
     description: str | None = Field(default=None, max_length=8000)
-    instructions: str | None = Field(default=None, max_length=8000)
+    instructions: str | None = Field(default=None, max_length=MAX_INSTRUCTIONS_CHARS)
     tools: list[str] | None = None
     effort: str | None = None
     delegate: bool | None = None
@@ -97,7 +101,7 @@ class ProfileCreate(Input):
     name: str = Field(min_length=1, max_length=128)
     kind: Literal["role", "specialist"] = "role"
     description: str = Field(max_length=8000)
-    instructions: str = Field(min_length=1, max_length=8000)
+    instructions: str = Field(min_length=1, max_length=MAX_INSTRUCTIONS_CHARS)
     tools: list[str] | None = None
     effort: str | None = None
     delegate: bool | None = None
@@ -173,7 +177,7 @@ async def install(body: NamedMutation, request: Request):
         agents, _ = registries(request)
         agents.require_complete_metadata()
         try:
-            installed = install_seed(body.name, registry=agents)
+            installed = install_seed(body.name, registry=agents, scope="global")
         except NameTakenError:
             raise HTTPException(
                 409,
@@ -325,6 +329,9 @@ async def save_profile(
                 agents,
                 params,
                 creating=creating,
+                # THE USER IS THE ACTOR on this route: the editor's save is the
+                # account write, so no tool consent is involved.
+                scope="global",
                 expected_definition_revision=expected,
             )
         except DefinitionRevisionMismatch as mismatch:
@@ -369,7 +376,9 @@ async def team(name: str, request: Request):
         found = registries(request)[1].get_team_by_name(name)
         if found is None:
             raise KeyError(name)
-        data = found.model_dump(mode="json")
+        # The detail route is account-only too; the additive fact comes from the
+        # same place the catalogue puts it (design §3.3, LOH-9 S2).
+        data = found.model_dump(mode="json") | {"scope": "global"}
         data["definition_revision"] = definition_revision(
             "team", str(found.id), found.model_dump(mode="json")
         )
@@ -425,9 +434,14 @@ async def save_team(name: str, body: TeamEdit | TeamCreate, request: Request, *,
             ) from None
 
     def mutate() -> dict[str, Any]:
+        from local_operator.profile_scope import scope_store
+
         registry = registries(request)[1]
         if creating:
-            result = registry.create_team(fields)
+            # The editor is the USER's act: a new team is saved for every
+            # conversation. The update below needs no scope because it follows
+            # the row's owner.
+            result = scope_store(registry, "global").create_team(fields)
         else:
             current = registry.get_team_by_name(name)
             if current is None:

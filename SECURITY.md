@@ -38,6 +38,16 @@ Local Operator implements several layers of security, including:
 - **Continuous Integration Security Checks:**  
   Our CI pipeline includes linting, type checking, and testing to catch issues early and to enforce secure coding practices.  Security features should always be included in the test suites.
 
+### Redaction policy
+
+The definition of what the credential redactor treats as a secret — and what it
+must never mask (key names, package names, public catalogue copy, documentation)
+— is [`docs/security/redaction-policy.md`](docs/security/redaction-policy.md).
+The owner is named there. Changes to a masking rule require a matching policy
+test in `tests/unit/secrets/test_redaction_policy.py`; the sanctioned read path
+for redacted-but-public copy is the `read_public_copy` tool described in that
+document, not a redaction bypass.
+
 ## Endpoint Protection
 
 Local Operator installs per-user services, so behaviour-based endpoint

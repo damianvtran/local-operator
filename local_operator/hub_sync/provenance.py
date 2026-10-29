@@ -35,7 +35,13 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Mapping
 
 from local_operator.config_writer import serialized_config_path_write
-from local_operator.hub_sync.identity import Kind, LinkError, LinkIdentity
+from local_operator.hub_sync.identity import (
+    Kind,
+    LinkError,
+    LinkIdentity,
+    LinkOrigin,
+    normalize_source,
+)
 from local_operator.hub_sync.segment import norm
 
 logger = logging.getLogger(__name__)
@@ -45,7 +51,27 @@ LEGACY_SCHEMA = 1
 #: Last N pre-apply backups kept per item (A9.3).
 BACKUPS_KEPT = 5
 
-RecordedBy = Literal["pull", "publish", "merge-pull", "merge-push", "adopt", "adopt-unknown"]
+RecordedBy = Literal[
+    "pull", "publish", "merge-pull", "merge-push", "adopt", "adopt-unknown", "subscribe"
+]
+
+#: Whether this link's managed content exists locally (``present``) or was never
+#: installed / deliberately removed (``absent``). Membership of the hub is the
+#: LINK, not its bytes: subscribing records the origin + policy without writing
+#: a copy, and unpulling removes the copy without unlinking. Absence is therefore
+#: an EXPLICIT recorded state, "the directory is missing" is not evidence of it --
+#: a genuinely lost directory must keep raising as the error it always was.
+#: Records written before this field existed carry content, so a missing key
+#: reads as ``present`` and every one of them behaves exactly as before.
+#:
+#: FORWARD COMPATIBILITY, ACCEPTED: an older core does not know this key, so it
+#: reads an absent record as ``present`` and reports the missing directory as
+#: ``local-concurrent-edit``. That is the honest failure it already had; it can
+#: neither install nor delete anything from it, and the record keeps its
+#: baseline, identity and alias reservation. Bumping ``SCHEMA`` would be worse
+#: (an older core would drop the whole link, losing the reservation), and the
+#: state is settled correctly as soon as a core that knows the field touches it.
+ContentState = Literal["present", "absent"]
 
 #: ``recorded_by`` of a record that LINKS an item to a hub id without vouching for
 #: what the two sides had in common (``lop teams link`` over a differing copy). The
@@ -201,9 +227,11 @@ def fingerprint_snapshot(kind: Kind, fields: Mapping[str, Any]) -> str:
     transcripts, credentials, or local provenance.
     """
     if kind == "skill":
-        from local_operator.hub_sync.skill_document import SkillDocument
+        from local_operator.hub_sync.skill_document import skill_manifest_from_json
 
-        return SkillDocument.from_json(dict(fields)).fingerprint
+        # FORM DISPATCH: a bundle link's fingerprint is its tree hash, which is
+        # recomputable from the managed directory; a document's is unchanged.
+        return skill_manifest_from_json(dict(fields)).fingerprint
     return _sha(
         json.dumps(
             dict(fields), ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -213,9 +241,9 @@ def fingerprint_snapshot(kind: Kind, fields: Mapping[str, Any]) -> str:
 
 def fingerprint_fields(kind: Kind, fields: Mapping[str, Any]) -> str:
     if kind == "skill":
-        from local_operator.hub_sync.skill_document import SkillDocument
+        from local_operator.hub_sync.skill_document import skill_manifest_from_json
 
-        return SkillDocument.from_json(dict(fields)).fingerprint
+        return skill_manifest_from_json(dict(fields)).fingerprint
     if kind == "team":
         return fingerprint_team(fields)
     return fingerprint_agent(
@@ -281,6 +309,16 @@ class BaselineRecord:
     #: this is per-artifact migration metadata, not another policy database.
     legacy_subscribe_hint: bool | None = None
     scope_known: bool = True
+    #: See ``ContentState``: an absent record keeps its baseline and policy and
+    #: has no managed directory. Only an explicit write may move it, and only
+    #: the managed-skill writer (install/apply) may move it back to ``present``.
+    content_state: ContentState = "present"
+    #: The publisher a PUBLIC bundle install was confirmed against (design §6.2).
+    #: ``publisher_id`` is the binding value (a display name is user-controlled),
+    #: ``publisher_name`` is display-only and ``archive_hash`` the exact bytes
+    #: confirmed. A later update whose row names another publisher REFUSES rather
+    #: than silently replacing content under a consent given to someone else.
+    bundle_confirmation: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", deepcopy(dict(self.fields)))
@@ -303,6 +341,12 @@ class BaselineRecord:
             "local_alias": self.local_alias,
             "legacy_subscribe_hint": self.legacy_subscribe_hint,
             "scope_known": self.scope_known,
+            "content_state": self.content_state,
+            "bundle_confirmation": (
+                deepcopy(dict(self.bundle_confirmation))
+                if self.bundle_confirmation is not None
+                else None
+            ),
         }
 
 
@@ -344,8 +388,50 @@ def iter_baselines(config_dir: Path) -> list[BaselineRecord]:
     return records
 
 
+def baselines_dir_listable(config_dir: Path) -> bool:
+    """Whether the baselines directory can be LISTED right now.
+
+    ``iter_baselines`` answers "the records I could read" and swallows an
+    unlistable directory as an empty one -- right for every inventory reader, wrong
+    for the ONE caller that deletes status rows on the strength of a check: a
+    transient listing failure would look exactly like "every link is gone", and the
+    prune would drop rows for items that still exist. A MISSING directory is not a
+    failure (a fresh profile has no links yet), so it answers True.
+    """
+
+    try:
+        with os.scandir(baselines_dir(config_dir)):
+            return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
+def _sync_dir(directory: Path) -> None:
+    """Fsync a directory so a rename/replace in it survives a power loss.
+
+    ``atomic_json`` in ``transactions`` does this for the journal; this module
+    cannot import it (transactions imports this one), so the same few lines live
+    here rather than in a shared package for one call site.
+    """
+
+    if os.name == "nt":  # directory fsync is not supported on Windows
+        return
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _atomic_write(path: Path, payload: Mapping[str, Any]) -> None:
-    """Temp file in the same directory + ``os.replace`` (the monitors/state shape)."""
+    """Temp file in the same directory + ``os.replace`` (the monitors/state shape).
+
+    The record's OWN directory entry is fsynced too: a successful replace is only
+    durable in the directory whose entries changed, and a baseline that vanishes
+    after a reported write would present as a lost link.
+    """
 
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
@@ -355,6 +441,9 @@ def _atomic_write(path: Path, payload: Mapping[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
+        _sync_dir(path.parent)
+        if path.parent.parent != path.parent:
+            _sync_dir(path.parent.parent)
     except BaseException:
         try:
             os.unlink(tmp)
@@ -523,6 +612,34 @@ def parse_baseline_record(raw: Any, kind: Kind, local_id: str) -> BaselineRecord
     lineage = raw.get("lineage", "unknown")
     if lineage not in ("clean", "unknown", "mixed-lineage"):
         return None
+    content_state = raw.get("content_state", "present")
+    if content_state not in ("present", "absent"):
+        return None
+    bundle_confirmation = None
+    raw_confirmation = raw.get("bundle_confirmation")
+    if raw_confirmation is not None:
+        # A persisted pin is a SECURITY input: only a well-formed one is
+        # trusted. An unreadable one is DROPPED, not the record: a hand-edited
+        # pin must not erase the link (round-2 M3b). With no pin the update
+        # behaves like an older record and the public consent gate still
+        # applies to any install.
+        if isinstance(raw_confirmation, dict):
+            publisher_id = raw_confirmation.get("publisher_id")
+            archive_hash = raw_confirmation.get("archive_hash")
+            publisher_name = raw_confirmation.get("publisher_name", "")
+            if (
+                isinstance(publisher_id, str)
+                and publisher_id.strip()
+                and isinstance(publisher_name, str)
+                and isinstance(archive_hash, str)
+                and len(archive_hash) == 64
+                and all(c in "0123456789abcdef" for c in archive_hash)
+            ):
+                bundle_confirmation = {
+                    "publisher_id": publisher_id.strip(),
+                    "publisher_name": publisher_name,
+                    "archive_hash": archive_hash,
+                }
     return BaselineRecord(
         kind=kind,
         local_id=local_id,
@@ -540,6 +657,8 @@ def parse_baseline_record(raw: Any, kind: Kind, local_id: str) -> BaselineRecord
         local_alias=local_alias,
         legacy_subscribe_hint=hint,
         scope_known=scope_known,
+        content_state=content_state,
+        bundle_confirmation=bundle_confirmation,
     )
 
 
@@ -584,6 +703,117 @@ def prune(
     return removed
 
 
+def canonical_hub_source(config_manager: Any) -> str | None:
+    """The CONFIGURED hub base, normalized exactly as source resolution approves it.
+
+    A link's ``hub_source`` must name the ONE destination this machine is
+    configured to address. The desktop's source-resolution route approves a
+    request against ``(configured_radient_base_url(ctx.config_manager),)`` and
+    returns its NORMALIZED form, so a link minted by a pull or by a publication
+    has to carry that same string: otherwise the same row would get two
+    different ``link_id``s depending on which path created it, and the answer
+    the resolve dialog would mint would not match the link the pull already
+    wrote.
+
+    ``None`` when the configuration cannot answer. The caller then records the
+    row WITHOUT an identity -- the honest "origin unknown" state -- because a
+    pull or a publication must never fail over its bookkeeping.
+    """
+
+    from local_operator.providers.radient_credentials import configured_radient_base_url
+
+    try:
+        return normalize_source(configured_radient_base_url(config_manager))
+    except Exception:  # noqa: BLE001 - an unreadable configuration means "no origin"
+        logger.warning("could not resolve the configured hub base", exc_info=True)
+        return None
+
+
+def serving_base(client: Any, config_dir: Path | None = None) -> str | None:
+    """The base a hub client ADDRESSED, or the CONFIGURED one when it does not say.
+
+    The origin of a link is the base the operation addressed: it is the base a
+    check reports as ``served_by`` and the one the integration and push gates
+    compare the link's source against, so a link that named a different base
+    could never be integrated. A client that does not expose its base (a test
+    rig's shape, or a client built before the attribute existed) falls back to
+    the CONFIGURED base -- which is what such a client addresses anyway.
+    """
+
+    base = str(getattr(client, "base_url", "") or "")
+    if base:
+        return base
+    if config_dir is None:
+        return None
+    from local_operator.config import ConfigManager
+
+    return canonical_hub_source(ConfigManager(Path(config_dir)))
+
+
+def link_identity(
+    kind: Kind,
+    local_id: str,
+    hub_id: str,
+    *,
+    origin: LinkOrigin | None,
+) -> LinkIdentity | None:
+    """The identity of a link whose origin is KNOWN, or None when it cannot be built.
+
+    A pull, an accepted publication and the origin repair all name the same
+    facts -- the kind, the local row, the hub row, the base that served it and
+    the scope it was served under -- and the identity is a digest of exactly
+    those, so the three paths cannot mint different links for the same row.
+
+    The organization's tenant comes from the ORIGIN, so the identity and the
+    record cannot disagree: a caller that already holds a record uses the
+    origin the record's own scope implies, and a caller that mints a new record
+    writes that same tenant into it.
+
+    ``None`` is a real answer, not a failure. An unusable base, a public scope
+    that names a tenant, an organization scope that names none, or an id the
+    identity refuses all make the link unbuildable; the caller then records the
+    row WITHOUT one and the inventory honestly reports it as unresolved.
+    """
+
+    if origin is None:
+        return None
+    try:
+        return LinkIdentity(
+            kind=kind,
+            local_id=local_id,
+            hub_source=origin.hub_source,
+            visibility=origin.visibility,
+            tenant_id=origin.tenant_id,
+            hub_id=hub_id,
+        )
+    except LinkError:
+        logger.warning(
+            "could not build the hub link identity for %s %s; the link stays unresolved",
+            kind,
+            local_id,
+            exc_info=True,
+        )
+        return None
+
+
+def attach_origin(
+    config_dir: Path, record: BaselineRecord, origin: LinkOrigin | None
+) -> BaselineRecord | None:
+    """Write a baseline record WITH the origin it was served under.
+
+    The record keeps everything it carries -- its fields, its fingerprint, its
+    lineage -- and gains the identity when the origin can be stated. An origin
+    that cannot produce one is NOT an error: the record is still written and
+    the inventory honestly keeps listing it as unresolved.
+    """
+
+    identity = link_identity(record.kind, record.local_id, record.hub_id, origin=origin)
+    if identity is not None:
+        record = replace(record, identity=identity)
+    write_baseline(config_dir, record)
+    return record
+
+
 def make_record(
     kind: Kind,
     local_id: str,
@@ -615,22 +845,47 @@ def record_agent_baseline(
     description: str,
     tenant_id: str | None = None,
     recorded_by: str = "pull",
+    origin: LinkOrigin | None = None,
 ) -> BaselineRecord | None:
     """Write B for an agent. Never raises: a pull must not fail over bookkeeping.
 
     A failure leaves the row without a record, which degrades it to
     baseline-unknown (check-only, never auto-applied) — the safe direction.
+
+    ``origin`` is what the SERVING ARM proved -- the base it addressed and the
+    scope it was served under. With it, the row also carries its
+    :class:`~local_operator.hub_sync.identity.LinkIdentity`, which is what the
+    links inventory reports as a confirmed source; without it the row is written
+    exactly as before (the pre-fix state: a hub id, no origin). An origin that
+    cannot produce an identity is NOT an error: the row is still written, and
+    the inventory honestly keeps listing it as unresolved.
     """
 
     try:
+        # The ORIGIN is the authority for the scope whenever there is one: the
+        # record's tenant has to EQUAL the identity's tenant (the write path
+        # refuses a mismatch), and the origin is the arm's own statement of the
+        # scope it served the row under. A disagreement is a caller bug, logged
+        # and resolved in the origin's favour -- never by guessing.
+        tenant = tenant_id or None
+        if origin is not None:
+            if tenant != origin.tenant_id:
+                logger.warning(
+                    "the hub origin for agent %s names a different organization than the pull did",
+                    local_id,
+                )
+            tenant = origin.tenant_id
         record = make_record(
             "agent",
             local_id,
             hub_id,
-            tenant_id,
+            tenant,
             {"instructions": norm(instructions), "description": norm(description)},
             recorded_by,
         )
+        identity = link_identity("agent", local_id, hub_id, origin=origin)
+        if identity is not None:
+            record = replace(record, identity=identity)
         write_baseline(config_dir, record)
         return record
     except (BaselineError, OSError, ValueError):
@@ -645,6 +900,8 @@ def record_team_pull(
     *,
     tenant_id: str,
     recorded_by: str = "pull",
+    origin: LinkOrigin | None = None,
+    scope_known: bool = True,
 ) -> BaselineRecord | None:
     """Link a freshly imported team to its hub document (B1.2).
 
@@ -652,6 +909,14 @@ def record_team_pull(
     normalisation is reflected — the bytes a later re-fetch is compared with).
     Returns None (and logs) if the document names no id or the write fails; the
     pull itself has already succeeded and stays successful.
+
+    ``origin`` is what the SERVING ARM proved -- the base it addressed and the
+    scope it was served under -- and it is what makes the row a CONFIRMED link
+    instead of a hub id with no source. It is never inferred from the
+    document: a publicly listed team carries its publisher's ``tenant_id``, so
+    a scope read from the document would put a public row behind an
+    organization identity. The public arm therefore passes ``tenant_id=""``
+    (the record names no organization) and a public origin.
     """
 
     hub_id = str(document.get("id") or "").strip()
@@ -659,11 +924,24 @@ def record_team_pull(
         logger.warning("hub team document for %r carries no id; not linking it", team.name)
         return None
     try:
+        # The ORIGIN is the authority for the scope whenever there is one: the
+        # record's tenant has to EQUAL the identity's tenant (the write path
+        # refuses a mismatch), and the origin is the arm's own statement of the
+        # scope it served the row under. A disagreement is a caller bug, logged
+        # and resolved in the origin's favour -- never by guessing.
+        tenant = tenant_id or None
+        if origin is not None:
+            if tenant != origin.tenant_id:
+                logger.warning(
+                    "the hub origin for team %s names a different organization than the pull did",
+                    team.id,
+                )
+            tenant = origin.tenant_id
         record = make_record(
             "team",
             team.id,
             hub_id,
-            tenant_id or None,
+            tenant,
             team_fields(
                 description=team.description,
                 manager=team.manager,
@@ -673,6 +951,12 @@ def record_team_pull(
             ),
             recorded_by,
         )
+        # A generic optional-auth read proves no scope without a declared
+        # target. Preserve that absence so a later check cannot certify a guess.
+        record = replace(record, scope_known=scope_known)
+        identity = link_identity("team", team.id, hub_id, origin=origin)
+        if identity is not None:
+            record = replace(record, identity=identity)
         write_baseline(config_dir, record)
         return record
     except (BaselineError, OSError, ValueError):

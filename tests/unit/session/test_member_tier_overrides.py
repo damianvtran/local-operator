@@ -63,6 +63,14 @@ LO = "test/lo-model"
 MED = "test/med-model"
 HI = "test/hi-model"
 
+#: The role these roster tests run on when they are about the ROSTER and not
+#: about a role's own pin. It is deliberately NOT ``coder``: the packaged coder
+#: seed carries the inherit sentinel ("always run on the launching session's
+#: model"), and that pin outranks the roster, so a roster's own mechanics — the
+#: slot's tier moving the model, an unconfigured slot tier refusing the launch,
+#: the receipt naming the team as the decider — are exercised on a role that
+#: pins nothing. The interaction between the two has its own tests.
+
 RESUME_PROMPT = "carry on from where you stopped"
 
 
@@ -183,6 +191,7 @@ def pin_role(registry: AgentRegistry, name: str, effort: str) -> None:
             effort=effort,
         ),
         creating=True,
+        scope="global",
     )
 
 
@@ -322,12 +331,12 @@ async def test_a_member_tier_alone_uses_that_tiers_own_effort(tmp_path, monkeypa
         config, model_choice="model", models={"hi": {"model": BIRTH.model_id, "effort": "xhigh"}}
     )
     registry = TeamRegistry(config)
-    make_team(registry, "teamwork", [TeamMember(role="coder", tier="hi")])
+    make_team(registry, "teamwork", [TeamMember(role="worker", tier="hi")])
 
     stream = RecordingStream()
     session = make_session(tmp_path, registry, stream, team="teamwork")
     try:
-        await launch(session, stream, "tier-only", agent="coder")
+        await launch(session, stream, "tier-only", agent="worker")
         assert stream.effort_for("tier-only") == "xhigh"
     finally:
         await session.dispose()
@@ -349,7 +358,7 @@ async def test_auto_overrides_the_tier_map_effort_to_the_models_default(tmp_path
         registry,
         "teamwork",
         [
-            TeamMember(role="coder", tier="hi"),
+            TeamMember(role="worker", tier="hi"),
             TeamMember(role="reviewer", tier="hi", effort="auto"),
         ],
     )
@@ -357,7 +366,7 @@ async def test_auto_overrides_the_tier_map_effort_to_the_models_default(tmp_path
     stream = RecordingStream()
     session = make_session(tmp_path, registry, stream, team="teamwork")
     try:
-        await launch(session, stream, "inherit-the-map", agent="coder")
+        await launch(session, stream, "inherit-the-map", agent="worker")
         await launch(session, stream, "take-the-default", agent="reviewer")
         assert stream.effort_for("inherit-the-map") == "xhigh"
         assert stream.effort_for("take-the-default") == "medium"
@@ -376,12 +385,12 @@ async def test_the_launch_tier_beats_the_member_tier_and_the_member_effort_survi
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
     write_config(config, model_choice="model", models={"med": BIRTH.model_id, "hi": OTHER})
     registry = TeamRegistry(config)
-    make_team(registry, "teamwork", [TeamMember(role="coder", tier="hi", effort="high")])
+    make_team(registry, "teamwork", [TeamMember(role="worker", tier="hi", effort="high")])
 
     stream = RecordingStream()
     session = make_session(tmp_path, registry, stream, team="teamwork")
     try:
-        row = await launch(session, stream, "launch-wins", agent="coder", effort="med")
+        row = await launch(session, stream, "launch-wins", agent="worker", effort="med")
         assert row.model_label == BIRTH.model_id
         assert stream.effort_for("launch-wins") == "high"
     finally:
@@ -396,7 +405,7 @@ async def test_an_explicit_model_keeps_the_members_own_effort(tmp_path, monkeypa
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
     write_config(config, model_choice="model", models={"lo": LO})
     registry = TeamRegistry(config)
-    make_team(registry, "teamwork", [TeamMember(role="coder", effort="high")])
+    make_team(registry, "teamwork", [TeamMember(role="worker", effort="high")])
 
     stream = RecordingStream()
     session = make_session(tmp_path, registry, stream, team="teamwork")
@@ -418,7 +427,7 @@ async def test_an_explicit_model_keeps_the_members_own_effort(tmp_path, monkeypa
                 reasoning_default_effort="medium",
             ),
         )
-        await launch(session, stream, "explicit-model", agent="coder", model=OTHER)
+        await launch(session, stream, "explicit-model", agent="worker", model=OTHER)
         assert stream.model_for("explicit-model") == OTHER
         assert stream.effort_for("explicit-model") == "high"
     finally:
@@ -433,12 +442,12 @@ async def test_inherit_runs_on_the_parents_model_and_depth(tmp_path, monkeypatch
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
     write_config(config, model_choice="model", models={"hi": OTHER})
     registry = TeamRegistry(config)
-    make_team(registry, "teamwork", [TeamMember(role="coder", tier="hi", effort="low")])
+    make_team(registry, "teamwork", [TeamMember(role="worker", tier="hi", effort="low")])
 
     stream = RecordingStream()
     session = make_session(tmp_path, registry, stream, team="teamwork")
     try:
-        row = await launch(session, stream, "inherits", agent="coder", model="inherit")
+        row = await launch(session, stream, "inherits", agent="worker", model="inherit")
         assert stream.model_for("inherits") == f"{BIRTH.provider}/{BIRTH.model_id}"
         assert stream.effort_for("inherits") == BIRTH.reasoning_effort
         assert row.owns_model is False
@@ -455,13 +464,13 @@ async def test_a_member_tier_that_is_not_configured_refuses_the_launch(tmp_path,
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
     write_config(config, model_choice="model", models={"lo": LO})  # no `hi`
     registry = TeamRegistry(config)
-    make_team(registry, "teamwork", [TeamMember(role="coder", tier="hi")])
+    make_team(registry, "teamwork", [TeamMember(role="worker", tier="hi")])
 
     stream = RecordingStream()
     session = make_session(tmp_path, registry, stream, team="teamwork")
     try:
         with pytest.raises(SubagentModelUnavailable) as caught:
-            session._launch_subagent(label="child", prompt="go", agent="coder")
+            session._launch_subagent(label="child", prompt="go", agent="worker")
         assert caught.value.tier == "hi"
         assert "no model configured at subagents.models.hi" in caught.value.reason
         assert not session.jobs.list()
@@ -740,13 +749,23 @@ def test_a_bad_override_word_is_refused_on_every_write_path(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+async def _account_consent(_intent: Any) -> str:
+    """A host that approves account writes.
+
+    These tests exercise MODEL/EFFORT semantics on the account team store, not
+    the consent seam (which has its own tests); after LOH-9 S2 a tool write into
+    the account needs the host's consent, so the rig supplies it explicitly.
+    """
+    return "test-consent"
+
+
 @pytest.mark.asyncio
 async def test_a_members_update_keeps_the_overrides_and_inherit_clears_one(tmp_path, monkeypatch):
     """Plan A.8. ``members=`` replaces the roster wholesale, so a roster edit
     that silently dropped the overrides would put that child back on the model
     the operator moved it off. ``inherit`` is the way to take one off."""
     registry = TeamRegistry(tmp_path)
-    context = ToolContext(cwd=".", team_registry=registry)
+    context = ToolContext(cwd=".", team_registry=registry, authorize_durable_write=_account_consent)
     write_config(tmp_path, model_choice="model", models={"lo": LO, "hi": HI})
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
 
@@ -756,6 +775,7 @@ async def test_a_members_update_keeps_the_overrides_and_inherit_clears_one(tmp_p
             "op": "create",
             "name": "teamwork",
             "manager": "manager",
+            "scope": "global",
             "members": ["coder", "reviewer"],
             "overrides": [
                 {"member": "coder", "tier": "hi", "effort": "xhigh"},
@@ -770,7 +790,12 @@ async def test_a_members_update_keeps_the_overrides_and_inherit_clears_one(tmp_p
 
     updated = await execute_team(
         "tc",
-        {"op": "update", "name": "teamwork", "members": ["coder", "reviewer", "scout"]},
+        {
+            "op": "update",
+            "name": "teamwork",
+            "scope": "global",
+            "members": ["coder", "reviewer", "scout"],
+        },
         None,
         None,
         context,
@@ -834,11 +859,12 @@ async def test_the_team_tool_refuses_overrides_until_the_operator_delegates(tmp_
     shipped ``operator`` default a model cannot pin a member's model, and the
     refusal says who can."""
     registry = TeamRegistry(tmp_path)
-    context = ToolContext(cwd=".", team_registry=registry)
+    context = ToolContext(cwd=".", team_registry=registry, authorize_durable_write=_account_consent)
     args = {
         "op": "create",
         "name": "teamwork",
         "manager": "manager",
+        "scope": "global",
         "members": ["coder"],
         "overrides": [{"member": "coder", "tier": "hi"}],
     }
@@ -869,14 +895,14 @@ async def test_the_receipt_says_the_team_decided_the_model(tmp_path, monkeypatch
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
     write_config(config, model_choice="model", models={"hi": HI})
     registry = TeamRegistry(config)
-    make_team(registry, "teamwork", [TeamMember(role="coder", tier="hi")])
+    make_team(registry, "teamwork", [TeamMember(role="worker", tier="hi")])
 
     stream = RecordingStream()
     session = make_session(tmp_path, registry, stream, team="teamwork")
     try:
         result = await execute_task(
             "call-1",
-            {"context": "goal", "tasks": [{"label": "pinned", "prompt": "go", "agent": "coder"}]},
+            {"context": "goal", "tasks": [{"label": "pinned", "prompt": "go", "agent": "worker"}]},
             None,
             None,
             session._build_tool_context(),
@@ -1004,12 +1030,12 @@ async def test_the_team_tool_refuses_a_bad_override_word_on_both_ops(tmp_path, m
     something absurd.
     """
     registry = TeamRegistry(tmp_path)
-    context = ToolContext(cwd=".", team_registry=registry)
+    context = ToolContext(cwd=".", team_registry=registry, authorize_durable_write=_account_consent)
     write_config(tmp_path, model_choice="model", models={"hi": HI})
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
 
     async def call(**args: Any) -> Any:
-        return await execute_team("tc", args, None, None, context)
+        return await execute_team("tc", {**args, "scope": "global"}, None, None, context)
 
     created = await call(op="create", name="clean", manager="m", members=["worker"])
     assert not created.is_error, created.text
@@ -1143,6 +1169,7 @@ async def test_a_worker_of_a_settled_team_launch_manager_takes_the_managers_row_
             delegate=True,
         ),
         creating=True,
+        scope="global",
     )
     registry = TeamRegistry(config)
     make_team(registry, "pod", [TeamMember(role="worker")], manager="lead")
@@ -1211,3 +1238,88 @@ def test_a_bad_override_word_warns_once_per_team_and_value(tmp_path, caplog):
         TeamRegistry(config).list_teams()
         again = [r for r in caplog.records if "ignoring the override" in r.getMessage()]
         assert len(again) == 1, "the next read must not repeat it"
+
+
+# ---------------------------------------------------------------------------
+# the inherit sentinel against the roster: the absolute pin outranks the slot
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_roster_slot_tier_does_not_move_a_role_that_pins_the_session_model(
+    tmp_path, monkeypatch
+):
+    """The absolute pin outranks the roster too, and the roster is why.
+
+    A roster slot's ``tier`` is NOT a safe place to leave above the role's
+    pin, because the ``team`` tool lets a DELEGATING MODEL set one (the
+    ``overrides`` list, available whenever ``subagents.model_choice=model``).
+    A pin a model could move by writing the roster would not be a pin: the
+    role would run on whatever the delegating model last asked for, which is
+    the failure the sentinel exists to close.
+
+    So the precedence is: the role's own inherit pin > the launch tier > the
+    roster slot's tier > the role's own TIER pin. The roster is the operator's
+    layer for every other kind of pin, and it stays that way — what it cannot
+    do is move a role that has declared which model it must run on.
+    """
+    from local_operator.agent_profiles import install_seed
+
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_config(config, model_choice="model", models={"hi": HI})
+    agents = AgentRegistry(tmp_path / "agents")
+    # The PACKAGED seed is where the pin travels: the published definition of
+    # the role, and the only channel a teammate pulling it gets.
+    assert install_seed("coder", registry=agents, scope="global") is not None
+    registry = TeamRegistry(config)
+    make_team(registry, "pinned", [TeamMember(role="coder", tier="hi")])
+
+    stream = RecordingStream()
+    session = make_session(tmp_path, registry, stream, team="pinned", agents=agents)
+    try:
+        row = await launch(session, stream, "run-under-pinned", agent="coder")
+        assert row.model_label == f"{BIRTH.provider}/{BIRTH.model_id}"
+        # And the request itself, not only the label the row carries.
+        assert stream.model_for("run-under-pinned") == f"{BIRTH.provider}/{BIRTH.model_id}"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_receipt_names_the_role_not_the_team_for_an_inherit_pinned_slot(
+    tmp_path, monkeypatch
+):
+    """``[selection: role_inherit]`` — the layer that actually decided.
+
+    A receipt that said ``team`` would send an operator looking at the roster
+    for a setting that did not decide anything, and would hide the one that
+    did. The narrowness matters as much: a roster slot whose role pins an
+    ordinary TIER still reads ``team``, because the ordinary tier is the role's
+    DEFAULT and the roster is free to move it.
+    """
+    from local_operator.agent_profiles import install_seed
+
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_config(config, model_choice="model", models={"hi": HI})
+    agents = AgentRegistry(tmp_path / "agents")
+    assert install_seed("coder", registry=agents, scope="global") is not None
+    registry = TeamRegistry(config)
+    make_team(registry, "pinned", [TeamMember(role="coder", tier="hi")])
+
+    stream = RecordingStream()
+    session = make_session(tmp_path, registry, stream, team="pinned", agents=agents)
+    try:
+        result = await execute_task(
+            "call-1",
+            {"context": "goal", "tasks": [{"label": "pinned", "prompt": "go", "agent": "coder"}]},
+            None,
+            None,
+            session._build_tool_context(),
+        )
+        text = "".join(block.text for block in result.content if isinstance(block, TextContent))
+        assert "[selection: role_inherit]" in text
+        assert "[selection: team]" not in text
+    finally:
+        await session.dispose()

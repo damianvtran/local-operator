@@ -1,0 +1,818 @@
+wire.settings.agents.description | Whether installed starter roles (reviewer, coder, aida, ...) update themselves to the packaged text at launch when you have not edited them. Off = updates are still reported; apply them with 'lop agents sync'. | 已安装的初始角色（reviewer、coder、aida等）未被修改时，是否在启动时自动更新为随包文本。关闭时仍会报告更新；用'lop agents sync'应用。
+wire.settings.agents.title | Agents | 智能体
+wire.settings.agents_auto_update_seeds.choice.false.description | only tell me; I apply them | 只告知；由我应用
+wire.settings.agents_auto_update_seeds.choice.true.description | keep unedited built-ins current | 让未修改的内置角色保持最新
+wire.settings.agents_auto_update_seeds.help | At launch, update unedited built-ins; tool changes still ask. | 启动时更新未修改的内置角色；工具变更仍会询问。
+wire.settings.agents_auto_update_seeds.label | Auto-update built-in roles | 自动更新内置角色
+wire.settings.aida.description | Your chief of staff: her display name, and the proactive cadence — when she checks in, how much she may escalate, and the pause switch. The name applies everywhere at once; edits are read at her next action, and /aida pause|resume act immediately. | 你的幕僚长：她的显示名称，以及主动节奏——何时问候、可升级的幅度，以及暂停开关。名称随处即时生效；修改会在她下次动作时读取，/aida pause|resume则立即生效。
+wire.settings.aida.title | Aida | Aida
+wire.settings.aida_cadence_at.help | Local wall-clock HH:MM. An invalid value falls back to 08:30 at the next arm. | 本地壁钟时间HH:MM。无效值会在下次调度时回退为08:30。
+wire.settings.aida_cadence_at.label | Daily check-in time | 每日问候时间
+wire.settings.aida_cadence_at.placeholder | 08:30 | 08:30
+wire.settings.aida_cadence_max_extra_per_day.help | How many escalation check-ins she may arm per day. 0 disables escalation. | 她每天可安排多少次升级问候。0表示禁用升级。
+wire.settings.aida_cadence_max_extra_per_day.label | Extra check-ins / day | 每日额外问候次数
+wire.settings.aida_cadence_min_gap_minutes.help | Minimum spacing between her wakes; closer requests are refused. | 她两次唤醒之间的最小间隔；更近的请求会被拒绝。
+wire.settings.aida_cadence_min_gap_minutes.label | Minimum gap (minutes) | 最小间隔（分钟）
+wire.settings.aida_cadence_paused.choice.false.description | running | 运行中
+wire.settings.aida_cadence_paused.choice.true.description | paused | 已暂停
+wire.settings.aida_cadence_paused.help | Written by /aida pause|resume, which also hold her wakes; editing it here works the same way at her next tick. | 由/aida pause|resume写入，这两个命令也会暂缓她的唤醒；在此处修改会在她下次触发时同样生效。
+wire.settings.aida_cadence_paused.label | Cadence paused | 节奏已暂停
+wire.settings.aida_enabled.choice.false.description | disabled | 已禁用
+wire.settings.aida_enabled.choice.true.description | enabled | 已启用
+wire.settings.aida_enabled.help | Read at boot and by /aida; a disabled install never creates her session. | 启动时及/aida读取；禁用状态下的安装不会创建她的会话。
+wire.settings.aida_enabled.label | Chief of staff enabled | 启用幕僚长
+wire.settings.aida_name.help | What she is called everywhere. Renaming her conversation or /aida rename <name> updates it. | 她在各处的称呼。重命名她的对话或执行/aida rename <name>都会更新它。
+wire.settings.aida_name.label | Display name | 显示名称
+wire.settings.aida_name.placeholder | Aida | Aida
+wire.settings.aida_onboarding_nudge_days.help | How rarely she may nudge about setting up an integration. Read from the onboarding slice. | 她可以间隔多少天才提醒一次设置集成。从新手引导配置段读取。
+wire.settings.aida_onboarding_nudge_days.label | Integration nudge interval (days) | 集成提醒间隔（天）
+wire.settings.appearance.description | Theme and the terminal features the TUI is allowed to use. | 主题，以及TUI可以使用的终端功能。
+wire.settings.appearance.title | Appearance | 外观
+wire.settings.approvals.description | Whether write and command tools prompt, in every running session. A config write tightens every running session at once; loosening one needs a write from that session's own process (/approvals auto in it, or a /settings page in that process). | 写入类与命令类工具是否在每个运行中的会话里弹出询问。一次配置写入会同时收紧所有运行中的会话；要放宽某个会话，需要从该会话自身进程写入（在其中执行/approvals auto，或在该进程的/settings页面操作）。
+wire.settings.approvals.title | Approvals | 审批
+wire.settings.asks.description | Questions an agent queues for you. A change applies at once in the terminal, the desktop app and on your phone. | 智能体为你排队提交的问题。更改会立即在终端、桌面应用和手机上生效。
+wire.settings.asks.title | Asks | 提问
+wire.settings.asks_lapsed_visible_for.choice.1h.description | hidden 1 hour after its deadline | 截止时间过后1小时隐藏
+wire.settings.asks_lapsed_visible_for.choice.1h.label | 1 hour | 1小时
+wire.settings.asks_lapsed_visible_for.choice.24h.description | hidden 24 hours after its deadline | 截止时间过后24小时隐藏
+wire.settings.asks_lapsed_visible_for.choice.24h.label | 24 hours | 24小时
+wire.settings.asks_lapsed_visible_for.choice.7d.description | hidden 7 days after its deadline (default) | 截止时间过后7天隐藏（默认）
+wire.settings.asks_lapsed_visible_for.choice.7d.label | 7 days | 7天
+wire.settings.asks_lapsed_visible_for.choice.at_expiry.description | hidden as soon as it times out | 超时即隐藏
+wire.settings.asks_lapsed_visible_for.choice.at_expiry.label | gone at expiry | 到期即隐藏
+wire.settings.asks_lapsed_visible_for.help | How long an unanswered ask stays shown past its deadline. | 未回答的提问在截止时间过后继续显示多久。
+wire.settings.asks_lapsed_visible_for.label | Show timed-out asks for | 超时提问显示时长
+wire.settings.auto_save_conversation.choice.false.description | save on request | 按需保存
+wire.settings.auto_save_conversation.choice.true.description | save automatically | 自动保存
+wire.settings.auto_save_conversation.help | Headless REPL launches only; the TUI's runtime does not read it. | 仅适用于无界面REPL启动；TUI运行时不会读取此项。
+wire.settings.auto_save_conversation.label | Auto-save conversation | 自动保存对话
+wire.settings.bash_memory_enabled.choice.false.description | no ceiling | 无上限
+wire.settings.bash_memory_enabled.choice.true.description | cap command memory | 限制命令内存
+wire.settings.bash_memory_enabled.help | Give every bash command a RAM ceiling. A command whose process group crosses it is killed (its group only, never lop) so it cannot take the device down; the model is told to use less memory. | 为每条bash命令设置内存上限。进程组超过上限的命令会被终止（只终止其进程组，绝不终止lop），以免拖垮设备；模型会被告知改用更少内存。
+wire.settings.bash_memory_enabled.label | Command memory limit | 命令内存限制
+wire.settings.bash_memory_limit_mb.help | The ceiling when 'manual' is selected above. 0 means use the auto ceiling instead, so leaving this at 0 never disables the guard. | 选中'manual'时使用的上限。0表示改用自动上限，因此保持为0不会禁用防护。
+wire.settings.bash_memory_limit_mb.label | Manual ceiling (MB) | 手动上限（MB）
+wire.settings.bash_memory_mode.choice.auto.description | derive from available memory (default) | 根据可用内存推导（默认）
+wire.settings.bash_memory_mode.choice.auto.label | auto | auto
+wire.settings.bash_memory_mode.choice.manual.description | use the limit_mb below | 使用下方的limit_mb
+wire.settings.bash_memory_mode.choice.manual.label | manual | manual
+wire.settings.bash_memory_mode.help | 'auto' derives the ceiling from the memory this device has free right now, so it tightens on its own when the machine is busy. 'manual' pins it to the number below. | 'auto'根据本设备当前空闲内存推导上限，机器繁忙时会自行收紧。'manual'则固定为下方的数值。
+wire.settings.bash_memory_mode.label | Ceiling source | 上限来源
+wire.settings.bash_memory_soft_fraction.help | Fraction of the ceiling at which one advisory line is emitted. It is only an advisory — userspace cannot slow an allocation — so it warns before the kill, it does not prevent it. | 输出那行建议时所处的上限占比。它只是建议——用户态无法减缓内存分配——所以只在终止前警告，并不能阻止终止。
+wire.settings.bash_memory_soft_fraction.label | Advisory threshold | 建议阈值
+wire.settings.bash_query_budget_enabled.choice.false.description | no budget | 无预算
+wire.settings.bash_query_budget_enabled.choice.true.description | time-box shell queries | 为shell查询设定时限
+wire.settings.bash_query_budget_enabled.help | Time-box a shell `grep`/`find`/`du` walk that reads the filesystem rather than a scoped file: one advisory at 10 s, then a stop at the budget below. Builds, installs and test runs are never affected. | 为读取文件系统（而非限定文件）的shell `grep`/`find`/`du`遍历设定时限：10秒时给出一行建议，达到下方预算后停止。构建、安装与测试运行不受影响。
+wire.settings.bash_query_budget_enabled.label | Shell query budget | shell查询预算
+wire.settings.bash_query_budget_seconds.help | Wall-clock budget for one shell query. The advisory fires at 10 s whatever this says; this is the stop. A per-command prefix of LOCAL_OPERATOR_ALLOW_SLOW_QUERY=1 skips the stop for a justified run. | 单次shell查询的壁钟预算。无论此值如何，建议都会在10秒时触发；这里设定的是停止时间。以LOCAL_OPERATOR_ALLOW_SLOW_QUERY=1作为单条命令的前缀，可为有正当理由的运行跳过停止。
+wire.settings.bash_query_budget_seconds.label | Budget (seconds) | 预算（秒）
+wire.settings.bash_query_budget_stop.choice.false.description | advisory only | 仅建议
+wire.settings.bash_query_budget_stop.choice.true.description | stop the query | 停止查询
+wire.settings.bash_query_budget_stop.help | On: a query that crosses the budget is killed and told why. Off: it runs to completion and only the advisory is shown, so an operator can watch before enforcing. | 开：超出预算的查询会被终止并说明原因。关：查询运行到底，只显示建议，便于操作员先观察再强制执行。
+wire.settings.bash_query_budget_stop.label | ...stop rather than warn | ……停止而非警告
+wire.settings.bash_shell.help | Interpreter for the bash tool. Empty uses bash on PATH, else /bin/sh. | bash工具的解析器。留空使用PATH里的bash，否则使用/bin/sh。
+wire.settings.bash_shell.help.windows | Interpreter for the bash tool. Empty: bash on PATH, else Git's bash.exe. | bash工具的解析器。留空：PATH里的bash，否则Git的bash.exe。
+wire.settings.bash_shell.label | Bash interpreter | bash解释器
+wire.settings.bool.off | off | 关
+wire.settings.bool.on | on | 开
+wire.settings.classification.description | Advisory skills, guides and MCP servers a decision model may suggest per message. Off keeps the prompt unchanged. | 决策模型可为每条消息建议的辅助技能、指南与MCP服务器。关闭时提示词保持不变。
+wire.settings.classification.title | Smart hints | 智能提示
+wire.settings.classification_auto.choice.false.description | the prompt stays exactly as it is | 提示词完全保持原样
+wire.settings.classification_auto.choice.true.description | a decision model may add advisory resources | 决策模型可以添加建议性资源
+wire.settings.classification_auto.help | On: a decision model may add advisory resources. Off: the prompt is unchanged. | 开：决策模型可以添加建议性资源。关：提示词保持不变。
+wire.settings.classification_auto.label | Smart hints | 智能提示
+wire.settings.classification_maxcandidates.help | Needs recommendations on. Candidates per kind; 0 uses 12. | 需开启智能提示。每种类型的候选数；0表示用12。
+wire.settings.classification_maxcandidates.label | ↳ max candidates | ↳ 候选数上限
+wire.settings.classification_maxrecommendations.help | Needs recommendations on. Per-message resources; 0 uses 3. | 需开启智能提示。每条消息的资源数；0表示用3。
+wire.settings.classification_maxrecommendations.label | ↳ max recommendations | ↳ 推荐数上限
+wire.settings.classification_maxstatechars.help | Needs recommendations on. State cap; 0 uses 6000 chars. | 需开启智能提示。状态上限；0表示用6000字符。
+wire.settings.classification_maxstatechars.label | ↳ max state chars | ↳ 状态字符上限
+wire.settings.classification_model.help | Needs recommendations on. Vendor model id; empty uses its default. | 需开启智能提示。提供商的模型ID；留空使用其默认值。
+wire.settings.classification_model.label | ↳ model | ↳ 模型
+wire.settings.classification_notice.help | Deprecated. Smart hints is silent in the chat; the call is in the log. | 已弃用。智能提示在对话中静默；调用记录见日志。
+wire.settings.classification_notice.label | Smart hints notice | 智能提示通知
+wire.settings.classification_timeoutms.help | Needs recommendations on. Per-call deadline; 0 uses 1500 ms. | 需开启智能提示。每次调用的截止时间；0表示用1500毫秒。
+wire.settings.classification_timeoutms.label | ↳ deadline (ms) | ↳ 截止时间（毫秒）
+wire.settings.classification_vendor.choice.auto.description | first leg with a usable credential | 第一个拥有可用凭据的环节
+wire.settings.classification_vendor.choice.auto.label | auto | auto
+wire.settings.classification_vendor.choice.openrouter.description | OpenRouter's alpha decisions route | OpenRouter的alpha决策路由
+wire.settings.classification_vendor.choice.openrouter.label | openrouter | openrouter
+wire.settings.classification_vendor.choice.radient.description | Radient's decision route | Radient的决策路由
+wire.settings.classification_vendor.choice.radient.label | radient | radient
+wire.settings.classification_vendor.choice.typesafe.description | TypeSafe's Jev endpoint | TypeSafe的Jev endpoint
+wire.settings.classification_vendor.choice.typesafe.label | typesafe | typesafe
+wire.settings.classification_vendor.help | Needs recommendations on. Pin one leg; auto prefers Radient. | 需开启智能提示。固定一个环节；auto优先Radient。
+wire.settings.classification_vendor.label | ↳ vendor | ↳ 厂商
+wire.settings.classification_waitms.help | Needs recommendations on. How long a turn waits; 0 uses 50 ms. | 需开启智能提示。一个回合的等待时长；0表示用50毫秒。
+wire.settings.classification_waitms.label | ↳ wait budget (ms) | ↳ 等待预算（毫秒）
+wire.settings.compaction.description | When the conversation is summarised to reclaim context. | 何时对对话做摘要以回收上下文。
+wire.settings.compaction.title | Compaction | 压缩
+wire.settings.compaction_auto_continue.choice.false.description | stop after the pass | 这次压缩后停止
+wire.settings.compaction_auto_continue.choice.true.description | continue automatically | 自动继续
+wire.settings.compaction_auto_continue.help | Schedule a continuation prompt after a successful post-turn pass. | 回合后压缩成功时，安排一条继续提示词。
+wire.settings.compaction_auto_continue.label | Continue after compaction | 压缩后继续
+wire.settings.compaction_enabled.choice.false.description | never compact | 从不压缩
+wire.settings.compaction_enabled.choice.true.description | compact automatically | 自动压缩
+wire.settings.compaction_enabled.help | Summarise older history when the context fills. | 上下文占满时对较早历史做摘要。
+wire.settings.compaction_enabled.label | Compaction | 压缩
+wire.settings.compaction_keep_recent_tokens.help | Recent history kept verbatim across a pass. | 每次压缩时原样保留的近期历史。
+wire.settings.compaction_keep_recent_tokens.label | Keep recent tokens | 保留最近token
+wire.settings.compaction_mid_turn_enabled.choice.false.description | only between turns | 仅在回合之间
+wire.settings.compaction_mid_turn_enabled.choice.true.description | compact mid-turn | 在回合中途压缩
+wire.settings.compaction_mid_turn_enabled.help | Allow a pass at safe tool-loop boundaries, not only between turns. | 允许在工具循环的安全边界处压缩，而不仅限回合之间。
+wire.settings.compaction_mid_turn_enabled.label | Mid-turn compaction | 回合中压缩
+wire.settings.compaction_strategy.choice.auto.description | snapcompact for vision models, else context-full | 视觉模型用snapcompact，否则用context-full
+wire.settings.compaction_strategy.choice.auto.label | auto | auto
+wire.settings.compaction_strategy.choice.context_full.description | summarise the whole context | 对整个上下文做摘要
+wire.settings.compaction_strategy.choice.context_full.label | context-full | context-full
+wire.settings.compaction_strategy.choice.off.description | disable the pass | 禁用压缩
+wire.settings.compaction_strategy.choice.off.label | off | 关闭
+wire.settings.compaction_strategy.choice.snapcompact.description | snapshot-based, keeps images out | 基于快照，排除图像
+wire.settings.compaction_strategy.choice.snapcompact.label | snapcompact | snapcompact
+wire.settings.compaction_strategy.help | Which mechanism compacts. Auto picks per model. | 使用哪种压缩机制。auto按模型选择。
+wire.settings.compaction_strategy.label | Strategy | 策略
+wire.settings.compaction_threshold_percent.help | Percentage trigger. 0.80 and 80 both mean 80%. | 百分比触发条件。0.80和80都表示80%。
+wire.settings.compaction_threshold_percent.label | Threshold (% of window) | 阈值（窗口百分比）
+wire.settings.compaction_threshold_tokens.help | Absolute trigger. The smaller of this and the percentage wins. | 绝对触发条件。此值与百分比中较小者生效。
+wire.settings.compaction_threshold_tokens.label | Threshold (tokens) | 阈值（token）
+wire.settings.compaction_wire_bytes_budget.help | Hard ceiling on the request. Older screenshots are dropped from the context (never from the transcript) to stay under it. 0 disables. | 请求的硬性上限。为保持在限内，较早的截图会从上下文中丢弃（绝不从记录中丢弃）。0表示禁用。
+wire.settings.compaction_wire_bytes_budget.label | Request size limit (bytes) | 请求大小上限（字节）
+wire.settings.compaction_wire_bytes_trigger.help | Compact once the request passes this size, so a screenshot-heavy session summarises early instead of dropping frames. 0 disables. | 请求超过此大小即压缩，让截图密集的会话提早摘要，而不是丢弃画面。0表示禁用。
+wire.settings.compaction_wire_bytes_trigger.label | Request size trigger (bytes) | 请求大小触发值（字节）
+wire.settings.conversation_length.help | Deprecated. Superseded by the compaction engine. | 已弃用。已被压缩引擎取代。
+wire.settings.conversation_length.label | Conversation length | 对话长度
+wire.settings.desktop.description | Where a notification click sends you when the desktop app is not running. | 桌面应用未运行时，点击通知会把你送到哪里。
+wire.settings.desktop.title | Desktop app | 桌面应用
+wire.settings.desktop_launch_command.help | Empty = discover the app (local-operator-ui, then the macOS app). '{'session'}' is the session id. | 留空则自动发现应用（先local-operator-ui，再macOS应用）。'{'session'}'为会话ID。
+wire.settings.desktop_launch_command.label | launch command | 启动命令
+wire.settings.desktop_launch_command.placeholder | local-operator-ui --open-session '{'session'}' | local-operator-ui --open-session '{'session'}'
+wire.settings.detail_length.help | Deprecated. Superseded by the compaction engine. | 已弃用。已被压缩引擎取代。
+wire.settings.detail_length.label | Detail length | 详情长度
+wire.settings.display_comfortable_rows.choice.false.description | compact, more history | 紧凑，可容纳更多历史
+wire.settings.display_comfortable_rows.choice.true.description | padded, easier to click | 留白更多，更易点击
+wire.settings.display_comfortable_rows.help | Pad tool and prompt rows so they are easier to click. | 为工具行与提示词行增加留白，使其更易点击。
+wire.settings.display_comfortable_rows.label | Comfortable action rows | 宽松的操作行
+wire.settings.display_composer_band.choice.false.description | hide it | 隐藏
+wire.settings.display_composer_band.choice.true.description | show the band | 显示状态栏
+wire.settings.display_composer_band.help | Also the standing alerts. Model, dir, context, cost, rate, elapsed. | 也包括常驻告警。模型、目录、上下文、费用、速率、耗时。
+wire.settings.display_composer_band.label | Status band | 状态栏
+wire.settings.display_composer_chevron.choice.false.description | hide it | 隐藏
+wire.settings.display_composer_chevron.choice.true.description | show the mark | 显示标记
+wire.settings.display_composer_chevron.help | The prompt mark at the left edge of the input row. | 输入行左缘的提示符标记。
+wire.settings.display_composer_chevron.label | Prompt chevron | 提示符箭头
+wire.settings.display_composer_context.choice.false.description | hide it | 隐藏
+wire.settings.display_composer_context.choice.true.description | show context usage | 显示上下文用量
+wire.settings.display_composer_context.help | The context-usage segment in the status band. | 状态栏中的上下文用量段。
+wire.settings.display_composer_context.label | Band: context | 状态栏：上下文
+wire.settings.display_composer_cost.choice.false.description | hide it | 隐藏
+wire.settings.display_composer_cost.choice.true.description | show the cost | 显示费用
+wire.settings.display_composer_cost.help | The session-cost segment in the status band. | 状态栏中的会话费用段。
+wire.settings.display_composer_cost.label | Band: session cost | 状态栏：会话费用
+wire.settings.display_composer_cwd.choice.false.description | hide it | 隐藏
+wire.settings.display_composer_cwd.choice.true.description | show the directory | 显示目录
+wire.settings.display_composer_cwd.help | The working-directory segment in the status band. | 状态栏中的工作目录段。
+wire.settings.display_composer_cwd.label | Band: working dir | 状态栏：工作目录
+wire.settings.display_composer_duration.choice.false.description | hide it | 隐藏
+wire.settings.display_composer_duration.choice.true.description | show the elapsed time | 显示耗时
+wire.settings.display_composer_duration.help | The elapsed-time segment in the status band. | 状态栏中的耗时段。
+wire.settings.display_composer_duration.label | Band: elapsed | 状态栏：耗时
+wire.settings.display_composer_model.choice.false.description | hide it | 隐藏
+wire.settings.display_composer_model.choice.true.description | show the model | 显示模型
+wire.settings.display_composer_model.help | The model-label segment in the status band. | 状态栏中的模型名称段。
+wire.settings.display_composer_model.label | Band: model | 状态栏：模型
+wire.settings.display_composer_rate.choice.false.description | hide it | 隐藏
+wire.settings.display_composer_rate.choice.true.description | show the rate | 显示速率
+wire.settings.display_composer_rate.help | The tok/s segment — the last completed call's throughput. | tok/s段：最近一次完成调用的吞吐量。
+wire.settings.display_composer_rate.label | Band: decode rate | 状态栏：解码速率
+wire.settings.display_dock.choice.full.description | one row per child, newest first | 每个子智能体一行，最新在前
+wire.settings.display_dock.choice.full.label | full | 完整
+wire.settings.display_dock.choice.hidden.description | not shown | 不显示
+wire.settings.display_dock.choice.hidden.label | hidden | 隐藏
+wire.settings.display_dock.choice.summary.description | a one-line count | 一行计数
+wire.settings.display_dock.choice.summary.label | summary | 摘要
+wire.settings.display_dock.help | How much room the subagent panel takes when a session starts; ctrl+g cycles it. | 会话启动时子智能体面板占多大空间；ctrl+g循环切换。
+wire.settings.display_dock.label | Subagent dock | 子智能体面板
+wire.settings.display_heading_markers.choice.false.description | colour and weight only | 仅靠颜色与字重
+wire.settings.display_heading_markers.choice.true.description | show ### markers | 显示###标记
+wire.settings.display_heading_markers.help | Show the literal ### before a heading, as the markdown source writes it. | 在标题前显示字面量###，即markdown源码的写法。
+wire.settings.display_heading_markers.label | Heading markers | 标题标记
+wire.settings.display_hide_cross_session.choice.false.description | show new; reopen to re-read | 显示新内容；重新打开以重读
+wire.settings.display_hide_cross_session.choice.true.description | hide new; reopen to re-read | 隐藏新内容；重新打开以重读
+wire.settings.display_hide_cross_session.help | Hide lop send traffic and inbound peer messages from transcripts. | 从会话记录中隐藏lop send流量与入站对等消息。
+wire.settings.display_hide_cross_session.label | Hide cross-session traffic | 隐藏跨会话流量
+wire.settings.display_images.choice.false.description | text receipts only | 仅文字回执
+wire.settings.display_images.choice.true.description | draw images | 绘制图像
+wire.settings.display_images.help | Screenshots and attachments drawn in the transcript. | 截图与附件会绘制在会话记录中。
+wire.settings.display_images.label | Inline images | 内嵌图像
+wire.settings.display_narration.choice.false.description | hide narration once tools run | 工具运行后隐藏叙述
+wire.settings.display_narration.choice.true.description | keep narration | 保留叙述
+wire.settings.display_narration.help | Keep the agent's mid-turn narration in the transcript after its tool calls run. | 智能体的工具调用运行后，在会话记录中保留其回合中叙述。
+wire.settings.display_narration.label | Mid-turn narration | 回合中叙述
+wire.settings.display_nerd_icons.choice.false.description | force plain icons | 强制使用普通图标
+wire.settings.display_nerd_icons.choice.false.label | off | 关
+wire.settings.display_nerd_icons.choice.none.description | decide from the terminal emulator | 由终端模拟器决定
+wire.settings.display_nerd_icons.choice.none.label | auto | auto
+wire.settings.display_nerd_icons.choice.true.description | force glyphs on | 强制启用字形
+wire.settings.display_nerd_icons.choice.true.label | on | 开
+wire.settings.display_nerd_icons.help | Expanded tool-row icons. Auto reads the terminal emulator's markers. | 展开的工具行图标。auto读取终端模拟器的标记。
+wire.settings.display_nerd_icons.label | Nerd Font glyphs | Nerd Font字形
+wire.settings.display_notification_session_name.choice.false.description | keep names off banners | 横幅上不出现名称
+wire.settings.display_notification_session_name.choice.true.description | name the session | 在横幅中标注会话名
+wire.settings.display_notification_session_name.help | A session's name, last line and error causes appear on banners, including the lock screen. | 会话名称、最后一行与错误原因会出现在横幅上，锁屏界面也包括在内。
+wire.settings.display_notification_session_name.label | Notification session names | 通知中的会话名称
+wire.settings.display_notifications.choice.false.description | never notify | 从不通知
+wire.settings.display_notifications.choice.true.description | notify when unfocused | 未聚焦时通知
+wire.settings.display_notifications.help | Fires only while the terminal is unfocused. | 仅在终端未聚焦时触发。
+wire.settings.display_notifications.label | Desktop notifications | 桌面通知
+wire.settings.display_rail.choice.false.description | no rail | 无竖线
+wire.settings.display_rail.choice.true.description | rail the answer only | 只为回答画线
+wire.settings.display_rail.help | A rule marks the ANSWER: the message that ends the turn. Mid-turn narration takes no rail. | 细线标记“回答”：即结束回合的那条消息。回合中叙述不画线。
+wire.settings.display_rail.label | Assistant gutter rail | 助手侧边线
+wire.settings.display_reasoning.choice.false.description | hide reasoning | 隐藏推理
+wire.settings.display_reasoning.choice.true.description | show live reasoning | 实时显示推理
+wire.settings.display_reasoning.help | Show the model's private thinking while it streams; it vanishes once the thinking ends. | 模型流式输出时实时显示其内部思考；思考结束后即消失。
+wire.settings.display_reasoning.label | Live model reasoning | 实时模型推理
+wire.settings.display_shimmer.choice.false.description | static working line | 静态工作行
+wire.settings.display_shimmer.choice.true.description | animate the working line | 为工作行添加动画
+wire.settings.display_shimmer.help | The animated sheen on the working line. | 工作行上的动态光泽。
+wire.settings.display_shimmer.label | Shimmer animation | 流光动画
+wire.settings.display_terminal_title.choice.false.description | leave the title alone | 不修改标题
+wire.settings.display_terminal_title.choice.true.description | set the window title | 设置窗口标题
+wire.settings.display_terminal_title.help | OSC 0 window title carrying the session name and run state. | 通过OSC 0设置窗口标题，携带会话名称与运行状态。
+wire.settings.display_terminal_title.label | Terminal title | 终端标题
+wire.settings.display_time_format.choice.12h.description | 7:52 PM PDT | 7:52 PM PDT
+wire.settings.display_time_format.choice.12h.label | 12-hour | 12小时制
+wire.settings.display_time_format.choice.24h.description | 19:52 PDT | 19:52 PDT
+wire.settings.display_time_format.choice.24h.label | 24-hour | 24小时制
+wire.settings.display_time_format.help | Scheduled wake times use your local timezone. Choose a 12- or 24-hour clock. | 定时唤醒时间使用你的本地时区。选择12或24小时制。
+wire.settings.display_time_format.label | Wake time format | 唤醒时间格式
+wire.settings.display_turn_answer_rail.choice.false.description | no rule beside the answer | 回答旁不画线
+wire.settings.display_turn_answer_rail.choice.true.description | rule beside the closing answer | 在收尾回答旁画线
+wire.settings.display_turn_answer_rail.help | Draw a thin rule beside the answer that closes a turn (desktop app). | 在结束回合的回答旁画一条细线（桌面应用）。
+wire.settings.display_turn_answer_rail.label | Mark the turn answer | 标记回合回答
+wire.settings.failover.description | What happens when a provider call fails or a quota runs out. | 提供商调用失败或配额用尽时会发生什么。
+wire.settings.failover.title | Failover and retry | 故障转移与重试
+wire.settings.fork.description | Where /fork opens the branched conversation. | /fork在哪里打开分叉出的对话。
+wire.settings.fork.title | Fork | 分叉
+wire.settings.fork_cmux_placement.choice.surface.description | a tab in the current workspace | 当前工作区中的一个标签页
+wire.settings.fork_cmux_placement.choice.surface.label | new surface | 新surface
+wire.settings.fork_cmux_placement.choice.workspace.description | a sidebar row of its own | 侧边栏中独立的一行
+wire.settings.fork_cmux_placement.choice.workspace.label | new workspace | 新工作区
+wire.settings.fork_cmux_placement.help | Under cmux, whether a fork gets its own workspace or a surface here. | 在cmux下，分叉是获得自己的新工作区，还是在此处作为一个surface打开。
+wire.settings.fork_cmux_placement.label | Where it opens under cmux | 在cmux下的打开位置
+wire.settings.fork_mode.choice.switch.description | follow the fork here; return with /resume | 在此处跟随分叉；用/resume返回
+wire.settings.fork_mode.choice.switch.label | this terminal | 此终端
+wire.settings.fork_mode.choice.window.description | open the fork elsewhere; this session keeps running | 在别处打开分叉；本会话继续运行
+wire.settings.fork_mode.choice.window.label | new window | 新窗口
+wire.settings.fork_mode.help | Choose where the fork opens; unfinished work stays in the original. | 选择分叉打开的位置；未完成的工作保留在原处。
+wire.settings.fork_mode.label | Where a fork opens | 分叉打开位置
+wire.settings.hooks.description | Run native and forwarded Claude Code / Codex PostToolUse hooks. | 运行原生与转发的Claude Code / Codex PostToolUse钩子。
+wire.settings.hooks.title | Hooks | 钩子
+wire.settings.hooks_forward_claude.help | Run PostToolUse hooks from ~/.claude and plugins after each tool call. | 每次工具调用后，运行来自~/.claude与插件的PostToolUse钩子。
+wire.settings.hooks_forward_claude.label | Forward Claude Code hooks | 转发Claude Code钩子
+wire.settings.hooks_forward_codex.help | Run PostToolUse hooks from ~/.codex/hooks.json after each tool call. | 每次工具调用后，运行~/.codex/hooks.json中的PostToolUse钩子。
+wire.settings.hooks_forward_codex.label | Forward Codex hooks | 转发Codex钩子
+wire.settings.hooks_native.help | Run hooks from hooks.json in the lop config dir after each tool call. | 每次工具调用后，运行lop配置目录中hooks.json里的钩子。
+wire.settings.hooks_native.label | Native hooks | 原生钩子
+wire.settings.hosting.help | Provider for new conversations. /model saved adopts it here. | 新对话使用的提供商。/model saved会把它采纳到此处。
+wire.settings.hosting.label | Default provider | 默认提供商
+wire.settings.hub.description | Keep agents and teams you pulled from the Agent Hub current: whether updates are merged in automatically, how often the hub is checked, and which model resolves a conflict. Your edits and deletions are merged, never overwritten. | 让你从Agent Hub pull来的智能体与团队保持最新：更新是否自动merge、多久检查一次hub、由哪个模型解决冲突。你的修改与删除会被merge，绝不会被覆盖。
+wire.settings.hub.title | Agent Hub | Agent Hub
+wire.settings.hub_auto_update_agents.choice.false.description | only tell me; I apply them | 只告知；由我应用
+wire.settings.hub_auto_update_agents.choice.true.description | merge hub updates automatically | 自动merge hub更新
+wire.settings.hub_auto_update_agents.help | Merge hub updates into pulled agents automatically. | 自动把hub更新merge进已pull的智能体。
+wire.settings.hub_auto_update_agents.label | Auto-update agents | 自动更新智能体
+wire.settings.hub_auto_update_teams.choice.false.description | only tell me; I apply them | 只告知；由我应用
+wire.settings.hub_auto_update_teams.choice.true.description | merge hub updates automatically | 自动merge hub更新
+wire.settings.hub_auto_update_teams.help | Merge hub updates into pulled teams automatically. | 自动把hub更新merge进已pull的团队。
+wire.settings.hub_auto_update_teams.label | Auto-update teams | 自动更新团队
+wire.settings.hub_check_interval_min.help | Minutes between hub update checks (both modes). | 两次hub更新检查之间的分钟数（两种模式）。
+wire.settings.hub_check_interval_min.label | Check interval (minutes) | 检查间隔（分钟）
+wire.settings.keymap.description | Keys for starting and resuming conversations. Press enter on a row, then press the key you want. | 用于开始与恢复对话的按键。在一行上按enter，然后按下你想要的键。
+wire.settings.keymap.title | Hotkeys | 快捷键
+wire.settings.language.help | Interface language. auto follows your operating system, falling back to English. | 界面语言。auto跟随操作系统，回退为英语。
+wire.settings.language.label | Language | 语言
+wire.settings.librarian.description | The Librarian keeps the global Library organised: her display name, the daily pass, and the pause switch. The Library is long-term and shared by every conversation. | Librarian负责整理所有会话共享的长期资料库：在此设置她的显示名称、每日整理和暂停开关。
+wire.settings.librarian.title | Librarian | Librarian
+wire.settings.librarian_cadence_at.help | Local wall-clock HH:MM. An invalid value falls back to 03:30 at the next arm. | 本地时间，格式为HH:MM。值无效时，下次安排定时任务会回退到03:30。
+wire.settings.librarian_cadence_at.label | Daily pass time | 每日整理时间
+wire.settings.librarian_cadence_at.placeholder | 03:30 | 03:30
+wire.settings.librarian_cadence_max_extra_per_day.help | How many extra passes she may request per day. 0 disables extra passes. | 她每天可请求的额外整理次数。0表示禁用额外整理。
+wire.settings.librarian_cadence_max_extra_per_day.label | Extra passes / day | 每日额外整理次数
+wire.settings.librarian_cadence_min_gap_minutes.help | Minimum spacing between her passes; closer requests are refused. | 两次整理之间的最短间隔；间隔不足的请求会被拒绝。
+wire.settings.librarian_cadence_min_gap_minutes.label | Minimum gap (minutes) | 最短间隔（分钟）
+wire.settings.librarian_cadence_paused.choice.false.description | running | 运行中
+wire.settings.librarian_cadence_paused.choice.true.description | paused | 已暂停
+wire.settings.librarian_cadence_paused.help | Pausing removes her scheduled rows; resuming re-arms the next pass. The desktop and /librarian write the same key. | 暂停会移除她的定时任务条目；恢复会重新安排下次整理。桌面应用和/librarian写入同一配置键。
+wire.settings.librarian_cadence_paused.label | Daily pass paused | 暂停每日整理
+wire.settings.librarian_enabled.choice.false.description | disabled | 已禁用
+wire.settings.librarian_enabled.choice.true.description | enabled | 已启用
+wire.settings.librarian_enabled.help | Read at boot and by /v1/desktop/librarian; a disabled install never creates her session. | 启动时及/v1/desktop/librarian会读取此设置；禁用后绝不会创建她的会话。
+wire.settings.librarian_enabled.label | Librarian enabled | 启用Librarian
+wire.settings.librarian_name.help | The name her pinned conversation and every receipt use. | 她的置顶会话和所有回执使用的名称。
+wire.settings.librarian_name.label | Display name | 显示名称
+wire.settings.librarian_name.placeholder | Librarian | Librarian
+wire.settings.local_providers.base_url.help | HTTP(S) API root. Changing servers requires a new token through /login; existing tokens are never forwarded to another endpoint. | HTTP(S) API根地址。变更服务器需要经/login获取新令牌；现有令牌绝不会转发到其他endpoint。
+wire.settings.local_providers.base_url.label | {name} endpoint | {name}的endpoint
+wire.settings.local_providers.description | Server endpoints and exact-model metadata. Use /login to connect; reselect with /model saved to apply model changes. | 服务器endpoint与精确模型元数据。用/login连接；用/model saved重新选择以应用模型变更。
+wire.settings.local_providers.models.help | JSON: '{'"model-id":'{'"context_window":8192'}''}'; server limits still apply. | JSON：'{'"model-id":'{'"context_window":8192'}''}'；仍受服务器限制。
+wire.settings.local_providers.models.label | {name} model overrides | {name}的模型覆盖
+wire.settings.local_providers.title | Local servers | 本地服务器
+wire.settings.max_learnings_history.help | Deprecated. Superseded by the compaction engine. | 已弃用。已被压缩引擎取代。
+wire.settings.max_learnings_history.label | Max learnings history | 学习历史上限
+wire.settings.memory_guard.description | A per-command RAM ceiling, so one oversized command is killed instead of taking the whole device down. | 逐命令的内存上限，让某条过大命令被终止，而不是拖垮整台设备。
+wire.settings.memory_guard.title | Command memory limit | 命令内存限制
+wire.settings.mesh_updates.description | The roll that follows a local update: after `lop update` moves this device to a newer build, every other active member is asked to move to the same build — one at a time, each waiting for that member to go idle, never forced. A member that has not granted this device `update` is skipped, by name, with the remedy. Takes effect at once: the next update uses the new setting, and a roll already running stops before its next member — an install already begun finishes. | 本地更新后进行的滚动：`lop update`将本设备移到较新构建后，会请其他每个活跃成员也移到同一构建——一次一个，各自等待该成员空闲，绝不强制。未向本设备授予`update`的成员会被按名称跳过，并给出补救办法。立即生效：下一次更新使用新设置；已在进行的滚动会在下一个成员之前停止——已经开始的安装会完成。
+wire.settings.mesh_updates.title | Mesh updates | mesh更新
+wire.settings.model.description | Provider, model and reasoning effort for new conversations. Existing sessions keep their model; /model saved adopts the default here. | 新对话的提供商、模型与推理强度。现有会话保留各自的模型；/model saved会采用这里的默认设置。
+wire.settings.model.title | Model | 模型
+wire.settings.model_effort.choice.high.description | deep reasoning | 深度推理
+wire.settings.model_effort.choice.low.description | light reasoning | 轻度推理
+wire.settings.model_effort.choice.max.description | the model's deepest reasoning | 模型最深的推理
+wire.settings.model_effort.choice.medium.description | moderate reasoning | 中等推理
+wire.settings.model_effort.choice.minimal.description | the least reasoning the model offers | 模型提供的最少推理
+wire.settings.model_effort.choice.none.description | reasoning off | 关闭推理
+wire.settings.model_effort.choice.unset.description | the model's own default | 模型自身的默认值
+wire.settings.model_effort.choice.unset.label | auto | auto
+wire.settings.model_effort.choice.xhigh.description | very deep reasoning | 极深推理
+wire.settings.model_effort.help | Effort for new conversations. Unset: the model's default. | 新对话的推理强度。未设置：用模型默认值。
+wire.settings.model_effort.label | Default reasoning effort | 默认推理强度
+wire.settings.model_name.help | Model for new conversations. /model saved adopts it here. | 新对话使用的模型。执行/model saved可让当前会话采用此默认模型。
+wire.settings.model_name.label | Default model | 默认模型
+wire.settings.monitor.description | Delta-watching monitors: how often they check, how much they keep, and when they give up. | 监视增量变化的监控：多久检查一次、保留多少内容、何时放弃。
+wire.settings.monitor.title | Monitors | 监控
+wire.settings.monitor_classifymaxchars.help | Bound on the changed lines the materiality check receives (the monitor's name and purpose ride along, clipped separately). | 重要性检查可接收的变更行上限（监控名称与用途一同传入，单独截断）。
+wire.settings.monitor_classifymaxchars.label | Classifier state (chars) | 分类器状态（字符）
+wire.settings.monitor_defaultintervals.help | Checks every N seconds when 'every' is omitted; floor 30s. | 省略'every'时每N秒检查一次；下限30秒。
+wire.settings.monitor_defaultintervals.label | Default interval (s) | 默认间隔（秒）
+wire.settings.monitor_deltamaxchars.help | Total delta text per delivery message. | 每条投递消息的增量文本总量。
+wire.settings.monitor_deltamaxchars.label | Delta budget (chars) | 增量预算（字符）
+wire.settings.monitor_maxconsecutivefailures.help | Consecutive check failures before a monitor is disabled. | 监控被禁用前允许的连续检查失败次数。
+wire.settings.monitor_maxconsecutivefailures.label | Disable after failures | 连续失败后禁用
+wire.settings.monitor_maxdeliveriesperhour.help | Per monitor; over the cap, changes are held and counted. | 每个监控；超过上限后，变更会被暂存并计数。
+wire.settings.monitor_maxdeliveriesperhour.label | Deliveries per hour | 每小时投递数
+wire.settings.monitor_maxdeltalines.help | Changed lines summarised per delivery. | 每次投递摘要的变更行数。
+wire.settings.monitor_maxdeltalines.label | Max delta lines | 变更行上限
+wire.settings.monitor_maxmonitors.help | Refuses arms past N; cancel one first. | 超过N个时拒绝新增；请先取消一个。
+wire.settings.monitor_maxmonitors.label | Max per session | 每会话上限
+wire.settings.monitor_normalizetimestamps.choice.false.description | timestamps diff like any text | 时间戳按普通文本参与比对
+wire.settings.monitor_normalizetimestamps.choice.true.description | timestamps do not count as changes | 时间戳不计为变更
+wire.settings.monitor_normalizetimestamps.help | Treat timestamps as noise before diffing, so clock fields do not alarm. | 比对前把时间戳当作噪声，以免时钟字段触发告警。
+wire.settings.monitor_normalizetimestamps.label | Ignore timestamp churn | 忽略时间戳变动
+wire.settings.monitor_runtimeoutms.help | Per-check deadline; 0 uses 120000 ms. | 每次检查的截止时间；0表示用120000毫秒。
+wire.settings.monitor_runtimeoutms.label | Run timeout (ms) | 运行超时（毫秒）
+wire.settings.monitor_snapshotmaxchars.help | Stored normalized output; bounds disk and diff input. | 存储的规范化输出；限定磁盘占用与比对输入大小。
+wire.settings.monitor_snapshotmaxchars.label | Snapshot cap (chars) | 快照上限（字符）
+wire.settings.network.description | Where this device listens, what it tells peers to dial, and the bounds for `lop network`: audit retention, how many unauthenticated connections the relay will hold at once, session-copy cadence and how long a borrowed login lives. All take effect when the relay restarts. | 本设备在哪里监听、告诉对等设备拨号到哪里，以及`lop network`的各项边界：审计保留、中继同时持有多少未认证连接、会话副本的节奏、借用登录的有效期。全部在中继重启后生效。
+wire.settings.network.title | Mesh network | mesh网络
+wire.settings.network_advertise_hosts.help | Empty = detected. Others: host:port, e.g. 203.0.113.7:4097 | 留空则自动检测。其他情况：host:port，例如203.0.113.7:4097
+wire.settings.network_advertise_hosts.label | Advertised endpoints | 对外公布的endpoint
+wire.settings.network_advertise_hosts.placeholder | 203.0.113.7:4097, tunnel.example.com:4100 | 203.0.113.7:4097, tunnel.example.com:4100
+wire.settings.network_audit_generations.help | Rotated files kept before the oldest is pruned and that pruning is recorded. | 轮转文件保留数：到达上限后最旧的被清除，清除动作会被记录。
+wire.settings.network_audit_generations.label | Audit generations kept | 审计保留代数
+wire.settings.network_audit_max_age_days.help | Age and size both rotate, because age binds on a quiet install and size on a busy one. Export with `lop network log --export` before pruning. | 时间和大小都会触发轮转：使用较少的实例受时间上限约束，使用频繁的实例受大小上限约束。清除前用`lop network log --export`导出。
+wire.settings.network_audit_max_age_days.label | Audit age cap (days) | 审计时间上限（天）
+wire.settings.network_audit_max_bytes.help | Bytes per generation, after rotation. 8 MiB of gzipped JSONL is roughly 55k records; the five-generation ceiling is therefore ~40 MiB. | 轮转后每代的字节数。8 MiB的gzip压缩JSONL约合55000条记录；五代的封顶因此约为40 MiB。
+wire.settings.network_audit_max_bytes.label | Audit size per generation | 每代审计大小
+wire.settings.network_credentials_github_repositories.help | owner/repo entries a brokered GitHub token may touch (empty: none) | 被代理的GitHub令牌可访问的owner/repo条目（留空：无）
+wire.settings.network_credentials_github_repositories.label | GitHub repositories | GitHub仓库
+wire.settings.network_credentials_github_repositories.placeholder | damianvtran/scratch, damianvtran/sandbox | damianvtran/scratch, damianvtran/sandbox
+wire.settings.network_credentials_grant_ttl_s.help | The longest a device may use a login it borrowed from its owner before asking again, and so how long a revoked or offline owner's login keeps working elsewhere. Never longer than the token itself. | 设备借用所有者的登录后、在再次请求之前可使用的最长时间；也是被撤销或离线的所有者的登录在别处继续可用的时长。绝不会超过令牌本身。
+wire.settings.network_credentials_grant_ttl_s.label | Borrowed login lifetime (s) | 借用登录有效期（秒）
+wire.settings.network_listen_address.help | 127.0.0.1 = dial-only; 0.0.0.0 = all; or one address. | 127.0.0.1表示只拨出；0.0.0.0表示全部；或填一个地址。
+wire.settings.network_listen_address.label | Listen address | 监听地址
+wire.settings.network_max_handshakes.help | Unauthenticated connections this relay will hold at once. A pairing holds one for the seconds until the code is typed; anything past the cap is dropped at accept, with no reply frame. | 本中继同时持有的未认证连接数。配对过程会占用一个连接，直到配对码被输入为止；超过上限的连接在accept时即被丢弃，不回任何应答帧。
+wire.settings.network_max_handshakes.label | Concurrent handshakes | 并发握手数
+wire.settings.network_port.help | The port peers dial; endpoints without one use it. | 对等设备拨号的端口；不带端口的endpoint默认使用它。
+wire.settings.network_port.label | Mesh port | mesh端口
+wire.settings.network_rollout_on_update.choice.auto.description | roll when an update moves to a newer build | 更新移到较新构建时滚动
+wire.settings.network_rollout_on_update.choice.auto.label | auto | auto
+wire.settings.network_rollout_on_update.choice.off.description | only `lop network update` rolls | 只有`lop network update`会滚动
+wire.settings.network_rollout_on_update.choice.off.label | off | off
+wire.settings.network_rollout_on_update.help | After `lop update` installs a newer build here, ask this device's mesh members to move to it: one at a time, each waiting for idle, never forced. Off: only `lop network update` rolls. A member that has not granted this device `update` is skipped, with the remedy to grant it there. | `lop update`在此安装较新构建后，请本设备的mesh成员也移到该构建：一次一个、各自等待空闲、绝不强制。关：只有`lop network update`会滚动。未向本设备授予`update`的成员会被跳过，并附上在那里授予的补救办法。
+wire.settings.network_rollout_on_update.label | Roll the mesh after an update | 更新后滚动升级mesh
+wire.settings.network_sync_debounce_s.help | Seconds a session's transcript must stay unchanged before its owner tells devices holding a copy to pull. A session going idle pushes at once, so its final message is never held back by this. | 会话记录需要保持多少秒不变，其所有者才会通知持有副本的设备来pull。会话进入空闲时会立即push，因此最后一条消息绝不会被此项拖延。
+wire.settings.network_sync_debounce_s.label | Sync quiet period (s) | 同步静默期（秒）
+wire.settings.network_sync_tick_s.help | How often the owner checks copied sessions for changes: one file stat each. | 所有者多久检查一次被复制的会话是否有变更：每个文件一次stat。
+wire.settings.network_sync_tick_s.label | Sync check interval (s) | 同步检查间隔（秒）
+wire.settings.openrouter.description | How OpenRouter picks a host; unset = sticky routing. | OpenRouter如何挑选主机；未设置时保持粘性路由。
+wire.settings.openrouter.title | OpenRouter routing | OpenRouter路由
+wire.settings.proactive.description | Bounds for the proactive agent class: how long a hidden patience wait defaults to, how it backs off across re-attempts, and when a cycle must end. Read at the moment a wait is armed or fires. | 主动类智能体的各项边界：隐藏的耐心等待默认多久、重试之间如何退避、一个周期何时必须结束。在等待被设置或触发的那一刻读取。
+wire.settings.proactive.title | Proactive class | 主动类智能体
+wire.settings.proactive_patience_backoff.help | Each later wait in a cycle is at least this many times the first — the default 5/15/45-minute progression. | 同一周期中，每次后续等待至少是第一次的这么多倍——默认按5/15/45分钟递增。
+wire.settings.proactive_patience_backoff.label | Patience backoff factor | 耐心退避系数
+wire.settings.proactive_patience_default_ms.help | How long a hidden wait defaults to when the agent does not size one (milliseconds; 300000 = 5 min). Clamped 60 s..24 h. | 智能体未指定时长时，隐藏等待的默认长度（毫秒；300000即5分钟）。限制在60秒至24小时之间。
+wire.settings.proactive_patience_default_ms.label | Default patience wait (ms) | 默认耐心等待（毫秒）
+wire.settings.proactive_patience_episode_ttl_ms.help | Hard stop for one cycle however the waits were sized (milliseconds; 7200000 = 2 h). A fire past it retires silently. | 无论各次等待如何设定，一个周期的硬性截止（毫秒；7200000即2小时）。超期触发会静默作废。
+wire.settings.proactive_patience_episode_ttl_ms.label | Patience cycle TTL (ms) | 耐心周期TTL（毫秒）
+wire.settings.proactive_patience_max_attempts.help | How many outbound waits one cycle may hold before it must end. | 一个周期在必须结束前可以持有多少次对外等待。
+wire.settings.proactive_patience_max_attempts.label | Patience max attempts | 耐心最大尝试次数
+wire.settings.proactive_patience_max_pending.help | How many hidden waits may be pending at once for one session. | 单个会话同时最多可以挂起多少个隐藏等待。
+wire.settings.proactive_patience_max_pending.label | Pending waits per session | 每会话挂起等待数
+wire.settings.projects.description | Project records: how long a tracked project may go without a progress line before it reads stale and is worth a check-in. Read at the next staleness computation. | 项目记录：被跟踪的项目多久没有进度更新就会被视为停滞、值得检查一次。在下一次停滞计算时读取。
+wire.settings.projects.title | Projects | 项目
+wire.settings.projects_stale_after_hours.help | A project whose progress is older than this reads stale and is worth a check-in. 1–168 hours. | 进度更新时间早于此时长的项目即视为停滞、值得检查一次。1-168小时。
+wire.settings.projects_stale_after_hours.label | Stale after (hours) | 停滞阈值（小时）
+wire.settings.providers.description | How direct provider connections are made: API surface and cache TTL. | 如何建立提供商直连：API接口与缓存TTL。
+wire.settings.providers.title | Wire protocol | 通信协议
+wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.help | Context size from which Anthropic requests use the 1-hour prompt-cache TTL (2x write cost, survives idle gaps over 5 minutes). 0 disables. | 上下文达到此规模后，Anthropic的请求将使用1小时提示词缓存TTL（写入成本2倍，可跨越超过5分钟的空闲间隔）。0表示禁用。
+wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label | Anthropic 1h cache above (tokens) | Anthropic 1h缓存阈值（token）
+wire.settings.providers_openai_api.choice.chat_completions.description | explicit compatibility opt-out | 为兼容性显式退出
+wire.settings.providers_openai_api.choice.chat_completions.label | chat_completions | chat_completions
+wire.settings.providers_openai_api.choice.responses.description | the public Responses API (default) | 公开的Responses API（默认）
+wire.settings.providers_openai_api.choice.responses.label | responses | responses
+wire.settings.providers_openai_api.help | Direct OpenAI GPT-5 calls use the Responses API unless opted out. | 直连OpenAI的GPT-5调用默认使用Responses API，除非显式退出。
+wire.settings.providers_openai_api.label | OpenAI API surface | OpenAI API接口
+wire.settings.providers_openai_use_max_context_window.help | Off: provider default. On: supported max. Applies next request; compaction unchanged. | 关：用提供商默认值。开：用支持的最大值。下一次请求生效；压缩行为不变。
+wire.settings.providers_openai_use_max_context_window.label | Use maximum OpenAI context | 使用OpenAI最大上下文
+wire.settings.providers_openrouter_allow_fallbacks.choice.false.description | fail rather than fall through | 宁可失败，也不切换
+wire.settings.providers_openrouter_allow_fallbacks.choice.false.label | false | false
+wire.settings.providers_openrouter_allow_fallbacks.choice.unset.description | no preference — OpenRouter's default (fall through) | 无偏好——OpenRouter的默认（会切换）
+wire.settings.providers_openrouter_allow_fallbacks.choice.unset.label | default | default
+wire.settings.providers_openrouter_allow_fallbacks.help | 'default' sends nothing (OpenRouter falls through to another host when the preferred one fails); 'false' fails rather than fall through to a host outside your preferences. | 'default'不发送任何内容（首选主机失败时，OpenRouter会切换到另一台主机）；'false'则宁可失败，也不切换到你的偏好之外的主机。
+wire.settings.providers_openrouter_allow_fallbacks.label | fallbacks | 回退
+wire.settings.providers_openrouter_data_collection.choice.allow.description | hosts may collect data | 主机可以收集数据
+wire.settings.providers_openrouter_data_collection.choice.allow.label | allow | allow
+wire.settings.providers_openrouter_data_collection.choice.deny.description | exclude hosts that collect data | 排除会收集数据的主机
+wire.settings.providers_openrouter_data_collection.choice.deny.label | deny | deny
+wire.settings.providers_openrouter_data_collection.choice.unset.description | no preference sent | 不发送偏好
+wire.settings.providers_openrouter_data_collection.choice.unset.label | default | default
+wire.settings.providers_openrouter_data_collection.help | 'deny' excludes hosts that may train on or retain your prompts. 'default' sends no preference (OpenRouter's default: allow). | 'deny'排除可能用你的提示词训练或留存的主机。'default'不发送偏好（OpenRouter默认：allow）。
+wire.settings.providers_openrouter_data_collection.label | data collection | 数据收集
+wire.settings.providers_openrouter_enforce_distillable_text.choice.true.description | distillable-text endpoints only | 仅限可蒸馏文本的endpoint
+wire.settings.providers_openrouter_enforce_distillable_text.choice.true.label | true | true
+wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.description | no preference sent | 不发送偏好
+wire.settings.providers_openrouter_enforce_distillable_text.choice.unset.label | default | default
+wire.settings.providers_openrouter_enforce_distillable_text.help | 'true': restrict to endpoints whose text output may be distilled. 'default': nothing sent. | 'true'：仅限文本输出可被蒸馏的endpoint。'default'：不发送任何内容。
+wire.settings.providers_openrouter_enforce_distillable_text.label | distillable text | 可蒸馏文本
+wire.settings.providers_openrouter_ignore.help | Empty = no opinion (sticky routing stays). Comma-separated block-list of host slugs to omit (e.g. a host that is failing right now) — may cost you the warm prompt cache. | 留空则不表态（粘性路由保持）。逗号分隔的主机slug阻止列表，用于排除主机（如当前正在故障的主机）——可能让你失去热提示词缓存。
+wire.settings.providers_openrouter_ignore.label | ignored hosts | 忽略的主机
+wire.settings.providers_openrouter_ignore.placeholder | deepseek, groq, mistral, … | deepseek, groq, mistral, …
+wire.settings.providers_openrouter_max_price.help | '{'"prompt": 1, "completion": 2'}' — USD / million tokens | '{'"prompt": 1, "completion": 2'}'——美元/百万token
+wire.settings.providers_openrouter_max_price.label | max price | 最高价格
+wire.settings.providers_openrouter_max_price.placeholder | '{'"prompt": 1, "completion": 2'}' | '{'"prompt": 1, "completion": 2'}'
+wire.settings.providers_openrouter_only.help | Empty = no opinion (sticky routing stays). Comma-separated allow-list of host slugs; every other host is excluded — a forced cold start if the warm host is not on it. | 留空则不表态（粘性路由保持）。逗号分隔的主机slug允许列表；其他所有主机都被排除——若热主机不在其中，将被迫冷启动。
+wire.settings.providers_openrouter_only.label | allowed hosts | 允许的主机
+wire.settings.providers_openrouter_only.placeholder | deepseek, groq, mistral, … | deepseek, groq, mistral, …
+wire.settings.providers_openrouter_order.help | Empty = no opinion (sticky routing stays). Comma-separated host slugs tried in this exact order. | 留空则不表态（粘性路由保持）。逗号分隔的主机slug，按此确切顺序尝试。
+wire.settings.providers_openrouter_order.label | host order | 主机顺序
+wire.settings.providers_openrouter_order.placeholder | deepseek, groq, mistral, … | deepseek, groq, mistral, …
+wire.settings.providers_openrouter_order.warning | disables sticky routing — prompt cache goes cold | 禁用粘性路由——提示词缓存会变冷
+wire.settings.providers_openrouter_preferred_max_latency.help | Prefer hosts whose time-to-first-token stays under this many seconds (p50). 0 sends no preference. A host above the bar is deprioritised, which may cost you a warm prompt cache. | 优先选择首token时间低于此秒数的主机（p50）。0表示不发送偏好。高于标准的主机会被降级，可能让你失去热提示词缓存。
+wire.settings.providers_openrouter_preferred_max_latency.label | max latency (s) | 最大延迟（秒）
+wire.settings.providers_openrouter_preferred_min_throughput.help | Prefer hosts serving at least this many output tokens/sec (p50). 0 sends no preference. A host below the bar is deprioritised, which may cost you a warm prompt cache. | 优先选择输出token/秒不低于此值的主机（p50）。0表示不发送偏好。低于标准的主机会被降级，可能让你失去热提示词缓存。
+wire.settings.providers_openrouter_preferred_min_throughput.label | min throughput (tok/s) | 最低吞吐量（tok/s）
+wire.settings.providers_openrouter_provider_affinity.help | Reuses the host that served the previous turn so the prompt cache stays warm. Off = OpenRouter's price-weighted load balancing. | 会复用服务上一回合的主机，让提示词缓存保持温热。关闭时用OpenRouter按价格加权的负载均衡。
+wire.settings.providers_openrouter_provider_affinity.label | cache affinity | 缓存亲和
+wire.settings.providers_openrouter_quantizations.help | Empty = no opinion. Comma-separated quantization levels the served model may use (e.g. int8, fp8, mxfp4). | 留空则不表态。逗号分隔的量化级别，供所服务的模型使用（如int8、fp8、mxfp4）。
+wire.settings.providers_openrouter_quantizations.label | quantizations | 量化级别
+wire.settings.providers_openrouter_quantizations.placeholder | int8, fp8, mxfp4, … | int8, fp8, mxfp4, …
+wire.settings.providers_openrouter_require_parameters.choice.true.description | only hosts that support every parameter | 仅限支持所有参数的主机
+wire.settings.providers_openrouter_require_parameters.choice.true.label | true | true
+wire.settings.providers_openrouter_require_parameters.choice.unset.description | no preference — unsupported parameters may be dropped | 无偏好——不支持的参数可能被丢弃
+wire.settings.providers_openrouter_require_parameters.choice.unset.label | default | default
+wire.settings.providers_openrouter_require_parameters.help | 'true' restricts to hosts that support every parameter you send (tools, structured output); 'default' lets OpenRouter silently drop unsupported ones. | 'true'仅限支持你发送的每个参数（工具、结构化输出）的主机；'default'则任由OpenRouter静默丢弃不支持的参数。
+wire.settings.providers_openrouter_require_parameters.label | require parameters | 要求参数支持
+wire.settings.providers_openrouter_sort.choice.latency.description | lowest response latency first | 响应延迟最低者优先
+wire.settings.providers_openrouter_sort.choice.latency.label | latency | 延迟
+wire.settings.providers_openrouter_sort.choice.price.description | cheapest host first | 最便宜的主机优先
+wire.settings.providers_openrouter_sort.choice.price.label | price | 价格
+wire.settings.providers_openrouter_sort.choice.throughput.description | highest tokens/sec first | token/秒最高者优先
+wire.settings.providers_openrouter_sort.choice.throughput.label | throughput | 吞吐量
+wire.settings.providers_openrouter_sort.choice.unset.description | no preference — sticky routing stays on (warmest cache) | 无偏好——保持粘性路由（缓存最热）
+wire.settings.providers_openrouter_sort.choice.unset.label | default | default
+wire.settings.providers_openrouter_sort.help | How OpenRouter ranks hosts for this call. May route away from the host holding your warm prompt cache (a cold start on long conversations); 'default' sends no preference at all. | OpenRouter如何为本次调用给主机排序。可能路由离开持有热提示词缓存的主机（长对话上会冷启动）；'default'完全不发送偏好。
+wire.settings.providers_openrouter_sort.label | routing policy | 路由策略
+wire.settings.providers_openrouter_zdr.choice.true.description | zero-data-retention endpoints only | 仅限零数据留存的endpoint
+wire.settings.providers_openrouter_zdr.choice.true.label | true | true
+wire.settings.providers_openrouter_zdr.choice.unset.description | no preference sent | 不发送偏好
+wire.settings.providers_openrouter_zdr.choice.unset.label | default | default
+wire.settings.providers_openrouter_zdr.help | 'true': restrict to zero-data-retention endpoints. 'default': nothing sent. | 'true'：仅限零数据留存的endpoint。'default'：不发送任何内容。
+wire.settings.providers_openrouter_zdr.label | zero data retention | 零数据留存
+wire.settings.query_budget.description | Time budget for a shell query — a grep/find/du walk rather than a build or an install: an advisory at 10 s, and a stop at the budget so one search cannot spend minutes of a turn. | shell查询的时间预算——针对grep/find/du遍历，而非构建或安装：10秒时给出建议，到达预算即停止，让一次搜索不至于在单个回合里耗掉几分钟。
+wire.settings.query_budget.title | Shell query budget | shell查询预算
+wire.settings.remote_compute.description | Preview: run agent work on Radient-hosted compute, bound to one of your mesh networks. | 预览：在Radient托管的计算资源上运行智能体工作，并绑定到你的一个mesh网络。
+wire.settings.remote_compute.title | Remote compute | 远程计算
+wire.settings.remote_compute_enabled.choice.false.description | local only | 仅本地
+wire.settings.remote_compute_enabled.choice.true.description | remote runs allowed | 允许远程运行
+wire.settings.remote_compute_enabled.help | Preview: sends work to Radient compute, bound to one mesh network. | 预览：将工作发送到Radient计算资源，并绑定到一个mesh网络。
+wire.settings.remote_compute_enabled.label | Remote compute | 远程计算
+wire.settings.retired.description | Keys that are read but no longer do anything. | 仍会被读取、但不再起作用的键。
+wire.settings.retired.title | Retired | 已停用
+wire.settings.retry_basedelayms.help | First backoff step; later attempts grow from it. | 退避的第一步；后续尝试以此递增。
+wire.settings.retry_basedelayms.label | Base delay (ms) | 基础延迟（毫秒）
+wire.settings.retry_connectivitybackoffcapms.help | Longest wait between connectivity retries. | 连接性重试之间的最长等待。
+wire.settings.retry_connectivitybackoffcapms.label | Connectivity backoff cap (ms) | 连接性退避上限（毫秒）
+wire.settings.retry_connectivitymaxretries.help | Patient budget for a machine that went offline; distinct from max retries. | 针对离线机器的耐心预算；与最大重试次数不同。
+wire.settings.retry_connectivitymaxretries.label | Connectivity retries | 连接性重试次数
+wire.settings.retry_enabled.choice.false.description | fail on the first error | 首次出错即失败
+wire.settings.retry_enabled.choice.true.description | retry with backoff | 带退避地重试
+wire.settings.retry_enabled.help | Retry a failed provider call before surfacing the error. | 提供商调用失败时先重试，再浮现错误。
+wire.settings.retry_enabled.label | Retry failed calls | 重试失败的调用
+wire.settings.retry_fallbackchains.help | Ordered provider/model hops tried when a call keeps failing. | 调用持续失败时按顺序尝试的provider/model跳转。
+wire.settings.retry_fallbackchains.label | Failover cascade | 故障转移级联
+wire.settings.retry_maxretries.help | Fast budget against a reachable provider (5xx, timeout). | 针对可达提供商的快速预算（5xx、超时）。
+wire.settings.retry_maxretries.label | Max retries | 最大重试次数
+wire.settings.retry_modelfallback.choice.false.description | stay on the chosen model | 留在所选模型
+wire.settings.retry_modelfallback.choice.true.description | fall back to the next hop | 回退到下一跳
+wire.settings.retry_modelfallback.help | Move to the next hop in the cascade when a model keeps failing. | 模型持续失败时，移到级联中的下一跳。
+wire.settings.retry_modelfallback.label | Model fallback | 模型回退
+wire.settings.retry_pinnedfallback.choice.cross_family.description | any vendor | 任何厂商
+wire.settings.retry_pinnedfallback.choice.cross_family.label | allow cross-vendor | 允许跨厂商
+wire.settings.retry_pinnedfallback.choice.same_family.description | same vendor only | 仅同一厂商
+wire.settings.retry_pinnedfallback.choice.same_family.label | same family only | 仅同一系列
+wire.settings.retry_pinnedfallback.help | What a pinned child may fall back to: same-family hops only, or any vendor (announced). | 固定的子智能体可以回退到什么：仅同一系列的跳转，或任何厂商（会公告）。
+wire.settings.retry_pinnedfallback.label | Pinned child fallback | 固定子智能体回退
+wire.settings.retry_usageawareaccountpick.choice.false.description | spread by session hash only | 仅按会话哈希分散
+wire.settings.retry_usageawareaccountpick.choice.true.description | prefer the least-loaded account | 优先负载最轻的账户
+wire.settings.retry_usageawareaccountpick.help | Start new sessions on the same-provider account with the most quota left, read from the cached /usage report. Applies to sessions only. | 在剩余配额最多的同提供商账户上启动新会话，数据来自缓存的/usage报告。仅适用于会话。
+wire.settings.retry_usageawareaccountpick.label | Usage-aware account pick | 用量感知账户选择
+wire.settings.retry_usageawarefallback.choice.false.description | only react to failures | 仅对失败做出反应
+wire.settings.retry_usageawarefallback.choice.true.description | check quota at message boundaries | 在消息边界检查配额
+wire.settings.retry_usageawarefallback.help | Switch before a quota runs out. Costs one quota request per user message. | 在配额耗尽之前切换。每条用户消息花费一次配额请求。
+wire.settings.retry_usageawarefallback.label | Usage-aware fallback | 用量感知回退
+wire.settings.retry_usagereservepercent.help | Headroom below which an account counts as low; a running session stays on it. | 低于此余量时账户视为低额；正在运行的会话仍留在其上。
+wire.settings.retry_usagereservepercent.label | Usage reserve (%) | 用量保留（%）
+wire.settings.runtime.description | How sessions behave when you leave them. The warm-runtime knobs are read when a runtime next draws its window. | 离开会话后如何处理。保活运行时的设置会在运行时下次确定保活时间窗口时读取。
+wire.settings.runtime.title | Runtime | 运行时
+wire.settings.runtime_background_on_resume.choice.false.description | stop the turn when you leave the session | 离开会话时停止该回合
+wire.settings.runtime_background_on_resume.choice.true.description | keep the turn running in the background | 让回合在后台继续运行
+wire.settings.runtime_background_on_resume.help | Leave a running turn working when you switch away from its session. | 切换离开某个会话时，让其运行中的回合继续工作。
+wire.settings.runtime_background_on_resume.label | Keep working after /resume | /resume后继续工作
+wire.settings.runtime_keep_alive_max.help | Cap on warm runtimes in this install; the least recently closed exits first. | 本安装中保活运行时的上限；关闭时间最早的先退出。
+wire.settings.runtime_keep_alive_max.label | Max warm conversations | 保活会话上限
+wire.settings.runtime_keep_alive_seconds.help | Re-opening inside this window attaches to the live runtime. 0 keeps nothing warm. | 在此窗口内重新打开会接续到仍然存活的运行时。0表示不保活任何内容。
+wire.settings.runtime_keep_alive_seconds.label | Keep closed conversations warm (s) | 已关闭会话保活时长（秒）
+wire.settings.runtime_unattended_gate_timeout.help | How long a question waits when you are away. 0 never times out. | 你不在时，一个问题会等待多久。0表示从不超时。
+wire.settings.runtime_unattended_gate_timeout.label | Unattended question timeout (h) | 无人值守提问超时（小时）
+wire.settings.send_journal_unconfirmed.help | Write a transcript notice when a `send` is not acknowledged. The tool result always reports it; this keeps a durable row too. | `send`未被确认时在会话记录中写入一条提示。工具结果总会有报告；此项还会留下持久的条目。
+wire.settings.send_journal_unconfirmed.label | Journal unacknowledged sends | 记录未确认的send
+wire.settings.session.description | Autosave. The cleanup policies have their own sections below. | 自动保存。清理策略在下面有各自的小节。
+wire.settings.session.title | Session storage | 会话存储
+wire.settings.session_cleanup.description | Session cleanup for the conversations you started and the workstreams in your sidebar. Off by default; nothing here runs until you switch it on. | 针对你发起的对话与侧边栏工作流的会话清理。默认关闭；在你开启之前，这里的一切都不会运行。
+wire.settings.session_cleanup.title | Your conversations | 你的对话
+wire.settings.session_cleanup_delegated_enabled.choice.false.description | keep all delegated work | 保留所有委托工作
+wire.settings.session_cleanup_delegated_enabled.choice.true.description | remove delegated work after the age below | 按下方时长清除委托工作
+wire.settings.session_cleanup_delegated_enabled.help | Remove subagent and background-session transcripts after the age below; never your conversations or anything in use. | 按下方时长清除子智能体与后台会话的记录；绝不涉及你的对话或任何使用中的内容。
+wire.settings.session_cleanup_delegated_enabled.label | Delegated cleanup | 委托工作清理
+wire.settings.session_cleanup_delegated_max_age_hours.help | Hours idle before removal: 2 to 720 (30 days). Default 48. | 空闲多少小时后清除：2至720（30天）。默认48。
+wire.settings.session_cleanup_delegated_max_age_hours.label | ↳ remove after (hours) | ↳ 多少小时后清除
+wire.settings.session_cleanup_enabled.choice.false.description | nothing is ever removed | 任何内容都不会被清除
+wire.settings.session_cleanup_enabled.choice.true.description | limits run at launch; newest 10 + live kept | 启动时执行各项限制；保留最新10个与运行中的
+wire.settings.session_cleanup_enabled.help | Off: nothing is ever removed. On: limits below run at launch, sparing the newest 10 + live. | 关：任何内容都不会被清除。开：启动时执行下方限制，保留最新10个与运行中的。
+wire.settings.session_cleanup_enabled.label | Session cleanup | 会话清理
+wire.settings.session_cleanup_max_inactive_days.help | Needs cleanup on. Remove sessions idle this many days; 0 = never. | 需开启清理。空闲达到这么多天的会话会被清除；0表示从不。
+wire.settings.session_cleanup_max_inactive_days.label | ↳ max inactive days | ↳ 最大空闲天数
+wire.settings.session_cleanup_max_sessions.help | Needs cleanup on. Keep N newest /resume sessions; 0 = no cap. | 需开启清理。保留最新的N个/resume会话；0表示无上限。
+wire.settings.session_cleanup_max_sessions.label | ↳ max sessions | ↳ 会话数上限
+wire.settings.session_cleanup_max_total_bytes.help | Needs cleanup on. Trim oldest past this many bytes; 0 = no cap. | 需开启清理。超过此字节数后修剪最旧的；0表示无上限。
+wire.settings.session_cleanup_max_total_bytes.label | ↳ max total bytes | ↳ 总字节数上限
+wire.settings.session_cleanup_remove_empty.choice.false.description | keep them | 保留
+wire.settings.session_cleanup_remove_empty.choice.true.description | remove transcript-less directories | 清除没有记录的目录
+wire.settings.session_cleanup_remove_empty.help | Needs cleanup on. Remove dirs that never got a transcript. | 需开启清理。清除从未产生记录的目录。
+wire.settings.session_cleanup_remove_empty.label | ↳ remove empty | ↳ 清除空目录
+wire.settings.session_compression.description | History is kept in full; old transcripts are stored compressed and read back automatically. Off: every transcript stays as a plain file. | 历史完整保留；较早的记录以压缩形式存储，读取时自动还原。关闭时：每条记录都保存为普通文件。
+wire.settings.session_compression.title | Transcript compression | 记录压缩
+wire.settings.session_compression_after_days.help | Needs compression on. Days idle before a transcript is compressed; 1 to 3650. Default 30. | 需要开启压缩。记录闲置多少天后压缩；1至3650。默认30。
+wire.settings.session_compression_after_days.label | ↳ compress after (days) | ↳ 闲置多少天后压缩
+wire.settings.session_compression_enabled.choice.false.description | leave every transcript as it is | 所有记录保持原样
+wire.settings.session_compression_enabled.choice.true.description | compress transcripts older than the age below | 压缩超过下方时长的记录
+wire.settings.session_compression_enabled.help | Off: transcripts stay plain; compressed sessions stay readable. On: old transcripts compress at launch. | 关闭：记录保持普通文件；已压缩的会话仍可读取。开启：启动时压缩较早的记录。
+wire.settings.session_compression_enabled.label | Compress old transcripts | 压缩较早的记录
+wire.settings.session_delegated.description | Delegated work: subagent and background-session transcripts and their scratch folders. On by default: they are removed after the age below. Your conversations, sidebar workstreams, anything running, waiting on a wake or monitor, linked to an open project, still in use by an active parent, or holding unpushed or uncommitted git work are kept. | 委托工作：子智能体与后台会话的记录及其暂存文件夹。默认开启：它们会在下方时长之后被清除。你的对话、侧边栏工作流、任何运行中、等待唤醒或监控、关联到未关闭项目、仍被活跃父级使用，或含有未push或未commit的git工作的内容，都会保留。
+wire.settings.session_delegated.title | Delegated work | 委托工作
+wire.settings.session_scratchpad.description | What one session's own scratch area may hold. The cap is checked on every write and applies immediately. | 单个会话自己的暂存区可保存的内容。上限在每次写入时检查，并立即生效。
+wire.settings.session_scratchpad.title | Scratchpad | 暂存区
+wire.settings.session_scratchpad_max_bytes.help | Bytes a session's scratchpad may hold: 16 MiB to 8 GiB. Default 256 MiB. | 单个会话的暂存区可占用的字节数：16 MiB至8 GiB。默认256 MiB。
+wire.settings.session_scratchpad_max_bytes.label | Scratchpad size cap (bytes) | 暂存区上限（字节）
+wire.settings.shell_environment.description | What a command the agent runs can see. Resolved once per session, so an edit here applies at the next launch and cannot weaken a session that is already running. | 智能体运行的命令能看到什么。每个会话只解析一次，所以在此修改会在下次启动时生效，也无法削弱已在运行的会话。
+wire.settings.shell_environment.title | Agent shell | 智能体shell
+wire.settings.shell_environment_exclude.help | Empty = nothing removed. Names never handed to a command the agent runs, in either mode — including the session credential store's own injections, so this is how a variable is denied outright. Covers the bash and eval children only; MCP servers and the harness's own processes are not governed by it. | 留空则不移除任何变量。无论哪种模式，这些名称都不会交给智能体运行的命令——包括会话凭据存储自身的注入，因此这也是彻底拒给某个变量的方式。仅覆盖bash与eval子进程；MCP服务器与harness自身的进程不受其约束。
+wire.settings.shell_environment_exclude.label | …removed in both modes | ……在两种模式下移除
+wire.settings.shell_environment_exclude.placeholder | OPENROUTER_API_KEY, … | OPENROUTER_API_KEY, …
+wire.settings.shell_environment_inherit.help | Empty = the safe set alone. Names the allowlist mode keeps ON TOP of the safe set — e.g. LOCAL_OPERATOR_CONFIG_DIR for a shell that must still resolve $(lop secret get NAME), or LANG. Inert in inherit mode. | 留空则只有安全集。allowlist模式在安全集之外额外保留的名称——例如需要继续解析$(lop secret get NAME)的shell所用的LOCAL_OPERATOR_CONFIG_DIR，或LANG。inherit模式下无效。
+wire.settings.shell_environment_inherit.label | …kept in allowlist mode | ……在allowlist模式下保留
+wire.settings.shell_environment_inherit.placeholder | LOCAL_OPERATOR_CONFIG_DIR, LANG, … | LOCAL_OPERATOR_CONFIG_DIR, LANG, …
+wire.settings.shell_environment_mode.choice.allowlist.description | the safe set plus the lists below, nothing else | 安全集加下方列表，别无其他
+wire.settings.shell_environment_mode.choice.allowlist.label | allowlist | allowlist
+wire.settings.shell_environment_mode.choice.inherit.description | your environment, as today (default) | 你的环境，同现状（默认）
+wire.settings.shell_environment_mode.choice.inherit.label | inherit | inherit
+wire.settings.shell_environment_mode.help | 'inherit' lets a command the agent runs see your environment (gh, aws, npm keep their tokens). 'allowlist' passes only PATH/HOME/SHELL/TERM/USER/LOGNAME plus the two lists beside this, so the provider key this session launched with is not handed to a command the model writes. Read once per session: changing it takes effect at the next launch. | 'inherit'让智能体运行的命令看到你的环境（gh、aws、npm保持其令牌）。'allowlist'只传递PATH/HOME/SHELL/TERM/USER/LOGNAME，加上旁边这两个列表，因此本会话启动时用的提供商密钥不会交给模型编写的命令。每个会话只读取一次：修改后下次启动才生效。
+wire.settings.shell_environment_mode.label | Agent shell environment | 智能体shell环境
+wire.settings.speech.description | How the assistant sounds when it speaks aloud. The descriptor is sent to the hub, which maps it onto whichever voice provider serves; fields a provider cannot express degrade with a note rather than failing. Read on the next spoken message. | 助手朗读时的声音。描述会发送到hub，由hub映射到实际服务的语音提供商；提供商无法表达的字段会带一条说明降级，而不是报错。在下一条朗读消息时读取。
+wire.settings.speech.title | Speech voicing | 语音朗读
+wire.settings.speech_transcription_cleanup.choice.auto.description | Native, else client rules. | 优先原生清理，否则使用客户端规则。
+wire.settings.speech_transcription_cleanup.choice.auto.label | auto | auto
+wire.settings.speech_transcription_cleanup.choice.client.description | Client rules; request raw copy. | 使用客户端规则；请求原始文本。
+wire.settings.speech_transcription_cleanup.choice.client.label | client | client
+wire.settings.speech_transcription_cleanup.choice.off.description | Verbatim; no filler or cue removal. | 逐字保留；不移除语气词或非语音提示。
+wire.settings.speech_transcription_cleanup.choice.off.label | off | off
+wire.settings.speech_transcription_cleanup.choice.provider.description | Native only where offered. | 仅在支持时使用原生清理。
+wire.settings.speech_transcription_cleanup.choice.provider.label | provider | provider
+wire.settings.speech_transcription_cleanup.help | How dictation strips filler words and non-speech cues. auto uses the provider's native cleanup where available and the conservative client rules elsewhere; provider and client each use only one of the two mechanisms; off keeps the verbatim transcript. A per-request `cleanup` field still wins. | 听写如何移除语气词和非语音提示。auto在提供商支持时使用原生清理，否则使用保守的客户端规则；provider和client各自仅使用其中一种机制；off保留逐字转录。单次请求中的`cleanup`字段仍优先。
+wire.settings.speech_transcription_cleanup.label | Transcription cleanup | 转录清理
+wire.settings.speech_voice_accent.help | A region tag such as en-GB, or empty. Reaches the provider as instructions text. | 区域标签，如en-GB，或留空。会以指令文本送达提供商。
+wire.settings.speech_voice_accent.label | Accent | 口音
+wire.settings.speech_voice_expressiveness.choice.high.description | Lively and expressive. | 活泼而有表现力。
+wire.settings.speech_voice_expressiveness.choice.high.label | high | high
+wire.settings.speech_voice_expressiveness.choice.low.description | Restrained and plain. | 克制而平淡。
+wire.settings.speech_voice_expressiveness.choice.low.label | low | low
+wire.settings.speech_voice_expressiveness.choice.medium.description | Today's constant. | 当前固定使用的值。
+wire.settings.speech_voice_expressiveness.choice.medium.label | medium | medium
+wire.settings.speech_voice_expressiveness.help | How animated the delivery is. Sets ElevenLabs stability; a phrase on OpenAI. | 朗读的生动程度。设置ElevenLabs的稳定性；在OpenAI上则是一句提示。
+wire.settings.speech_voice_expressiveness.label | Expressiveness | 表现力
+wire.settings.speech_voice_gender.choice.auto.description | Classify per agent (recommended). | 按智能体分类（推荐）。
+wire.settings.speech_voice_gender.choice.auto.label | auto | auto
+wire.settings.speech_voice_gender.choice.female.description | Always use a female voice. | 始终使用女声。
+wire.settings.speech_voice_gender.choice.female.label | female | female
+wire.settings.speech_voice_gender.choice.male.description | Always use a male voice. | 始终使用男声。
+wire.settings.speech_voice_gender.choice.male.label | male | male
+wire.settings.speech_voice_gender.help | auto picks per agent; a fixed value overrides the classifier. | auto按智能体选择；固定值会覆盖分类器。
+wire.settings.speech_voice_gender.label | Voice gender | 声音性别
+wire.settings.speech_voice_instructions.help | Free text for how speech should sound (OpenAI only). Empty sends none of our own. | 描述朗读应如何呈现的自由文本（仅限OpenAI）。留空则不发送任何自有内容。
+wire.settings.speech_voice_instructions.label | Delivery instructions | 朗读指令
+wire.settings.speech_voice_language.help | auto lets the provider detect; a two-letter code (e.g. es) pins it. | auto由提供商检测；两位字母代码（如es）则固定。
+wire.settings.speech_voice_language.label | Language | 语言
+wire.settings.speech_voice_pace.help | Speaking rate, 1.0 being normal. A provider whose own range is narrower clamps. | 语速，1.0为正常。自身范围更窄的提供商会钳制到其范围内。
+wire.settings.speech_voice_pace.label | Pace | 语速
+wire.settings.speech_voice_tone.choice.authoritative.description | Confident and assured. | 自信而笃定。
+wire.settings.speech_voice_tone.choice.authoritative.label | authoritative | authoritative
+wire.settings.speech_voice_tone.choice.bright.description | Upbeat and energetic. | 明快而充满活力。
+wire.settings.speech_voice_tone.choice.bright.label | bright | bright
+wire.settings.speech_voice_tone.choice.calm.description | Unhurried and steady. | 从容而沉稳。
+wire.settings.speech_voice_tone.choice.calm.label | calm | calm
+wire.settings.speech_voice_tone.choice.neutral.description | Even and unmarked. | 平稳而不带色彩。
+wire.settings.speech_voice_tone.choice.neutral.label | neutral | neutral
+wire.settings.speech_voice_tone.choice.warm.description | Friendly and approachable. | 友好而亲切。
+wire.settings.speech_voice_tone.choice.warm.label | warm | warm
+wire.settings.speech_voice_tone.help | Warmth of delivery. Honoured as a voice row or emulated in instructions. | 朗读的温暖感。会作为语音行被遵循，或在指令中模拟。
+wire.settings.speech_voice_tone.label | Tone | 语气
+wire.settings.static.description | Extra directories the local server may serve image, audio, video and HTML previews from. The agent home, session folders, uploads and the working directories of your agents and running sessions are always included. | 本地服务器可以提供图像、音频、视频与HTML预览的额外目录。智能体主目录、会话文件夹、上传内容，以及你的智能体与运行中会话的工作目录始终包含在内。
+wire.settings.static.title | File previews | 文件预览
+wire.settings.static_roots.help | Empty = only the built-in roots. Consulted only by the fallback posture (a connection that is not loopback): normal loopback previews can serve any readable file. Comma-separated absolute directories; dot-directories below a root are never served. | 留空则只用内置根目录。仅在回退形态（非环回连接）下启用：正常环回预览可以服务任何可读文件。逗号分隔的绝对目录；根目录下的点目录从不对外提供。
+wire.settings.static_roots.label | Extra preview roots | 额外预览根目录
+wire.settings.static_roots.placeholder | ~/Documents, /Volumes/data/reports | ~/Documents, /Volumes/data/reports
+wire.settings.static_roots.warning | only applies to the fallback (non-loopback) posture | 仅适用于回退（非环回）形态
+wire.settings.subagents.description | Concurrency cap, child knowledge slimming, who picks a child's model, and the model each tier runs on. | 并发上限、子智能体知识精简、由谁选择子智能体模型，以及各档位运行的模型。
+wire.settings.subagents.title | Subagents | 子智能体
+wire.settings.subagents_max_running.help | Ceiling on concurrent subagents and backgrounded bash, which share one pool. | 并发子智能体与后台bash的上限，二者共用一个池。
+wire.settings.subagents_max_running.label | Max background jobs | 后台任务上限
+wire.settings.subagents_max_team_depth.help | Deepest launch allowed in a tree that runs a team. 1 is the top's children. | 运行团队的树中允许的最深启动层级。1即顶层的直接子级。
+wire.settings.subagents_max_team_depth.label | Max nested-team depth | 嵌套团队最大深度
+wire.settings.subagents_model_choice.choice.model.description | may run the subagent on a costlier model | 可以让子智能体运行在更贵的模型上
+wire.settings.subagents_model_choice.choice.model.label | the model | 模型
+wire.settings.subagents_model_choice.choice.operator.description | inherits the session model | 继承会话模型
+wire.settings.subagents_model_choice.choice.operator.label | the operator | 操作员
+wire.settings.subagents_model_choice.help | Who picks a subagent's tier; the operator pins one in its profile. | 由谁选择子智能体的档位；操作员可在其配置中固定。
+wire.settings.subagents_model_choice.label | Who picks a subagent's model | 由谁选择子智能体模型
+wire.settings.subagents_models_hi.help | Bills at that model's rates; 'default': session; empty removes the tier | 按该模型的费率计费；'default'：用会话模型；留空则删除该档位
+wire.settings.subagents_models_hi.label | Subagent model: hi | 子智能体模型：hi
+wire.settings.subagents_models_lo.help | Bills at that model's rates; 'default': session; empty removes the tier | 按该模型的费率计费；'default'：用会话模型；留空则删除该档位
+wire.settings.subagents_models_lo.label | Subagent model: lo | 子智能体模型：lo
+wire.settings.subagents_models_med.help | Bills at that model's rates; 'default': session; empty removes the tier | 按该模型的费率计费；'default'：用会话模型；留空则删除该档位
+wire.settings.subagents_models_med.label | Subagent model: med | 子智能体模型：med
+wire.settings.subagents_slim_child_knowledge.choice.false.description | inherit the parent block as-is | 原样继承父级知识块
+wire.settings.subagents_slim_child_knowledge.choice.true.description | keep names, trim the rest | 保留名称，裁掉其余
+wire.settings.subagents_slim_child_knowledge.help | Keep skill/guide names; trim descriptions and parent extras. | 保留技能/指南名称；裁剪描述与父级附加内容。
+wire.settings.subagents_slim_child_knowledge.label | Slim child knowledge | 精简子智能体知识
+wire.settings.supplements.description | After an answer, point out the files it produced and, when you turn it on, draw a chart of numbers it showed. Off by environment: LOP_SUPPLEMENTS=0. | 回答之后，指出它生成的文件；开启后，还会为其中出现的数字绘制图表。可通过环境关闭：LOP_SUPPLEMENTS=0。
+wire.settings.supplements.title | Highlights | 亮点
+wire.settings.supplements_denyprefixes.help | Needs Highlights on. Comma-separated folders whose files are never listed or sent to a decision model; use it on a machine holding customer data. | 需开启亮点。逗号分隔的文件夹，其中的文件绝不会被列出或发送给决策模型；在存有客户数据的机器上使用。
+wire.settings.supplements_denyprefixes.label | ↳ never list under | ↳ 绝不列出
+wire.settings.supplements_denyprefixes.placeholder | ~/clients, ~/Documents/private | ~/clients, ~/Documents/private
+wire.settings.supplements_enabled.choice.false.description | nothing is added under an answer | 回答下方不添加任何内容
+wire.settings.supplements_enabled.choice.true.description | files an answer produced are pointed out under it | 在回答下方指出它生成的文件
+wire.settings.supplements_enabled.help | On: an answer can be followed by a line pointing at the files it made. | 开：回答下方可以跟一行，指出它生成的文件。
+wire.settings.supplements_enabled.label | Highlights | 亮点
+wire.settings.supplements_files.choice.false.description | files are never listed | 从不列出文件
+wire.settings.supplements_files.choice.true.description | deliverable files are listed | 列出可交付文件
+wire.settings.supplements_files.help | Needs Highlights on. Point out reports and exports an answer produced. | 需开启亮点。指出回答生成的报告与导出文件。
+wire.settings.supplements_files.label | ↳ files | ↳ 文件
+wire.settings.supplements_graphics.choice.false.description | no chart is ever generated | 从不生成图表
+wire.settings.supplements_graphics.choice.true.description | a chart may be generated (spends tokens) | 可以生成图表（消耗token）
+wire.settings.supplements_graphics.help | Needs Highlights on. Draw a chart when an answer shows numbers. Spends model tokens. | 需开启亮点。回答中出现数字时绘制图表。消耗模型token。
+wire.settings.supplements_graphics.label | ↳ graphics | ↳ 图表
+wire.settings.supplements_maxcostusd.help | Needs graphics on. Soft cap on one job's spend. | 需开启图表。单个任务花费的软上限。
+wire.settings.supplements_maxcostusd.label | ↳ cost cap ($) | ↳ 费用上限（$）
+wire.settings.supplements_maxfeatured.help | Needs Highlights on. Files named before the rest fold into 'N more'. | 需开启亮点。先点名的文件之外的其余文件折叠为'N more'。
+wire.settings.supplements_maxfeatured.label | ↳ files shown | ↳ 显示文件数
+wire.settings.supplements_maxoutputtokens.help | Needs graphics on. Output budget per generator turn. | 需开启图表。每次生成器回合的输出预算。
+wire.settings.supplements_maxoutputtokens.label | ↳ max output tokens | ↳ 输出token上限
+wire.settings.supplements_maxturns.help | Needs graphics on. Model turns per chart, including one repair. | 需开启图表。每张图表的模型回合数，含一次修复。
+wire.settings.supplements_maxturns.label | ↳ max turns | ↳ 回合数上限
+wire.settings.supplements_model.help | Needs graphics on. auto picks a cheap fast model; session uses this session's. | 需开启图表。auto挑选便宜快速的模型；session使用本会话的模型。
+wire.settings.supplements_model.label | ↳ graphics model | ↳ 图表模型
+wire.settings.supplements_timeouts.help | Needs Highlights on. Give up on a whole job after this long. | 需开启亮点。整个任务超过此时长即放弃。
+wire.settings.supplements_timeouts.label | ↳ time limit (s) | ↳ 时间上限（秒）
+wire.settings.team_bridge.description | Your agent can exchange messages with other members' agents in your organization. Off by default; you can pause or turn it off at any time. | 你的智能体可与组织内其他成员的智能体交换消息。默认关闭；你可以随时暂停或关闭。
+wire.settings.team_bridge.title | Agent messages | 智能体消息
+wire.settings.team_bridge_enabled.help | Off by default. Also needs a Radient sign-in and an eligible organization. | 默认关闭。还需要登录Radient并加入符合条件的组织。
+wire.settings.team_bridge_enabled.label | Enabled on this machine | 在本机启用
+wire.settings.team_bridge_session.help | Session that may be woken for new messages; empty = badge only. | 可因新消息而被唤醒的会话；留空则仅显示角标。
+wire.settings.team_bridge_session.label | CoS session | CoS会话
+wire.settings.tool_approval_mode.choice.ask.description | prompt before write/exec tools | 写入/执行工具前先询问
+wire.settings.tool_approval_mode.choice.ask.label | ask | ask
+wire.settings.tool_approval_mode.choice.auto.description | run them without asking | 不经询问直接运行
+wire.settings.tool_approval_mode.choice.auto.label | auto | auto
+wire.settings.tool_approval_mode.help | Loosening needs a write in this session — /approvals auto. | 放宽需要在本会话内写入——/approvals auto。
+wire.settings.tool_approval_mode.label | Tool approval mode | 工具审批模式
+wire.settings.tools.description | How the built-in tools execute. | 内置工具如何执行。
+wire.settings.tools.title | Tools | 工具
+wire.settings.tools_defer.help | Keep rarely used tools' schemas out of every request until the agent reads tool://<name> or calls one. The tools stay callable either way. Off sends every schema on every request. | 把罕用工具的schema排除在每次请求之外，直到智能体读取tool://<name>或调用其一。两种情况下工具都可调用。关闭则每次请求都发送全部schema。
+wire.settings.tools_defer.label | Load rarely used tool schemas on demand | 按需加载罕用工具的schema
+wire.settings.tools_search_interception_block.help | On: the command is refused with a suggestion. Off: it runs anyway and the interception is logged, so an operator can watch before enforcing. | 开：命令会被拒绝并给出建议。关：照常运行，并记录拦截情况，便于操作员先观察再强制执行。
+wire.settings.tools_search_interception_block.label | ...refuse rather than warn | ……拒绝而非警告
+wire.settings.tools_search_interception_enabled.help | Refuse a shell `grep`/`rg`/`find` that recurses from a repository root or a vendor/build tree, and point the agent at the `grep` tool. A scoped or single-file search is never touched. Off disables the check. | 拒绝从仓库根目录或vendor/构建目录递归的shell `grep`/`rg`/`find`，并引导智能体改用`grep`工具。限定范围或单文件搜索绝不受影响。关则禁用该检查。
+wire.settings.tools_search_interception_enabled.label | Block unbounded searches | 拦截无界搜索
+wire.settings.tools_search_interception_rg_excludes.help | Give ripgrep a generated config that skips node_modules/.git/out etc., so an `rg` the guard does not block is still fast. Applies to ripgrep only. | 为ripgrep生成配置，跳过node_modules/.git/out等目录，让未被守卫拦截的`rg`依然快速。仅适用于ripgrep。
+wire.settings.tools_search_interception_rg_excludes.label | ...prune vendor trees for ripgrep | ……为ripgrep裁剪vendor目录
+wire.settings.tui_sidebar_position.choice.left.description | sessions to the left of the conversation | 会话位于对话左侧
+wire.settings.tui_sidebar_position.choice.left.label | left | 左侧
+wire.settings.tui_sidebar_position.choice.right.description | sessions to the right of the conversation | 会话位于对话右侧
+wire.settings.tui_sidebar_position.choice.right.label | right | 右侧
+wire.settings.tui_sidebar_position.help | Which side of the conversation holds the session sidebar. | 会话侧边栏位于对话的哪一侧。
+wire.settings.tui_sidebar_position.label | Sidebar position | 侧边栏位置
+wire.settings.tui_sidebar_show_subagents.choice.false.description | show only your own sessions | 只显示你自己的会话
+wire.settings.tui_sidebar_show_subagents.choice.true.description | list recent subagent runs | 列出最近的子智能体运行
+wire.settings.tui_sidebar_show_subagents.help | List recent subagent runs below your own sessions. Ctrl+A toggles the layer while the sidebar has focus. | 在你自己的会话下方列出最近的子智能体运行。侧边栏获得焦点时，Ctrl+A切换该层显示。
+wire.settings.tui_sidebar_show_subagents.label | Sidebar subagent layer | 侧边栏子智能体层
+wire.settings.tui_sidebar_visible.choice.false.description | keep the full conversation width | 保持对话全宽
+wire.settings.tui_sidebar_visible.choice.true.description | show the sidebar | 显示侧边栏
+wire.settings.tui_sidebar_visible.help | Active and recent conversations. Ctrl+B toggles the sidebar. | 活跃与最近的对话。Ctrl+B切换侧边栏。
+wire.settings.tui_sidebar_visible.label | Session sidebar | 会话侧边栏
+wire.settings.tui_theme.help | Colour ramp. /theme switches it live with an arrow-key preview. | 配色方案。/theme配合方向键预览实时切换。
+wire.settings.tui_theme.label | Theme | 主题
+wire.settings.wakes.description | When a watched condition goes stale, the assistant is woken to check in rather than left to wait for the daily cadence: the master switch, the per-day budget and spacing, and which sources may fire. Read at the next evaluation pass. | 当被监控的条件长时间无变化时，唤醒助手去检查，而不是让它一直等到每日例行：总开关、每日预算与间隔、以及哪些来源可以触发。在下一次评估时读取。
+wire.settings.wakes.title | Wake triggers | 唤醒触发器
+wire.settings.wakes_triggers_enabled.choice.false.description | disabled | 已禁用
+wire.settings.wakes_triggers_enabled.choice.true.description | enabled | 已启用
+wire.settings.wakes_triggers_enabled.help | Master switch for trigger wakes; off means no check-in is ever created. | 触发唤醒的总开关；关闭意味着永远不创建检查。
+wire.settings.wakes_triggers_enabled.label | Enabled | 已启用
+wire.settings.wakes_triggers_max_per_day.help | Per-target rolling 24 h budget for trigger wakes. 0 disables trigger wakes without touching the switch above. | 每个目标的24小时滚动预算，用于触发唤醒。0表示禁用触发唤醒，不影响上方开关。
+wire.settings.wakes_triggers_max_per_day.label | Max check-in wakes per day | 每日检查唤醒上限
+wire.settings.wakes_triggers_min_gap_minutes.help | Minimum spacing between trigger wakes to the same target. | 同一目标的触发唤醒之间的最小间隔。
+wire.settings.wakes_triggers_min_gap_minutes.label | Minimum gap (minutes) | 最小间隔（分钟）
+wire.settings.wakes_triggers_project_staleness_enabled.choice.false.description | off | 关
+wire.settings.wakes_triggers_project_staleness_enabled.choice.true.description | watching | 监视中
+wire.settings.wakes_triggers_project_staleness_enabled.help | Wake to check in on projects whose progress went stale. Settled (done/paused/archived) projects are never watched. | 项目进度停滞时唤醒去检查。已结项（done/paused/archived）的项目从不监视。
+wire.settings.wakes_triggers_project_staleness_enabled.label | Project staleness trigger | 项目停滞触发器
+wire.settings.web_fetch.description | Limits and rendering for the fetch tool. | fetch工具的限制与渲染。
+wire.settings.web_fetch.title | Web fetch | 网页抓取
+wire.settings.web_fetch_allow_private.choice.false.description | block private targets | 阻止私有目标
+wire.settings.web_fetch_allow_private.choice.true.description | allow private targets | 允许私有目标
+wire.settings.web_fetch_allow_private.help | SSRF guard. On permits loopback, private and link-local targets. | SSRF防护。开启时允许环回、私有与链路本地目标。
+wire.settings.web_fetch_allow_private.label | Allow private addresses | 允许私有地址
+wire.settings.web_fetch_blocked_retry.choice.false.description | stay self-identifying | 保持自我标识
+wire.settings.web_fetch_blocked_retry.choice.true.description | retry refusals once | 对拒绝重试一次
+wire.settings.web_fetch_blocked_retry.help | After a refusal, retry once with browser-shaped headers. | 被拒绝后，改用浏览器风格请求头重试一次。
+wire.settings.web_fetch_blocked_retry.label | Browser-profile retry | 模拟浏览器重试
+wire.settings.web_fetch_cache_ttl_seconds.help | 0 disables the URL cache entirely. | 0表示完全禁用URL缓存。
+wire.settings.web_fetch_cache_ttl_seconds.label | Cache TTL (s) | 缓存TTL（秒）
+wire.settings.web_fetch_enabled.choice.false.description | fetch disabled | fetch已禁用
+wire.settings.web_fetch_enabled.choice.true.description | fetch available | fetch可用
+wire.settings.web_fetch_enabled.help | Offer the fetch tool and read <url>; off refuses every call. | 提供fetch工具与read <url>；关闭则拒绝所有调用。
+wire.settings.web_fetch_enabled.label | Web fetch | 网页抓取
+wire.settings.web_fetch_enrich.choice.false.description | scrape HTML directly | 直接抓取HTML
+wire.settings.web_fetch_enrich.choice.true.description | try cleaner sources first | 先尝试更干净的来源
+wire.settings.web_fetch_enrich.help | Try .md, llms.txt and content negotiation before scraping HTML. | 抓取HTML之前，先尝试.md、llms.txt与内容协商。
+wire.settings.web_fetch_enrich.label | Enrich before scraping | 抓取前先增强
+wire.settings.web_fetch_max_attempts.help | Retries share the call's timeout, so more attempts never take longer. | 重试共享该调用的超时，因此更多尝试不会花更长时间。
+wire.settings.web_fetch_max_attempts.label | Attempts per hop | 每跳尝试次数
+wire.settings.web_fetch_max_bytes.help | Enforced during streaming, so a huge page is cut off rather than buffered. | 在流式传输中执行，因此超大页面会被截断而不是整体缓冲。
+wire.settings.web_fetch_max_bytes.label | Download ceiling (bytes) | 下载上限（字节）
+wire.settings.web_fetch_max_redirects.help | Redirect hops followed before giving up. | 放弃前跟随的重定向跳数。
+wire.settings.web_fetch_max_redirects.label | Max redirects | 重定向上限
+wire.settings.web_fetch_render_backend.choice.auto.description | markdownify if available, else stdlib | 有markdownify就用，否则用stdlib
+wire.settings.web_fetch_render_backend.choice.auto.label | auto | auto
+wire.settings.web_fetch_render_backend.choice.stdlib.description | always the bundled renderer | 始终使用内置渲染器
+wire.settings.web_fetch_render_backend.choice.stdlib.label | stdlib | stdlib
+wire.settings.web_fetch_render_backend.help | Auto uses markdownify when the [fetch] extra is installed. | 安装[fetch] extra后，auto会使用markdownify。
+wire.settings.web_fetch_render_backend.label | HTML renderer | HTML渲染器
+wire.settings.web_fetch_timeout_seconds.help | Per-request timeout. | 每个请求的超时。
+wire.settings.web_fetch_timeout_seconds.label | Timeout (s) | 超时（秒）
+wire.settings.web_search.description | Providers and load balancing for the search tool. | search工具的提供商与负载均衡。
+wire.settings.web_search.title | Web search | 网页搜索
+wire.settings.web_search_deepseek_evidence.help | Adds a per-page quote and relevance score after a DeepSeek search. | 在DeepSeek搜索后，为每个页面附加摘录与相关性评分。
+wire.settings.web_search_deepseek_evidence.label | DeepSeek page evidence | DeepSeek页面证据
+wire.settings.web_search_enabled.choice.false.description | search disabled | search已禁用
+wire.settings.web_search_enabled.choice.true.description | search available | search可用
+wire.settings.web_search_enabled.help | Offer the search tool and let it run; off refuses every call. | 提供search工具并允许运行；关闭则拒绝所有调用。
+wire.settings.web_search_enabled.label | Web search | 网页搜索
+wire.settings.web_search_excluded_providers.help | Never used, even in the automatic chain. Comma-separated; empty = none excluded. | 从不使用，自动链中也不例外。逗号分隔；留空则不排除任何提供商。
+wire.settings.web_search_excluded_providers.label | Excluded providers | 排除的提供商
+wire.settings.web_search_providers.help | Comma-separated, in priority order; tried before the automatic free providers. | 逗号分隔，按优先级顺序；先于自动的免费提供商尝试。
+wire.settings.web_search_providers.label | Providers | 提供商
+wire.settings.web_search_read_enabled.help | Offer web_read: answer from pages a search already retrieved, no refetch. | 提供web_read：从搜索已获取的页面作答，不重新抓取。
+wire.settings.web_search_read_enabled.label | Read from search | 从搜索读取
+wire.settings.web_search_searxng_endpoint.help | Base URL of a self-hosted SearXNG instance. | 自托管SearXNG实例的基础URL。
+wire.settings.web_search_searxng_endpoint.label | SearXNG endpoint | SearXNG endpoint
+wire.settings.web_search_strategy.choice.ordered.description | top of the list first, fall through | 列表顶部优先，逐级回退
+wire.settings.web_search_strategy.choice.ordered.label | ordered | ordered
+wire.settings.web_search_strategy.choice.round_robin.description | rotate across providers | 在提供商之间轮换
+wire.settings.web_search_strategy.choice.round_robin.label | round_robin | round_robin
+wire.settings.web_search_strategy.help | How the provider list is consumed. | 提供商列表的使用方式。
+wire.settings.web_search_strategy.label | Load balancing | 负载均衡
+wire.settings.web_search_timeout_seconds.help | Per-provider request timeout. Clamped to 1-120 when read. | 每个提供商的请求超时。读取时钳制在1-120之间。
+wire.settings.web_search_timeout_seconds.label | Timeout (s) | 超时（秒）
+wire.settings.web_tools.description | Whether the search and fetch tools are offered and allowed to run. | 是否提供search与fetch工具并允许运行。
+wire.settings.web_tools.title | Web tools | 网页工具

@@ -1,0 +1,549 @@
+{
+  "method": "Audit-local, in-memory 40% Arabic-script word stretch with U+0640 tatweel; no source/catalogue writes. This is a synthetic fit/parser probe, not native or rendered RTL evidence and not an advertised core one-command workflow.",
+  "argument_parity_errors": [],
+  "plural_render_count": 76,
+  "plural_render_errors": [],
+  "width_rows": [
+    {
+      "key": "relay.ask.context.messages",
+      "mode": "dynamic_wrap_or_clip",
+      "maxCells": 60,
+      "pseudo_cells": 143,
+      "fits": false
+    },
+    {
+      "key": "relay.ask.dismiss.answered_in_chat",
+      "mode": "static",
+      "maxCells": 34,
+      "pseudo_cells": 30,
+      "fits": true
+    },
+    {
+      "key": "relay.ask.dismiss.answered_in_chat_note",
+      "mode": "static",
+      "maxCells": 44,
+      "pseudo_cells": 51,
+      "fits": false
+    },
+    {
+      "key": "relay.ask.dismiss.cancel",
+      "mode": "static",
+      "maxCells": 12,
+      "pseudo_cells": 14,
+      "fits": false
+    },
+    {
+      "key": "relay.ask.dismiss.moot",
+      "mode": "static",
+      "maxCells": 34,
+      "pseudo_cells": 18,
+      "fits": true
+    },
+    {
+      "key": "relay.ask.dismiss.moot_note",
+      "mode": "static",
+      "maxCells": 44,
+      "pseudo_cells": 38,
+      "fits": true
+    },
+    {
+      "key": "relay.ask.dismiss.open",
+      "mode": "static",
+      "maxCells": 12,
+      "pseudo_cells": 13,
+      "fits": false
+    },
+    {
+      "key": "relay.ask.dismiss.receipt",
+      "mode": "static",
+      "maxCells": 44,
+      "pseudo_cells": 52,
+      "fits": false
+    },
+    {
+      "key": "relay.ask.dismiss.receipt_answered_in_chat",
+      "mode": "static",
+      "maxCells": 44,
+      "pseudo_cells": 60,
+      "fits": false
+    },
+    {
+      "key": "relay.ask.dismiss.receipt_moot",
+      "mode": "static",
+      "maxCells": 44,
+      "pseudo_cells": 42,
+      "fits": true
+    },
+    {
+      "key": "relay.ask.dismiss.title",
+      "mode": "static",
+      "maxCells": 24,
+      "pseudo_cells": 23,
+      "fits": true
+    },
+    {
+      "key": "tui.asks.context.messages",
+      "mode": "dynamic_wrap_or_clip",
+      "maxCells": 78,
+      "pseudo_cells": 167,
+      "fits": false
+    },
+    {
+      "key": "tui.asks.dismiss.answered_in_chat",
+      "mode": "static",
+      "maxCells": 34,
+      "pseudo_cells": 27,
+      "fits": true
+    },
+    {
+      "key": "tui.asks.dismiss.answered_in_chat_note",
+      "mode": "static",
+      "maxCells": 44,
+      "pseudo_cells": 51,
+      "fits": false
+    },
+    {
+      "key": "tui.asks.dismiss.fleet_gone",
+      "mode": "static",
+      "maxCells": 60,
+      "pseudo_cells": 64,
+      "fits": false
+    },
+    {
+      "key": "tui.asks.dismiss.hint",
+      "mode": "static",
+      "maxCells": 40,
+      "pseudo_cells": 40,
+      "fits": true
+    },
+    {
+      "key": "tui.asks.dismiss.moot",
+      "mode": "static",
+      "maxCells": 34,
+      "pseudo_cells": 18,
+      "fits": true
+    },
+    {
+      "key": "tui.asks.dismiss.moot_note",
+      "mode": "static",
+      "maxCells": 44,
+      "pseudo_cells": 38,
+      "fits": true
+    },
+    {
+      "key": "tui.asks.dismiss.notice_answered_in_chat",
+      "mode": "static",
+      "maxCells": 44,
+      "pseudo_cells": 53,
+      "fits": false
+    },
+    {
+      "key": "tui.asks.dismiss.notice_moot",
+      "mode": "static",
+      "maxCells": 44,
+      "pseudo_cells": 39,
+      "fits": true
+    },
+    {
+      "key": "tui.asks.dismiss.notice_no_reply",
+      "mode": "static",
+      "maxCells": 44,
+      "pseudo_cells": 55,
+      "fits": false
+    },
+    {
+      "key": "tui.asks.dismiss.title",
+      "mode": "static",
+      "maxCells": 60,
+      "pseudo_cells": 24,
+      "fits": true
+    },
+    {
+      "key": "tui.palette.kind_agent",
+      "mode": "static",
+      "maxCells": 12,
+      "pseudo_cells": 7,
+      "fits": true
+    },
+    {
+      "key": "tui.palette.kind_command",
+      "mode": "static",
+      "maxCells": 12,
+      "pseudo_cells": 7,
+      "fits": true
+    },
+    {
+      "key": "tui.palette.kind_session",
+      "mode": "static",
+      "maxCells": 12,
+      "pseudo_cells": 6,
+      "fits": true
+    },
+    {
+      "key": "tui.palette.kind_setting",
+      "mode": "static",
+      "maxCells": 12,
+      "pseudo_cells": 7,
+      "fits": true
+    },
+    {
+      "key": "tui.palette.kind_team",
+      "mode": "static",
+      "maxCells": 12,
+      "pseudo_cells": 5,
+      "fits": true
+    },
+    {
+      "key": "tui.palette.no_matches",
+      "mode": "static",
+      "maxCells": 24,
+      "pseudo_cells": 29,
+      "fits": false
+    },
+    {
+      "key": "tui.palette.placeholder",
+      "mode": "static",
+      "maxCells": 48,
+      "pseudo_cells": 58,
+      "fits": false
+    },
+    {
+      "key": "tui.welcome.tip.approvals",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 50,
+      "fits": true
+    },
+    {
+      "key": "tui.welcome.tip.classification_login",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 56,
+      "fits": true
+    },
+    {
+      "key": "tui.welcome.tip.classification_off",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 57,
+      "fits": true
+    },
+    {
+      "key": "tui.welcome.tip.cmux",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 74,
+      "fits": false
+    },
+    {
+      "key": "tui.welcome.tip.esc",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 51,
+      "fits": true
+    },
+    {
+      "key": "tui.welcome.tip.fork",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 71,
+      "fits": false
+    },
+    {
+      "key": "tui.welcome.tip.fork_placement",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 67,
+      "fits": false
+    },
+    {
+      "key": "tui.welcome.tip.hotkeys",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 45,
+      "fits": true
+    },
+    {
+      "key": "tui.welcome.tip.key_new_session",
+      "mode": "reserved_placeholder",
+      "maxCells": 32,
+      "pseudo_cells": 38,
+      "fits": false
+    },
+    {
+      "key": "tui.welcome.tip.key_resume",
+      "mode": "reserved_placeholder",
+      "maxCells": 32,
+      "pseudo_cells": 32,
+      "fits": true
+    },
+    {
+      "key": "tui.welcome.tip.mesh",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 62,
+      "fits": false
+    },
+    {
+      "key": "tui.welcome.tip.model",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 63,
+      "fits": false
+    },
+    {
+      "key": "tui.welcome.tip.paste",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 57,
+      "fits": true
+    },
+    {
+      "key": "tui.welcome.tip.resume",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 52,
+      "fits": true
+    },
+    {
+      "key": "tui.welcome.tip.setup",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 75,
+      "fits": false
+    },
+    {
+      "key": "tui.welcome.tip.shell",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 50,
+      "fits": true
+    },
+    {
+      "key": "tui.welcome.tip.subagents",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 78,
+      "fits": false
+    },
+    {
+      "key": "tui.welcome.tip.team",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 56,
+      "fits": true
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.help",
+      "mode": "static",
+      "maxCells": 58,
+      "pseudo_cells": 69,
+      "fits": false
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.label",
+      "mode": "static",
+      "maxCells": 29,
+      "pseudo_cells": 32,
+      "fits": false
+    },
+    {
+      "key": "wire.settings.session_compression.title",
+      "mode": "static",
+      "maxCells": 34,
+      "pseudo_cells": 24,
+      "fits": true
+    },
+    {
+      "key": "wire.settings.session_compression_after_days.label",
+      "mode": "static",
+      "maxCells": 29,
+      "pseudo_cells": 35,
+      "fits": false
+    },
+    {
+      "key": "wire.settings.session_compression_enabled.label",
+      "mode": "static",
+      "maxCells": 29,
+      "pseudo_cells": 39,
+      "fits": false
+    },
+    {
+      "key": "wire.settings.session_scratchpad.title",
+      "mode": "static",
+      "maxCells": 12,
+      "pseudo_cells": 10,
+      "fits": true
+    },
+    {
+      "key": "wire.settings.session_scratchpad_max_bytes.label",
+      "mode": "static",
+      "maxCells": 29,
+      "pseudo_cells": 22,
+      "fits": true
+    }
+  ],
+  "static_or_reserved_over_budget": [
+    {
+      "key": "relay.ask.dismiss.answered_in_chat_note",
+      "mode": "static",
+      "maxCells": 44,
+      "pseudo_cells": 51,
+      "fits": false
+    },
+    {
+      "key": "relay.ask.dismiss.cancel",
+      "mode": "static",
+      "maxCells": 12,
+      "pseudo_cells": 14,
+      "fits": false
+    },
+    {
+      "key": "relay.ask.dismiss.open",
+      "mode": "static",
+      "maxCells": 12,
+      "pseudo_cells": 13,
+      "fits": false
+    },
+    {
+      "key": "relay.ask.dismiss.receipt",
+      "mode": "static",
+      "maxCells": 44,
+      "pseudo_cells": 52,
+      "fits": false
+    },
+    {
+      "key": "relay.ask.dismiss.receipt_answered_in_chat",
+      "mode": "static",
+      "maxCells": 44,
+      "pseudo_cells": 60,
+      "fits": false
+    },
+    {
+      "key": "tui.asks.dismiss.answered_in_chat_note",
+      "mode": "static",
+      "maxCells": 44,
+      "pseudo_cells": 51,
+      "fits": false
+    },
+    {
+      "key": "tui.asks.dismiss.fleet_gone",
+      "mode": "static",
+      "maxCells": 60,
+      "pseudo_cells": 64,
+      "fits": false
+    },
+    {
+      "key": "tui.asks.dismiss.notice_answered_in_chat",
+      "mode": "static",
+      "maxCells": 44,
+      "pseudo_cells": 53,
+      "fits": false
+    },
+    {
+      "key": "tui.asks.dismiss.notice_no_reply",
+      "mode": "static",
+      "maxCells": 44,
+      "pseudo_cells": 55,
+      "fits": false
+    },
+    {
+      "key": "tui.palette.no_matches",
+      "mode": "static",
+      "maxCells": 24,
+      "pseudo_cells": 29,
+      "fits": false
+    },
+    {
+      "key": "tui.palette.placeholder",
+      "mode": "static",
+      "maxCells": 48,
+      "pseudo_cells": 58,
+      "fits": false
+    },
+    {
+      "key": "tui.welcome.tip.cmux",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 74,
+      "fits": false
+    },
+    {
+      "key": "tui.welcome.tip.fork",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 71,
+      "fits": false
+    },
+    {
+      "key": "tui.welcome.tip.fork_placement",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 67,
+      "fits": false
+    },
+    {
+      "key": "tui.welcome.tip.key_new_session",
+      "mode": "reserved_placeholder",
+      "maxCells": 32,
+      "pseudo_cells": 38,
+      "fits": false
+    },
+    {
+      "key": "tui.welcome.tip.mesh",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 62,
+      "fits": false
+    },
+    {
+      "key": "tui.welcome.tip.model",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 63,
+      "fits": false
+    },
+    {
+      "key": "tui.welcome.tip.setup",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 75,
+      "fits": false
+    },
+    {
+      "key": "tui.welcome.tip.subagents",
+      "mode": "static",
+      "maxCells": 57,
+      "pseudo_cells": 78,
+      "fits": false
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.help",
+      "mode": "static",
+      "maxCells": 58,
+      "pseudo_cells": 69,
+      "fits": false
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.label",
+      "mode": "static",
+      "maxCells": 29,
+      "pseudo_cells": 32,
+      "fits": false
+    },
+    {
+      "key": "wire.settings.session_compression_after_days.label",
+      "mode": "static",
+      "maxCells": 29,
+      "pseudo_cells": 35,
+      "fits": false
+    },
+    {
+      "key": "wire.settings.session_compression_enabled.label",
+      "mode": "static",
+      "maxCells": 29,
+      "pseudo_cells": 39,
+      "fits": false
+    }
+  ]
+}

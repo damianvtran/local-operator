@@ -1,0 +1,155 @@
+{
+  "schema": 1,
+  "audit_id": "zh24r2",
+  "audit_kind": "independent_translation_reaudit",
+  "locale": "zh-CN",
+  "namespace": "wire.remote_compute",
+  "round": 2,
+  "audit_date": "2026-10-24",
+  "key_count": 43,
+  "source_audit_revision": "c4ba95919dbea27fcf990101f9e48ed21e977e10",
+  "audited_revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "fix_commit_under_review": "cb716031e335aa27e632227f1a0303e143dcd19f",
+  "current_byte_round_for_ledger": true,
+  "current_bytes_match_audited_hashes": true,
+  "supersedes": [
+    {
+      "audit_id": "zh24a1",
+      "record": "i18n/audits/evidence/zh-CN/wire.remote_compute/zh24a1/record.json",
+      "pre_fix_target_sha256_prefix": "9db01ce7c93f",
+      "reason": "Names pre-fix target bytes; superseded by this current-byte record."
+    }
+  ],
+  "supersedes_statement": "This record supersedes the pre-fix audit record(s) listed in `supersedes` for wire.remote_compute: they name target bytes `9db01ce7c93f…` and earlier, which are no longer current after cb716031e3. All verdicts and hashes here are derived from revision d9f70f622d.",
+  "translator": {
+    "agent": null,
+    "session": null,
+    "model": null,
+    "date": null,
+    "source": "Not recorded in the tree: i18n/provenance carries no zh-CN entry. The only provenance is commit c4ba95919d (\"feat(i18n): complete the zh-CN core delta\"); agent/model/date are left null rather than invented."
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "b1d9d628481a",
+    "model": "deepseek/deepseek-flash",
+    "audit_date": "2026-10-24",
+    "independent_from_translator_session": true,
+    "independent_from_implementer": true,
+    "actual_model_source": "Session header for b1d9d628481a reports the served model deepseek/deepseek-flash; no fallback was observed during this audit.",
+    "tooling": "Read-only: local_operator.i18n.runtime.render_message for ICU rendering, audit.py and fix-verify.py in this bundle for mechanics; no catalogue, ledger, allowance, shipped or hold file was edited."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.remote_compute.json",
+      "sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.remote_compute.context.json",
+      "sha256": "ef149146941e72c79a64446737a5d12be5016850b04df462f48e3a6eb0ae2e36"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.remote_compute.json",
+      "sha256": "87e37fac0ae0d3fb3fe28920983d6d4e31be55f3a10c74f3d48f1bc21bab6d91"
+    },
+    "policy": [
+      {
+        "path": "i18n/glossary.md",
+        "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+      },
+      {
+        "path": "i18n/style-guides/zh-CN.md",
+        "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+      }
+    ],
+    "note": "en/context/target are the ledger inputs; hashes re-derived from the audited revision."
+  },
+  "changed_keys": [
+    "wire.remote_compute.api_override",
+    "wire.remote_compute.bad_sha",
+    "wire.remote_compute.finished_unknown",
+    "wire.remote_compute.needs_prompt",
+    "wire.remote_compute.retrying",
+    "wire.remote_compute.status_unknown"
+  ],
+  "fix_verification": {
+    "path": "i18n/audits/evidence/zh-CN/wire.remote_compute/zh24r2/fix-verification.json",
+    "changed_key_count": 6,
+    "all_values_match_proposal": true,
+    "all_argument_sets_equal": true,
+    "all_renders_ok": true,
+    "over_budget": []
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "verdict": "clean",
+    "findings_total": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0,
+    "finding_ids": [],
+    "unresolved_blocker_major_count": 0
+  },
+  "ledger_entry_candidate": {
+    "locale": "zh-CN",
+    "namespace": "wire.remote_compute",
+    "source_sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+    "translator": {
+      "agent": null,
+      "model": null,
+      "date": null
+    },
+    "auditor": {
+      "agent": "translation-auditor (lopdev team)",
+      "model": "deepseek/deepseek-flash",
+      "date": "2026-10-24",
+      "result": "passed",
+      "findings": 0
+    },
+    "status": "passed",
+    "note": "zh-CN core held-candidate wave 2026-10-24, round 2 at current bytes. Evidence: i18n/audits/evidence/zh-CN/wire.remote_compute/zh24r2/record.json. All 6 applied fix(es) verified against the pre-fix proposal; no residual finding; blocker/major 0. Auditor independent of translator and implementer; current-byte round."
+  },
+  "audit_notes_not_execution_log": "report.md is the audit report; audit.log is the executed command transcript for this namespace; fix-verification.json, mechanical-raw.json, runtime-mechanical.json and pseudo-evidence.json are machine output. String-level audit only: no native terminal, relay SPA or rendered-frame pass is claimed.",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.remote_compute/zh24r2/audit.log",
+      "sha256": "a7adb4a8dba80e3a46c390c3aea5a9ff770c3a4fb8072048b47f290226ba0cd3"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.remote_compute/zh24r2/audit.py.txt",
+      "sha256": "8c396c384520289bed2de98ff0119346a2c96c39b2ddfab0407e6aebf5dc3611"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.remote_compute/zh24r2/wire.remote_compute.compact.txt",
+      "sha256": "fd6b1404bf0b2d6999f7768c73bdc4a7de9427ee8de027d2c471ab947f8cfd64"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.remote_compute/zh24r2/wire.remote_compute.pairs.txt",
+      "sha256": "ca38908fda2179248409e2485b2d4bd12ae792d36a3e24c7f668d52e862375f7"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.remote_compute/zh24r2/fix-verification.json",
+      "sha256": "805741715482f9f2dca29df3a21b3f9818cb744ac845e2687e7b82b814044e4d"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.remote_compute/zh24r2/fix-verify.py.txt",
+      "sha256": "8d0df4677ddd17c018738ef0282f6fb4ab419d531edbfcfe5def843b0d29bf02"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.remote_compute/zh24r2/mechanical-raw.json",
+      "sha256": "3b047be663c087348897b24376da402f25f4ad750dc6e9f9dacedc06a63a761b"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.remote_compute/zh24r2/pseudo-evidence.json",
+      "sha256": "b46dcd762089933e174eca61b17ca2f6b043a1a4ab833fafe1e92f21fae3faf2"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.remote_compute/zh24r2/report.md",
+      "sha256": "af22279762131699b775f66f999ee9ebc805f6905c446eb3485a1b8f9b624532"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.remote_compute/zh24r2/runtime-mechanical.json",
+      "sha256": "1f3198c30051bb751060784dcb29ec512facd293946c29cbcdf4f45af97cbf4c"
+    }
+  ]
+}

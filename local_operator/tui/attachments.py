@@ -101,7 +101,19 @@ async def open_path_quietly(path: str) -> bool:
             process.kill()
         except ProcessLookupError:  # pragma: no cover — it exited between the two
             pass
+        await process.wait()
         return False
+    except asyncio.CancelledError:
+        # A full-page viewer can close while the OS opener is still alive.
+        # Cancellation must reap that exact child, not abandon a process when
+        # the Textual worker goes away.
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        await process.wait()
+        raise
     except Exception:  # noqa: BLE001 — a drain failure must not mask the exit code
         logger.debug("attachment opener failed", exc_info=True)
         return False

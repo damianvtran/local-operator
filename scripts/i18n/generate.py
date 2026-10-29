@@ -55,14 +55,25 @@ KEYS_DIR = REPO / "local_operator" / "i18n" / "keys"
 LEDGER = REPO / "i18n" / "ledger.json"
 
 #: Security disposition is independent of per-carried-namespace audit passes.
-#: Chinese's held wire.slash candidate cannot be bypassed by omitting its file
-#: or ledger row and publishing a smaller passed package. Even new passed rows
-#: do not clear the hold: removal requires a separately reviewed, explicit
-#: security disposition. This blocks eligibility, not recognition/formatting.
-SECURITY_HELD_LOCALES = frozenset({"zh-CN"})
+#: A held locale cannot be made eligible by omitting its file or ledger row and
+#: publishing a smaller passed package; removal requires a separately reviewed,
+#: explicit security disposition from the policy owner. This blocks eligibility,
+#: not recognition/formatting.
+#:
+#: EMPTY AS OF 2026-10-24, by the owner's explicit disposition. zh-CN had been
+#: held because ``wire.slash.credential`` was read outside the redaction policy
+#: (docs/security/redaction-policy.md, 2026-10-19). That blocker is resolved at
+#: the source: the policy now names key names as never-secret, and the
+#: sanctioned ``read_public_copy`` route (PR #2877, released in 0.89.0) served
+#: the committed blob with checkout-identity binding and an audit record. The
+#: namespace was then re-audited at its current bytes (evidence:
+#: i18n/audits/evidence/zh-CN/wire.slash/zh24s1/), every carried namespace has a
+#: current-byte passed audit, and i18n/ledger.json carries 81 passed zh-CN rows.
+#: Add a locale back here only with a new reviewed disposition.
+SECURITY_HELD_LOCALES: frozenset[str] = frozenset()
 
-#: Namespaces whose ENGLISH copy the relay SPA carries in-process, as the
-#: ``bundled.gen.ts`` map the store registers before any consumer renders.
+#: Namespaces whose audited shipped-locale copy the relay SPA carries in-process,
+#: as the ``bundled.gen.ts`` map the store registers before any consumer renders.
 #: EXPLICIT and reviewed, never "every ``relay.*`` file": ``relay.login`` is
 #: rendered by the daemon's SSR gate before the SPA exists, so bundling it into
 #: the client would ship copy the client never paints. ``wire.*`` is never
@@ -73,8 +84,59 @@ SECURITY_HELD_LOCALES = frozenset({"zh-CN"})
 #: ``relay.account_policy`` is the LOH-12 account-routing slice: the settings
 #: screen the SPA paints, with its wire.* counterpart served per §2.1 rather
 #: than bundled. Both were added independently on either side of the rebase;
-#: the tuple is one reviewed line per slice and carries all three.
-OWNED_SPA_NAMESPACES = ("relay.shell", "relay.session", "relay.account_policy")
+#: the tuple is one reviewed line per slice and carries all four.
+#: ``relay.session.tags`` is the tag slice (LOH-11 C1): the tag line, the
+#: assignment sheet and the list's long-press copy, split out of ``relay.session``
+#: because the catalogues are one small owned namespace per surface.
+#: ``relay.asks`` is the asks/cards slice (the relay's last planned namespace,
+#: RFC §5): the ask card, asks sheet, dock, settled row, pending decision card,
+#: approval-gate sheet and the disclosure that holds panels shut while a
+#: question waits. The tuple is one reviewed line per slice, never a glob.
+#: ``relay.approvals`` is the approvals-policy slice that landed on main while
+#: ``relay.asks`` was in flight (`feat(mobile): offer both approval scopes on
+#: the phone`): the policy state line, the third (global) scope and the mode
+#: change links the pending card carries. It is a namespace of its own rather
+#: than more ``relay.asks`` keys because the asks catalogues are already
+#: carried by every translated locale, and a new key there would be untranslated
+#: in all of them. It was expected to start en-only and ride §2.5 fallback; it
+#: does not, because the programme's rule is that new copy ships translated. It
+#: carries all seven locales, and the day it landed untranslated is the day the
+#: ratchet and the census became mutually unsatisfiable for it (check.py forbade
+#: the debt, the census required it). Recorded here because the next new
+#: namespace will hit the same wall.
+OWNED_SPA_NAMESPACES = (
+    "relay.shell",
+    "relay.session",
+    "relay.session.tags",
+    "relay.account_policy",
+    "relay.library",
+    # The ask card's own copy (R5 surfaces, 2026-10-23): the dismiss reasons and
+    # the stale-ask context line, painted by the SPA inside the asks sheet. One
+    # small owned namespace rather than keys added to `relay.session`, because a
+    # new key in a namespace a locale has not carried yet GROWS the shrink-only
+    # coverage allowance (docs/I18N.md).
+    "relay.ask",
+    "relay.approvals",
+    "relay.asks",
+    # The borderless redesign's chrome (drawer, chips, tray, banners; 2026-10-25,
+    # docs/design/mobile-relay-redesign.md §11.1). Its own namespace so no existing
+    # English value changes: a value edit stales every locale's passed ledger rows.
+    "relay.chrome",
+    # Condensed transcript bars and tool-fold units (C2). A separate owned
+    # namespace keeps the frozen relay.chrome source bytes and ledger hashes
+    # untouched while its English copy is prepared for the translation wave.
+    "relay.transcript",
+    # The session header's status dot (live / not answering / ended). Its own
+    # owned namespace for the same reason relay.transcript has one: the two new
+    # keys must not change relay.chrome's frozen English bytes, which would stale
+    # every locale's passed ledger row for that namespace.
+    "relay.health",
+    # The phone inbox (`#/notifications`, docs/design/notifications-inbox.md §9):
+    # reel, item detail, receipts and confirmations. Its own namespace for the
+    # `relay.chrome` reason: adding keys there would stale every locale's passed
+    # ledger row for a redesign another lane owns.
+    "relay.notifications",
+)
 
 GENERATED_HEADER = (
     '"""GENERATED by scripts/i18n/generate.py — do not edit by hand.\n\n'
@@ -197,7 +259,20 @@ def _render_keys_module(namespace: str, messages: dict[str, str]) -> str:
             # drift gate compares bytes, so a formatter pass after generation
             # would make the check unreproducible (review round 2, MAJOR).
             call = f'    return Msg(\n        "{key}",\n        {{{pairs}}},\n    )'
-        body.append(f"def {fname}({signature}) -> Msg:\n{call}\n")
+        header = f"def {fname}({signature}) -> Msg:"
+        # A namespace's longer function name plus several typed placeholders can
+        # exceed the same 100-column gate as the return statement. Wrap the
+        # generated signature too, rather than hand-editing one generated key
+        # module or giving this namespace a lint exemption. `signature` is EMPTY
+        # for a zero-placeholder key, and wrapping an empty one emitted a lone
+        # `,` inside the parentheses — invalid Python for a long identifier that
+        # the generator has always accepted (agent review round 1, C1-2). A
+        # function NAME cannot be split by any formatter, so that shape keeps the
+        # single-line header it has at the merge base.
+        if len(header) > 100 and signature:
+            wrapped = signature.replace(", ", ",\n    ")
+            header = f"def {fname}(\n    {wrapped},\n) -> Msg:"
+        body.append(f"{header}\n{call}\n")
     if body:
         # Imports only when something uses them: a namespace stub with zero
         # keys yet must not trip flake8's unused-import rule (F401) — the
@@ -303,31 +378,32 @@ def _render_shipped() -> str:
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 
-def _render_bundled_module(namespaces: dict[str, dict[str, str]]) -> str:
-    """The relay SPA's OWN English copy, keyed by its owned namespaces.
+def _render_bundled_module(namespaces: dict[str, dict[str, dict[str, str]]]) -> str:
+    """The relay SPA's audited own copy, keyed by namespace then locale.
 
     A ``.ts`` map rather than a shipped JSON import tree (the RFC's "bundle a
     bootstrap set" for the relay, §2.1/§3.3): the store imports it and hands
-    each namespace to the runtime's ``registerBundle`` before first paint, so
-    the copy travels with the code and cannot 404. Types only live in
-    ``keys.gen.ts``; THIS file carries the strings, from the explicit owned
-    namespace list alone — no wire prose is bundled.
+    each namespace/locale pair to the runtime's ``registerBundle`` before first
+    paint, so the copy travels with the code and cannot 404. Only generated
+    shipped locales are emitted: a catalogue on disk is not publication
+    permission. Types only live in ``keys.gen.ts``; THIS file carries strings
+    from the explicit owned namespace list alone — no wire prose is bundled.
     """
     lines = [
         "/** GENERATED by scripts/i18n/generate.py — do not edit by hand.",
-        " * The relay SPA's own English copy, emitted from the explicit owned",
-        " * namespaces only — never an implicit wire/bootstrap bundle.",
+        " * The relay SPA's audited own copy, emitted from explicit owned",
+        " * namespaces and shipped locales only — never an implicit wire bundle.",
         " * Regenerate with generate.py; --check rejects drift in CI. */",
-        # Split from the type annotation: the joined declaration is one emitted
-        # line longer than flake8's 100 columns; implicit concatenation keeps
-        # the emitted bytes identical.
-        "export const BUNDLED_OWNED: Readonly<Record<string, "
-        "Readonly<Record<string, string>>>> = {",
+        "export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,",
+        " Readonly<Record<string, string>>>>>> = {",
     ]
     for namespace in sorted(namespaces):
         lines.append(f"  {json.dumps(namespace)}: {{")
-        for key, message in sorted(namespaces[namespace].items()):
-            lines.append(f"    {json.dumps(key)}: {json.dumps(message)},")
+        for locale in sorted(namespaces[namespace]):
+            lines.append(f"    {json.dumps(locale)}: {{")
+            for key, message in sorted(namespaces[namespace][locale].items()):
+                lines.append(f"      {json.dumps(key)}: {json.dumps(message)},")
+            lines.append("    },")
         lines.append("  },")
     lines.append("};")
     lines.append("")
@@ -413,11 +489,39 @@ def _planned_files(emitted: Path) -> dict[Path, str]:
     # (the generator tests build mini-trees) without binding them to relay.shell.
     # The committed bundle's exact contents are pinned by test_generate's
     # ownership test, so a silent empty bundle cannot ship.
-    owned: dict[str, dict[str, str]] = {}
+    #
+    # ONLY SELECTABLE LOCALES ARE EMITTED (review round 2, MINOR). The runtime's
+    # `uiLocaleFor` selects a non-English UI locale only when EVERY owned
+    # namespace carries the whole English key set for it; a locale that misses
+    # one owned namespace or one key paints English as a whole and can never have
+    # its bundle read. Emitting it would ship dead copy — measured at 43,129 B for
+    # eight locales against 15,445 B for the en-only baseline — so the set is
+    # intersected with the English key sets here, mirroring that runtime rule.
+    # `en` is always present: it is the fallback every partial locale reads.
+    zh = catalogues.catalogue_root()
+    owned: dict[str, dict[str, dict[str, str]]] = {}
     for namespace in OWNED_SPA_NAMESPACES:
-        path = en_dir / f"{namespace}.json"
-        if path.is_file():
-            owned[namespace] = _read_json(path)
+        en_path = en_dir / f"{namespace}.json"
+        if not en_path.is_file():
+            continue
+        english = _read_json(en_path)
+        for locale in _shipped_locales():
+            path = zh / locale / f"{namespace}.json"
+            if not path.is_file():
+                continue
+            messages = _read_json(path)
+            if locale == "en" or set(english) <= set(messages):
+                owned.setdefault(namespace, {})[locale] = messages
+    # A locale is only kept when it cleared EVERY owned namespace above.
+    covering = set(owned[next(iter(owned))]) if owned else set()
+    for namespace in owned:
+        covering &= set(owned[namespace])
+    for namespace in list(owned):
+        owned[namespace] = {
+            locale: messages
+            for locale, messages in owned[namespace].items()
+            if locale in covering or locale == "en"
+        }
     planned[REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts"] = _render_bundled_module(
         owned
     )

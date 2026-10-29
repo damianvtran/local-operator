@@ -1,0 +1,73 @@
+tui.review.activity_close | closed | بند کیا
+tui.review.activity_comment | commented | تبصرہ کیا
+tui.review.activity_edit | edited | ترمیم کی
+tui.review.activity_merge | merged | merge کیا
+tui.review.activity_push | pushed | push کیا
+tui.review.activity_ready | marked ready | تیار نشان زد کیا
+tui.review.activity_review | reviewed | جائزہ لیا
+tui.review.activity_you | you {acts} | آپ نے {acts}
+tui.review.age_days | {amount, plural, one {updated # d ago} other {updated # d ago}} | {amount, plural, one {# d پہلے اپ ڈیٹ ہوا} other {# d پہلے اپ ڈیٹ ہوا}}
+tui.review.age_hours | {amount, plural, one {updated # h ago} other {updated # h ago}} | {amount, plural, one {# h پہلے اپ ڈیٹ ہوا} other {# h پہلے اپ ڈیٹ ہوا}}
+tui.review.age_just_now | updated just now | ابھی اپ ڈیٹ ہوا
+tui.review.age_minutes | {amount, plural, one {updated # min ago} other {updated # min ago}} | {amount, plural, one {# min پہلے اپ ڈیٹ ہوا} other {# min پہلے اپ ڈیٹ ہوا}}
+tui.review.checked_just_now | Checked just now | ابھی چیک ہوا
+tui.review.ci_failing | {count, plural, one {# failing} other {# failing}} | {count, plural, one {# ناکام} other {# ناکام}}
+tui.review.ci_failing_status | CI failing | CI ناکام
+tui.review.ci_no_checks | No checks yet | ابھی کوئی چیک نہیں
+tui.review.ci_passed_count | {passed}/{total} passed | {passed}/{total} کامیاب
+tui.review.ci_passed_status | CI passed | CI کامیاب
+tui.review.ci_pending | CI pending | CI منتظر
+tui.review.ci_running | CI running | CI جاری
+tui.review.comments_count | {count, plural, one {# comment} other {# comments}} | {count, plural, one {# تبصرہ} other {# تبصرے}}
+tui.review.empty_body | Pull requests and merge requests this conversation opens or mentions will appear here. | اس گفتگو کی کھولی یا مذکور pull درخواستیں اور merge درخواستیں یہاں آئیں گی۔
+tui.review.empty_header | No code reviews yet | ابھی کوئی کوڈ جائزہ نہیں
+tui.review.error_body | Nothing was lost — the conversation's record is unchanged. | کچھ نہیں کھویا — گفتگو کا ریکارڈ پہلے جیسا ہے۔
+tui.review.error_detail | {error} | {error}
+tui.review.error_header | Code reviews could not be read. | کوڈ جائزے پڑھے نہیں جا سکے۔
+tui.review.error_retry | Press r to try again. | دوبارہ کوشش کے لیے r دبائیں۔
+tui.review.group_mentioned | Mentioned | مذکور
+tui.review.group_opened | Opened | کھولی گئیں
+tui.review.hint_back | back | واپس
+tui.review.hint_move | move | منتقلی
+tui.review.hint_open | open | کھولیں
+tui.review.hint_refresh | refresh | تازہ کریں
+tui.review.lane_awaiting_rereview | {state} · awaiting re-review | {state} · دوبارہ جائزے کا منتظر
+tui.review.lane_code | Code | کوڈ
+tui.review.lane_design | Design | ڈیزائن
+tui.review.lane_no_review | No agent review yet | ابھی ایجنٹ کا جائزہ نہیں
+tui.review.lane_qa | QA | QA
+tui.review.lane_round | Round {round} · {state} | راؤنڈ {round} · {state}
+tui.review.lane_stale | stale | پرانا
+tui.review.lane_stale_head | stale — reviewed {reviewed}, head {head} | پرانا — جائزہ {reviewed}، head {head}
+tui.review.lane_stale_reviewed | stale — reviewed {reviewed} | پرانا — جائزہ {reviewed}
+tui.review.lane_state_clean | clean | صاف
+tui.review.lane_state_findings_open | findings open | مسائل کھلے ہیں
+tui.review.lane_state_remediation_posted | remediation posted | اصلاحی جواب آ گیا
+tui.review.lane_state_terminal | terminal | حتمی
+tui.review.lane_state_unstated | reviewed — verdict not stated | جائزہ ہوا — فیصلہ نہیں دیا گیا
+tui.review.lane_ux | UX | UX
+tui.review.link_only | Link only | صرف لنک
+tui.review.loading | Loading code reviews… | کوڈ جائزے لوڈ ہو رہے ہیں…
+tui.review.notice_cooling | Cooling — this host is rate-limited; nothing was fetched yet. | وقفہ — میزبان پر درخواستوں کی حد ہے؛ ابھی کچھ نہیں لایا گیا۔
+tui.review.notice_fetch_failed | Couldn't fetch this pass — will retry. | یہ بار ڈیٹا نہیں آ سکا — دوبارہ کوشش ہوگی۔
+tui.review.notice_refresh_error | Couldn't refresh: {error} | تازہ نہیں ہو سکا: {error}
+tui.review.notice_stale | Stale — last known state, not current. | پرانا ڈیٹا — آخری معلوم حالت، موجودہ نہیں۔
+tui.review.notice_stale_error | Stale — last known, not current: {error} | پرانا ڈیٹا — آخری معلوم، موجودہ نہیں: {error}
+tui.review.refreshing | Refreshing code reviews… | کوڈ جائزے تازہ ہو رہے ہیں…
+tui.review.relation_inherited | inherited | وراثت میں ملا
+tui.review.relation_subagent | via subagent | ذیلی ایجنٹ کے ذریعے
+tui.review.relation_subagent_named | via subagent {name} | ذیلی ایجنٹ {name} کے ذریعے
+tui.review.relation_subagent_path | via subagent {path} | ذیلی ایجنٹ {path} کے ذریعے
+tui.review.relation_unknown | unknown — possibly opened | نامعلوم — شاید کھولی گئی
+tui.review.relation_unknown_title | Possibly opened by this session; the evidence did not prove it was. | شاید اس سیشن نے کھولی؛ ثبوت سے یقینی نہیں۔
+tui.review.row_fetching | Fetching current state… | موجودہ حالت لی جا رہی ہے…
+tui.review.scan_failed | Couldn't scan this conversation; showing what was already recorded. | گفتگو اسکین نہیں ہو سکی؛ پہلا محفوظ ریکارڈ دکھایا جا رہا ہے۔
+tui.review.session_unavailable | No session is open yet. | ابھی کوئی سیشن کھلا نہیں۔
+tui.review.slash_help | Review this session's pull and merge requests | اس سیشن کی pull اور merge درخواستوں کا جائزہ لیں
+tui.review.state_closed | Closed | بند
+tui.review.state_draft | Draft | مسودہ
+tui.review.state_merged | Merged | merge شدہ
+tui.review.state_open | Open | کھلی
+tui.review.state_unknown | Unknown | نامعلوم
+tui.review.subtitle | Pull requests and merge requests this conversation opens or mentions. | اس گفتگو کی کھولی یا مذکور pull درخواستیں اور merge درخواستیں۔
+tui.review.title | Code review | کوڈ جائزہ

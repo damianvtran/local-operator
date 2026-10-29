@@ -1,0 +1,6 @@
+tui.tags.added	EN="Added “{name}”."	UR="“{name}” شامل کیا گیا۔"	OLD="“{name}” شامل کی گئی۔"
+tui.tags.cap_applied	EN="8 tags applied. Remove one before adding another."	UR="8 ٹیگز لاگو ہیں۔ دوسرا شامل کرنے سے پہلے ایک ہٹائیں۔"	OLD="8 ٹیگز لاگو ہیں۔ دوسری شامل کرنے سے پہلے ایک ہٹائیں۔"
+tui.tags.create_help	EN="Creates a shared tag and applies it here."	UR="مشترکہ ٹیگ تیار کر کے یہاں لاگو کیا جاتا ہے۔"	OLD="مشترکہ ٹیگ تیار کر کے یہاں لاگو کی جاتی ہے۔"
+tui.tags.created_applied	EN="Created and applied “{name}”."	UR="“{name}” تیار کر کے لاگو کیا گیا۔"	OLD="“{name}” تیار کر کے لاگو کی گئی۔"
+tui.tags.partial_create	EN="Tag created, but couldn't apply it. Retry applying."	UR="ٹیگ بن گیا، مگر لاگو نہیں ہو سکا۔ دوبارہ لاگو کرنے کی کوشش کریں۔"	OLD="ٹیگ بن گئی، مگر لاگو نہیں ہو سکی۔ دوبارہ لاگو کرنے کی کوشش کریں۔"
+tui.tags.removed	EN="Removed “{name}”."	UR="“{name}” ہٹا دیا گیا۔"	OLD="“{name}” ہٹا دی گئی۔"

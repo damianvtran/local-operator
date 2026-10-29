@@ -19,7 +19,7 @@ import pytest
 
 from local_operator.network import store
 from local_operator.network.credentials import consent, placement, reconcile
-from local_operator.network.credentials.types import DEVICE_BOUND_PROVIDERS
+from local_operator.network.credentials.types import is_device_bound_provider
 from local_operator.network.types import MeshRefusal
 from tests.unit.network.test_credentials_consent import (  # noqa: F401 — fixture by import
     N,
@@ -173,7 +173,13 @@ def test_only_native_oauth_classes_are_projected(rig: Any) -> None:
     assert result.projected == [P], result
     doc = _doc(rig)
     assert doc.entry("deepseek") is None and doc.entry("kimi") is None
-    assert "kimi" in DEVICE_BOUND_PROVIDERS
+    assert is_device_bound_provider("kimi")
+
+
+@pytest.mark.parametrize("provider", ["kimi", "kimi-wechat"])
+def test_device_bound_aliases_never_enter_derived_projection(provider: str) -> None:
+    assert not reconcile.provider_ok(provider)
+    assert reconcile.provider_ok("openai"), "ordinary authorized OAuth stays brokerable"
 
 
 def test_account_mismatch_projects_nothing(rig: Any) -> None:

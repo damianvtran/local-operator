@@ -1,0 +1,16 @@
+{
+  "cli.services_status.install_service": "instálalo con `{command}`",
+  "cli.services_status.install_service_help": "Solo Linux: instala y activa la unidad de usuario de systemd para serve",
+  "cli.services_status.restart_supervision_limit": "`lop services restart` puede recargarlo, pero no puede supervisarlo",
+  "cli.services_status.serve_install_isolated_home": "se escribió el archivo de la unidad, pero este HOME no es el del gestor systemd del usuario; no se activó nada",
+  "cli.services_status.serve_install_linux_only": "instalar el servicio serve requiere systemd --user en Linux; serve no cambia en macOS",
+  "cli.services_status.serve_install_not_serving": "la unidad serve se activó pero no sirve su propio proceso: {error}",
+  "cli.services_status.serve_install_wrong_cgroup": "la unidad serve respondió, pero el cgroup de su PID no confirma local-operator-serve.service",
+  "cli.services_status.serve_linger_required": "linger está desactivado: ejecuta `loginctl enable-linger` para conservar esta unidad tras cerrar sesión",
+  "cli.services_status.serve_unit_enabled": "servicio de usuario de systemd activado: {unit}",
+  "cli.services_status.serve_unit_written": "archivo de unidad escrito: {unit}",
+  "cli.services_status.supervised_by": "supervisado por: {unit}",
+  "cli.services_status.supervision_unknown": "supervisión desconocida: no se pudo resolver ninguna unidad de systemd",
+  "cli.services_status.unsupervised_scope": "sin supervisión: {scope}; systemd no puede reiniciarlo",
+  "cli.services_status.unsupervised_unknown": "sin supervisión: no se encontró ninguna unidad de systemd; systemd no puede reiniciarlo"
+}

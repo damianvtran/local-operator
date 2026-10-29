@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Render every Urdu plural through the real core runtime at CLDR-boundary counts."""
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+REPO = Path('/Users/damian/local-operator/.worktrees/i18n-ur-core')
+sys.path.insert(0, str(REPO))
+from local_operator.i18n.format import plural_category  # noqa: E402
+from local_operator.i18n.runtime import render_message  # noqa: E402
+
+ROOT = REPO / 'local_operator/i18n/catalogues'
+OUT = Path('/Users/damian/.local-operator/sessions/3e0f499dc2ee/scratchpad/ur-core-second-audit')
+rows = []
+for ur_path in sorted((ROOT / 'ur').glob('*.json')):
+    if ur_path.name.endswith('.context.json'):
+        continue
+    en_path = ROOT / 'en' / ur_path.name
+    if not en_path.exists():
+        continue
+    en = json.loads(en_path.read_text())
+    ur = json.loads(ur_path.read_text())
+    for key, source in en.items():
+        if ', plural,' not in source:
+            continue
+        names = set(re.findall(r'\{([A-Za-z_]\w*)\s*(?:\}|,)', source))
+        number_name = 'count' if 'count' in names else 'amount'
+        samples = []
+        for count in [0, 1, 2, 21, 1.5]:
+            params = {}
+            for name in names:
+                if name == number_name:
+                    params[name] = count
+                elif name == 'time':
+                    params[name] = '19:36'
+                elif name == 'limit':
+                    params[name] = 3
+                elif name == 'label':
+                    params[name] = str(count)
+                else:
+                    params[name] = 'X'
+            rendered = render_message(ur[key], params, 'ur')
+            samples.append({
+                'count': count,
+                'category': plural_category('ur', count),
+                'rendered': rendered,
+                'latin_count_present': str(count) in rendered,
+            })
+        rows.append({'key': key, 'en': source, 'ur': ur[key], 'samples': samples})
+
+expected = {0: 'other', 1: 'one', 2: 'other', 21: 'other', 1.5: 'other'}
+category_checks = [
+    {'value': value, 'expected': category, 'actual': plural_category('ur', value)}
+    for value, category in expected.items()
+]
+result = {
+    'method': 'core render_message(locale=ur) for every catalogue plural at 0,1,2,21,1.5; core plural_category checked against expected CLDR one/other boundaries',
+    'plural_key_count': len(rows),
+    'render_count': sum(len(r['samples']) for r in rows),
+    'render_error_count': 0,
+    'category_mismatch_count': sum(r['expected'] != r['actual'] for r in category_checks),
+    'missing_literal_count_count': sum(
+        not sample['latin_count_present'] for row in rows for sample in row['samples']
+        if isinstance(sample['count'], int)
+    ),
+    'category_checks': category_checks,
+    'rows': rows,
+}
+(OUT / 'plurals-rendered.json').write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps({k: v for k, v in result.items() if k != 'rows'}, ensure_ascii=False, indent=2))
+for row in rows:
+    print(row['key'], ' | '.join(f"{s['count']}={s['rendered']}" for s in row['samples'][:4]))

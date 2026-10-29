@@ -368,5 +368,9 @@ async def test_a_session_gate_suppresses_a_non_material_change(
         assert counters is not None
         assert counters["suppressed"]["non_material_metadata"] == 1
         assert counters["deliveries"] == 0
+        # ... and the derived index carries the count, so a cold listing can
+        # say the change was suppressed instead of "nothing has changed".
+        index_row = monitor_store.read_index(config_dir)[session.session_id]["monitors"][0]
+        assert index_row["suppressed"]["non_material_metadata"] == 1
     finally:
         await session.dispose()

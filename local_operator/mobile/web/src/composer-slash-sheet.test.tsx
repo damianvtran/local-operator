@@ -83,15 +83,17 @@ function projection(): SessionProjection {
 function renderComposer(): HTMLTextAreaElement {
 	render(
 		<Composer
+			ended={false}
 			pid="p1"
 			projection={projection()}
 			onOpenModels={() => {}}
+			onReturnToModels={() => {}}
 			onOpenEffort={() => {}}
 			effortOpen={false}
 			onCloseEffort={() => {}}
 		/>,
 	);
-	return screen.getByPlaceholderText("Message…") as HTMLTextAreaElement;
+	return screen.getByPlaceholderText("Ask anything…") as HTMLTextAreaElement;
 }
 
 afterEach(() => {

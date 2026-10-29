@@ -1,0 +1,144 @@
+tui.team_authoring.create
+EN "new team"
+UR "نئی ٹیم"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.edit
+EN "edit team · {name}"
+UR "ٹیم میں ترمیم · {name}"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.name
+EN "name"
+UR "نام"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.label
+EN "label"
+UR "لیبل"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.description
+EN "when to use"
+UR "کب استعمال کریں"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.manager
+EN "manager"
+UR "منیجر"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.members
+EN "members"
+UR "ارکان"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.aliases
+EN "aliases"
+UR "عرفی نام"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.instructions
+EN "instructions"
+UR "ہدایات"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.project
+EN "project brief"
+UR "پروجیکٹ بریف"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.members_hint
+EN "comma-separated: coder, coder:2, team:pod"
+UR "کاما سے الگ: coder, coder:2, team:pod"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.aliases_hint
+EN "comma-separated names · empty clears aliases"
+UR "کاما سے الگ نام · خالی سے عرفی نام ہٹ جائیں گے"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.instructions_hint
+EN "standing team guidance · Tab moves to the next field"
+UR "مستقل ٹیم ہدایات · Tab سے اگلا خانہ"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.overrides_hint
+EN "Existing member overrides are preserved. Edit overrides on the desktop."
+UR "ارکان کی موجودہ اووررائیڈس برقرار رہتی ہیں؛ ترمیم ڈیسک ٹاپ پر کریں۔"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.legend
+EN "ctrl+s save · tab move · esc cancel"
+UR "ctrl+s محفوظ · tab منتقلی · esc منسوخ"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.discard
+EN "Discard changes? y discard · n keep editing"
+UR "تبدیلیاں چھوڑیں؟ y چھوڑیں · n ترمیم جاری رکھیں"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.invalid_name
+EN "Use a team name without spaces or path separators."
+UR "ایسا ٹیم نام رکھیں جس میں اسپیس یا پاتھ کے جداکار نہ ہوں۔"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.required_manager
+EN "A manager is required."
+UR "منیجر ضروری ہے۔"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.required_instructions
+EN "Instructions are required for a new team."
+UR "نئی ٹیم کے لیے ہدایات ضروری ہیں۔"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.invalid_members
+EN "Use comma-separated role, role:2 or team:pod entries."
+UR "کاما سے الگ role، role:2 یا team:pod اندراج استعمال کریں۔"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.invalid_aliases
+EN "Use comma-separated names without spaces or empty entries."
+UR "کاما سے الگ نام رکھیں؛ اسپیس یا خالی اندراج نہ ہوں۔"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.saved
+EN "saved team {name}"
+UR "ٹیم {name} محفوظ ہو گئی"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.no_change
+EN "no changes to save"
+UR "محفوظ کرنے کے لیے کوئی تبدیلی نہیں"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.revision_changed
+EN "Someone else changed this team; reopen to edit."
+UR "کسی اور نے یہ ٹیم بدل دی ہے؛ ترمیم کے لیے دوبارہ کھولیں۔"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.missing
+EN "No installed team named {name}."
+UR "{name} نام کی کوئی ٹیم انسٹال نہیں۔"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.usage_edit
+EN "Use /team edit <name>."
+UR "/team edit <name> استعمال کریں۔"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.usage_new
+EN "Use /team new with no extra arguments."
+UR "/team new بغیر اضافی دلائل کے استعمال کریں۔"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.registry_missing
+EN "No team registry is attached to this session."
+UR "اس سیشن سے کوئی ٹیم رجسٹری منسلک نہیں۔"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.footer
+EN "/team chart <name> · /team new · /team edit <name>"
+UR "/team chart <name> · /team new · /team edit <name>"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.save_error
+EN "Could not save: {reason}"
+UR "محفوظ نہیں ہو سکا: {reason}"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.notice_read_only
+EN "Read-only: this conversation’s runtime is on another device, so team changes are not available here."
+UR "صرف پڑھنے کے لیے: اس گفتگو کا رن ٹائم دوسرے ڈیوائس پر ہے، اس لیے یہاں ٹیم کی تبدیلیاں دستیاب نہیں۔"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.new_hint
+EN "Create a team"
+UR "ٹیم بنائیں"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.edit_hint
+EN "Edit an installed team"
+UR "انسٹال شدہ ٹیم میں ترمیم کریں"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.subcommand
+EN "subcommand"
+UR "ذیلی کمانڈ"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.talk_hint
+EN "talk to team · {detail}"
+UR "ٹیم سے بات کریں · {detail}"
+CX {"role": "team form guidance, field label or receipt", "tone": "brief, calm, keyboard-first", "note": "Team authoring. Wrap at 58 content cells; preserve slash commands, placeholders and keyboard chords. Override editing is desktop-only."}
+tui.team_authoring.promote_hint
+EN "Copy this conversation's team into your account"
+UR "اس گفتگو کی ٹیم اپنے اکاؤنٹ میں کاپی کریں"
+CX {"role": "argument-picker row hint", "tone": "brief, verb-first, no jargon", "note": "Describes /team promote in the reserved-verb rows. 'account' is the product word for the everywhere-store; the row is a subcommand, so keep it one line at 60 columns."}

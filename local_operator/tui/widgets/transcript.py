@@ -69,13 +69,19 @@ from local_operator.harness.intent import ACTIVITY_THINKING
 from local_operator.harness.peer_cycles import PeerCycleCertificate
 from local_operator.i18n.format import format_number
 from local_operator.i18n.keys import tui_transcript
-from local_operator.i18n.text import active_locale, tr
+from local_operator.i18n.text import active_locale, register_refresh, tr, tr_record
 from local_operator.mobile.peer_model import TERMINAL_SENDER
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.composer_focus import (
     composer_may_take_focus,
     focus_is_claimed,
     return_focus_to_composer,
+)
+from local_operator.tui.i18n_status import (
+    balance_display_line,
+    display_tr,
+    localized_display,
+    strip_display_controls,
 )
 from local_operator.tui.internal_work_membership import (
     WorkGroupIdentity,
@@ -934,7 +940,11 @@ class TranscriptBlock(Static):
         the pointer was over.
         """
         url = self.link_at(event.x, event.y)
-        if url is None:
+        # Textual dispatches inherited handlers on the SAME widget even after
+        # a subclass stops bubbling. File callouts have their own affordance
+        # boundary; forwarding them again here invents an HTTP-only warning
+        # after an otherwise successful viewer/Finder action.
+        if url is None or url.casefold().startswith("file:"):
             return
         opener = getattr(self.app, "open_transcript_link", None)
         if opener is None:
@@ -967,6 +977,9 @@ class TranscriptBlock(Static):
             return None
         copied: list[str] = []
         for index, row in enumerate(visual.plain.split("\n")):
+            # Isolates are paint metadata, never clipboard content. Strip before
+            # applying cell-based selection offsets as well as before returning.
+            row = strip_display_controls(row)
             span = selection.get_span(index)
             if span is None or self.copy_row_is_chrome(index):
                 continue
@@ -1392,15 +1405,34 @@ class ExpandableActionBlock(TranscriptBlock):
 #: Resolved through the i18n runtime (T3, RFC §3.1): the marker strings are the
 #: en catalogue's ``tui.transcript.queued.*`` values — the leading middle dot and
 #: every word — so a wave moves them like every other extracted area.
-_t = tr("tui.transcript")
+_raw_t = tr("tui.transcript")
+_record_t = tr_record("tui.transcript")
+_t = display_tr("tui.transcript", technical_params=("pid",), technical_literals=("esc",))
 
-QUEUED_ROW_TEXT = _t(tui_transcript.queued_newest())
+# Raw constants are layout inputs. Projection happens after each marker line is
+# wrapped, so a narrow frame can never cut through an isolate.
+QUEUED_ROW_TEXT = _raw_t(tui_transcript.queued_newest())
 #: The same state WITHOUT the offer, for every queued message but the newest.
 #: Only the newest is recallable (``app._withdraw_queued_prompt`` lifts one at a
 #: time, the sibling steer channel's rule), so a second marked row advertising
 #: the same key promises a recall that press will decline — measured: two rows
 #: offering, one honouring (UX round 2, U4).
-QUEUED_ROW_TEXT_OLDER = _t(tui_transcript.queued_older())
+QUEUED_ROW_TEXT_OLDER = _raw_t(tui_transcript.queued_older())
+#: Where QUEUED_ROW_TEXT actually came from. An English fallback under an Urdu
+#: preference must stay byte-identical — its leading `·` belongs at the LEFT
+#: edge, while an RTL paragraph resolves it to the right (M-2).
+_QUEUED_SOURCE: str = _record_t(tui_transcript.queued_newest()).source_locale or "en"
+
+
+def _reload_copy() -> None:
+    """Remove old-locale isolates from import-time rows on every live switch."""
+    global QUEUED_ROW_TEXT, QUEUED_ROW_TEXT_OLDER, _QUEUED_SOURCE
+    QUEUED_ROW_TEXT = _raw_t(tui_transcript.queued_newest())
+    QUEUED_ROW_TEXT_OLDER = _raw_t(tui_transcript.queued_older())
+    _QUEUED_SOURCE = _record_t(tui_transcript.queued_newest()).source_locale or "en"
+
+
+register_refresh(_reload_copy)
 
 
 class UserBlock(TranscriptBlock):
@@ -1736,9 +1768,22 @@ class UserBlock(TranscriptBlock):
             # (design round 2, D6). `wrap_cells` is what the notice tier and the
             # prompt prose already use.
             marker = QUEUED_ROW_TEXT if self._queued_offer else QUEUED_ROW_TEXT_OLDER
-            mark = wrap_cells(marker, max(body, 1))
+            # The leading `·` is app chrome, not translated prose. Prefixing it
+            # to the projected run put it INSIDE the RLI, where an RTL paragraph
+            # resolves a left-edge marker to the right edge — the fallback
+            # contract this row already honours when there is no translation.
+            dot = "· " if marker.startswith("· ") else ""
+            text = marker[len(dot) :] if dot else marker
+            mark = wrap_cells(text, max(body - len(dot), 1))
+            if len(mark) > 1:
+                # Only the FIRST line pays for the dot; the tail keeps the row.
+                mark = [mark[0], *wrap_cells(" ".join(mark[1:]), max(body, 1))]
             start = len(rows)
-            rows.extend(mark)
+            for index, line in enumerate(mark):
+                painted = localized_display(
+                    line, source_locale=_QUEUED_SOURCE, technical_literals=("esc",)
+                ).plain
+                rows.append(f"{dot}{painted}" if index == 0 and dot else painted)
             # EVERY row the marker wrapped onto is receipt ink, not just its
             # last: the receipt token means "the app is talking here", and a
             # control row painted half in the prompt's own colour reads as
@@ -1877,6 +1922,20 @@ class NoticeBlock(TranscriptBlock):
     #: notice silently stopped tracking its column (measured at boot with two
     #: failures; design round 2, D2-1). Every other notice leaves it ``None``.
     mcp_failure_fit: tuple[str, str, int] | None = None
+
+    #: True while this row states a fact about the PREVIOUS runtime rather than
+    #: the live one: a failure projected out of the session's durable checkpoint
+    #: on a cold open, or out of an owner's last round on a viewer.
+    #:
+    #: It exists because the row outlives the moment it describes. The same
+    #: server can recover before the reader's next breath, and a present-tense
+    #: "MCP <x> failed" that nothing retracts is a standing contradiction of the
+    #: healthy toast beside it (QA round 1, Q2, measured on the real fixture: a
+    #: green "MCP ready: 12 servers" above nine red "failed" rows). Labelling it
+    #: as history makes it a true statement that no later state can contradict,
+    #: and it is what tells ``_report_mcp_startup`` to RESTATE this row in place
+    #: (never append beside it) once a live outcome confirms the same failure.
+    mcp_failure_history: bool = False
 
     #: Five tiers. ``info`` is `dim` — the quietest ink in the app, a step below a
     #: settled tool summary — which is right for a receipt nobody needs to read
@@ -2459,7 +2518,13 @@ class WakeBlock(ExpandableActionBlock):
                 slot = offer
         slot_cells = cell_len(slot) + 1 if slot else 0
         budget = max(0, remaining - slot_cells)
+        # `_summary` is raw source plus provenance. Fit first, then project the
+        # final line so truncation cannot orphan a bidi delimiter. No provenance
+        # (`None`) means this identity is not catalogue copy: external tool and
+        # model prose passes through untouched even under an Urdu preference.
         summary = truncate_cells(identity, budget)
+        if self._summary_source_locale is not None:
+            summary = localized_display(summary, source_locale=self._summary_source_locale).plain
 
         summary_style = Style(color=theme_mod.semantic_color(self._summary_ink()))
         row = Text(no_wrap=True, overflow="ellipsis")
@@ -2518,6 +2583,10 @@ class WakeBlock(ExpandableActionBlock):
                     row.append(truncate_cells(wrapped, line_width), style=dim)
         return row
 
+    #: Provenance of the raw `_summary` currently being fitted; non-catalogue
+    #: wake prose stays unprojected even while Urdu is the active preference.
+    _summary_source_locale: str | None = None
+
     def _summary_ink(self) -> str:
         """The theme ink a receipt's summary line is painted in.
 
@@ -2555,8 +2624,12 @@ class WakeBlock(ExpandableActionBlock):
                 if stripped.startswith("- "):
                     ids.append(stripped[2:].split(" ", 1)[0].split("(", 1)[0].strip())
             count = len(ids)
-            label = _t(tui_transcript.catchup_missed(count=count))
-            headline = _t(tui_transcript.catchup_headline(label=label))
+            # Nest RAW localized prose: painting the inner label first would
+            # inject controls into the outer message and double-isolate it.
+            label = _raw_t(tui_transcript.catchup_missed(count=count))
+            record = _record_t(tui_transcript.catchup_headline(label=label))
+            self._summary_source_locale = record.source_locale
+            headline = record.text
             if ids:
                 # The same label treatment the single-delivery fold applies
                 # (UX review round 2, U5 / QA Q3): this branch composes its
@@ -2566,6 +2639,7 @@ class WakeBlock(ExpandableActionBlock):
                 # shared lookup, so the two shapes cannot drift.
                 headline += f" ({', '.join(wake_display_name(i) for i in ids)})"
             return headline, message
+        self._summary_source_locale = None
         # The envelope strip is shared with the phone fold
         # (``harness.rows.wake_receipt_headline``): while it lived only here,
         # the phone rendered the raw model-facing envelope verbatim.
@@ -2762,6 +2836,14 @@ class PeerMessageBlock(ExpandableActionBlock):
     #: acted) and not "inbox" (a place, not an event): the row reports that a
     #: peer session reached in. The icon carries the direction.
     tool_name = "peer"
+
+    #: Provenance of the identity this row's raw `_summary` fitted; ``None``
+    #: for a sender NAME (user data), which is never catalogue prose.
+    _summary_source_locale: str | None = None
+    #: Technical tokens inside that raw identity (the pid), isolated as LTR
+    #: islands exactly as `display_tr(technical_params=("pid",))` did before
+    #: the row fitted RAW.
+    _summary_literals: tuple[str, ...] = ()
 
     #: Floor for the width the expansion reasons about, in cells. Two uses,
     #: which must agree or the card contradicts itself: :meth:`_header`'s
@@ -2988,8 +3070,10 @@ class PeerMessageBlock(ExpandableActionBlock):
         identity survives either way because it leads.
         """
         name, quoted = self._sender_name()
+        self._summary_literals = ()
         if name:
             identity = f'"{name}"' if quoted else name
+            self._summary_source_locale = None
         else:
             pid = self._sender_pid()
             # "another session" is the same fallback vocabulary
@@ -2997,11 +3081,12 @@ class PeerMessageBlock(ExpandableActionBlock):
             # the two spellings identical so a reader meeting one in a
             # transcript and one in a tool result does not think they are
             # different states.
-            identity = (
-                _t(tui_transcript.sender_pid(pid=pid))
-                if pid
-                else _t(tui_transcript.sender_unknown())
+            record = _record_t(
+                tui_transcript.sender_pid(pid=pid) if pid else tui_transcript.sender_unknown()
             )
+            identity = record.text
+            self._summary_source_locale = record.source_locale
+            self._summary_literals = (str(pid),) if pid else ()
         # The SNIPPET is stripped of control sequences and Cf; the body is not.
         #
         # `text()` and the expansion must stay byte-verbatim or `/copy` stops
@@ -3227,6 +3312,16 @@ class PeerMessageBlock(ExpandableActionBlock):
         #   notice does not have, so the two never align.
         composed = f"{identity} · {snippet}" if snippet else identity
         summary = truncate_cells(composed, budget)
+        # Fit RAW, then project the final line: truncating projected text can
+        # place the cut inside an island and leave unmatched delimiters on a
+        # pinned one-row receipt (M-1, the WakeBlock rule). The pid survives as
+        # an LTR island exactly as it did through the namespace resolver.
+        if self._summary_source_locale is not None:
+            summary = localized_display(
+                summary,
+                source_locale=self._summary_source_locale,
+                technical_literals=self._summary_literals,
+            ).plain
 
         row = Text(no_wrap=True, overflow="ellipsis")
         if indent:
@@ -3245,6 +3340,7 @@ class PeerMessageBlock(ExpandableActionBlock):
             pad = max(1, width - used - cell_len(slot))
             row.append(" " * pad, style=dim)
             row.append(slot, style=dim)
+        balance_display_line(row)
         return row
 
     def _body_rows(self, body: int) -> list[str]:
@@ -3470,26 +3566,27 @@ class HubMessageBlock(PeerMessageBlock):
             else "Subagent" if direction == "to_parent" else "Hub"
         ), False
 
-    def _intent(self) -> str:
+    def _intent(self, *, raw: bool = False) -> str:
+        resolve = _raw_t if raw else _t
         return " · ".join(
             word
             for flag, word in (
                 (
                     self.hub_details.get("expects_reply") is True,
-                    _t(tui_transcript.hub_reply_requested()),
+                    resolve(tui_transcript.hub_reply_requested()),
                 ),
-                (self.hub_details.get("steer") is True, _t(tui_transcript.hub_steered())),
+                (self.hub_details.get("steer") is True, resolve(tui_transcript.hub_steered())),
             )
             if flag
         )
 
     def _summary(self) -> tuple[str, str]:
         identity, snippet = super()._summary()
-        intent = self._intent()
+        intent = self._intent(raw=True)
+        record = _record_t(tui_transcript.hub_from(identity=identity))
+        self._summary_source_locale = record.source_locale or "en"
         return (
-            " · ".join(
-                part for part in (_t(tui_transcript.hub_from(identity=identity)), intent) if part
-            ),
+            " · ".join(part for part in (record.text, intent) if part),
             snippet,
         )
 
@@ -3731,6 +3828,10 @@ class QuietGroupBlock(ExpandableActionBlock):
         locale = active_locale()
         return str(count) if locale == "en" else format_number(count, locale)
 
+    #: Provenance of the raw group sentence; ``None`` for internal work names,
+    #: which are not catalogue copy.
+    _summary_source_locale: str | None = None
+
     def _summary_text(self) -> str:
         """The bar's one sentence: ``messages · 12`` (``12+`` when cut).
 
@@ -3747,11 +3848,14 @@ class QuietGroupBlock(ExpandableActionBlock):
             for record, block in zip(records, self._members, strict=True)
             if block.internal_work_membership is not None
         }
+        self._summary_source_locale = None
         clauses = owned_work_clauses(records, memberships, partial=self.partial)
         if clauses is not None:
             return " · ".join(clauses)
         count = self._count_label(self.group.count) + ("+" if self.partial else "")
-        parts = [_t(tui_transcript.group_messages(count=count))]
+        message = _record_t(tui_transcript.group_messages(count=count))
+        self._summary_source_locale = message.source_locale or "en"
+        parts = [message.text]
         # ICU selects the locale's noun form with the number, but the count label
         # stays the existing raw decimal text; formatting that selector would add
         # thousands separators and change already-reviewed English frame bytes.
@@ -3766,7 +3870,7 @@ class QuietGroupBlock(ExpandableActionBlock):
         # `0 actions`; the one-row guarantee is in `_build_row`'s truncation.
         if self.group.actions:
             parts.append(
-                _t(
+                _raw_t(
                     tui_transcript.group_actions(
                         count=self.group.actions, label=self._count_label(self.group.actions)
                     )
@@ -3774,7 +3878,7 @@ class QuietGroupBlock(ExpandableActionBlock):
             )
         if self.group.reply_requested:
             parts.append(
-                _t(
+                _raw_t(
                     tui_transcript.group_reply_requested(
                         count=self.group.reply_requested,
                         label=self._count_label(self.group.reply_requested),
@@ -3783,7 +3887,7 @@ class QuietGroupBlock(ExpandableActionBlock):
             )
         if self.group.steered:
             parts.append(
-                _t(
+                _raw_t(
                     tui_transcript.group_steered(
                         count=self.group.steered, label=self._count_label(self.group.steered)
                     )
@@ -3833,6 +3937,8 @@ class QuietGroupBlock(ExpandableActionBlock):
         slot_cells = cell_len(slot) + 1 if slot else 0
         budget = max(0, remaining - slot_cells)
         summary = truncate_cells(summary, budget)
+        if self._summary_source_locale is not None:
+            summary = localized_display(summary, source_locale=self._summary_source_locale).plain
 
         row = Text(no_wrap=True, overflow="ellipsis")
         if indent:
@@ -3850,6 +3956,7 @@ class QuietGroupBlock(ExpandableActionBlock):
             pad = max(1, width - used - cell_len(slot))
             row.append(" " * pad, style=dim)
             row.append(slot, style=dim)
+        balance_display_line(row)
         return row
 
     def _build_content(self, width: int) -> Text:
@@ -6920,6 +7027,19 @@ class TranscriptView(ScrollableContainer):
         mount cannot re-acquire following for a reader who just left the tail.
         """
         self._on_user_scroll = hook
+
+    def on_show(self) -> None:
+        """Announce a SHOW to the same listener that hears about extents.
+
+        Showing a view changes what the app can measure about it, and Textual
+        owes no extent change when the new extent happens to match the last
+        laid-out one — so a listener keyed only on extents can miss the state
+        change itself. The deferred resume fill re-arms from this hook, and
+        standing that fill down while hidden is only safe if showing the view
+        resumes it (review round 1, M1).
+        """
+        if self._on_extent_changed is not None:
+            self._on_extent_changed()
 
     def set_on_extent_changed(self, hook: Callable[[], None] | None) -> None:
         """Install the hook fired whenever the scrollable extent changes.

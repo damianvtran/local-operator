@@ -686,6 +686,17 @@ def escalation_script(fragment: str, client_password: str) -> str:
         # reached.
         record = f"tiers={_shell_quote(tier)}" if index == 0 else f'tiers="$tiers>{tier}"'
         lines.append(f'if [ "$rc" -ne 0 ]; then {record}; out=$({invocation} 2>&1); rc=$?; fi')
+    # THE PAYLOAD STAYS LAST. ``out`` holds one rung's combined stdout+stderr and
+    # is printed BELOW, after the metadata line, as the ladder's final writes.
+    # ``guest_supervisor.parse_output`` takes the LAST captured object that
+    # matches the caller's expected shape, and that ordering is load-bearing: a
+    # command's own ``print`` is its final statement, so its payload is the last
+    # payload-shaped object in the capture, while sudo's prompt and any guest
+    # warning land BEFORE it. Anything written after the payload -- a second
+    # ``printf``, an echoed diagnostic, or an explicit stdout flush followed by a
+    # later write -- would silently invert that ordering and let a shadow object
+    # be read as the result, which is the "no restart" blindness this parser
+    # exists to prevent. Keep this print last.
     lines.append("printf 'escalation=%s\\n' \"$tiers\"")
     lines.append("printf '%s\\n' \"$out\"")
     lines.append("exit $rc")

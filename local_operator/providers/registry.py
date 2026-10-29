@@ -570,6 +570,40 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         # path: it is where the subscription's models live (`k3`, `k3-256k`,
         # `kimi-for-coding`), and the mainland host rejects the OAuth bearer
         # with 401 "Invalid Authentication". Confirmed live against both hosts.
+        #
+        # 2026-10-24: a stored overseas grant (JWT region=overseas; this does
+        # not prove its issuing host) was called against api.kimi.com/coding/v1
+        # AND api.kimi.ai/coding/v1 — /models and /usages on both — and every
+        # call answered 200 with an identical first model and quota window. The
+        # .ai login host therefore needs no .ai API variant: .com accepts that
+        # grant for inference. See providers/oauth/kimi.py for OAuth host choice.
+        oauth_base_url="https://api.kimi.com/coding/v1",
+    ),
+    ProviderDefinition(
+        id="kimi-wechat",
+        search_aliases=(
+            "kimi-cn",
+            "moonshot-cn",
+            "wechat",
+        ),
+        name="Kimi (WeChat sign-in)",
+        brand="Kimi WeChat",
+        # The SAME two login entries are alternative sign-ins for ONE Kimi
+        # credential: `store_credentials_as="kimi"` puts the row in kimi's
+        # slot, and auth_store._identity_key_for dedupes OAuth payloads to
+        # `oauth:kimi`. Signing in here replaces a kimi.ai row (and vice versa)
+        # rather than adding a second account; the login that ran last records
+        # its `auth_host`, which is what refresh then follows.
+        #
+        # Deliberately no `refresh_token`: the STORAGE id (`kimi`) owns the
+        # refresh callable, and auth_store._refresh_fn resolves that first. A
+        # second path here would be a fork of refresh semantics (host recording
+        # and the legacy default) that could drift.
+        login=_lazy_login("local_operator.providers.oauth.kimi", "login_kimi_wechat"),
+        get_api_key=_oauth_api_key,
+        store_credentials_as="kimi",
+        env_keys="KIMI_API_KEY",
+        base_url="https://api.moonshot.cn/v1",
         oauth_base_url="https://api.kimi.com/coding/v1",
     ),
     ProviderDefinition(
@@ -1211,24 +1245,11 @@ def credential_provider_id(provider_id: str) -> str:
 #: ``radient-key`` — pasted-key logins that alias onto a provider but bill by
 #: the token, and labelling their calls subscription-flavoured would be a
 #: wrong number wearing a plan's authority. Every id here is one whose only
-#: NORMAL way to serve a call is a plan: a subscription sign-in, or a plan key.
-#: The one reading nobody can see is an env API key (`OPENAI_API_KEY` &
-#: friends) configured under one of these ids: the call records the ID, not
-#: the credential kind, and the design accepts that limit wherever a label is
-#: read (``session.spend.inference_billing_labels`` says the same for
-#: ``anthropic``/``kimi``).
-#:
-#: BOTH ids of a one-pool pair belong here together, and that is why ``openai``
-#: sits beside ``openai-device`` (review round 1, MINOR 1): the browser and
-#: device sign-ins are one ChatGPT pool writing one credential row, so a call
-#: must not read ``subscription_api_equivalent`` or ``billed`` depending only
-#: on which of the two ids its spec names. Same for ``zai``/``zai-oauth`` and
-#: ``alibaba-token-plan``/``alibaba-token-plan-oauth``.
-#:
-#: NOT here, and deliberately: ``anthropic`` and ``kimi``, which serve a
-#: subscription sign-in AND a plain API key under one id — a call records no
-#: credential kind, so their calls take the metered reading (the known limit
-#: ``session.spend.inference_billing_labels`` documents).
+#: NORMAL way to serve a call is a plan, except dual-mode ``openai``.
+#: Dispatch now records the actual credential kind on Usage; this set retains
+#: historical defaults only for old/direct callers lacking that stamp.
+#: OpenAI is dual-mode, unlike the plan-only ids below: an explicit API key
+#: overrides its legacy subscription default.
 SUBSCRIPTION_LOGIN_FLAVOURS: frozenset[str] = frozenset(
     {
         "openai",
@@ -1241,6 +1262,10 @@ SUBSCRIPTION_LOGIN_FLAVOURS: frozenset[str] = frozenset(
         "alibaba-token-plan-oauth",
     }
 )
+
+
+#: Pasted keys on these routes fund a plan, not a per-request cash bill.
+PLAN_ONLY_PROVIDER_IDS: frozenset[str] = SUBSCRIPTION_LOGIN_FLAVOURS - {"openai"}
 
 
 def subscription_login_flavour(provider_id: str) -> bool:
@@ -1640,3 +1665,31 @@ def credential_file_names(provider_id: str) -> list[str]:
                 if required and required not in names:
                     names.append(required)
     return names
+
+
+def env_secret_is_oauth(secret: str) -> bool:
+    """True when ``secret`` came ONLY out of OAuth-named env variables.
+
+    The callable ``env_keys`` resolvers can hand back either kind of credential —
+    ``_anthropic_env_key`` prefers ``ANTHROPIC_OAUTH_TOKEN`` over
+    ``ANTHROPIC_API_KEY`` — and return only the VALUE, so the caller cannot tell
+    which it got. Getting that wrong is not cosmetic: Anthropic rejects an OAuth
+    token sent as ``x-api-key`` with a 401, which is exactly the "model cannot be
+    described" outcome this whole path exists to avoid.
+
+    Matching on the variable NAME keeps this a general rule instead of a second
+    place that knows about Anthropic specifically. Catalogue lookup and dispatch
+    share it so an environment token cannot acquire two payment identities.
+
+    ``all`` and not ``any``, because the two misclassifications do not cost the
+    same. A plain ``OPENAI_API_KEY`` whose value happens to equal that of any
+    other variable with OAUTH in its name was reported as an OAuth token, and
+    OpenAI's OAuth route needs a ChatGPT account id that an env key cannot
+    supply — so the provider became unlistable outright, silently and for as
+    long as the variables stayed set. An OAuth token misread as a key costs one
+    401 on one provider and falls back to the bundled registry. When a value
+    appears under both kinds of name it is genuinely ambiguous, and this resolves
+    the ambiguity toward the cheaper mistake.
+    """
+    names = [name.upper() for name, value in os.environ.items() if value == secret]
+    return bool(names) and all("OAUTH" in name for name in names)

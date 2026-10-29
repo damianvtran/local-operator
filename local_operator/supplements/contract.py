@@ -13,6 +13,12 @@ that import on every process start.
 
 WHAT IS NOT HERE. The runner, the decision, the generator, the validator, the denylist and
 every surface renderer are later lanes (C1/C2/T/R/U/N).
+
+SOUNDS ARE ARTIFACTS, NOT A PREVIEW LIST. Every sound a turn generated is carried in the
+row, in generation order, under ONE pathological bound (:data:`SOUNDS_MAX`) that discloses
+itself as ``sounds_more``. There is no per-turn selector here and no surface may invent
+one: a three-item head slice is what made a 14-item batch read as three sounds with no
+sign the rest existed, and that is a product defect, not a rendering choice.
 """
 
 # NO ``from __future__ import annotations`` here, deliberately: with stringified annotations
@@ -69,6 +75,15 @@ HEIGHT_HINT_MAX: Final = 480
 MORE_MAX: Final = 20
 #: Components per job (memo §2.8 aggregate frame budget names the same number).
 MAX_COMPONENTS: Final = 3
+#: Sounds per row: ONE bound for the WHOLE turn's audio, never a selector.
+#:
+#: A ``generate_sound_effect`` batch tops out at 50 items and costs one tool call, so
+#: a realistic multi-batch turn stays far below this; the bound exists so a looping
+#: agent cannot grow one journal row without limit. It must never be read as "show
+#: the first few": every sound the turn generated is an artifact in its own right, so
+#: a row that does hit the bound discloses the cut with ``sounds_more`` (the
+#: ``files_more`` precedent) instead of dropping the tail silently.
+SOUNDS_MAX: Final = 200
 #: ``supplement_steer`` text bound, in characters (memo §2.7 ops table).
 STEER_TEXT_MAX_CHARS: Final = 500
 
@@ -162,6 +177,10 @@ class SupplementDetails(TypedDict):
     components: list[SupplementComponent]
     at: float
     files_more: NotRequired[int]
+    #: Sounds the single row bound (``SOUNDS_MAX``) held back, counted the way
+    #: ``files_more`` counts files. Present only when the bound actually bit, so a
+    #: normal row stays byte-identical to what older builds wrote.
+    sounds_more: NotRequired[int]
     more: NotRequired[list[str]]
     images: NotRequired[list[SupplementImage]]
     sounds: NotRequired[list[SupplementSound]]

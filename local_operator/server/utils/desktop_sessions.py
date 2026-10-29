@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -110,6 +111,8 @@ from local_operator.session.errors import MoveIndeterminate
 from local_operator.session.frontend_state import (
     FrontendSync,
     FrontendUpdate,
+    bound_ask_snapshot_in_place,
+    bound_delta_rows_in_place,
     job_trajectory_wire_value,
     sync_wire_payload,
 )
@@ -123,6 +126,7 @@ from local_operator.session.open_frame import (
     OPEN_FRAME_SNAPSHOT_BUDGET_S,
     align_page,
     build_frame,
+    late_index_stop,
     page_seq_bounds,
     paintable,
     served_bytes,
@@ -145,7 +149,7 @@ from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 from local_operator.session.session_search import search_store
 from local_operator.session.transcript import (
-    TRANSCRIPT_FILENAME,
+    custom_type_proven_absent,
     read_latest_custom,
     read_latest_custom_entry,
     validate_page_request,
@@ -440,10 +444,83 @@ def resolve_working_directory(cwd: str) -> Path:
 DRAFT_MODEL_KEY = "model"
 
 
-#: The three fields the draft selection travels with, on the HTTP wire and inside
-#: the marker: the same shape the canonical frontend state publishes for a
+#: The fields the draft selection travels with, on the HTTP wire and inside the
+#: marker: the same shape the canonical frontend state publishes for a
 #: conversation's model, so the picker's row can be handed back unmodified.
-DRAFT_MODEL_FIELDS = ("provider", "model_id", "reasoning_effort")
+#:
+#: ``fast_mode`` is the OPTIONAL member (ui#1265) — see the writer, which omits
+#: it when the call did not name one so a client that never sends the field
+#: still gets the document the pre-fast-mode build wrote.
+DRAFT_MODEL_FIELDS = ("provider", "model_id", "reasoning_effort", "fast_mode")
+
+
+def _checkpoint_proven_absent(path: Path) -> bool:
+    """Whether ``path``'s journal provably carries NO frontend checkpoint row.
+
+    Lets ``_locate`` skip the backward walk that, for a journal with no such row,
+    parses the whole file. The evidence is ``tail_anchor``'s absence record (written
+    by core-start prewarm, never here), re-validated by ``validate_anchor``: same
+    inode, not shrunk, the boundary row's digest, and a needle scan of every byte
+    appended since the record.
+
+    THE SAME-SIZE REWRITE GUARD (review round 1 on #2941). ``validate_anchor``
+    trusts the bytes BELOW the recorded size. An in-place rewrite that keeps the
+    length, the inode and the final row (reproduced with ``r+b``) could plant a
+    checkpoint row there, and ``_locate`` would answer the fallback cwd where the
+    walk answers the row's. So when the journal has NOT grown past the record, its
+    ``st_ctime_ns`` (not settable by ``utime``) must not be newer than the record's
+    own ``st_mtime_ns``: a journal untouched since the proof was published passes,
+    a rewritten one falls back to the walk. A journal that HAS grown is the append
+    path; its ctime moves by construction, so it keeps the suffix scan as its proof
+    — the fast path for a live, appended-to journal is preserved.
+
+    THE COMPARISON IS ``>=``, NOT ``>``, AND THAT IS A CORRECTNESS REQUIREMENT
+    (CI, #2941 shard test(3.12,2)). Where the journal and the record land in the
+    same timestamp tick — a filesystem with coarse ctime/mtime granularity — a
+    rewrite's ctime comes out EQUAL to the record's mtime. ``>`` read that as "not
+    rewritten" and answered the fallback cwd where the walk answers the planted
+    row's: a wrong answer, not merely a slow one. So the fast path is taken only
+    when the record is STRICTLY newer than the journal's last metadata change
+    (``ctime < mtime``); equality means "cannot tell", and "cannot tell" refuses.
+    ``index_prewarm._rewritten_since_record`` carries the SAME predicate — the two
+    are one decision seen from the reader's and the rebuilder's side, and if they
+    disagree the record is either trusted when it should not be or rebuilt
+    forever.
+
+    RESIDUAL, stated rather than hidden: a middle rewrite FOLLOWED by an append, or
+    one landing between the prewarm scan and the record's publication, is not
+    caught. Nothing in this repo writes a journal that way (it is append-only;
+    rollback truncates, which the shrink guard refuses), the replay reader already
+    trusts this record identically, and closing it fully means hashing the file —
+    the cost this record exists to avoid.
+    """
+    from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    from local_operator.session.tail_anchor import (
+        ANCHOR_CUSTOM_TYPE,
+        anchor_path,
+        read_anchor,
+        validate_anchor,
+    )
+    from local_operator.session.transcript import TRANSCRIPT_FILENAME
+
+    if ANCHOR_CUSTOM_TYPE != FRONTEND_CHECKPOINT_CUSTOM_TYPE:
+        return False
+    anchor = validate_anchor(path, read_anchor(path))
+    # ``validate_anchor`` already refuses a record that is not an absence proof
+    # (a selection-only record from the ledger carries ``checkpoint_absent=False``);
+    # re-stated here so this reader's condition does not depend on that.
+    if anchor is None or not anchor.checkpoint_absent:
+        return False
+    try:
+        journal = os.stat(path / TRANSCRIPT_FILENAME)
+        record = os.stat(anchor_path(path))
+    except OSError:
+        return False
+    # ``>=``: equal ticks cannot distinguish a rewrite from an untouched journal,
+    # so equality refuses and the walk answers (see the docstring).
+    if journal.st_size == anchor.size and journal.st_ctime_ns >= record.st_mtime_ns:
+        return False
+    return True
 
 
 def _door_may_open(path: Path) -> bool:
@@ -493,7 +570,7 @@ def read_desktop_marker(session_dir: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def stored_draft_model(marker: dict[str, Any] | None) -> dict[str, str | None] | None:
+def stored_draft_model(marker: dict[str, Any] | None) -> dict[str, Any] | None:
     """The draft selection a marker carries, or ``None`` when it carries none.
 
     Every field is re-checked here rather than trusted: the marker is a plain
@@ -511,11 +588,17 @@ def stored_draft_model(marker: dict[str, Any] | None) -> dict[str, str | None] |
     if not isinstance(model_id, str) or not model_id:
         return None
     effort = choice.get("reasoning_effort")
-    return {
+    stored: dict[str, Any] = {
         "provider": provider,
         "model_id": model_id,
         "reasoning_effort": effort if isinstance(effort, str) and effort else None,
     }
+    # Only a real ``true`` is evidence. A hand-edited ``"fast_mode": "yes"`` must
+    # read as "no claim" rather than as ON: the value ends up gating a wire key
+    # that costs the user money at premium pricing.
+    if choice.get("fast_mode") is True:
+        stored["fast_mode"] = True
+    return stored
 
 
 def draft_birth_selection(root: Path, session_id: str) -> ModelSpec | None:
@@ -600,6 +683,15 @@ def draft_birth_selection(root: Path, session_id: str) -> ModelSpec | None:
     resolved = resolve_birth_effort(spec, choice["reasoning_effort"], root)
     if resolved != spec.reasoning_effort:
         spec = spec.model_copy(update={"reasoning_effort": resolved})
+    # The FAST dial, clamped by the ROUTE's own answer exactly as the journal
+    # restore is (``Session._restore_selected_model``): a marker can outlive the
+    # model table that wrote it, and putting the speed key on a route that
+    # rejects it is a 400 on the first turn this seed exists to open. Objecting
+    # is not silent either — the pick that wrote a ``true`` here was validated at
+    # the create boundary, so a marker whose tier vanished is an old build's
+    # document, not a client this plane accepted.
+    if choice.get("fast_mode") is True and spec.supports_fast_mode:
+        spec = spec.model_copy(update={"fast_mode": True})
     return spec
 
 
@@ -636,7 +728,14 @@ def write_desktop_marker(
     marker = path / DESKTOP_MARKER_NAME
     payload: dict[str, Any] = {"version": 1, "cwd": str(directory)}
     if model is not None:
-        payload[DRAFT_MODEL_KEY] = {field: model.get(field) for field in DRAFT_MODEL_FIELDS}
+        chosen = {field: model.get(field) for field in DRAFT_MODEL_FIELDS}
+        # Absence, not ``null``: ``reasoning_effort: null`` IS the choice "this
+        # model, no level", while a dial nobody named is simply not a key. Writing
+        # it as null would change the bytes an older client's create produces,
+        # which is the additivity contract ``DRAFT_MODEL_KEY`` states.
+        if chosen.get("fast_mode") is None:
+            chosen.pop("fast_mode", None)
+        payload[DRAFT_MODEL_KEY] = chosen
     if purpose is not None:
         # ADDITIVE, exactly like the model above: a marker written without it is
         # the document every earlier build wrote, and the marker's readers take
@@ -1292,6 +1391,41 @@ class DesktopSubscription:
     dwell_until: float = 0.0
 
 
+def _json_copy(value: Any) -> Any:
+    """A fresh copy of a JSON value, equal to ``json.loads(json.dumps(value))``.
+
+    WHY NOT THE ROUND TRIP (conversation-first-paint R5, 2026-10-27). The open
+    frame's ``_wire_rows`` used ``json.loads(entry.to_json())`` per row to copy
+    a cached page's payload before the frame steps edit it: 12 ms for a 200-row
+    page of the 51.7 MB fixture, on the event loop, before the snapshot. This
+    walks the same tree in ~3 ms.
+
+    WHY A COPY AT ALL: the page cache SHARES pages between requests
+    (``page_cache.TranscriptPageCache.get``), so a wire row must never alias the
+    cached entry. ``copy.deepcopy`` measured the same 12 ms as the round trip.
+
+    IDENTICAL TO THE ROUND TRIP, NOT MERELY CLOSE. A page payload comes from
+    ``json.loads`` of a journal line, so it is ``dict`` (str keys) / ``list`` /
+    scalars, and those are copied directly; a float is the same object, so its
+    ``repr`` (the wire spelling) cannot change. Anything else — a tuple, a
+    non-``str`` key, a subclass — is what the round trip NORMALISES, so that
+    subtree takes the round trip itself and keeps its exact old spelling.
+    """
+    kind = type(value)
+    if kind is dict:
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                return json.loads(json.dumps(value))
+            out[key] = _json_copy(item)
+        return out
+    if kind is list:
+        return [_json_copy(item) for item in value]
+    if kind is str or kind is int or kind is float or kind is bool or value is None:
+        return value
+    return json.loads(json.dumps(value))
+
+
 class DesktopSessionBridge:
     def __init__(
         self,
@@ -1874,6 +2008,23 @@ class DesktopSessionBridge:
                     surface="desktop",
                     initial_model=birth,
                     model_selection_override=birth is not None,
+                    # THE ONE CALLER OF THE DEFERRED OPT-IN (`AttachedSession.
+                    # cold`'s docstring names the contract). This surface's
+                    # first frame paints its transcript from
+                    # ``load_transcript_page`` in ``_open_frame_history``, never
+                    # from this facade's message list, so a durable metadata
+                    # record for an unchanged journal can restore the same
+                    # durable details while leaving the message list unread
+                    # until the bind actually needs it — the parse that dominates
+                    # a cold desktop open (1,619 / 533 / 685 ms of backend CPU on
+                    # 8 / 30 / 100 MB journals) is skipped for a repeat open.
+                    #
+                    # NOT A BRIDGE FLAG AND NOT A SECOND MODE: the TUI, peer
+                    # viewers, mobile, resume, new sessions and the sidebar's
+                    # saved preview all construct their facades without this
+                    # argument and stay eager, because each of them paints or
+                    # folds ``history()`` and none has a page reader behind it.
+                    deferred_history=True,
                 )
             self.remote = remote
             # A detached interval has no receipt feed. A new epoch makes
@@ -3007,6 +3158,28 @@ class DesktopSessionBridge:
             for key in ("jobs", "usage_components"):
                 if key in payload["changes"]:
                     payload["changes"][key] = bounded[key]
+        # A PER-ROW DELTA IS NOT RE-INFLATED. This used to replace
+        # ``changes["jobs"]`` with the bridge's full bounded snapshot, because
+        # the runtime's delta carried the whole roster and the snapshot's bounds
+        # were what kept it on the wire. That is now backwards: the runtime
+        # sends only the rows that moved (``job_deltas``), so substituting the
+        # 185-row snapshot put ~715 KB back on a frame that carried one row —
+        # measured on session 17cd3e74c66f's checkpoint. Bound the CHANGED ROWS
+        # instead, with the same roster share the snapshot and the runtime use,
+        # so an older runtime's unbounded rows still leave here bounded.
+        job_deltas = payload.get("job_deltas")
+        if isinstance(job_deltas, dict):
+            upserted = job_deltas.get("upserted")
+            if isinstance(upserted, list) and upserted:
+                # The producer sends the divisor as a scalar. Rebuilding the
+                # snapshot just to COUNT its rows would re-create the per-tick
+                # cost this delta removes — and this branch runs on every tick.
+                # The fallback is for a runtime older than the scalar, which
+                # still needs a correct share.
+                roster_size = job_deltas.get("roster_size")
+                if not isinstance(roster_size, int) or roster_size < 1:
+                    roster_size = len(self.state()["snapshot"].get("jobs") or ())
+                bound_delta_rows_in_place(upserted, roster_size=roster_size)
         self.publish("frontend.update", payload)
 
     async def refresh_attention(self) -> dict[str, Any]:
@@ -3273,6 +3446,72 @@ class DesktopSessionBridge:
             )
         )
 
+    def _cold_verdict(self) -> bool:
+        """Whether this bridge's facade is COLD, read now, with no I/O.
+
+        ONE spelling of the override's own gate, asked twice: before the index
+        read (so a warm owner pays nothing) and again immediately before the rows
+        are applied (so a facade that resynced during the await cannot have index
+        rows laid over its live fold — review round 1, m1). Three local reads, no
+        round trip, which is what makes the second ask free.
+
+        ``remote is None`` is "no facade yet", not cold: there is nothing to
+        override and ``state()`` would raise.
+        """
+        remote = self.remote
+        return remote is not None and self.remote_row is None and remote.is_cold
+
+    async def _cold_ask_rows(self) -> tuple[list[dict[str, Any]] | None, int] | None:
+        """This conversation's ask rows from the DERIVED INDEX, or ``None``.
+
+        ``None`` means "do not override": a live owner's own frame is
+        authoritative (it carries the drafts the index deliberately does not), and
+        a PEER's rows are the peer's to serve. The gate is :meth:`_cold_verdict`,
+        re-asked by the caller before it applies — so a frame can neither claim to
+        be cold while serving a live owner's stale rows, nor serve index rows over
+        a facade that warmed up while this read was in flight.
+
+        A cold facade that ATTACHED and is mid-resync (``is_cold`` while its
+        owner still answers) also lands here. That is not a regression: the
+        runtime writes this index on every ask change (``AskQueue._refresh``), so
+        the rows are the same ones its next frame will carry.
+
+        Off the loop: one small file read per cold snapshot, on the route that
+        already reads a journal page off it.
+
+        AN INDEX WITH NO ENTRY IS NOT AN EMPTY QUEUE (QA round 1, Q1): the caller
+        leaves the facade's own values alone, because absence of the file means
+        "this conversation has no queued-ask entry" — including the case QA named,
+        where the TTL sweep has removed an entry whose rows are all terminal and
+        past the horizon while a retained fold still carries them.
+        """
+        if not self._cold_verdict():
+            return None
+        from local_operator.asks import store
+        from local_operator.asks.visibility import lapsed_visible_ms
+
+        root = self.root
+        try:
+            entry = await asyncio.to_thread(store.read_entry, root, self.session_id)
+            if entry is None:
+                return None
+            # The same window the aggregate route applies (``asks.lapsed_visible_for``,
+            # decision D8), polled on the loop with its listener fan-out.
+            window = lapsed_visible_ms(root, poll_now=True)
+            rows = await asyncio.to_thread(
+                store.session_asks,
+                root,
+                self.session_id,
+                lapsed_visible_ms=window,
+            )
+        except Exception:  # noqa: BLE001 — a read of derived data never fails a paint
+            logger.debug("cold ask rows unavailable for %s", self.session_id, exc_info=True)
+            return None
+        # ``None`` rows beside a count is the wire's LIVE-BUT-EMPTY shape: the
+        # tally is the capability signal, and this conversation plainly has the
+        # engine (its index entry exists) while showing nothing.
+        return (rows or None), sum(1 for row in rows if store.is_outstanding(row.get("status")))
+
     def _shared_attention_refresh(self) -> asyncio.Task[dict[str, Any]]:
         """The one in-flight attention read, started if none is running.
 
@@ -3439,7 +3678,58 @@ class DesktopSessionBridge:
         # is already inside ``frontend``. Do NOT introduce an await between these
         # two lines and the ``return``; ``tests/unit/server/test_desktop_sessions.py``
         # pins it.
+        # COLD ASK ROWS COME FROM THE DURABLE INDEX (#1363 QA Q-1, SA-D8).
+        #
+        # A COLD FACADE'S ASK FOLD IS NOT DERIVABLE AND NOT TRUSTWORTHY. Two
+        # shapes reach here and both were the bug: a retained viewer that went
+        # cold keeps the LAST canonical state it was handed (``_go_cold`` keeps
+        # the conversation on screen), so its ``asks`` still say ``open`` long
+        # after the ask settled; and a fresh cold facade carries no asks at all,
+        # so a settled receipt never reaches the card. Neither can be repaired
+        # from the runtime — there is none — while the DURABLE answer is already
+        # on this disk: ``<config_dir>/asks/<sid>.json`` is what the cold door
+        # writes and what ``GET /v1/desktop/asks`` reads, and this method's own
+        # ``cold`` verdict is exactly "no verified owner to ask".
+        #
+        # READ BEFORE ``state()``, and that ordering is the contract above rather
+        # than tidiness: no await may sit between the state read, the watermark
+        # read and the return, or a subscriber's queued frame could be dropped as
+        # superseded on a watermark that never contained it. ``_cold_ask_rows`` is
+        # the one await, so it happens first. An index with no entry for this
+        # session leaves the facade's own values alone: absence of the file is
+        # "this conversation has no queued-ask entry", not a claim that its queue
+        # is empty, and a runtime that never ran the engine must keep reading as a
+        # host that cannot answer (``asks_open`` absent).
+        cold_asks = await self._cold_ask_rows()
         state = self.state()
+        # THE VERDICT IS ASKED AGAIN HERE, not carried over (review round 1, m1).
+        # The read above yields the loop twice, and a facade can finish a resync
+        # in that window; applying rows judged "cold" a moment ago would then lay
+        # index rows OVER a live owner's own fold — and a delta at or below this
+        # frame's watermark would be dropped as superseded while the frame carried
+        # the older rows. The verdict is three local reads, so it is cheap to ask
+        # again, and this is the last look before the assignment.
+        if cold_asks is not None and self._cold_verdict():
+            rows, open_count = cold_asks
+            snapshot = state.get("snapshot")
+            if isinstance(snapshot, dict):
+                if rows is None:
+                    snapshot.pop("asks", None)
+                else:
+                    snapshot["asks"] = rows
+                # ``asks_open`` counts OUTSTANDING rows over the WHOLE list, taken
+                # before the bound — the live path's own rule (a capped frame
+                # states the real tally, not the prefix's).
+                snapshot["asks_open"] = open_count
+                # THE WIRE'S OWN BOUND, on THESE rows (review m2). This override
+                # runs after ``sync_wire_payload`` bounded the FACADE's list, so
+                # without it a cold frame could ship every fat index row past the
+                # budget while ``asks_truncated`` still described the facade's
+                # list — the "bound on one route only" leak that file records
+                # twice. The flag is cleared first so it can only ever describe
+                # the rows this frame carries.
+                snapshot.pop("asks_truncated", None)
+                bound_ask_snapshot_in_place(snapshot)
         seq, epoch = self.sequence, self.epoch
         if open_trace.enabled():
             open_trace.mark(
@@ -3838,6 +4128,11 @@ class DesktopSessionBridge:
         cursor_missing = False
         cursor = before_id
         index: Any = None
+        # Per attempt: (rows prepended, that page's ``has_more``), so a late index
+        # can replay where the index-backed read stops (``late_index_stop``).
+        page_rows: list[tuple[int, bool]] = []
+        index_at_first_page = False
+        tail_read = before_id is None and through_id is None and around_id is None
         for attempt in range(OPEN_FRAME_MAX_RAW_PAGES):
             try:
                 page = await load_transcript_page(
@@ -3881,6 +4176,7 @@ class DesktopSessionBridge:
             if not rows:
                 break
             collected = rows + collected
+            page_rows.append((len(rows), page.has_more))
             if not collected:
                 break
             kept, reached = align_page(collected, limit, supplements=supplements)
@@ -3911,6 +4207,7 @@ class DesktopSessionBridge:
                 and around_id is None
             ):
                 index = await self._frame_index(deadline)
+                index_at_first_page = index is not None
             if (
                 index is not None
                 and len(paintable_rows) >= limit
@@ -3937,6 +4234,22 @@ class DesktopSessionBridge:
                 break
         if index is None:
             index = await self._frame_index(deadline)
+            if tail_read and not index_at_first_page:
+                # THE INDEX LANDED DURING THE HUNT (#3037 QA, O1; the relay twin
+                # carries the same rule): the facts will say ``ready``, so the rows
+                # must be the ones the index-backed read serves, not the blind
+                # hunt's overshoot the next read takes away.
+                stop = late_index_stop(
+                    [rows for rows, _more in page_rows],
+                    collected,
+                    index=index,
+                    limit=limit,
+                    supplements=supplements,
+                )
+                if stop is not None and stop < len(page_rows):
+                    collected = collected[-sum(rows for rows, _more in page_rows[:stop]) :]
+                    has_more = page_rows[stop - 1][1]
+                    order_pages = order_pages[:stop]
         # THE CUT IS APPLIED ONCE, HERE, AND IT IS THE CONTRACT ITSELF: at least
         # ``limit`` paintable rows, starting at a user row when one is in reach,
         # and exactly ``limit`` rows with ``head_reached=False`` when none is. A
@@ -3996,7 +4309,16 @@ class DesktopSessionBridge:
         second vocabulary for one screen.
         """
         return visible_transcript_rows(
-            [{**json.loads(entry.to_json()), "ts_source": "entry"} for entry in entries]
+            [
+                {
+                    "id": entry.id,
+                    "ts": entry.ts,
+                    "type": entry.type,
+                    "payload": _json_copy(entry.payload),
+                    "ts_source": "entry",
+                }
+                for entry in entries
+            ]
         )
 
     async def _frame_index(self, deadline: float) -> Any:
@@ -4016,9 +4338,13 @@ class DesktopSessionBridge:
            ``building``, the refresh runs on, and the next frame — or the
            ``/history`` that follows inside the same open — carries the facts.
 
-        The refresh is STARTED either way, which is the promise that makes that
-        follow-up read cheap: by the time the client asks again the index is
-        resident, or its cache file exists so the refresh costs 3-62 ms.
+        The refresh task is REGISTERED either way, which makes that follow-up
+        read cheap. During a desktop events open the index module's paint hold
+        postpones a cold full scan that cannot fit its existing first-paint
+        budget until the snapshot has been written; a deferred task -- or a
+        running one paused for that same hold -- is not awaited here (it cannot
+        finish while this request owns the hold). With
+        no hold -- standalone history, TUI or mobile -- scheduling is unchanged.
         """
         from local_operator.session import transcript_index as index_module
 
@@ -4032,6 +4358,14 @@ class DesktopSessionBridge:
             return None
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            return None
+        if index_module.refresh_paused_for_paint(self.root, self.session_id):
+            # A cold, unpayable scan waiting on the paint hold this very open
+            # owns (``transcript_index``'s "The paint hold"), or one already
+            # running that pauses for that hold ("ITS OWN OPEN TOO" -- the warm
+            # re-open of a conversation still being indexed): either way it
+            # cannot land before the snapshot is written, so waiting here would
+            # spend the budget idle for the same ``building`` answer.
             return None
         done, _pending = await asyncio.wait({task}, timeout=remaining)
         if task not in done:
@@ -6391,6 +6725,10 @@ def prepare_images_for_owner(
         stage_images_in_store(root, [send, *extra])
         if image.get("marker") is not None:
             send = {**send, "marker": image["marker"]}
+        if image.get("origin_path"):
+            # The origin path is display metadata, not bytes: it survives the
+            # owner-ingest settle untouched (the digest keys the bytes alone).
+            send = {**send, "origin_path": image["origin_path"]}
         prepared.append(send)
     return prepared
 
@@ -6487,13 +6825,13 @@ def _persisted_children(
     roster read must not block the loop a streaming turn is using either way.
     """
     from local_operator.fork import fork_instant
-    from local_operator.session.session import (
+    from local_operator.session.roster_sidecar import (
         SUBAGENT_ROSTER_CUSTOM_TYPE,
         SUBAGENT_ROSTER_SIDECAR,
-        _read_roster_sidecar,
+        read_roster_sidecar,
     )
 
-    payload = _read_roster_sidecar(parent_dir / SUBAGENT_ROSTER_SIDECAR)
+    payload = read_roster_sidecar(parent_dir / SUBAGENT_ROSTER_SIDECAR)
     if payload is None and indexed:
         # Files already scanned the journal under its request budget, including a durable
         # negative result. Never fall back to a second unbounded journal read here.
@@ -7338,11 +7676,15 @@ class DesktopSessions:
         return await self.tags()
 
     async def set_tags(
-        self, session_id: str, tag_ids: list[str], primary: str | None
+        self,
+        session_id: str,
+        tag_ids: list[str],
+        primary: str | None,
+        expected_revision: str | int | None = None,
     ) -> dict[str, Any]:
         from local_operator.session.session_tags import (
+            TagRevisionConflict,
             read_categories,
-            read_entity_tags,
             set_entity_tags,
         )
 
@@ -7354,16 +7696,27 @@ class DesktopSessions:
                 or not (self.root / "sessions" / session_id).is_dir()
             ):
                 raise KeyError("Unknown session")
-            set_entity_tags(self.root, "session", session_id, tag_ids, primary)
-            # Resolve IDs and names against one snapshot: a concurrent deletion
-            # may prune a tag, but must not leave primary outside the returned tags.
+            try:
+                state = set_entity_tags(
+                    self.root, "session", session_id, tag_ids, primary, expected_revision
+                )
+            except TagRevisionConflict as exc:
+                exc.current["session_id"] = session_id
+                raise
+            # Keep the returned revision paired with the write's state, rather
+            # than re-reading a possibly newer assignment from another caller.
             categories = read_categories(self.root)
-            state = read_entity_tags(self.root, "session", session_id, categories=categories)
             lookup = {tag["id"]: tag for tag in categories}
+            surviving = [key for key in state["tags"] if key in lookup]
             return {
                 "session_id": session_id,
-                "primary": state["primary"],
-                "tags": [lookup[key] for key in state["tags"] if key in lookup],
+                "primary": (
+                    state["primary"]
+                    if state["primary"] in surviving
+                    else (surviving[0] if surviving else None)
+                ),
+                "tags": [lookup[key] for key in surviving],
+                "tags_revision": str(state["revision"]),
             }
 
         return await asyncio.to_thread(apply)
@@ -7910,7 +8263,13 @@ class DesktopSessions:
                 # both is "re-read the tail and dedupe by id" (review round 1,
                 # R1-3).
                 return _absent_child_page("gone", before_id=before_id)
-            if not (child_dir / TRANSCRIPT_FILENAME).exists():
+            from local_operator.session import compression
+
+            if not compression.has_transcript(child_dir):
+                # "pending" means the row exists but its transcript has not been
+                # written YET; a compressed transcript has been written, and
+                # reading it as pending made a real child look like a build in
+                # flight forever.
                 return _absent_child_page("pending", before_id=before_id)
             return child_dir
 
@@ -8015,7 +8374,7 @@ class DesktopSessions:
         cwd: str,
         *,
         target: dict[str, str] | None = None,
-        model: dict[str, str | None] | None = None,
+        model: dict[str, Any] | None = None,
         draft_id: str | None = None,
         purpose: str | None = None,
     ) -> str:
@@ -8349,6 +8708,42 @@ class DesktopSessions:
             return None
         return draft
 
+    def session_id_servable(self, session_id: str) -> bool:
+        """Whether this daemon still has ``session_id`` to serve.
+
+        THE REPLAY QUESTION, asked by the mint's receipt journal. A mint's
+        ``draft:<request_id>`` row exists so a lost response cannot register a
+        SECOND draft for one pane, and the id it records is the whole answer.
+        That id is not durable: the registry entry expires after
+        :data:`DRAFT_TTL_S`, and a draft that materialised can have its
+        conversation deleted. Replaying either hands the client an id the
+        session door answers "Unknown session" for — its ``/events`` streams
+        404, and a brand-new chat paints the terminal missing state over work
+        the user has not started. So a replay is conditional on exactly this.
+
+        TWO STATES ANSWER YES, and they are the two the doors resolve as local
+        (``files_target``, ``session``): a REGISTERED unexpired draft, through
+        :meth:`_draft_for` so expiry is answered where it is asked rather than
+        by a sweeper; and a MATERIALISED session, read off the marker
+        (``desktop.json``) — the same fact ``create`` writes and
+        ``assert_draft_unmaterialised`` reads, so the two cannot disagree about
+        which side of materialisation an id is on.
+
+        MARKER, NOT ``_door_may_open``, and the difference is load-bearing: a
+        warmed draft's engage leaves a residue directory (``.execution-lease`` +
+        ``.session.pid``, no marker, no transcript) whose origin reads as the
+        user's, so the door's origin predicate alone would call it openable
+        while the door itself still refuses it (M1's second leg). The marker is
+        both the cheaper fact and the stricter one.
+
+        Loop-only, like :meth:`_draft_for`: one dict lookup plus one ``is_file``
+        — no registry scan, no catalogue, no peer dial. A receipt only ever
+        names an id THIS daemon minted, so a peer cannot be the answer.
+        """
+        if self._draft_for(session_id) is not None:
+            return True
+        return (self.root / "sessions" / session_id / DESKTOP_MARKER_NAME).is_file()
+
     def _draft_listing_exclusions(self) -> set[str]:
         """Ids no listing may carry: drafts not yet materialised, however known.
 
@@ -8512,10 +8907,11 @@ class DesktopSessions:
                     )
                 except ValueError:
                     # Imported legacy directory names remain listable, not taggable.
-                    state = {"tags": [], "primary": None}
+                    state = {"tags": [], "primary": None, "revision": 0}
                 return {
                     "tags": [tag_lookup[key] for key in state["tags"]],
                     "primary": state["primary"],
+                    "tags_revision": str(state["revision"]),
                 }
 
             # THE CATALOGUE, SCOPED AND PAGED — one call, and the same one the
@@ -8594,6 +8990,13 @@ class DesktopSessions:
             projected: dict[str, dict[str, Any]] = {}
             for entry in (*page_entries, *extra_entries):
                 row = entry.row._asdict()
+                # ``SessionRow.team``/``agent`` carry a PEER row's binding into the
+                # picker. A local row answers that question in ``binding`` below,
+                # from its own attachment, so the empty top-level copies are
+                # dropped rather than published as a second, contradicting answer
+                # (review round 1, R1 on #2754).
+                row.pop("team", None)
+                row.pop("agent", None)
                 stored = read_session_attachment(self.root / "sessions" / entry.id)
                 # Read once per row: the ownership stamp is the durable carrier of
                 # placement, and its ABSENCE is the statement "no mesh has ever
@@ -8921,6 +9324,161 @@ class DesktopSessions:
         if victim is None:
             raise ValueError("Too many active desktop sessions")
         return victim
+
+    def _locate(self, session_id: str) -> _LocatedSession:
+        """This session's opening directory — or the PEER that holds it.
+
+        The marker element is provenance, not decoration: it is what
+        lets the caller ask
+        :func:`_cwd_is_unconfirmed` whether the directory is a
+        durable claim a failed move could have written (the marker),
+        or the checkpoint fallback for a pre-checkpoint transcript,
+        which has no marker to doubt.
+
+        THE REMOTE ARM IS HERE, and this is the ONLY place the pool
+        decides that a session is another device's: every desktop
+        route resolves a session through this method, so one
+        decision covers the snapshot, the history page, the event
+        stream, the send path and the control verbs — the same
+        argument ``_ensure_facade`` makes for holding the only
+        bridge construction in the tree.
+
+        WHAT IT DOES NOT COST. A LOCAL ID NEVER DIALS: the
+        directory is checked first, and that is the order the
+        session's own durability asks for (a conversation moved home
+        has a directory HERE, and the peer cache can still hold a
+        listing for it for one TTL). ``remote_row_for`` is
+        cache-first, so the row the sidebar's poll already read is a
+        tuple scan, and a miss pays ONE cached projection read —
+        which is the read the route in front of this method used to
+        make on EVERY snapshot call, including the local ones. On a
+        machine in no network it answers ``None`` without opening a
+        socket, so an unknown id still costs one ``is_dir`` and still
+        answers the shared 404.
+        """
+        path = self.root / "sessions" / session_id
+        if path.is_dir() and _door_may_open(path):
+            # Through the TOLERANT reader, not ``json.loads``: a marker this
+            # code cannot parse (a hand edit, an interrupted write, a
+            # directory where the document should be) is a document with no
+            # cwd, and a session whose marker has no readable cwd still opens
+            # here — on the checkpoint fallback below — instead of failing the
+            # open with a 409/404 raised out of a parse error. Round 1 of
+            # #1110 wrote the coverage for a malformed marker and found the
+            # strict read behind it (R3).
+            stored = read_desktop_marker(path)
+            if not (path / DESKTOP_MARKER_NAME).exists() and session_activity(path) is None:
+                # M1's SECOND LEG (round-1 review): a directory with NO
+                # marker document at all, no transcript and no mail
+                # spool must not open as a session. That is what a
+                # draft's engage leaves behind (residue measured as
+                # ``.execution-lease`` + ``.session.pid``, or the empty
+                # directory a drained runtime leaves), and before this
+                # check the checkpoint fallback below answered such a
+                # directory with a phantom bridge on ``root.parent`` —
+                # 200s on every door for an id no create can ever make
+                # a session again (measured: ``probe_residue_locate``).
+                #
+                # EXISTENCE OF THE MARKER PATH, not readability: a
+                # marker that is present but unreadable — garbage, an
+                # interrupted write, a directory where the document
+                # should be — keeps its own contract (the tolerant
+                # reader answers it on the fallback below, review
+                # round 1 of #1110), so only the document's total
+                # ABSENCE is evidence of nothing.
+                raise KeyError("Unknown session")
+            marker_cwd = (stored or {}).get("cwd")
+            if isinstance(marker_cwd, str) and marker_cwd:
+                return _LocatedSession(marker_cwd, marker_cwd)
+            # The cold facade restores cwd from the durable canonical
+            # checkpoint. This fallback is only used by pre-checkpoint
+            # transcripts, whose historical launch directory is unknown.
+            from local_operator.session.frontend_state import (
+                FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+            )
+
+            # A ONE-ROW read, not a ``Transcript(path)``: constructing the
+            # transcript JSON-decodes the whole journal (2059.5 ms on the
+            # operator's 261 MB conversation — the A/B table in
+            # ``docs/evidence/session-load-central-cache``), and this branch
+            # runs on every bridge creation for a session that carries no
+            # ``desktop.json`` marker. The reader answers from the tail
+            # backward and never creates the directory.
+            #
+            # ABSENCE FIRST. For a journal with NO checkpoint row that
+            # backward walk has no row to stop on and parses the whole file
+            # (measured 290 ms cProfile-cum on a 32k-row journal, on every
+            # fresh process's first open, cache hit or not).
+            # ``_checkpoint_proven_absent`` answers from ``tail_anchor``'s
+            # absence record — written by core-start prewarm, never here — and
+            # re-validates it against the journal on disk (inode, boundary-row
+            # digest, needle scan of every byte appended since, and the
+            # same-size rewrite guard). When it says absent the walk would have
+            # answered ``None`` too; anything unproven — no sidecar, a stale
+            # one, a compressed journal — falls through to the walk unchanged.
+            #
+            # NO SIDECAR, SAME PROOF (L10). Before prewarm has written that
+            # record, ``custom_type_proven_absent`` makes it on the spot: a
+            # streaming scan of the plain journal for both spellings of the
+            # type (~3 ms warm for 8 MB, against 81-90 ms of walk). It writes
+            # nothing — publishing the sidecar stays prewarm's job — and any
+            # spelling it meets, an archive, or a journal past its cap leaves
+            # the walk as the answer.
+            checkpoint = (
+                None
+                if _checkpoint_proven_absent(path)
+                or custom_type_proven_absent(path, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+                else read_latest_custom(path, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+            )
+            return _LocatedSession(
+                str((checkpoint or {}).get("state", {}).get("cwd") or self.root.parent),
+                None,
+            )
+        from local_operator.session.remote_open import (
+            PeerSessionUnresolved,
+            remote_row_and_silence,
+        )
+
+        row, silent = remote_row_and_silence(session_id, self.root)
+        if row is None:
+            # A MISS IS ONLY "UNKNOWN" WHEN SOMEBODY ANSWERED.
+            # ``remote_row_and_silence`` ends in a genuine read
+            # (``ttl_s=0``) precisely so a just-created peer id
+            # resolves; that SAME read also reports the devices
+            # that did NOT reply, and this is the one place that
+            # fact is turned into an answer for a route. ONE READ,
+            # BOTH HALVES: the pair comes back from a single call,
+            # so no second dial can be paid and no silence older
+            # than the read that missed can be reported (agent
+            # review round 1, R-1 — the two-call shape re-dialled
+            # whenever the listing spent its own documented budget
+            # and threw away the rows that read had fetched).
+            #
+            # WHY IT MATTERS HERE AND NOT ONLY IN THE ROUTE: the
+            # shared 404 is what the renderer turns into
+            # "missing" — "This conversation is no longer on this
+            # machine", composer refused. That is a deletion claim
+            # this device cannot support while a peer is silent,
+            # so the two cases must not arrive as one KeyError
+            # (mesh-wire-honesty.md §S2).
+            if silent:
+                raise PeerSessionUnresolved(session_id, silent)
+            raise KeyError("Unknown session")
+        if not row.reachable:
+            # REFUSED BEFORE ANYTHING IS BUILT, and with the SAME
+            # sentence the TUI refuses the same state with (the
+            # composer lives in ``remote_open``): a viewer built for
+            # an unreachable peer can never bind, so the honest
+            # answer is the one that names the device, the reason and
+            # the diagnosing command. The route maps it to the same
+            # 409 ``session_is_remote`` this id answered before the
+            # open path existed.
+            raise PeerSessionUnreachable(session_id, row)
+        # cwd="" and NOT a local path: a directory on this machine
+        # means nothing on the peer, and an empty cwd is what lets the
+        # peer default to its own (``RemoteOwner.engage`` forwards
+        # nothing when the caller supplied nothing).
+        return _LocatedSession("", None, row)
 
     def _locate_flight(
         self, session_id: str, locate: Callable[[], _LocatedSession]
@@ -9260,143 +9818,6 @@ class DesktopSessions:
                     )
                     self.bridges[session_id] = bridge
                 else:
-                    path = self.root / "sessions" / session_id
-
-                    def locate() -> _LocatedSession:
-                        """This session's opening directory — or the PEER that holds it.
-
-                        The marker element is provenance, not decoration: it is what
-                        lets the caller ask
-                        :func:`_cwd_is_unconfirmed` whether the directory is a
-                        durable claim a failed move could have written (the marker),
-                        or the checkpoint fallback for a pre-checkpoint transcript,
-                        which has no marker to doubt.
-
-                        THE REMOTE ARM IS HERE, and this is the ONLY place the pool
-                        decides that a session is another device's: every desktop
-                        route resolves a session through this method, so one
-                        decision covers the snapshot, the history page, the event
-                        stream, the send path and the control verbs — the same
-                        argument ``_ensure_facade`` makes for holding the only
-                        bridge construction in the tree.
-
-                        WHAT IT DOES NOT COST. A LOCAL ID NEVER DIALS: the
-                        directory is checked first, and that is the order the
-                        session's own durability asks for (a conversation moved home
-                        has a directory HERE, and the peer cache can still hold a
-                        listing for it for one TTL). ``remote_row_for`` is
-                        cache-first, so the row the sidebar's poll already read is a
-                        tuple scan, and a miss pays ONE cached projection read —
-                        which is the read the route in front of this method used to
-                        make on EVERY snapshot call, including the local ones. On a
-                        machine in no network it answers ``None`` without opening a
-                        socket, so an unknown id still costs one ``is_dir`` and still
-                        answers the shared 404.
-                        """
-                        if path.is_dir() and _door_may_open(path):
-                            # Through the TOLERANT reader, not ``json.loads``: a marker this
-                            # code cannot parse (a hand edit, an interrupted write, a
-                            # directory where the document should be) is a document with no
-                            # cwd, and a session whose marker has no readable cwd still opens
-                            # here — on the checkpoint fallback below — instead of failing the
-                            # open with a 409/404 raised out of a parse error. Round 1 of
-                            # #1110 wrote the coverage for a malformed marker and found the
-                            # strict read behind it (R3).
-                            stored = read_desktop_marker(path)
-                            if (
-                                not (path / DESKTOP_MARKER_NAME).exists()
-                                and session_activity(path) is None
-                            ):
-                                # M1's SECOND LEG (round-1 review): a directory with NO
-                                # marker document at all, no transcript and no mail
-                                # spool must not open as a session. That is what a
-                                # draft's engage leaves behind (residue measured as
-                                # ``.execution-lease`` + ``.session.pid``, or the empty
-                                # directory a drained runtime leaves), and before this
-                                # check the checkpoint fallback below answered such a
-                                # directory with a phantom bridge on ``root.parent`` —
-                                # 200s on every door for an id no create can ever make
-                                # a session again (measured: ``probe_residue_locate``).
-                                #
-                                # EXISTENCE OF THE MARKER PATH, not readability: a
-                                # marker that is present but unreadable — garbage, an
-                                # interrupted write, a directory where the document
-                                # should be — keeps its own contract (the tolerant
-                                # reader answers it on the fallback below, review
-                                # round 1 of #1110), so only the document's total
-                                # ABSENCE is evidence of nothing.
-                                raise KeyError("Unknown session")
-                            marker_cwd = (stored or {}).get("cwd")
-                            if isinstance(marker_cwd, str) and marker_cwd:
-                                return _LocatedSession(marker_cwd, marker_cwd)
-                            # The cold facade restores cwd from the durable canonical
-                            # checkpoint. This fallback is only used by pre-checkpoint
-                            # transcripts, whose historical launch directory is unknown.
-                            from local_operator.session.frontend_state import (
-                                FRONTEND_CHECKPOINT_CUSTOM_TYPE,
-                            )
-
-                            # A ONE-ROW read, not a ``Transcript(path)``: constructing the
-                            # transcript JSON-decodes the whole journal (2059.5 ms on the
-                            # operator's 261 MB conversation — the A/B table in
-                            # ``docs/evidence/session-load-central-cache``), and this branch
-                            # runs on every bridge creation for a session that carries no
-                            # ``desktop.json`` marker. The reader answers from the tail
-                            # backward and never creates the directory.
-                            checkpoint = read_latest_custom(path, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
-                            return _LocatedSession(
-                                str(
-                                    (checkpoint or {}).get("state", {}).get("cwd")
-                                    or self.root.parent
-                                ),
-                                None,
-                            )
-                        from local_operator.session.remote_open import (
-                            PeerSessionUnresolved,
-                            remote_row_and_silence,
-                        )
-
-                        row, silent = remote_row_and_silence(session_id, self.root)
-                        if row is None:
-                            # A MISS IS ONLY "UNKNOWN" WHEN SOMEBODY ANSWERED.
-                            # ``remote_row_and_silence`` ends in a genuine read
-                            # (``ttl_s=0``) precisely so a just-created peer id
-                            # resolves; that SAME read also reports the devices
-                            # that did NOT reply, and this is the one place that
-                            # fact is turned into an answer for a route. ONE READ,
-                            # BOTH HALVES: the pair comes back from a single call,
-                            # so no second dial can be paid and no silence older
-                            # than the read that missed can be reported (agent
-                            # review round 1, R-1 — the two-call shape re-dialled
-                            # whenever the listing spent its own documented budget
-                            # and threw away the rows that read had fetched).
-                            #
-                            # WHY IT MATTERS HERE AND NOT ONLY IN THE ROUTE: the
-                            # shared 404 is what the renderer turns into
-                            # "missing" — "This conversation is no longer on this
-                            # machine", composer refused. That is a deletion claim
-                            # this device cannot support while a peer is silent,
-                            # so the two cases must not arrive as one KeyError
-                            # (mesh-wire-honesty.md §S2).
-                            if silent:
-                                raise PeerSessionUnresolved(session_id, silent)
-                            raise KeyError("Unknown session")
-                        if not row.reachable:
-                            # REFUSED BEFORE ANYTHING IS BUILT, and with the SAME
-                            # sentence the TUI refuses the same state with (the
-                            # composer lives in ``remote_open``): a viewer built for
-                            # an unreachable peer can never bind, so the honest
-                            # answer is the one that names the device, the reason and
-                            # the diagnosing command. The route maps it to the same
-                            # 409 ``session_is_remote`` this id answered before the
-                            # open path existed.
-                            raise PeerSessionUnreachable(session_id, row)
-                        # cwd="" and NOT a local path: a directory on this machine
-                        # means nothing on the peer, and an empty cwd is what lets the
-                        # peer default to its own (``RemoteOwner.engage`` forwards
-                        # nothing when the caller supplied nothing).
-                        return _LocatedSession("", None, row)
-
                     # THE LOOKUP FIRST, so an unknown session stays 404 on a latched
                     # daemon too: that is what lets "the 503 is the LATCH answering" be
                     # read as a control in the evidence rather than as an artefact of
@@ -9405,7 +9826,9 @@ class DesktopSessions:
                     # second request for the same cold session awaits this one read
                     # instead of paying a second full parse, and one session therefore
                     # cannot be built twice.
-                    flight = self._locate_flight(session_id, locate)
+                    flight = self._locate_flight(
+                        session_id, functools.partial(self._locate, session_id)
+                    )
             if doomed is not None:
                 # M1's close, outside the pool lock (``forget``'s rule): the
                 # draft this bridge was born of is gone and the id never became
@@ -9531,6 +9954,93 @@ class DesktopSessions:
         finally:
             with CancelScope(shield=True):
                 await bridge.release()
+
+    def _checkpoint_row(self, session_id: str) -> SessionRow | None:
+        """The manifest's placement, without the door's unused cwd reconstruction.
+
+        A journal without a desktop marker is still a session under the SAME
+        door predicate. The full ``_locate`` then reads a frontend checkpoint
+        to derive its cwd -- an entire journal pass when that marker is absent
+        (measured on the marker-less gate8 fixture). The manifest never uses
+        cwd, so a local admissible directory stops here instead. The peer arm
+        delegates to ``_locate`` unchanged: reachability, unresolved-peer and
+        unknown-id refusals must remain the door's own answers.
+        """
+        path = self.root / "sessions" / session_id
+        if path.is_dir() and _door_may_open(path):
+            if not (path / DESKTOP_MARKER_NAME).exists() and session_activity(path) is None:
+                raise KeyError("Unknown session")
+            return None
+        return self._locate(session_id).remote_row
+
+    async def checkpoints(self, session_id: str) -> dict[str, Any]:
+        """The checkpoint rail's manifest, answered WITHOUT taking a bridge.
+
+        WHY NOT ``session()`` (CORE-PROFILE L1, 2026-10-25). The manifest needs
+        two facts -- "is this a peer conversation?" and the index view -- and
+        ``session()`` buys a third it never reads: ``bridge.acquire`` builds the
+        whole cold facade (``AttachedSession.cold``: the cold replay parse, the
+        model-selection scan, the subagent restore) and holds the BRIDGE lock
+        while it does. Measured on a cold process: 2,494 ms CPU on an 8 MB
+        journal for a manifest whose own derivation took 6 ms, and in the app's
+        open burst the parallel ``/events`` queued behind it on that lock. The
+        index module answers by itself (the mobile relay already calls
+        ``checkpoints_view`` directly), so this asks only the questions the door
+        asks, in the door's order, and builds nothing.
+
+        THE SAME ANSWERS AS THE DOOR, ONE BY ONE, so the response bytes and every
+        refusal stay what they were through ``session(read=True,
+        allow_draft=True)`` + ``bridge.checkpoints()``:
+
+        * a malformed id, and an id the lookup cannot resolve, are the shared
+          404 -- decided BEFORE the latch, exactly as the door decides it;
+        * a latched (retiring) daemon refuses with ``DaemonRetiring`` once the
+          id is known (``assert_admitting``, the one admission predicate);
+        * a registered draft is admitted (the route always passed
+          ``allow_draft``), and a resident bridge whose draft has lapsed without
+          a marker is the same 404 the door's M1 close answers -- read here,
+          never mutated: the door owns the pool's bookkeeping;
+        * a resident bridge carries its own placement (``remote_row``); a cold
+          id uses the same directory admission predicate and the same peer
+          resolution as the door, without reconstructing an unused cwd from
+          journal checkpoints (``_checkpoint_row``). The peer answer is the
+          same ``unsupported`` the bridge gave.
+
+        The pool lock is held for the dict reads only, as ``session()`` holds it.
+        This request no longer counts as a bridge user, so the retirement poll
+        no longer waits on it -- it is a stat plus a cache read, or the 200 ms
+        first-paint wager at most, and a client retries a cut read.
+        """
+        if not SESSION_ID.fullmatch(session_id):
+            raise KeyError("Unknown session")
+        resolve_row = False
+        remote_row: SessionRow | None = None
+        async with self.lock:
+            draft = self._draft_for(session_id)
+            bridge = self.bridges.get(session_id)
+            if bridge is not None and draft is None and bridge.draft is not None:
+                if (
+                    session_id not in self._materialising
+                    and not (self.root / "sessions" / session_id / DESKTOP_MARKER_NAME).is_file()
+                ):
+                    raise KeyError("Unknown session")
+            if bridge is not None:
+                self.assert_admitting()
+                remote_row = bridge.remote_row
+            elif draft is not None:
+                self.assert_admitting()
+            else:
+                resolve_row = True
+        if resolve_row:
+            remote_row = await asyncio.to_thread(self._checkpoint_row, session_id)
+            self.assert_admitting()
+        if remote_row is not None:
+            return {
+                "session_id": session_id,
+                "index": {"state": "unsupported"},
+                "checkpoints": [],
+            }
+        return await transcript_index.checkpoints_view(self.root, session_id)
 
     async def forget(self, session_id: str) -> bool:
         """Drop a removed conversation's resident bridge; True if one existed.

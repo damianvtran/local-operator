@@ -79,6 +79,83 @@ that named both comes back as the team's manager. Stored loop progress remains
 visible, but restarting or resuming never automatically replays iterations.
 Pass a new loop option explicitly to start another loop.
 
+## `--remote` (preview)
+
+`lop exec --remote` submits a short-lived run to Radient remote compute (tier 1)
+instead of running it here: the prompt, a git repository URL and a full commit
+SHA. Nothing from this machine is uploaded, which is why the repository and
+commit are required rather than defaulting to the working directory.
+
+```sh
+lop exec --remote --repo https://github.com/example/repo.git --sha <40-hex> \
+  --network home 'Run the acceptance checks'
+lop exec --remote-status RUN_ID
+lop exec --remote-cancel RUN_ID
+```
+
+| Flag | Contract |
+| --- | --- |
+| `--remote` | Submit this task to remote compute (preview). |
+| `--repo URL` | The repository the far end checks out: an `https://`, `ssh://` or `git@host:path` address. |
+| `--sha SHA` | The full 40-character commit to check out. A branch name or short hash is refused. |
+| `--network NAME\|ID` | The mesh network to submit through. Optional when this device is an active member of exactly one. |
+| `--size s\|m\|l` | Compute size (default `m`). |
+| `--max-hours H` | Hours the run may execute before the server stops it (default 2; the server may cap it). |
+| `--budget-usd N` | Spending cap for this run; the server's admission default applies when omitted. |
+| `--name TEXT` | Label carried on the run. |
+| `--idempotency-key KEY` | Reuse a key instead of minting one, so retrying a submitted run returns that run rather than starting a second. A submission answered with a replay prints one line on stderr saying the key matched an earlier submission and no new run was created, then continues normally. |
+| `--detach` | Print the run id (stdout) and the receipt (stderr), then exit instead of watching. |
+| `--remote-status RUN_ID` | Print one run as JSON on stdout and exit; the network verdict goes to stderr. |
+| `--remote-cancel RUN_ID` | Cancel a run and exit. Idempotent, and reachable while the preview switch is off. |
+
+Flags that only mean something to a local run (`--tools`, `--background`,
+`--goal`, `--resume` and the rest) are refused by name beside `--remote`
+rather than silently ignored.
+
+**Network binding.** A remote run is bound to one mesh network that this device
+is an active member of. The network the receipt reports is the one Radient's
+response named — confirmed against the request, never assumed from what this
+client asked for — and a response naming another network is refused instead of
+reported as this network's run.
+
+**Testing against a non-production Radient.** `LOP_REMOTE_COMPUTE_API_URL` moves
+the remote-compute API base off production, and only remote compute: the tunnel
+client stays pinned to the production host, because that is where a tunnel's
+credential is expected. **The override sends your Radient login to that host, so
+point it only at a host you control.** The value must be an `https://` URL;
+`http://` is accepted only for `127.0.0.1`, `::1` or `localhost`, where the
+connection never leaves this machine. Userinfo, a query string and a fragment are
+refused, even empty (`…/?`, `…/#`); so are whitespace, control and non-ASCII
+characters and any `%`, anywhere in the value — a tab or a percent-escape can
+change which host is contacted after parsing. The authority must be exactly one
+hostname (ASCII letters, digits, `-` and `.`, no leading or trailing dot, no
+empty label) or one bracketed IPv6 literal, with an optional port in 1-65535. A
+trailing slash is dropped; any path is kept and prepended to every request under
+the API base, which is how a gateway is addressed. This module does not normalise
+those segments — but httpx collapses `.` and `..` when it builds the request, so a
+gateway path must not depend on them (`/a/../b` is sent as `/b`; duplicate
+slashes and letter case are preserved). While the variable is
+set, one line on stderr names the exact `host:port` the request will go to,
+before the first request — on `--remote`, `--remote-status` and `--remote-cancel`
+alike, since all three send the same login — so a login sent somewhere other
+than production is never silent; stdout is unchanged. An unusable value is
+refused with one sentence and exit 1 — it never falls back to production.
+
+**403 means the preview does not cover this account.** Remote compute is
+admitted per Radient account, so a login outside the preview allowlist is
+answered with `403`; the command says that in one sentence and exits 1. No
+retry, idempotency key or flag changes it.
+
+**Exit codes.**
+
+| Code | Meaning |
+| --- | --- |
+| `0` | The run succeeded (or, for `--detach`/`--remote-status`/`--remote-cancel`, the command did). Also `0` when the watch reaches its time bound while the run is still going: the run did **not** finish, so check it with `--remote-status`. |
+| `1` | The run failed, or its outcome is unknown, or it ended with no outcome (a deleted run), or the command itself errored. |
+| `3` | The run expired: it hit its deadline before it was done. |
+| `4` | The run was cancelled. |
+| `130` | The watch was interrupted (Ctrl-C); the run itself is still going and was not cancelled. |
+
 ## Final-response enforcement (`--output-format`)
 
 `lop exec` can require the assistant's FINAL response to be a machine-readable

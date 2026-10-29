@@ -40,7 +40,7 @@ SIGN_IN = "Sign in to Radient to access your account"
 
 
 class Stub:
-    """A fake Radient: /token, /me, /agents, /prices, and a log of what arrived.
+    """A fake Radient: /auth/oauth/token, /me, /agents, /prices, and a log of what arrived.
 
     ``/agents`` answers 200 for the SAME expired bearer ``/me`` refuses under,
     which is what the operator's install did on 2026-09-19 — the reason a stale
@@ -78,10 +78,10 @@ class Stub:
             header = request.headers.get("authorization", "")
             return header.removeprefix("Bearer ") if header else "<none>"
 
-        @fake.post("/token")
+        @fake.post("/auth/oauth/token")
         async def token(request: Request) -> JSONResponse:
             body = await request.json()
-            self.calls.append(("POST", "/token", ""))
+            self.calls.append(("POST", "/auth/oauth/token", ""))
             if self.refresh == "invalid_grant":
                 return JSONResponse({"error": "invalid_grant"}, status_code=400)
             if self.refresh == "500":
@@ -130,7 +130,9 @@ class Stub:
         regression, and one per block window is what the memo buys back.
         """
         return sum(
-            1 for method, path, _bearer in self.calls if method == "POST" and path == "/token"
+            1
+            for method, path, _bearer in self.calls
+            if method == "POST" and path == "/auth/oauth/token"
         )
 
 
@@ -161,7 +163,11 @@ async def proxy(
     peer: AuthStore | None = None
     async with serve(stub.app) as upstream_url, serve(app) as desktop_url:
         monkeypatch.setattr(desktop_radient, "base_url", lambda: upstream_url + "/v1")
-        monkeypatch.setattr(oauth, "TOKEN_URL", upstream_url + "/token")
+        # The refresh guard trusts only the declared canonical hub. The stub IS
+        # that hub here: both constants point at it, so the guard stays in force
+        # instead of being bypassed, and refresh is exercised for real.
+        monkeypatch.setattr(oauth, "DEFAULT_RADIENT_API_BASE_URL", upstream_url)
+        monkeypatch.setattr(oauth, "TOKEN_URL", upstream_url + "/auth/oauth/token")
         async with httpx.AsyncClient(
             base_url=desktop_url, timeout=30, headers={"Authorization": "Bearer " + token}
         ) as client:
@@ -340,7 +346,7 @@ async def test_a_peer_refresh_that_lands_is_joined_not_refused(
         # The peer's refresh POST, then the credentialless read that did not wait for it,
         # then OUR read — which is on the ledger only because the peer's token exists.
         assert stub.paths() == [
-            "POST /token <none>",
+            "POST /auth/oauth/token <none>",
             "GET /v1/prices <none>",
             f"GET /v1/me {FRESH}",
         ], stub.paths()

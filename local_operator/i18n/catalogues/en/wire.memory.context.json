@@ -29,6 +29,16 @@
     "tone": "concise, neutral; explicit about trust and limitations",
     "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
   },
+  "wire.memory.capture.locators.label": {
+    "role": "Memory settings section or policy row",
+    "tone": "concise, neutral; explicit about trust and limitations",
+    "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
+  },
+  "wire.memory.capture.locators.help": {
+    "role": "Memory settings section or policy row",
+    "tone": "concise, neutral; explicit about trust and limitations",
+    "note": "English-only addition with English fallback until independently translated and audited. Identifiers, memory://, memory-sync-v1 and token limits are literal protocol names/units."
+  },
   "wire.memory.suggest.label": {
     "role": "Memory settings section or policy row",
     "tone": "concise, neutral; explicit about trust and limitations",

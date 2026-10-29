@@ -54,6 +54,10 @@ class MoveTo:
     #: conversation. Ignored with ``keep`` by the CLI (a copy retires nothing,
     #: so it has no safe point to wait for), which is the CLI's contract to own.
     queue: bool = False
+    #: The explicit opt-out from the source's role-definition gate (LOH-9 S2):
+    #: a conversation that owns session roles refuses a move by default because
+    #: v1 does not carry them; this flag moves it and leaves them here.
+    drop_session_roles: bool = False
     error: str = ""
 
 
@@ -92,6 +96,10 @@ def parse_move_to(arg: str) -> MoveTo | None:
     # still answer it — without the default, the bare ``--to`` forms raise
     # ``UnboundLocalError`` (the red shard that added this line).
     queue = False
+    # The same default-for-every-form rule as ``queue`` above (LOH-9 S2): the
+    # request build reads this name on every ``--to`` form, including the ones
+    # that never mention the flag.
+    drop_session_roles = False
     words: list[str] = []
     index = 0
     while index < len(tokens):
@@ -110,6 +118,8 @@ def parse_move_to(arg: str) -> MoveTo | None:
             keep = True
         elif token == "--queue":
             queue = True
+        elif token == "--drop-session-roles":
+            drop_session_roles = True
         elif token.startswith("-"):
             if token == "--wait" or token.startswith("--wait="):
                 # THE OTHER HALF OF THE BUSY PAPERCUT (``mobility._busy_sentence``):
@@ -124,7 +134,12 @@ def parse_move_to(arg: str) -> MoveTo | None:
                         "`lop sessions move <id> --to <to> --wait <seconds>`"
                     )
                 )
-            return MoveTo(error=f"/move --to takes only --keep and --queue, not {token!r}")
+            return MoveTo(
+                error=(
+                    "/move --to takes only --keep, --queue and --drop-session-roles, "
+                    f"not {token!r}"
+                )
+            )
         else:
             words.append(token)
         index += 1
@@ -135,11 +150,22 @@ def parse_move_to(arg: str) -> MoveTo | None:
         # A PATH WITH ``--to`` is the one shape the design refuses by name rather
         # than guessing (§1.7 table: "/move <path> --to … ⇒ refused").
         return MoveTo(error=AMBIGUOUS_MOVE)
-    return MoveTo(session_id=session_id, to=to, keep=keep, queue=queue)
+    return MoveTo(
+        session_id=session_id,
+        to=to,
+        keep=keep,
+        queue=queue,
+        drop_session_roles=drop_session_roles,
+    )
 
 
 def run_session_move(
-    session_id: str, to: str, *, keep: bool = False, queue: bool = False
+    session_id: str,
+    to: str,
+    *,
+    keep: bool = False,
+    queue: bool = False,
+    drop_session_roles: bool = False,
 ) -> dict[str, Any]:
     """Run ``lop sessions move … --json`` and return its contract document.
 
@@ -159,6 +185,8 @@ def run_session_move(
         argv.append("--keep")
     if queue:
         argv.append("--queue")
+    if drop_session_roles:
+        argv.append("--drop-session-roles")
     argv.append("--json")
     env = dict(os.environ)
     env.pop("FORCE_COLOR", None)

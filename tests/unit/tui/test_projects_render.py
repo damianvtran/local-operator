@@ -1513,3 +1513,55 @@ def test_section_ruler_names_the_viewport_section_and_sheds_in_order() -> None:
     # Off any band (and ungrouped) the caller paints the shipped plain rule.
     assert section_ruler(views, "list", top_row=99, cursor=0, width=40) is None
     assert section_ruler([_view("alpha")], "list", top_row=0, cursor=0, width=40) is None
+
+
+def test_list_states_rows_the_registry_page_left_out_in_one_overflow_row() -> None:
+    """The store's page and the render cap share ONE "+N more not shown" row.
+
+    Two rows would each carry a number neither knows the total of, and the
+    store's page would otherwise be invisible on the canvas — a dormant project
+    painted away with no sign that anything was hidden.
+    """
+    views = [_view(f"p{i:03d}") for i in range(3)]
+    plain = render_project_list(views, cursor=0, now=NOW, hidden=7).text.plain
+    assert plain.splitlines()[-1].strip() == "… +7 more not shown"
+
+    # Both cuts at once: one row carrying the SUM.
+    views = [_view(f"p{i:03d}") for i in range(PROJECTS_MAX + 2)]
+    plain = render_project_list(views, cursor=0, now=NOW, hidden=7).text.plain
+    assert plain.splitlines()[-1].strip() == "… +9 more not shown"
+
+    # An EMPTY page never gets the row: "no projects yet" beside "+5 more not
+    # shown" would claim rows the canvas is not hiding (that pairing is an
+    # unreadable store, not a truncated one).
+    assert "more not shown" not in render_project_list([], hidden=5).text.plain
+
+
+def test_board_states_the_registry_page_remainder_in_its_overflow_row() -> None:
+    """M3: the board paints the page-scoped set, so it must declare it too.
+
+    Same row, same numbers as the list — the board's overflow lives in the
+    first painted column, so the assertion is on the canvas text rather than on
+    the last line.
+    """
+    views = [_view(f"p{i:03d}") for i in range(3)]
+    plain = render_project_board(views, cursor=0, now=NOW, hidden=7).text.plain
+    assert "… +7 more not shown" in plain
+
+    # Both cuts at once: one row carrying the SUM, not two rows to add up.
+    views = [_view(f"p{i:03d}") for i in range(PROJECTS_MAX + 2)]
+    plain = render_project_board(views, cursor=0, now=NOW, hidden=7).text.plain
+    assert plain.count("more not shown") == 1
+    assert "… +9 more not shown" in plain
+
+
+def test_timeline_states_the_registry_page_remainder_as_its_last_line() -> None:
+    """M3: the timeline caps rows too, and the declaration closes the chart."""
+    views = [_view(f"p{i:03d}") for i in range(3)]
+    plain = render_project_timeline(views, hidden=7).text.plain
+    assert plain.splitlines()[-1].strip() == "… +7 more not shown"
+
+    # The empty chart keeps the empty sentence alone: "+N more not shown" over
+    # it would claim rows the chart is not hiding.
+    empty = render_project_timeline([], hidden=5).text.plain
+    assert "more not shown" not in empty

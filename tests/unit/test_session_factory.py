@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -668,9 +669,10 @@ async def test_the_tool_roster_follows_the_sessions_final_inventory(
             "task",
             "wait",
             "jobs",
-            # Appended LAST by design (§E): a roster entry the classification
-            # block may advertise once this session's inventory holds the tool.
+            # Capability entries follow the session-management tools by design (§E):
+            # the classification block may advertise them once the inventory holds them.
             "code_requests",
+            "secret",
         ]
         cached = session_factory._classification_roster(hooks)
         assert [row.name for row in cached if row.kind == "tool"] == [
@@ -681,6 +683,7 @@ async def test_the_tool_roster_follows_the_sessions_final_inventory(
             "wait",
             "jobs",
             "code_requests",
+            "secret",
         ]
         # A later inventory write rebuilds both the roster and its cache: the
         # cache key carries the tool term, so the change is visible on the
@@ -915,6 +918,64 @@ async def test_a_birth_effort_is_the_constructed_specs_level(tmp_config_dir: Pat
         assert default.model.reasoning_effort == "low", "configured model_effort must still govern"
     finally:
         await default.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_birth_fast_is_the_constructed_specs_dial(tmp_config_dir: Path) -> None:
+    """The chosen SPEED reaches the spec this session is BUILT on.
+
+    The desktop create path (ui#1265) can birth a conversation on fast, and the
+    dial travels the same channel as ``birth_effort``: the view's spawn
+    environment (``launch._spawn_runtime`` -> ``LOP_MOBILE_CHILD_FAST``) into
+    ``spawn_owned_session`` and then into this factory. Construction rather than
+    a later switch is the point — the owner's first frontend snapshot, its first
+    provider call and the selection row it journals at admission then agree with
+    the chip the user set before the conversation existed.
+
+    Two controls. A caller that names no dial gets today's spec (every caller
+    before this field, the CLI, the TUI). And a dial asked of a route that does
+    not SELL the tier is CLAMPED to off rather than raising: a stored choice may
+    outlive the catalogue that offered it, and the refusal belongs to the moment
+    the user picks (the create/preview 422), never to a launch that would then
+    fail to open the conversation.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+
+    (tmp_config_dir / "config.yml").write_text(
+        "version: 0.0.0\n" "values:\n" "  hosting: anthropic\n" "  model_name: claude-opus-5\n"
+    )
+    chosen = await create_session(
+        _args(hosting="anthropic", model="claude-opus-5", birth_fast=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert chosen.model.supports_fast_mode is True, "the registry must sell this tier"
+        assert chosen.model.fast_mode is True
+    finally:
+        await chosen.dispose()
+
+    default = await create_session(
+        _args(hosting="anthropic", model="claude-opus-5"),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert default.model.fast_mode is False, "a caller that names no dial keeps today's spec"
+    finally:
+        await default.dispose()
+
+    clamped = await create_session(
+        _args(hosting="deepseek", model="deepseek-flash", birth_fast=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert clamped.model.supports_fast_mode is False
+        assert clamped.model.fast_mode is False, "no tier, no dial — and no failed launch"
+    finally:
+        await clamped.dispose()
 
 
 @pytest.mark.asyncio
@@ -1485,7 +1546,7 @@ class FakeSessionShell(Session):
         self._dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
         self._final_dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
 
-    def refresh_tools(self, tools) -> bool:
+    def refresh_tools(self, tools, *, republish: bool = True) -> bool:
         """Swap the inventory and report it as reaching the next model call.
 
         The real ``Session`` publishes its tools array once per turn, so its
@@ -3082,6 +3143,60 @@ async def test_one_attachment_transition_journals_exactly_one_row(tmp_config_dir
 
 
 @pytest.mark.asyncio
+async def test_the_env_block_carries_the_session_id_and_never_the_name(
+    tmp_config_dir: Path,
+) -> None:
+    """Self-identity rides the byte-stable prefix: the ID, never the NAME.
+
+    The incident: an agent could not recognise its own row in the
+    ``sessions`` listing, read it as a peer on the same topic, and spawned a
+    duplicate. The id now sits in the env block, which the model reads every
+    turn. The name is deliberately absent — auto-naming and user renames would
+    otherwise anchor a stale name for the run or force a stable-prefix rebuild
+    on every rename (see ``_env_details``).
+
+    Stability is the other half: two prepares hand back byte-identical blocks,
+    write ONE ``system_prefix`` entry, and journal no ``[session-state]``
+    environment delta — the id is captured once, so it cannot reprice the
+    cached prefix mid-session.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.resume import write_session_title
+
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(session, Session)
+    try:
+        session_id = session._transcript.directory.name
+        title = "a name the stable prefix must never carry"
+        # A real rename, through the writer the listings read — the point is
+        # that the prefix does not follow it, whatever route the name takes.
+        write_session_title(session._transcript.directory, title, user_set=True, past_names=[])
+
+        first = await session._prepare_system_blocks()
+        env = first[2]
+        assert f"Session ID: {session_id}" in env
+        assert title not in env
+
+        second = await session._prepare_system_blocks()
+        assert second[2] == env, "the env block moved between two prepares"
+
+        prefixes = [
+            entry
+            for entry in session._transcript.entries()
+            if str(entry.payload.get("custom_type", "")) == "system_prefix"
+        ]
+        assert len(prefixes) == 1, "a second prefix epoch was persisted"
+        assert _session_state_rows(session) == []
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_child_is_told_whether_an_interface_is_attached_to_its_parent(
     tmp_config_dir: Path,
 ) -> None:
@@ -3142,6 +3257,111 @@ async def test_a_child_is_told_whether_an_interface_is_attached_to_its_parent(
 
 
 @pytest.mark.asyncio
+async def test_a_fork_keeps_the_parent_id_in_its_prefix_and_journals_its_own(
+    tmp_config_dir: Path,
+) -> None:
+    """R1-3: pin BOTH halves of the fork residual, so it stays deliberate.
+
+    ``_prepare`` has no fork branch — a fork passes its own id like any session.
+    What suppresses it is the INHERITED frozen prefix: the fork loads the
+    parent's ``system_prefix`` byte-for-byte (so the parent's provider cache
+    still hits), the wire block therefore keeps the PARENT's ``Session ID``
+    line, and the fork id reaches the same request as a ``[session-state] ##
+    Environment`` delta. Two identity surfaces disagreeing is the class this PR
+    exists to fix; this records the bound — the state record is the newer
+    authority and is in context before the first model call — and that the
+    delta is written once, not per turn.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.fork import fork_session
+
+    parent = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(parent, Session)
+    try:
+        # FREEZE the parent's prefix in its own transcript — that is the entry
+        # the clone carries and the fork inherits.
+        await parent._prepare_system_blocks()
+        parent_id = parent._transcript.directory.name
+    finally:
+        await parent.dispose()
+
+    fork_id = await asyncio.to_thread(fork_session, Path(tmp_config_dir), parent_id)
+    fork = await create_session(
+        _args(hosting="test", model="test", yolo=True, resume=fork_id),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(fork, Session)
+    try:
+        assert fork._transcript.directory.name == fork_id
+        first = await fork._prepare_system_blocks()
+        assert f"Session ID: {parent_id}" in first[2], first[2]
+        assert f"Session ID: {fork_id}" not in first[2], first[2]
+
+        second = await fork._prepare_system_blocks()
+        assert second[2] == first[2]
+
+        rows = [row for row in _session_state_rows(fork) if fork_id in str(row.payload)]
+        assert len(rows) == 1, [str(row.payload) for row in rows]
+        changed = (rows[0].payload.get("details") or {}).get("blocks") or {}
+        # Section index 2 IS the environment block — the fork's own id, delivered
+        # as the delta rather than as a prefix rebuild.
+        assert list(changed) == ["2"], changed
+    finally:
+        await fork.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_childs_env_block_carries_its_own_session_id(tmp_config_dir: Path) -> None:
+    """The child shape is a session too, and it holds the ``sessions`` tool.
+
+    ``_construct_child_session`` builds its own blocks (the factory is not
+    reused), so threading the id into the factory's provider alone would have
+    left a delegated child — the shape ``.github/workflows/ci.yml`` records as
+    ~93% of sessions, the reason children get their own context ratchet — with
+    the old three-line env block and no way to recognise its own row. The id
+    here is the same field its ToolContext carries, so the prompt and the
+    listing agree byte-for-byte.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.harness.subagent import _build_child_session
+
+    parent = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(parent, Session)
+    try:
+        child = await _build_child_session(
+            label="probe",
+            prompt="do a thing",
+            parent_session=parent,
+            model_spec=None,
+            job_id="probe-job-self-id",
+        )
+        try:
+            blocks = child._system_blocks_provider()
+            if inspect.isawaitable(blocks):
+                blocks = await blocks
+            child_id = child._transcript.directory.name
+            assert child_id != parent._transcript.directory.name
+            assert f"Session ID: {child_id}" in blocks[2]
+            # The parent's id must not leak in as the child's identity.
+            assert f"Session ID: {parent._transcript.directory.name}" not in blocks[2]
+        finally:
+            await child.dispose()
+    finally:
+        await parent.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_child_of_an_unmeasured_parent_is_told_nothing(tmp_config_dir: Path) -> None:
     """A parent with no runtime probe answers "nothing measured", and that is
     not the same as "attached" — the fail-open default belongs to the PARK
@@ -3175,6 +3395,59 @@ async def test_a_child_of_an_unmeasured_parent_is_told_nothing(tmp_config_dir: P
             await child.dispose()
     finally:
         await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_factory_closure_carries_the_open_asks_section(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SA-D3: the REAL prompt closure reads the reminder off the goal holder.
+
+    The section is built by the session (its queue, its stamp) but reaches the
+    provider through the holder the factory closure reads, so a missing argument
+    at ``build_system_blocks`` — or a missing read at the closure — would leave
+    the feature dead while every session-level test still passed.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.asks import policy
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert isinstance(session, Session)
+
+    async def hook(questions):  # pragma: no cover — presence is what gates ask
+        return None
+
+    session.set_ask_handler(hook)
+    queue = session.ask_queue()
+    assert queue is not None
+    try:
+        blocks = session._system_blocks_provider()
+        if inspect.isawaitable(blocks):
+            blocks = await blocks
+        assert "<open-asks>" not in str(blocks[-1]), "nothing open, nothing shipped"
+
+        outcome = queue.enqueue(
+            [{"id": "ship", "question": "Ship it tonight?", "options": []}], 3600
+        )
+        assert outcome["ok"], outcome
+        blocks = session._system_blocks_provider()
+        if inspect.isawaitable(blocks):
+            blocks = await blocks
+        tail = str(blocks[-1])
+        assert "<open-asks>" in tail
+        assert "Ship it tonight?" in tail
+        assert str(outcome["details"]["ask_id"]) in tail
+        # No prompt has been admitted, so there is no "as of" to claim — the
+        # honest shape, not a zero or a made-up clock.
+        assert "As of the user's message" not in tail
+    finally:
+        await session.dispose()
 
 
 def test_a_bom_does_not_survive_into_the_prompt(
@@ -4767,6 +5040,7 @@ def _patch_store_maintenance_passes(
 ) -> None:
     """Replace store-wide callbacks with ordered, resumable test probes."""
     from local_operator.analytics import backfill as analytics_backfill
+    from local_operator.session import census as census_mod
     from local_operator.session import cleanup as cleanup_mod
     from local_operator.tools import group_reaper
 
@@ -4781,6 +5055,7 @@ def _patch_store_maintenance_passes(
 
         return callback
 
+    monkeypatch.setattr(census_mod, "run_store_census", record("census"))
     monkeypatch.setattr(cleanup_mod, "cleanup_from_config", record("cleanup"))
     monkeypatch.setattr(group_reaper, "sweep_orphan_groups", record("groups"))
     monkeypatch.setattr(resume_mod, "backfill_session_origins", record("origins"))
@@ -4936,6 +5211,7 @@ def test_store_maintenance_thread_retries_after_lock_owner_exits(
     assert not worker.is_alive(), "worker did not stop when asked"
     assert attempts == 4, "worker abandoned lock retries after its initial contention"
     assert calls == [
+        "census",
         "cleanup",
         "groups",
         "origins",
@@ -5093,7 +5369,7 @@ def test_store_maintenance_malformed_stamp_is_retried(
         cast("ConfigManager", FakeConfigManager()), tmp_path, None
     )
 
-    assert len(calls) == 6
+    assert len(calls) == 7
     assert json.loads(stamp.read_text(encoding="utf-8"))["version"] == (
         session_factory._STORE_MAINTENANCE_STAMP_VERSION
     )
@@ -5160,6 +5436,7 @@ def test_store_maintenance_failed_pass_retries_without_completion_stamp(
     )
     assert calls[: len(first_run)] == first_run
     assert calls[len(first_run) :] == [
+        "census",
         "cleanup",
         "groups",
         "origins",
@@ -5330,7 +5607,13 @@ def test_a_pass_that_stands_down_mid_walk_writes_no_completion_stamp(
         cast("ConfigManager", FakeConfigManager()), tmp_path, None, stop_event=stop
     )
     assert not (tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME).exists()
-    assert calls == ["cleanup", "groups", "origins", "titles"], "a pass ran after the stop"
+    assert calls == [
+        "census",
+        "cleanup",
+        "groups",
+        "origins",
+        "titles",
+    ], "a pass ran after the stop"
 
     # No stamp means the next run re-derives the worklist rather than trusting
     # a completion record — the resume cost is bounded by the sentinels the
@@ -5340,6 +5623,7 @@ def test_a_pass_that_stands_down_mid_walk_writes_no_completion_stamp(
         cast("ConfigManager", FakeConfigManager()), tmp_path, None
     )
     assert calls == [
+        "census",
         "cleanup",
         "groups",
         "origins",
@@ -5411,32 +5695,167 @@ async def test_the_stop_request_reaches_the_dispatched_walk(tmp_path: Path, monk
         session_factory.reset_store_maintenance_for_tests()
 
 
-def test_a_leaving_runtime_stops_the_store_walk_at_a_directory(tmp_path: Path) -> None:
-    """Cell A: a real departure stops a real walk between two directories.
+#: The walker is parked inside the scan of the FOURTH directory, so exactly three
+#: are answered when the departure lands. Three is "some work done, most left": it
+#: keeps ``0 < before < count`` true by construction rather than by timing.
+_WALK_HELD_AT = 4
 
-    The shape being pinned (the path itself was closed by the daemon-thread
-    move): the four store-walking passes check the departure event once per
-    directory, so a runtime that has decided to leave pays ONE directory's work
-    — not the 3-7 minutes a pass of this store costs — and a partial sweep
-    publishes no completion stamp, which is what makes the next boot re-derive
-    its worklist instead of trusting a claim the walk did not earn.
 
-    A real child, a synthetic store (never the operator's), the production
-    dispatch, and the production departure seam (``_commit_to_leaving``) — the
-    assertions are all COUNTS read off the child's own report, so nothing here
-    depends on how long any of it took; the subprocess timeout is the only
-    clock, and it is a backstop.
+def _assert_store_walk_stood_down(report: dict[str, Any], *, count: int) -> None:
+    """The one oracle for the store-walk child's report, shared by cell and controls.
+
+    Every message names WHICH guard fired, because the controls below assert on
+    it: a control that failed for any other reason (a child that never started,
+    a hold that timed out) would pass for the wrong cause.
     """
-    count, lines = 60, 800
-    result_path = tmp_path / "cell-a.json"
+    held = _WALK_HELD_AT - 1
+    assert report["session_dirs"] == count, "the synthetic store lost a session directory"
+    assert report["worker_settled"] is True, "the maintenance worker thread outlived the child"
+    assert report["hold_timed_out"] is False, "the hold was never released"
+    # PRECONDITION: the observer saw the title pass part-way. A walk that is
+    # already complete when the observer looks cannot show a departure stopping
+    # anything, whatever the later counts say.
+    assert 0 < report["before_titles"] < count, (
+        f"precondition: the observer saw {report['before_titles']} of {count} directories "
+        "answered, so the walk was already complete before the departure"
+    )
+    assert report["before_titles"] == held, report
+    # The REAL departure set the REAL stop event while the walker was still held;
+    # a walk that ended on its own would never have set it.
+    assert report["stop_set_at_hold"] is True, "the departure did not set the stop before release"
+    assert report["after_origins"] == count, "the origin pass should have finished before it"
+    # AFTER-WORK GUARD: the held directory finishes (it was already inside the
+    # scan) and the next directory's boundary check sees the stop, so exactly one
+    # more directory is answered. A consumer that ignores a set stop reaches
+    # ``count`` here.
+    assert report["after_titles"] == report["before_titles"] + 1, (
+        f"after-work guard: {report['after_titles']} directories answered after the "
+        f"departure, expected {report['before_titles'] + 1} — the walk ran past the stop"
+    )
+    assert report["stamp"] is False
+    assert report["done_set"] is True
+    assert "titles" in report["passes"], report
+    assert "analytics-names" not in report["passes"], "a pass ran after the stop"
+    # The runner handed EVERY swept pass a callable predicate, not a captured
+    # boolean and not nothing — the wiring, asserted inside a real walk.
+    assert report["predicate_wired"] == {"origins": True, "titles": True}, report["predicate_wired"]
+    # Resumable, not lucky: the next run pays exactly for the directories the
+    # partial walk never answered, and it finishes the store.
+    assert report["scan_calls_run2"] == count - report["after_titles"], report
+    assert report["after2_titles"] == count and report["after2_origins"] == count
+    assert report["reader_failures"] == []
+    assert report["tmp_sidecars"] == []
+
+
+def _first_line(error: BaseException, limit: int = 300) -> str:
+    """The first line of an assertion's message: the guard's own sentence, bounded.
+
+    ``assert cond, message`` renders as ``message`` then pytest's expression dump, so
+    the first line is the text the oracle chose to say and nothing else.
+    """
+    lines = str(error).splitlines() or [""]
+    return lines[0][:limit]
+
+
+def _walk_modules() -> dict[str, dict[str, str]]:
+    """Realpath and sha256 of the three production modules the walk is made of.
+
+    The child reports the same three for ITS imports and the case compares them to
+    THIS process's own: an editable install, a stray second tree on ``PYTHONPATH`` or
+    a stale ``cwd`` would otherwise let the child exercise code the parent never
+    imported (the two-tree coupling behind an earlier 46-failure incident). The
+    commit sha an environment variable carries is metadata and proves nothing about
+    the bytes that ran.
+    """
+    from local_operator.session.runtime import process as process_mod
+
+    found: dict[str, dict[str, str]] = {}
+    for label, module in (
+        ("resume", resume_mod),
+        ("session_factory", session_factory),
+        ("process", process_mod),
+    ):
+        path = Path(str(module.__file__)).resolve()
+        found[label] = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    return found
+
+
+def _judge_store_walk(
+    report: dict[str, Any],
+    record_property: Callable[[str, object], None],
+    *,
+    expect: str | None,
+    count: int = 60,
+) -> None:
+    """Run the oracle and record WHICH guard spoke, so the artifact shows the reason.
+
+    ``expect`` is ``None`` for the shipped cell (the oracle must pass) or the text the
+    failing guard must open with for a control: a control that failed for any other
+    reason fails here instead of passing for the wrong cause.
+    """
+    if expect is None:
+        try:
+            _assert_store_walk_stood_down(report, count=count)
+        except AssertionError as error:
+            record_property("walk_oracle", "failed: " + _first_line(error))
+            raise
+        record_property("walk_oracle", "passed")
+        return
+    with pytest.raises(AssertionError) as caught:
+        _assert_store_walk_stood_down(report, count=count)
+    record_property("walk_oracle", _first_line(caught.value))
+    assert expect in _first_line(caught.value, 1000), (
+        f"the oracle failed, but not on the guard this control is about ({expect!r}): "
+        f"{_first_line(caught.value, 1000)}"
+    )
+
+
+def _run_store_walk_child(
+    tmp_path: Path,
+    mode: str,
+    record_property: Callable[[str, object], None],
+    *,
+    count: int = 60,
+    lines: int = 800,
+) -> dict[str, Any]:
+    """Run the real store walk in a real child; return its report after identity checks.
+
+    WHY A CHILD, AND WHY THE HOLD LIVES IN IT: the walk is a daemon thread
+    dispatched by the production ``_start_store_maintenance``, and the departure
+    is the production ``_commit_to_leaving``. The previous version polled the
+    answered-directory count and departed when it saw one, which observes the walk
+    but never holds it: on a slow runner the walker finished all 60 directories
+    before the observer ran (CI run 39783288112 job 119840150674:
+    ``before_titles == 60``). The child now holds the REAL walker inside its real
+    per-directory scan (``counting_scan`` at the ``_WALK_HELD_AT``-th directory),
+    so "departure lands mid-walk" no longer depends on how fast either thread ran.
+
+    ``mode``:
+
+    * ``positive`` — hold the walker, depart, release: the shipped cell.
+    * ``old_setup`` — the previous setup made deterministic: the OBSERVER is held
+      until the walker has finished, so it sees a complete walk. The oracle must
+      fail its precondition guard.
+    * ``ignore_stop`` — hold, depart (the REAL stop event IS set), but hand the
+      walking passes a predicate that never reports stop. The walk then runs to
+      ``count`` and the oracle must fail its AFTER-WORK guard — not merely
+      "the stop was never set", which a producer that skips the stop would also
+      show.
+
+    The child is its own session leader so the parent can reap the whole group,
+    and the parent records PID/PGID/executable/source file into the junit XML
+    (``record_property``) so CI artifacts show WHICH process and WHICH tree ran.
+    """
+    result_path = tmp_path / f"cell-a-{mode}.json"
     script = r"""
-import asyncio, json, sys, time
+import asyncio, hashlib, json, os, sys, threading, time
 from pathlib import Path
 from types import SimpleNamespace
 
 root = Path(sys.argv[1])
 result_path = Path(sys.argv[2])
 count, lines = int(sys.argv[3]), int(sys.argv[4])
+mode, held_at = sys.argv[5], int(sys.argv[6])
 
 from local_operator import resume
 from local_operator import session_factory as sf
@@ -5444,6 +5863,23 @@ from local_operator.analytics import backfill
 from local_operator.session import cleanup
 from local_operator.session.runtime import process
 from local_operator.tools import group_reaper
+
+# ORPHAN GUARD. If the pytest process that started this child dies without running
+# its cleanup (a CI step timeout delivers SIGTERM/SIGKILL to the runner's process
+# tree, and this child is deliberately in a NEW session so the parent can reap its
+# group), the child must not outlive it. A parent's death re-parents the child, so a
+# changed parent pid is the signal; the poll is a liveness check, not a test clock.
+_parent = os.getppid()
+def _orphan_guard():
+    while True:
+        time.sleep(1)
+        if os.getppid() != _parent:
+            os._exit(70)
+threading.Thread(target=_orphan_guard, name="orphan-guard", daemon=True).start()
+
+def module_identity(module):
+    path = Path(module.__file__).resolve()
+    return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
 # A synthetic store: user sessions with a real opening, then filler so the FULL
 # title scan (the expensive step) is a real read rather than a formality.
@@ -5462,10 +5898,16 @@ for index in range(count):
     (directory / resume.TRANSCRIPT_NAME).write_text(
         json.dumps(opening) + "\n" + filler, encoding="utf-8")
 
-# The two passes that do not walk the store succeed instantly, so a missing
-# completion stamp can only be the stop's doing.
+# cleanup and the orphan-group sweep are stubbed to succeed instantly, so a missing
+# completion stamp can only be the stop's doing. The store census is NOT stubbed: it
+# is a real pass that walks `sessions/` and leaves `sessions/.session-census.json`, a
+# FILE beside the session directories. Every loop over the store below therefore
+# handles actual directories only (`session_dirs`), and the count is asserted
+# against `count` so the filter cannot hide a missing directory.
 cleanup.cleanup_from_config = lambda *_a, **_k: None
 group_reaper.sweep_orphan_groups = lambda *_a, **_k: None
+
+producer_done = threading.Event()
 
 # Every pass announces itself, and the walking ones stay REAL. Each walking call
 # records whether it was handed a callable predicate, so the wiring the runner
@@ -5476,7 +5918,16 @@ def logged(label, function):
     def callback(*args, **kwargs):
         passes.append(label)
         predicate_wired[label] = callable(kwargs.get("should_stop"))
-        return function(*args, **kwargs)
+        if mode == "ignore_stop" and "should_stop" in kwargs:
+            # The consumer under test ignores the stop; the REAL stop event is
+            # still set by the departure, so a failure here is about the walk
+            # running past a set stop and nothing else.
+            kwargs["should_stop"] = lambda: False
+        try:
+            return function(*args, **kwargs)
+        finally:
+            if label == "titles":
+                producer_done.set()
     return callback
 resume.backfill_session_origins = logged("origins", resume.backfill_session_origins)
 resume.backfill_session_titles = logged("titles", resume.backfill_session_titles)
@@ -5487,18 +5938,34 @@ backfill.backfill_analytics_session_daily = logged(
 
 # The instrument for "how much work does the NEXT run pay": the full transcript
 # read is what a resume costs, and it is only taken for a directory the sweep
-# has not answered yet.
+# has not answered yet. It is ALSO the hold: the walker thread stops here, inside
+# the real per-directory scan, once, after ``held_at - 1`` directories are
+# answered. ONE-SHOT, because the recovery pass below runs on the loop thread and
+# would deadlock on a second hold. A hold that is never released raises in the
+# walker instead of falling through to a pass.
 scans = []
+reached = threading.Event()
+release = threading.Event()
+hold = {"armed": mode in ("positive", "ignore_stop"), "timed_out": False}
 real_scan = resume._scan_all_titles
 def counting_scan(transcript):
     scans.append(str(transcript))
+    if hold["armed"] and len(scans) == held_at:
+        hold["armed"] = False
+        reached.set()
+        if not release.wait(60):
+            hold["timed_out"] = True
+            raise RuntimeError("the hold was never released")
     return real_scan(transcript)
 resume._scan_all_titles = counting_scan
+
+def session_dirs():
+    return sorted(d for d in sessions.iterdir() if d.is_dir())
 
 def answered(which):
     names = ((resume.ORIGIN_NAME, resume.ORIGIN_SCAN_SENTINEL_NAME) if which == "origins"
              else (resume.TITLE_SIDECAR_NAME, resume.TITLE_SCAN_SENTINEL_NAME))
-    return sum(1 for d in sessions.iterdir() if any((d / name).exists() for name in names))
+    return sum(1 for d in session_dirs() if any((d / name).exists() for name in names))
 
 class Handle:
     _disposing = False
@@ -5513,47 +5980,80 @@ class Runtime:
     async def announce_retiring(self, label, *, to="", draining=False, leaving=""):
         self.announcements.append(label)
 
+report = {
+    "mode": mode,
+    "child": {
+        "pid": os.getpid(),
+        "pgid": os.getpgrp() if hasattr(os, "getpgrp") else None,
+        "executable": sys.executable,
+        "modules": {
+            "resume": module_identity(resume),
+            "session_factory": module_identity(sf),
+            "process": module_identity(process),
+        },
+        "github_sha": os.environ.get("GITHUB_SHA"),
+    },
+}
+
 async def main():
     sf._STORE_MAINTENANCE_IDLE_DELAY_SECONDS = 0
     sf._start_store_maintenance(SimpleNamespace(), root, None)
-    # Wait for the TITLE pass to be under way (the origin walk runs first, so
-    # this means it finished), then commit to leaving: the stop lands MID-WALK,
-    # which is the case the defect is about.
-    deadline = time.monotonic() + 90
-    while answered("titles") < 1 and time.monotonic() < deadline:
-        await asyncio.sleep(0.001)
-    started = answered("titles")
-    if started < 1:
-        raise RuntimeError("the title walk never started")
+    worker = sf._STORE_MAINTENANCE_THREAD
+    stop_event = sf._STORE_MAINTENANCE_STOP
+    if worker is None or stop_event is None:
+        raise RuntimeError("the maintenance worker was never dispatched")
+    try:
+        # What the observer waits for is the whole point of the cell: the walker
+        # parked INSIDE the title walk (positive), or — the old setup made
+        # deterministic — the walker FINISHED (old_setup).
+        gate = producer_done if mode == "old_setup" else reached
+        if not await asyncio.to_thread(gate.wait, 90):
+            raise RuntimeError("the walker never reached its gate (" + mode + ")")
+        started = answered("titles")
+        handle, runtime = Handle(), Runtime()
+        drain = await process._commit_to_leaving(
+            handle, runtime, asyncio.Event(),
+            label="gen 2", reason="the build on disk changed",
+            detail="generation 20260924T000000Z-deadbeef", loaded="gen 1")
+        if drain is None:
+            raise RuntimeError("the departure did not commit")
+        report["before_titles"] = started
+    finally:
+        # Read BEFORE the release: a stop that is only set after the walker was
+        # let go proves nothing about what stopped it.
+        report["stop_set_at_hold"] = stop_event.is_set()
+        # ALWAYS release, then wait for the worker thread ITSELF to be gone — on
+        # a failure too — so no walker outlives this child. The stop is also set
+        # here, AFTER it was recorded, purely so the delegated-sweep loop the
+        # worker enters once the launch pass ends returns instead of outliving
+        # a departure that never committed.
+        release.set()
+        stop_event.set()
+        await asyncio.to_thread(worker.join, 60)
+        report["worker_settled"] = not worker.is_alive()
+        report["hold_timed_out"] = hold["timed_out"]
+    if not report["worker_settled"]:
+        raise RuntimeError("the maintenance worker did not settle")
 
-    handle, runtime = Handle(), Runtime()
-    drain = await process._commit_to_leaving(
-        handle, runtime, asyncio.Event(),
-        label="gen 2", reason="the build on disk changed",
-        detail="generation 20260924T000000Z-deadbeef", loaded="gen 1")
-    if drain is None:
-        raise RuntimeError("the departure did not commit")
-
-    await sf.await_store_maintenance_for_tests()
-    report = {
+    hold["armed"] = False
+    report.update({
         "count": count,
-        "before_titles": started,
         "after_titles": answered("titles"),
         "after_origins": answered("origins"),
-        "stop_set": bool(sf._STORE_MAINTENANCE_STOP and sf._STORE_MAINTENANCE_STOP.is_set()),
         "done_set": bool(sf._STORE_MAINTENANCE_DONE and sf._STORE_MAINTENANCE_DONE.is_set()),
         "stamp": (root / sf._STORE_MAINTENANCE_STAMP_NAME).exists(),
         "passes": list(passes),
         "predicate_wired": dict(predicate_wired),
         "scan_calls_run1": len(scans),
-        "tmp_sidecars": sorted(p.name for d in sessions.iterdir() for p in d.glob("*.tmp")),
+        "session_dirs": len(session_dirs()),
+        "tmp_sidecars": sorted(p.name for d in session_dirs() for p in d.glob("*.tmp")),
         "reader_failures": [],
-    }
+    })
 
     # Every directory must still answer its readers, and the store must be
     # resumable: the next run's full-scan count is the directories this walk
     # never answered.
-    for directory in sessions.iterdir():
+    for directory in session_dirs():
         try:
             resume.session_origin(directory)
             resume.stored_session_title(directory)
@@ -5567,48 +6067,196 @@ async def main():
     report["scan_calls_run2"] = len(scans)
     report["after2_titles"] = answered("titles")
     report["after2_origins"] = answered("origins")
-    result_path.write_text(json.dumps(report), encoding="utf-8")
 
-with asyncio.Runner() as runner:
-    runner.run(main())
+try:
+    with asyncio.Runner() as runner:
+        runner.run(main())
+except BaseException as error:
+    # The partial report is the evidence for WHERE it stopped; the parent fails
+    # on the non-zero exit and prints it.
+    report["error"] = repr(error)
+    raise
+finally:
+    result_path.write_text(json.dumps(report), encoding="utf-8")
 """
     env = os.environ.copy()
     env.pop("XPC_FLAGS", None)
-    result = subprocess.run(
-        [sys.executable, "-c", script, str(tmp_path), str(result_path), str(count), str(lines)],
-        cwd=Path(__file__).parents[2],
+    repo_root = Path(__file__).parents[2]
+    argv = [
+        sys.executable,
+        "-c",
+        script,
+        str(tmp_path),
+        str(result_path),
+        str(count),
+        str(lines),
+        mode,
+        str(_WALK_HELD_AT),
+    ]
+    child = subprocess.Popen(
+        argv,
+        cwd=repo_root,
         env=env,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=180,
-        check=False,
+        start_new_session=True,
     )
-    assert result.returncode == 0, result.stderr
-    report = json.loads(result_path.read_text(encoding="utf-8"))
+    # RECORDED BEFORE ANYTHING CAN FAIL, so a timeout or a crash still leaves the
+    # identity of the process this case started in the artifact. The child leads its
+    # own group (``start_new_session``), so its pgid IS its pid; asking the kernel
+    # would race a child that already exited (``scripts/run_bounded.py`` measured it).
+    record_property("walk_mode", mode)
+    record_property("walk_parent_pid", os.getpid())
+    record_property("walk_child_pid", child.pid)
+    record_property(
+        "walk_child_pgid",
+        child.pid if hasattr(os, "killpg") else "unavailable: no process groups here",
+    )
 
-    # The sweep observed the stop: it left with the event set, part-way through
-    # the walk, and the worker returned so its done event is set.
-    assert report["stop_set"] is True
-    assert report["done_set"] is True
-    assert 0 < report["before_titles"] < count
-    assert report["after_origins"] == count, "the origin pass should have finished before it"
-    assert report["after_titles"] < count, "the walk finished instead of standing down"
-    # DIRECTORY granularity: the overshoot past the last observed directory is a
-    # handful, not the rest of the pass.
-    assert report["after_titles"] - report["before_titles"] <= 15, report
-    assert not (tmp_path / session_factory._STORE_MAINTENANCE_STAMP_NAME).exists()
-    assert report["stamp"] is False
-    assert "titles" in report["passes"], report
-    assert "analytics-names" not in report["passes"], "a pass ran after the stop"
-    # The runner handed EVERY swept pass a callable predicate, not a captured
-    # boolean and not nothing — the wiring, asserted inside a real walk.
-    assert report["predicate_wired"] == {"origins": True, "titles": True}, report["predicate_wired"]
-    # Resumable, not lucky: the next run pays exactly for the directories the
-    # partial walk never answered, and it finishes the store.
-    assert report["scan_calls_run2"] == count - report["after_titles"], report
-    assert report["after2_titles"] == count and report["after2_origins"] == count
-    assert report["reader_failures"] == []
-    assert report["tmp_sidecars"] == []
+    def _reap() -> None:
+        # Only ever this child's OWN new group, and only while the child is still
+        # running: once it has been waited for, the pid is the kernel's to reuse and
+        # a group signal could land on an unrelated process.
+        if hasattr(os, "killpg"):
+            try:
+                os.killpg(child.pid, 9)
+            except (ProcessLookupError, PermissionError):
+                pass
+        else:
+            child.kill()
+
+    reap = "not-reached"
+    stdout = stderr = ""
+    report: dict[str, Any] | None = None
+    try:
+        try:
+            stdout, stderr = child.communicate(timeout=180)
+            reap = "exited"
+        except subprocess.TimeoutExpired:
+            reap = "timeout-killed"
+            _reap()
+            try:
+                stdout, stderr = child.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                reap = "timeout-killed-unconfirmed"
+            pytest.fail(f"the store-walk child ({mode}) timed out\n{stderr}")
+    finally:
+        # EVERY exit path ends with the child gone or the failure to get it gone
+        # on record — an assertion in this frame, a KeyboardInterrupt, a timeout.
+        if child.poll() is None:
+            reap += ">killed-in-finally"
+            _reap()
+            try:
+                child.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                reap += ">unconfirmed"
+        record_property("walk_reap", reap)
+        record_property(
+            "walk_child_returncode",
+            child.returncode if child.returncode is not None else "unavailable: not reaped",
+        )
+        if result_path.exists():
+            try:
+                report = json.loads(result_path.read_text(encoding="utf-8"))
+            except ValueError:
+                report = None
+        record_property(
+            "walk_report",
+            (
+                json.dumps(report, sort_keys=True)
+                if report is not None
+                else "unavailable: the child wrote no readable report"
+            ),
+        )
+    assert child.returncode == 0, f"{stdout}\n{stderr}"
+    assert report is not None, "the child exited cleanly but wrote no report"
+
+    # SOURCE IDENTITY, from the child itself: the process that ran the walk is the
+    # one this test started, from the interpreter and the BYTES of the production
+    # modules this test process imported — not a second tree that happens to be
+    # importable. A mismatch is a harness failure, never evidence about the product.
+    identity = report["child"]
+    parent_modules = _walk_modules()
+    record_property(
+        "walk_source_identity",
+        json.dumps(
+            {
+                "parent": parent_modules,
+                "child": identity["modules"],
+                "executable": identity["executable"],
+                "github_sha": identity["github_sha"],
+            },
+            sort_keys=True,
+        ),
+    )
+    assert identity["pid"] == child.pid
+    if identity["pgid"] is not None:
+        assert identity["pgid"] == child.pid, "the child is not its own group leader"
+    assert os.path.realpath(identity["executable"]) == os.path.realpath(sys.executable)
+    assert identity["modules"] == parent_modules, (
+        "source identity: the child imported different module files or bytes than the "
+        f"test process\nchild={identity['modules']}\nparent={parent_modules}"
+    )
+    return report
+
+
+def test_a_leaving_runtime_stops_the_store_walk_at_a_directory(
+    tmp_path: Path, record_property: Callable[[str, object], None]
+) -> None:
+    """Cell A: a real departure stops a real walk between two directories.
+
+    The shape being pinned (the path itself was closed by the daemon-thread
+    move): the four store-walking passes check the departure event once per
+    directory, so a runtime that has decided to leave pays ONE directory's work
+    — not the 3-7 minutes a pass of this store costs — and a partial sweep
+    publishes no completion stamp, which is what makes the next boot re-derive
+    its worklist instead of trusting a claim the walk did not earn.
+
+    A real child, a synthetic store (never the operator's), the production
+    dispatch, and the production departure seam (``_commit_to_leaving``). The
+    walker is HELD inside its real scan at the fourth directory, so the departure
+    provably lands mid-walk: the assertions are COUNTS read off the child's own
+    report (three answered before, four after) and nothing depends on how fast
+    any thread ran. The subprocess timeout is only a backstop.
+    """
+    report = _run_store_walk_child(tmp_path, "positive", record_property)
+    _judge_store_walk(report, record_property, expect=None)
+
+
+def test_cell_a_control_the_old_observer_setup_fails_its_precondition(
+    tmp_path: Path, record_property: Callable[[str, object], None]
+) -> None:
+    """Control: an observer that looks after the walk finished is rejected, by name.
+
+    This is the previous setup made deterministic (the observer waits for the
+    walker's completion rather than racing it), and it must trip the PRECONDITION
+    guard with the walk complete (``60 of 60``) — proving the strict
+    ``0 < before < count`` bound is doing its job and that the shipped cell does
+    not pass by a setup that could not tell a departure from a finished walk.
+    """
+    report = _run_store_walk_child(tmp_path, "old_setup", record_property)
+    _judge_store_walk(report, record_property, expect="precondition: the observer saw 60 of 60")
+
+
+def test_cell_a_control_a_consumer_that_ignores_a_set_stop_runs_the_walk_to_the_end(
+    tmp_path: Path, record_property: Callable[[str, object], None]
+) -> None:
+    """Control: with the stop TRUE but ignored, the oracle fails its AFTER-WORK guard.
+
+    The real departure sets the real stop event before the hold is released
+    (asserted in the report), the walking passes are handed a predicate that never
+    reports it, and the walk reaches every directory. The oracle must fail on the
+    after-work count — not on "the stop was never set", which is what a producer
+    that skipped the stop would show, and is a different defect.
+    """
+    report = _run_store_walk_child(tmp_path, "ignore_stop", record_property)
+    # The stop WAS set by the real departure before the hold was released and the
+    # walk still reached every directory: the failure below is the consumer's, not a
+    # producer that never signalled (that defect trips the stop-set guard instead).
+    assert report["stop_set_at_hold"] is True
+    assert report["after_titles"] == 60
+    _judge_store_walk(report, record_property, expect="after-work guard: 60 directories answered")
 
 
 @pytest.mark.asyncio
@@ -6971,6 +7619,57 @@ async def test_without_the_key_the_headless_gate_still_asks(
         await session.dispose()
 
 
+@pytest.mark.asyncio
+async def test_a_resumed_conversations_approval_choice_reaches_the_headless_gate(
+    tmp_config_dir: Path, monkeypatch
+) -> None:
+    """The CONVERSATION outranks the config for the plain headless gate (2026-10-23).
+
+    A ``--resume`` reopens a conversation whose human had typed ``/approvals
+    auto``; the file says ``ask``. The gate that decides this run's write/exec
+    calls must read the conversation's own record, or the resumed run denies
+    calls its owner had already chosen to allow — the mirror of the incident
+    the config read above exists for. A FRESH run has no such file, which is
+    why the same expression keeps the config default for new conversations.
+    """
+    import local_operator.session_factory as sf
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.session.approval_policy import write_override
+
+    session_id = "7c1d2e3f4a5b"
+    directory = tmp_config_dir / "sessions" / session_id
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text(
+        json.dumps({"id": "e1", "type": "user", "content": "hello"}) + "\n", encoding="utf-8"
+    )
+    write_override(directory, "auto")
+    (tmp_config_dir / "config.yml").write_text(
+        "version: 0.0.0\n"
+        "values:\n"
+        "  hosting: test\n"
+        "  model_name: test\n"
+        "  tool_approval_mode: ask\n"
+    )
+    seen: list[bool] = []
+    real = sf._make_request_approval
+
+    def spy(auto: bool):
+        seen.append(auto)
+        return real(auto)
+
+    monkeypatch.setattr(sf, "_make_request_approval", spy)
+    session = await create_session(
+        _args(hosting="test", model="test", resume=session_id),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert seen == [True], "the resumed conversation's recorded auto must reach the gate"
+    finally:
+        await session.dispose()
+
+
 # --- The configuration run's shape is applied by the FACTORY, not by a caller ---
 #
 # The helper's own behaviour is pinned in
@@ -7056,7 +7755,7 @@ async def test_create_session_applies_the_configuration_run_shape(
     # birth_off_loop_before_first_journal`` uses.
     assert isinstance(session, Session)
     try:
-        assert {tool.name for tool in session._tools} == {"agent", "team"}
+        assert {tool.name for tool in session._tools} == {"agent", "team", "skill"}
         assert session.__dict__["_declared_tool_ops"] == {
             name: frozenset(values) for name, values in AGENTS_CONFIG_TOOL_OPS.items()
         }
@@ -7099,10 +7798,130 @@ async def test_the_runtime_child_of_a_run_boots_declared(
         assert {tool.name for tool in session._tools} == {
             "agent",
             "team",
+            "skill",
         }, "a run's runtime child must boot bounded, not with the full builtin inventory"
         assert session._goal_state.run_brief == AGENTS_CONFIG_PREAMBLE
     finally:
         await handle._session.dispose()
+
+
+def _result_text(result: Any) -> str:
+    """The text of a tool result's first block (every ``skill`` result is text)."""
+    from local_operator.harness.types import TextContent
+
+    block = result.content[0]
+    assert isinstance(block, TextContent)
+    return block.text
+
+
+def _skill_md(name: str, body: str = "body\n") -> str:
+    return f"---\nname: {name}\ndescription: {name} skill.\n---\n{body}"
+
+
+@pytest.mark.asyncio
+async def test_a_factory_built_run_revises_a_skill_through_its_real_tool(
+    run_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The REAL ``skill`` tool, resolved from the run's own inventory, writes.
+
+    Not a stub ``_op_tool``: the absence of a real-tool test inside a run is what
+    hid the agent/team scoping gap, so this one drives the tool the factory merged
+    in, through the op-scope wrapper the declaration installed, against the
+    profile root the factory resolved. A one-file update must keep the reference
+    file (the patch overlay), and the declaration's op scope must refuse an op the
+    run was not given.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.server.utils import desktop_skill_writes as writes
+    from local_operator.session.session import Session
+
+    writes.create(
+        run_root,
+        "demo",
+        files=[
+            {"path": "SKILL.md", "content": _skill_md("demo")},
+            {"path": "references/notes.md", "content": "keep me\n"},
+        ],
+    )
+    run_id = "abcdef654321"
+    _configuration_run_dir(run_root, run_id)
+    monkeypatch.setenv("LOP_RUNTIME_ADOPT_SESSION", "1")
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True, resume=run_id),
+        ConfigManager(run_root),
+        AgentRegistry(run_root),
+    )
+    assert isinstance(session, Session)
+    try:
+        skill = next(tool for tool in session._tools if tool.name == "skill")
+        context = session._build_tool_context()
+        assert context.memory_config_dir == str(run_root)
+        assert skill.parameters["properties"]["op"]["enum"] == [
+            "list",
+            "show",
+            "create",
+            "update",
+            "edit",
+        ]
+        shown = await skill.execute("c1", {"op": "show", "name": "demo"}, None, None, context)
+        text = _result_text(shown)
+        assert not shown.is_error, text
+        fingerprint = next(
+            line.split()[1] for line in text.splitlines() if line.startswith("fingerprint:")
+        )
+        assert "references/notes.md" in text
+        updated = await skill.execute(
+            "c2",
+            {
+                "op": "update",
+                "name": "demo",
+                "expected_fingerprint": fingerprint,
+                "files": [{"path": "SKILL.md", "content": _skill_md("demo", "Troubleshooting\n")}],
+            },
+            None,
+            None,
+            context,
+        )
+        assert not updated.is_error, _result_text(updated)
+        folder = run_root / "skills" / "demo"
+        assert "Troubleshooting" in (folder / "SKILL.md").read_text()
+        assert (folder / "references" / "notes.md").read_text() == "keep me\n"
+        refused = await skill.execute("c3", {"op": "delete", "name": "demo"}, None, None, context)
+        assert refused.is_error
+        assert folder.is_dir()
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_session_has_no_skill_tool(
+    run_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative control for the test above: same factory, no run marker, no tool.
+
+    And the merge cannot smuggle it into a declared session that does not name it:
+    the shape's ``_merge_capability_tools(("skill",))`` filters through the
+    declaration, so a run declared WITHOUT ``skill`` stays without it.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.session.session import Session
+
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(run_root),
+        AgentRegistry(run_root),
+    )
+    assert isinstance(session, Session)
+    try:
+        names = [tool.name for tool in session._tools]
+        assert "skill" not in names and "agent" in names
+        session.set_tool_inventory(("agent", "team"))
+        session._merge_capability_tools(("skill",))
+        assert "skill" not in {tool.name for tool in session._tools}
+    finally:
+        await session.dispose()
 
 
 # -- delegated-session sweeps on the store-maintenance thread -----------------
@@ -7235,3 +8054,284 @@ async def test_voice_section_follows_the_voice_probe_and_off_is_byte_identical(
     assert await probed() == baseline
     state["on"], state["raise"] = True, True
     assert await probed() == baseline
+
+
+@pytest.mark.asyncio
+async def test_create_session_scopes_roles_and_teams_to_the_conversation(
+    tmp_config_dir: Path,
+) -> None:
+    """LOH-9 S1: the session's registries are composites over <session>/roles.
+
+    A row placed in the session scope is visible through the session's
+    registry and absent from a plain global registry. Writes still land
+    globally in S1, so this pins the read seam only.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.profile_scope import ScopedAgentRegistry, ScopedTeamRegistry
+
+    session = cast(
+        Session,
+        await create_session(
+            _args(hosting="test", model="test", yolo=True),
+            ConfigManager(tmp_config_dir),
+            AgentRegistry(tmp_config_dir),
+        ),
+    )
+    try:
+        scoped_agents = cast(ScopedAgentRegistry, session.agent_registry)
+        assert isinstance(scoped_agents, ScopedAgentRegistry)
+        assert isinstance(session.team_registry, ScopedTeamRegistry)
+        roles = session._transcript.directory / "roles"
+        assert scoped_agents.scope_dir == roles
+
+        scoped_agents.session_registry.create_agent(_agent_fields("conversation-only"))
+        assert scoped_agents.get_agent_by_name("conversation-only") is not None
+        assert AgentRegistry(tmp_config_dir).get_agent_by_name("conversation-only") is None
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_factory_records_the_guidance_its_prompt_injected(
+    tmp_config_dir: Path, tmp_path: Path
+) -> None:
+    """The record the read tool trusts is built from the SAME render as the
+    prompt block, and reaches the per-turn tool context (review R1-1)."""
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.context_files import _head_digest, _read_head
+
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    guidance = repo / "AGENTS.md"
+    guidance.write_text("# Rules\n\n## Gate\n\nalways run the gate\n")
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+        cwd=str(repo),
+    )
+    try:
+        built = cast(Session, session)
+        assert "always run the gate" in getattr(built._system_blocks_provider, "repo_guidance")
+        expected = ((str(guidance.resolve()), _head_digest(_read_head(guidance)[0])),)
+        assert built._build_tool_context().injected_guidance == expected
+    finally:
+        await session.dispose()
+
+
+# --- configuration runs author the ACCOUNT catalogue (F0) ------------------------
+
+
+def _seed_config_run(
+    config_dir: Path, session_id: str, *, damaged_marker: bool = False, stamp_origin: bool = True
+) -> Path:
+    """A session directory the desktop ``create`` with ``purpose`` would leave.
+
+    The origin stamp FIRST, then the marker, in the create path's own order
+    (``desktop_sessions.persist``). ``damaged_marker`` leaves the origin as the
+    only witness, the fail-closed case ``is_config_run_dir`` must still answer;
+    ``stamp_origin=False`` leaves the marker as the only one, so each witness is
+    proved on its own rather than only beside the other.
+    A transcript line because ``--resume`` resolves a session by its activity file.
+    """
+    import json
+
+    from local_operator.resume import ORIGIN_AGENT_CONFIG, mark_session_origin
+    from local_operator.session.retention import (
+        AGENTS_CONFIG_PURPOSE,
+        DESKTOP_PURPOSE_KEY,
+    )
+
+    directory = config_dir / "sessions" / session_id
+    directory.mkdir(parents=True)
+    if stamp_origin:
+        mark_session_origin(directory, ORIGIN_AGENT_CONFIG)
+    marker = (
+        "{ not json"
+        if damaged_marker
+        else json.dumps(
+            {"version": 1, "cwd": str(config_dir), DESKTOP_PURPOSE_KEY: AGENTS_CONFIG_PURPOSE}
+        )
+    )
+    (directory / "desktop.json").write_text(marker, encoding="utf-8")
+    (directory / "transcript.jsonl").write_text(
+        json.dumps({"id": "e1", "type": "user", "content": "add a reviewer"}) + "\n",
+        encoding="utf-8",
+    )
+    return directory
+
+
+async def _run_tool(session: Session, tool_name: str, **args: Any) -> Any:
+    """Call the session's REAL tool through the session's own per-turn context.
+
+    Deliberately not the stub ``_op_tool`` of ``test_agents_config_run.py``: the
+    defect these tests pin lived in what the real ``agent``/``team`` tools do with
+    the registries the factory handed them, which a stub never consults.
+    """
+    tool = next(tool for tool in session._tools if tool.name == tool_name)
+    return await tool.execute("tc", args, None, None, session._build_tool_context())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("damaged_marker", "stamp_origin"),
+    [(False, True), (True, True), (False, False)],
+    ids=["both-witnesses", "origin-only", "marker-only"],
+)
+async def test_a_config_run_writes_agents_and_teams_to_the_account(
+    tmp_config_dir: Path, damaged_marker: bool, stamp_origin: bool
+) -> None:
+    """The Agents page's composer must change what the Agents page lists.
+
+    LOH-9 S2 scoped every session's registries to its conversation, the
+    configuration run included, so inside a run an account ``update`` was refused
+    (no host installs a durable-write consent seam) and a ``create`` landed in
+    ``<run>/roles``, which ``/v1/desktop/profiles`` never reads. Driven through the
+    real factory and the real tools; the account side is read the way the desktop
+    routes read it (``desktop_profiles.registries``: plain registries over the root)
+    and projected through the same catalogue functions.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.harness.types import ToolContext
+    from local_operator.server.utils.desktop_profiles import (
+        profile_catalogue,
+        team_catalogue,
+    )
+    from local_operator.teams import TeamEditFields, TeamRegistry
+    from local_operator.tools.agent_tool import execute_agent
+
+    # The account role is authored the way the page's own save path leaves it:
+    # through the tool on a PLAIN registry, which is the account store.
+    seeded = await execute_agent(
+        "seed",
+        {
+            "op": "create",
+            "name": "acct-reviewer",
+            "description": "Reviews before merge",
+            "instructions": "Review.",
+        },
+        None,
+        None,
+        ToolContext(cwd=".", agent_registry=AgentRegistry(tmp_config_dir)),
+    )
+    assert not seeded.is_error, seeded.text
+    TeamRegistry(tmp_config_dir).create_team(
+        TeamEditFields(name="acct-team", description="before", manager="manager")
+    )
+    session_id = "c0f1a2b3c4d5"
+    run_dir = _seed_config_run(
+        tmp_config_dir, session_id, damaged_marker=damaged_marker, stamp_origin=stamp_origin
+    )
+
+    session = cast(
+        Session,
+        await create_session(
+            _args(hosting="test", model="test", yolo=True, resume=session_id),
+            ConfigManager(tmp_config_dir),
+            AgentRegistry(tmp_config_dir),
+        ),
+    )
+    try:
+        assert session._transcript.directory == run_dir
+        # ``skill`` is the run's third declared tool (#3055); it writes through the
+        # skill storage, not the registries this test is about.
+        assert {tool.name for tool in session._tools} == {"agent", "team", "skill"}
+        # Every call runs before anything is asserted, so a regression reports
+        # all four outcomes at once (on the defect: the updates refused for want
+        # of a consent seam, the creates filed "in this conversation").
+        results = {
+            "agent update": await _run_tool(
+                session,
+                "agent",
+                op="update",
+                name="acct-reviewer",
+                description="revised by the run",
+            ),
+            "agent create": await _run_tool(
+                session,
+                "agent",
+                op="create",
+                name="run-author",
+                description="Created by the configuration run",
+                instructions="Do the thing.",
+            ),
+            "team update": await _run_tool(
+                session, "team", op="update", name="acct-team", description="after"
+            ),
+            "team create": await _run_tool(
+                session, "team", op="create", name="run-team", description="new", manager="manager"
+            ),
+        }
+        outcomes = {op: (result.is_error, result.text) for op, result in results.items()}
+        assert all(
+            not failed and "in your account" in text for failed, text in outcomes.values()
+        ), outcomes
+        assert getattr(session.agent_registry, "scope_dir", None) is None
+        assert getattr(session.team_registry, "scope_dir", None) is None
+    finally:
+        await session.dispose()
+
+    profiles = {row["name"]: row for row in profile_catalogue(AgentRegistry(tmp_config_dir))}
+    assert "run-author" in profiles, "a run's create must reach the account catalogue"
+    assert profiles["acct-reviewer"]["description"] == "revised by the run"
+    teams = {row["name"]: row for row in team_catalogue(TeamRegistry(tmp_config_dir))}
+    assert "run-team" in teams, "a run's team create must reach the account catalogue"
+    assert teams["acct-team"]["description"] == "after"
+    assert not (run_dir / "roles").exists(), "nothing may be filed in the run's dead store"
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_session_stays_conversation_scoped(tmp_config_dir: Path) -> None:
+    """Negative control for the configuration-run exemption.
+
+    The exemption keys on the run's durable witnesses, so a session with neither
+    keeps LOH-9's scoping: its registries carry a ``scope_dir`` and a tool
+    ``create`` with no ``scope`` is filed in the conversation, out of the account.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.server.utils.desktop_profiles import profile_catalogue
+
+    session = cast(
+        Session,
+        await create_session(
+            _args(hosting="test", model="test", yolo=True),
+            ConfigManager(tmp_config_dir),
+            AgentRegistry(tmp_config_dir),
+        ),
+    )
+    try:
+        roles = session._transcript.directory / "roles"
+        assert getattr(session.agent_registry, "scope_dir", None) == roles
+        assert getattr(session.team_registry, "scope_dir", None) is not None
+        created = await _run_tool(
+            session,
+            "agent",
+            op="create",
+            name="chat-only",
+            description="Created in an ordinary conversation",
+            instructions="Do the thing.",
+        )
+        assert not created.is_error, created.text
+        assert "in this conversation" in created.text
+    finally:
+        await session.dispose()
+    assert "chat-only" not in {
+        row["name"] for row in profile_catalogue(AgentRegistry(tmp_config_dir))
+    }
+
+
+def test_is_config_run_dir_reads_either_witness(tmp_path: Path) -> None:
+    """One predicate for the scoping and the shape: marker OR origin, else False."""
+    from local_operator.session_factory import is_config_run_dir
+
+    assert is_config_run_dir(_seed_config_run(tmp_path, "a")) is True
+    assert is_config_run_dir(_seed_config_run(tmp_path, "b", damaged_marker=True)) is True
+    assert is_config_run_dir(_seed_config_run(tmp_path, "m", stamp_origin=False)) is True
+    plain = tmp_path / "sessions" / "c"
+    plain.mkdir(parents=True)
+    assert is_config_run_dir(plain) is False
+    assert is_config_run_dir(tmp_path / "sessions" / "missing") is False

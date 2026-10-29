@@ -1,0 +1,13 @@
+{
+  "cli.exec_worker_help.agent": "智能体名称选择器",
+  "cli.exec_worker_help.agent_id": "智能体ID",
+  "cli.exec_worker_help.control": "为本次运行发布会话记录并提供控制套接字",
+  "cli.exec_worker_help.hosting": "覆盖托管平台",
+  "cli.exec_worker_help.job_id": "账本任务ID；设置后，工作进程退出时向JSONL账本追加终态记录（finished_at + exit_code）",
+  "cli.exec_worker_help.json": "每个智能体事件输出一行JSON",
+  "cli.exec_worker_help.model": "覆盖模型",
+  "cli.exec_worker_help.prompt": "要执行的提示词",
+  "cli.exec_worker_help.resume": "按ID恢复之前的会话（或''@latest''）",
+  "cli.exec_worker_help.train": "训练模式：将会话记录追加到智能体目录（旧版--train）",
+  "cli.exec_worker_help.yolo": "自动批准所有工具层级"
+}

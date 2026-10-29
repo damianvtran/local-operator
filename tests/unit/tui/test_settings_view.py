@@ -3102,14 +3102,12 @@ async def test_paging_lands_on_the_true_end_of_the_list() -> None:
 
             await pilot.press("home")
             await pilot.pause()
-            # Pagedown moves ONE SECTION PER PRESS, so a fixed cushion is a count
-            # in disguise: the list grows with every section (42 headers after the
-            # voice fold; 25 on main before it) and the old 40 stopped two short.
-            # Press until the cursor stops moving instead — a paging bug that
-            # stalls mid-list still fails the assertion below, because the loop
-            # ends wherever the gesture ends.
-            previous = None
-            for _ in range(200):
+            # A cushion, not a count, but DERIVED since the Library merge added
+            # sections: a fixed 40 no longer reached the end at 42 headers and
+            # reported the Memory section as the bottom. Paging clamps, so the
+            # extra presses after the last section are no-ops.
+            presses = sum(1 for row in view._rows if row.kind == "header") + 2
+            for _ in range(presses):
                 await pilot.press("pagedown")
                 await pilot.pause()
                 if view._selected == previous:
@@ -3125,10 +3123,8 @@ async def test_paging_lands_on_the_true_end_of_the_list() -> None:
                 view._body.scroll_offset.y == view._body.max_scroll_y
             ), "paging reached the last row without reaching the bottom of the view"
 
-            # And back: `pageup` reaches the first row the same way, so it needs
-            # the same convergence rather than a second cushion.
-            previous = None
-            for _ in range(200):
+            # And back: `pageup` reaches the first row the same way.
+            for _ in range(presses):
                 await pilot.press("pageup")
                 await pilot.pause()
                 if view._selected == previous:
@@ -5785,3 +5781,22 @@ async def test_a_valid_delegated_age_is_written_nested(tmp_path: Path) -> None:
             )
             == 96
         )
+
+
+def test_every_scratchpad_cap_label_fits_the_settings_label_budget() -> None:
+    """R2-2: a localized label is painted in the same 29-cell column as English;
+    the unit-bearing lengths for es/fr/ru/vi overshot it before this test."""
+    from local_operator.i18n import catalogues
+    from local_operator.tui.widgets.settings_view import _LABEL_BUDGET
+
+    assert _LABEL_BUDGET == 29
+    checked = 0
+    for locale in catalogues.locales():
+        if "wire.settings" not in catalogues.namespaces(locale):
+            continue
+        label = catalogues.load_catalogue(locale, "wire.settings")[
+            "wire.settings.session_scratchpad_max_bytes.label"
+        ]
+        assert cell_len(label) <= _LABEL_BUDGET, (locale, cell_len(label), label)
+        checked += 1
+    assert checked >= 6

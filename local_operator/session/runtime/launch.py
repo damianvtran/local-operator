@@ -69,6 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Union, cast
 
+from local_operator.agent_shell import without_daemon_bearer
 from local_operator.harness.approval import (
     mint_operator_cap,
     open_operator_cap_handoff,
@@ -427,7 +428,10 @@ def _spawn_runtime(
     first provider call and the selection row it journals at admission all
     carry that level. Applying it afterwards over the model RPC would leave the
     child briefly on the model's own default and would lose the level
-    altogether if the owner was already running.
+    altogether if the owner was already running. The birth FAST DIAL rides it
+    for exactly those reasons (``LOP_MOBILE_CHILD_FAST``): a conversation the
+    pane created with the toggle on must run its first turn on the tier, not
+    report one it is not sending (ui#1265).
 
     ONE VALUE HERE IS NOT ROUTING DATA: the engage claim
     (``types.ENGAGED_ENV``). It has to travel in the environment because it is a
@@ -440,6 +444,22 @@ def _spawn_runtime(
     exactly the leak the scrub below exists to prevent (review round 1, M4).
     """
     env = dict(os.environ)
+    # The session runtime never reads the daemon's desktop bearer, and anything it
+    # holds its tool children can read (``ps -E`` showed it in cell 14 on #3002), so
+    # it is never handed one (operator ask a-772b; ``agent_shell.DAEMON_BEARER_ENVS``).
+    # Kept first because it is a subtraction on the inherited environment; the
+    # ownership stamp below then ADDS a value this supervisor means to set, and a
+    # later scrub would be the only thing that could undo it by accident.
+    without_daemon_bearer(env)
+    # ONLY the wake supervisor ITSELF stamps its ownership token, and only on a
+    # runtime it forks directly. Gated on pid equality, not on the variable
+    # being present: a wake runtime inherits the variables, so a presence
+    # check made every session it messaged or spawned look supervisor-owned,
+    # and a stop then cut their turns (#3028 review r4, MAJOR-2). Every other
+    # spawn has the marker stripped. Routing/ownership data, not a credential.
+    from local_operator.wakes.owned_runtimes import stamp_child_env
+
+    stamp_child_env(env)
     env["LOP_MOBILE_CHILD_CWD"] = cwd
     env["LOP_MOBILE_CHILD_RESUME"] = session_id
     # A viewer's birth sample seeds only a new conversation. It is NOT a
@@ -448,6 +468,12 @@ def _spawn_runtime(
         "LOP_MOBILE_CHILD_PROVIDER",
         "LOP_MOBILE_CHILD_MODEL",
         "LOP_MOBILE_CHILD_EFFORT",
+        # The DIAL is part of the same birth sample (``DraftModel.fast_mode``,
+        # ui#1265). It is scrubbed here for the reason this tuple exists at all:
+        # a child spawned from inside another session inherits that session's
+        # flags, and a stale ``LOP_MOBILE_CHILD_FAST`` would arm premium pricing
+        # on a fresh conversation from a sibling that finished hours ago.
+        "LOP_MOBILE_CHILD_FAST",
         "LOP_MODEL_SELECTION_OVERRIDE",
     ):
         env.pop(key, None)
@@ -460,6 +486,17 @@ def _spawn_runtime(
         effort = getattr(initial_model, "reasoning_effort", None)
         if effort:
             env["LOP_MOBILE_CHILD_EFFORT"] = str(effort)
+        # THE DIAL rides the same channel and is written on BOTH conditions for
+        # the same reason ``spec_for_target`` clamps it: the target's own
+        # ``supports_fast_mode`` is authoritative about whether the key may be
+        # sent at all, so asking a child with no tier to go fast would be a 400
+        # on its first turn. ABSENT, not ``"0"``: the key's presence is what
+        # tells the child a dial was CHOSEN, and every caller before this field
+        # has to leave exactly the bytes it left before.
+        if getattr(initial_model, "fast_mode", False) and getattr(
+            initial_model, "supports_fast_mode", False
+        ):
+            env["LOP_MOBILE_CHILD_FAST"] = "1"
     if model_selection_override:
         env["LOP_MODEL_SELECTION_OVERRIDE"] = "1"
     if defer_materialise:
@@ -1241,6 +1278,20 @@ async def engage_runtime(
                 # loop looks at the lease at all.
                 logger.debug("engage: %s is starting under pid %s; waiting", session_id, holder)
             elif not spawned:
+                # ADMISSION BEFORE THE FORK (memory_guard.admission_check): only a
+                # NEW runtime is gated — attaching to one that already runs costs
+                # nothing — and the refusal is a RuntimeStartupError with the
+                # sentence as its actionable text, because "retrying changes nothing
+                # until memory is freed" is exactly that class's contract. A 2 GB
+                # node OOM-killed its own relay by adding runtimes one at a time.
+                from local_operator import memory_guard
+
+                admission = await asyncio.to_thread(
+                    memory_guard.admission_check, "a session runtime"
+                )
+                if not admission.admitted:
+                    logger.warning("engage: %s refused: %s", session_id, admission.reason)
+                    raise RuntimeStartupError(admission.reason, actionable=admission.reason)
                 logger.debug("engage: spawning a runtime for %s", session_id)
                 candidate = await asyncio.to_thread(
                     _spawn_runtime,

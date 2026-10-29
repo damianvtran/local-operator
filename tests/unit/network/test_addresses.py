@@ -367,6 +367,48 @@ def test_declared_hosts_lead_and_the_bound_still_caps_the_union(
     assert published[1] == "10.1.0.1:4097"
 
 
+def test_a_declared_private_address_on_the_live_table_is_used(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Declaration validation must not demote an address the host actually holds."""
+    monkeypatch.setattr(addresses, "_interface_ipv4s", _table(("en0", _UP, "10.9.0.2")))
+    monkeypatch.setattr(addresses, "_default_route_address", lambda: "10.9.0.2")
+    settings = relay.NetworkSettings(port=4097, advertise_hosts=("10.9.0.2:4097",))
+
+    assert relay.advertise_endpoints(settings) == ["10.9.0.2:4097"]
+
+
+def test_a_stale_declared_private_address_is_skipped_with_the_reason(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The reported stale address is not published when the live table disproves it."""
+    monkeypatch.setattr(addresses, "_interface_ipv4s", _table(("en0", _UP, "10.9.0.2")))
+    monkeypatch.setattr(addresses, "_default_route_address", lambda: "10.9.0.2")
+    settings = relay.NetworkSettings(port=4097, advertise_hosts=("172.20.13.239:4097",))
+    caplog.set_level("WARNING", logger=relay.__name__)
+
+    assert relay.advertise_endpoints(settings) == ["10.9.0.2:4097"]
+    assert caplog.messages == [
+        "Skipping advertised address 172.20.13.239:4097: 172.20.13.239 is a private "
+        "address absent from this host's live interface table."
+    ]
+
+
+@pytest.mark.parametrize(
+    "declared",
+    ("8.8.8.8:4097", "100.64.0.1:4097", "tunnel.example.com:4097"),
+)
+def test_public_and_nat_declarations_do_not_need_a_local_interface(
+    monkeypatch: pytest.MonkeyPatch, declared: str
+) -> None:
+    """Public, CGNAT and tunnel declarations are not local-interface assertions."""
+    monkeypatch.setattr(addresses, "_interface_ipv4s", _table(("en0", _UP, "10.9.0.2")))
+    monkeypatch.setattr(addresses, "_default_route_address", lambda: "10.9.0.2")
+    settings = relay.NetworkSettings(port=4097, advertise_hosts=(declared,))
+
+    assert relay.advertise_endpoints(settings)[0] == declared
+
+
 def test_the_declared_host_the_operator_typed_is_the_one_reported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

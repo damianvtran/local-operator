@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -394,6 +395,99 @@ _HOST_SUBJECT = {
 }
 
 
+#: How many candidates a miss may name. Five fits one screen and one line each;
+#: the point is a correction, not a listing.
+MAX_MISS_CANDIDATES = 5
+
+
+def _element_not_found_copy(error: BridgeError) -> str:
+    """The miss, plus the nearest real elements when the host could name them.
+
+    THE MEASURED FAILURE this exists for: nine CSS guesses on GitHub's "Create
+    GitHub App" form, each one a whole tool call, each answering only "element
+    not found" — so the agent learned nothing and guessed again. A host that can
+    see the accessibility tree answers with the elements that DO exist and the
+    locator that names each one, which turns the same failure into one
+    correction.
+
+    Three shapes, in order of usefulness:
+    1. the host named candidates → list them with their locators;
+    2. the selector was not valid CSS (the host says so) → say that, and point at
+       the locator forms, because "take a new snapshot" is the wrong advice for a
+       syntax mistake;
+    3. a plain miss → the historical sentence, unchanged.
+    """
+    message = f"element not found: {error.message}"
+    raw = error.data.get("candidates")
+    candidates = (
+        [entry for entry in raw if isinstance(entry, dict)] if isinstance(raw, list) else []
+    )
+    lines: list[str] = []
+    for entry in candidates[:MAX_MISS_CANDIDATES]:
+        role = str(entry.get("role") or "")
+        name = str(entry.get("name") or "")
+        locator = str(entry.get("locator") or "")
+        if not (role or name or locator):
+            continue
+        label = (
+            f"{role} {json.dumps(name, ensure_ascii=False)}".strip()
+            if role
+            else json.dumps(name, ensure_ascii=False)
+        )
+        lines.append(f"  - {label}" + (f"  →  {locator}" if locator else ""))
+    if lines:
+        return (
+            f"{message}. Closest matches in the accessibility tree:\n"
+            + "\n".join(lines)
+            + "\nRetry with one of those locators (they take a role/label/text and "
+            "survive framework-generated ids), or take a snapshot for refs."
+        )
+    if "not valid" in error.message:
+        return (
+            f"{message}. Fix the selector — or name the element by what it IS: "
+            'role=checkbox[name="Active"], label="Homepage URL", '
+            'text="Create GitHub App".'
+        )
+    return f"{message}. Take a new snapshot and retry with a fresh ref."
+
+
+#: An http(s) URL inside free text, up to the first whitespace or quote.
+_MESSAGE_URL = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
+#: Punctuation that ends a sentence rather than a URL. Stripped from the MATCH and
+#: appended back after redaction, so `(see https://x.test/a).` keeps its `).`
+#: while the URL itself is reduced. Inside a path, parentheses and brackets are
+#: legitimate (`/wiki/Foo_(bar)`), which is why they are not excluded from the
+#: match class (agent review round 6, R6-2).
+_MESSAGE_URL_TRAILING = ".,;:)]}"
+
+
+def _redact_message_urls(text: str) -> str:
+    """Reduce every URL in an untrusted message to its safe, value-free shape."""
+
+    def _safe(match: re.Match[str]) -> str:
+        from urllib.parse import urlparse, urlunsplit
+
+        from local_operator.tools.builtin import _network_safe_url
+
+        raw = match.group(0)
+        trailing = ""
+        while raw and raw[-1] in _MESSAGE_URL_TRAILING:
+            trailing = raw[-1] + trailing
+            raw = raw[:-1]
+        try:
+            parsed = urlparse(raw)
+        except ValueError:
+            return "(a URL was withheld)" + trailing
+        # `_network_safe_url` is the ONE renderer of a network URL in this
+        # codebase; reusing it is what stops this path inventing a second rule.
+        safe = _network_safe_url(
+            urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
+        )
+        return (safe or "(a URL was withheld)") + trailing
+
+    return _MESSAGE_URL.sub(_safe, text)
+
+
 def format_error(
     error: BridgeError, *, action: str = "", surface: str = "", host: str = HOST_EXTENSION
 ) -> str:
@@ -449,6 +543,20 @@ def format_error(
     # one, because "update the app or Local Operator" is not actionable without
     # knowing which side is behind. Implemented above the table lookup.
     if error.code == ErrorCode.ORIGIN_DENIED:
+        # The network actions reuse `origin_denied` for a POLICY refusal that has
+        # nothing to do with a navigation: a body scope that is not an exact
+        # non-root URL, or a capture that belongs to another requester. The
+        # navigation sentence ("a prompt went unanswered") sent an agent chasing
+        # an approval that does not exist (QA finding, 2026-10-26), so the host's
+        # own message is rendered when it has one for these actions.
+        if action.startswith("network_") and str(error.message or "").strip():
+            # Host copy is untrusted input on this path, so any URL it carries is
+            # reduced to the same safe shape the metadata renderer uses: scheme,
+            # host, path and query KEYS, never a value or a fragment. Today's
+            # host messages are fixed strings; this is what keeps the contract
+            # true if one ever quotes the refused URL (agent review round 4,
+            # R4-1).
+            return f"{_redact_message_urls(str(error.message))} Nothing was captured by this call."
         origin = str(error.data.get("origin") or _origin(str(error.data.get("url", ""))))
         return (
             f"navigation to {origin or '(unknown origin)'} was denied by the user (or the "
@@ -459,9 +567,7 @@ def format_error(
     if error.code == ErrorCode.NAV_FAILED:
         return f"navigation failed: {error.message}"
     if error.code == ErrorCode.ELEMENT_NOT_FOUND:
-        return (
-            f"element not found: {error.message}. Take a new snapshot and retry with a fresh ref."
-        )
+        return _element_not_found_copy(error)
     if error.code == ErrorCode.ORIGIN_PROMPT_PENDING:
         return pending_copy
     if error.code == ErrorCode.TAB_LIMIT:

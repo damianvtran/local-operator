@@ -1066,6 +1066,88 @@ def test_spawn_runtime_carries_a_chosen_birth_effort_to_the_child(tmp_path, monk
     assert "LOP_MODEL_SELECTION_OVERRIDE" not in recorded[1]
 
 
+def test_spawn_runtime_carries_a_chosen_birth_fast_to_the_child(tmp_path, monkeypatch) -> None:
+    """The chosen SPEED DIAL reaches the child's environment with the pair.
+
+    Same seam and same argument as the birth-effort test above, and it exists for
+    the same reason: every caller monkeypatches ``_spawn_runtime`` away, so
+    nothing else pins the line that exports the birth sample. The dial is a
+    CONSTRUCTION input rather than a later switch (``DraftModel.fast_mode``,
+    ui#1265): the owner's first frontend snapshot, its first provider call and
+    the selection row it journals at admission must agree with the toggle the
+    user set before the conversation existed. The CLI never picks a dial, so
+    every other caller's environment has to keep the bytes it always had.
+
+    The inherited half is the same defect class the effort test names: a cell
+    spawned from inside another session inherits its flags, and a stale
+    ``LOP_MOBILE_CHILD_FAST`` would arm premium pricing on a fresh conversation
+    from a sibling that finished hours ago.
+    """
+    from local_operator.harness.types import ModelSpec
+    from local_operator.session.runtime import launch as launch_module
+
+    recorded: list[dict[str, str]] = []
+
+    class _Popen:
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            return None
+
+    def fake_popen(argv, **kwargs: Any):
+        recorded.append(kwargs.get("env") or {})
+        return _Popen()
+
+    monkeypatch.setattr(launch_module, "spawn_disclaimed", fake_popen)
+    monkeypatch.setenv("LOP_MOBILE_CHILD_FAST", "1")
+    monkeypatch.setenv("LOP_MOBILE_CHILD_PROVIDER", "stale")
+
+    chosen = ModelSpec(
+        provider="anthropic",
+        model_id="claude-opus-5",
+        supports_fast_mode=True,
+        fast_mode=True,
+    )
+    checked = launch_module._spawn_runtime(
+        "sess-fast1",
+        str(tmp_path),
+        defer_materialise=True,
+        initial_model=chosen,
+        model_selection_override=True,
+    )
+    capture = getattr(checked, "lop_capture_path", None)
+    if capture is not None:
+        capture.unlink(missing_ok=True)
+    # A birth sample that named the pair and not the dial: the key must be ABSENT
+    # rather than "0", so the child falls through to the standard speed every
+    # pre-existing caller ships. The inherited value must be scrubbed here too.
+    pair_only = launch_module._spawn_runtime(
+        "sess-fast2",
+        str(tmp_path),
+        defer_materialise=True,
+        initial_model=ModelSpec(provider="anthropic", model_id="claude-opus-5"),
+        model_selection_override=True,
+    )
+    capture = getattr(pair_only, "lop_capture_path", None)
+    if capture is not None:
+        capture.unlink(missing_ok=True)
+    # The dial WITHOUT the pair it belongs to is not a birth sample at all (the
+    # CLI's ``--model`` is the only other caller, and it has no dial); an orphan
+    # key must never survive into a child.
+    plain = launch_module._spawn_runtime("sess-fast3", str(tmp_path), defer_materialise=True)
+    capture = getattr(plain, "lop_capture_path", None)
+    if capture is not None:
+        capture.unlink(missing_ok=True)
+
+    assert recorded[0]["LOP_MOBILE_CHILD_FAST"] == "1"
+    assert recorded[0]["LOP_MOBILE_CHILD_MODEL"] == "claude-opus-5"
+    assert "LOP_MOBILE_CHILD_FAST" not in recorded[1]
+    assert "LOP_MOBILE_CHILD_FAST" not in recorded[2]
+
+
 def test_spawn_runtime_argv_isolates_the_import_and_names_the_process(
     tmp_path, monkeypatch
 ) -> None:
@@ -1688,3 +1770,46 @@ async def test_a_draining_record_is_reported_as_leaving_then_the_next_engage_spa
     assert outcome.detail == "runtime ready", outcome.detail
     assert fleet.winners == 1, "no runtime took the transcript"
     assert fleet.losers == 0, "a doomed candidate was spawned into the drain window"
+
+
+def test_spawn_runtime_never_hands_the_desktop_bearer_to_a_session_runtime(
+    tmp_path, monkeypatch
+) -> None:
+    """A session runtime must not HOLD the daemon's desktop bearer (operator ask a-772b).
+
+    QA #3002 cell 14 read the bearer out of the runtime's own environment
+    (``KERN_PROCARGS2``) as well as the bash tool child's. The runtime never reads it --
+    ``server.desktop.desktop_posture`` is the one reader and it runs in the daemon -- so
+    the spawn drops it, and every process the runtime starts inherits nothing to leak.
+    The standby warm (adopted later with this same environment) is covered by the same
+    builder; its adopt request carries this dict.
+    """
+    from local_operator.session.runtime import launch as launch_module
+
+    recorded: list[dict[str, str]] = []
+
+    class _Popen:
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            return None
+
+    def fake_popen(argv, **kwargs: Any):
+        recorded.append(dict(kwargs.get("env") or {}))
+        return _Popen()
+
+    monkeypatch.setattr(launch_module, "spawn_disclaimed", fake_popen)
+    monkeypatch.setattr("local_operator.session.runtime.standby.adoption_possible", lambda: False)
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "sentinel-desktop-bearer")
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", "null")
+    spawned = launch_module._spawn_runtime("sess-bearer", str(tmp_path), defer_materialise=True)
+    capture = getattr(spawned, "lop_capture_path", None)
+    if capture is not None:
+        capture.unlink(missing_ok=True)
+
+    assert recorded, "the real spawn path ran"
+    assert "LOCAL_OPERATOR_DESKTOP_TOKEN" not in recorded[0]
+    assert "sentinel-desktop-bearer" not in recorded[0].values()

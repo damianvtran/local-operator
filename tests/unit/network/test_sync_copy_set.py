@@ -44,7 +44,7 @@ from typing import Any
 import pytest
 
 from local_operator.network import sync
-from local_operator.session import subagent_ledger
+from local_operator.session import compression, subagent_ledger
 
 # ---------------------------------------------------------------------------
 # The entry types, imported from their owners
@@ -69,6 +69,8 @@ def _entry_owners() -> dict[str, str]:
         TITLE_SIDECAR_NAME,
     )
     from local_operator.scratchpad import SCRATCHPAD_DIRNAME
+    from local_operator.session.approval_policy import OVERRIDE_FILENAME
+    from local_operator.session.auto_tag import AUTO_TAG_FILENAME
     from local_operator.session.channel_spend import PENDING_SIDECAR_NAME
     from local_operator.session.creation import CREATED_AT_NAME
     from local_operator.session.placement import MESH_STAMP_NAME
@@ -79,6 +81,7 @@ def _entry_owners() -> dict[str, str]:
         TRANSCRIPT_FILENAME,
     )
     from local_operator.session.runtime.inbox import INBOX_NAME
+    from local_operator.session.runtime.journal import EXIT_RECORD_NAME, RUN_RECORD_NAME
     from local_operator.session.runtime.registry import (
         SIGNAL_RECEIPT_NAME,
         STOP_MARKER_NAME,
@@ -97,9 +100,19 @@ def _entry_owners() -> dict[str, str]:
         ORIGIN_NAME: "resume",
         ORIGIN_CACHE_NAME: "resume",
         CREATED_AT_NAME: "session.creation",
+        # A desktop fork's pending auto-tag intent: per-device tag state that
+        # must not travel (see sync.EXCLUDED_ENTRIES). Listed here so the
+        # round-trip test builds it and proves it does NOT arrive.
+        AUTO_TAG_FILENAME: "session.auto_tag",
+        # The conversation's own approval choice: excluded from the copy set on
+        # purpose (a copy starts without it), so it must appear here for the
+        # every-entry-type coverage test.
+        OVERRIDE_FILENAME: "session.approval_policy",
         TURN_JOURNAL_NAME: "session.runtime.registry",
         STOP_MARKER_NAME: "session.runtime.registry",
         SIGNAL_RECEIPT_NAME: "session.runtime.registry",
+        EXIT_RECORD_NAME: "session.runtime.journal",
+        RUN_RECORD_NAME: "session.runtime.journal",
         INBOX_NAME: "session.runtime.inbox",
         FORK_BOUNDARY_NAME: "fork",
         DESKTOP_MARKER_NAME: "session.retention",
@@ -247,7 +260,8 @@ def test_the_measured_store_entries_are_all_classified() -> None:
 # cover is the exact failure that happened: a new constant with a literal value in a
 # module that owns session state.
 _PATH_SUFFIX = re.compile(
-    r"(NAME|FILENAME|DIRNAME|FILE|DIR|SIDECAR|MARKER|RECORD|STEM|PATH|BASENAME|PREFIX|SUFFIX)$"
+    r"(NAMES|NAME|FILENAMES|FILENAME|DIRNAME|FILE|DIR|SIDECAR|MARKER|RECORD|STEM|PATH|"
+    r"BASENAME|PREFIX|SUFFIX)$"
 )
 _UPPER_NAME = re.compile(r"^_?[A-Z][A-Z0-9_]*$")
 #: A path-shaped VALUE: one or more RELATIVE segments — no leading ``/``, and no segment
@@ -264,6 +278,11 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/notifications/store.py": (
+        1,
+        "notifications.db is the machine-wide config-root inbox, not a session "
+        "directory entry; session transfer must not copy every conversation's inbox.",
+    ),
     "local_operator/owned_process.py": (
         2,
         "``_OWNER_DIR`` ('owner'): the run-root segment a managed owner's lease and "
@@ -284,10 +303,94 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "conversation the sender was speaking to, so none of the three is an entry "
         "of a session directory",
     ),
+    "local_operator/memory_maintenance.py": (
+        3,
+        "``LOCK_NAME``/``STAMP_NAME``/``ATTEMPT_NAME`` ('.compact.lock', '.compact.stamp', "
+        "'.compact.attempt'): the memory store's unattended-maintenance lock and cadence "
+        "stamps, inside the DEVICE-LEVEL store directory (<config>/memory/), never an entry "
+        "of a session directory. They describe THIS host's compaction/expiry passes (a "
+        "cross-process fcntl lock and wall-clock stamps), so no session copy may carry "
+        "them: a peer inheriting them would skip or back off passes it never ran",
+    ),
+    "local_operator/network/mobility.py": (
+        1,
+        "``DROPPED_ROLES_DIRNAME`` ('dropped-session-roles'): the DEVICE-LEVEL stash a "
+        "``--drop-session-roles`` move puts a conversation's role/team definitions in "
+        "before the commit deletes the session directory. Deliberately a sibling of "
+        "``sessions/``, never an entry inside one: the copy set must not carry it, no "
+        "retention/cleanup path may walk it, and its only removal path is the user's",
+    ),
+    "local_operator/session/cold_metadata.py": (
+        1,
+        "``CACHE_DIRNAME`` ('cold_replay'): the segment under the DEVICE cache root "
+        "(<config>/cache/) holding a session's deferred-open metadata record. A derived "
+        "cache file, rebuilt from the journal on the next open, never an entry of a "
+        "session directory and never part of what a sync copy carries.",
+    ),
+    "local_operator/role_provenance.py": (
+        2,
+        "``PROVENANCE_FILENAME``/``PROVENANCE_LOCKNAME`` ('role-provenance.jsonl' and "
+        "its sidecar lock): the DEVICE-LEVEL promotion index at the config root, the "
+        "same family as ``DROPPED_ROLES_DIRNAME``. It records where an account "
+        "definition came from, keyed by definition id and not by conversation, so it "
+        "is deliberately a sibling of ``sessions/`` rather than an entry inside one — "
+        "no session copy may carry it, and a session travelling to another device "
+        "neither needs nor may inherit it",
+    ),
     "local_operator/paths.py": (
         5,
         "the store's own roots and log file (``~/.local-operator``, ``logs``, "
         "``runtime.log``, the agent home): the directories a session lives UNDER",
+    ),
+    "local_operator/remote_compute/config.py": (
+        2,
+        "``_ALABEL_PREFIX`` ('xn--') and ``_LOOPBACK_NAME`` ('localhost') are "
+        "URL-host vocabulary for validating the remote-compute API override — a "
+        "punycode label prefix and the loopback host name — not filesystem paths, "
+        "so nothing on disk travels or stays behind",
+    ),
+    "local_operator/network/credentials/mcp_state.py": (
+        2,
+        "``MCP_AUTH_FILENAME``/``MCP_AUTH_LOCK_FILENAME`` ('mcp_auth.json' and its "
+        "sidecar lock): the per-network durable credential EVIDENCE under "
+        "``<config>/network/credentials/<network_id>/``. Machine-local state about "
+        "which sign-in this device must recover, beside the placement document, "
+        "never an entry of a session directory and never copied to a peer",
+    ),
+    "local_operator/network/credentials/desktop_approval.py": (
+        1,
+        "``_CREDENTIAL_PREFIX`` ('credential_'): the approval-op registry's record-key "
+        "prefix that claims every ``credential_*`` ``what`` key for this module's family "
+        "refusal. An in-memory dispatch key, not a filename or directory: nothing on "
+        "disk is named by it, so it is not a session-directory entry",
+    ),
+    # THE PAIRING CARD'S OWN FAMILY PREFIX, the ``credential_`` rule one module over.
+    # ``pair_op`` registers ``pair_`` as a FAMILY so an unknown pairing operation
+    # beside the shapes this build can describe is refused instead of signed blind.
+    "local_operator/operator/pair_op.py": (
+        1,
+        "``_PAIR_PREFIX`` ('pair_'): the approval-op registry's record-key prefix for "
+        "the pairing card's family refusal. An in-memory ``what``-key dispatcher, not "
+        "a filename or directory — nothing on disk is named by it, and the card's "
+        "own sidecars live outside the session store, so it is not a "
+        "session-directory entry",
+    ),
+    # ---- the transcript compression pass's STORE-LEVEL names ----
+    "local_operator/session/compression.py": (
+        2,
+        "``COMPRESSION_LOG_NAME`` ('.compression-log.jsonl') and "
+        "``LAST_COMPRESSION_NAME`` ('last-compression.json') are the pass's ledger and "
+        "its last-run record, both written at the ``sessions/`` ROOT, not inside a "
+        "session directory, so neither is a copy-set entry. The module's other two "
+        "path-shaped names ARE session entries and are classified in "
+        "``sync.EXCLUDED_ENTRIES``: ``LOCK_NAME`` (the per-device writer lock) and "
+        "``PREVIEW_SIDECAR_NAME`` ('preview.json', the listing cache derived from "
+        "the archive's tail, which the destination rebuilds). Its THIRD path-shaped "
+        "name is computed rather than literal — ``ARCHIVE_FILENAMES`` — so it is "
+        "declared in ``_COMPUTED_PATH_CONSTANTS`` instead, and it is a COPY-SET "
+        "entry: the archive forms ARE the transcript and ``sync.COPY_SET_NAMES`` "
+        "carries both, which is what lets a compressed session be moved at all "
+        "(review round 3, M-1)",
     ),
     "local_operator/team_bridge/connector/lock.py": (
         1,
@@ -302,6 +405,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``SWEEPS_FILE``: the machine-level stop-sweep ledger under ``<config>/logs`` "
         "(beside ``exec-jobs.jsonl``), history about a SWEEP, never a file in a session",
+    ),
+    # The census document lives BESIDE the session directories (a store-level
+    # file), never inside one: it is the audit baseline, not conversation
+    # content, so a session travelling between devices carries none of it.
+    "local_operator/session/census.py": (
+        1,
+        "``CENSUS_NAME`` ('.session-census.json'): the store's audit baseline "
+        "beside the session directories, never an entry of a session",
     ),
     "local_operator/server/utils/local_tokens.py": (
         1,
@@ -329,7 +440,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "directories a session lives UNDER, the same values ``paths.py`` declares",
     ),
     "local_operator/config_watch.py": (1, "the same file, watched"),
-    "local_operator/config_migrations.py": (1, "the marker recording which migrations ran"),
+    "local_operator/config_migrations.py": (
+        2,
+        "``LEGACY_STAMP_NAME`` ('.migrations') is the marker recording which migrations "
+        "ran, and ``_KEY_INVENTORY_NAME`` ('.config-keys.json') is the per-launch "
+        "inventory of setting paths: both are machine-local config-root machinery "
+        "beside ``config.yml``, written by this device for this device, and neither is "
+        "an entry of a session directory or ever travels with one",
+    ),
     "local_operator/logger.py": (1, "the process log at the store root"),
     "local_operator/tools/harness_import_tool.py": (
         1,
@@ -337,6 +455,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "not a path or an entry of a session directory; the tool reads foreign "
         "stores through the import adapters and writes transcripts through the "
         "session store, so it owns no copy-set filename.",
+    ),
+    "local_operator/tools/public_copy.py": (
+        3,
+        "``TOOL_NAME`` is the model-facing registry key; ``_AUDIT_DIRNAME`` and "
+        "``_AUDIT_FILENAME`` name the operator-level public-copy audit log under "
+        "``<config>/audit/``. None is an entry of a session directory, and the "
+        "copy set must neither carry nor exclude them.",
     ),
     "local_operator/harness_import/manifest.py": (
         1,
@@ -367,6 +492,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "update-operation records for this INSTALLROOT — machine-local recovery "
         "state bound to one install, exactly as untransportable as the lock and "
         "the attempt file beside it.",
+    ),
+    "local_operator/procname.py": (
+        1,
+        "``_SOURCE_MARKER`` ('source'): the sidecar a published runtime image "
+        "carries inside ``<stable root>/runtime/<build key>/``, naming the "
+        "interpreter it was cloned from. It is install-level state about ONE "
+        "interpreter build, beside the published image under the lop install root "
+        "and outside any session directory; a session travelling between devices "
+        "carries neither the image nor its marker",
     ),
     "local_operator/harness/reply_channel.py": (1, "the structured-reply TOOL's name"),
     "local_operator/cross_session.py": (
@@ -418,6 +552,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``sessions/`` — install-level publication state, never an entry of a session "
         "directory",
     ),
+    # The carrier's HASH DOMAIN is not a path: ``TREE_HASH_PREFIX`` is the
+    # separator string every tree digest starts with ("skill-tree-v1\n"), the
+    # same kind of value as a version tag. The module's real filenames
+    # (``SKILL.md``, the archive name) are classified where they live, and no
+    # constant here names an entry of a session directory.
+    "local_operator/hub_sync/skill_bundle.py": (
+        1,
+        "``TREE_HASH_PREFIX``: the tree-hash domain separator, not a pathname",
+    ),
     "local_operator/skills/discovery.py": (
         1,
         "``_SKILL_FILE`` (``SKILL.md``): the marker FILENAME looked for inside skill "
@@ -438,6 +581,60 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``ROLE_NAME``: the packaged seed's NAME (an identifier resolved through the "
         "agent registry), not a file in a session directory",
+    ),
+    # The Librarian is Aida's twin: her store lives at the CONFIG root
+    # (``<config>/librarian/``), beside ``sessions/`` rather than inside one.
+    # Her state, extras ledger and ensure lock are this INSTALL's records, and a
+    # session directory travelling between devices carries none of them.
+    "local_operator/librarian/state.py": (
+        4,
+        "``LIBRARIAN_DIRNAME``/``STATE_NAME``/``EXTRAS_NAME``/``LOCK_NAME``: her "
+        "store under the config root, never an entry of a session",
+    ),
+    "local_operator/librarian/bootstrap.py": (
+        1,
+        "``ROLE_NAME``: the packaged seed's NAME (an identifier resolved through the "
+        "agent registry), not a file in a session directory — the Aida precedent",
+    ),
+    "local_operator/librarian/proactive.py": (
+        2,
+        "``ROW_PREFIX``/``EXTRA_ID_PREFIX``: prefixes of AGENT-ROW ids in the "
+        "proactive ledger, never filenames or entries of a session directory",
+    ),
+    "local_operator/tui/librarian_control.py": (
+        1,
+        "``MODULE_NAME`` (``local_operator.librarian``): a dotted MODULE name the "
+        "control plane imports lazily, not a path or a session entry",
+    ),
+    # The tag store is CONFIG-ROOT presentation state: ``<config>/tags/`` holds
+    # the registry and per-session assignments, and ``sidebar-tags.json`` sits
+    # beside ``config.yml`` as the grouping toggle. It is the TUI's own view
+    # data, never an entry a session directory holds, and a session moved to
+    # another device carries none of it.
+    "local_operator/tui/sidebar_tags.py": (
+        1,
+        "``TAG_GROUPS_FILE`` ('sidebar-tags.json'): the grouping toggle at the "
+        "CONFIG root beside config.yml, never an entry of a session directory",
+    ),
+    # The Library's derived catalog and authoritative metadata live under the
+    # CONFIG root too: the index is a discardable cache under
+    # ``<config>/cache/library/`` and the metadata database is
+    # ``<config>/library/library.sqlite3``. Neither is an entry a session
+    # directory holds, and a moved session rebuilds its rows from its journal.
+    "local_operator/library/index.py": (
+        2,
+        "``INDEX_DIRNAME``/``INDEX_FILENAME``: the derived catalog cache at "
+        "``<config>/cache/library/index.json``, never an entry of a session",
+    ),
+    "local_operator/library/metadata.py": (
+        2,
+        "``DB_DIRNAME``/``DB_FILENAME``: the cross-session metadata database at "
+        "``<config>/library/library.sqlite3``, never an entry of a session",
+    ),
+    "local_operator/library/identity.py": (
+        1,
+        "``ASSET_ID_PREFIX`` (``la_``): the Library asset id's prefix, an identifier "
+        "fragment rather than a path — no file carries this name",
     ),
     "local_operator/aida/naming.py": (
         1,
@@ -488,6 +685,17 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "config root, beside the seen-store and the push registries — machine "
         "state about moves, never an entry of a session directory",
     ),
+    # The keyed session-start receipt store (`mobile/start_receipts.py`). Its ONE
+    # construction site passes `config_dir()` (`mobile/daemon.py`), so the database
+    # sits at the config root beside the transfer receipts. It must never travel with
+    # a session: a request id replayed from another device's store would resolve to a
+    # session that is not on this daemon.
+    "local_operator/mobile/start_receipts.py": (
+        1,
+        "``RECEIPTS_NAME``: the per-installation keyed session-start receipt store "
+        "under the config root, beside the transfer receipts — machine state mapping "
+        "a request id to THIS daemon's session, never an entry of a session directory",
+    ),
     "local_operator/secrets/keys.py": (
         5,
         "``secrets/`` and its registration ticket: the credential store at the config root. "
@@ -498,18 +706,24 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/secrets/legacy_env.py": (1, "the legacy credentials file at the store root"),
     "local_operator/secrets/protocol.py": (2, "the secret broker's socket and lock"),
     "local_operator/session/cleanup.py": (
-        3,
-        "the cleanup log and last-cleanup record (sessions root) and the store marker "
-        "that gates removal: none of them is a file a session directory holds",
+        5,
+        "the cleanup log, the value-hold index and the last-cleanup record (all at the "
+        "sessions root), the store marker that gates removal, and ``HANDED_AWAY_DIRNAME`` "
+        "— the ``<config>/network/handed-away/`` quarantine a committed mesh move renames "
+        "its directory into. That last one is a CONFIG-LEVEL directory: it is where a "
+        "session tree goes to stop being one, so it can never be an entry of a session "
+        "directory, and none of the five is a file a session directory holds",
     ),
     "local_operator/session/delegated_retention.py": (
-        4,
+        5,
         "``STATE_NAME`` (the one-time-notice record) and ``SWEEP_LOCK_NAME`` (the cross-process "
         "sweep lock): the former sits at the sessions root, the latter at the config root; "
         "neither inside a session directory. ``RESCUE_BUNDLE_PREFIX``/``RESCUE_BUNDLE_SUFFIX`` "
         "are the FRAGMENTS of the rescue bundle's name (``reap-rescue-<tree>.bundle``), joined "
         "to a tree's name; the result is written beside that tree inside the pad and is never "
-        "a bare session entry. "
+        "a bare session entry. ``CONTENT_MANIFEST_DIRNAME`` is the cleanup-manifest directory "
+        "name at the sessions root: the per-session manifest FILES sit under it, and the name "
+        "itself can never name a session directory. "
         "(``ROSTER_NAME`` is a session entry, already classified by the copy set.)",
     ),
     "local_operator/session_factory.py": (
@@ -528,11 +742,35 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``sessions`` itself: the directory the entries live IN",
     ),
+    # The session-tag store's reserved DISPLAY label (``RESERVED_NAME``,
+    # ``"Untagged"``): the pseudo-category the UI shows for conversations no tag
+    # claims, and the one name a user may not assign. It is a candidate only
+    # because it matches the guard's NAME-suffix heuristic (the Aida
+    # ``DEFAULT_NAME`` precedent) — a label in the registry's vocabulary, never
+    # a file or directory inside a session. The store itself is at
+    # ``<config>/tags/``, beside ``sessions/``: its ``"tags"``/``"revision"``/
+    # ``"categories.json"`` segments are spelled inline, so they are not
+    # constants this derivation sees, and a move carries none of the store.
+    "local_operator/session/session_tags.py": (
+        1,
+        "``RESERVED_NAME`` ('Untagged'): the reserved tag DISPLAY NAME for the "
+        "untagged pseudo-category — a label in the registry's vocabulary, never "
+        "a path or an entry of a session directory",
+    ),
+    # The ``artifact_data`` tool's own name (``TOOL_NAME``): a candidate only
+    # through the NAME-suffix heuristic. The tool keeps no state on disk — its
+    # data lives in the remote claude.ai store — so a move carries nothing.
+    "local_operator/tools/artifact_data_tool.py": (
+        1,
+        "``TOOL_NAME`` ('artifact_data'): the tool's registered name, never a path "
+        "or an entry of a session directory",
+    ),
     "local_operator/asks/store.py": (
-        4,
+        5,
         "``ASKS_DIRNAME`` (``asks``) and ``SESSIONS_DIRNAME`` (``sessions``): the two "
         "directories the queue's paths are built UNDER, never entries of a session "
-        "directory. Plus the two row-id FRAGMENTS (``ask-response-``, ``ask-timeout-``), "
+        "directory. Plus the three row-id FRAGMENTS (``ask-response-``, ``ask-timeout-``, "
+        "and ``ask-relay-``, the watcher's settle-note row), "
         "joined to a row id and never a bare filename. The third name constant in that "
         "module, ``ASKS_LOG_NAME`` "
         "(``asks.jsonl``), IS an entry of one and is classified instead — it sits in "
@@ -553,16 +791,31 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``.corrupt`` fragment suffixed onto a quarantined store file",
     ),
     "local_operator/network/projection.py": (1, "the tombstone list under ``network/``"),
-    "local_operator/i18n/catalogues.py": (
+    "local_operator/network/relay.py": (
         1,
+        "``DELIBERATE_STOP_MARKER`` (``relay-stop-requested.json``): the relay's "
+        "deliberate-stop marker at ``<config>/run``, beside ``run/peers`` -- device-local "
+        "runtime state about THIS device's supervised relay process, written by a stop "
+        "verb and consumed by the relay's exit; never a session entry and never synced",
+    ),
+    "local_operator/i18n/catalogues.py": (
+        2,
         "``CONTEXT_SUFFIX`` (``.context.json``): the suffix of the en-only context "
         "sidecar inside the packaged ``local_operator/i18n/catalogues/`` tree — package "
-        "data shipped with the wheel, never an entry of a session directory",
+        "data shipped with the wheel, never an entry of a session directory. "
+        "``WIRE_NAMESPACE_PREFIX`` (``wire.``): a namespace-SELECTOR prefix the "
+        "per-locale bundle route filters catalogue namespace ids with; it is never "
+        "joined to a path or used as a filename",
     ),
     "local_operator/network/audit.py": (
         1,
         "``_ROTATION_MARKER`` (``.gz``): the suffix a rotated audit file carries under "
         "``network/audit`` — a store file, never a session entry",
+    ),
+    "local_operator/network/enrollment.py": (
+        1,
+        "DIRECTORY_NAME is the device-local network/enrollment-approvals authority "
+        "namespace, never a session entry or movable session credential",
     ),
     "local_operator/network/approvals.py": (
         2,
@@ -650,6 +903,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "machinery",
     ),
     "local_operator/session/runtime/registry.py": (1, "``reaped`` under the runtime's run dir"),
+    "local_operator/session/runtime/restart_fence.py": (
+        1,
+        "``FENCE_NAME`` is the permanent per-device admission-lock inode under "
+        "``<config>/run``; it coordinates local processes and is not session content "
+        "or state that travels with a conversation",
+    ),
     "local_operator/session/runtime/types.py": (
         3,
         "``run``'s per-runtime subdirectories (``run/mobile``, ``run/host``, ``run/serve``): "
@@ -674,6 +933,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``proc-groups`` under the store root, plus the ``.lock`` suffix on its own lock file",
     ),
     "local_operator/tools/spill.py": (1, "``spill``, where elided tool output is parked"),
+    # Declared, not classified: the shell confinement profile only DENIES this suffix
+    # to sandboxed children. The files it matches live under the config root
+    # (`network/store.py` writes `networks/<id>.secrets.json`), so listing it in the
+    # copy set or EXCLUDED_ENTRIES would claim a session entry that never exists.
+    "local_operator/tools/confinement.py": (
+        1,
+        "``_NETWORK_SECRETS_SUFFIX`` ('.secrets.json'): a kernel-deny regex suffix for "
+        "``network/networks/<id>.secrets.json`` under the CONFIG dir, never an entry of a "
+        "session directory",
+    ),
     "local_operator/tools/builtin.py": (
         3,
         "the ripgrep excludes file under the agent home, plus two HOST-id fragments "
@@ -772,12 +1041,17 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     ),
     # ---- the desktop app's own feeds and the TUI's per-user state ----
     "local_operator/server/utils/desktop_feed.py": (
-        3,
+        4,
         "the agent and team directories the desktop app reads (the profile store), plus "
-        "``code_requests``: the derived per-session index the feed's 1 s probe stats to "
-        "invalidate one conversation's rows (review round 1, Q3)",
+        "``code_requests`` and ``asks``: config-root derived indexes the feed's 1 s "
+        "probe stats, not entries inside one session directory",
     ),
-    "local_operator/tui/sidebar_pins.py": (1, "the sidebar's pinned-session list"),
+    "local_operator/tui/sidebar_pins.py": (
+        3,
+        "``PINS_FILE``/``UNPINNED_FILE``/``LOCK_NAME``: the sidebar's pinned-session "
+        "index, its deliberate-unpin ledger and their write lock, all at the config "
+        "root — install-level state, never an entry of a session directory",
+    ),
     "local_operator/tui/move_targets.py": (1, "the move dialog's recent-targets list"),
     "local_operator/tui/resume_click.py": (1, "the desktop app's bundle/binary name"),
     "local_operator/tui/input_decode.py": (
@@ -874,8 +1148,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``recommend_`` prefixes a generated question id",
     ),
     "local_operator/compaction/cutpoint.py": (
-        1,
-        "``compaction-elision`` prefixes an elision id inside the transcript payload",
+        2,
+        "``compaction-elision`` prefixes an elision id inside the transcript payload; "
+        "``compaction-carried`` prefixes the synthetic carried-tier row's message id in "
+        "the live/replay context, never a filename or session entry",
     ),
     "local_operator/keymap.py": (1, "``keymap.`` prefixes a config key name"),
     "local_operator/mobile/peer_send.py": (1, "``peer-`` prefixes a message id"),
@@ -945,15 +1221,77 @@ def _derived_constants(source: str) -> dict[str, str]:
     return found
 
 
-def _unclassified_in_module(source: str, module: str) -> list[str]:
+#: Path-named constants whose VALUE the derivation cannot read: ``module -> {name: why,
+#: and which list carries it}``. A computed name is where a value can hide from a
+#: syntactic guard, and it is exactly where the archive forms hid (review round 3,
+#: M-1: ``ARCHIVE_FILENAMES`` ends in ``FILENAMES`` and is built from the codec table,
+#: so neither half of the derivation saw it). Each entry is a DECLARATION, not an
+#: exemption: ``test_the_transcripts_archive_forms_are_in_the_copy_set`` asks the owner
+#: module for the real values and requires the copy set to carry every one.
+_COMPUTED_PATH_CONSTANTS: dict[str, dict[str, str]] = {
+    "local_operator/session/compression.py": {
+        "ARCHIVE_FILENAMES": (
+            "the transcript's archive forms, COMPUTED from ``ARCHIVE_SUFFIXES``, so no "
+            "literal exists to derive. They ARE the transcript: ``sync.COPY_SET_NAMES`` "
+            "carries both names — a deleting move asks its completeness question "
+            "BEFORE the restore, and an archive no list names refuses the move with a "
+            "sentence whose remedy is deleting the conversation's only copy — and "
+            "``sync.EXCLUDED_ENTRIES`` must never carry them, because excluding the "
+            "transcript would let that move proceed without it if a restore failed. "
+            "``test_the_transcripts_archive_forms_are_in_the_copy_set`` asks the owner "
+            "for the real values and fails if the copy set misses one"
+        ),
+    },
+}
+
+#: The computed-name shape the derivation can still make a candidate: a container of
+#: FILE NAMES (``ARCHIVE_FILENAMES``). Deliberately ONLY this suffix — a computed
+#: singular such as an f-string ``*_NAME`` is ordinary bookkeeping in every module, and
+#: making all of them candidates would turn this guard into a second hand-written
+#: census of the product. A plural container is different: its whole job is to name
+#: files, so it is session-state relevant wherever it lives.
+_FILENAMES_NAME = re.compile(r"^_?[A-Z][A-Z0-9_]*FILENAMES$")
+
+
+def _computed_path_constants(source: str) -> list[str]:
+    """Module-level ``*_FILENAMES`` constants in ``source`` whose value is not a literal.
+
+    The half of the derivation that cannot be syntactic (see
+    ``_COMPUTED_PATH_CONSTANTS``). ``ARCHIVE_FILENAMES`` is built from the codec table,
+    so ``_derived_constants`` — which reads string literals — never saw it; that is the
+    coverage hole this file's docstring warns about, and the one that let a compressed
+    session refuse to move (review round 3, M-1). A candidate here must be declared by
+    name, and the declaration must say which list carries it.
+    """
+    found: list[str] = []
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+        else:
+            continue
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name) and _FILENAMES_NAME.match(target.id):
+                found.append(target.id)
+    return found
+
+
+def _unclassified_in_module(source: str, module: str, *, ignore_row: bool = False) -> list[str]:
     """Names in ``source`` that are neither classified nor declared for ``module``.
 
     The whole rule, in one place, so the test below and the probe that mutates a source
-    string exercise the SAME code rather than two spellings of it.
+    string exercise the SAME code rather than two spellings of it. ``ignore_row`` skips
+    the module's own blanket ``_DERIVED_DECLARATIONS`` row and keeps its per-name
+    computed declarations: that is how the row's COUNT is measured, without the row
+    vouching for itself.
     """
-    declared = _DERIVED_DECLARATIONS.get(module)
+    declared = None if ignore_row else _DERIVED_DECLARATIONS.get(module)
     if declared and declared[0] == 0:
         declared = None
+    computed_declared = _COMPUTED_PATH_CONSTANTS.get(module, {})
     out: list[str] = []
     for name, value in sorted(_derived_constants(source).items()):
         if _classified(value):
@@ -961,6 +1299,10 @@ def _unclassified_in_module(source: str, module: str) -> list[str]:
         if declared:
             continue
         out.append(f"{name}={value!r}")
+    for name in sorted(_computed_path_constants(source)):
+        if name in computed_declared:
+            continue
+        out.append(f"{name}=<computed>")
     return out
 
 
@@ -1009,10 +1351,29 @@ def test_every_path_shaped_constant_is_classified_or_declared() -> None:
         if not path.is_file():
             stale.append(f"{module} (no such module)")
             continue
-        names = _unclassified_in_module(path.read_text(encoding="utf-8"), "")
+        names = _unclassified_in_module(path.read_text(encoding="utf-8"), module, ignore_row=True)
         if len(names) != count:
             stale.append(f"{module} (declares {count}, holds {len(names)}: {', '.join(names)})")
     assert stale == [], f"declarations that no longer describe the source: {stale}"
+    # AND THE COMPUTED DECLARATIONS, the third shape: a path-named constant whose value
+    # is built at runtime is invisible to ``_derived_constants``, so it is declared BY
+    # NAME. A declared name that no longer exists is a stale row, and one that has no
+    # reason is not a statement.
+    stale_computed: list[str] = []
+    for module, declarations in sorted(_COMPUTED_PATH_CONSTANTS.items()):
+        path = Path(__file__).resolve().parents[3] / module
+        if not path.is_file():
+            stale_computed.append(f"{module} (no such module)")
+            continue
+        present = set(_computed_path_constants(path.read_text(encoding="utf-8")))
+        for name, reason in sorted(declarations.items()):
+            if not reason.strip():
+                stale_computed.append(f"{module}:{name} (no reason)")
+            if name not in present:
+                stale_computed.append(f"{module}:{name} (not a computed path constant)")
+    assert (
+        stale_computed == []
+    ), f"computed declarations that no longer describe the source: {stale_computed}"
 
 
 def test_the_derivation_reports_a_new_constant_in_an_owning_module() -> None:
@@ -1066,6 +1427,45 @@ def test_the_derivation_sees_the_spellings_round_3_measured_escaping() -> None:
     # none of the suffixes above is not a candidate (``ACTION_TOOL_NAME`` is a tool).
     for ignored in ('REVIEW_PROBE_ABS_PATH = "/etc/hosts"', 'REVIEW_PROBE_UP_PATH = "../x.json"'):
         assert _unclassified_in_module(pristine + "\n" + ignored + "\n", module) == []
+
+
+def test_the_transcripts_archive_forms_are_in_the_copy_set() -> None:
+    """M-1 / Q-3: every ARCHIVE FORM of the transcript is a COPY-SET name.
+
+    THE HOLE THE DERIVATION COULD NOT SEE. ``compression.ARCHIVE_FILENAMES`` ends in
+    ``FILENAMES`` and its value is computed from the codec table, so the syntactic
+    guard missed it twice; ``COPY_SET_NAMES`` named only ``transcript.jsonl``. A
+    compressed session's body is therefore a file no list accounted for, and
+    ``assert_complete`` — which ``mobility._source_prepare`` calls BEFORE anything
+    restores the transcript — refused the move of every session past
+    ``after_days``, offering to delete the conversation's only copy as the remedy.
+
+    This asks the OWNER for the values instead of trusting a spelling, so a codec
+    added to ``ARCHIVE_SUFFIXES`` fails here until the copy set carries its name. The
+    direction is pinned too: excluding the archive would let a deleting move proceed
+    without the transcript when a restore fails.
+    """
+    archive_names = set(compression.ARCHIVE_FILENAMES)
+    assert archive_names == {"transcript.jsonl.zst", "transcript.jsonl.gz"}
+    assert archive_names <= set(sync.COPY_SET_NAMES), (
+        "a compressed transcript is the copy set's transcript member: every archive "
+        "form must be in sync.COPY_SET_NAMES, missing "
+        f"{sorted(archive_names - set(sync.COPY_SET_NAMES))}"
+    )
+    assert not (archive_names & set(sync.EXCLUDED_ENTRIES)), (
+        "the archive forms must never be excluded: a deleting move may not drop the "
+        "only copy of the transcript"
+    )
+    # AND THE THIRD NAME THE SAME PASS LEAVES BEHIND. A crash during compression parks
+    # the plain journal under ``.transcript.jsonl.quarantine`` (the verified archive is
+    # published first, and ``restore_for_write`` renames it back) — unclassified it
+    # refused that session's move exactly as the archive did.
+    assert compression.QUARANTINE_NAME in sync.EXCLUDED_ENTRIES
+    assert compression.QUARANTINE_NAME not in sync.COPY_SET_NAMES
+    # And the recovery path that makes the exclusion safe is still the restore.
+    assert compression.QUARANTINE_NAME.startswith(".") and compression.QUARANTINE_NAME.endswith(
+        ".quarantine"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1733,3 +2133,26 @@ def test_a_symlink_wearing_a_receipt_name_is_still_refused(tmp_path) -> None:
     os.symlink(outside, directory / "subagent-lane-j1.v1.json")
     assert sync.unlisted_entries(directory) == ["subagent-lane-j1.v1.json"]
     assert sync.family_entries(directory) == []
+
+
+def test_the_approval_sidecar_is_classified_and_never_copied(tmp_path: Path) -> None:
+    """A session that used approvals.json must still be movable.
+
+    The sidecar is a real file at the session root, so leaving it unclassified
+    made `assert_complete` refuse every move of such a session with
+    `unlisted_content` and offer "delete the record" as the remedy. It is
+    classified as NEVER_COPIED instead: the move is allowed and the copy starts
+    without the source conversation's consent.
+    """
+    from local_operator.session.approval_policy import OVERRIDE_FILENAME, write_override
+
+    session_dir = tmp_path / "sessions" / "s1"
+    session_dir.mkdir(parents=True)
+    (session_dir / sync.TRANSCRIPT_NAME).write_text("")
+    write_override(session_dir, "auto")
+    assert (session_dir / OVERRIDE_FILENAME).is_file()
+
+    assert sync.unlisted_entries(session_dir) == []
+    sync.assert_complete(session_dir)  # no SyncRefused
+    assert OVERRIDE_FILENAME in sync.NEVER_COPIED
+    assert OVERRIDE_FILENAME not in sync.copy_set(tmp_path, "s1")

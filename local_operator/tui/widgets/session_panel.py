@@ -64,6 +64,10 @@ from local_operator.session.channel_spend import (
     BASIS_SUBSCRIPTION,
     NOT_TRACKED_MICRO,
     PENDING_OWNER_APPEND_REASON,
+    UNPRICED_CANCELLED_OUTCOME_UNKNOWN,
+    UNPRICED_FAILED_NOT_BILLED,
+    UNPRICED_NOT_STATED,
+    UNPRICED_PARTIAL,
 )
 from local_operator.session.protocol import SessionProtocol
 from local_operator.session.spend import SessionSpend
@@ -1061,6 +1065,15 @@ def _draw_spend_channels(body: _Body, runtime: SessionDiagnostics) -> bool:
         dim_money=total_text == UNKNOWN_COST_CELL,
         notes=_SPEND_MARK_RUNGS if mark else (),
     )
+    total_basis = getattr(published, "by_basis", None) or {}
+    split = _payment_split_rungs(
+        {key: total_basis.get(key, 0) for key in (BASIS_BILLED, BASIS_SUBSCRIPTION)}
+    )
+    if split:
+        # The fixed note column cannot fit both amounts at narrow widths. A
+        # wrapping continuation keeps the split visible without moving money
+        # columns or sacrificing the lower-bound warning on the Total row.
+        body.note("Total split: " + split[0])
     if child_micro:
         child_knowledge = str(getattr(children, "knowledge", "") or "")
         child_note = {
@@ -1072,11 +1085,21 @@ def _draw_spend_channels(body: _Body, runtime: SessionDiagnostics) -> bool:
             body,
             "subagents · included in total",
             format_usd(child_micro),
-            notes=child_note,
+            notes=_payment_split_rungs(getattr(children, "by_basis", None), total_micro=child_micro)
+            or child_note,
         )
     for row in rows:
         amount = _as_micro(row.get("amount_micro"))
-        money = format_usd(amount) if amount is not None else UNKNOWN_COST_CELL
+        reason = str(row.get("unpriced_reason") or "")
+        if amount is not None:
+            money, dim_money = format_usd(amount), False
+        elif reason == UNPRICED_FAILED_NOT_BILLED:
+            # A failed attempt with no figure is the ledger's documented
+            # presumption of no charge. `no charge` is a positive statement,
+            # so it is NOT dimmed like the `$—` unknown class.
+            money, dim_money = _t(copy.spend_no_charge()), False
+        else:
+            money, dim_money = UNKNOWN_COST_CELL, True
         row_mark = (
             "+"
             if amount is not None and str(row.get("knowledge") or "") in {"partial", "floor"}
@@ -1090,10 +1113,10 @@ def _draw_spend_channels(body: _Body, runtime: SessionDiagnostics) -> bool:
             _channel_row_label(row),
             money,
             mark=row_mark,
-            dim_money=amount is None,
+            dim_money=dim_money,
             notes=tuple(notes),
         )
-    _draw_spend_basis(body, published)
+    _draw_spend_basis(body, published, excluded=(BASIS_BILLED, BASIS_SUBSCRIPTION) if split else ())
     if pending_calls:
         # D1 (design round 1): a voice charge that is RECORDED but excluded
         # from the total was invisible — the unmarked total read complete, and
@@ -1133,7 +1156,7 @@ def _spend_note_budget(width: int) -> int:
         return 15
     if width >= 62:
         # An 80-column terminal's card lands here (65 content cells measured):
-        # the short basis rungs ("plan-covered", "est.", "billed") fit, which
+        # the short basis rungs ("included", "est.", "billed") fit, which
         # is the disclosure D1 needs beside the money; below this the notes
         # shed entirely rather than crop.
         return 12
@@ -1232,13 +1255,24 @@ def _shorten_name(name: str, room: int) -> str:
 
 
 def _row_note_candidates(row: dict[str, Any]) -> list[str]:
-    """Notes for one row, widest first: basis tag, then units, then each alone.
+    """Notes for one row, widest first: the unpriced reason, else basis then units.
 
-    The tag leads because it is the disclosure the money needs beside it
-    ("this was billed / plan-covered / estimated"); the units follow because
-    they answer "how much of it". Both are refinements, so they may shed whole
-    at narrow widths (design round 1, D1/D6).
+    A specific reason REPLACES the generic not-tracked disclosure, and is the
+    row's only note: appending a basis tag can read as a contradiction on a
+    mixed row (``failed · not billed · billed`` describes the failed attempt and
+    the successful one in the same breath), so the reason is not combined with
+    the basis or unit count. Rows without a reason keep the basis-tag ladder.
+
+    A MIXED row (stated money plus failed attempts) gets its own ladder: the
+    note must describe the failed attempt's INCREMENT, never label the priced
+    group as unbilled (design round 1, D-1).
     """
+    reason = str(row.get("unpriced_reason") or "")
+    reason_rungs = _reason_rungs(
+        reason, amount_known=_as_micro(row.get("amount_micro")) is not None
+    )
+    if reason_rungs:
+        return list(reason_rungs)
     rungs = _basis_rungs(
         row.get("basis"), amount_known=_as_micro(row.get("amount_micro")) is not None
     )
@@ -1253,6 +1287,49 @@ def _row_note_candidates(row: dict[str, Any]) -> list[str]:
     return candidates
 
 
+def _reason_rungs(reason: str, *, amount_known: bool) -> tuple[str, ...]:
+    """The note ladder for one ``unpriced_reason``, widest first.
+
+    Built at call time rather than module load so the strings resolve through
+    the active locale. Each ladder carries rungs down to the 12-cell budget of
+    an 80x24 terminal's 65-cell body, so a specific explanation never sheds
+    WHOLE: the generic tag used to survive at that width while an outcome- or
+    cancellation-specific reason vanished (design round 1, D-2).
+
+    ``amount_known`` separates a failed-only group from a mixed one. A mixed
+    row's note says the failed attempt added no charge; it must NOT say
+    "not billed", which would read as the priced group's disposition (D-1).
+    """
+    if reason == UNPRICED_FAILED_NOT_BILLED:
+        if amount_known:
+            return (
+                _t(copy.spend_unpriced_failed_mixed()),
+                _t(copy.spend_unpriced_failed_mixed_mid()),
+                _t(copy.spend_unpriced_failed_mixed_short()),
+            )
+        return (
+            _t(copy.spend_unpriced_failed_wide()),
+            _t(copy.spend_unpriced_failed()),
+            _t(copy.spend_unpriced_failed_short()),
+        )
+    if reason == UNPRICED_CANCELLED_OUTCOME_UNKNOWN:
+        return (
+            _t(copy.spend_unpriced_cancelled_wide()),
+            _t(copy.spend_unpriced_cancelled()),
+            _t(copy.spend_unpriced_cancelled_short()),
+            _t(copy.spend_unpriced_cancelled_shortest()),
+        )
+    if reason == UNPRICED_NOT_STATED:
+        return (_t(copy.spend_unpriced_ok()), _t(copy.spend_unpriced_ok_short()))
+    if reason == UNPRICED_PARTIAL:
+        return (
+            _t(copy.spend_unpriced_partial()),
+            _t(copy.spend_unpriced_partial_short()),
+            _t(copy.spend_unpriced_partial_shortest()),
+        )
+    return ()
+
+
 #: Per-basis note ladders, widest first: the full spelling, then the narrowest
 #: one that still means the same thing. A single wide string used to shed
 #: ENTIRELY below ~92 cells, which took the basis disclosure off every row of
@@ -1260,7 +1337,7 @@ def _row_note_candidates(row: dict[str, Any]) -> list[str]:
 #: round 1, D1/D6).
 _TAG_RUNGS: dict[str, tuple[str, ...]] = {
     "billed": ("billed",),
-    "plan-covered (API price)": ("plan-covered (API price)", "plan-covered"),
+    "included (API-equivalent)": ("included (API-equivalent)", "included"),
     "estimated": ("estimated", "est."),
     "price not stated": ("price not stated", "not stated"),
     # Shortest rung last and it fits the 80-column card's 12-cell note budget:
@@ -1274,6 +1351,8 @@ _TAG_RUNGS: dict[str, tuple[str, ...]] = {
 def _basis_rungs(basis: Any, *, amount_known: bool) -> tuple[str, ...]:
     """The rungs for one row's basis list, widest first (see ``_TAG_RUNGS``)."""
     tags = _basis_tag_list(basis, amount_known=amount_known)
+    if not tags:
+        return ()
     if len(tags) == 1:
         return _TAG_RUNGS.get(tags[0], (tags[0],))
     # A row carrying several bases keeps the joined spelling only: there is no
@@ -1286,7 +1365,7 @@ def _basis_tag_list(basis: Any, *, amount_known: bool) -> list[str]:
 
     ``quote`` never reaches here (the adapter maps it to ``estimated``), and
     ``subscription_api_equivalent`` is spelled the way a user reads it —
-    "plan-covered (API price)" — rather than as the wire's shorthand (design
+    "included (API-equivalent)" — rather than as the wire's shorthand (design
     round 1, D1c). ``not_tracked`` reads as "basis not recorded" when the row's
     amount IS known (the inference case: the money is stated, its billing basis
     is the part missing) and as "price not stated" when the amount is missing
@@ -1297,7 +1376,7 @@ def _basis_tag_list(basis: Any, *, amount_known: bool) -> list[str]:
     for value in basis if isinstance(basis, list) else []:
         label = {
             BASIS_BILLED: "billed",
-            BASIS_SUBSCRIPTION: "plan-covered (API price)",
+            BASIS_SUBSCRIPTION: "included (API-equivalent)",
             BASIS_ESTIMATED: "estimated",
             BASIS_NOT_TRACKED: not_tracked_label,
         }.get(str(value))
@@ -1322,7 +1401,46 @@ def _units_text(row: dict[str, Any]) -> str:
     return f"{units:g} {noun}"
 
 
-def _draw_spend_basis(body: _Body, published: Any) -> None:
+def _payment_split_rungs(basis: Any, *, total_micro: int | None = None) -> tuple[str, ...]:
+    """Only published buckets may qualify a total, including on narrow cards."""
+    if not isinstance(basis, dict):
+        return ()
+    # A homogeneous child already states its whole amount in the money cell.
+    # Repeating it in the note looks like a second charge. Only mixed children
+    # need amount-bearing notes to explain how that money divides.
+    nonzero = [(key, _as_micro(value)) for key, value in basis.items() if _as_micro(value)]
+    if total_micro is not None and len(nonzero) == 1 and nonzero[0][1] == total_micro:
+        key = nonzero[0][0]
+        return _basis_rungs(
+            [BASIS_NOT_TRACKED if key == NOT_TRACKED_MICRO else key], amount_known=True
+        )
+    parts = []
+    short = []
+    labels = []
+    for key, label, compact in (
+        (BASIS_BILLED, "billed", "billed"),
+        (BASIS_SUBSCRIPTION, "included (API-equivalent)", "included"),
+        (BASIS_ESTIMATED, "estimated", "est."),
+        (NOT_TRACKED_MICRO, "basis not recorded", "unrecorded"),
+    ):
+        micro = _as_micro(basis.get(key))
+        if micro:
+            parts.append(f"{format_usd(micro)} {label}")
+            short.append(f"{format_usd(micro)} {compact}")
+            labels.append(compact)
+    return (
+        (
+            " · ".join(parts),
+            " · ".join(short),
+            " · ".join(labels),
+            "mixed basis" if len(parts) > 1 else labels[0],
+        )
+        if parts
+        else ()
+    )
+
+
+def _draw_spend_basis(body: _Body, published: Any, *, excluded: tuple[str, ...] = ()) -> None:
     """The basis footer: buckets that SUM TO THE TOTAL, labels dim, figures fg.
 
     Round 1 measured the old footer as the least legible line in the section
@@ -1344,10 +1462,12 @@ def _draw_spend_basis(body: _Body, published: Any) -> None:
     units: list[tuple[str, str]] = []  # (label, figure) — figure "" for a clause
     for key, label in (
         (BASIS_BILLED, "billed"),
-        (BASIS_SUBSCRIPTION, "plan-covered (API price)"),
+        (BASIS_SUBSCRIPTION, "included (API-equivalent)"),
         (BASIS_ESTIMATED, "estimated"),
         (NOT_TRACKED_MICRO, "basis not recorded"),
     ):
+        if key in excluded:
+            continue
         value = _as_micro(basis.get(key))
         if not value:
             continue

@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import socket
+import subprocess
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -339,9 +341,19 @@ def test_ready_reads_a_stopped_relay_as_refused_and_a_black_hole_as_silent(
     assert reach[0]["detail"].startswith(relay.CONNECT_FAILED_PREFIX)
     assert reach[0]["observed"]["outcome"] == "refused"
     assert reach[0]["observed"]["attempted"] is True
-    # No link, so nothing was asked and no capability could have passed.
-    assert all(row["ok"] is False for row in _rows(payload, "readiness"))
-    assert {row["code"] for row in _rows(payload, "readiness")} == {readiness.CODE_NOT_ASKED}
+    # No link, so no PEER-SIDE capability was asked or passed. Restart authority
+    # is receiver-local too, so it is honestly unknown rather than inferred.
+    peer_rows = [
+        row
+        for row in _rows(payload, "readiness")
+        if row["capability"] != readiness.CAPABILITY_PEER_RESTART
+    ]
+    assert all(row["ok"] is False for row in peer_rows)
+    assert {row["code"] for row in peer_rows} == {readiness.CODE_NOT_ASKED}
+    restart = _capability(payload, readiness.CAPABILITY_PEER_RESTART)
+    assert restart["ok"] is False
+    assert restart["code"] == readiness.CODE_UNKNOWN
+    assert restart["source"] == readiness.SOURCE_UNKNOWN
 
     human = _human(capsys, "--peer", server_b.identity.name)
     assert "ConnectionRefusedError" not in human
@@ -857,8 +869,8 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
 ) -> None:
     """The headline: every offload blocker the 2026-09-28 run hit, one row each.
 
-    BEFORE: no operator authority, no git identity, no MCP surface, no default
-    model — four rows, four codes, and the remedy each one names. AFTER fixing
+    BEFORE: no operator authority, no git identity, no repository checkout, no MCP
+    surface, no default model — five rows, five codes, and the remedy each one names. AFTER fixing
     each ON THE PEER (the files its own processes read), the same report is
     ready: every row ok and rc 0. The operator step is stubbed at the
     authority-report seam rather than install a launchd anchor, because the
@@ -881,6 +893,9 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
     home = tmp_path / "peer-home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    # Resolve git BEFORE the fixture replaces PATH with its synthetic tool bin.
+    git = shutil.which("git")
+    assert git is not None
     # The peer's tooling inventory (2026-10-06): a complete lane toolchain on a
     # controlled PATH plus a stored gh login, so the new row reads ok — and the
     # block after the fixes drops a tool to watch the NON-GATING warn over the
@@ -917,6 +932,19 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
     git_row = _capability(payload, readiness.CAPABILITY_GIT)
     assert (git_row["ok"], git_row["code"]) == (False, readiness.CODE_NO_GIT_IDENTITY)
     assert "set its git author name and email" in " ".join(git_row["remedies"])
+    repository_row = _capability(payload, readiness.CAPABILITY_REPOSITORY)
+    assert (repository_row["ok"], repository_row["code"]) == (
+        False,
+        readiness.CODE_NO_REPOSITORY,
+    )
+    assert repository_row["observed"] == {
+        "path": str(home / "local-operator"),
+        "state": "missing",
+    }
+    assert (
+        f"git clone https://github.com/damianvtran/local-operator {home / 'local-operator'}"
+        in " ".join(repository_row["remedies"])
+    )
     mcp_row = _capability(payload, readiness.CAPABILITY_MCP_SERVERS)
     assert (mcp_row["ok"], mcp_row["code"]) == (False, readiness.CODE_NO_MCP_SERVERS)
     assert "push the MCP server definitions" in " ".join(mcp_row["remedies"])
@@ -951,6 +979,12 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
     auth = AuthStore(db_path=server_b.root / "auth.db", config_dir=server_b.root)
     auth.upsert_credential("openai", {"type": "api_key", "key": "local-test"})
     auth.close()
+    subprocess.run(
+        [git, "init", "--quiet", str(home / "local-operator")],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
     rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
     ok_rows = [
@@ -1027,7 +1061,7 @@ def test_an_old_peer_degrades_to_peer_too_old_and_is_never_asked(
     too_old = [
         row
         for row in _rows(payload, "readiness")
-        if row["capability"] != readiness.CAPABILITY_BUILD
+        if row["capability"] in readiness.PEER_SIDE_CHECKS
     ]
     assert {row["code"] for row in too_old} == {readiness.CODE_PEER_TOO_OLD}
     assert {row["capability"] for row in too_old} == set(readiness.PEER_SIDE_CHECKS)
@@ -1037,6 +1071,9 @@ def test_an_old_peer_degrades_to_peer_too_old_and_is_never_asked(
     )
     build = _capability(payload, readiness.CAPABILITY_BUILD)
     assert build["ok"] is True, build
+    restart = _capability(payload, readiness.CAPABILITY_PEER_RESTART)
+    assert restart["source"] == readiness.SOURCE_UNKNOWN
+    assert restart["code"] == readiness.CODE_UNKNOWN
     server_b.stop()
 
 
@@ -1206,3 +1243,53 @@ def test_a_fresh_device_with_no_networks_remembers_nothing_to_report(
     assert rc == 0
     assert payload["checks"] == [] or all(row.get("ok") for row in payload["checks"])
     assert payload["identity_present"] is True
+
+
+def test_a_hostile_serve_fact_over_a_real_link_costs_only_its_own_row(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#3075 QA round 1, Q1 over the wire: a peer whose ``serve_daemons`` carries a
+    non-string cgroup (and an escape-laden version) crashed A's control thread at
+    ``serve_supervision`` and blanked EVERY row for that peer. Now the serve row is
+    ``unknown`` and the build/git rows still arrive from the peer."""
+    pair_devices: Devices = request.getfixturevalue("devices")
+    server_a, server_b, _host, _port = pair_devices
+    record, _h, _p = _pair(pair_devices, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    live = _bind_and_start(server_b, record)
+    _settle_the_peer_link(server_a, server_b, record, live)
+    _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live])
+    original = server_b._handlers["net_readiness"]  # noqa: SLF001 — the slice's seat
+
+    def hostile(link: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        facts = original(link, frame)
+        assert isinstance(facts, dict), "the real readiness handler must return facts"
+        facts["serve_daemons"] = {
+            "platform": "linux",
+            "install": {"version": "0.90.19", "source_ref": ""},
+            "daemons": [
+                {
+                    "pid": 1,
+                    "state": "live",
+                    "identity": "proven",
+                    "version": "\x1b[2J\x1b]0;pwned\x07",
+                    "source_ref": "",
+                    "reloadable": True,
+                    "cgroup": 12345,
+                }
+            ],
+        }
+        return facts
+
+    monkeypatch.setitem(server_b._handlers, "net_readiness", hostile)  # noqa: SLF001
+    _rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
+    serve = _capability(payload, readiness.CAPABILITY_SERVE_DAEMON)
+    assert serve["code"] == readiness.CODE_UNKNOWN and serve["ok"] is False, serve
+    assert "\x1b" not in json.dumps(payload, ensure_ascii=False)
+    git = _capability(payload, readiness.CAPABILITY_GIT)
+    assert git["source"] == readiness.SOURCE_PEER and git["code"] != readiness.CODE_NOT_ASKED
+    assert _capability(payload, readiness.CAPABILITY_BUILD)["ok"] is True
+    server_b.stop()

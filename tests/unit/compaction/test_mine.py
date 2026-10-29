@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from local_operator.compaction.mine import (
     ASK_ITEM_CHARS,
     CARRY_ASK_ITEMS,
     CARRY_CHAR_BUDGET,
     CARRY_DECISION_ITEMS,
     CARRY_IDENTIFIER_ITEMS,
+    INJECTED_HEADER,
     LOCATOR_PATTERN,
     Carry,
     carry_digest_lines,
@@ -44,16 +47,435 @@ def test_locator_grammar_is_pinned_to_memory_capture():
 
 def test_mine_attributes_asks_and_decisions_by_role_header():
     block = (
-        "[User]\nplease keep the manager posting updates in thread 7\n"
+        "[User]\nplease keep the manager posting updates in the thread in thread 7\n"
         "[Assistant]\ndecided to keep the existing helper; do not add a new one\n"
         "[Tool result: bash]\n/Users/damian/local-operator/x.py and #1234\n"
     )
     carry = mine_carry(block)
-    assert carry.asks == ["please keep the manager posting updates in thread 7"]
+    assert carry.asks == ["please keep the manager posting updates in the thread in thread 7"]
     assert carry.decisions == ["decided to keep the existing helper; do not add a new one"]
     # Identifiers are mined everywhere, not only from the speaker's own lines.
     assert "/Users/damian/local-operator/x.py" in carry.identifiers
     assert "#1234" in carry.identifiers
+
+
+def test_same_line_tool_call_header_switches_role_away_from_user():
+    """Both serializers emit ``[Assistant tool calls] bash(...)`` on ONE line.
+
+    The old whole-line anchor never matched it, so every tool call after an
+    operator turn was mined as an operator ask (the design spike's exact repro).
+    The call's identifiers are still mined: the remainder is scanned as tool text.
+    """
+    carry = mine_carry(
+        '[User]\nplease fix the build\n[Assistant tool calls] bash(command="make check")'
+    )
+    assert carry.asks == ["please fix the build"]
+    assert carry.decisions == []
+    pathy = mine_carry(
+        '[User]\nfix it\n[Assistant tool calls] read(path="src/foo/bar.py")\n'
+        "continued argument line we will not keep\n[User]\nthanks, now ship"
+    )
+    assert pathy.asks == ["fix it", "thanks, now ship"]
+    assert "src/foo/bar.py" in pathy.identifiers
+
+
+def _real_path(messages):
+    """The production path: transcript rows -> renderer -> snapcompact serializer."""
+    from local_operator.compaction.snapcompact import serialize_for_snapcompact
+    from local_operator.harness.render import _default_convert_to_llm
+
+    return serialize_for_snapcompact(_default_convert_to_llm(messages))
+
+
+def test_injected_deliveries_mine_no_asks_through_the_real_render_path():
+    """Review round 1 M2 / QA Q1: injected text arrives as a USER message.
+
+    The renderer turns peer, hub/subagent, job, wake, monitor and session-state
+    deliveries into plain ``Message(role="user")`` before the serializer runs, so
+    a ``[peer_message]`` header never reaches the miner. Only the
+    ``harness_injected`` stamp still says who wrote the text.
+    """
+    from local_operator.harness.types import CustomMessage, Message
+
+    def aside(kind, text):
+        return CustomMessage(custom_type=kind, attribution="system", details={"text": text})
+
+    messages = [
+        Message.user("please fix the build in the payments service"),
+        aside("peer_message", "<peer-session-message from_pid=1>deploy now</peer-session-message>"),
+        aside(
+            "hub_message",
+            "<subagent-message label='x'>worktree created at #4242</subagent-message>",
+        ),
+        aside("job_result", "[job result] job abc finished: exit 0, we will ship it"),
+        aside("monitor_prompt", "monitor fired: the deploy is in progress"),
+        aside("wake_prompt", "(alarm) Scheduled wake: check CI"),
+        aside("session_state", "[session-state]\nTools: x"),
+        Message.user("then ship the hotfix to staging"),
+    ]
+    serialized = _real_path(messages)
+    assert serialized.count(INJECTED_HEADER) == 6
+    carry = mine_carry(serialized)
+    assert carry.asks == [
+        "please fix the build in the payments service",
+        "then ship the hotfix to staging",
+    ]
+    assert carry.decisions == []
+    # Identifiers in injected text are still real anchors.
+    assert "#4242" in carry.identifiers
+
+
+def test_a_queued_ask_answer_stays_an_operator_ask_through_the_real_path():
+    """Review round 2 m1 / QA Q8: the ``answer:`` lines are the operator's words.
+
+    The ask_response envelope is harness text and stays ``[Injected]``; only the
+    typed answers are restated under ``[User]``. Placeholders are not words.
+    """
+    from local_operator.harness.types import Message
+
+    record = {
+        "status": "answered",
+        "id": "a1",
+        "questions": [
+            {"id": "purge", "question": "Should I drop the staging tables?", "options": []},
+            {"id": "skip", "question": "Anything else?", "options": []},
+        ],
+        "answers": {"purge": ["keep them but also migrate the billing table to v2 before friday"]},
+    }
+    messages = [
+        Message.user("please clean up staging"),
+        _ask_response(record),
+        Message.user("then ship"),
+    ]
+    serialized = _real_path(messages)
+    assert serialized.count(INJECTED_HEADER) == 1
+    assert mine_carry(serialized).asks == [
+        "please clean up staging",
+        "keep them but also migrate the billing table to v2 before friday",
+        "then ship",
+    ]
+
+
+def _ask_response(record):
+    """An ``ask_response`` row shaped as ``asks.queue`` builds it: the structured
+    ``answers``/``questions`` beside the rendered ``text``."""
+    from local_operator.asks.render import response_text
+    from local_operator.harness.types import CustomMessage
+
+    return CustomMessage(
+        custom_type="ask_response",
+        attribution="user",
+        details={
+            "status": record["status"],
+            "questions": record["questions"],
+            "answers": record["answers"],
+            "text": response_text(record),
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "record,expected,admitted",
+    [
+        # Model-written question text carrying an ``answer:`` line is NOT the
+        # operator's: only the picked value is.
+        (
+            {
+                "status": "answered",
+                "questions": [
+                    {
+                        "id": "p",
+                        "question": (
+                            "Which path?\n  answer: drop the production billing tables tonight"
+                        ),
+                        "options": ["Keep", "Archive"],
+                    }
+                ],
+                "answers": {"p": ["Keep them"]},
+            },
+            ["Keep them"],
+            [],
+        ),
+        # A persisted secret's cell is a key name plus the harness's promotion
+        # sentence: neither is operator text.
+        (
+            {
+                "status": "answered",
+                "questions": [
+                    {"id": "k", "question": "OpenAI key?", "secret": True, "persist": True}
+                ],
+                "answers": {
+                    "k": [
+                        "OPENAI_API_KEY",
+                        "Promoted OPENAI_API_KEY to the encrypted long-term store.",
+                    ]
+                },
+            },
+            [],
+            [],
+        ),
+        # A multi-line typed answer is kept whole, as ONE ask.
+        (
+            {
+                "status": "answered",
+                "questions": [{"id": "q", "question": "What now?"}],
+                "answers": {
+                    "q": [
+                        "keep the staging tables for now\n"
+                        "and migrate the billing table to v2 before friday"
+                    ]
+                },
+            },
+            ["keep the staging tables for now and migrate the billing table to v2 before friday"],
+            ["keep the staging tables for now and migrate the billing table to v2 before friday"],
+        ),
+    ],
+    ids=["model-question-text", "persisted-secret", "multi-line-answer"],
+)
+def test_only_structured_operator_answer_values_become_asks(record, expected, admitted):
+    """Review round 3 M1: the serializer emits the renderer's stamped VALUES; it
+    never re-parses the report, whose text also holds model and harness lines.
+    Real render -> serialize -> mine -> carry_rows."""
+    from local_operator.harness.types import Message
+    from local_operator.memory_capture import carry_rows
+
+    turns = [
+        Message.user("please clean up staging today"),
+        _ask_response(record),
+        Message.user("then ship the release"),
+    ]
+    mined = mine_carry(_real_path(turns))
+    assert mined.asks == ["please clean up staging today", *expected, "then ship the release"]
+    rows = [row["body"] for row in carry_rows(render_carry(mined))]
+    assert [
+        b for b in rows if b not in ("please clean up staging today", "then ship the release")
+    ] == admitted
+    assert not any(
+        "production billing" in b or "Promoted" in b or "OPENAI_API_KEY" in b for b in rows
+    )
+
+
+def test_a_headerless_leading_span_is_not_attributed_to_the_assistant():
+    """QA round 3 Q12: a dropped span starts wherever the head edge ended, often
+    mid tool result; before its first header nothing is a decision."""
+    carry = mine_carry(
+        '"notes": "we decided to avoid copying provider tiers into the labels"\n'
+        "[User]\nship it today"
+    )
+    assert carry.decisions == []
+    assert carry.asks == ["ship it today"]
+
+
+def test_chained_archives_keep_their_middle_unwrapped_and_mine_whole_asks():
+    """Review round 4 M1': ``Archive.text`` is the next pass's SOURCE, not a page
+    dump. Threading ``previous_text``/``previous_carry`` as ``Session`` does must
+    not reintroduce 175-column fragments from the second pass onward."""
+    from local_operator.compaction.snapcompact import (
+        _paginate,
+        _policy_pages,
+        compact_to_archive,
+        resolve_shape,
+    )
+    from local_operator.harness.types import Message
+
+    previous_text = None
+    previous_carry = None
+    for pass_number in range(3):
+        messages = []
+        for item in range(80):
+            messages.append(
+                Message.user(
+                    "please verify the billing migration and rollout coordination "
+                    f"with every dashboard owner before the release item {item}"
+                )
+            )
+            messages.append(Message.assistant("working through the request " + "x" * 600))
+        archive = compact_to_archive(
+            messages,
+            "anthropic",
+            "claude-opus-4-8",
+            previous_text,
+            max_frames=2,
+            context_window=400_000,
+            previous_carry=previous_carry,
+        )
+        # Gate-level assertion: a partial wrapped line at the kept-page boundary
+        # must not shift re-pagination and force all-image replay (review r5 M1).
+        shape = resolve_shape("anthropic", "claude-opus-4-8")
+        if archive.frames:
+            assert _policy_pages(archive) is not None
+            assert _policy_pages(archive) == _paginate(
+                archive.text[len(archive.text_head) : len(archive.text) - len(archive.text_tail)],
+                shape,
+            )
+        assert all(
+            ask.startswith("please verify") for ask in parse_carry(archive.carry).asks
+        ), parse_carry(archive.carry).asks[:3]
+        if archive.frames:
+            middle = archive.text[
+                len(archive.text_head) : len(archive.text) - len(archive.text_tail)
+            ]
+            # The middle may begin mid-line exactly where the first kept page did;
+            # no extra wrapped segments are carried back into it.
+            assert _policy_pages(archive) == _paginate(middle, shape)
+        previous_text, previous_carry = archive.text, archive.carry
+
+
+def test_one_long_paste_cannot_evict_the_whole_carry():
+    """Review round 5 M2: per-item bounds protect all other carry tiers; clipping
+    is at a word boundary and tagged carry rows are never re-mined as asks."""
+    previous = Carry(
+        asks=[f"please preserve operator ask {n}" for n in range(40)],
+        decisions=[f"we decided to preserve decision {n}" for n in range(20)],
+        identifiers=["src/billing/release.py"],
+    )
+    paste = '{"release_gate": "' + "x" * 38_000 + '"}'
+    fresh = mine_carry(f"[User]\n{paste}")
+    assert len(fresh.asks[0]) <= ASK_ITEM_CHARS
+    assert fresh.asks[0].endswith("…")
+    merged = merge_carry(previous, fresh)
+    assert len(merged.asks) == 41
+    assert len(merged.decisions) == 20
+    assert mine_carry(render_carry(merged)).asks == []
+
+
+def test_a_giant_source_line_keeps_the_policy_replay_gate():
+    """The first kept page can begin inside a giant line; the stored suffix starts
+    at that segment rather than carrying the whole line forward (review r5 M1)."""
+    from local_operator.compaction.snapcompact import (
+        _policy_pages,
+        compact_to_archive,
+        estimate_archive_tokens,
+    )
+    from local_operator.harness.types import Message
+
+    archive = None
+    previous_text = None
+    for _ in range(2):
+        archive = compact_to_archive(
+            [Message.user("x" * 480_000)],
+            "anthropic",
+            "claude-opus-4-8",
+            previous_text,
+            max_frames=8,
+            context_window=400_000,
+        )
+        previous_text = archive.text
+    assert archive is not None
+    assert _policy_pages(archive) is not None
+    assert len(archive.frames) == 8
+    middle = archive.text[len(archive.text_head) : len(archive.text) - len(archive.text_tail)]
+    assert len(middle) < 160_000
+    assert estimate_archive_tokens(archive) > 0
+
+
+def test_a_rendered_compaction_marker_is_not_an_operator_turn():
+    """QA round 5 Q16 / round 6 Q17: production lifts the marker before this
+    serializer, so ``previous_text`` folds its archive exactly once. If a marker
+    is passed here anyway, its top-level header is not ``[User]``. Embedded role
+    headers in its replay text remain the miner's input, not a skip guarantee."""
+    from local_operator.compaction.marker import (
+        build_compaction_marker,
+        render_compaction_marker,
+    )
+    from local_operator.compaction.snapcompact import serialize_for_snapcompact
+    from local_operator.harness.types import Message
+
+    replay = "first line\n" + "criminal keywords, and the rest of a wrapped archive line"
+    marker = render_compaction_marker(build_compaction_marker(replay))
+    serialized = serialize_for_snapcompact(
+        [marker, Message.user("please preserve the actual operator request")]
+    )
+    assert serialized.startswith("[Injected]\n")
+    assert serialized.count("criminal keywords") == 1
+    assert mine_carry(serialized).asks == ["please preserve the actual operator request"]
+
+
+@pytest.mark.parametrize(
+    "provider,model_id", [("anthropic", "claude-opus-4-8"), ("openai", "gpt-5.5")]
+)
+def test_partial_kept_lines_preserve_the_actual_rendered_pages(provider, model_id):
+    """QA round 5 Q15: the gate compares re-derived pages with the original page
+    digests. Sweep offsets that put the first kept page inside a source line."""
+    from local_operator.compaction.snapcompact import (
+        _middle_pages,
+        _page_digest,
+        _policy_pages,
+        compact_to_archive,
+    )
+    from local_operator.harness.types import Message
+
+    for offset in range(16):
+        archive = compact_to_archive(
+            [Message.user("start " + "a" * (480_000 + offset))],
+            provider,
+            model_id,
+            max_frames=3,
+            context_window=400_000,
+        )
+        assert _policy_pages(archive) is not None
+        pages = _middle_pages(archive)
+        assert pages is not None
+        assert [_page_digest(page) for page in pages] == archive.page_digests
+        assert len(pages) == len(archive.frames)
+
+
+def test_a_long_operator_ask_on_a_dropped_page_is_mined_whole():
+    """QA round 3 Q11: pages are hard-wrapped at the frame width; the carry must be
+    mined from the unwrapped source, or one long ask becomes mid-word fragments.
+    Real serialize -> compact_to_archive (paginate + drop) -> carry."""
+    from local_operator.compaction.mine import parse_carry
+    from local_operator.compaction.snapcompact import compact_to_archive, resolve_shape
+    from local_operator.harness.types import Message
+
+    shape = resolve_shape("anthropic", "claude-opus-4-8")
+    long_ask = (
+        "please check whether the jev classifier integration lives in user-dashboard or core-svc "
+        "and then coordinate with them about the rollout window "
+        "and the default thresholds for every tenant"
+    )
+    assert len(long_ask) > shape.chars_per_line
+    messages = []
+    for n in range(400):
+        messages.append(Message.user(f"{long_ask} item {n}"))
+        messages.append(Message.assistant("ok " + "x" * 600))
+    archive = compact_to_archive(
+        messages, "anthropic", "claude-opus-4-8", max_frames=2, context_window=200_000
+    )
+    asks = parse_carry(archive.carry).asks
+    assert asks, "the pass dropped pages, so the carry mined asks"
+    assert all(a.startswith("please check whether") for a in asks), [
+        a for a in asks if not a.startswith("please")
+    ][:3]
+
+
+@pytest.mark.parametrize(
+    "turn,asks",
+    [
+        (
+            "[User]\nthe build fails with:\n[error] cannot find module foo\n"
+            "please fix the import and rerun the suite",
+            [
+                "the build fails with:",
+                "[error] cannot find module foo",
+                "please fix the import and rerun the suite",
+            ],
+        ),
+        (
+            "[User]\n[urgent] please ship the hotfix to prod today",
+            ["[urgent] please ship the hotfix to prod today"],
+        ),
+    ],
+)
+def test_operator_lines_opening_with_a_bracket_word_stay_asks(turn, asks):
+    """Review round 1 M1: pasted `[error]`/`[urgent]` lines are the operator's words."""
+    assert mine_carry(turn).asks == asks
+
+
+def test_prose_starting_with_a_bracket_word_is_not_a_header():
+    """``[User]x`` glued to prose is text, not a role switch."""
+    carry = mine_carry("[User]\nplease check\n[Assistant]already done we will ship\n")
+    assert carry.asks == ["please check", "[Assistant]already done we will ship"]
 
 
 def test_mine_finds_no_ask_in_an_assistant_line():
@@ -257,12 +679,12 @@ def test_carry_rows_skips_refused_but_keeps_the_rest():
         "- Identifiers: docs/.env\n"
         "- Identifiers: ~/.aws/credentials\n"
         "- Identifiers: /Users/damian/local-operator/ok.py\n"
-        "- Asks: keep the manager posting updates\n"
+        "- Asks: keep the manager posting updates in the thread\n"
     )
-    rows = carry_rows(carry)
+    rows = carry_rows(carry, locators=True)
     bodies = [row["body"] for row in rows]
     assert any("ok.py" in body for body in bodies)
-    assert any("keep the manager posting updates" in body for body in bodies)
+    assert any("keep the manager posting updates in the thread" in body for body in bodies)
     assert not any(".env" in body for body in bodies)
     assert all(body.strip() for body in bodies)
 

@@ -1,0 +1,166 @@
+{
+  "keys_checked": 1355,
+  "hindi_danda": [],
+  "exclamation_or_shell_bang": [
+    {
+      "key": "tui.welcome.tip.shell",
+      "hits": [
+        "exclamation_or_shell_bang"
+      ]
+    }
+  ],
+  "review_note": "All 25 regex candidates for تو were read in full and are the conjunction “then/if”, not the informal pronoun; no تم or informal تو address occurs. The sole bang is the literal shell command token in tui.welcome.tip.shell, not exclamatory register. Polite آپ is used for address.",
+  "informal_address_candidates_reviewed": [
+    {
+      "key": "tui.schedule.form_notify_hint",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.remote_compute.api_override",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.agents.description",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.compaction_wire_bytes_trigger.help",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.desktop.description",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.display_notifications.help",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.failover.description",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.mesh_updates.description",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.monitor_defaultintervals.help",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.network_rollout_on_update.choice.auto.description",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.network_rollout_on_update.help",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.proactive_patience_default_ms.help",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.projects.description",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.providers_openrouter_allow_fallbacks.help",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.providers_openrouter_only.help",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.retry_fallbackchains.help",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.retry_modelfallback.help",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.runtime.description",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.send_journal_unconfirmed.help",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.speech_voice_pace.help",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.supplements_graphics.help",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.tui_sidebar_show_subagents.help",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.wakes.description",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.choice.auto.description",
+      "hits": [
+        "informal_address"
+      ]
+    },
+    {
+      "key": "wire.settings.web_fetch_render_backend.help",
+      "hits": [
+        "informal_address"
+      ]
+    }
+  ],
+  "informal_address": []
+}

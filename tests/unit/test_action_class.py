@@ -206,7 +206,7 @@ class TestSetRegisteredActionClass:
         from local_operator.agent_profiles import install_seed
 
         registry = AgentRegistry(tmp_path)
-        install_seed("aida", registry=registry)
+        install_seed("aida", registry=registry, scope="global")
         assert set_registered_action_class(registry, "Aida", PROACTIVE) == "aida"
         row = registry.get_agent_by_name("aida")
         assert row is not None and class_from_tags(row.tags) == PROACTIVE

@@ -199,7 +199,8 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # whose legend describes THIS terminal's keyboard (`?`/`/keys`,
             # issue #1944) and has no desktop surface it would describe — the
             # decision is stated on the `keys` entry in `slash_commands.py`; and
-            # `/notifications`, whose affordance on the desktop is the sidebar's
+            # `/unread` (the completion-receipt listing, formerly
+            # `/notifications`), whose affordance on the desktop is the sidebar's
             # OWN control, and a destination the renderer has no adapter for is a
             # row that is offered and then dead-ends (the `/mobile` lesson); and
             # `/network`, whose desktop home is not a slash-command destination
@@ -253,13 +254,30 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
                 "memory",
                 "mobile",
                 "network",
-                "notifications",
+                # The completion-receipt listing, formerly `/notifications`
+                # (decision D2): still withheld, for the reason that row gave.
+                # `/notifications` itself now NAVIGATES to the Notifications page.
+                "unread",
                 # TUI-only request ledger; no desktop destination ships.
                 "review",
                 # TUI-only: one conversation's live wakes, written through that
                 # session. The desktop's schedules page reads the machine-wide
                 # index instead, so there is no destination to point at.
                 "schedule",
+                # TUI-local filesystem preview; no desktop adapter.
+                "view",
+                # TUI-only: this machine's derived asset catalog and its
+                # metadata sidecar. The desktop owns a Library pane over its
+                # own catalog; a destination here would paint the wrong host.
+                "library",
+                # TUI-only: the optional Librarian package's local state and
+                # its pinned conversation. Same wrong-machine argument.
+                "librarian",
+                # TUI-only: the tag surface edits THIS config root's store and
+                # the grouping preference paints THIS terminal's sidebar. No
+                # desktop destination ships in this slice.
+                "tag",
+                "tags",
             }
             assert len(catalog) == len(SLASH_COMMANDS) - len(withheld)
             # The literal is DELIBERATE, unlike its three neighbours. The

@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""Assemble the portable scoped Urdu round-2 audit receipt."""
+from __future__ import annotations
+
+import json
+from datetime import date
+from pathlib import Path
+
+OUT = Path('/Users/damian/.local-operator/sessions/3e0f499dc2ee/scratchpad/ur-core-round2-audit')
+scope = json.loads((OUT / 'scope.json').read_text())
+mechanical = json.loads((OUT / 'mechanical-summary.json').read_text())
+runtime = json.loads((OUT / 'runtime-fit-plurals.json').read_text())
+findings_doc = json.loads((OUT / 'findings.json').read_text())
+dispositions = json.loads((OUT / 'dispositions.json').read_text())
+hashes = json.loads((OUT / 'hash-checks.json').read_text())
+findings = findings_doc['findings']
+mech_by_ns = {n['namespace']: n for n in mechanical['namespace_rows']}
+pseudo_by_ns = {}
+for row in runtime['fit_rows']:
+    if not row['pseudo_fits']:
+        pseudo_by_ns.setdefault(row['key'].rsplit('.', 1)[0] if False else next(n['namespace'] for n in mechanical['namespace_rows'] if row['key'].startswith(n['namespace'] + '.')), []).append({'key': row['key'], 'actual_cells': row['cells'], 'maxCells': row['maxCells'], 'pseudo_cells': row['pseudo_30pct_cells']})
+help_risks = [r for r in runtime['approximate_help_rows'] if r['overflow_risk']]
+
+namespace_rows = []
+for source in scope['changed_namespaces'] + [scope['unchanged_neighbor']]:
+    ns = source['namespace']
+    related = [f for f in findings if ns in f['namespaces']]
+    majors = [f for f in related if f['severity'] in {'BLOCKER', 'MAJOR'}]
+    minors = [f for f in related if f['severity'] in {'MINOR', 'NIT'}]
+    followups = []
+    if ns == 'wire.slash':
+        followups.append({'kind': 'approximate_help_rendered_fit', 'keys': [r['key'] for r in help_risks], 'note': 'Approximate text-cell counts exceed the ~55-cell /help guide; rendered review remains required and this is not a silent pass.'})
+    if ns in pseudo_by_ns:
+        followups.append({'kind': 'pseudo_stretch_rendered_fit', 'keys': pseudo_by_ns[ns], 'note': 'Actual Urdu fits maxCells; 30% pseudo-stretch exceeds it and is retained only as rendered fit-risk evidence.'})
+    verdict = 'changes_requested' if majors else 'clean_with_followups' if minors or followups else 'clean'
+    namespace_rows.append({
+        'namespace': ns,
+        'namespace_total_keys': source['namespace_keys'],
+        'changed_keys_reviewed': source['changed_key_count'],
+        'unchanged_neighbor_keys_reviewed': source['namespace_keys'] if ns == scope['unchanged_neighbor']['namespace'] else 0,
+        'keys_reviewed': mech_by_ns[ns]['keys_reviewed'],
+        'en_sha256': source['en_sha256'],
+        'ur_sha256': source['ur_sha256'],
+        'context_sha256': source['context_sha256'],
+        'verdict': verdict,
+        'result': 'failed' if majors else 'passed',
+        'unresolved_blocker_major_count': len(majors),
+        'finding_ids': [f['id'] for f in related],
+        'accepted_minor_nit_ids': [f['id'] for f in minors] if not majors else [],
+        'rendered_followups': followups,
+    })
+
+verdict_counts = {}
+for row in namespace_rows:
+    verdict_counts[row['verdict']] = verdict_counts.get(row['verdict'], 0) + 1
+receipt = {
+    'schema': 1,
+    'record_kind': 'auditor_receipt',
+    'audit': {
+        'name': 'Round-2 scoped independent audit of core ur remediation',
+        'locale': 'ur',
+        'surface': 'core',
+        'round': 2,
+        'date': str(date.today()),
+        'delta': f"{scope['old_commit']}..{scope['new_commit']}",
+        'old_commit': scope['old_commit'],
+        'new_commit': scope['new_commit'],
+        'worktree': '/Users/damian/local-operator/.worktrees/i18n-ur-core',
+        'status': 'failed',
+        'result': 'changes_requested',
+        'overall_verdict': 'changes_requested',
+    },
+    'auditor': {
+        'agent': 'translation-auditor (lopdev team); independent scoped round-2 core auditor',
+        'session': '3e0f499dc2ee',
+        'model': 'openrouter/moonshotai/kimi-k3.1-pro',
+        'fallback': 'none observed; the served model recorded above performed this audit',
+        'date': str(date.today()),
+        'result': 'failed',
+        'findings': findings_doc['core_auditor_findings'],
+    },
+    'independence': {
+        'independent_of_all_translator_sessions': True,
+        'translator_sessions': ['3f68f20b2cad', '52136848d1fc', '7a648afb0f8d', '7c4a4229b011', 'ffc94c8cb17d'],
+        'other_new_audit_receipt_read': False,
+        'note': 'Round-2 used the catalogues, delta, context, and its own round-1 findings. Translator provenance was used only to enumerate the other first-audit dispositions; no other audit receipt was read.',
+    },
+    'scope': {
+        'changed_namespace_count': 11,
+        'unchanged_direct_neighbor_namespaces': ['relay.session.tags'],
+        'review_namespace_count': 12,
+        'changed_key_count': scope['changed_key_count'],
+        'unchanged_neighbor_key_count': scope['unchanged_neighbor']['namespace_keys'],
+        'keys_read': mechanical['review_key_count'],
+        'review_rule': 'Every changed value plus every relay.session.tags value was read against current English; unrelated unchanged namespaces were not re-audited.',
+        'english_and_context_unchanged_in_delta': hashes['english_and_context_unchanged_in_delta'],
+        'hash_algorithm': 'SHA-256 over exact UTF-8 file bytes; context_sha256 is null when English has no sidecar',
+        'translator_provenance_hash_mismatch_count': hashes['translator_hash_mismatch_count'],
+    },
+    'verdicts': {
+        'overall': 'changes_requested',
+        'namespace_count_by_verdict': verdict_counts,
+        'severity_counts': findings_doc['severity_counts'],
+        'core_auditor_findings': findings_doc['core_auditor_findings'],
+        'remaining_BLOCKER': 0,
+        'remaining_MAJOR': ['UR-R2-001'],
+        'round_1_dispositions': {
+            'total': dispositions['disposition_count'],
+            'verified_fixed': dispositions['verified_fixed_count'],
+            'verified_superseded': dispositions['verified_superseded_count'],
+            'unresolved_reopened': dispositions['unresolved_count'],
+            'unresolved_ids': ['UR2-009'],
+        },
+    },
+    'checks': {
+        'repository': {
+            'generate_check': '91 artifact(s) byte-identical',
+            'catalogues_only_check': '0 problem(s)',
+            'log': 'repository-checks.log',
+        },
+        'mechanical': {
+            'review_key_count': mechanical['review_key_count'],
+            'key_set_parity_failure_count': sum(not n['key_set_parity'] for n in mechanical['namespace_rows']),
+            'icu_signature_mismatch_count': mechanical['flag_counts'].get('icu_signature_mismatch', 0),
+            'technical_token_mismatch_count': mechanical['flag_counts'].get('technical_token_mismatch', 0),
+            'newline_mismatch_count': mechanical['flag_counts'].get('newline_mismatch', 0),
+            'non_nfc_count': mechanical['flag_counts'].get('non_nfc', 0),
+            'manual_bidi_control_count': mechanical['flag_counts'].get('manual_bidi_control', 0),
+            'native_digit_count': mechanical['flag_counts'].get('native_digit', 0),
+            'hindi_danda_count': mechanical['flag_counts'].get('hindi_danda', 0),
+            'informal_tum_count': mechanical['flag_counts'].get('informal_tum', 0),
+            'literal_redaction_artifact_count': mechanical['flag_counts'].get('literal_redaction_artifact', 0),
+            'number_date_time_review_key_count': mechanical['number_date_time_review_key_count'],
+            'latin_candidates': 'All 35 Latin-phrase candidates were adjudicated; permitted product/command/API/technical terms were not counted as leakage.',
+        },
+        'plurals': {
+            'scoped_plural_key_count': runtime['plural_key_count'],
+            'runtime_render_count': runtime['plural_render_count'],
+            'counts': [0, 1, 2, 21, 1.5],
+            'render_error_count': runtime['plural_error_count'],
+            'cldr_category_mismatch_count': runtime['plural_category_mismatch_count'],
+            'missing_count_count': runtime['plural_missing_count_count'],
+        },
+        'fit_pseudo_help': {
+            'scoped_explicit_maxCells_key_count': runtime['fit_key_count'],
+            'actual_rendered_overflow_count': runtime['actual_overflow_count'],
+            'pseudo_30pct_overflow_count': runtime['pseudo_30pct_overflow_count'],
+            'pseudo_disposition': 'Pseudo-stretch risks are retained for the separate rendered gate, not called actual clipping.',
+            'approximate_help_changed_key_count': runtime['approximate_help_key_count'],
+            'approximate_help_overflow_count': runtime['approximate_help_overflow_count'],
+            'approximate_help_risks': help_risks,
+            'approximate_help_disposition': 'These remain explicit rendered-review risks, not silent passes and not measured rendered failures.',
+        },
+        'native_semantics_register_glossary': {
+            'result': 'One MAJOR redaction artifact and five MINOR native/terminology findings; all other scoped values are semantically acceptable.',
+            'formality': 'No تم/direct تو address was found; آپ and respectful imperatives remain consistent.',
+            'allowed_english': 'Product/technology names, commands and tool names, flags, config keys, paths, identifiers, URLs, API/acronym/enum and machine syntax, and established Git operations were preserved and not misreported as leakage.',
+        },
+        'rendered_rtl': 'NOT PERFORMED and NOT CLAIMED. Native RTL/bidi/shaping, layout, fallback and long-text/design evidence remain a separate gate.',
+    },
+    'namespaces': namespace_rows,
+    'findings': findings,
+    'dispositions_file': 'dispositions.json',
+    'evidence': {
+        'portable_bundle': 'All paths are sibling files in this receipt directory; .pairs files contain the complete 676-value scoped review workbook.',
+        'scope_file': 'scope.json',
+        'findings_file': 'findings.json',
+        'mechanical_summary_file': 'mechanical-summary.json',
+        'mechanical_rows_file': 'mechanical-rows.json',
+        'runtime_evidence_file': 'runtime-fit-plurals.json',
+        'hash_checks_file': 'hash-checks.json',
+        'repository_checks_file': 'repository-checks.log',
+        'human_report_file': 'ur-core-round2-audit.md',
+        'reproduction_scripts': ['scripts/audit_ur_round2.py', 'scripts/runtime_ur_round2.py', 'scripts/build_ur_round2_receipt.py'],
+    },
+    'not_claimed': [
+        'No source, catalogue, ledger, generated shipped.json, eligibility, hold, or PR was edited.',
+        'No unrelated unchanged namespace was semantically re-audited.',
+        'No approximate /help or pseudo-stretch risk is called rendered proof in either direction.',
+        'No native/rendered RTL or design sign-off is claimed.',
+    ],
+}
+path = OUT / 'ur-core-round2-audit.receipt.json'
+path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + '\n')
+print(path)
+print(json.dumps({'keys_read': receipt['scope']['keys_read'], 'verdicts': verdict_counts, 'severity': findings_doc['severity_counts'], 'round_1': receipt['verdicts']['round_1_dispositions']}, ensure_ascii=False, indent=2))

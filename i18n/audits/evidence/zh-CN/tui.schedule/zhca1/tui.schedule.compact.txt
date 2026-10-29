@@ -1,0 +1,13 @@
+tui.schedule.detail_next	Next	下次
+tui.schedule.empty_header	No scheduled wakes	暂无定时唤醒
+tui.schedule.ends_left	{count, plural, one {# left} other {# left}}	{count, plural, other {剩余#次}}
+tui.schedule.ends_until_left	{duration} left	剩余{duration}
+tui.schedule.fired	{count, plural, one {# fired} other {# fired}}	{count, plural, other {已触发#次}}
+tui.schedule.fired_detail_of	{count} of {limit}	{count}/{limit}
+tui.schedule.fired_of	{count, plural, one {# of {limit} fired} other {# of {limit} fired}}	{count, plural, other {已触发#/{limit}次}}
+tui.schedule.form_notify_hint	tell me when the wake's turn finishes	唤醒开启的这轮对话结束时通知我
+tui.schedule.form_when_label	when	时间
+tui.schedule.notice_supervisor	Nothing supervises these wakes — they fire only while this conversation is running.	没有进程监管这些唤醒——仅在本次会话运行期间触发。
+tui.schedule.status_overdue	overdue {age}	已逾期{age}
+tui.schedule.subtitle	{count, plural, one {# wake in this conversation} other {# wakes in this conversation}}	{count, plural, other {本次会话有#个唤醒}}
+tui.schedule.title	Scheduled wakes	定时唤醒

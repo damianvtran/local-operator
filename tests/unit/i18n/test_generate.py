@@ -16,6 +16,54 @@ from local_operator.i18n import format as fmt
 REPO = Path(__file__).resolve().parents[3]
 
 
+def test_long_keyword_signature_wraps_without_losing_required_parameters(i18n_generate) -> None:
+    """Several typed placeholders must not make generated source fail its own lint."""
+    import ast
+
+    module = i18n_generate._render_keys_module(
+        "demo",
+        {
+            "demo.session.tray.agents_failed": (
+                "Agents {running, number}/{total, number}: {failed, number} failed"
+            )
+        },
+    )
+    assert all(len(line) <= 100 for line in module.splitlines())
+    tree = ast.parse(module)
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
+    assert {arg.arg for arg in function.args.kwonlyargs} == {"failed", "running", "total"}
+    assert function.args.kw_defaults == [None, None, None]
+    assert not function.args.args and function.args.kwarg is None
+    compile(module, "demo.py", "exec")
+
+
+def test_long_placeholder_free_name_stays_valid_source(i18n_generate) -> None:
+    """The OTHER long-header shape: no placeholders at all (agent review C1-2).
+
+    Wrapping an empty parameter list emitted `def name(\n    ,\n) -> Msg:`, a
+    SyntaxError for a key the generator has always accepted. A function name can
+    be split by no formatter, so this shape must stay parseable — the long-line
+    lint concern cannot justify emitting invalid Python.
+    """
+    import ast
+
+    key = "demo." + "one_" * 24 + "label"
+    module = i18n_generate._render_keys_module("demo", {key: "A fixed label"})
+    tree = ast.parse(module)
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef))
+    # The generated name is `one_` x 24 plus `label`: split only for the
+    # 100-column gate. Implicit concatenation keeps the asserted text
+    # byte-identical (one Constant after parsing).
+    assert function.name == (
+        "one_one_one_one_one_one_one_one_"
+        "one_one_one_one_one_one_one_one_"
+        "one_one_one_one_one_one_one_one_label"
+    )
+    assert not function.args.args and not function.args.kwonlyargs
+    assert function.args.kw_defaults == []
+    compile(module, "demo.py", "exec")
+
+
 @pytest.fixture()
 def generated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, i18n_generate):
     """A fixture catalogue root + emitted tables wired into the generator."""
@@ -113,6 +161,28 @@ def test_bundled_spa_module_is_empty_when_no_owned_namespace_is_present(
     ]
     assert '"relay.shell"' in shell_bundle and "no sessions running" in shell_bundle
     assert "relay.login" not in shell_bundle and "wire." not in shell_bundle
+
+
+def test_bundled_spa_module_emits_only_shipped_localized_owned_copy(
+    generated, i18n_generate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audited locale files become namespace/locale bundles; held bytes do not.
+
+    The synthetic Urdu text is a generation fixture, not a translation or an
+    audit. An unshipped locale beside it must not leak into the client package.
+    """
+    root, emitted = generated
+    monkeypatch.setattr(i18n_generate, "_shipped_locales", lambda: ("en", "ur"))
+    for locale, text in (("en", "English"), ("ur", "اردو"), ("fr", "Français")):
+        target = root / locale
+        target.mkdir(exist_ok=True)
+        (target / "relay.shell.json").write_text(json.dumps({"relay.shell.list.empty": text}))
+    planned = i18n_generate._planned_files(emitted)
+    bundle = planned[i18n_generate.REPO / "local_operator/mobile/web/src/i18n/bundled.gen.ts"]
+    assert bundle.index('"relay.shell": {') < bundle.index('"en": {')
+    assert bundle.index('"en": {') < bundle.index('"ur": {')
+    assert json.dumps("اردو") in bundle
+    assert json.dumps("Français") not in bundle
 
 
 def test_committed_bundle_carries_exactly_the_owned_shell_namespace() -> None:
@@ -455,9 +525,17 @@ def test_drift_check_passes_on_the_committed_tree() -> None:
 @pytest.mark.parametrize("slash_status", [None, "failed", "passed"])
 @pytest.mark.parametrize("candidate", ["zh-CN", "zh-cn", "zh-Hans", "zh_CN"])
 def test_security_hold_cannot_be_bypassed_by_partial_or_forged_passes(
-    generated, i18n_generate, slash_status, candidate
+    generated, i18n_generate, monkeypatch, slash_status, candidate
 ) -> None:
-    """Synthetic bytes only: omission is the bypass the carried gate cannot see."""
+    """Synthetic bytes only: omission is the bypass the carried gate cannot see.
+
+    The real disposition is EMPTY for zh-CN as of 2026-10-24, so the
+    canonical tag is held here in the loaded module's isolated state: these
+    synthetic rows (including the fully passed ones) must still be excluded,
+    which is what proves the mechanism is live rather than zh-CN's old status
+    baked into a fixture. The alias candidates are not SUPPORTED tags, so they
+    can never ship however complete their directory looks.
+    """
     root, _ = generated
     entries = []
     for locale in ("en", "fr", candidate):
@@ -490,6 +568,9 @@ def test_security_hold_cannot_be_bypassed_by_partial_or_forged_passes(
             }
         )
     i18n_generate.LEDGER.write_text(json.dumps({"entries": entries}))
+    # The committed disposition is empty; inject the canonical hold under test.
+    assert i18n_generate.SECURITY_HELD_LOCALES == frozenset()
+    monkeypatch.setattr(i18n_generate, "SECURITY_HELD_LOCALES", frozenset({"zh-CN"}))
     # fr proves that ordinary partial namespace eligibility remains supported.
     # Even fabricated passes do not constitute explicit security disposition.
     assert i18n_generate._shipped_locales() == ["en", "fr"]

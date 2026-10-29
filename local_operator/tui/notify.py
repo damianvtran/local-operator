@@ -185,6 +185,11 @@ BODY_APPROVAL = "Waiting for approval"
 BODY_ASK = "Waiting for your answer"
 BODY_ERROR = "Stopped with an error"
 BODY_INTERRUPTED = "Stopped before finishing"
+#: An inbox item's banner body when ``display.notification_session_name`` is
+#: off (contract §1.5): the house sentence that replaces the model-written
+#: body, so a lock screen learns only that something wants the operator. Same
+#: tier as the completion bodies beside it (unextracted banner literals).
+BODY_UPDATE = "An agent flagged an update"
 #: The retire-for-build row's sentence, shared verbatim with ``rows.py`` (the
 #: module that owns this row on both surfaces) so the banner cannot drift
 #: from the row it stands for. Warning-tier in the row; the banner's own

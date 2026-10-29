@@ -303,6 +303,11 @@ CONTRACT_KEYS = (
     "LOP_MOBILE_CHILD_PROVIDER",
     "LOP_MOBILE_CHILD_MODEL",
     "LOP_MOBILE_CHILD_EFFORT",
+    # The birth dial (ui#1265) is part of the same spawn contract: a spare
+    # missing it adopts into a conversation that opens at standard speed while a
+    # cold child born on the same pick runs the tier, which is the drift this
+    # tuple exists to forbid.
+    "LOP_MOBILE_CHILD_FAST",
     "LOP_MODEL_SELECTION_OVERRIDE",
     "LOP_RUNTIME_DEFER_MATERIALISE",
     # The engage claim (``types.ENGAGED_ENV``, spelled out here because this
@@ -1085,6 +1090,14 @@ def _spawn_standby(
     env = dict(os.environ)
     for key in CONTRACT_KEYS + ("LOP_RUNTIME_ADOPT_SESSION",):
         env.pop(key, None)
+    # A warm BECOMES a session runtime, and adoption cannot repair the `ps -E` view of
+    # its launch environment (``_apply_environment``), so the desktop plane's bearer is
+    # withheld at the spawn, as in ``launch`` (operator ask a-772b): a standby never
+    # holds it, and adoption installs the requester's environment, which
+    # ``launch._spawn_runtime`` built the same way.
+    from local_operator.agent_shell import without_daemon_bearer
+
+    without_daemon_bearer(env)
     # Pinned, because the child resolves its root from the environment and a
     # warmer's own environment is the only one it should serve. Safe to pin: the
     # config dir is read at call time, not by the warm, and adoption replaces

@@ -1,0 +1,2 @@
+tui.review.lane_stale_head	EN="stale — reviewed {reviewed}, head {head}"	UR="پرانا — {reviewed} پر جائزہ، head {head}"	OLD="پرانا — جائزہ {reviewed}، head {head}"
+tui.review.lane_stale_reviewed	EN="stale — reviewed {reviewed}"	UR="پرانا — {reviewed} پر جائزہ"	OLD="پرانا — جائزہ {reviewed}"

@@ -176,7 +176,7 @@ def test_an_unknown_kind_raises_rather_than_reading_as_restored() -> None:
     """
     import pytest
 
-    assert set(NOTICE_KINDS) == {"disabled", "stalled", "restored"}
+    assert set(NOTICE_KINDS) == {"disabled", "stalled", "restored", "blind", "seeing"}
     with pytest.raises(ValueError) as caught:
         format_monitor_notice_text(notice(kind="expired"))
     assert "expired" in str(caught.value)
@@ -246,3 +246,52 @@ def test_the_human_remedy_rides_a_broken_watch_but_not_a_recovery() -> None:
     assert MONITOR_HUMAN_REMEDY not in monitor_receipt_body(
         format_monitor_notice_text(notice(kind="restored"))
     )
+
+
+# ---------------------------------------------------------------------------
+# The blind episode (2026-10-20): the words a watch that cannot compare says
+# ---------------------------------------------------------------------------
+
+
+def test_a_blind_notice_names_the_state_and_the_consequence() -> None:
+    text = format_monitor_notice_text(
+        notice(kind="blind", detail="its full result is no longer in the spill store")
+    )
+    first = text.splitlines()[0]
+    assert "cannot compare its result" in first
+    assert "BLIND" in first
+    assert "changes are not being reported" in first
+    assert "Reason: its full result is no longer in the spill store" in text
+    # The baseline is kept, so the notice must promise the consolidated delta.
+    assert "last comparable baseline" in text
+    assert "Monitors tick only while this session is open." in text
+    assert len(text) <= NOTICE_MAX_CHARS
+
+
+def test_a_seeing_notice_closes_the_blind_episode() -> None:
+    text = format_monitor_notice_text(notice(kind="seeing"))
+    assert "seeing its full result again" in text
+    assert "blind episode has ended" in text
+    assert len(text) <= NOTICE_MAX_CHARS
+
+
+def test_a_blind_notice_without_a_baseline_promises_no_delta() -> None:
+    """Review round 1, F4 / QA round 1, Q1: there is nothing to diff against.
+
+    The live m2 monitor's FIRST check was already blind (its 4.5 MB result
+    exceeded the spill cap), but the notice said it kept "its last comparable
+    baseline" and would report everything missed as one delta. It had none.
+    """
+    text = format_monitor_notice_text(notice(kind="blind", no_baseline=True))
+    assert "No comparable baseline existed" in text
+    assert "everything it missed as one delta" not in text
+    assert len(text) <= NOTICE_MAX_CHARS
+
+
+def test_a_seeing_notice_without_a_baseline_says_the_first_result_became_it() -> None:
+    text = format_monitor_notice_text(notice(kind="seeing", no_baseline=True))
+    assert "no delta covers the gap" in text
+    assert "diffs against the last comparable baseline" not in text
+    # The default (a baseline existed) keeps the consolidated-delta sentence.
+    with_baseline = format_monitor_notice_text(notice(kind="seeing"))
+    assert "diffs against the last comparable baseline" in with_baseline

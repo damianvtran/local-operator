@@ -76,7 +76,7 @@ describe("WorkingLine", () => {
 			const { container } = render(<WorkingLine activity="responding" startedS={startedS} />);
 			const clock = container.querySelector(".w-\\[6ch\\]");
 			expect(clock, `startedS=${startedS}`).toBeTruthy();
-			expect(clock?.className).toContain("text-right");
+			expect(clock?.className).toContain("text-end");
 			expect(clock?.className).toContain("shrink-0");
 			cleanup();
 		}

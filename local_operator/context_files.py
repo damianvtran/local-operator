@@ -734,15 +734,39 @@ def render_context_files(files: list[Path], cwd: str | Path) -> str:
     already see is pure noise. Larger files ship head + index; see the module
     docstring for why that beats the byte-truncated dump it replaces.
     """
+    return render_context_files_with_record(files, cwd)[0]
+
+
+#: One injected guidance file as the prompt actually carried it: resolved path
+#: and the sha256 of the head text that went into ``<repo-guidance>``. See
+#: :func:`render_read_index` for the one consumer and why it needs both.
+GuidanceRecord = tuple[str, str]
+
+
+def _head_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def render_context_files_with_record(
+    files: list[Path], cwd: str | Path
+) -> tuple[str, tuple[GuidanceRecord, ...]]:
+    """:func:`render_context_files` plus the record of what it injected.
+
+    The record is taken from the SAME head read that produced the block, so it
+    describes exactly the bytes the model was shown — not a later re-read of
+    the disk, which is what the read tool's guidance index must not trust.
+    """
     if not files:
-        return ""
+        return "", ()
     base = Path(cwd).resolve()
     parts: list[str] = []
+    record: list[GuidanceRecord] = []
     for path in files:
         try:
             text, head_lines, has_more = _read_head(path)
         except OSError:
             continue
+        record.append((str(path.resolve()), _head_digest(text)))
         try:
             shown = str(path.relative_to(base))
         except ValueError:
@@ -752,16 +776,77 @@ def render_context_files(files: list[Path], cwd: str | Path) -> str:
             body += "\n" + _render_index(path, shown, head_lines)
         parts.append(f'<file path="{shown}">\n{body}\n</file>')
     if not parts:
-        return ""
+        return "", ()
     return (
         "## Repository guidance\n\n"
         "These instruction files were found in this directory's ancestors and "
         "state the project's conventions. Treat them as the project's "
         "defaults; a direct instruction in the conversation still wins.\n\n"
         "<repo-guidance>\n" + "\n".join(parts) + "\n</repo-guidance>"
-    )
+    ), tuple(record)
 
 
 def load_repo_guidance(cwd: str | Path, *, boundary: Path | None = None) -> str:
     """One call: discover + render. ``""`` when there is nothing to inject."""
     return render_context_files(discover_context_files(cwd, boundary=boundary), cwd)
+
+
+def load_repo_guidance_with_record(
+    cwd: str | Path, *, boundary: Path | None = None
+) -> tuple[str, tuple[GuidanceRecord, ...]]:
+    """:func:`load_repo_guidance` plus the injected-file record, from one walk."""
+    return render_context_files_with_record(discover_context_files(cwd, boundary=boundary), cwd)
+
+
+def render_read_index(
+    path: Path, record: tuple[GuidanceRecord, ...] | None, shown: str
+) -> str | None:
+    """What a whole-file ``read`` of an injected guidance file returns, or None.
+
+    Why this exists: team briefs say "read AGENTS.md before work", so children
+    re-read the guidance file their system prompt already carries. Measured
+    over a week: ~2,700 such reads, 27 MB of results. For a file larger than
+    the read clamp the whole-file read returns only its first 8 KiB -- the
+    head :func:`render_context_files` already injected, plus a little -- and
+    nothing from the sections the reader needed. Returning the section index
+    instead (built by the very renderer the prompt uses, so the two can never
+    disagree on line numbers) costs ~4 KB and names the range to read next.
+
+    ``record`` is what THIS session's prompt actually carried (see
+    :func:`render_context_files_with_record`; children inherit the parent's).
+    It is the only safe witness for "already in your system prompt": the
+    prompt is built once and never re-read, so a check against today's disk
+    would lie about a file edited or created since (agent review R1-1). The
+    file must be in the record AND its current head must hash to the recorded
+    digest; anything else -- no record, a file never injected, a head edited
+    since start -- returns None and the caller does the ordinary read, which
+    is the honest answer. A changed TAIL with an unchanged head still shapes:
+    the index is rendered from the current file, so its ranges stay correct.
+
+    The caller (the read tool) applies the other gates: whole-file, non-raw,
+    and only when the ordinary read would be clamped -- below the clamp the
+    whole file comes back in one call, which an index would only make two.
+    """
+    if not record:
+        return None
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return None
+    digest = dict(record).get(str(resolved))
+    if digest is None:
+        return None
+    try:
+        text, head_lines, has_more = _read_head(resolved)
+    except OSError:
+        return None
+    if not has_more or _head_digest(text) != digest:
+        return None
+    return (
+        f"`{shown}` is repository guidance: its head (L1-{head_lines}) is already "
+        f"in your system prompt under <repo-guidance>, so a whole-file read "
+        f"would only repeat it. Read the section you need by range."
+        + _render_index(resolved, shown, head_lines).replace(
+            "is NOT included above", "is NOT in your system prompt"
+        )
+    )

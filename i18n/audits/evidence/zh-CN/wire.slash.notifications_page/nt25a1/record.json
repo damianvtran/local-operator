@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "audit_id": "nt25a1",
+  "audit_id_assigned_by": "manager delegation, 2026-10-25",
+  "audit_kind": "independent_current_byte_namespace_audit",
+  "locale": "zh-CN",
+  "namespace": "wire.slash.notifications_page",
+  "audit_date": "2026-10-25",
+  "audited_revision": "329b5c581784df1082dbd0630c0f814c7a3c0c8f",
+  "audited_revision_note": "Current working-tree bytes named by input_hashes; English source pin verified; task baseline 3c16a9e77c63dce7082af6137e151421b6cbf2be.",
+  "attestation_revision": "329b5c581784df1082dbd0630c0f814c7a3c0c8f",
+  "key_count": {
+    "en": 1,
+    "target": 1
+  },
+  "verdict": "passed",
+  "result": "clean-with-findings",
+  "verdict_reason": "All keys read against English/context; actual parser, argument and render checks passed. No unresolved blocker/major; minor register/terminology findings remain.",
+  "auditor": {
+    "agent": "translation-auditor",
+    "instance": "audit-zh-cn-6a81bd6cab5c",
+    "session": "6a81bd6cab5c",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Host model-switch message: openai/gpt-6.1-sol after provider quota failures; not the requested anthropic/claude-opus-5-5.",
+    "date": "2026-10-25",
+    "independence": "Independent audit-zh-CN agent/context; authored none of the UI tr-zh-CN or L1-core-notify coder translations and made no catalogue/code/ledger edits."
+  },
+  "translator": {
+    "agent": "L1-core-notify coder",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-10-25"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.json",
+      "sha256": "9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594"
+    },
+    "en_context_sidecar": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.notifications_page.context.json",
+      "sha256": "2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.slash.notifications_page.json",
+      "sha256": "31c919f35913e6c0f333c739acd3a602912bf54f6ef8fd82ed0176bcec988b67"
+    }
+  },
+  "artifacts": [
+    "report.md",
+    "audit.log",
+    "receipt.json"
+  ],
+  "audit_log": {
+    "path": "audit.log",
+    "state": "present",
+    "provenance": "Actual isolated core interpreter output produced independently by this auditor."
+  },
+  "findings": [
+    {
+      "key": "wire.slash.notifications_page.help",
+      "severity": "minor",
+      "current": "问题和智能体更新；read全部标为已读",
+      "proposed_text": "请求和智能体更新；read全部标为已读",
+      "reason": "Asks is the named product queue: UI rail, drawer, filter and detail all use 请求, whereas this command help switches it to 问题. Reuse 请求 for cross-surface glossary consistency; keep literal read. The proposed text is also 34 cells, within maxCells 50.",
+      "disposition": "unresolved; original translator/coder or design/QA to address"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "result": "clean-with-findings",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0,
+    "rejected": 0,
+    "findings_total": 1
+  },
+  "limitations": [
+    "LLM audit; no native-speaker attestation.",
+    "No browser/rendered-fit evidence claimed."
+  ],
+  "current_bytes_match_audited_hashes": true
+}

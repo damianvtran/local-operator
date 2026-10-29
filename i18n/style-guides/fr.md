@@ -29,6 +29,11 @@ for `fr`; when this file and a habit disagree, this file wins.
   script, prompt · API, CLI, TUI, JSON, YAML, HTTP, URL, GPU · bug. Reason:
   translating them ("validation", "bogue") reads foreign to fr developers.
 - Wave-1 recorded addition: runtime (kept English; mirrors the es guide).
+- Wave-2 recorded addition (fr `wire.errors.files` backfill): bearer, as the
+  HTTP authorization scheme named in a 401 (`Authorization: Bearer …`).
+  "token d’accès" keeps "token" English by the list above; "bearer" is the
+  scheme token beside it, and the shipped fr corpus uses no French rendering
+  of it. Naming the scheme is what tells the caller what to send.
 - Prefer French where settled: serveur, fichier, dossier, réseau, stockage,
   paramètres (settings), appareil (device), équipe, compétence (skill).
 
@@ -65,6 +70,11 @@ for `fr`; when this file and a habit disagree, this file wins.
 - Budgets: `maxCells` from the en sidecar; pinned: PERSIST_HINT 42/43 cells,
   tip pool 59, `/help` ≈ 55. French typographic spaces (U+202F) count one
   cell each — account for them.
+- Recorded width exception: `cli.services_status` in this wave:
+  `serve_linger_required` measures 102 and `unsupervised_unknown` 92 cells with
+  `rich.cells.cell_len` against the 80/78 status budget. The durability clause
+  and the scope name lengthen them; shortening either drops the logout-only
+  qualification this copy exists to keep.
 
 ## Punctuation & typography
 

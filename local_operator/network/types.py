@@ -174,6 +174,10 @@ def peer_whole_int(value: Any, *, default: int = 0, maximum: int | None = None) 
 #: device to install a strictly newer published build. It names the BOUND, not
 #: just the act — the peer never delivers code, never names a ref and never runs
 #: a command; it names a version this device resolves through its OWN channel.
+#: Peer-initiated relay recovery uses this same self-decided lifecycle grant:
+#: restarting only this relay is narrower than replacing its build, still probes
+#: busy sessions, and gives the requester no shell or fleet-wide authority. The
+#: capability's public words name both acts so the recovery right is not hidden.
 #: Like the two onboarding scopes it is granted PER MEMBER — no NON-ADMIN role
 #: carries it (the blanket ``admin`` role holds the full vocabulary by
 #: construction, for every capability), so adding it to ``read``/``drive``
@@ -279,7 +283,7 @@ def normalise_pending(value: object) -> str | None:
 
 
 def row_needs_claim(*, state: object, pending: object) -> str | None:
-    """The ONE reader of a ROW's needs claim: never a claim on a STORED row.
+    """The ONE reader of a ROW's needs claim: only an answerable live runtime.
 
     ``pending`` answers "what is a person being waited on" — a parked gate on a
     runtime that can be answered (``approval``/``ask``) — and a stored session
@@ -292,13 +296,13 @@ def row_needs_claim(*, state: object, pending: object) -> str | None:
     they are dropped HERE, at the row boundary, so a mixed-version fleet paints
     one row one way — the rule is the reader's, not each renderer's.
 
-    ``state`` is the row's own state word, compared against the catalogue's
-    ``stored`` token — the same token ``session_state_words`` renders as "not
-    running" — rather than inferred from an absent field: a live row's state
-    is a runtime word (``live``/``wedged``/...), and a row that carries
-    neither state nor pending is "no claim" either way.
+    The phantom-approval case also includes wedged owners: an older relay can
+    retain pending="approval" after its heartbeat stops, but that owner cannot
+    answer the gate. Drop known non-live states here so mixed-version fleets
+    are protected even when producer-side normalization is absent. An absent
+    state retains the legacy reader contract; it is not evidence of death.
     """
-    if str(state or "").strip() == "stored":
+    if str(state or "").strip() in {"stored", "wedged", "stale"}:
         return None
     return normalise_pending(pending)
 
@@ -398,6 +402,10 @@ NET_OPS: tuple[str, ...] = (
     # requester, which is why the origin learns the grant from the answer rather
     # than by reading a table it cannot see.
     "net_update",
+    # Peer-initiated relay recovery (meshrestart.py). The same self-decided
+    # ``update`` grant covers this narrower lifecycle act: no role gains it, the
+    # member probes its own busy sessions, and only its own relay is restarted.
+    "net_restart",
     "net_bye",
     "ping",
 )
@@ -475,6 +483,11 @@ LOCAL_OPS: tuple[str, ...] = (
     # a peer may do HERE is a write to this device's row and nothing else — a
     # local act with a local name, never a wire op.
     "net_member_caps",
+    # THE OTHER LOCAL HALF of a member row (naming design §3.1): a device renaming
+    # ITSELF. One row, this device's own, and no peer's agreement is needed — so it
+    # is the same local-op boundary as the line above, never a wire op. The peer
+    # side is Rule N1 in ``relay.adopt_members``, which needs no op of its own.
+    "net_identity_name",
     # The three verbs the later slices serve (§1.3). Declared here, in P0, so the
     # totality rule ("a LOCAL_OPS name never appears in OP_CAPABILITY") already
     # holds for them and no slice has to edit this tuple: the names are this
@@ -493,6 +506,10 @@ LOCAL_OPS: tuple[str, ...] = (
     # GitHub tokens for one ``(key, holder)`` immediately — the same local-op
     # boundary as the three leg-1 verbs, a different direction of travel.
     "credential_revoke",
+    # The member-side repair pull (mesh-mcp-credentials.md §4): a local act by the
+    # same boundary rule — this device's own relay is told to pull one copy from
+    # its owner now, and the link it needs lives in that process.
+    "credential_sync_pull",
     # The MCP definition sync's on-demand half (mcpdefs.py): reach every linked
     # peer, or one named peer, and bring its user-scope MCP servers up to date.
     # A local op for the same reason ``definitions_sync`` is one — this device's
@@ -502,6 +519,10 @@ LOCAL_OPS: tuple[str, ...] = (
     # OWN relay to ask a peer to move to this device's build. A local act by the
     # ``peer_*`` boundary rule — the peer-scope half is ``net_update``.
     "peer_update",
+    # The client half of ``net_restart``: this device's relay asks one named
+    # peer, then reconnects to verify the new instance rather than claiming an
+    # accepted request restarted anything.
+    "peer_restart",
 )
 
 #: The phases ``net_session_move`` carries (§1.3 of the build plan). Declared
@@ -510,7 +531,7 @@ LOCAL_OPS: tuple[str, ...] = (
 #: §6.5 recovery — the destination asks the source what happened), and ``invite``
 #: reaches the DESTINATION, which by definition does not own the id yet. See
 #: ``authorizer.Authorizer._session_scope`` for the carve-outs.
-MOVE_PHASES: tuple[str, ...] = ("status", "prepare", "ready", "done", "invite")
+MOVE_PHASES: tuple[str, ...] = ("status", "prepare", "ready", "done", "invite", "rollback")
 
 #: Move phases the SOURCE must answer for an id it has already handed away. A
 #: ``prepare`` is deliberately absent: preparing a session this device no longer
@@ -594,8 +615,8 @@ CAPABILITY_WORDS: dict[str, str] = {
     # authority over the install, and the whole reason a standing grant is
     # defensible here is the narrowness below.
     "update": (
-        "install a newer build here when this peer asks, and only from "
-        "this device's own update channel"
+        "install a newer build here from this device's own update channel, or restart "
+        "only this device's relay for recovery, when this peer asks"
     ),
     "admin": "administer the network",
 }
@@ -688,6 +709,9 @@ OP_CAPABILITY: dict[str, str | None] = {
     # learns the grant is absent (``not_authorised``), quoted by name into the
     # ``no_grant`` skip.
     "net_update": "update",
+    # Relay recovery is the same receiver-side, self-decided lifecycle grant as
+    # an update, not ``admin`` (a network decision) or ``stop`` (one session).
+    "net_restart": "update",
     "net_bye": None,
     "ping": "list",
 }
@@ -887,6 +911,16 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     # the hand-written list is what missed this row.
     "event_mute": "view",  # stop sending THIS connection deltas; affects nobody else
     "event_unmute": "view",  # the matching resume, on the same connection
+    # ``view``, and for the same reason as the mute pair: the op writes ONE
+    # number onto the SENDING connection's own record (``conn.tui_input_at_ms``,
+    # session/runtime/server.py), so it changes nothing any other viewer or the
+    # owner's own state can observe. It carries no content either — an epoch
+    # millisecond and nothing else, because the ladder asks only "is the
+    # operator here NOW" — so ``view`` (the capability that already opens this
+    # stream) is the narrowest word that covers it, and no narrower row exists.
+    # Without this row the relay refused it closed, and the stream with it
+    # (test_stream_op_gate.py found it: R6-1's ``activity`` had no decision).
+    "activity": "view",  # this connection's own input freshness; timestamp only
     # session-scoped WRITE, not a per-viewer mark: it clears the OWNER's own
     # attention state (serving.py ``acknowledge_attention`` →
     # ``Session.acknowledge_attention``), and the runtime then pushes the new
@@ -1394,6 +1428,15 @@ class MemberRecord:
     added_via: str = "invite"
     endpoints: list[str] = field(default_factory=list)
     last_seen_at: float | None = None
+    #: The ``host:port`` this device last saw the member's link ARRIVE from, with
+    #: the member's own declared listen port substituted for the ephemeral source
+    #: port. A FALLBACK dial candidate only, never a declaration: when every
+    #: declared endpoint has gone stale (an EC2 stop/start moved the public IP and
+    #: the row can only heal on a completed handshake), the address the member
+    #: actually reached us from is the best evidence of where it is now
+    #: (2026-10-21, cloud-node-1). Local to this device: not relayed in member
+    #: lists as an endpoint, and absent on rows from older builds.
+    observed_endpoint: str = ""
     last_seen_instance: str = ""
     #: How many times a second live process has claimed this device id outside
     #: the restart grace window — the copied-key detector's evidence.
@@ -1708,6 +1751,17 @@ class InviteRecord:
 
     def is_fresh(self, now: float) -> bool:
         return now < self.expires_at
+
+    def listed_state(self, now: float) -> str:
+        """``state`` as a listing should print it: a dead ``minted`` row says ``expired``.
+
+        ``state`` is the single-use ledger and never moves on expiry (nothing
+        redeemed or consumed the token), so a listing that printed it verbatim
+        called a token that redemption already refuses (``not is_fresh``)
+        ``minted`` — 24 of them on one record, 2026-10-21. Display-only: the
+        stored state, and every decision made on it, is unchanged.
+        """
+        return "expired" if self.state == "minted" and not self.is_fresh(now) else self.state
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)

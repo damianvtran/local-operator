@@ -1,0 +1,19 @@
+{
+  "relay.session.list.search_placeholder": "搜索对话……",
+  "relay.session.list.empty_hint": "在下方新建会话，或在电脑上的TUI中开始",
+  "relay.session.list.no_matches": "没有匹配的对话",
+  "relay.session.list.start_idle": "新建会话",
+  "relay.session.list.start_busy": "正在启动……",
+  "relay.session.view.back": "返回会话列表",
+  "relay.session.view.empty_title": "暂无消息",
+  "relay.session.view.empty_hint": "在下方发送消息以开始",
+  "relay.session.past.back": "返回",
+  "relay.session.past.heading": "历史会话",
+  "relay.session.past.search_placeholder": "搜索名称和对话……",
+  "relay.session.past.loading": "正在加载……",
+  "relay.session.directory.sheet_title": "工作目录",
+  "relay.session.directory.path_placeholder": "或输入其他路径……",
+  "relay.session.model.sheet_title": "模型",
+  "relay.session.model.filter_placeholder": "筛选模型",
+  "relay.session.model.loading": "正在加载……"
+}

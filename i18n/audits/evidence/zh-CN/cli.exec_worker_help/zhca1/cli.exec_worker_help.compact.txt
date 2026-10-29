@@ -1,0 +1,4 @@
+cli.exec_worker_help.agent	Agent name selector	智能体名称选择器
+cli.exec_worker_help.control	Publish a session record and serve the control socket for this run	为本次运行发布会话记录并提供控制套接字
+cli.exec_worker_help.job_id	Ledger job id; when set, the worker appends a terminal record (finished_at + exit_code) to the JSONL ledger on exit	账本任务ID；设置后，工作进程退出时向JSONL账本追加终态记录（finished_at + exit_code）
+cli.exec_worker_help.json	Emit one JSON line per agent event	每个智能体事件输出一行JSON

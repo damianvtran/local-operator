@@ -8,9 +8,10 @@ interaction story is a line that becomes content IN PLACE:
   the ``Preparing highlights…`` line, whose lead is the shimmering graphic from
   :mod:`local_operator.tui.imagegen`;
 - **settled** — the file rows (or the ≤ 2 files one-liner), the "N more"
-  disclosure, and nothing else this surface draws: HTML components are skipped
-  SILENTLY and with no placeholder — see :meth:`_build` for why that is the
-  documented design point and not an omission;
+  disclosure, then one compact row per generated sound, and nothing else this
+  surface draws: HTML components are skipped SILENTLY and with no placeholder —
+  see :meth:`_build` for why that is the documented design point and not an
+  omission;
 - **cancelled / failed** — the callouts, then the one quiet line.
 
 NO header, label or title chrome, on purpose (the 2026-10-10 amendment): the
@@ -48,7 +49,7 @@ from local_operator.supplements.contract import reader_disposition
 from local_operator.terminals import is_hyperlinked
 from local_operator.tui import supplements as supplement_mod
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.link_targets import file_affordance
+from local_operator.tui.link_targets import file_affordance, file_uri_to_path
 from local_operator.tui.widgets.transcript import (
     SPINE_INDENT,
     TranscriptBlock,
@@ -100,6 +101,7 @@ class SupplementBlock(TranscriptBlock):
         #: the affordance on the same input the paint-time check admitted
         #: (``file_affordance`` refuses a bare absolute path by contract).
         self._painted_links: dict[str, str] = {}
+        self._painted_identities: dict[str, tuple[int, int, int, int]] = {}
         #: The painted line index of the "N more" row (None when absent), for
         #: the click hit test. Line-indexed because every row is truncated to
         #: one line, so widget y maps to a line exactly.
@@ -189,6 +191,7 @@ class SupplementBlock(TranscriptBlock):
         lines: list[Text] = []
         self._more_line = None
         self._painted_links = {}
+        self._painted_identities = {}
         if disposition == "nothing":
             # Nothing renders: a superseded or dismissed row hides the whole
             # block, and the app removes it from the transcript.
@@ -231,6 +234,25 @@ class SupplementBlock(TranscriptBlock):
                 file_rows = self._file_rows(body, files)
                 lines.extend(file_rows)
                 lines.extend(self._more_rows(body, more_count, base_index=len(file_rows)))
+
+        # Generated sounds, after the files and above the state line. EVERY sound the
+        # turn produced gets a row: the block paints one form (this surface has no
+        # collapse state), and a sound is an artifact, not decoration -- a batch of
+        # fourteen must read as fourteen rows, never as a count. The row is text, not
+        # a player: see ``supplement_mod.sound_row_text`` for the D10 rule.
+        for text in supplement_mod.sound_rows(self._sounds()):
+            lines.append(self._fit(self._line(text, style=self._muted_style()), body))
+        sounds_more = self._sounds_more()
+        if sounds_more > 0:
+            # The row bound (SOUNDS_MAX) cut the list; say so instead of ending it.
+            lines.append(
+                self._fit(
+                    self._line(
+                        supplement_mod.sounds_more_text(sounds_more), style=self._more_style()
+                    ),
+                    body,
+                )
+            )
 
         if show_line:
             line = self._state_line(disposition)
@@ -281,7 +303,7 @@ class SupplementBlock(TranscriptBlock):
             text = name or path
             row.append(text, style=link_style)
             if uri:
-                self._painted_links[uri] = raw_path
+                self._remember_file(uri, raw_path)
             if path and path != text:
                 row.append("  ")
                 row.append(path, style=self._path_style(link_style))
@@ -314,12 +336,24 @@ class SupplementBlock(TranscriptBlock):
             row = self._line("", style=None)
             row.append(label, style=link_style)
             if uri:
-                self._painted_links[uri] = raw
+                self._remember_file(uri, raw)
             if shown and shown != label:
                 row.append("  ")
                 row.append(shown, style=self._path_style(link_style))
             rows.append(self._fit(row, body))
         return rows
+
+    def _remember_file(self, uri: str, raw: str) -> None:
+        from pathlib import Path
+
+        from local_operator.tui.file_viewer import file_identity
+
+        try:
+            identity = file_identity(Path(file_uri_to_path(uri)))
+        except OSError:
+            return
+        self._painted_links[uri] = raw
+        self._painted_identities[uri] = identity
 
     def _line(self, text: str, *, style: Style | None) -> Text:
         row = Text(no_wrap=True, overflow="ellipsis")
@@ -426,6 +460,20 @@ class SupplementBlock(TranscriptBlock):
             return []
         return [item for item in files if isinstance(item, Mapping)]
 
+    def _sounds(self) -> list[Mapping[str, Any]]:
+        """The row's sounds, in row order (generation order), malformed entries dropped."""
+        sounds = self._details.get("sounds")
+        if not isinstance(sounds, list):
+            return []
+        return [item for item in sounds if isinstance(item, Mapping)]
+
+    def _sounds_more(self) -> int:
+        """How many sounds the row bound held back (0 when it did not bite)."""
+        count = self._details.get("sounds_more")
+        if isinstance(count, bool) or not isinstance(count, int):
+            return 0
+        return max(0, count)
+
     def _more_paths(self) -> list[str]:
         more = self._details.get("more")
         if not isinstance(more, list):
@@ -459,7 +507,11 @@ class SupplementBlock(TranscriptBlock):
             if url.startswith("file:"):
                 opener = getattr(self.app, "open_transcript_file", None)
                 if opener is not None:
-                    opener(url, source_path=self._painted_links.get(url, ""))
+                    opener(
+                        url,
+                        source_path=self._painted_links.get(url, ""),
+                        expected=self._painted_identities.get(url),
+                    )
                     event.stop()
                 return
             super().on_click(event)

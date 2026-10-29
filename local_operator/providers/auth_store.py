@@ -95,6 +95,7 @@ if TYPE_CHECKING:  # the store path stays an optional, import-guarded argument
         CacheAffinityHint,
         EndpointModeResolver,
     )
+    from local_operator.providers.account_policy import ResetCandidate
     from local_operator.providers.usage import QuotaHealth, UsageReport
     from local_operator.providers.usage_cache import UsageCacheStore
 
@@ -378,6 +379,53 @@ CREATE TABLE IF NOT EXISTS auth_credential_refresh_leases (
   expires_at_ms INTEGER NOT NULL
 );
 """
+
+
+def failure_block_window(
+    retry_after_ms: int | None,
+    *,
+    usage_limited: bool,
+    model_id: str = "",
+    floor_ms: int = DEFAULT_BLOCK_MS,
+) -> tuple[str, int]:
+    """``(block_scope, block_ms)`` for a credential that just failed: the ONE rule.
+
+    WHY THIS IS A FUNCTION: the window a failing credential sits out used to be
+    spelled inline in :meth:`AuthStore.rotate_sibling`, so the only credential
+    that obeyed it was a LOCAL row. A row borrowed over the mesh answered the same
+    ``429 … retry in 24h`` and was asked again on the very next request, because
+    nothing on the borrower remembered it (``MeshCredentialClient.report_sync``
+    now calls this too). Both sides read the same rule here so they cannot drift.
+
+    The rule itself is unchanged: the provider's advertised wait, floored at
+    ``floor_ms`` and capped at :data:`MAX_CREDENTIAL_BLOCK_MS` — the ceiling
+    :meth:`AuthStore.block_credential` already applied to every local block, so
+    a ``retry in 24h`` rests a row for an hour and is then re-probed once rather
+    than stranded for a day on one reading. A usage-limit verdict on a model
+    with a parsable family is scoped to that family (see ``rotate_sibling`` for
+    why the family is the under-block side that heals); anything else is
+    account-wide.
+    """
+    from local_operator.model.registry import model_family
+
+    family = model_family(model_id) if model_id else ""
+    scope = f"model:{family}" if (usage_limited and family) else ""
+    window = max(floor_ms, int(retry_after_ms or 0))
+    return scope, min(window, MAX_CREDENTIAL_BLOCK_MS)
+
+
+def block_scope_gates(scope: str, model_id: str) -> bool:
+    """Whether a block written with ``scope`` stops a request for ``model_id``.
+
+    The read half of :func:`failure_block_window`, shared for the same reason:
+    an account-wide block (``""``) gates every model, a ``model:<slug>`` block
+    gates exactly the models whose id contains the slug — the predicate
+    :meth:`AuthStore.is_blocked_for_model` applies to its stored rows.
+    """
+    if not scope:
+        return True
+    lowered = (model_id or "").lower()
+    return bool(lowered) and scope.removeprefix("model:") in lowered
 
 
 class AuthStoreError(Exception):
@@ -706,6 +754,69 @@ def credential_identity(credential: "StoredCredential | Mapping[str, Any]") -> s
 
 
 @dataclasses.dataclass(frozen=True)
+class RowQuotaFact:
+    """One enabled row's quota gates, as :meth:`AuthStore.quota_eligibility` read them.
+
+    Non-secret by construction: an id, two remainders and a verdict word.
+    """
+
+    credential_id: int
+    #: The persisted block's remainder for the model (``blocked_remaining_ms``); 0 = none.
+    blocked_ms: int
+    #: The selector's usage verdict: ``healthy``/``reserve``/``depleted``/``unknown``.
+    usage_state: str
+    #: For a ``depleted`` verdict, ms until a FRESH report proves it reopens;
+    #: ``None`` when that is not proven (stale evidence, no stated reset).
+    usage_depleted_reopens_ms: int | None = None
+
+    @property
+    def quota_limited(self) -> bool:
+        """Out of the selection for quota alone — a live block or spent usage."""
+        return self.blocked_ms > 0 or self.usage_state == "depleted"
+
+    @property
+    def wait_ms(self) -> int | None:
+        """When BOTH gates are open again, or ``None`` when that is not proven."""
+        if self.usage_state != "depleted":
+            return self.blocked_ms
+        if self.usage_depleted_reopens_ms is None:
+            return None
+        return max(self.blocked_ms, self.usage_depleted_reopens_ms)
+
+
+@dataclasses.dataclass(frozen=True)
+class QuotaEligibility:
+    """Every candidate row's quota gates, and what they prove about the pool."""
+
+    rows: tuple[RowQuotaFact, ...] = ()
+
+    @property
+    def all_quota_limited(self) -> bool:
+        """True only when there ARE rows and quota alone excludes every one.
+
+        An ``unknown`` verdict is not a limit (the selector fails open on it),
+        so one row with no usable evidence keeps this False — an empty pick
+        must then have another cause, and no quota claim is made.
+        """
+        return bool(self.rows) and all(row.quota_limited for row in self.rows)
+
+    @property
+    def retry_after_ms(self) -> int:
+        """The earliest PROVEN reopening across the pool, or 0 when none is proven.
+
+        All rows must have a proven reopening: a row whose own reopening is
+        unknown could serve sooner than any stated one, so the earliest stated
+        time would be a claim the evidence does not support.
+        """
+        if not self.all_quota_limited:
+            return 0
+        waits = [row.wait_ms for row in self.rows]
+        if any(wait is None for wait in waits):
+            return 0
+        return min(int(wait) for wait in waits if wait is not None)
+
+
+@dataclasses.dataclass(frozen=True)
 class OAuthAccess:
     """The identity-carrying credential record handed to wire clients.
 
@@ -961,8 +1072,26 @@ def close_shared_auth_stores() -> None:
 atexit.register(close_shared_auth_stores)
 
 
+def _radient_account_identity(credential: Mapping[str, Any]) -> str | None:
+    """Storage namespace, not authority to enroll or select an account.
+
+    Org-first dedupe loses account A's credential when B joins the same org.
+    Default organization is mutable routing metadata, not account identity.
+    Include the exact stored endpoint so an account label on another hub cannot
+    replace a pinned row either. Missing endpoint metadata remains missing; this
+    helper must not invent the currently configured hub as a legacy binding.
+    """
+    account = credential.get("account_id")
+    if not isinstance(account, str) or not account.strip():
+        return None
+    endpoint = credential.get("api_endpoint")
+    if endpoint is not None and not isinstance(endpoint, str):
+        return None
+    return "radient-account:" + json.dumps([account, endpoint], separators=(",", ":"))
+
+
 def _identity_key_for(provider: str, credential: dict[str, Any]) -> str | None:
-    """Dedupe key so one account holds one row (org scope ⇒ separate rows).
+    """Provider storage identity; Radient default-org changes keep the same row.
 
     API keys and CLI-stored credentials never dedupe (each key is its own
     row). OAuth payloads dedupe on the account identity when the IdP returns
@@ -973,6 +1102,10 @@ def _identity_key_for(provider: str, credential: dict[str, Any]) -> str | None:
     """
     if credential.get("type") == "api_key" or credential.get("source") == "login":
         return None
+    if provider == "radient":
+        binding = _radient_account_identity(credential)
+        if binding is not None:
+            return binding
     for field in ("org_id", "account_id", "email", "project_id"):
         value = credential.get(field)
         if value:
@@ -1331,6 +1464,10 @@ class AuthStore:
         #: write (no mkdir, no schema DDL, no WAL, no chmod). Read paths
         #: (:meth:`list_credentials`) work; write paths must not be reached.
         self._read_only = read_only
+        #: Whether the read-only handle reads the live WAL (both sidecars were
+        #: already present) rather than an immutable main-file snapshot. Set by
+        #: :meth:`_connect_read_only`; read by :meth:`read_only_sidecar_present`.
+        self._ro_sees_wal = False
         self._config_dir = config_dir
         self._config_overrides = dict(config_overrides or {})
         self._runtime_overrides: dict[str, str] = {}
@@ -1412,11 +1549,57 @@ class AuthStore:
     def _connect_read_only(self) -> _SerializedConnection | None:
         """The metadata-only handle, or ``None`` when there is nothing to read.
 
-        ``mode=ro&immutable=1`` over an existing file only: no mkdir, no
-        O_CREAT, no WAL PRAGMA, no schema DDL, no commit, no chmod. The
-        ``immutable=1`` is required, not decorative — a plain ``mode=ro`` open
-        still creates ``-wal``/``-shm`` sidecars (measured), which the no-writes
-        promise forbids. sqlite also refuses every write through this handle.
+        Two opens, chosen by what is ALREADY on disk, because the no-writes
+        promise (#2894: a read never creates a file) and a current answer pull
+        in opposite directions:
+
+        * Both ``-wal`` and ``-shm`` exist (any owner with a live writer, i.e.
+          practically every running desktop): plain ``mode=ro``. This reads
+          the committed WAL, so a busy store answers with its CURRENT rows
+          instead of being declared unknown/stale forever. It creates no file
+          (both sidecars are there) and never writes ``auth.db`` or ``-wal``;
+          like every WAL reader it records its read-mark in the existing
+          ``-shm``, which is SQLite's reader coordination, not credential data
+          and not a new file (#2894 forbids the latter).
+        * ``readonly_shm=1`` is deliberately NOT used, although it would leave
+          even the ``-shm`` bytes alone. SQLite keeps ONE wal-index mapping per
+          database file per process, and the first connection to map it decides
+          whether it is read-only: while such a reader is open, every writable
+          ``AuthStore`` opened in the same process fails with "attempt to write
+          a readonly database". The relay answers ``ready`` beside the credential
+          sync engine and owner broker, and the mobile daemon serves ``/usage``
+          beside ``/models``, so that broke real writes (PR #3084 review R1-1:
+          26,636 of 26,642 same-process writes failed under readonly_shm, 0 of
+          1,263 under plain ``mode=ro``). A read must never break a write.
+        * Otherwise ``mode=ro&immutable=1``: no sidecars means the last writer
+          checkpointed and closed, so the main file IS the current state. A
+          plain ``mode=ro`` here would CREATE ``-wal``/``-shm`` (measured),
+          which the promise forbids. A ``-wal`` without ``-shm`` (a crash
+          leftover) also lands here and is reported by
+          :meth:`read_only_sidecar_present` as possibly stale.
+
+        No mkdir, no O_CREAT of the database, no WAL PRAGMA, no schema DDL, no
+        commit, no chmod on either branch; sqlite refuses every row write
+        through both handles. A ``-shm`` that is corrupt, truncated or from an
+        older WAL generation with no writer alive is rebuilt from the WAL's own
+        checksummed frames, so it reads as the recovered truth (what the next
+        writer would see), not as unknown; a corrupt ``-wal`` or main file
+        still fails to open and reads as unavailable.
+
+        Two residual effects, both accepted rather than hidden:
+
+        * The sidecar check and the open are not atomic. If the last writer
+          checkpoints and unlinks both sidecars in between, this open recreates
+          them empty (a 0-byte ``-wal`` and a fresh ``-shm``, exactly what the
+          next writer would create) and still reads the right rows, which that
+          checkpoint has just put in the main file. They are NOT unlinked
+          afterwards: by then another process may be using them, and deleting a
+          live ``-shm`` is how WAL coordination gets corrupted. No credential
+          data is written.
+        * A reader open across the last writer's close can make that writer
+          skip its close-time checkpoint and leave ``-wal``/``-shm`` behind.
+          The next read takes this same branch and is correct; the next writer
+          checkpoints them. Read handles here are short-lived.
 
         Returns ``None`` when there is nothing to read: an ABSENT database
         (legitimately empty) or one that will not open. Callers distinguish the
@@ -1425,16 +1608,40 @@ class AuthStore:
         """
         if not self._db_path.exists():
             return None
+        if self._wal_sidecars_present():
+            conn = self._open_read_only_uri("mode=ro")
+            if conn is not None:
+                self._ro_sees_wal = True
+                return conn
+        return self._open_read_only_uri("mode=ro&immutable=1")
+
+    def _wal_sidecars_present(self) -> bool:
+        """Whether BOTH WAL sidecars already exist, so a WAL read creates no file."""
+        try:
+            return all(
+                self._db_path.with_suffix(self._db_path.suffix + suffix).is_file()
+                for suffix in ("-wal", "-shm")
+            )
+        except OSError:
+            return False
+
+    def _open_read_only_uri(self, query: str) -> _SerializedConnection | None:
+        """One read-only open with ``query``; ``None`` when it will not open."""
         try:
             conn = sqlite3.connect(
-                f"file:{self._db_path}?mode=ro&immutable=1",
+                f"file:{self._db_path}?{query}",
                 timeout=5.0,
                 uri=True,
                 check_same_thread=False,
             )
+        except Exception:  # noqa: BLE001 — corrupt/unreadable db = no handle
+            logger.debug("auth store: read-only open failed %s", self._db_path, exc_info=True)
+            return None
+        try:
             conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
             return _SerializedConnection(conn)
         except Exception:  # noqa: BLE001 — corrupt/unreadable db = no handle
+            conn.close()
             logger.debug("auth store: read-only open failed %s", self._db_path, exc_info=True)
             return None
 
@@ -1490,15 +1697,30 @@ class AuthStore:
         return required.issubset(cols)
 
     def read_only_sidecar_present(self) -> bool:
-        """True when a non-empty ``-wal`` sits beside the store's database.
+        """True when this read-only handle may be missing committed WAL frames.
 
-        ``immutable=1`` (the read-only open) cannot see an uncheckpointed WAL,
-        so a committed DELETE in the WAL is invisible to it: the reader still
-        sees the removed credential row. A non-empty ``-wal`` is that exact
-        on-disk signal, which the seam surfaces as staleness so a possibly-
-        deleted account is never presented as current. A zero-length WAL holds
-        no frames and is not staleness.
+        Only the IMMUTABLE handle can be stale: ``immutable=1`` cannot see an
+        uncheckpointed WAL, so a committed DELETE in it is invisible and the
+        reader would still see the removed credential row. A non-empty ``-wal``
+        beside that handle is the on-disk signal, which callers surface as
+        staleness (the phone seam) or unknown (``lop network ready``) so a
+        possibly-deleted account is never presented as current. A zero-length
+        WAL holds no frames and is not staleness.
+
+        The WAL-reading handle (both sidecars present, see
+        :meth:`_connect_read_only`) already reads every committed frame, so it
+        is never stale. Answering from the file size alone made every busy
+        owner permanently "could not be read": a live writer's ``-wal`` is
+        practically never empty, since SQLite reuses it after a checkpoint
+        rather than truncating it.
+
+        The name now reads "may be stale", not "a sidecar exists". It is kept
+        because :class:`UsageCacheStore` exposes the same probe and the phone
+        seam and readiness call it by name on either store, so renaming one
+        side would split that shared shape.
         """
+        if self._ro_sees_wal:
+            return False
         try:
             wal = self._db_path.with_suffix(self._db_path.suffix + "-wal")
             return wal.exists() and wal.stat().st_size > 0
@@ -1790,6 +2012,21 @@ class AuthStore:
             return creds
         return [c for c in creds if c.disabled_cause is None]
 
+    def retained_radient_login_ids(self) -> tuple[int, ...]:
+        """Safe status references, never a route back into credential selection.
+
+        Read only identity/state columns: retained bearer payloads and guessed
+        labels have no place in the recovery notice, including read-only hosts.
+        """
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return ()
+        rows = conn.execute(
+            "SELECT id FROM auth_credentials WHERE provider = 'radient' "
+            "AND credential_type = 'oauth' AND disabled_cause = 'identity_unattributed' ORDER BY id"
+        ).fetchall()
+        return tuple(row[0] for row in rows)
+
     def active_local_credential(self, provider: str, endpoint: str) -> StoredCredential | None:
         """The last configured token for this endpoint, without reviving history.
 
@@ -1802,6 +2039,56 @@ class AuthStore:
             if row.credential_type == "api_key" and row.data.get("endpoint") == endpoint:
                 return row if row.disabled_cause is None else None
         return None
+
+    def complete_radient_login(self, result: dict[str, Any]) -> StoredCredential:
+        """Consume one verified interactive result after host cancellation checks.
+
+        Generic metadata/refresh writes cannot enter this transition. The flow
+        receipt rechecks its abort signal and payload before any persistence;
+        serialized flags or a copied dictionary carry no admission authority.
+        """
+        from local_operator.providers.oauth.radient import consume_verified_login
+
+        if self._read_only:
+            raise AuthStoreError("A read-only credential store cannot complete a login")
+        payload = consume_verified_login(result)
+        # Defer the existing parked-service notification until quarantine and
+        # same-account restoration have reached their final durable state.
+        stored = self._upsert_credential_metadata("radient", payload, _notify=False)
+        if stored.data != payload:
+            raise AuthStoreError("Radient login changed before completion")
+        # Fresh authenticated material supersedes automatic identity/token
+        # failures for this exact binding, never an unrelated operator disable.
+        # No unknown row is rebound to the newly verified account.
+        if stored.disabled_cause in {"identity_unattributed", "invalidated-token"}:
+            self._conn.execute(
+                "UPDATE auth_credentials SET disabled_cause = NULL WHERE id = ? "
+                "AND disabled_cause = ? AND data = ?",
+                (stored.id, stored.disabled_cause, json.dumps(stored.data)),
+            )
+            self._conn.commit()
+            stored = self._reread_after_write(stored.id)
+        if stored.disabled_cause is not None:
+            return stored
+        hub = payload["api_endpoint"]
+        for legacy in self.list_credentials("radient"):
+            account = legacy.data.get("account_id")
+            if (
+                legacy.credential_type != "oauth"
+                or (isinstance(account, str) and account.strip())
+                or legacy.data.get("api_endpoint") not in (None, "", hub)
+            ):
+                continue
+            # Preserve contents/id/key and explicit disabled states. Another
+            # login may have attributed this row after the scan; CAS refuses
+            # to quarantine that new identity or a concurrently disabled row.
+            self._conn.execute(
+                "UPDATE auth_credentials SET disabled_cause = ?, updated_at = ? "
+                "WHERE id = ? AND data = ? AND disabled_cause IS NULL",
+                ("identity_unattributed", self._now_ms(), legacy.id, json.dumps(legacy.data)),
+            )
+        self._conn.commit()
+        return self._after_credential_write("radient", stored.id)
 
     def upsert_credential(self, provider: str, credential: dict[str, Any]) -> StoredCredential:
         """Seal Muse secrets before metadata serialization; preserve other providers."""
@@ -1832,12 +2119,13 @@ class AuthStore:
         return row
 
     def _upsert_credential_metadata(
-        self, provider: str, credential: dict[str, Any]
+        self, provider: str, credential: dict[str, Any], *, _notify: bool = True
     ) -> StoredCredential:
-        """Insert, or update the row for the same identity (org scope ⇒ rows).
+        """Insert or update the provider's same identity; preserve other accounts.
 
-        Revives soft-deleted rows for the same identity (re-login), and lifts
-        the row's retry backoff blocks — see :meth:`_after_credential_write`.
+        Non-Radient re-logins revive same-identity soft-deleted rows. Radient
+        disabled states require a verified completion, not this dictionary API.
+        Retry backoff bookkeeping remains in :meth:`_after_credential_write`.
 
         The login path already resolves ``store_credentials_as`` before calling
         here, so this normalization is usually a no-op. It is applied anyway
@@ -1895,41 +2183,55 @@ class AuthStore:
                 "AND identity_key = ? ORDER BY id",
                 (provider, identity),
             ).fetchone()
-            if row is None and provider == "radient" and identity != f"oauth:{provider}":
-                # ADOPT THE PRE-IDENTITY ROW. A provider that starts returning
-                # an IdP identity (Radient's id_token claims, decoded from this
-                # release on) moves its dedupe key from the per-provider
-                # constant to the account id, so the first re-login after the
-                # upgrade found no row and INSERTED a second one beside the
-                # constant-keyed row — the stale-refresh-token duplicate the
-                # constant exists to prevent. Upgrading that one row in place is
-                # exactly what the constant key did before (every login of that
-                # provider landed on it), so this never merges two rows that
-                # would not have been one row yesterday. Scoped to Radient, the
-                # one provider whose identity changed shape in this release:
-                # xAI/Anthropic have carried an id_token identity for a while,
-                # and a constant-keyed row there can be a DIFFERENT account.
-                row = self._conn.execute(
-                    "SELECT id FROM auth_credentials WHERE provider = ? "
-                    "AND identity_key = ? ORDER BY id",
-                    (provider, f"oauth:{provider}"),
-                ).fetchone()
-                if row is not None and credential_type == "oauth":
-                    self._conn.execute(
-                        "UPDATE auth_credentials SET identity_key = ? WHERE id = ?",
-                        (identity, row[0]),
-                    )
-                else:
-                    row = None
+            if provider == "radient" and credential_type == "oauth":
+                binding = _radient_account_identity(payload)
+                if row is not None and binding is None:
+                    previous = self.get_credential(row[0])
+                    if previous is not None and previous.data.get("account_id"):
+                        raise AuthStoreError("Unproven Radient login cannot replace an account")
+                if binding is not None:
+                    # Upgrade only a uniquely matching stored binding. The old
+                    # constant/org key is not proof that a row belongs to this
+                    # login; rebinding it would invalidate another owner's pin.
+                    endpoint = payload.get("api_endpoint")
+                    has_hub = isinstance(endpoint, str) and bool(endpoint.strip())
+                    candidates = [
+                        item
+                        for item in self.list_credentials(provider, include_disabled=True)
+                        if item.credential_type == "oauth"
+                        and _radient_account_identity(item.data) == binding
+                        # Missing legacy hub metadata cannot be filled from the
+                        # current default. A row already in this new namespace
+                        # can still be re-logged-in without adopting history.
+                        and (has_hub or item.identity_key == binding)
+                    ]
+                    if len(candidates) > 1:
+                        raise AuthStoreError("Ambiguous stored Radient account binding")
+                    if row is not None and (not candidates or candidates[0].id != row[0]):
+                        raise AuthStoreError("Stored Radient account namespace mismatch")
+                    if row is None and candidates:
+                        row = (candidates[0].id,)
+                        self._conn.execute(
+                            "UPDATE auth_credentials SET identity_key = ? WHERE id = ?",
+                            (identity, row[0]),
+                        )
             if row is not None:
                 self._conn.execute(
                     "UPDATE auth_credentials SET credential_type = ?, data = ?, "
-                    "disabled_cause = NULL,"
+                    # Only a future verified Radient completion may release
+                    # a disabled identity. A generic same-key metadata write
+                    # must preserve quarantine and explicit operator disables.
+                    "disabled_cause = CASE WHEN provider = 'radient' "
+                    "THEN disabled_cause ELSE NULL END,"
                     " updated_at = ?, login_incarnation = ? WHERE id = ?",
                     (credential_type, data_json, now, incarnation, row[0]),
                 )
                 self._conn.commit()
-                return self._after_credential_write(provider, row[0])
+                return (
+                    self._after_credential_write(provider, row[0])
+                    if _notify
+                    else self._reread_after_write(row[0])
+                )
 
         cursor = self._conn.execute(
             "INSERT INTO auth_credentials "
@@ -1939,7 +2241,11 @@ class AuthStore:
             (provider, credential_type, data_json, identity, now, now, incarnation),
         )
         self._conn.commit()
-        return self._after_credential_write(provider, cursor.lastrowid)
+        return (
+            self._after_credential_write(provider, cursor.lastrowid)
+            if _notify
+            else self._reread_after_write(cursor.lastrowid)
+        )
 
     @staticmethod
     def native_lifecycle_snapshot(db_path: Path, provider: str) -> list[tuple[Any, ...]] | None:
@@ -2049,6 +2355,9 @@ class AuthStore:
         gate.
         """
         stored = self._reread_after_write(credential_id)
+        # Identity labels in a generic write are not an interactive admission
+        # receipt. Quarantine belongs after a verified exchange and the host's
+        # cancellation check, never in this shared metadata-write hook.
         self.clear_blocks(stored.id)
         self._rearm_parked_tunnel_login(provider, stored)
         return stored
@@ -2378,7 +2687,7 @@ class AuthStore:
             (credential_id, provider_key),
         ).fetchall()
         now = self._now_ms()
-        return any(until > now and scope.removeprefix("model:") in lowered for scope, until in rows)
+        return any(until > now and block_scope_gates(scope, lowered) for scope, until in rows)
 
     def blocked_remaining_ms(self, credential_id: int, provider: str, model_id: str) -> int:
         """The ms until ``credential_id`` could serve ``model_id`` again, or ``0``.
@@ -3031,6 +3340,7 @@ class AuthStore:
             from local_operator.providers.oauth.callback_server import (
                 InvalidGrantError,
                 LoginError,
+                RefreshNotSentError,
             )
 
             presented = self._presented_refresh_token(fresh)
@@ -3097,11 +3407,22 @@ class AuthStore:
                     async with asyncio.timeout(PROVIDER_REFRESH_TOTAL_BUDGET_S):
                         refreshed = await refresh(fresh)
                 except AuthStoreError:
-                    # The refresh fn's OWN refusal. Nothing about it says what
-                    # happened to the token on the wire, so the marker is left
-                    # exactly as it is: armed if the exchange may have run, and
-                    # absent if it never did.
+                    # The provider's own failure, which cannot say whether the
+                    # request was written: keep the marker exactly as it is.
+                    # The case where nothing was sent has its own type below.
                     raise
+                except RefreshNotSentError as exc:
+                    # Nothing was presented: the provider refused before its
+                    # first request reached a socket, so the marker armed just
+                    # above is a claim this exchange cannot support. Keeping it
+                    # would defer the next refresh for the marker's whole bound
+                    # and report that deferral in place of this refusal. The
+                    # refusal still surfaces as the store's own error type, as
+                    # every refresh failure here does.
+                    self._clear_send_marker(row.id, armed)
+                    raise AuthStoreError(
+                        f"OAuth refresh for '{row.provider}' was refused before sending: {exc}"
+                    ) from exc
                 except InvalidGrantError as exc:
                     # RFC 6749 SS5.2 terminal grant error. Re-raised as the store's
                     # own permanent-failure type so nothing above imports the
@@ -3458,17 +3779,25 @@ class AuthStore:
         consulted here, so a lazy sweep is both sufficient and free of a
         background task that would have to be owned and cancelled.
         """
+        from local_operator.providers.account_affinity import current_lend_demotions
+
+        # A peer's 5xx demotions for the lend being resolved (owner side; see
+        # ``lend_selection_context``). Unioned on READ and never stored, so they
+        # reorder this one resolve exactly as the borrower's own demotion would
+        # reorder a local turn, and the owner's marks are untouched: the
+        # all-demoted branches only clear marks outside ``read_only``.
+        lend = set(current_lend_demotions())
         provider = self._storage_id(provider)
         marks = self._deprioritized.get(provider)
         if not marks:
-            return set()
+            return lend
         now = self._now_ms()
         for cid in [cid for cid, until in marks.items() if until <= now]:
             marks.pop(cid, None)
         if not marks:
             self._deprioritized.pop(provider, None)
-            return set()
-        return set(marks)
+            return lend
+        return set(marks) | lend
 
     def _selection_order(
         self,
@@ -3653,10 +3982,29 @@ class AuthStore:
         self, rows: list[StoredCredential], provider: str, session_id: str | None, model_id: str
     ) -> int | None:
         from local_operator.providers.account_affinity import (
+            current_lend_anchor,
             current_selection_endpoint,
             current_selection_signature,
+            receipt_endpoint_matches,
         )
 
+        anchor = current_lend_anchor()
+        if anchor is not None:
+            # A LEND: the receipt lives on the borrower, which validated its
+            # lifetime, model, prefix and endpoint before sending this anchor.
+            # The owner's half is the half only it can judge — the row must be
+            # one of THESE candidates (already past exclusion, blocks and
+            # depletion) with the same immutable ``created_at``, so a stale or
+            # forged anchor naming a re-created, excluded or spent row anchors
+            # nothing and the lend falls back to the policy pick. Returning here
+            # gives the anchor every consumer a local receipt has: first place
+            # in the order and the demotion exemption.
+            account_id, created_at = anchor
+            if session_id and any(
+                row.id == account_id and row.created_at == created_at for row in rows
+            ):
+                return account_id
+            return None
         signature = current_selection_signature()
         boundary = getattr(self, "_account_request_boundaries", {}).get(session_id)
         if (
@@ -3685,10 +4033,7 @@ class AuthStore:
             endpoint = current_selection_endpoint() or (
                 boundary.endpoint_mode if boundary is not None else None
             )
-            if (
-                endpoint is not None
-                and endpoint(self._selection_identity(chosen)) != receipt.endpoint_mode
-            ):
+            if not receipt_endpoint_matches(receipt, self._selection_identity(chosen), endpoint):
                 return None
             return receipt.account_id
         return None
@@ -3743,33 +4088,9 @@ class AuthStore:
         """
         if not rows:
             return []
-        from local_operator.providers.account_policy import (
-            reset_candidate,
-            reset_ranked_ids,
-        )
+        from local_operator.providers.account_policy import reset_ranked_ids
 
-        try:
-            now_ms = self._now_ms()
-            candidates = [
-                reset_candidate(
-                    row.id,
-                    self._cached_usage_report(row, provider),
-                    model_id,
-                    now_ms,
-                    max_age_ms=self._usage_pick_max_age_ms,
-                )
-                for row in rows
-            ]
-        except Exception:
-            # Cache failure is unknown evidence, not an account outage.
-            # Keep the existing fail-open contract for optional readers.
-            logger.debug("account pick: cached evidence unavailable", exc_info=True)
-            from local_operator.providers.account_policy import ResetCandidate
-
-            candidates = [ResetCandidate(row.id) for row in rows]
-        finally:
-            if self._usage_cache is not None:
-                self._usage_cache.close()
+        candidates = self._reset_candidates(rows, provider, model_id)
         by_id = {row.id: row for row in rows}
         allowed = {
             candidate.account_id for candidate in candidates if candidate.state != "depleted"
@@ -3819,6 +4140,103 @@ class AuthStore:
                 )
             )
         return ordered
+
+    def _reset_candidates(
+        self, rows: list[StoredCredential], provider: str, model_id: str
+    ) -> list["ResetCandidate"]:
+        """Each row's cached usage verdict — THE eligibility evidence of the pick.
+
+        One builder for both readers: :meth:`_base_selection_order` drops the
+        ``depleted`` rows from inference selection, and :meth:`quota_eligibility`
+        explains an empty selection from the very same verdicts, so the reason a
+        peer is told can never disagree with the reason the pick came back empty.
+        """
+        from local_operator.providers.account_policy import (
+            ResetCandidate,
+            reset_candidate,
+        )
+
+        try:
+            now_ms = self._now_ms()
+            return [
+                reset_candidate(
+                    row.id,
+                    self._cached_usage_report(row, provider),
+                    model_id,
+                    now_ms,
+                    max_age_ms=self._usage_pick_max_age_ms,
+                )
+                for row in rows
+            ]
+        except Exception:
+            # Cache failure is unknown evidence, not an account outage.
+            # Keep the existing fail-open contract for optional readers.
+            logger.debug("account pick: cached evidence unavailable", exc_info=True)
+            return [ResetCandidate(row.id) for row in rows]
+        finally:
+            if self._usage_cache is not None:
+                self._usage_cache.close()
+
+    def quota_eligibility(
+        self,
+        provider: str,
+        model_id: str,
+        *,
+        exclude_credential_ids: Collection[int] | None = None,
+    ) -> "QuotaEligibility":
+        """Why each enabled row is (not) servable for ``model_id``, on quota grounds.
+
+        WHY (2026-10-28, remote quota follow-up): the mesh broker explained an
+        empty resolve from the persisted SQL blocks alone, but the selector also
+        drops rows whose cached usage says ``depleted``. Once one block timer
+        lapsed while the usage evidence still said spent, every login was
+        unusable for quota and a borrower was told ``no_local_credential`` —
+        "nothing is signed in here", cached with a re-login remedy — for a pool
+        that heals on its own. This read answers from the SAME two gates the
+        selection applies (:meth:`is_blocked_for_model`'s remainder and
+        :meth:`_reset_candidates`' verdict), so it adds no quota policy.
+
+        ``exclude_credential_ids`` are the rows the caller's resolve hid (a
+        holder's approval scope, its own resting rows): they were never
+        candidates, so they neither explain nor contradict the empty answer.
+        Read-only: nothing is blocked, demoted, pinned or written.
+
+        THE SAME ROW SOURCE AS THE PICK (#3108 review n1): a local provider resolves
+        only its ACTIVE endpoint row (``_usable_key_rows``), so that is the row read
+        here; reading every stored row would explain the empty pick from rows the
+        pick never considered.
+        """
+        from local_operator.providers.local import LOCAL_PROVIDER_IDS, resolve_base_url
+
+        hidden = set(exclude_credential_ids or ())
+        if provider in LOCAL_PROVIDER_IDS:
+            selected = self.active_local_credential(provider, resolve_base_url(provider))
+            candidates = [selected] if selected is not None else []
+        else:
+            candidates = self.list_credentials(provider)
+        rows = [row for row in candidates if row.id not in hidden]
+        # The storage spelling, as ``_selection_order`` hands the selector: the
+        # usage cache is keyed by it, so an alias would read every row as unknown.
+        storage = self._storage_id(provider)
+        verdicts = {c.account_id: c for c in self._reset_candidates(rows, storage, model_id)}
+        now_ms = self._now_ms()
+        facts: list[RowQuotaFact] = []
+        for row in rows:
+            blocked_ms = int(self.blocked_remaining_ms(row.id, provider, model_id))
+            verdict = verdicts.get(row.id)
+            depleted = verdict is not None and verdict.state == "depleted"
+            reopens = verdict.reopens_at_ms if depleted and verdict is not None else None
+            facts.append(
+                RowQuotaFact(
+                    credential_id=row.id,
+                    blocked_ms=blocked_ms,
+                    usage_state=verdict.state if verdict is not None else "unknown",
+                    usage_depleted_reopens_ms=(
+                        max(0, reopens - now_ms) if reopens is not None else None
+                    ),
+                )
+            )
+        return QuotaEligibility(rows=tuple(facts))
 
     @staticmethod
     def _hash_order(rows: list[StoredCredential], session_id: str) -> list[StoredCredential]:
@@ -4376,6 +4794,80 @@ class AuthStore:
             api_endpoint=endpoint if isinstance(endpoint, str) else None,
             account_created_at=row.created_at if row is not None else 0,
         )
+
+    async def get_catalogue_access(self, provider: str) -> OAuthAccess | None:
+        """A credential for READING a provider catalogue, not routing inference.
+
+        Inference selection deliberately excludes quota-depleted accounts. Model
+        discovery must not inherit that decision: an exhausted account can still
+        have a valid OAuth grant and a provider-published model list. Hiding that
+        list made a signed-in provider look completely empty.
+
+        Keep the cascade's credential precedence (runtime/config override, OAuth,
+        login key, environment, other stored key), but do not read usage, rank or
+        repoint accounts, clear demotions, or block a credential on failure. A
+        transient refresh error degrades to the next eligible credential; a
+        provider-declared dead grant is never sent. Successful token rotation is
+        still persisted because discarding a single-use refresh token would break
+        the account, not protect it.
+        """
+        provider = self._storage_id(provider)
+        override = self._runtime_overrides.get(provider) or self._config_overrides.get(provider)
+        if override:
+            return OAuthAccess(access_token=override, credential_id=0, kind="api_key")
+
+        key_fn = self._oauth_key_fn(provider)
+        oauth_rows = [
+            row for row in self.list_credentials(provider) if row.credential_type == "oauth"
+        ]
+        for row in oauth_rows:
+            try:
+                creds = await self._ensure_oauth_fresh(row)
+            except AuthStoreError:
+                continue
+            key = key_fn(creds) if key_fn else creds.get("access")
+            if key:
+                current = self.get_credential(row.id) or row
+                data = current.data
+                return OAuthAccess(
+                    access_token=key,
+                    credential_id=current.id,
+                    account_id=data.get("account_id"),
+                    email=data.get("email"),
+                    org_id=data.get("org_id"),
+                    api_endpoint=data.get("api_endpoint"),
+                    kind="oauth",
+                    raw=data,
+                    account_created_at=current.created_at,
+                )
+
+        # Preserve the ordinary cascade's API-key tiers and environment fallback.
+        # Iterating stored rows directly is intentional: `_usable_key_rows` also
+        # applies inference blocks, which are unrelated to catalogue authorization.
+        for source in ("login", None):
+            for row in self.list_credentials(provider):
+                if row.credential_type != "api_key":
+                    continue
+                if (source == "login") != (row.data.get("source") == "login"):
+                    continue
+                key = row.data.get("key")
+                if key:
+                    return OAuthAccess(
+                        access_token=key,
+                        credential_id=row.id,
+                        kind="api_key",
+                        account_created_at=row.created_at,
+                    )
+            if source == "login":
+                env_key = self._env_api_key(provider)
+                if env_key:
+                    return OAuthAccess(access_token=env_key, credential_id=0, kind="api_key")
+
+        resolver = self._fallback_resolvers.get(provider)
+        fallback = resolver(provider) if resolver is not None else None
+        if fallback:
+            return OAuthAccess(access_token=fallback, credential_id=0, kind="api_key")
+        return None
 
     async def list_oauth_accesses(self, provider: str) -> list[OAuthAccess]:
         """EVERY logged-in OAuth account for ``provider``, each one refreshed.
@@ -4997,15 +5489,17 @@ class AuthStore:
                 # unusable", so it is never written from a family-named
                 # rotation. The family comes from the model the request ran,
                 # via the same parser the usage layer's tier rows key on.
-                from local_operator.model.registry import model_family
-
-                family = model_family(model_id) if model_id else ""
-                scope = f"model:{family}" if (usage_limited and family) else ""
+                scope, window_ms = failure_block_window(
+                    retry_after,
+                    usage_limited=usage_limited,
+                    model_id=model_id,
+                    floor_ms=block_ms,
+                )
                 self.block_credential(
                     failing.id,
                     provider,
                     block_scope=scope,
-                    block_ms=max(block_ms, retry_after or 0),
+                    block_ms=window_ms,
                 )
             if usage_limited:
                 # Sticky preserved: same account stays first after backoff.

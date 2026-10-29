@@ -40,13 +40,15 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE, AsyncJob
+from local_operator.harness.loop import AgentLoop
 from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.harness.types import AbortSignal, ChatRequest, StreamEvent
 from local_operator.session.runtime.serving import ServingSessionHandle
@@ -119,6 +121,38 @@ def _settled(job_id: str) -> AsyncJob:
         start_time=1.0,
         result_text=f"{job_id} done",
     )
+
+
+@contextmanager
+def _batch_settles_after_last_yield(session: Session) -> Iterator[None]:
+    """Make the batch a genuine finally leftover, not an early safe-boundary row.
+
+    Separate-delivery lifecycle cells still need a separately admitted run.
+    Settling after the final yield snapshot preserves that intent under safe-
+    boundary delivery. The file runs serially; the static hook is always
+    restored as a staticmethod so later runs cannot bind it as an instance method.
+    """
+    original_collect_yield = AgentLoop._collect_yield_injections
+    settled = False
+
+    async def settle_after_last_yield(config: Any) -> Any:
+        nonlocal settled
+        late = await original_collect_yield(config)
+        if not settled and not late:
+            settled = True
+            await session._on_job_completed("qa-r2", "the QA round finished", _settled("qa-r2"))
+            await session._on_job_completed(
+                "rev-r6", "the review round finished", _settled("rev-r6")
+            )
+            assert session.is_streaming
+            assert session._deferred_job_results
+        return late
+
+    AgentLoop._collect_yield_injections = staticmethod(settle_after_last_yield)
+    try:
+        yield
+    finally:
+        AgentLoop._collect_yield_injections = staticmethod(original_collect_yield)
 
 
 def _lines(directory: Path) -> list[dict[str, Any]]:
@@ -325,15 +359,15 @@ async def test_a_settled_batch_survives_an_exit_that_already_committed(
 
 
 @pytest.mark.asyncio
-async def test_a_settled_batch_still_opens_one_turn_without_the_latch(
+async def test_a_settled_batch_still_delivers_in_the_same_run_without_the_latch(
     headless_tui_env: Path,
 ) -> None:
-    """THE NEGATIVE CONTROL: off the latch, the batch is delivered as ONE turn.
+    """THE NEGATIVE CONTROL: off the latch, the batch joins the current run.
 
-    Identical script, no departure. If the gate were consulted anywhere but the
-    latch, this cell would report fleet-wide silent under-delivery instead of a
-    delivered batch — so it is also what stops the fix from being written on the
-    wrong side of the condition.
+    Identical script, no departure. Safe boundaries now carry the settled rows
+    into the work run's next request instead of opening a separate post-final
+    delivery run. If the latch were consulted on the wrong side, this cell
+    would still report fleet-wide silent under-delivery.
     """
     config = headless_tui_env
     directory = config / "delivery-without-a-departure"
@@ -353,19 +387,18 @@ async def test_a_settled_batch_still_opens_one_turn_without_the_latch(
 
     assert (
         len(stream.requests) == 2
-    ), f"one work turn plus ONE batched delivery turn: {len(stream.requests)}"
+    ), f"the work run takes its second request with the settled batch: {len(stream.requests)}"
     delivered = "\n".join(text for text in _user_row_texts(stream.requests[1]))
     assert (
         "the QA round finished" in delivered and "the review round finished" in delivered
     ), f"both results ride the same turn: {delivered[-2000:]}"
-    assert len(_run_rows(directory)) == 2, "the delivery turn opened its own run"
-    # ONE ROW PER RESULT, re-asserted AFTER the delivery turn ran. The rows
-    # above are written at settle time; the delivery turn then hands those same
-    # messages back as its initials, and the pipeline's incoming-journal loop
-    # must not journal them a second time (the QA probe on this PR measured two
-    # rows becoming FOUR, same ids, until the loop learned to skip a durable
-    # row). The latch cell cannot see this -- its batch is held, not delivered
-    # -- so this is the only cell that runs the loop over pre-durable initials.
+    assert len(_run_rows(directory)) == 1, "the batch joined the existing work run"
+    # ONE ROW PER RESULT, re-asserted AFTER the same-run delivery. The rows
+    # above are written at settle time; the aside then hands those same message
+    # objects to the existing loop, whose incoming-journal loop must not write
+    # them a second time (the QA probe on this PR measured two rows becoming
+    # FOUR, same ids, until the loop learned to skip a durable row). The latch
+    # cell cannot see this -- its batch is held, not delivered.
     rows = _job_result_rows(directory)
     assert [row.get("job_id") for row in rows] == ["qa-r2", "rev-r6"], (
         "one row per result after the delivery turn: the loop must skip rows "
@@ -498,12 +531,11 @@ async def _work_turn_with_deferred_children_unlatched(
         assert work_token, "the work run must have minted its token by admission"
         gate = _park_runs_before_dispatch(session, except_token=work_token)
 
-    await session._on_job_completed("qa-r2", "the QA round finished", _settled("qa-r2"))
-    await session._on_job_completed("rev-r6", "the review round finished", _settled("rev-r6"))
-    assert session._deferred_job_results, "precondition: the batch is deferred"
-
-    stream.release.set()
-    await asyncio.wait_for(asyncio.shield(task), timeout=_STEP_TIMEOUT_S)
+    # These cells exercise a SEPARATE delivery run's lifecycle, so their rows
+    # must be genuine finally leftovers rather than early safe-boundary input.
+    with _batch_settles_after_last_yield(session):
+        stream.release.set()
+        await asyncio.wait_for(asyncio.shield(task), timeout=_STEP_TIMEOUT_S)
     return session, gate
 
 
@@ -896,12 +928,9 @@ async def test_a_declared_one_shot_turn_holds_its_final_batch_inside_the_lock(
         assert (
             not session._leaving_deliveries
         ), "precondition: the latch arms in the turn's OWN tail, not at entry"
-        await session._on_job_completed("qa-r2", "the QA round finished", _settled("qa-r2"))
-        await session._on_job_completed("rev-r6", "the review round finished", _settled("rev-r6"))
-        assert session._deferred_job_results, "precondition: the batch is deferred"
-
-        stream.release.set()
-        await asyncio.wait_for(asyncio.shield(task), timeout=_STEP_TIMEOUT_S)
+        with _batch_settles_after_last_yield(session):
+            stream.release.set()
+            await asyncio.wait_for(asyncio.shield(task), timeout=_STEP_TIMEOUT_S)
         # THE DISCRIMINATOR: with the declaration, the flush held the batch
         # inside the lock and NO delivery task exists to be admitted at the
         # release. Give the loop a bounded beat to prove one did not appear.
@@ -1251,11 +1280,9 @@ async def test_run_print_mode_holds_a_deferred_batch_on_its_way_out(
     )
     with bounded(120, "run_print_mode holds a deferred batch on its way out"):
         await asyncio.wait_for(stream.entered.wait(), _STEP_TIMEOUT_S)
-        await session._on_job_completed("qa-r2", "the QA round finished", _settled("qa-r2"))
-        await session._on_job_completed("rev-r6", "the review round finished", _settled("rev-r6"))
-        assert session._deferred_job_results, "precondition: the batch is deferred"
-        stream.release.set()
-        code = await asyncio.wait_for(run_task, timeout=_STEP_TIMEOUT_S)
+        with _batch_settles_after_last_yield(session):
+            stream.release.set()
+            code = await asyncio.wait_for(run_task, timeout=_STEP_TIMEOUT_S)
         assert code == 0
 
     assert (

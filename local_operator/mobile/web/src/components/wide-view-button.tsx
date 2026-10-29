@@ -2,12 +2,12 @@
  * The wide-view toggle (issue #1870): the one control that enters and leaves the
  * wider reading layout, rendered wherever a reader can reach it.
  *
- * ONE COMPONENT, TWO PLACES, because the preference is one preference. It ships on
- * the conversation list's footer (beside the theme, the other per-phone
- * preference) and on the SESSION screen's header — the surface the issue is
- * actually about, where a reader who notices the narrow column is standing
- * (design round 1, D2). A second copy of this markup is how the two drift into
- * different labels or different pressed states.
+ * ONE COMPONENT, ONE PLACE, because the preference is one preference. It ships on
+ * the conversation list's footer, beside the theme — the other per-phone
+ * preference. The SESSION screen used to render a second copy in its header;
+ * that button moved into the session menu, whose Wide view row reads and writes
+ * the same `getWideView`/`applyWideView` pair. Keeping one button component is
+ * what stops the label or pressed state drifting between surfaces.
  *
  * THE LABEL IS A WORD, not a glyph alone (design round 1, D3). `⇔` reads as
  * swap/pan and sits beside the theme's `◐`, so a first-time reader has nothing to
@@ -41,10 +41,10 @@ export function WideViewButton({ className }: { className?: string }) {
 			aria-label="wide view"
 			aria-pressed={wide}
 			className={cn(
-				"flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md border text-meta select-none",
+				"flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md text-meta select-none",
 				wide
-					? "border-accent bg-accent text-on-accent active:bg-accent-active"
-					: "border-control bg-surface text-ink-muted active:bg-elevated",
+					? "bg-accent text-on-accent active:bg-accent-active"
+					: "bg-surface text-ink-muted active:bg-elevated",
 				className,
 			)}
 		>

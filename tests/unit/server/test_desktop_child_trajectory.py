@@ -185,6 +185,76 @@ def a_bridge(root: Path, frames: list[dict[str, Any]], monkeypatch: pytest.Monke
     return bridge
 
 
+def test_a_job_delta_is_not_re_inflated_to_the_bridge_snapshot(tmp_path, monkeypatch):
+    """A one-row roster delta must publish ONE row, not the bounded snapshot.
+
+    THE MEASURED FRAME. The bridge used to replace ``changes["jobs"]`` with its
+    own bounded snapshot whenever the runtime's frame carried a roster arm. That
+    was right when the runtime sent the whole roster; it is wrong now that it
+    sends only the rows that moved. On session 17cd3e74c66f's 185-row checkpoint
+    the substitution put ~715 KB back on a frame carrying one row. The rows are
+    still BOUNDED here, with the same roster share the snapshot uses, so an
+    older runtime's unbounded rows cannot leave the bridge unbounded either.
+    """
+    from local_operator.session.frontend_state import _job_summary
+
+    frames: list[dict[str, Any]] = []
+    bridge = a_bridge(tmp_path / uuid.uuid4().hex, frames, monkeypatch)
+    rows = [
+        JobState(
+            id=f"job-{index:03d}",
+            type="task",
+            status="running",
+            session_id=CHILD_ID,
+            result_text="r" * 500,
+        )
+        for index in range(60)
+    ]
+    # The bridge's own bounded snapshot is what the old code substituted. A
+    # bare bridge has no owner to install canonical state on, so the snapshot is
+    # supplied directly — it is an input to `_frontend`, not the subject. The
+    # CALL COUNT is the second subject: rebuilding it per tick was the cost.
+    roster = [_job_summary(row) for row in rows]
+    calls = {"state": 0}
+
+    def counted_state() -> dict[str, Any]:
+        calls["state"] += 1
+        return {"snapshot": {"jobs": roster, "usage_components": []}}
+
+    monkeypatch.setattr(bridge, "state", counted_state)
+
+    changed = rows[7].model_copy(update={"status": "completed"})
+    update = FrontendUpdate(
+        epoch="e1",
+        sequence=2,
+        changes={"streaming": False},
+        job_deltas={"upserted": [_job_summary(changed)], "roster_size": len(rows)},
+    )
+    bridge._frontend(update)
+
+    assert calls["state"] == 0, "the bridge rebuilt the snapshot to learn the roster size"
+    payload = frames[-1]
+    assert "jobs" not in payload["changes"], "the bridge must not substitute the whole roster"
+    assert [row["id"] for row in payload["job_deltas"]["upserted"]] == [changed.id]
+    assert payload["job_deltas"]["upserted"][0]["status"] == "completed"
+    assert len(payload["job_deltas"]["upserted"][0]["result_text"]) <= 500
+    published = len(json.dumps(payload))
+    snapshot = len(json.dumps(roster))
+    assert snapshot > 30_000, f"fixture must be big enough to matter; {snapshot}"
+    assert published < snapshot // 5, (published, snapshot)
+
+    # ...and an OLD runtime that sends no scalar still gets a correct share, at
+    # the one-time cost of reading the snapshot.
+    older = FrontendUpdate(
+        epoch="e1",
+        sequence=3,
+        changes={"streaming": False},
+        job_deltas={"upserted": [_job_summary(changed)]},
+    )
+    bridge._frontend(older)
+    assert calls["state"] == 1, "the fallback must still derive the roster size"
+
+
 # -- the frame's opt-in -------------------------------------------------------
 
 

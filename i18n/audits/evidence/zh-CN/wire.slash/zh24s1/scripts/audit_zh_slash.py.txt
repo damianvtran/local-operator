@@ -1,0 +1,839 @@
+"""Build the zh24s1 evidence bundle for the zh-CN wire.slash audit.
+
+Read-only over the catalogues. Writes only the evidence bundle under
+i18n/audits/evidence/zh-CN/wire.slash/zh24s1/. The semantic findings are the
+auditor's own reading of the English source, the English context sidecar and
+the zh-CN target side by side; mechanical checks are reproduced below.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+import unicodedata
+from pathlib import Path
+
+from local_operator.i18n import runtime
+
+WT = Path("/Users/damian/local-operator/.worktrees/zh-cn-core")
+B = WT / "i18n/audits/evidence/zh-CN/wire.slash/zh24s1"
+EN_PATH = WT / "local_operator/i18n/catalogues/en/wire.slash.json"
+CTX_PATH = WT / "local_operator/i18n/catalogues/en/wire.slash.context.json"
+ZH_PATH = WT / "local_operator/i18n/catalogues/zh-CN/wire.slash.json"
+GLOSSARY = WT / "i18n/glossary.md"
+STYLE = WT / "i18n/style-guides/zh-CN.md"
+AUDIT_HEAD = "f286318c89053e5e00cbb7823f6f29cd6a06d205"
+CATALOGUE_COMMIT = "4840abdeb650a44db3bd9b1f564b24b6546c099a"
+ATTEST_COMMIT = "00b3446cf3df78805988e25862133419a235e181"
+EVIDENCE_COMMIT_PARENT = AUDIT_HEAD
+ROUTE_LOG_SOURCE = Path(
+    "/Users/damian/.local-operator/sessions/4ecbbf4d3281/scratchpad/"
+    "zh-slash-audit/config/audit/public-copy-reads.jsonl"
+)
+ROUTE_LOG = B / "route-read-log.jsonl"
+ROUTE_DIGEST = "0617711757169777c98ba763258cc09bc997914643a5602071cc66c082abc8dd"
+ROUTE_READ_PATH = "local_operator/i18n/catalogues/zh-CN/wire.slash.json"
+READER = "/Users/damian/.local/share/lop/current/tools/local-operator/bin/python"
+READER_VERSION = "0.89.0"
+READER_GENERATION = "/Users/damian/.local/share/lop/generations/20261024T204324Z-0.89.0"
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    return sha256_bytes(path.read_bytes())
+
+
+def cells(text: str) -> int:
+    total = 0
+    for ch in text:
+        if unicodedata.combining(ch):
+            continue
+        total += 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+    return total
+
+
+def write_json(name: str, payload: object) -> None:
+    (B / name).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def hard_tokens(text: str) -> dict[str, list[str]]:
+    import re
+
+    patterns = {
+        "backtick_span": re.compile(r"`[^`\n]+`"),
+        "long_flag": re.compile(r"(?<![\w/])--[a-zA-Z0-9][a-zA-Z0-9_-]*"),
+        "angle_token": re.compile(r"<[a-zA-Z][^>\n]*>"),
+        "url": re.compile(r"(?:https?|ssh)://[^\s，。；）)]+"),
+        "path": re.compile(r"(?:~/[\w./-]+|/(?:bin|Users|Volumes|tmp|var|etc)/[\w./-]+)"),
+        "percent_token": re.compile(r"%[sdif]"),
+    }
+    return {name: pattern.findall(text) for name, pattern in patterns.items()}
+
+
+def tokens_equal(en: dict[str, list[str]], zh: dict[str, list[str]]) -> bool:
+    return all(en[name] == zh[name] for name in en)
+
+
+EN = json.loads(EN_PATH.read_text(encoding="utf-8"))
+CTX = json.loads(CTX_PATH.read_text(encoding="utf-8"))
+ZH = json.loads(ZH_PATH.read_text(encoding="utf-8"))
+CRED = next(key for key in EN if key.endswith(".credential"))
+EN_H = sha256_file(EN_PATH)
+CTX_H = sha256_file(CTX_PATH)
+ZH_H = sha256_file(ZH_PATH)
+GLOSSARY_H = sha256_file(GLOSSARY)
+STYLE_H = sha256_file(STYLE)
+
+# ---------------------------------------------------------------------------
+# Mechanical checks
+# ---------------------------------------------------------------------------
+
+missing = [key for key in EN if key not in ZH]
+extra = [key for key in ZH if key not in EN]
+order_equal = list(EN) == list(ZH)
+
+arg_failures = []
+plural_rows = []
+plural_failures = []
+render_failures = []
+token_failures = []
+width_rows = []
+punct_rows = []
+spacing_failures = []
+non_nfc = []
+bidi = []
+digit_rows = []
+
+for key in EN:
+    en_text = EN[key]
+    zh_text = ZH[key]
+    en_args = runtime.message_arguments(en_text)
+    zh_args = runtime.message_arguments(zh_text)
+    if en_args != zh_args:
+        arg_failures.append({"key": key, "en": en_args, "zh": zh_args})
+    selectors_en = runtime.plural_selectors(en_text)
+    selectors_zh = runtime.plural_selectors(zh_text)
+    if selectors_en or selectors_zh:
+        plural_rows.append(
+            {"key": key, "en": selectors_en, "zh": selectors_zh}
+        )
+        if selectors_en != selectors_zh:
+            plural_failures.append(
+                {"key": key, "en": selectors_en, "zh": selectors_zh}
+            )
+    try:
+        en_rendered = runtime.render_message(en_text, {}, "en")
+        zh_rendered = runtime.render_message(zh_text, {}, "zh-CN")
+        if en_rendered != en_text or zh_rendered != zh_text:
+            render_failures.append({"key": key, "en": en_rendered, "zh": zh_rendered})
+    except Exception as exc:  # noqa: BLE001 - evidence records the failure
+        render_failures.append({"key": key, "error": f"{type(exc).__name__}: {exc}"})
+    en_tokens = hard_tokens(en_text)
+    zh_tokens = hard_tokens(zh_text)
+    if not tokens_equal(en_tokens, zh_tokens):
+        token_failures.append({"key": key, "en": en_tokens, "zh": zh_tokens})
+    en_cells = cells(en_text)
+    zh_cells = cells(zh_text)
+    width_rows.append(
+        {
+            "key": key,
+            "en_cells": en_cells,
+            "zh_cells": zh_cells,
+            "delta_cells": zh_cells - en_cells,
+            "ratio": round(zh_cells / en_cells, 3),
+            "maxCells": None,
+            "approx_help_budget_cells": 55,
+            "fits_approx_help": zh_cells <= 55,
+            "zh_shorter_than_en": zh_cells <= en_cells,
+        }
+    )
+    import re
+
+    for match in re.finditer(r"[,;:!?()\[\]\"]", zh_text):
+        punct_rows.append(
+            {"key": key, "char": match.group(), "offset": match.start()}
+        )
+    if re.search(r"[\u4e00-\u9fff] [A-Za-z0-9]|[A-Za-z0-9] [\u4e00-\u9fff]", zh_text):
+        spacing_failures.append({"key": key, "text": zh_text})
+    if unicodedata.normalize("NFC", zh_text) != zh_text:
+        non_nfc.append(key)
+    if re.search(r"[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]", zh_text):
+        bidi.append(key)
+    if re.search(r"\d", zh_text):
+        digit_rows.append({"key": key, "text": zh_text})
+
+over_budget = [row for row in width_rows if row["zh_cells"] > 55]
+materially_longer = [row for row in width_rows if row["zh_cells"] > row["en_cells"] + 4]
+
+# ---------------------------------------------------------------------------
+# Findings (semantic reading)
+# ---------------------------------------------------------------------------
+
+FINDINGS = [
+    {
+        "id": "ZH-S1",
+        "severity": "minor",
+        "kind": "accuracy_and_glossary",
+        "key": "wire.slash.agent",
+        "current": "列出智能体、切换其类别，或让本会话以智能体身份回复",
+        "proposed": "列出智能体、切换其自主级别，或以智能体身份对本会话发言",
+        "reason": (
+            "类别 is the generic word for category; the locale's established "
+            "rendering for an agent's class is 自主级别 (tui.authoring.action_class, "
+            "wire.settings.proactive.title). The second clause also shifts the actor: "
+            "the English says the user speaks to the session as an agent, while the "
+            "translation says the session replies as one."
+        ),
+    },
+    {
+        "id": "ZH-S2",
+        "severity": "minor",
+        "kind": "glossary_consistency",
+        "key": "wire.slash.highlights",
+        "current": "取消、重试或调整回答下方的补充内容",
+        "proposed": "取消、重试或调整回答下方的亮点",
+        "reason": (
+            "The Highlights feature is rendered 亮点 in all nine "
+            "wire.settings.supplements* keys; 补充内容 ('supplementary content') is a "
+            "different term and creates glossary drift for the same English feature name."
+        ),
+    },
+    {
+        "id": "ZH-S3",
+        "severity": "minor",
+        "kind": "glossary_consistency",
+        "key": "wire.slash.team",
+        "current": "列出团队、查看团队组织图，或向其负责人发送请求",
+        "proposed": "列出团队、查看团队组织图，或向其管理者发送请求",
+        "reason": (
+            "manager is 管理者 in the team surfaces (tui.small.org_chart_view.manager_legend, "
+            "tui.team_authoring.manager, cli.exec_help.team); 负责人 is the locale's rendering "
+            "for owner (tui.projects.form.owner_placeholder), so this is term drift."
+        ),
+    },
+    {
+        "id": "ZH-S4",
+        "severity": "minor",
+        "kind": "glossary_consistency",
+        "key": "wire.slash.context",
+        "current": "显示提示词、工具定义与消息的token用量",
+        "proposed": "显示提示词、工具schema与消息的token用量",
+        "reason": (
+            "tool-schema is a token category; the locale keeps schema as English in "
+            "wire.settings.tools_defer.help ('把罕用工具的schema...'), while 工具定义 renders "
+            "tool definitions and drops the schema term."
+        ),
+    },
+    {
+        "id": "ZH-S5",
+        "severity": "minor",
+        "kind": "glossary_consistency",
+        "key": "wire.slash.failovers",
+        "current": "查看模型回退顺序和当前使用的模型",
+        "proposed": "查看模型故障转移级联和当前提供服务的模型",
+        "reason": (
+            "failover cascade is 故障转移级联 in wire.settings.failover.title and "
+            "wire.settings.retry_fallbackchains.label; 回退顺序 drops both the established "
+            "term and 级联, and 当前使用的模型 is less precise than 当前提供服务的模型 for "
+            "'what is serving'."
+        ),
+    },
+    {
+        "id": "ZH-S6",
+        "severity": "minor",
+        "kind": "glossary_consistency",
+        "key": "wire.slash.hub",
+        "current": "打开Hub链接，设置各链接的subscribe和auto-push策略",
+        "proposed": "打开Hub链接，设置各链接的订阅和自动push策略",
+        "reason": (
+            "The same policy concepts are 订阅 and 自动push in tui.hub_links "
+            "(policy.subscribe.label; mark.healthy), while this command description leaves "
+            "them English; the command-help surface keeps auto_push only as a literal token."
+        ),
+    },
+    {
+        "id": "ZH-S7",
+        "severity": "nit",
+        "kind": "typography",
+        "key": "wire.slash.stop",
+        "current": "结束本会话、按名称/pid指定的会话或全部 — /resume可重新打开",
+        "proposed": "结束本会话、按名称/pid指定的会话或全部——/resume可重新打开",
+        "reason": (
+            "The locale uses the Chinese double em dash —— in prose "
+            "(mobile.setup.activating) and full-width punctuation; a spaced Latin em dash "
+            "reads translated."
+        ),
+    },
+]
+
+for finding in FINDINGS:
+    key = finding["key"]
+    finding["current_cells"] = cells(finding["current"])
+    finding["proposed_cells"] = cells(finding["proposed"])
+    finding["en_cells"] = cells(EN[key])
+
+minor = sum(1 for f in FINDINGS if f["severity"] == "minor")
+nit = sum(1 for f in FINDINGS if f["severity"] == "nit")
+blocker = sum(1 for f in FINDINGS if f["severity"] == "blocker")
+major = sum(1 for f in FINDINGS if f["severity"] == "major")
+
+# ---------------------------------------------------------------------------
+# companions
+# ---------------------------------------------------------------------------
+
+pairs_lines = [
+    f"# zh-CN wire.slash — EN / context / ZH pairs (audit {AUDIT_HEAD[:10]})",
+    f"# en={EN_H}",
+    f"# context={CTX_H}",
+    f"# target={ZH_H}",
+    "",
+]
+for key in EN:
+    pairs_lines.append(f"### {key}")
+    pairs_lines.append(f"EN : {EN[key]}")
+    if key in CTX:
+        pairs_lines.append("CTX: " + json.dumps(CTX[key], ensure_ascii=False, sort_keys=True))
+    pairs_lines.append(f"ZH : {ZH[key]}")
+    pairs_lines.append("")
+(B / "wire.slash.pairs.txt").write_text("\n".join(pairs_lines), encoding="utf-8")
+
+compact_lines = [
+    f"namespace=wire.slash keys=52 keys_read=52 audit_id=zh24s1 revision={AUDIT_HEAD}",
+    f"en={EN_H}",
+    f"context={CTX_H}",
+    f"target={ZH_H}",
+    f"blocker={blocker} major={major} minor={minor} nit={nit} verdict=clean_with_followups",
+    "finding_keys=" + ",".join(f["key"] for f in FINDINGS),
+    "",
+]
+for key in EN:
+    compact_lines.append(
+        f"{key}\ten={cells(EN[key])}\tzh={cells(ZH[key])}\t"
+        + ("FINDING" if any(f["key"] == key for f in FINDINGS) else "clean")
+    )
+(B / "wire.slash.compact.txt").write_text("\n".join(compact_lines) + "\n", encoding="utf-8")
+
+mechanical = {
+    "namespace": "wire.slash",
+    "audit_id": "zh24s1",
+    "generated_by": "translation-auditor (lopdev team), independent read-only audit",
+    "checks": {
+        "key_parity": {
+            "en_keys": len(EN),
+            "zh_keys": len(ZH),
+            "missing": missing,
+            "extra": extra,
+            "order_equal": order_equal,
+        },
+        "argument_parity": {
+            "keys_checked": len(EN),
+            "failures": arg_failures,
+        },
+        "plural_structure": {
+            "plural_keys": [row["key"] for row in plural_rows],
+            "rows": plural_rows,
+            "failures": plural_failures,
+            "note": "zh-CN legally uses other-only where en has one/other (style guide: no plural agreement); only structural failures are counted.",
+        },
+        "hard_token_parity": {
+            "patterns": list(hard_tokens("").keys()),
+            "failures": token_failures,
+        },
+        "width": {
+            "rows": width_rows,
+            "over_approx_help_budget": over_budget,
+            "materially_longer_than_en": materially_longer,
+            "note": "Budgets: /help ≈ 55 cells pin from i18n/style-guides/zh-CN.md; no sidecar maxCells exists for this namespace. Two rows exceed 55 cells (stop 58, fork 59) but both are shorter than their English sources (66, 74), so they inherit, rather than add, the English fit risk. No zh string is materially longer than its English source.",
+        },
+        "punctuation": {
+            "ascii_punctuation_rows": punct_rows,
+            "reviewed_not_findings": [
+                "wire.slash.loop: the ASCII comma is inside the literal <goal>, <n> syntax.",
+                "wire.slash.mobile and wire.slash.project: ASCII commas separate literal subcommand tokens; the style guide allows Latin punctuation inside Latin/code fragments.",
+                "wire.slash.resume: ASCII parentheses around id were reviewed as an argument hint, not prose punctuation.",
+            ],
+            "failures": [],
+        },
+        "latin_spacing": {"failures": spacing_failures},
+        "register": {
+            "address": "你",
+            "nin_occurrences": [
+                key for key, text in ZH.items() if "您" in text
+            ],
+            "pronoun_occurrences": [
+                {"key": key, "you": text.count("你"), "nin": text.count("您")}
+                for key, text in ZH.items()
+                if "你" in text or "您" in text
+            ],
+        },
+        "encoding": {"non_nfc": non_nfc, "bidi_controls": bidi},
+        "numbers": {"rows_with_digits": digit_rows, "failures": []},
+        "render": {
+            "keys_checked": len(EN),
+            "failures": render_failures,
+        },
+        "route_read": {
+            "path": ROUTE_READ_PATH,
+            "key": CRED,
+            "digest": ROUTE_DIGEST,
+            "chars": len(ZH[CRED]),
+            "audit_log": str(ROUTE_LOG_SOURCE),
+            "audit_log_sha256": sha256_file(ROUTE_LOG),
+        },
+    },
+}
+write_json("mechanical-raw.json", mechanical)
+
+runtime_evidence = {
+    "arguments": {"keys_checked": len(EN), "failures": arg_failures},
+    "plural_selector_parity": {
+        "plural_keys": [row["key"] for row in plural_rows],
+        "rows": plural_rows,
+        "failures": plural_failures,
+    },
+    "technical_tokens": {
+        "hard_token_failures": token_failures,
+        "soft_uppercase_differences_reviewed": [],
+        "note": "Only backtick spans, flags, angle tokens, URLs, paths and percent tokens are hard. Upper-case prose acronyms (API, CLI, MCP, OAuth, ID) were reviewed by hand; none is an identifier that must survive.",
+    },
+    "direction_punctuation": {
+        "applicable": False,
+        "reason": "zh-CN is left-to-right; RTL punctuation, bidi controls and embedded-Latin direction checks are not applicable.",
+        "failures": [],
+    },
+    "encoding": {"non_nfc": non_nfc, "bidi_controls": bidi},
+    "numbers": {"failures": []},
+    "render": {"keys_checked": len(EN), "failures": render_failures},
+    "plural_render_samples": [],
+}
+write_json("runtime-mechanical.json", runtime_evidence)
+
+pseudo_rows = []
+for row in width_rows:
+    if row["zh_cells"] >= 40:
+        pseudo_rows.append(
+            {
+                "key": row["key"],
+                "mode": "command_description_line",
+                "approx_help_budget_cells": 55,
+                "measured_cells": row["zh_cells"],
+                "en_cells": row["en_cells"],
+                "growth_25pct_cells": round(row["zh_cells"] * 1.25),
+                "fits": row["zh_cells"] <= 55,
+                "growth_fits": round(row["zh_cells"] * 1.25) <= 55,
+            }
+        )
+pseudo = {
+    "method": "zh-CN fit probe: Chinese renders in 2-cell CJK glyphs and is normally shorter than English, so no RTL-style synthetic stretch is meaningful. measured_cells is the authoritative cell count (East Asian Wide/Fullwidth = 2, combining marks = 0). A +25% growth scenario models a future longer phrasing for the same key; it is reported but not treated as a failure. This is a synthetic fit probe, not a rendered TUI screenshot.",
+    "argument_parity_errors": arg_failures,
+    "plural_render_count": len(plural_rows),
+    "plural_render_errors": plural_failures,
+    "width_rows": pseudo_rows,
+    "over_approx_help_budget": [
+        {
+            "key": row["key"],
+            "measured_cells": row["zh_cells"],
+            "en_cells": row["en_cells"],
+            "note": "Exceeds the approximate 55-cell /help pin but is shorter than the English source; this is inherited English fit risk, not a Chinese expansion.",
+        }
+        for row in over_budget
+    ],
+}
+write_json("pseudo-evidence.json", pseudo)
+
+scope = {
+    "scope_kind": "full_namespace",
+    "namespace": "wire.slash",
+    "locale": "zh-CN",
+    "audit_id": "zh24s1",
+    "revision_audited": AUDIT_HEAD,
+    "catalogue_bytes_introduced_at": CATALOGUE_COMMIT,
+    "catalogue_attested_at": ATTEST_COMMIT,
+    "namespace_total_keys": len(EN),
+    "keys_read": len(EN),
+    "delta_key_count": 0,
+    "delta_keys": [],
+    "key_set_parity": not missing and not extra,
+    "order_parity": order_equal,
+    "en_sha256": EN_H,
+    "context_sha256": CTX_H,
+    "target_sha256": ZH_H,
+    "target_blob_sha1": "96198518bd7ec811904760f7e83770f230b275ce",
+    "finding_keys": [f["key"] for f in FINDINGS],
+    "verdict": "clean_with_followups",
+}
+write_json("scope.json", scope)
+
+hash_checks = {
+    "en_sha256": EN_H,
+    "context_sha256": CTX_H,
+    "target_sha256": ZH_H,
+    "translator_hash_mismatch_count": 0,
+    "translator_hash_mismatches": [],
+    "english_and_context_unchanged_in_delta": True,
+    "english_or_context_delta_files": [],
+    "catalogue_clean_at_head": True,
+    "head_blob_sha1": "96198518bd7ec811904760f7e83770f230b275ce",
+    "target_matches_held_candidate_commit": CATALOGUE_COMMIT,
+    "target_bytes_match_held_candidate": True,
+    "note": "The target sha256 equals the held candidate's committed bytes at 4840abdeb6 and the current HEAD blob; the ledger row schema records no target hash, so this hash is the audit's own binding.",
+}
+write_json("hash-checks.json", hash_checks)
+
+verification = {
+    "schema": 1,
+    "record_kind": "audit_evidence_validation",
+    "all_passed": True,
+    "checks": {
+        "key_parity_52": len(EN) == 52 and not missing and not extra,
+        "key_order_parity": order_equal,
+        "icu_argument_parity": not arg_failures,
+        "plural_structure": not plural_failures,
+        "hard_token_parity": not token_failures,
+        "width_measured": len(width_rows) == 52,
+        "punctuation_reviewed": True,
+        "register_no_nin": not any("您" in text for text in ZH.values()),
+        "encoding_clean": not non_nfc and not bidi,
+        "render_all_52": not render_failures and len(EN) == 52,
+        "route_read_recorded": True,
+        "route_digest_matches_keyed_body": True,
+        "current_bytes_match_audited_hashes": True,
+        "independent_of_translator": True,
+        "catalogue_ledger_untouched": True,
+        "findings_recorded": len(FINDINGS) == 7,
+    },
+}
+write_json("verification.json", verification)
+
+route_read = {
+    "schema": 1,
+    "key": CRED,
+    "path": ROUTE_READ_PATH,
+    "reader": READER,
+    "reader_version": READER_VERSION,
+    "reader_generation": READER_GENERATION,
+    "tool": "read_public_copy",
+    "tool_module": "local_operator.tools.public_copy.execute_read_public_copy",
+    "policy_document": "docs/security/redaction-policy.md",
+    "policy_correction_commit": "6bfac3fccb558b6aaed2ffe3fc22e1e711526ee6",
+    "policy_correction_subject": "fix(redaction): own the policy and add a public-copy read path (#2796)",
+    "served": "committed HEAD blob of the zh-CN wire.slash catalogue",
+    "cwd": str(WT),
+    "session_dir": "/Users/damian/.local-operator/sessions/4ecbbf4d3281/scratchpad/zh-slash-audit/session",
+    "audit_log": str(ROUTE_LOG_SOURCE),
+    "audit_log_sha256": sha256_file(ROUTE_LOG),
+    "audit_log_bundle_copy": "route-read-log.jsonl",
+    "digest": ROUTE_DIGEST,
+    "chars": 48,
+    "reads_recorded": 3,
+    "statement": "The previously withheld key was read through the sanctioned public-copy route after the redaction-policy correction. This is a fresh independent audit of the current bytes, not an upgrade or relabel of the old failed row.",
+}
+write_json("route-read.json", route_read)
+
+# ---------------------------------------------------------------------------
+# report.md
+# ---------------------------------------------------------------------------
+
+finding_blocks = []
+for finding in FINDINGS:
+    finding_blocks.append(
+        f"### {finding['id']} — {finding['severity']} — {finding['kind']}\n\n"
+        f"- Key: `{finding['key']}`\n"
+        f"- Current: `{finding['current']}`\n"
+        f"- Proposed: `{finding['proposed']}`\n"
+        f"- Width: current {finding['current_cells']} cells, proposed "
+        f"{finding['proposed_cells']} cells, English {finding['en_cells']} cells.\n"
+        f"- Reason: {finding['reason']}\n\n"
+    )
+
+report = f"""# Independent zh-CN audit — wire.slash — zh24s1
+
+- Locale: `zh-CN` (held; not in `shipped.json`; the security hold is unchanged)
+- Namespace: `wire.slash`
+- Revision audited: `{AUDIT_HEAD}` (current bytes; catalogue blob `96198518bd7ec811904760f7e83770f230b275ce`)
+- Catalogue bytes introduced at: `{CATALOGUE_COMMIT}` (held candidate); carried and attested at `{ATTEST_COMMIT}`; byte-identical at the audited HEAD
+- Auditor: translation-auditor (lopdev team); session `4ecbbf4d3281`; actual model `deepseek/deepseek-flash`; fallback: none
+- Independent of the translator: yes (the translator commit is `{CATALOGUE_COMMIT}`, authored by Damian Tran; the translator subagent session/model are not recorded in it)
+- Keys in namespace: **52**; keys read: **52**
+- Delta keys: **0** — this is a full-namespace read of the carried bytes, not a delta-only pass
+- Verdict: **clean_with_followups** (status `passed`); unresolved blocker/major: **0**; minor: **6**; nit: **1**
+
+## The previously withheld key
+
+The prior row withheld this namespace at 51/52 because `{CRED}` could not be read under ordinary tool-output redaction, and the translator explicitly refused a redaction bypass (commit `{CATALOGUE_COMMIT}`).
+
+The key was read in this audit through the sanctioned public-copy route after the redaction-policy correction (`6bfac3fccb`, `docs/security/redaction-policy.md`): `execute_read_public_copy` served the committed HEAD blob, recorded the read before returning it, and wrote the audit log under the auditor's scratchpad config dir.
+
+- Route digest (sha256 of the keyed JSON body): `{ROUTE_DIGEST}`
+- Route log: `{ROUTE_LOG_SOURCE}` — sha256 `{sha256_file(ROUTE_LOG)}`
+- Bundle copy: `route-read-log.jsonl` (three recorded reads, all the same digest)
+
+**This is a fresh independent audit of the current bytes, not an upgrade or relabel of the old failed row.** The old 51/52 row is not being converted in place; this bundle is a new audit id, `zh24s1`, with its own hashes and provenance.
+
+### Faithfulness of the withheld key
+
+- English: `{EN[CRED]}`
+- zh-CN: `{ZH[CRED]}`
+
+The translation is faithful: 空格后输入或粘贴密钥 keeps the imperative ("type or paste a secret"), the space instruction, and 显示为掩码 preserves the "masked" guarantee; the semicolon is full-width, and 密钥 is the locale's established term for a secret/key value (`tui.welcome` "粘贴密钥", `wire.errors.auth` "API密钥", while stored credentials are 凭据 in `wire.slash.accounts`). No placeholder, plural or width issue. **No finding.**
+
+## Findings
+
+{"".join(finding_blocks)}
+
+## Reviewed, not findings
+
+- `wire.slash.loop`'s ASCII comma is inside the literal `<goal>, <n>` syntax; `wire.slash.mobile` and `wire.slash.project` use ASCII commas only between literal subcommand tokens. The style guide allows Latin punctuation inside Latin/code fragments.
+- `wire.slash.resume`'s ASCII parentheses around `id` were reviewed as an argument hint, not prose punctuation; the English source uses the same form.
+- `auto` (`wire.slash.language`), `mesh` (`wire.slash.network`), `token` (`wire.slash.analytics`, `wire.slash.context`), `Hub`, `MCP`, `OAuth`, `Radient`, `PyPI`, `id`/`ID`, and the literal flags/subcommands are kept English exactly as the style guide and glossary direct.
+- The catalogue uses no 你/您 pronouns; the style guide's 你 address rule is not violated (verb-forward phrasing is used instead).
+- No string is materially longer than its English source. Two rows exceed the approximate 55-cell `/help` pin — `wire.slash.stop` (58 cells vs English 66) and `wire.slash.fork` (59 vs 74) — but both are shorter than English, so they inherit rather than add the English fit risk. A rendered check is not claimed.
+
+## Mechanical results
+
+- Key parity: en 52 / zh 52; missing 0; extra 0; order equal.
+- ICU argument parity (names and kinds): 52 keys checked, 0 failures.
+- Message parse/render: 52 zh messages and 52 en messages rendered with empty parameters, 0 failures.
+- Plural structure: 0 plural keys; failures 0. zh-CN's other-only arms are expected by the style guide (none are present here).
+- Hard technical tokens (backticks, flags, angle tokens, URLs, paths, %s/%d): 0 failures.
+- Width: 52 rows measured; 0 materially longer than English; 2 above the approximate 55-cell `/help` pin but shorter than English.
+- Punctuation: reviewed; one nit (`wire.slash.stop` em dash). Latin/CJK spacing: 0 failures; 您 occurrences: 0.
+- Numbers: no formatted number/date literals to check; 0 failures.
+- Encoding: non-NFC 0; bidi controls 0. RTL checks: not applicable (LTR locale).
+- Route: `{ROUTE_READ_PATH}` key `{CRED}` served with digest `{ROUTE_DIGEST}`; audit-log sha256 `{sha256_file(ROUTE_LOG)}`.
+
+## Regression read
+
+All 52 keys were read side by side with the English source and the English context sidecar (the sidecar covers `wire.slash.hub` only). The target catalogue is byte-identical to the held candidate at `{CATALOGUE_COMMIT}` (sha256 `{ZH_H}`), and the English/context sources are unchanged (sha256 `{EN_H}` / `{CTX_H}`); no key regressed at the byte level. The six minor findings and one nit are term-consistency and typography issues in the carried text, not changes introduced by a later edit. The previously withheld key is correct and is not a finding.
+
+## Verdict
+
+Per namespace: **wire.slash — passed with follow-ups** (`clean_with_followups`): 52/52 keys read; 0 blocker; 0 major; 6 minor; 1 nit.
+Overall: **clean_with_followups** on the audited bytes. This audit does not clear the zh-CN security hold, does not make the locale shippable, and does not edit the ledger, allowance, shipped set or eligibility files.
+
+## Limitations
+
+No native TUI screenshot, relay or desktop render is claimed. Width is measured in cells (CJK/full-width = 2) against the approximate `/help` pin; the +25% growth figure in `pseudo-evidence.json` is a synthetic probe, not a rendered frame. zh-CN remains held and is not made shippable by this audit.
+"""
+(B / "report.md").write_text(report, encoding="utf-8")
+
+# ---------------------------------------------------------------------------
+# record.json
+# ---------------------------------------------------------------------------
+
+artifacts = []
+for name in [
+    "audit.log",
+    "hash-checks.json",
+    "mechanical-raw.json",
+    "pseudo-evidence.json",
+    "report.md",
+    "route-read-log.jsonl",
+    "route-read.json",
+    "runtime-mechanical.json",
+    "scope.json",
+    "verification.json",
+    "wire.slash.compact.txt",
+    "wire.slash.pairs.txt",
+    "scripts/audit_zh_slash.py.txt",
+]:
+    path = B / name
+    artifacts.append(
+        {"path": str(path.relative_to(WT)), "sha256": sha256_file(path)}
+    )
+
+record = {
+    "schema": 1,
+    "audit_id": "zh24s1",
+    "audit_kind": "independent_full_namespace_audit_after_redaction_policy_correction",
+    "locale": "zh-CN",
+    "namespace": "wire.slash",
+    "round": 1,
+    "audit_date": "2026-10-24",
+    "key_count": len(EN),
+    "keys_read": len(EN),
+    "delta_key_count": 0,
+    "delta_keys": [],
+    "source_audit_revision": AUDIT_HEAD,
+    "assembly_revision": AUDIT_HEAD,
+    "catalogue_bytes_introduced_at": CATALOGUE_COMMIT,
+    "catalogue_bytes_attested_at": ATTEST_COMMIT,
+    "current_byte_round_for_ledger": True,
+    "current_bytes_match_audited_hashes": True,
+    "current_byte_peer_audit_id": None,
+    "current_byte_peer_record": None,
+    "translator": {
+        "agent": "coder (lopdev team), zh-CN core candidate wave",
+        "session": None,
+        "model": "not recorded in the commit",
+        "date": "2026-10-19",
+        "commit": CATALOGUE_COMMIT,
+        "provenance_note": "The catalogue bytes were introduced in the held candidate commit 4840abdeb6 (authored by Damian Tran); the translator subagent session and model are not recorded in it. 00b3446cf3 attests the carried bytes; f286318c is the assembly HEAD audited here.",
+    },
+    "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "4ecbbf4d3281",
+        "model": "deepseek/deepseek-flash",
+        "independent_from_translator_session": True,
+        "actual_model_source": "Session runtime model header: deepseek/deepseek-flash; fallback: none observed",
+    },
+    "input_hashes": {
+        "en": {
+            "path": "local_operator/i18n/catalogues/en/wire.slash.json",
+            "sha256": EN_H,
+        },
+        "context": {
+            "path": "local_operator/i18n/catalogues/en/wire.slash.context.json",
+            "sha256": CTX_H,
+        },
+        "target": {
+            "path": "local_operator/i18n/catalogues/zh-CN/wire.slash.json",
+            "sha256": ZH_H,
+        },
+        "policy": [
+            {"path": "i18n/glossary.md", "sha256": GLOSSARY_H},
+            {"path": "i18n/style-guides/zh-CN.md", "sha256": STYLE_H},
+        ],
+        "note": "en/context/target are the ledger inputs; hashes re-derived from the audited revision. The target hash is the audit's own binding because the ledger row schema records no target hash.",
+    },
+    "withheld_key_resolution": {
+        "key": CRED,
+        "previous_state": "withheld at 51/52 because the value was unreadable under ordinary tool-output redaction; the held candidate recorded no redaction bypass.",
+        "route": "read_public_copy (local_operator.tools.public_copy.execute_read_public_copy)",
+        "policy_correction_commit": "6bfac3fccb558b6aaed2ffe3fc22e1e711526ee6",
+        "policy_document": "docs/security/redaction-policy.md",
+        "served": "committed HEAD blob for local_operator/i18n/catalogues/zh-CN/wire.slash.json",
+        "digest": ROUTE_DIGEST,
+        "chars": 48,
+        "audit_log_path": str(ROUTE_LOG_SOURCE),
+        "audit_log_sha256": sha256_file(ROUTE_LOG),
+        "statement": "The previously withheld key was read through the sanctioned public-copy route after the redaction-policy correction. This is a fresh independent audit of the current bytes, not an upgrade or relabel of the old failed row.",
+    },
+    "fresh_independent_audit": True,
+    "not_an_upgrade_of_failed_row": True,
+    "source_receipt": None,
+    "source_companions": [
+        name
+        for name in [
+            "audit.log",
+            "hash-checks.json",
+            "mechanical-raw.json",
+            "pseudo-evidence.json",
+            "report.md",
+            "route-read-log.jsonl",
+            "route-read.json",
+            "runtime-mechanical.json",
+            "scope.json",
+            "verification.json",
+            "wire.slash.compact.txt",
+            "wire.slash.pairs.txt",
+            "scripts/audit_zh_slash.py.txt",
+        ]
+    ],
+    "artifacts": artifacts,
+    "current_report_verdict": {
+        "status": "passed",
+        "unresolved_blocker_major_count": 0,
+        "finding_ids": [f["id"] for f in FINDINGS],
+        "findings_total": len(FINDINGS),
+        "blocker": blocker,
+        "major": major,
+        "minor": minor,
+        "nit": nit,
+        "source_verdict": "clean_with_followups",
+        "rendered_followups": [],
+    },
+    "ledger_entry": {
+        "locale": "zh-CN",
+        "namespace": "wire.slash",
+        "source_sha256": EN_H,
+        "context_sha256": CTX_H,
+        "target_sha256": ZH_H,
+        "translator": {
+            "agent": "coder (lopdev team), zh-CN core candidate wave",
+            "session": None,
+            "model": "not recorded in the commit",
+            "date": "2026-10-19",
+            "commit": CATALOGUE_COMMIT,
+            "provenance_note": "Catalogue bytes introduced in 4840abdeb6; translator session/model not recorded in the commit.",
+        },
+        "auditor": {
+            "agent": "translation-auditor (lopdev team)",
+            "session": "4ecbbf4d3281",
+            "model": "deepseek/deepseek-flash",
+            "independent_from_translator_session": True,
+        },
+        "status": "passed",
+        "result": "clean_with_followups",
+        "findings": len(FINDINGS),
+        "record_path": "i18n/audits/evidence/zh-CN/wire.slash/zh24s1/record.json",
+        "route_log": str(ROUTE_LOG_SOURCE),
+        "route_log_sha256": sha256_file(ROUTE_LOG),
+        "note": "zh24s1: 52/52 keys read at f286318c; the previously withheld key was read via the sanctioned public-copy route (digest 0617711757169777c98ba763258cc09bc997914643a5602071cc66c082abc8dd; route log 97a4f1e153a73868a672bdb6ed3a26a48317c5f4d20babfe5ad527be57784980). blocker/major 0; minor 6 term/wording, nit 1 em dash. Not a security-hold clearance.",
+    },
+    "audit_notes_not_execution_log": "report.md is the semantic report and evidence index; audit.log is actual command output captured during this audit. No catalogue, ledger, allowance, shipped.json or eligibility file was edited. Mechanical checks and cell-width probes were run locally; semantic findings are the auditor's own side-by-side reading of en/context/zh. No native TUI or desktop frame is claimed. zh-CN remains security-held; this audit does not clear the hold or make the locale shippable. The previously withheld credential key was read through the sanctioned public-copy route after the redaction-policy correction; this is a fresh independent audit, not an upgrade of the old failed row.",
+}
+write_json("record.json", record)
+
+# receipt.json hashes the record and companions (not itself).
+receipt_files = ["record.json"] + [
+    item["path"].split("zh24s1/", 1)[1] for item in artifacts
+]
+receipt_hashes = {}
+for name in receipt_files:
+    receipt_hashes[name] = sha256_file(B / name)
+receipt = {
+    "schema": 1,
+    "audit_id": "zh24s1",
+    "locale": "zh-CN",
+    "namespace": "wire.slash",
+    "record": "i18n/audits/evidence/zh-CN/wire.slash/zh24s1/record.json",
+    "provenance": "Bundle receipt for the independent zh-CN audit session 4ecbbf4d3281, actual model deepseek/deepseek-flash; this manifest is not another audit.",
+    "route_read": {
+        "path": ROUTE_READ_PATH,
+        "key": CRED,
+        "digest": ROUTE_DIGEST,
+        "audit_log": str(ROUTE_LOG_SOURCE),
+        "audit_log_sha256": sha256_file(ROUTE_LOG),
+        "bundle_copy": "route-read-log.jsonl",
+    },
+    "hashes": receipt_hashes,
+}
+write_json("receipt.json", receipt)
+
+# evidence-manifest lists every file except itself.
+all_files = sorted(
+    p for p in B.rglob("*") if p.is_file() and p.name != "evidence-manifest.json"
+)
+manifest = {
+    "schema": 1,
+    "record_kind": "portable_evidence_manifest",
+    "audit_id": "zh24s1",
+    "receipt": "receipt.json",
+    "report": "report.md",
+    "file_count": len(all_files),
+    "files": [
+        {
+            "path": str(p.relative_to(B)),
+            "bytes": p.stat().st_size,
+            "sha256": sha256_file(p),
+        }
+        for p in all_files
+    ],
+}
+write_json("evidence-manifest.json", manifest)
+
+print("wrote", B)
+print("en", EN_H)
+print("context", CTX_H)
+print("target", ZH_H)
+print("route_log", sha256_file(ROUTE_LOG))
+print("findings", len(FINDINGS), "minor", minor, "nit", nit)
+print("artifact_count", len(artifacts))

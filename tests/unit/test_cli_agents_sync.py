@@ -71,7 +71,7 @@ def test_the_command_reports_an_installed_starter_as_current(
     isolated_config_dir: Path, capsys
 ) -> None:
     registry = AgentRegistry(isolated_config_dir)
-    assert install_seed("reviewer", registry=registry) is not None
+    assert install_seed("reviewer", registry=registry, scope="global") is not None
 
     args = build_cli_parser().parse_args(["agents", "sync"])
     rc = agents_sync_command(args, registry, isolated_config_dir)
@@ -84,8 +84,8 @@ def test_the_command_reports_an_installed_starter_as_current(
 
 def test_the_command_syncs_only_the_named_profile(isolated_config_dir: Path, capsys) -> None:
     registry = AgentRegistry(isolated_config_dir)
-    assert install_seed("reviewer", registry=registry) is not None
-    assert install_seed("coder", registry=registry) is not None
+    assert install_seed("reviewer", registry=registry, scope="global") is not None
+    assert install_seed("coder", registry=registry, scope="global") is not None
 
     args = build_cli_parser().parse_args(["agents", "sync", "--name", "coder"])
     rc = agents_sync_command(args, registry, isolated_config_dir)
@@ -107,8 +107,8 @@ def test_the_all_flag_names_every_installed_profile(isolated_config_dir: Path, c
     """
 
     registry = AgentRegistry(isolated_config_dir)
-    assert install_seed("reviewer", registry=registry) is not None
-    assert install_seed("coder", registry=registry) is not None
+    assert install_seed("reviewer", registry=registry, scope="global") is not None
+    assert install_seed("coder", registry=registry, scope="global") is not None
 
     args = build_cli_parser().parse_args(["agents", "sync", "--all"])
     rc = agents_sync_command(args, registry, isolated_config_dir)
@@ -157,7 +157,7 @@ def test_check_reports_a_behind_starter_and_writes_nothing(
 
     seeds = _scratch_seeds(tmp_path, monkeypatch)
     registry = AgentRegistry(isolated_config_dir)
-    assert install_seed("reviewer", registry=registry) is not None
+    assert install_seed("reviewer", registry=registry, scope="global") is not None
     publish_seed(seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
     before = _tree_bytes(isolated_config_dir / "agents")
 
@@ -187,7 +187,7 @@ def test_dry_run_writes_nothing_for_the_seed_arm(
 
     seeds = _scratch_seeds(tmp_path, monkeypatch)
     registry = AgentRegistry(isolated_config_dir)
-    assert install_seed("reviewer", registry=registry) is not None
+    assert install_seed("reviewer", registry=registry, scope="global") is not None
     publish_seed(seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
     before = _tree_bytes(isolated_config_dir / "agents")
 
@@ -216,7 +216,7 @@ def test_an_unconfirmed_replace_never_forces_the_seed_arm(
 
     seeds = _scratch_seeds(tmp_path, monkeypatch)
     registry = AgentRegistry(isolated_config_dir)
-    assert install_seed("reviewer", registry=registry) is not None
+    assert install_seed("reviewer", registry=registry, scope="global") is not None
     installed = registry.get_agent_by_name("reviewer")
     assert installed is not None
     registry.set_agent_system_prompt(installed.id, "MY EDITED PROMPT")
@@ -252,7 +252,7 @@ def test_replace_yes_applies_seeds_even_when_the_hub_arm_then_errors(
     monkeypatch.setattr("local_operator.hub_sync.service.apply_items", busy)
     seeds = _scratch_seeds(tmp_path, monkeypatch)
     registry = AgentRegistry(isolated_config_dir)
-    assert install_seed("reviewer", registry=registry) is not None
+    assert install_seed("reviewer", registry=registry, scope="global") is not None
     installed = registry.get_agent_by_name("reviewer")
     assert installed is not None
     registry.set_agent_system_prompt(installed.id, "MY EDITED PROMPT")
@@ -279,7 +279,7 @@ def test_an_unconfirmed_replace_changes_nothing_on_a_clean_row(
 
     seeds = _scratch_seeds(tmp_path, monkeypatch)
     registry = AgentRegistry(isolated_config_dir)
-    assert install_seed("reviewer", registry=registry) is not None
+    assert install_seed("reviewer", registry=registry, scope="global") is not None
     publish_seed(seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
     installed = registry.get_agent_by_name("reviewer")
     assert installed is not None
@@ -307,7 +307,7 @@ def test_check_with_merge_flags_refuses_before_any_seed_write(
 
     seeds = _scratch_seeds(tmp_path, monkeypatch)
     registry = AgentRegistry(isolated_config_dir)
-    assert install_seed("reviewer", registry=registry) is not None
+    assert install_seed("reviewer", registry=registry, scope="global") is not None
     publish_seed(seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
     before = _tree_bytes(isolated_config_dir)
 
@@ -335,7 +335,7 @@ def test_force_prints_exactly_one_deprecation_warning(
 
     seeds = _scratch_seeds(tmp_path, monkeypatch)
     registry = AgentRegistry(isolated_config_dir)
-    assert install_seed("reviewer", registry=registry) is not None
+    assert install_seed("reviewer", registry=registry, scope="global") is not None
     publish_seed(seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
 
     args = build_cli_parser().parse_args(["agents", "sync", "--force"])

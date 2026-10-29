@@ -950,26 +950,34 @@ def test_a_cold_dismiss_from_the_phone_records_the_remote_surface(monkeypatch) -
     assert events[-1]["by"] == {"surface": "remote"}
 
 
-def test_a_cold_dismiss_of_an_open_ask_refuses_in_the_queues_own_words(monkeypatch) -> None:
-    """Only ``ask_owner_present`` falls back to the dial (fork A).
-
-    A refusal is the answer, not a reason to boot a runtime: an open ask is not
-    dismissible (no surface offers it, and the queue refuses it), so engaging to
-    ask a runtime the same question would spend a boot to be told the same thing.
-    The sentence is the queue's, verbatim, because a stale tap reads the same
-    words on the phone as on the TUI.
-    """
+def test_a_cold_dismiss_of_an_open_ask_is_accepted_and_boots_nothing(monkeypatch) -> None:
+    """D6 (design §15): a session with no runtime is "no agent work running", so
+    the cold door takes an OPEN ask, records the reason and boots nothing."""
     client, engagements = _cold_engage(monkeypatch)
     _durable_ask_session("ask-open-1", expired=False)
     reply = _client().post(
         f"/api/sessions/{SESSION_A}/command",
-        json={"op": "ask_dismiss", "ask_id": "ask-open-1"},
+        json={"op": "ask_dismiss", "ask_id": "ask-open-1", "reason": "answered_in_chat"},
     )
 
-    assert reply.status_code == 422, reply.text
-    assert reply.json()["error"] == "only a timed-out ask can be dismissed; it is still open."
+    assert reply.status_code == 200, reply.text
+    events = ask_store.read_events(config_dir() / "sessions" / SESSION_A)
+    assert events[-1]["kind"] == ask_store.EVENT_DISMISSED
+    assert events[-1]["reason"] == "answered_in_chat"
     assert engagements == []
     assert client.calls == []
+
+
+def test_an_unknown_dismiss_reason_is_refused_at_the_wire(monkeypatch) -> None:
+    _cold_engage(monkeypatch)
+    _durable_ask_session("ask-open-2", expired=False)
+    reply = _client().post(
+        f"/api/sessions/{SESSION_A}/command",
+        json={"op": "ask_dismiss", "ask_id": "ask-open-2", "reason": "because"},
+    )
+    assert reply.status_code >= 400, reply.text
+    events = ask_store.read_events(config_dir() / "sessions" / SESSION_A)
+    assert all(e["kind"] != ask_store.EVENT_DISMISSED for e in events)
 
 
 def test_a_refused_cold_answer_keeps_the_session_claimed_active(monkeypatch) -> None:

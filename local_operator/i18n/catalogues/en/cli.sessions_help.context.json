@@ -228,5 +228,10 @@
     "role": "lop CLI help text",
     "tone": "terse, operator-facing, describes a flag or command",
     "note": "help for `sync_owner`; flag/command tokens stay in situ"
+  },
+  "cli.sessions_help.cleanup_scratchpads_only": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "names both modes: --dry-run audits pads; otherwise reclaims only build/cache content from delegated scratchpads, never transcripts or conversations. 'scratchpad' is the product noun (the URL scheme and the on-disk folder); use it as the settled term rather than 'pad'."
   }
 }

@@ -32,5 +32,14 @@ export default defineConfig({
 		// (its localStorage getter is non-enumerable). src/test-setup.ts
 		// re-attaches real Storage so the suite runs on any supported Node.
 		setupFiles: ["./src/test-setup.ts"],
+		// THE SUITE IS TZ-INDEPENDENT BY CONSTRUCTION, NOT BY LUCK.
+		// `usage-sheet.format.test.tsx` asserts rendered clock times ("15:04",
+		// "3:04 PM") for a fixed epoch, and an unset TZ makes those assertions
+		// describe the CONTRIBUTOR'S machine: 13/13 pass on a UTC runner, 2 of
+		// 13 fail on a UTC-5 laptop, for the same code. Pinning here means the
+		// assertion is about formatting rather than geography, and it is pinned
+		// in the runner rather than in a shell prefix so Windows, macOS, Linux
+		// and CI all get the same environment.
+		env: { TZ: "UTC" },
 	},
 });

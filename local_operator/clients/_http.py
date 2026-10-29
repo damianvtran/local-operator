@@ -267,6 +267,38 @@ class APIError(RuntimeError):
         self.body = body
 
 
+class NotModified(Exception):
+    """A conditional GET answered ``304 Not Modified``: an OUTCOME, not a failure.
+
+    A ``304`` is the upstream's own assertion that the representation the caller
+    already holds -- the one its validator named -- is still current, so the call
+    succeeded with **no body to read**. It has to be its own class because every
+    neighbouring shape on this path would misread it:
+
+    * ``raise_for_status()`` does not raise for a 3xx, so the request looks
+      successful and the failure would surface later as an empty body parsed as
+      an unrecognised envelope;
+    * ``_refuse_redirect`` DOES refuse every 3xx (correctly -- a redirect must not
+      re-send a bearer), so it would call a 304 ``unexpected_redirect``;
+    * returning an empty dict would be indistinguishable from a payload that
+      really was empty, and every caller of a manifest read has to WRITE
+      something for that case (the hub check records it as a failure).
+
+    Raising forces each caller to state what "nothing new" means for it, which
+    for the hub check is "unchanged" -- never a failed check.
+
+    Attributes:
+        etag: The ``ETag`` the 304 carried, when the upstream sent one. The
+            validator the caller sent is the authoritative one (a 304 is only
+            produced for a match), so this is for diagnostics and for callers
+            that did not keep their own copy.
+    """
+
+    def __init__(self, *, etag: Optional[str] = None) -> None:
+        super().__init__("the upstream answered 304 Not Modified")
+        self.etag = etag
+
+
 def api_error_from_exception(
     exc: RequestException,
     *,

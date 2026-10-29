@@ -1,0 +1,4 @@
+wire.remote_compute.finished_exit_code
+EN exit code: {exit_code}
+OLD خروجی کوڈ: {exit_code}
+NEW ایگزٹ کوڈ: {exit_code}

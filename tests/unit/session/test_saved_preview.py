@@ -12,6 +12,7 @@ cannot prove is reported through ``partial`` rather than by returning nothing.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -106,6 +107,134 @@ def test_preview_replays_correct_session_and_prunes(tmp_path):
     assert not result.partial
     assert result.messages[-1].text == "Useful saved answer"
     assert "original tool output" not in result.messages[0].text
+
+
+def test_an_unchanged_journal_replays_only_once(tmp_path, monkeypatch):
+    """A sidebar revisit must not pay the journal decode and replay again."""
+    journal(tmp_path, [message("one", "first"), message("two", "second")])
+    from local_operator.session import saved_preview
+
+    original = saved_preview.replay_entries
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(saved_preview, "replay_entries", counted)
+    first = read_saved_preview(tmp_path)
+    second = read_saved_preview(tmp_path)
+
+    assert calls == 1
+    assert second == first
+
+
+def test_an_append_invalidates_the_saved_preview(tmp_path, monkeypatch):
+    """A cached answer must never hide a row appended after it was read."""
+    journal(tmp_path, [message("one", "before")])
+    from local_operator.session import saved_preview
+
+    original = saved_preview.replay_entries
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(saved_preview, "replay_entries", counted)
+    assert [m.text for m in read_saved_preview(tmp_path).messages] == ["before"]
+    with (tmp_path / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(message("two", "after").to_json() + "\n")
+
+    assert [m.text for m in read_saved_preview(tmp_path).messages] == ["before", "after"]
+    assert calls == 2
+
+
+def test_an_in_place_rewind_invalidates_even_at_the_same_size_and_mtime(tmp_path):
+    """Rewind is a writer too: identity needs more than inode, size and mtime."""
+    path = tmp_path / "transcript.jsonl"
+    journal(tmp_path, [message("one", "aaaa"), message("two", "bbbb")])
+    assert [m.text for m in read_saved_preview(tmp_path).messages] == ["aaaa", "bbbb"]
+    before = path.stat()
+    path.write_text(
+        message("one", "cccc").to_json() + "\n" + message("two", "dddd").to_json() + "\n"
+    )
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert path.stat().st_size == before.st_size
+
+    assert [m.text for m in read_saved_preview(tmp_path).messages] == ["cccc", "dddd"]
+
+
+def test_a_compaction_replacement_cannot_serve_the_old_preview(tmp_path):
+    path = tmp_path / "transcript.jsonl"
+    journal(tmp_path, [message("one", "before compaction")])
+    assert read_saved_preview(tmp_path).messages[0].text == "before compaction"
+    replacement = tmp_path / "replacement.jsonl"
+    replacement.write_text(message("two", "after compaction").to_json() + "\n")
+    replacement.replace(path)
+
+    assert read_saved_preview(tmp_path).messages[0].text == "after compaction"
+
+
+def test_a_write_during_replay_is_not_published_as_current(tmp_path, monkeypatch):
+    """An overlapping writer invalidates the in-flight read before publication."""
+    journal(tmp_path, [message("one", "before")])
+    from local_operator.session import saved_preview
+
+    original = saved_preview.replay_entries
+
+    def append_while_reading(*args, **kwargs):
+        result = original(*args, **kwargs)
+        with (tmp_path / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(message("two", "after").to_json() + "\n")
+        return result
+
+    monkeypatch.setattr(saved_preview, "replay_entries", append_while_reading)
+    racing = read_saved_preview(tmp_path)
+
+    assert [m.text for m in racing.messages] == ["before"]
+    assert [m.text for m in read_saved_preview(tmp_path).messages] == ["before", "after"]
+
+
+def test_cached_messages_are_not_shared_with_history_consumers(tmp_path):
+    """A hit must be an independent copy, nested content included.
+
+    A shallow copy passes a top-level assignment test while still sharing the
+    ``Message`` objects and their content lists, so the mutation here is NESTED
+    and the later read must not observe it.
+    """
+    journal(tmp_path, [message("one", "original")])
+    first = read_saved_preview(tmp_path)
+    assert first.messages[0].text == "original"
+    first.messages[0].content[0].text = "consumer annotation"
+
+    later = read_saved_preview(tmp_path)
+    assert later.messages[0].text == "original"
+    assert later.messages[0] is not first.messages[0]
+    assert later.messages is not first.messages
+
+
+def test_a_preview_too_large_for_the_budget_is_not_admitted(tmp_path, monkeypatch):
+    """The LRU is bounded in bytes, so an oversized preview must stay uncached."""
+    journal(tmp_path, [message("one", "held")])
+    from local_operator.session import saved_preview
+
+    original = saved_preview.replay_entries
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(saved_preview, "replay_entries", counted)
+    monkeypatch.setattr(saved_preview, "_PREVIEW_CACHE_ENTRY_BYTES", 0)
+
+    assert [m.text for m in read_saved_preview(tmp_path).messages] == ["held"]
+    assert [m.text for m in read_saved_preview(tmp_path).messages] == ["held"]
+    assert calls == 2, "an over-budget preview was admitted to the cache"
 
 
 def test_preview_walks_by_rows_not_a_byte_window(tmp_path, monkeypatch):

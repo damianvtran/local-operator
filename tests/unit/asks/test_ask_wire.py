@@ -459,6 +459,47 @@ def test_the_fold_fronts_the_mirrored_card_and_keeps_pending_count_approvals(
     assert projection.asks_open == 1
 
 
+def test_a_dismissed_row_keeps_its_reason_on_the_phone_wire() -> None:
+    """SA-D8 (design §17): the projection filters a row against its dataclass.
+
+    ``ProjectionFold.set_asks`` keeps only the keys ``PendingAskWire`` declares,
+    so a field missing from that model is a field the phone never receives,
+    whatever the runtime published. The pair is on a DISMISSED row and nowhere
+    else, which is what keeps the change additive.
+    """
+    projection = SessionProjection(session_id="s1", pid=1, kind="daemon")
+    fold = ProjectionFold(projection)
+    fold.set_asks(
+        [
+            {
+                "ask_id": "a-9",
+                "status": "dismissed",
+                "created_at": 5,
+                "expires_at": 10,
+                "questions": [],
+                "dismissed_at": 123,
+                "dismissed_reason": "answered_in_chat",
+            }
+        ],
+        0,
+    )
+    rows = projection.asks
+    assert rows is not None
+    (row,) = rows
+    assert row.to_json()["dismissed_at"] == 123
+    assert row.to_json()["dismissed_reason"] == "answered_in_chat"
+    # A settled ask offers nothing to answer, so the legacy mirror stays clear.
+    assert projection.pending is None
+    assert projection.asks_open == 0
+
+    fold.set_asks([{"ask_id": "a-9", "status": "open", "created_at": 5, "questions": []}], 1)
+    open_rows = projection.asks
+    assert open_rows is not None
+    open_row = open_rows[0].to_json()
+    assert "dismissed_at" not in open_row
+    assert "dismissed_reason" not in open_row
+
+
 def test_the_mirror_ignores_a_timed_out_ask(tmp_path: Path) -> None:
     """A dead ask must not be painted as "waiting for you" (§4)."""
     projection = SessionProjection(session_id="s1", pid=1, kind="daemon")

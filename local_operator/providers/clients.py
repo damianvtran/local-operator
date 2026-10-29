@@ -19,6 +19,7 @@ retryable/auth flags for the failover layer.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import email.utils
 import functools
@@ -45,6 +46,7 @@ from local_operator.harness.types import (
     AgentTool,
     AudioContent,
     ChatRequest,
+    DocumentContent,
     ImageContent,
     Message,
     ModelSpec,
@@ -69,6 +71,15 @@ from local_operator.model.speed import (
 )
 from local_operator.providers.account_affinity import set_wire_hint
 from local_operator.providers.context import bind_native_context
+from local_operator.providers.documents import (
+    DocumentBudget,
+    DocumentForm,
+    document_budget_for_messages,
+    document_budget_for_request,
+    document_form,
+    document_native_ok,
+    fallback_document_text,
+)
 from local_operator.providers.failover import ProviderError
 from local_operator.providers.replay import (
     REASONING_ECHO_PLACEHOLDER,
@@ -1704,7 +1715,9 @@ def _estimated_prompt_tokens(request: ChatRequest) -> tuple[int, int]:
         measured_hint = request.context_tokens_hint_measured
         return hint, measured_hint if measured_hint is not None else hint
 
-    local = estimate_messages_tokens(request.messages)
+    # The provider-bound estimate must measure the same raw tool row the wire
+    # encoder will send; analytics and durable history keep using the receipt.
+    local = estimate_messages_tokens(request.wire_messages())
 
     extra_chars = sum(len(block) for block in request.system_blocks)
     for tool in request.tools:
@@ -2175,7 +2188,39 @@ def _echo_reasoning_content(entry: dict[str, Any]) -> bool:
     return True
 
 
-def _message_to_openai(message: Message) -> dict[str, Any]:
+def _document_chat_part(
+    block: DocumentContent,
+    form: DocumentForm | None,
+    budget: DocumentBudget | None = None,
+) -> dict[str, Any]:
+    """One document block as an OpenAI-COMPATIBLE chat content part.
+
+    Two shapes live behind that word, and which one is sent is ``form.wire``'s
+    decision — computed at REQUEST time from the provider id and the wire this
+    client is actually building (contract amendment 6), never from the block's
+    admission label. OpenRouter and OpenAI share ``file``; Mistral spells the
+    same data URL as ``document_url``.
+
+    Ineligible payloads (no form, over a limit, non-PDF) become TEXT — the
+    fallback extraction — never a skipped block: a provider that cannot read
+    the file must still receive what the file says.
+    """
+    if document_native_ok(block, form, budget=budget):
+        data_url = f"data:{block.mime_type};base64,{block.data}"
+        if form is not None and form.wire == "mistral":
+            return {"type": "document_url", "document_url": data_url}
+        return {
+            "type": "file",
+            "file": {"filename": block.filename, "file_data": data_url},
+        }
+    return {"type": "text", "text": fallback_document_text(block)}
+
+
+def _message_to_openai(
+    message: Message,
+    document_form_: DocumentForm | None = None,
+    document_budget_: DocumentBudget | None = None,
+) -> dict[str, Any]:
     """Render one harness message into OpenAI chat-completions shape."""
     if message.role == "assistant" and message.tool_calls:
         # Same whitespace rule as `_is_empty_assistant`: a whitespace-only
@@ -2226,6 +2271,12 @@ def _message_to_openai(message: Message) -> dict[str, Any]:
                     "image_url": {"url": f"data:{block.mime_type};base64,{block.data}"},
                 }
             )
+        elif isinstance(block, DocumentContent):
+            # A document part is never "plain": even its fallback text must ride
+            # the parts array, because ``plain_only`` would otherwise join the
+            # extraction into one string and lose the per-file framing.
+            plain_only = False
+            parts.append(_document_chat_part(block, document_form_, document_budget_))
         elif isinstance(block, AudioContent):
             plain_only = False
             wire_format = stt_audio.format_for_model_wire(block.mime_type)
@@ -2249,6 +2300,14 @@ def _message_to_openai(message: Message) -> dict[str, Any]:
                 }
             )
     role = message.role
+    if not parts and role == "user":
+        # Backfilled, not left as ``"content": ""``: an openai-compat route
+        # that forwards to Claude (OpenRouter, Radient) translates the empty
+        # string into the same blank text block Anthropic refuses the whole
+        # request over, and skipping the turn would change the role sequence.
+        # Same placeholder, same reason as the Responses wire below; see
+        # ``EMPTY_USER_TEXT``.
+        return {"role": role, "content": EMPTY_USER_TEXT}
     if plain_only:
         return {"role": role, "content": "".join(p["text"] for p in parts)}
     return {"role": role, "content": parts}
@@ -2284,8 +2343,32 @@ def _messages_to_openai_responses(
     model: ModelSpec | None = None,
     endpoint: str = "",
     scope: str | None = None,
+    *,
+    request: ChatRequest | None = None,
 ) -> list[dict[str, Any]]:
     """Render harness history as Responses input items, including tool turns."""
+    # Request-time document policy: the same provider id reaches Chat OR
+    # Responses depending on credentials/config, so this wire asks for ITS row
+    # (contract amendment 6) rather than reading the admission label.
+    doc_form = (
+        document_form(
+            model.provider,
+            "openai-responses",
+            supports_images=model.supports_images,
+            context_window=model.context_window,
+        )
+        if model is not None
+        else None
+    )
+    # The Responses guide's 50 MB is per file AND combined across files; one
+    # budget spans every message this body will carry, after the measured
+    # non-document payload is reserved (M1 / round-2 minor 2). The full
+    # request is preferred (system blocks and tool schemas spend the same
+    # ceiling); a caller that only has messages gets the message-only figure.
+    if request is not None:
+        doc_budget = document_budget_for_request(doc_form, request)
+    else:
+        doc_budget = document_budget_for_messages(doc_form, messages)
     items: list[dict[str, Any]] = []
     for message in _without_unrenderable_tool_calls(messages):
         if model is not None:
@@ -2342,6 +2425,17 @@ def _messages_to_openai_responses(
                         "image_url": f"data:{block.mime_type};base64,{block.data}",
                     }
                 )
+            elif isinstance(block, DocumentContent):
+                if document_native_ok(block, doc_form, budget=doc_budget):
+                    content.append(
+                        {
+                            "type": "input_file",
+                            "filename": block.filename,
+                            "file_data": f"data:{block.mime_type};base64,{block.data}",
+                        }
+                    )
+                else:
+                    content.append({"type": "input_text", "text": fallback_document_text(block)})
             elif isinstance(block, AudioContent):
                 # STRUCTURAL REFUSAL, not a silent drop: the Responses API
                 # describes text and image inputs, and audio input is a Chat
@@ -2357,7 +2451,7 @@ def _messages_to_openai_responses(
             # A user turn with nothing to say is backfilled, not skipped, for
             # the same reason the Anthropic wire backfills it (see
             # ``EMPTY_USER_TEXT``) and the same reason Google's builder does
-            # (``parts or [{"text": ""}]``): the turn occupies a role, so
+            # (``parts or [{"text": EMPTY_USER_TEXT}]``): the turn occupies a role, so
             # dropping it changes the role sequence. It became reachable when
             # ``Message.user`` stopped emitting an empty text block (#2460) —
             # the message now renders zero blocks where it used to render one
@@ -2611,6 +2705,32 @@ def _part_holds_frame(part: Any, image_part_types: tuple[str, ...]) -> bool:
     return isinstance(nested, list) and any(
         isinstance(inner, dict) and inner.get("type") in image_part_types for inner in nested
     )
+
+
+def _frozen_prefix_ids(request: ChatRequest) -> frozenset[str]:
+    """Ids of the Radient Saver epoch rows at the head of ``request.messages``.
+
+    Empty unless ``SessionStreamFn`` spliced a frozen prefix (contract §4), so
+    every other request renders exactly as before.
+    """
+    count = request.frozen_prefix_messages
+    if not count or count <= 0:
+        return frozenset()
+    return frozenset(message.id for message in request.messages[:count])
+
+
+def _last_block(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The last content block of the last rendered message, normalising a string."""
+    if not messages:
+        return None
+    last = messages[-1]
+    content = last.get("content")
+    if isinstance(content, str):
+        last["content"] = [{"type": "text", "text": content}]
+        content = last["content"]
+    if isinstance(content, list) and content and isinstance(content[-1], dict):
+        return content[-1]
+    return None
 
 
 def _targets_cover(targets: list[dict[str, Any]], block: dict[str, Any]) -> bool:
@@ -2917,15 +3037,33 @@ class OpenAICompatClient:
     def _build_body(self, request: ChatRequest, *, scope: str | None = None) -> dict[str, Any]:
         endpoint = f"{self._base_url}/chat/completions"
         direct_deepseek = request.model.provider == "deepseek"
+        # ONE budget for the whole request: the provider ceilings are per
+        # request/combined, so documents must be summed across messages AND
+        # the body's other bytes reserved first (agent review round 1 M1 /
+        # round 2 minor 2).
+        chat_document_form = document_form(
+            request.model.provider,
+            "openai-chat",
+            supports_images=request.model.supports_images,
+            context_window=request.model.context_window,
+        )
+        chat_document_budget = document_budget_for_request(chat_document_form, request)
         messages = self._system_messages(request)
+        wire_messages = request.wire_messages()
         # DeepSeek's thinking mode refuses the shape this builds when the echo is
         # missing (see ``ModelSpec.requires_reasoning_echo`` for what is measured
         # and what its counter-shapes are), so the fill is applied here, at the
         # one boundary where the wire history is rendered, and real recorded
         # reasoning always wins over the placeholder.
         echo_turns = 0
-        for message in _without_unrenderable_tool_calls(request.messages):
-            entry = self._replay_chat_message(message, request.model, endpoint, scope)
+        # Radient Saver (contract §4): the rendered entry that ends the frozen
+        # prefix, captured as rendered (one entry per message on this wire).
+        epoch_ids = _frozen_prefix_ids(request)
+        epoch_entry: dict[str, Any] | None = None
+        for message in _without_unrenderable_tool_calls(wire_messages):
+            entry = self._replay_chat_message(
+                message, request.model, endpoint, scope, chat_document_budget
+            )
             # DeepSeek tool requests replay ALL prior native reasoning, even a
             # reasoning-only turn. Validate provenance before retaining it: a
             # display-only thought or another model/account's payload is not
@@ -2939,6 +3077,8 @@ class OpenAICompatClient:
             if request.model.requires_reasoning_echo and _echo_reasoning_content(entry):
                 echo_turns += 1
             messages.append(entry)
+            if message.id in epoch_ids:
+                epoch_entry = entry
         # Aggregator identity alone is not the model family: Google keeps its
         # final-user requirement through OpenRouter's OpenAI-compatible wire.
         google_boundary_tokens = 0
@@ -2964,7 +3104,7 @@ class OpenAICompatClient:
         if direct_deepseek:
             messages = _deepseek_tool_images(messages)
         elif request.model.supports_prompt_cache:
-            self._message_cache_markers(messages)
+            self._message_cache_markers(messages, frozen_entry=epoch_entry)
         body: dict[str, Any] = {
             "model": request.model.model_id,
             "stream": True,
@@ -3105,9 +3245,22 @@ class OpenAICompatClient:
 
     @staticmethod
     def _replay_chat_message(
-        message: Message, model: ModelSpec, endpoint: str, scope: str | None
+        message: Message,
+        model: ModelSpec,
+        endpoint: str,
+        scope: str | None,
+        document_budget_: DocumentBudget | None = None,
     ) -> dict[str, Any]:
-        entry = _message_to_openai(message)
+        entry = _message_to_openai(
+            message,
+            document_form(
+                model.provider,
+                "openai-chat",
+                supports_images=model.supports_images,
+                context_window=model.context_window,
+            ),
+            document_budget_,
+        )
         native = replay_items(message, model, endpoint, "openai-chat", scope)
         if native:
             for item in native:
@@ -3148,7 +3301,12 @@ class OpenAICompatClient:
                 out.append({"role": "system", "content": block})
         return out
 
-    def _message_cache_markers(self, messages: list[dict[str, Any]]) -> None:
+    def _message_cache_markers(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        frozen_entry: dict[str, Any] | None = None,
+    ) -> None:
         """Mark the final message and the settled boundary for caching.
 
         Same economics as the Anthropic client: system-only markers stop the
@@ -3164,6 +3322,10 @@ class OpenAICompatClient:
         can no longer find it (see ``_settled_cache_target`` for the measured
         cost). With no usable frame in the history the previous user turn is
         marked instead, the historical layout for text-only sessions.
+
+        ``frozen_entry`` is the rendered message ending a Radient Saver prefix
+        (contract §4). When present its last block takes the second marker in
+        place of the heuristic, exactly as on the Anthropic wire.
         """
         targets: list[dict[str, Any]] = []
         if messages:
@@ -3175,7 +3337,11 @@ class OpenAICompatClient:
             if isinstance(content, list) and content:
                 targets.append(content[-1])
         settled = _settled_cache_target(messages, ("image_url",))
-        if settled is not None:
+        frozen_block = _last_block([frozen_entry]) if frozen_entry is not None else None
+        if frozen_block is not None:
+            if not _targets_cover(targets, frozen_block):
+                targets.append(frozen_block)
+        elif settled is not None:
             if not _targets_cover(targets, settled):
                 targets.append(settled)
         else:
@@ -3242,11 +3408,16 @@ class OpenAICompatClient:
             scope,
             _estimate_slope(request.model),
         )
+        wire_messages = request.wire_messages()
         body: dict[str, Any] = {
             "model": request.model.model_id,
             "stream": True,
             "input": _messages_to_openai_responses(
-                request.messages, request.model, endpoint or f"{self._base_url}/responses", scope
+                wire_messages,
+                request.model,
+                endpoint or f"{self._base_url}/responses",
+                scope,
+                request=request,
             ),
         }
         if request.system_blocks:
@@ -4067,6 +4238,132 @@ def _anthropic_stream_error(error: Mapping[str, Any]) -> ProviderError:
     )
 
 
+#: Process-wide latch: the API refused the ``diagnostics`` body field once, so
+#: no later request sends it. Cache diagnostics are GA and need no beta header
+#: (https://platform.claude.com/docs/en/build-with-claude/cache-diagnostics),
+#: but they are pure telemetry: a workspace, region or future API version that
+#: rejects the key must cost one retried request, never a turn, and never one
+#: wasted round trip per call for the rest of the process. A list so the latch
+#: is a mutation rather than a ``global`` rebinding; tests reset it.
+#:
+#: PROCESS-wide rather than keyed by credential/workspace/model, deliberately.
+#: The cost is that one refusing org or model (e.g. a ZDR "covered model" that
+#: answers 400 rather than ``unavailable``) blinds diagnostics for every other
+#: account in the same process until it restarts. That costs telemetry only,
+#: never a turn, and no refusal has ever been observed, while a keyed latch adds
+#: state whose key (org id is not known for API keys) would itself be a guess.
+#: Revisit with a ``(credential, model)`` key if a real refusal shows up.
+_ANTHROPIC_DIAGNOSTICS_REFUSED: list[bool] = [False]
+
+#: ``StreamStartEvent.cache_miss_type`` values that are NOT a prefix break:
+#: the conversation's first diagnosed request, a compared request whose prefix
+#: matched (a miss there is TTL expiry), and a comparison still running.
+ANTHROPIC_CACHE_DIAGNOSIS_NO_BREAK = frozenset({"baseline", "unchanged", "pending"})
+
+
+def _anthropic_cache_diagnosis(
+    message: Mapping[str, Any], *, previous_id: str | None
+) -> tuple[str, int]:
+    """``(cache_miss_type, cache_missed_tokens)`` from a diagnosed ``message_start``.
+
+    Only called when the request carried ``diagnostics``. The API's three
+    shapes: ``diagnostics: null`` (no divergence, or the first turn — told
+    apart by whether we named a previous id), ``{"cache_miss_reason": null}``
+    (comparison still running) and ``{"cache_miss_reason": {"type": ...,
+    "cache_missed_input_tokens": n}}``. Anything unrecognised reads as
+    ``unavailable`` — the API's own word for "no comparison produced" — so a
+    shape change degrades the telemetry instead of raising into the stream.
+    """
+    diagnostics = message.get("diagnostics")
+    if diagnostics is None:
+        return ("unchanged" if previous_id else "baseline"), 0
+    if not isinstance(diagnostics, Mapping):
+        return "unavailable", 0
+    reason = diagnostics.get("cache_miss_reason")
+    if reason is None:
+        return "pending", 0
+    if not isinstance(reason, Mapping):
+        return "unavailable", 0
+    kind = _first_text(reason.get("type")) or "unavailable"
+    try:
+        missed = max(0, int(reason.get("cache_missed_input_tokens") or 0))
+    except (TypeError, ValueError):
+        missed = 0
+    return kind, missed
+
+
+#: The refusal shapes :func:`_refuses_diagnostics` latches on, matched against
+#: the lower-cased, stripped error message. Either the message opens with the
+#: field name, or a CLAUSE does: a clause starts at the message start or after
+#: ``;``/``,`` plus optional whitespace (``messages: ok, but diagnostics: ...``
+#: has ``but`` in between, so free words up to the name are allowed), and must
+#: not already have named a path of its own (``[^;,:]*`` refuses to cross a
+#: ``:``). That last rule is what keeps quoted request text out: in
+#: ``system.0.text: run diagnostics: please`` the clause already said
+#: ``system.0.text:`` before reaching the word. The reviewer's sketch,
+#: ``(?:^|[\s;,])diagnostics[:.]``, still matched that repro (a space precedes
+#: the word), which is why the clause rule replaced it.
+#:
+#: The tail is ``(?::|\.\w)``, not ``[:.]``: a period counts only when a path
+#: segment follows it (``diagnostics.previous_message_id``). A bare ``[:.]`` also
+#: took a sentence-ending period after a comma clause, so prose such as
+#: ``tools.0.description: checks health, runs diagnostics. returns status``
+#: latched (PR #3018 review round 1, m1).
+#:
+#: Residual, accepted: quoted text that itself contains ``, diagnostics:`` or
+#: ``, diagnostics.<word>`` still latches. The cost is telemetry only (one
+#: resend, diagnostics off until restart) and the API's validation messages do
+#: not normally echo prompt text.
+_DIAGNOSTICS_REFUSAL = re.compile(
+    r"^diagnostics\b|(?:^|[;,])[^;,:]*?(?<![\w.])diagnostics(?::|\.\w)"
+)
+
+
+async def _refuses_diagnostics(response: httpx.Response) -> bool:
+    """Whether an error response is the API rejecting the ``diagnostics`` key.
+
+    Matched on status 400 plus the field NAME in the refusal's own shape — the
+    message starts with ``diagnostics`` or names it as a path (``diagnostics:``
+    / ``diagnostics.``, e.g. ``diagnostics: Extra inputs are not permitted``) —
+    never on status alone: an ordinary 400 is a defect in the request and must
+    surface unchanged. Never on a bare substring either: a 400 about a tool or
+    schema path that merely CONTAINS the word (``tools.0.name: run_diagnostics
+    ...``) would otherwise switch the feature off for the whole process.
+
+    The second arm requires the name to START a path segment — at a clause
+    boundary (whitespace, ``;`` or ``,``) — not merely to follow some non-word
+    character. A 400 that QUOTES request text (``system.0.text: run
+    diagnostics: please``) has ``diagnostics:`` after a space too, so the
+    boundary alone cannot tell them apart; what can is that the API names a
+    field by its full path, so a refusal of the top-level key is either the
+    whole message or a later clause (``...; diagnostics: Extra inputs``), and
+    quoted text sits after another path's ``: `` (PR #2984 review round 2,
+    r2-n1). Hence the lookbehind on the clause separators and the guard that
+    no ``<path>: `` precedes the match within the same clause.
+    """
+    if response.status_code != 400:
+        return False
+    await response.aread()
+    message = _extract_error_message(response, _error_payload(response)).strip().lower()
+    # ``^diagnostics\b`` (not a bare ``startswith``) so ``diagnostics_level: ...``
+    # opening a message about some OTHER field cannot latch either.
+    return bool(_DIAGNOSTICS_REFUSAL.search(message))
+
+
+def _overage_account(oauth_access: "OAuthAccess | None") -> str:
+    """The key overage state is recorded under for one subscription credential.
+
+    Overage is a property of the billed account, so the account id is the
+    natural key; the credential row id stands in when the record carries no
+    account (an older stored token), which is still one subscription.
+    """
+    if oauth_access is None:
+        return ""
+    if oauth_access.account_id:
+        return f"account:{oauth_access.account_id}"
+    return f"credential:{oauth_access.credential_id}"
+
+
 def _anthropic_cache_marker_ttl_ms(body: dict[str, Any]) -> int:
     """Read legal cache marker positions, never nested user/tool JSON fields.
 
@@ -4106,8 +4403,8 @@ class AnthropicClient:
     ``content_block_start/delta/stop`` events for ``text`` and ``tool_use``
     blocks; tool arguments stream via ``input_json_delta``.
 
-    Large contexts switch every marker to the 1-hour cache TTL; see
-    ``_cache_ttl_for`` for the economics and the wire constraint.
+    Some requests switch every marker to the 1-hour cache TTL; see
+    ``_cache_ttl_for`` for the policy and the wire constraint.
     """
 
     def __init__(
@@ -4117,6 +4414,7 @@ class AnthropicClient:
         http_client: httpx.AsyncClient | None = None,
         timeout: float = 600.0,
         cache_ttl_1h_min_context_tokens: int = 0,
+        subagent_cache_ttl_1h_min_context_tokens: int = 0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._owns_client = http_client is None
@@ -4126,6 +4424,12 @@ class AnthropicClient:
         # bare ``AnthropicClient()`` (tests, scripts) sends the exact body it
         # always did; ``client_for_spec`` passes the configured threshold.
         self._cache_ttl_1h_min_context_tokens = max(0, int(cache_ttl_1h_min_context_tokens))
+        # Delegated-child size gate; 0 (never 1h) everywhere by default because
+        # the measured subagent trade is negative at every size — see
+        # ``providers/anthropic_cache_ttl.py``.
+        self._subagent_cache_ttl_1h_min_context_tokens = max(
+            0, int(subagent_cache_ttl_1h_min_context_tokens)
+        )
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -4269,10 +4573,31 @@ class AnthropicClient:
             marker["ttl"] = ttl
         return marker
 
-    def _cache_ttl_for(self, request: ChatRequest, body: dict[str, Any]) -> str | None:
+    def _cache_ttl_for(
+        self,
+        request: ChatRequest,
+        body: dict[str, Any],
+        *,
+        oauth: bool = False,
+        account: str = "",
+    ) -> str | None:
         """Pick the prompt-cache TTL for this request: ``"1h"`` or None (5m).
 
-        WHY: a 5m entry expires while a large session waits on a subagent, a
+        The policy lives in ``providers/anthropic_cache_ttl.py`` (measured
+        numbers, Claude Code parity, overage); this method feeds
+        it the facts only the wire client has — whether the credential is a
+        subscription (``oauth``), whose overage state applies (``account``),
+        and the body to size when no hint exists:
+
+        * subscription main thread, not in overage -> 1h at any size;
+        * subagent turns -> 5m unless
+          ``subagent_cache_ttl_1h_min_context_tokens`` opts them in by size;
+        * auxiliary one-shots (compaction, naming, asides...) -> 5m;
+        * API key, or a subscription drawing on overage -> the size threshold
+          below for the main thread.
+
+        The threshold rationale, kept for the API-key main thread it still
+        governs. WHY: a 5m entry expires while a large session waits on a subagent, a
         scheduled wake, or the user, and its next call then rewrites the whole
         prefix at 1.25× base. Measured over 24h of this harness's own traffic:
         276 such rewrites of >150k contexts cost 89.5M write tokens (~112M
@@ -4289,12 +4614,11 @@ class AnthropicClient:
         request — system blocks and message breakpoints alike — never to a
         subset.
 
-        The decision is one-directional in practice and needs no hysteresis:
-        context only grows within a turn, and once it crosses the threshold
-        the 1h markers stay until compaction shrinks it. Dropping back to 5m
-        markers after compaction is fine — the compacted prefix is new
-        content that has to be written either way, and a smaller context is
-        exactly the case where the cheaper write rate wins again.
+        No hysteresis is needed: a request whose TTL differs from the one
+        that wrote the prefix still reads that prefix in full (measured live,
+        PR #2985 review round 1), so crossing the threshold in either
+        direction changes only the rate of NEW writes, never re-writes the
+        cached prefix.
 
         Two size sources, in preference order:
 
@@ -4311,13 +4635,22 @@ class AnthropicClient:
            the second call on. Without the fallback a resumed 400k session
            would send its first (and most expensive) request at 5m.
         """
-        threshold = self._cache_ttl_1h_min_context_tokens
-        if threshold <= 0:
-            return None
-        size = request.context_tokens_hint
-        if size is None:
-            size = self._estimate_context_tokens(body)
-        return "1h" if size >= threshold else None
+        from local_operator.providers import anthropic_cache_ttl as policy
+
+        def size() -> int:
+            hint = request.context_tokens_hint
+            return hint if hint is not None else self._estimate_context_tokens(body)
+
+        role = request.cache_role or policy.cache_role(request.purpose, delegated=False)
+        return policy.decide_cache_ttl(
+            role=role,  # type: ignore[arg-type]  # validated by the producer
+            subscription=oauth,
+            overage=oauth and policy.overage_active(account),
+            main_min_context_tokens=self._cache_ttl_1h_min_context_tokens,
+            subagent_min_context_tokens=self._subagent_cache_ttl_1h_min_context_tokens,
+            context_size=size,
+            after_long_call=request.cache_after_long_call,
+        )
 
     @classmethod
     def _system_blocks(
@@ -4347,7 +4680,11 @@ class AnthropicClient:
         return rendered
 
     @staticmethod
-    def _message_blocks(message: Message) -> list[dict[str, Any]]:
+    def _message_blocks(
+        message: Message,
+        document_form_: DocumentForm | None = None,
+        document_budget_: DocumentBudget | None = None,
+    ) -> list[dict[str, Any]]:
         """Render one message's content blocks for the Anthropic wire.
 
         An empty or whitespace-only text block is DROPPED, never shipped:
@@ -4383,6 +4720,24 @@ class AnthropicClient:
                         },
                     }
                 )
+            elif isinstance(block, DocumentContent):
+                # Native ``document`` block on the messages API; anything not
+                # eligible (a non-PDF, an over-limit file, a model row that
+                # does not exist) becomes extracted text here, so the model
+                # always has SOMETHING to read (contract §3).
+                if document_native_ok(block, document_form_, budget=document_budget_):
+                    blocks.append(
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": block.data,
+                            },
+                        }
+                    )
+                else:
+                    blocks.append({"type": "text", "text": fallback_document_text(block)})
             elif isinstance(block, AudioContent):
                 # No audio input on this wire — the spec's capability flag for
                 # every Anthropic model stays false, so reaching here means a
@@ -4395,20 +4750,29 @@ class AnthropicClient:
         return blocks
 
     @staticmethod
-    def _tool_result_blocks(message: Message) -> list[dict[str, Any]]:
+    def _tool_result_blocks(
+        message: Message,
+        document_form_: DocumentForm | None = None,
+        document_budget_: DocumentBudget | None = None,
+    ) -> list[dict[str, Any]]:
         """Render a tool result's content as Anthropic blocks.
 
         Uses the message's content blocks (never ``message.text``) so
         image-only results survive; an empty result is backfilled because
         Anthropic 400s on empty ``tool_result`` content.
         """
-        blocks = AnthropicClient._message_blocks(message)
+        blocks = AnthropicClient._message_blocks(message, document_form_, document_budget_)
         if not blocks:
             return [{"type": "text", "text": EMPTY_TOOL_RESULT_TEXT}]
         return blocks
 
     def _message_cache_breakpoints(
-        self, messages: list[dict[str, Any]], body: dict[str, Any], *, ttl: str | None = None
+        self,
+        messages: list[dict[str, Any]],
+        body: dict[str, Any],
+        *,
+        ttl: str | None = None,
+        frozen_block: dict[str, Any] | None = None,
     ) -> None:
         """Place cache_control on the conversation, not just the system head.
 
@@ -4432,6 +4796,13 @@ class AnthropicClient:
         ``ttl`` must be the SAME value the system markers were rendered with:
         Anthropic rejects a 1h marker that follows a 5m one, and the message
         markers always follow the system ones.
+
+        ``frozen_block`` is the last rendered block of a Radient Saver prefix
+        (``ChatRequest.frozen_prefix_messages``, contract §4). When present it
+        REPLACES the settled/previous-user heuristic as the second marker: the
+        epochs are byte-stable until the chain advances, so a marker there is a
+        cache entry the next turn reads in full. System markers and the budget
+        are unchanged.
         """
         system = body.get("system") or []
         system_markers = [i for i, entry in enumerate(system) if "cache_control" in entry]
@@ -4441,7 +4812,10 @@ class AnthropicClient:
             if isinstance(last.get("content"), list) and last["content"]:
                 message_targets.append(last["content"][-1])
         settled = _settled_cache_target(messages, ("image",))
-        if settled is not None:
+        if frozen_block is not None:
+            if not _targets_cover(message_targets, frozen_block):
+                message_targets.append(frozen_block)
+        elif settled is not None:
             if not _targets_cover(message_targets, settled):
                 message_targets.append(settled)
         else:
@@ -4469,9 +4843,29 @@ class AnthropicClient:
     ) -> str | None:
         return "anthropic:messages" if self._base_url == ANTHROPIC_API_URL else None
 
-    def _build_body(self, request: ChatRequest, *, oauth: bool = False) -> dict[str, Any]:
+    def _build_body(
+        self, request: ChatRequest, *, oauth: bool = False, account: str = ""
+    ) -> dict[str, Any]:
+        # Request-time document policy for THIS wire (contract amendment 6).
+        # The row is the Anthropic document-input form; a model reached through
+        # this client on another provider id gets no row and therefore the
+        # fallback, which is the table's default.
+        doc_form = document_form(
+            request.model.provider,
+            "anthropic-messages",
+            supports_images=request.model.supports_images,
+            context_window=request.model.context_window,
+        )
+        doc_budget = document_budget_for_request(doc_form, request)
         messages: list[dict[str, Any]] = []
-        for message in _without_unrenderable_tool_calls(request.messages):
+        wire_messages = request.wire_messages()
+        # Radient Saver (contract §4): the rendered block that ENDS the frozen
+        # prefix. The rendered list is not 1:1 with the request (tool rows merge
+        # into one user message, empty turns drop), so the block is captured as
+        # it is rendered rather than located by index afterwards.
+        epoch_ids = _frozen_prefix_ids(request)
+        epoch_block: dict[str, Any] | None = None
+        for message in _without_unrenderable_tool_calls(wire_messages):
             # Anthropic 400s on an assistant message whose content array is
             # empty, which is exactly what an errored/aborted model turn
             # replays as. Same drop as the OpenAI paths; see
@@ -4479,7 +4873,7 @@ class AnthropicClient:
             if _is_empty_assistant(message):
                 continue
             if message.role == "assistant" and message.tool_calls:
-                content = self._message_blocks(message)
+                content = self._message_blocks(message, doc_form, doc_budget)
                 content.extend(
                     {
                         "type": "tool_use",
@@ -4496,7 +4890,7 @@ class AnthropicClient:
                     {
                         "type": "tool_result",
                         "tool_use_id": message.tool_call_id or "",
-                        "content": self._tool_result_blocks(message),
+                        "content": self._tool_result_blocks(message, doc_form, doc_budget),
                         **({"is_error": True} if message.is_error else {}),
                     }
                 ]
@@ -4509,7 +4903,7 @@ class AnthropicClient:
                 else:
                     messages.append({"role": "user", "content": content})
             else:
-                blocks = self._message_blocks(message)
+                blocks = self._message_blocks(message, doc_form, doc_budget)
                 if not blocks:
                     # Every block was blank, so there is no content left to
                     # send — but the message still OCCUPIES A ROLE, and that is
@@ -4527,6 +4921,8 @@ class AnthropicClient:
                     # where skipping is the right answer.
                     blocks = [{"type": "text", "text": EMPTY_USER_TEXT}]
                 messages.append({"role": message.role, "content": blocks})
+            if message.id in epoch_ids:
+                epoch_block = _last_block(messages)
 
         body: dict[str, Any] = {
             "model": request.model.model_id,
@@ -4557,7 +4953,7 @@ class AnthropicClient:
                 }
                 for tool in request.tools
             ]
-        ttl = self._cache_ttl_for(request, body)
+        ttl = self._cache_ttl_for(request, body, oauth=oauth, account=account)
         if blocks:
             body["system"] = self._system_blocks(blocks, ttl=ttl)
         # System-only breakpoints stop the cached prefix before the first
@@ -4568,7 +4964,7 @@ class AnthropicClient:
         # second breakpoint's block survives frame re-renders, within
         # MAX_CACHE_BREAKPOINTS by dropping the lowest-value system
         # breakpoint.
-        self._message_cache_breakpoints(messages, body, ttl=ttl)
+        self._message_cache_breakpoints(messages, body, ttl=ttl, frozen_block=epoch_block)
         if request.tools:
             # Safe default: unmapped values fall back to auto (PR-22).
             #
@@ -4662,6 +5058,19 @@ class AnthropicClient:
             body["speed"] = fast.value
         if request.stop_sequences:
             body["stop_sequences"] = list(request.stop_sequences)
+        if (
+            request.cache_diagnostics
+            and self._base_url == ANTHROPIC_API_URL
+            and not _ANTHROPIC_DIAGNOSTICS_REFUSED[0]
+        ):
+            # First-party API only: Bedrock, Vertex and relays do not offer
+            # the feature, and an unknown key there is a guaranteed 400. Sent
+            # on EVERY turn of the conversation, including the first with an
+            # explicit null, because the object is the opt-in — the API
+            # fingerprints a response only when its request carried it, so a
+            # skipped turn would leave the next one nothing to compare with.
+            # Outside the cached prefix: the comparison is server-side.
+            body["diagnostics"] = {"previous_message_id": request.cache_diagnostics_previous_id}
         if self._base_url == ANTHROPIC_API_URL:
             lifetime = _anthropic_cache_marker_ttl_ms(body)
             if lifetime:
@@ -4669,6 +5078,32 @@ class AnthropicClient:
                 # context-size approximation or arbitrary nested tool input.
                 set_wire_hint(request, "anthropic:messages", lifetime, "explicit-wire")
         return body
+
+    @contextlib.asynccontextmanager
+    async def _open_messages_stream(
+        self, url: str, body: dict[str, Any], headers: dict[str, str]
+    ) -> AsyncIterator[httpx.Response]:
+        """Open the Messages stream, shedding a refused ``diagnostics`` key once.
+
+        The fail-closed half of cache diagnostics: if the API answers 400
+        naming the field, the latch flips for the whole process, the key is
+        removed from ``body`` IN PLACE (the caller reads ``"diagnostics" in
+        body`` to know whether ``message_start`` carries a diagnosis) and the
+        identical request is sent again. Nothing has been streamed yet, so the
+        retry is invisible to the turn; every other status passes through.
+        """
+        async with self._http.stream("POST", url, json=body, headers=headers) as response:
+            if not ("diagnostics" in body and await _refuses_diagnostics(response)):
+                yield response
+                return
+        _ANTHROPIC_DIAGNOSTICS_REFUSED[0] = True
+        body.pop("diagnostics", None)
+        logger.info(
+            "anthropic: cache diagnostics refused by the API (HTTP 400); "
+            "disabled for this process"
+        )
+        async with self._http.stream("POST", url, json=body, headers=headers) as response:
+            yield response
 
     async def stream(
         self,
@@ -4685,12 +5120,14 @@ class AnthropicClient:
         usage = Usage(at_ms=tariff.now_ms())
         streamed_text = False
         block_index_to_call: dict[int, tuple[str, str]] = {}
+        oauth = self._is_oauth(oauth_access)
+        overage_account = _overage_account(oauth_access) if oauth else ""
+        body = self._build_body(request, oauth=oauth, account=overage_account)
 
-        async with self._http.stream(
-            "POST",
+        async with self._open_messages_stream(
             url,
-            json=self._build_body(request, oauth=self._is_oauth(oauth_access)),
-            headers=self._headers(
+            body,
+            self._headers(
                 api_key,
                 oauth_access,
                 effort=request.model.reasoning_effort,
@@ -4706,6 +5143,15 @@ class AnthropicClient:
                 ),
             ),
         ) as response:
+            if overage_account:
+                # Before the status check: a 429 carries the same headers, and
+                # "plan limits spent, overage allowed" is exactly what the NEXT
+                # request's TTL must know. See ``anthropic_cache_ttl``.
+                from local_operator.providers.anthropic_cache_ttl import (
+                    observe_unified_headers,
+                )
+
+                observe_unified_headers(overage_account, response.headers)
             if response.status_code >= 400:
                 await response.aread()
                 raise_for_status(response)
@@ -4722,8 +5168,23 @@ class AnthropicClient:
                     # an Anthropic-pinned run with NO native turn identity on
                     # any event — and therefore no way for an external runtime
                     # to commit no-replay proof.
+                    # ``diagnostics`` rides the same frame (streaming puts it
+                    # on ``message_start``, nowhere else). Read only when THIS
+                    # request opted in — the retry below may have dropped the
+                    # key — so an undiagnosed call reports ``None``, never a
+                    # fabricated "baseline".
+                    miss_type, missed_tokens = (
+                        _anthropic_cache_diagnosis(
+                            event.get("message") or {},
+                            previous_id=request.cache_diagnostics_previous_id,
+                        )
+                        if "diagnostics" in body
+                        else (None, 0)
+                    )
                     yield StreamStartEvent(
-                        response_id=_stream_id((event.get("message") or {}).get("id"))
+                        response_id=_stream_id((event.get("message") or {}).get("id")),
+                        cache_miss_type=miss_type,
+                        cache_missed_tokens=missed_tokens,
                     )
                     raw_usage = (event.get("message") or {}).get("usage") or {}
                     usage.input_tokens = int(raw_usage.get("input_tokens", usage.input_tokens))
@@ -4829,10 +5290,20 @@ class GoogleClient:
             await self._http.aclose()
 
     def _build_body(self, request: ChatRequest, *, scope: str | None = None) -> dict[str, Any]:
+        # Request-time document policy: Gemini's row is the only one this wire
+        # may use, and its limits are checked per block (contract amendment 6).
+        doc_form = document_form(
+            request.model.provider,
+            "google-content",
+            supports_images=request.model.supports_images,
+            context_window=request.model.context_window,
+        )
+        doc_budget = document_budget_for_request(doc_form, request)
         contents: list[dict[str, Any]] = []
         last_tool_result = False
         rendered_call_ids: dict[str, str | None] = {}
-        for message in _without_unrenderable_tool_calls(request.messages):
+        wire_messages = request.wire_messages()
+        for message in _without_unrenderable_tool_calls(wire_messages):
             if message.role != "tool":
                 last_tool_result = False
             native = replay_items(message, request.model, self._base_url, "google-content", scope)
@@ -4850,12 +5321,28 @@ class GoogleClient:
             if _is_empty_assistant(message):
                 continue
             role = "user" if message.role == "user" else "model"
-            parts: list[dict[str, Any]] = [{"text": message.text}] if message.text else []
+            # Blank text is dropped, the rule ``AnthropicClient._message_blocks``
+            # and both OpenAI wires follow: ``if message.text`` let a
+            # whitespace-only text beside an image ship as ``{"text": "  \n"}``.
+            # Tested on the JOINED text rather than per block so a message with
+            # real text keeps the exact part it always had (inner whitespace
+            # blocks included; ``drop_blank_text_blocks`` keeps them on disk and
+            # on replay whenever real text is present) and only a turn with
+            # nothing to read loses it.
+            text = message.text
+            parts: list[dict[str, Any]] = [{"text": text}] if text.strip() else []
             for block in message.content:
                 if isinstance(block, ImageContent):
                     parts.append(
                         {"inline_data": {"mime_type": block.mime_type, "data": block.data}}
                     )
+                elif isinstance(block, DocumentContent):
+                    if document_native_ok(block, doc_form, budget=doc_budget):
+                        parts.append(
+                            {"inline_data": {"mime_type": block.mime_type, "data": block.data}}
+                        )
+                    else:
+                        parts.append({"text": fallback_document_text(block)})
                 elif isinstance(block, AudioContent):
                     # Mirrors the image branch above, snake_case spelling and
                     # all: the REST API accepts ``inline_data``/``inlineData``
@@ -4914,7 +5401,10 @@ class GoogleClient:
                 last_tool_result = True
                 continue
             if parts or message.role == "user":
-                contents.append({"role": role, "parts": parts or [{"text": ""}]})
+                # An empty user turn keeps its role but never a blank part: see
+                # ``EMPTY_USER_TEXT`` (``[{"text": ""}]`` was the old filler,
+                # and an empty part is what every other wire stopped sending).
+                contents.append({"role": role, "parts": parts or [{"text": EMPTY_USER_TEXT}]})
 
         boundary_tokens = _google_user_boundary(contents, native=True)
         request = bind_native_context(
@@ -5221,11 +5711,15 @@ class MockClient:
         api_key: str | None,
         oauth_access: "OAuthAccess | None" = None,
     ) -> AsyncIterator[StreamEvent]:
+        # Resolve once per stream, exactly like a production wire build. Safe
+        # request history remains untouched; only this provider-bound view can
+        # carry an armed value.
+        messages = request.wire_messages()
         # Mirror the real clients: the boundary leads every stream, including
         # the refusal path, so anything exercised against the mock sees the
         # same event shape a provider produces.
         yield StreamStartEvent(response_id="mock-response-id")
-        if any("[refuse]" in message.text for message in request.messages):
+        if any("[refuse]" in message.text for message in messages):
             yield StreamUsageEvent(usage=Usage(input_tokens=10, output_tokens=0))
             yield StreamEndEvent(
                 stop_reason="refusal",
@@ -5239,7 +5733,7 @@ class MockClient:
         # fresh runaway and a follow-up after Esc looped identically (round 2,
         # U6/N2). A real provider decides per request; the mock's closest
         # analogue is the newest instruction.
-        last_user = next((m for m in reversed(request.messages) if m.role == "user"), None)
+        last_user = next((m for m in reversed(messages) if m.role == "user"), None)
         # ``[hang]``: a request that NEVER returns. The one shape that leaves a
         # runtime busy with nothing this process can read as a step — the
         # parent's own provider request is not a term of
@@ -5254,8 +5748,8 @@ class MockClient:
         # transcript would hang every later request of the session.
         hangs = (
             last_user is not None
-            and request.messages
-            and request.messages[-1] is last_user
+            and messages
+            and messages[-1] is last_user
             and "[hang]" in last_user.text
         )
         if hangs:
@@ -5272,7 +5766,7 @@ class MockClient:
         # instead of sleeping again forever.
         sleep_for = (
             _mock_bash_sleep(last_user.text)
-            if last_user is not None and request.messages and request.messages[-1] is last_user
+            if last_user is not None and messages and messages[-1] is last_user
             else None
         )
         if sleep_for is not None:
@@ -5305,6 +5799,7 @@ def client_for_spec(
     http_client: httpx.AsyncClient | None = None,
     openai_api: str = "responses",
     anthropic_cache_ttl_1h_min_context_tokens: int = 0,
+    anthropic_subagent_cache_ttl_1h_min_context_tokens: int = 0,
     openrouter_provider_preferences: Mapping[str, Any] | None = None,
 ) -> WireClient:
     """Build the wire client for a ``ModelSpec`` via the provider registry.
@@ -5314,14 +5809,19 @@ def client_for_spec(
 
     ``anthropic_cache_ttl_1h_min_context_tokens`` is the configured
     ``providers.anthropic.cache_ttl_1h_min_context_tokens`` (see
-    ``AnthropicClient._cache_ttl_for``); it only reaches the Anthropic wire.
+    ``AnthropicClient._cache_ttl_for``); it only reaches the Anthropic wire,
+    as does ``anthropic_subagent_cache_ttl_1h_min_context_tokens``
+    (``providers.anthropic.subagent_cache_ttl_1h_min_context_tokens``).
     ``openrouter_provider_preferences`` is the resolved ``providers.openrouter``
     routing block (see ``model.configure._openrouter_provider_preferences``);
     it only reaches clients serving an OpenRouter-routed spec. Like
     ``openai_api`` both are per-provider settings resolved by the caller
     (``SessionStreamFn._client_for``) so this function stays settings-free.
     """
-    from local_operator.providers.registry import get_provider_definition
+    from local_operator.providers.registry import (
+        credential_provider_id,
+        get_provider_definition,
+    )
 
     definition = get_provider_definition(spec.provider)
     if definition is None:
@@ -5354,6 +5854,9 @@ def client_for_spec(
             base_url=base,
             http_client=http_client,
             cache_ttl_1h_min_context_tokens=anthropic_cache_ttl_1h_min_context_tokens,
+            subagent_cache_ttl_1h_min_context_tokens=(
+                anthropic_subagent_cache_ttl_1h_min_context_tokens
+            ),
         )
     if wire == "google":
         base = spec.base_url or GOOGLE_API_URL
@@ -5372,10 +5875,12 @@ def client_for_spec(
     extra_headers = None
     if spec.provider == "openrouter":
         extra_headers = openrouter_attribution_headers()
-    elif spec.provider == "kimi":
+    elif credential_provider_id(spec.provider) == "kimi":
         # The OAuth grant is minted against a device fingerprint; every
         # inference call must present the same X-Msh-* headers or the provider
         # can reject the session as an unknown device (kimi.py invariant).
+        # Resolve the storage id so a manual kimi-wechat/k3 spec keeps the same
+        # binding without rewriting the provider or model the caller selected.
         from local_operator.providers.oauth.kimi import kimi_common_headers
 
         extra_headers = kimi_common_headers()

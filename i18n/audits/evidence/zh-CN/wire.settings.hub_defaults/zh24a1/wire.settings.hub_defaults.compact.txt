@@ -1,0 +1,9 @@
+wire.settings.hub_defaults.agents.help | Off pauses updates for all agent/skill links; on subscribes new ones. | 关闭会暂停所有智能体/技能链接的更新；开启会订阅新链接。
+wire.settings.hub_defaults.agents.label | Auto-update agent/skill links | 自动更新智能体/技能链接
+wire.settings.hub_defaults.agents.off.description | pause updates for all agent and skill links | 暂停所有智能体和技能链接的更新
+wire.settings.hub_defaults.agents.on.description | subscribe new agent and skill links | 订阅新的智能体和技能链接
+wire.settings.hub_defaults.model_default.note | Hub merges use your current default model. The old hub model override is ignored. | hub的merge使用当前默认模型，旧的hub模型覆盖设置会被忽略。
+wire.settings.hub_defaults.teams.help | Default for new team links; existing links keep their own policies. | 新团队链接的默认策略；现有链接保留各自策略。
+wire.settings.hub_defaults.teams.label | Subscribe new team links | 订阅新团队链接
+wire.settings.hub_defaults.teams.off.description | pause incoming updates for new team links | 暂停接收新团队链接的更新
+wire.settings.hub_defaults.teams.on.description | subscribe new team links | 订阅新团队链接

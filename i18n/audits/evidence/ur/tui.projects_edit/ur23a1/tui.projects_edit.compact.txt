@@ -1,0 +1,35 @@
+tui.projects_edit.form_title |  · edit project |  · پروجیکٹ میں ترمیم
+tui.projects_edit.binding_edit | Edit project | پروجیکٹ میں ترمیم کریں
+tui.projects_edit.binding_add_milestone | Add milestone | سنگ میل شامل کریں
+tui.projects_edit.binding_remove_milestone | Remove milestone | سنگ میل ہٹائیں
+tui.projects_edit.binding_next_field | Next field | اگلا خانہ
+tui.projects_edit.binding_add | Add | شامل کریں
+tui.projects_edit.binding_cancel | Cancel | منسوخ کریں
+tui.projects_edit.hint_edit | edit | ترمیم
+tui.projects_edit.hint_add_milestone | add milestone | سنگ میل شامل
+tui.projects_edit.hint_remove_milestone | remove | ہٹائیں
+tui.projects_edit.hint_next_field | next field | اگلا خانہ
+tui.projects_edit.hint_add | add | شامل
+tui.projects_edit.hint_cancel | cancel | منسوخ
+tui.projects_edit.key_hint_edit | the reference handle — changing it renames the key | حوالے کا ہینڈل — اسے بدلنے سے کلید کا نام بدلے گا
+tui.projects_edit.refusal_estimate_clear | an estimate cannot be cleared — enter a number or restore the old one | تخمینہ صاف نہیں کیا جا سکتا — عدد درج کریں یا پرانا بحال کریں
+tui.projects_edit.refusal_estimate_number | estimate must be a number | تخمینہ عدد ہونا چاہیے
+tui.projects_edit.refusal_estimate_range | estimate must be greater than 0 and at most {maximum} | تخمینہ 0 سے بڑا اور زیادہ سے زیادہ {maximum} ہو
+tui.projects_edit.refusal_date_order | the target date is before the start date | ہدف کی تاریخ آغاز کی تاریخ سے پہلے کی ہے
+tui.projects_edit.refusal_name_required | the key is required — it is the reference handle | کلید ضروری ہے — یہی حوالے کا ہینڈل ہے
+tui.projects_edit.refusal_project_gone_edit | ''{name}'' is no longer in the store — the edit was not saved | اسٹور میں ''{name}'' اب موجود نہیں — ترمیم محفوظ نہیں ہوئی
+tui.projects_edit.refusal_project_gone_milestone | ''{name}'' is no longer in the store — the milestone was not changed | اسٹور میں ''{name}'' اب موجود نہیں — سنگ میل نہیں بدلا
+tui.projects_edit.no_changes | no changes to save | محفوظ کرنے کے لیے کوئی تبدیلی نہیں
+tui.projects_edit.saved | saved | محفوظ ہوا
+tui.projects_edit.confirm_remove | remove milestone ''{name}''? · y remove · n keep | سنگ میل ''{name}'' ہٹائیں؟ · y ہٹائیں · n رکھیں
+tui.projects_edit.remove_needs_row | put the cursor on a milestone row to remove | ہٹانے کے لیے کرسر سنگ میل کی قطار پر رکھیں
+tui.projects_edit.removed | milestone ''{name}'' removed | سنگ میل ''{name}'' ہٹا دیا گیا
+tui.projects_edit.milestone_added | milestone ''{name}'' added | سنگ میل ''{name}'' شامل ہوا
+tui.projects_edit.milestone_updated | milestone ''{name}'' updated | سنگ میل ''{name}'' اپ ڈیٹ ہوا
+tui.projects_edit.milestone_unchanged | milestone ''{name}'' was already exactly that | سنگ میل ''{name}'' پہلے سے بالکل ایسا ہی تھا
+tui.projects_edit.prompt_title |  · add milestone |  · سنگ میل شامل کریں
+tui.projects_edit.prompt_name_label | milestone | سنگ میل
+tui.projects_edit.prompt_name_hint | a name that exists updates it | موجودہ نام سے وہی سنگ میل اپ ڈیٹ ہوگا
+tui.projects_edit.prompt_name_required | a milestone needs a name | سنگ میل کا نام ضروری ہے
+tui.projects_edit.prompt_date_label | target date | ہدف کی تاریخ
+tui.projects_edit.prompt_date_hint | optional — YYYY-MM-DD | اختیاری — YYYY-MM-DD

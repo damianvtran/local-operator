@@ -1214,6 +1214,12 @@ class Incident:
     raw: str
     provider: str = ""
     model: str = ""
+    #: The selector the request STARTED from, when ``provider``/``model`` is a
+    #: DIFFERENT target the walk failed over to. Rendered as its own line, and
+    #: only when it differs from the head's pair: the card then says both which
+    #: model returned the error and which one the user actually chose, which is
+    #: the sentence a reader needs to decide whether a retry is worth making.
+    failover_from: str = ""
 
     @property
     def hint(self) -> str:
@@ -1223,6 +1229,16 @@ class Incident:
         source = f" ({self.provider}/{self.model})" if self.provider or self.model else ""
         head = f"[session incident{source}] {self.category}:"
         lines = [f"{head} {self.raw.strip()[:500]}"]
+        # THE FAILOVER PATH, stated once and only when there was one. Without
+        # this line the head alone says "openai/gpt-5 failed" to a user who
+        # selected Anthropic — true, but silent about WHY an OpenAI model was
+        # answering at all. With it, the card carries both halves the operator
+        # needs: the selection, and the target that returned this error.
+        if self.failover_from and self.failover_from != f"{self.provider}/{self.model}":
+            lines.append(  # i18n: ignore model-facing incident block
+                f"failed on {self.provider}/{self.model} after failing over from "
+                f"{self.failover_from}"
+            )
         if self.hint:
             lines.append(
                 f"suggested action: {self.hint}"
@@ -1242,18 +1258,22 @@ def _matches(text: str, marker: Marker) -> bool:
     return bool(re.search(re.escape(marker), text))
 
 
-def classify_incident(raw: str, provider: str = "", model: str = "") -> Incident:
+def classify_incident(
+    raw: str, provider: str = "", model: str = "", failover_from: str = ""
+) -> Incident:
     """Classify an error string; never raises, never returns None."""
     text = (raw or "").lower()
     for category, patterns in _RULES:
         if any(_matches(text, marker) for marker in patterns):
-            return Incident(category, raw, provider, model)
-    return Incident("unknown", raw, provider, model)
+            return Incident(category, raw, provider, model, failover_from)
+    return Incident("unknown", raw, provider, model, failover_from)
 
 
-def format_incident_message(raw: str, provider: str = "", model: str = "") -> str:
+def format_incident_message(
+    raw: str, provider: str = "", model: str = "", failover_from: str = ""
+) -> str:
     """One-call formatter for the rendered user-visible text."""
-    return classify_incident(raw, provider, model).render()
+    return classify_incident(raw, provider, model, failover_from).render()
 
 
 def format_credential_message(
@@ -1745,3 +1765,28 @@ def format_model_switch_message(
             "may differ from the previous model; act as the model you now are."
         )
     return "\n".join(lines)
+
+
+# Child outcomes are not all involuntary cut-offs. Keep deliberate cancellation
+# out of CUT_OFF_CAUSES: attention/journal classification relies on that table.
+CHILD_DEATH_CAUSES = {
+    "child-paused": "the child was deliberately paused and can be resumed",
+    "child-cancelled": "the child was explicitly cancelled or paused",
+    "child-parent-gone": "the parent session ended and stopped the child",
+    "child-failed": "the child run failed",
+    "child-provider-error": "the child's provider failed",
+    "child-host-kill": "the child host disappeared without an exit record",
+    "child-never-settled": "the child was launched but never recorded an outcome",
+}
+
+
+def render_child_death(cause: str, detail: str = "", last_step: str = "") -> str:
+    """Render one recoverable child-death fact without changing cut-off semantics."""
+    sentence = CHILD_DEATH_CAUSES.get(cause)
+    if sentence is None:
+        sentence = render_cut_off_reason(cause) if cause else "the child stopped"
+    if detail:
+        sentence += f" ({' '.join(detail.split())})"
+    if last_step:
+        sentence += f"; last completed step: {' '.join(last_step.split())}"
+    return sentence

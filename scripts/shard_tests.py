@@ -3,7 +3,7 @@
 Usage:
     python scripts/shard_tests.py --shard I --total N [--out shard_tests.txt]
     python scripts/shard_tests.py --report          # all shards, projected totals
-    python scripts/shard_tests.py --tree e2e --shard I --total 3 --out e2e_tests.txt
+    python scripts/shard_tests.py --tree e2e --shard I --total 2 --out e2e_tests.txt
 
 Two trees are sharded today -- ``unit`` (the default) and ``e2e`` -- and the
 only thing that differs between them is which files to collect and which
@@ -180,7 +180,7 @@ class Tree:
 
     ``default_shards`` is the count the matching CI job passes as ``--total``.
     It is per-tree because the two trees are split across different things --
-    five unit shards on one OS versus three e2e shards on EACH of two OSes --
+    five unit shards on one OS versus two e2e shards on EACH of two OSes --
     and a count that silently disagreed with the job's matrix is how a shard
     ends up orphaned (see `test_ci_shard_matrix_covers_every_shard_...`).
     """
@@ -218,7 +218,7 @@ TREES: dict[str, Tree] = {
         name="e2e",
         glob="tests/e2e/**/test_*.py",
         manifest=REPO / "tests" / "durations-e2e.json",
-        default_shards=3,
+        default_shards=2,
     ),
 }
 DEFAULT_TREE = "unit"

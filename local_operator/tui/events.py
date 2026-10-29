@@ -618,8 +618,11 @@ class SupplementProgress(SessionEvent):
     ``(anchor, job, version)`` is its identity.
 
     ``files``/``components`` are the row's shapes (present on decided/done
-    only, empty otherwise); ``error``/``error_type`` mirror the row. The
-    mapping is assembled here, where the wire event is known, and NOT read
+    only, empty otherwise); ``error``/``error_type`` mirror the row. ``sounds``
+    rides the same beats as ``files`` (a generated sound is ready at ``decided``,
+    like a callout), and is kept OUT of ``details()`` when empty so a
+    sound-free beat's mapping stays byte-identical to before the field existed.
+    The mapping is assembled here, where the wire event is known, and NOT read
     from the live payload by the app.
     """
 
@@ -635,6 +638,8 @@ class SupplementProgress(SessionEvent):
         components: list[dict[str, object]] | None = None,
         error: str = "",
         error_type: str = "",
+        sounds: list[dict[str, object]] | None = None,
+        sounds_more: int = 0,
     ) -> None:
         super().__init__()
         self.anchor = anchor
@@ -645,6 +650,8 @@ class SupplementProgress(SessionEvent):
         self.elapsed_s = elapsed_s
         self.files = list(files or [])
         self.components = list(components or [])
+        self.sounds = list(sounds or [])
+        self.sounds_more = int(sounds_more)
         self.error = error
         self.error_type = error_type
 
@@ -665,6 +672,10 @@ class SupplementProgress(SessionEvent):
             "components": list(self.components),
             "error": self.error,
         }
+        if self.sounds:
+            details["sounds"] = list(self.sounds)
+        if self.sounds_more > 0:
+            details["sounds_more"] = self.sounds_more
         return details
 
 
@@ -979,6 +990,31 @@ class EventController:
                 or getattr(message_usage, "input_tokens", 0)
                 or context_tokens
             )
+        # ...AND THE RECEIPTS OF ROWS THE WIRE BOUND DROPPED. A REMOTE viewer
+        # only sees what ``harness.wire.bound_agent_end_for_wire`` emits, and
+        # that bound keeps the newest ``AGENT_END_MESSAGE_TAIL_MAX`` messages
+        # when a deep turn would otherwise cross the socket line. Its
+        # ``usage_aggregate`` folds every dropped row's receipt (see
+        # ``wire._usage_aggregate``), so adding it here is what keeps the band
+        # honest: without it a 3,000-message turn would report the spend of its
+        # last 24 messages. In-process events never carry the key, so the local
+        # TUI path is unchanged.
+        aggregate = getattr(event, "usage_aggregate", None)
+        if isinstance(aggregate, dict):
+            totals["input"] += int(aggregate.get("input_tokens") or 0)
+            totals["output"] += int(aggregate.get("output_tokens") or 0)
+            totals["cache_read"] += int(aggregate.get("cache_read_tokens") or 0)
+            totals["cache_write"] += int(aggregate.get("cache_write_tokens") or 0)
+            cost_components.extend(
+                Usage.model_validate(component)
+                for component in aggregate.get("cost_components") or []
+            )
+            # Only when no retained message reported one: the aggregate is the
+            # OLDER suffix, and the newest occupancy reading is the turn's.
+            if not context_tokens:
+                context_tokens = int(aggregate.get("context_tokens") or 0)
+            if usage is None:
+                usage = Usage.model_validate(aggregate)
         if usage is not None:
             usage = Usage(
                 input_tokens=totals["input"],
@@ -987,6 +1023,14 @@ class EventController:
                 cache_write_tokens=totals["cache_write"],
                 context_tokens=context_tokens or None,
                 cost_components=cost_components,
+                billing_basis=(
+                    cost_components[0].billing_basis
+                    if cost_components
+                    and all(
+                        c.billing_basis == cost_components[0].billing_basis for c in cost_components
+                    )
+                    else None
+                ),
             )
         # The aggregate still prices the calls. A post-turn compaction can stamp
         # a newer occupancy level on the boundary without corrupting that bill.
@@ -1308,6 +1352,8 @@ class EventController:
                 list(event.components),
                 event.error,
                 event.error_type,
+                [dict(item) for item in event.sounds],
+                event.sounds_more,
             )
         )
 

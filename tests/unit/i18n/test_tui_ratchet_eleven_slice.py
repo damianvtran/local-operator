@@ -79,7 +79,11 @@ def test_the_six_keys_are_exactly_their_base_bytes() -> None:
     # A REAL equality: the review caught that the first draft could not fail
     # (F2/Q1) — a comparison that passes when the dicts differ is decoration.
     assert live == golden, "the shipped catalogue and the fixture golden drifted"
-    assert len(golden) == 121, len(golden)
+    # 137 = the previous 121 plus the sixteen classification-spend note keys
+    # (11 wide/narrow rungs + 3 mixed-attempt rungs + 2 shortest rungs) added
+    # with the JEV spend fix. Their exact bytes are pinned by the spend-notes
+    # test, so this count is a second, independent stop against a silent drop.
+    assert len(golden) == 137, len(golden)
     for key, value in BASE.items():
         assert live[key] == value, key
     sidecar = catalogues.context("en", "tui.small")

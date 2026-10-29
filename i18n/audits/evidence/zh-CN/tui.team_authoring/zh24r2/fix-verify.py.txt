@@ -1,0 +1,218 @@
+"""zh24r2 fix verification: does each applied value match its audited proposal?
+
+Read-only over the worktree. For one namespace it compares the pre-fix target
+(cb716031e3^) with the current target at HEAD, extracts the exact proposed text
+recorded in the pre-fix zh24a1 report, and re-derives ICU arguments and rendered
+width from the current English source and sidecar.
+
+Output: fix-verification.json in the audit bundle directory.
+
+The proposal is parsed from the pre-fix report rather than embedded here, so an
+editor cannot silently "verify" a value against itself.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import unicodedata
+
+REPO = "/Users/damian/local-operator/.worktrees/zh-cn-core"
+FIX = "cb716031e335aa27e632227f1a0303e143dcd19f"
+LOCALE = "zh-CN"
+sys.path.insert(0, REPO)
+
+from local_operator.i18n import runtime  # noqa: E402
+
+CAT = os.path.join(REPO, "local_operator", "i18n", "catalogues")
+AUDITS = os.path.join(REPO, "i18n", "audits", "evidence", "zh-CN")
+
+SAMPLES = {
+    "count": 3,
+    "time": "19:36",
+    "name": "release-notes",
+    "path": "/home/user/notes/today.md",
+    "size": "1,234",
+    "status": "running",
+    "run_id": "01J8Z3K4M5N6P7Q8R9S0T1U2V3",
+    "network_id": "net_01J8Z3K4M5N6P7Q8R9S0",
+    "max_hours": 2,
+    "max_bytes": 4096,
+    "flag": "--size",
+    "error": "permission denied",
+    "reason": "write failed",
+    "amount": "$0.12",
+    "exit_code": 1,
+    "max": 10,
+    "tier": "1.0x",
+    "detail": "3 名成员",
+    "state": "开启",
+    "answered": "01J8Z3K4M5N6P7Q8R9S0T1U2V3",
+    "asked_for": "01J8Z3K4M5N6P7Q8R9S0T1U2V4",
+}
+
+
+def cells(text: str) -> int:
+    return sum(
+        2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        for ch in text
+        if unicodedata.category(ch) not in ("Mn", "Me", "Cf")
+    )
+
+
+def extract_proposal(report: str, key: str) -> str | None:
+    """Return the proposal text recorded for `key` in a pre-fix report.
+
+    Handles both shapes the pre-fix reports use:
+      ### ZH-nn — minor — `key`
+      - Proposed: `...`
+    and the multi-key finding shape:
+      - `key`
+        - proposed: ``...``
+    The multi-key reports wrap values in double backticks, so those are tried
+    before single backticks.
+    """
+    lines = report.splitlines()
+    patterns = (
+        re.compile(r"[Pp]roposed\s*:\s*``(.+?)``"),
+        re.compile(r"[Pp]roposed\s*:\s*`([^`]+)`"),
+    )
+
+    def proposal_in(candidates):
+        for probe in candidates:
+            for pattern in patterns:
+                match = pattern.search(probe)
+                if match:
+                    return match.group(1)
+        return None
+
+    for i, line in enumerate(lines):
+        if key not in line:
+            continue
+        found = proposal_in(lines[i : i + 6])
+        if found:
+            # A combined finding (ZH-12) records both values on one line as
+            # "value one / value two"; split it by the keys named on the heading.
+            if " / " in found:
+                named = [
+                    token
+                    for token in re.findall(r"[a-z_]+(?:\.[a-z_]+)+", line)
+                    if token in report
+                ]
+                # Drop duplicates while keeping order.
+                named = list(dict.fromkeys(named))
+                if len(named) > 1 and key in named:
+                    parts = found.split(" / ")
+                    if len(parts) == len(named):
+                        found = parts[named.index(key)]
+            return found
+    return None
+
+
+def old_target(ns: str) -> dict:
+    raw = subprocess.check_output(
+        ["git", "-C", REPO, "show", f"{FIX}^:local_operator/i18n/catalogues/zh-CN/{ns}.json"]
+    )
+    return json.loads(raw)
+
+
+def main() -> int:
+    ns = sys.argv[1]
+    outdir = sys.argv[2]
+    en = json.load(open(os.path.join(CAT, "en", f"{ns}.json"), encoding="utf-8"))
+    zh = json.load(open(os.path.join(CAT, LOCALE, f"{ns}.json"), encoding="utf-8"))
+    ctx_path = os.path.join(CAT, "en", f"{ns}.context.json")
+    ctx = json.load(open(ctx_path, encoding="utf-8")) if os.path.exists(ctx_path) else {}
+    report = open(os.path.join(AUDITS, ns, "zh24a1", "report.md"), encoding="utf-8").read()
+    old = old_target(ns)
+
+    changed = [key for key in en if key in old and old.get(key) != zh.get(key)]
+    rows = []
+    for key in changed:
+        proposed = extract_proposal(report, key)
+        current = zh[key]
+        try:
+            rendered = runtime.render_message(
+                current,
+                {
+                    name: SAMPLES.get(name, f"<{name}>")
+                    for name, _ in runtime.message_arguments(current)
+                },
+                LOCALE,
+            )
+            render_err = None
+        except Exception as exc:  # evidence records the failure verbatim
+            rendered, render_err = None, f"{type(exc).__name__}: {exc}"
+        budget = (ctx.get(key) or {}).get("maxCells")
+        rows.append(
+            {
+                "key": key,
+                "pre_fix": old[key],
+                "current": current,
+                "proposed_by_pre_fix_audit": proposed,
+                "proposal_found": proposed is not None,
+                "matches_proposed_text_exactly": proposed is not None and current == proposed,
+                "changed_from_pre_fix": current != old[key],
+                "en_sha256": hashlib.sha256(en[key].encode()).hexdigest(),
+                "current_sha256": hashlib.sha256(current.encode()).hexdigest(),
+                "en_arguments": [list(a) for a in runtime.message_arguments(en[key])],
+                "zh_arguments": [list(a) for a in runtime.message_arguments(current)],
+                "argument_sets_equal": [list(a) for a in runtime.message_arguments(en[key])]
+                == [list(a) for a in runtime.message_arguments(current)],
+                "en_plural_selectors": [list(s) for s in runtime.plural_selectors(en[key])],
+                "zh_plural_selectors": [list(s) for s in runtime.plural_selectors(current)],
+                "rendered": rendered,
+                "render_error": render_err,
+                "rendered_cells": cells(rendered) if rendered is not None else None,
+                "maxCells": budget,
+                "over_budget": (
+                    cells(rendered) - budget if budget is not None and rendered is not None else None
+                ),
+            }
+        )
+
+    doc = {
+        "schema": 1,
+        "audit_id": "zh24r2",
+        "locale": LOCALE,
+        "namespace": ns,
+        "fix_commit": FIX,
+        "source_revision": subprocess.check_output(
+            ["git", "-C", REPO, "rev-parse", "HEAD"]
+        ).decode().strip(),
+        "method": (
+            "Read-only comparison of the pre-fix target at cb716031e3^, the current target at "
+            "HEAD, and the exact proposed text parsed from the pre-fix zh24a1 report. ICU "
+            "arguments and plural selectors are parsed by the repo's own runtime; width is "
+            "measured in display cells with representative values."
+        ),
+        "changed_key_count": len(changed),
+        "all_values_match_proposal": all(
+            r["matches_proposed_text_exactly"] for r in rows
+        ),
+        "all_values_changed": all(r["changed_from_pre_fix"] for r in rows),
+        "all_argument_sets_equal": all(r["argument_sets_equal"] for r in rows),
+        "all_renders_ok": all(r["render_error"] is None for r in rows),
+        "over_budget": [
+            r["key"] for r in rows if r["over_budget"] is not None and r["over_budget"] > 0
+        ],
+        "rows": rows,
+    }
+    os.makedirs(outdir, exist_ok=True)
+    with open(os.path.join(outdir, "fix-verification.json"), "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    print(
+        f"namespace={ns} changed_keys={len(rows)} matches={doc['all_values_match_proposal']} "
+        f"args_equal={doc['all_argument_sets_equal']} renders_ok={doc['all_renders_ok']} "
+        f"over_budget={len(doc['over_budget'])}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

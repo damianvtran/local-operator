@@ -78,18 +78,26 @@ class ReceiptConflict(ValueError):
 class Unclaimed(Exception):
     """An operation's outcome that must NOT be recorded against its key.
 
-    THE ONE WAY TO SAY "this refusal is not this request's outcome". ``run``
-    records whatever the operation returns, and a recorded refusal is REPLAYED —
-    the right answer for a request that may already have left something behind
-    (a created conversation, a snapshot written before the base moved), and the
-    wrong one for a refusal raised before any write at all, whose own sentence
-    tells the caller to retry: replaying that would refuse a retry that could
-    have succeeded, forever, for that id (review round 2, Q4).
+    THE ONE WAY TO SAY "this outcome is not FINAL for this request id". ``run``
+    records whatever the operation returns, and a recorded outcome is REPLAYED.
+    That is the right answer for a request that may already have left something
+    behind (a created conversation, a snapshot written before the base moved),
+    and the wrong one for an outcome whose own next step is the SAME id running
+    again:
 
-    Raised from inside the operation rather than acted on afterwards, so the
-    withdrawal happens INSIDE this journal's critical section: the row never
-    exists in its recorded state, and a same-id request waiting on the lock sees
-    a free key rather than a refusal it has to distinguish from an outcome.
+    * a refusal raised before any write — its sentence tells the caller to
+      retry, so replaying it would refuse a retry that could have succeeded,
+      forever, for that id (review round 2, Q4);
+    * an intermediate ``pending-reconciliation`` answer — the remote row exists
+      but local reconciliation has not landed, and a retry with the same id is
+      the only action that can finish it; replaying the pending answer would
+      make that action unreachable.
+
+    The CALLER decides finality; the journal never infers it. Raised from inside
+    the operation rather than acted on afterwards, so the withdrawal happens
+    INSIDE this journal's critical section: the row never exists in its recorded
+    state, and a same-id request waiting on the lock sees a free key rather than
+    an outcome it has to distinguish as final or not.
     """
 
     def __init__(self, result: dict[str, Any]) -> None:
@@ -215,6 +223,36 @@ class DesktopReceipts:
         with closing(self._db()) as db, db:
             db.execute("UPDATE receipts SET result = ? WHERE id = ?", (json.dumps(result), key))
 
+    def _replace(self, key: str, result: dict[str, Any]) -> None:
+        """Supersede a RECORDED outcome for ``key`` with a later one.
+
+        THE INVARIANT, stated where the write happens: at-most-once exists to
+        stop a lost response from duplicating a LIVE side effect. When a recorded
+        outcome names something that is provably gone by the time the retry
+        arrives — the draft id a mint journalled, dropped from the registry on
+        expiry or materialised into a conversation since deleted — replaying it
+        hands the caller a name this daemon cannot serve, and re-running the
+        operation is NOT a second effect: the first one has nothing left to
+        duplicate. The CALLER proves that before asking for this, through
+        ``run``'s ``replay_guard``; the journal never infers it.
+
+        ``result IS NOT NULL`` keeps this to FINAL outcomes. A pending claim is
+        :meth:`_release`'s business, and rewriting one here would be
+        indistinguishable from recording an attempt that never completed.
+
+        ACROSS PROCESSES the claim's transaction serialises only the READ: two
+        daemons sharing one store can both see the same dead row and both mint.
+        Accepted rather than fixed, because the at-most-once guarantee this
+        journal exists for — a LIVE side effect run twice — is untouched (both
+        re-ran an operation with nothing left to duplicate), and a draft mint
+        starts nothing: the loser's id is one registry entry that ages out.
+        """
+        with closing(self._db()) as db, db:
+            db.execute(
+                "UPDATE receipts SET result = ? WHERE id = ? AND result IS NOT NULL",
+                (json.dumps(result), key),
+            )
+
     async def run(
         self,
         key: str,
@@ -222,7 +260,19 @@ class DesktopReceipts:
         operation: Callable[[], Awaitable[dict[str, Any]]],
         *,
         retry_safe: bool = False,
+        replay_guard: Callable[[dict[str, Any]], bool] | None = None,
     ) -> dict[str, Any]:
+        """Run ``operation`` once per ``key``, replaying its recorded outcome.
+
+        ``replay_guard`` makes the replay CONDITIONAL: it is asked, inside the
+        per-key lock and only for a recorded outcome, whether that outcome may
+        still be served. A recorded success can name a resource that has since
+        ceased to exist (a mint's draft id — see :meth:`_replace`), and replaying
+        it is the defect rather than the protection. Answering ``False`` runs
+        the operation again and supersedes the row, under the SAME lock and
+        fingerprint check, so a same-id retry still coalesces and a different
+        body still raises :class:`ReceiptConflict`.
+        """
         fingerprint = hashlib.sha256(
             json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
@@ -234,8 +284,16 @@ class DesktopReceipts:
         try:
             async with lock:
                 cached = await asyncio.to_thread(self._claim, key, fingerprint, retry_safe)
+                superseding = False
                 if cached is not None:
-                    return {**cached, "replayed": True}
+                    # The guard runs HERE, under the per-key lock, so two
+                    # requests for this id in THIS process cannot both decide to
+                    # re-run: the second waits, then judges the row the first
+                    # wrote. (Across processes the claim serialises the read
+                    # only — see ``_replace``.)
+                    if replay_guard is None or replay_guard(cached):
+                        return {**cached, "replayed": True}
+                    superseding = True
                 try:
                     result = await operation()
                 except Unclaimed as unclaimed:
@@ -245,7 +303,10 @@ class DesktopReceipts:
                     # :class:`Unclaimed` for why this is not an ``_finish``.
                     await asyncio.to_thread(self._release, key)
                     return unclaimed.result
-                await asyncio.to_thread(self._finish, key, result)
+                if superseding:
+                    await asyncio.to_thread(self._replace, key, result)
+                else:
+                    await asyncio.to_thread(self._finish, key, result)
                 return result
         finally:
             # Include waiters in the count so removing an entry can never admit

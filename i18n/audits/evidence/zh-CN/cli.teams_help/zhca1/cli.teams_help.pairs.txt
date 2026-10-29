@@ -1,0 +1,35 @@
+# cli.teams_help — sampled en/zh pairs for attestation zhca1
+# 8/34 keys; all >120 chars and all plurals included
+
+## cli.teams_help.create  [17 chars]
+EN: Create a new team
+ZH: 创建团队
+
+## cli.teams_help.create_manager  [54 chars]
+EN: Role or specialist who orchestrates (default: manager)
+ZH: 负责编排的角色或专家（默认：manager）
+
+## cli.teams_help.list  [14 chars]
+EN: List all teams
+ZH: 列出所有团队
+
+## cli.teams_help.pull  [74 chars]
+EN: Pull a team from the hub by id, or by name from the public hub (Agent Hub)
+ZH: 按ID从hub pull团队，或按名称从公共hub pull（Agent Hub）
+
+## cli.teams_help.pull_team_id  [122 chars, LONG>120]
+EN: ID of the published team to pull, or a public team's name (`lop teams pull a-team`; names resolve over the public listing)
+ZH: 要pull的已发布团队ID，或公共团队名称（`lop teams pull a-team`；通过公共列表解析名称）
+
+## cli.teams_help.push  [158 chars, LONG>120]
+EN: Push a team to an organization or the public hub (Agent Hub); exit codes: 0 published, 1 error, 2 preview-only with changes pending, 3 declined, 130 cancelled
+ZH: 将团队push至组织或公共hub（Agent Hub）；退出码：0已发布，1错误，2仅预览且有待处理更改，3已拒绝，130已取消
+
+## cli.teams_help.search_query  [89 chars]
+EN: Text to match against a public team's name or description (omit to list the newest teams)
+ZH: 匹配公共团队名称或说明的文本（省略则列出最新团队）
+
+## cli.teams_help.sync_name  [33 chars]
+EN: Sync only the team with this name
+ZH: 仅同步此名称的团队
+

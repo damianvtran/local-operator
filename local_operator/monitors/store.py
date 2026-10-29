@@ -274,6 +274,16 @@ def health_hint(row: Mapping[str, Any], now_ms: int) -> str | None:
         # A disabled row already renders its own reason and count; the shared
         # hint would only restate it.
         return None
+    if isinstance(row, Mapping) and row.get("blind") and not _is_expired(row, now_ms):
+        # Blind outranks every other hint: the watch is armed, its call still
+        # runs, and nothing it sees reaches the operator — the exact state the
+        # 2026-10-20 Slack monitor rendered as healthy for seven missed replies.
+        # EXPIRED outranks blind (review round 1, F5): a watch past ``until_at``
+        # will not tick again, so "cannot compare" would describe a failure that
+        # can no longer produce a missed change.
+        reason = " ".join(str(row.get("blind_reason") or "").split())
+        detail = reason or "its full result is not available"
+        return f"BLIND: cannot compare its result — {detail}; changes are not being reported"
     since = row.get("unavailable_since") if isinstance(row, Mapping) else None
     if isinstance(since, int) and not isinstance(since, bool) and since > 0:
         return f"tool unavailable since {_clock(since)} — retrying"
@@ -294,6 +304,21 @@ def health_hint(row: Mapping[str, Any], now_ms: int) -> str | None:
         int(deliveries) if isinstance(deliveries, int) and not isinstance(deliveries, bool) else 0
     )
     if checks_n >= 3 and deliveries_n == 0:
+        suppressed = _suppressed_total(row)
+        if suppressed:
+            # The neutral sentence below claims nothing CHANGED. A monitor that
+            # suppressed its changes knows otherwise: the call did produce
+            # deltas, the gate filed them as bookkeeping, and the reader is
+            # owed that fact instead of "nothing has changed" — the live store
+            # held ten such monitors, one with 93 suppressions. The NEWS LEADS
+            # (design round 1, D1): the TUI band renders the first em-dash
+            # clause, and the old ordering there deleted the suppression fact.
+            plural = "" if suppressed == 1 else "s"
+            return (
+                f"{suppressed} change{plural} suppressed as non-material "
+                f"({checks_n} checks, {deliveries_n} deliveries) — the call may have "
+                "changed without telling you"
+            )
         # Neutral, not a warning: a watch that has seen nothing may simply be
         # watching something quiet — or watching the wrong thing.
         return (
@@ -301,6 +326,30 @@ def health_hint(row: Mapping[str, Any], now_ms: int) -> str | None:
             "(confirm the call observes what you expect)"
         )
     return None
+
+
+def _is_expired(row: Mapping[str, Any], now_ms: int) -> bool:
+    """Whether ``until_at`` has passed — the one rule all surfaces share."""
+    until = row.get("until_at")
+    return isinstance(until, int) and not isinstance(until, bool) and until <= now_ms
+
+
+def _suppressed_total(row: Mapping[str, Any]) -> int:
+    """Every counted suppression on a row, whatever the gate called it.
+
+    The counters file names the classes (``non_material_metadata``,
+    ``ignorable``, ``rate_cap``) and an older file may carry others; the reader
+    only needs the total, and it must tolerate a missing/malformed mapping
+    because the index is best-effort derived state.
+    """
+    suppressed = row.get("suppressed")
+    if not isinstance(suppressed, Mapping):
+        return 0
+    total = 0
+    for value in suppressed.values():
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            total += value
+    return total
 
 
 def unavailable_since_of(row: Mapping[str, Any]) -> int:

@@ -107,11 +107,20 @@ SENTINELS: dict[str, Any] = {
     # fallback — silently unreadable, exactly the drop class this guard exists
     # for.
     "bridge_runtime": object(),
+    # THE DURABLE-WRITE CONSENT SEAM (LOH-9 S2) is a host-owned capability, not
+    # a value: dropped on the way to the executor, a tool that CAN ask the user
+    # would silently refuse every account write, and the only visible symptom
+    # would be a role that unexpectedly stays conversation-scoped.
+    "authorize_durable_write": lambda intent: None,
     # The confinement root backs every local tool's enforcement points (shell
     # spawn, path readers). Dropped on the way to the executor, a session the
     # caller confined would run its UNCONFINED default -- shell on the host,
     # paths anywhere -- which is the boundary silently off.
     "confinement_root": "/tmp/sentinel-confinement",
+    # The scout's write-confined shell root. Dropped on the way to the
+    # executor, a scout's bash would run UNWRAPPED on the host -- reads, writes
+    # and network all open -- while its approval tier still said "read".
+    "shell_write_root": "/tmp/sentinel-shell-write",
 }
 
 #: ToolContext fields the Session takes under a DIFFERENT name. Kept tiny and

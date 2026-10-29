@@ -1,0 +1,23 @@
+wire.slash.agent | List agents, switch an agent's class, or speak to this session as one | ایجنٹس دیکھیں، کسی ایجنٹ کی قسم بدلیں، یا اس سیشن سے بطور ایجنٹ بات کریں
+wire.slash.approvals | Show or set tool approval mode for this session | اس سیشن کے لیے ٹول منظوری کا موڈ دیکھیں یا مقرر کریں
+wire.slash.copy | Copy an agent message or code block | ایجنٹ کا پیغام یا کوڈ بلاک نقل کریں
+wire.slash.credential | Type or paste a secret after a space; masked | اسپیس کے بعد خفیہ متن لکھیں/چسپاں کریں؛ متن چھپا رہے گا
+wire.slash.failovers | Show the model failover cascade and what is serving | ماڈل فیل اوور کی ترتیب اور فعال ماڈل دکھائیں
+wire.slash.fast | Toggle faster output at premium pricing | زیادہ قیمت پر تیز آؤٹ پٹ چالو/بند کریں
+wire.slash.fork | Branch this chat; --switch here, --window elsewhere; <message> starts work | اس گفتگو کی شاخ بنائیں؛ --switch یہیں، --window کہیں اور؛ <message> سے کام شروع کریں
+wire.slash.highlights | Cancel, retry or steer the highlights under an answer | جواب کے نمایاں حصے منسوخ کریں، دوبارہ کوشش کریں یا رخ بدلیں
+wire.slash.hub | Open Hub links — per-link subscribe and auto-push policy | Hub روابط کھولیں — فی ربط رکنیت اور خودکار push پالیسی
+wire.slash.links | Open a link from this conversation in a browser | اس گفتگو کا ربط براؤزر میں کھولیں
+wire.slash.login | Authenticate a provider | پرووائیڈر میں لاگ اِن کریں
+wire.slash.logout | Remove stored provider credentials | محفوظ پرووائیڈر کریڈینشلز ہٹائیں
+wire.slash.loop | Loop toward a goal: /loop <goal>, <n>; --stop cancels | ہدف تک لوپ: /loop <goal>, <n>؛ --stop سے منسوخ
+wire.slash.mcp | List MCP servers; add/remove one, or manage an OAuth grant | MCP سرورز دیکھیں/شامل/ہٹائیں؛ OAuth اجازت منظم کریں
+wire.slash.move | Change this session's working directory | اس سیشن کی ورکنگ ڈائریکٹری بدلیں
+wire.slash.network | Networks, peers, and this device's mesh state | نیٹ ورکس، پیئرز اور اس ڈیوائس کی میش حالت
+wire.slash.provider | List providers and their login/usage state | پرووائیڈرز اور ان کے لاگ اِن/استعمال کی حالت کی فہرست
+wire.slash.reload | Relaunch this conversation on the current install | موجودہ انسٹال پر یہ گفتگو دوبارہ چلائیں
+wire.slash.search | Configure web search providers and load balancing | ویب تلاش کے پرووائیڈرز اور لوڈ بیلنسنگ ترتیب دیں
+wire.slash.team | List teams, chart a team's org, or send a request to a team's manager | ٹیمیں اور تنظیمی خاکہ دیکھیں؛ مینیجر کو درخواست بھیجیں
+wire.slash.theme | Switch color theme; arrows preview live | رنگی تھیم بدلیں؛ ایرو کیز سے براہِ راست پیش منظر
+wire.slash.update | Install the latest version from PyPI and relaunch | PyPI سے تازہ ورژن انسٹال کر کے دوبارہ شروع کریں
+wire.slash.usage | Show provider usage quota | پرووائیڈر کا استعمالی کوٹہ دکھائیں

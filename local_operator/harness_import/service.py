@@ -544,7 +544,16 @@ class HarnessImportService:
                 ),
             )
         except Exception:
-            if created_here and not (directory / "transcript.jsonl").exists():
+            # ``created_here`` is taken BEFORE the materialise and is
+            # ``not directory.exists()``, so a pre-existing session — archived or
+            # not — can never reach this removal: its directory exists from the
+            # start. The second arm is ``has_transcript`` rather than a stat of the
+            # plain name so the "nothing was committed" proof holds for a session
+            # whose transcript is an archive (which would otherwise read as empty
+            # and be removed).
+            from local_operator.session import compression
+
+            if created_here and not compression.has_transcript(directory):
                 shutil.rmtree(directory, ignore_errors=True)
             raise
         self._apply_stats(outcome, mapped)

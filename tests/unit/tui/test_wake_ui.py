@@ -418,10 +418,13 @@ def _monitor(
     disabled: bool = False,
     reason: str = "",
     failures: int = 0,
+    until_at: int | None = None,
 ) -> tuple[SimpleNamespace, dict[str, Any]]:
     """(spec-ish, counters) — what the scheduler's two read surfaces return."""
     now = int(time.time() * 1000)
-    spec = SimpleNamespace(id=monitor_id, name=name, tool="bash", every_ms=every_ms)
+    spec = SimpleNamespace(
+        id=monitor_id, name=name, tool="bash", every_ms=every_ms, until_at=until_at
+    )
     counters: dict[str, Any] = {
         "next_due_at": None if due_in_ms is None else now + due_in_ms,
         "last_check_at": now - 1_000,
@@ -1272,3 +1275,84 @@ class TestMonitorBandHealth:
 
         assert "checks, 0 deliveries" not in out
         assert "unavailable" not in out
+
+
+class TestBlindMonitorState:
+    """A watch whose result cannot be compared must not paint as a healthy one.
+
+    Measured live: a monitor that compared the display projection of a spilled
+    Slack thread rendered as an ordinary armed row with a due clock while seven
+    replies went unreported. The band's job is to make the state visible even
+    when the health sentence is cut.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_blind_monitor_leads_with_its_state_word(self) -> None:
+        spec, counters = _monitor("m1", "watch the slack thread")
+        counters["blind"] = True
+        counters["blind_reason"] = "its full result is no longer in the spill store"
+
+        _, out = await _paint([], [(spec, counters)])
+
+        row = out.splitlines()[1]
+        assert "blind" in row
+        assert "BLIND: cannot compare its result" in row
+        assert "watch the slack thread" in row
+
+    @pytest.mark.asyncio
+    async def test_a_blind_row_outranks_a_quiet_one_for_the_two_row_cap(self) -> None:
+        healthy_spec, healthy = _monitor("m1", "watch the deploy queue", due_in_ms=30_000)
+        healthy["deliveries"] = 2
+        blind_spec, blind = _monitor("m2", "watch the slack thread")
+        blind["blind"] = True
+        blind["blind_reason"] = "its result was stored incompletely"
+
+        _, out = await _paint([], [(healthy_spec, healthy), (blind_spec, blind)])
+
+        assert "m2" in out.splitlines()[1]
+        assert "blind" in out.splitlines()[1]
+
+
+class TestSuppressedMonitorState:
+    """Design review round 1, D1: the band must say a change was withheld.
+
+    The band renders the first em-dash clause of the shared hint, so the
+    suppression fact was after the cut and a suppressing watch read as a quiet
+    one at every width. The hint now leads with the news.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_suppressing_monitor_says_so_in_the_band(self) -> None:
+        spec, counters = _monitor("m_supp", "Deployment watch")
+        counters["checks"], counters["deliveries"] = 20, 0
+        counters["suppressed"] = {"non_material_metadata": 7, "ignorable": 0, "rate_cap": 0}
+
+        _, out = await _paint([], [(spec, counters)])
+
+        assert "suppressed" in out
+        assert "7 changes suppressed as non-material" in out
+        # It is a row that needs reading, not a quiet one: the band's header
+        # counts warning-ink rows.
+        assert "1 of 1 needs attention" in out, out
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_monitor_stays_quiet(self) -> None:
+        spec, counters = _monitor("m_ok", "Deployment watch")
+        counters["deliveries"] = 2
+
+        _, out = await _paint([], [(spec, counters)])
+
+        assert "suppressed" not in out
+
+    @pytest.mark.asyncio
+    async def test_an_expired_blind_monitor_does_not_lead_with_blind(self) -> None:
+        """Review round 1, F5: expired outranks blind on every surface."""
+        now = int(time.time() * 1000)
+        spec, counters = _monitor("m_gone", "Deployment watch", due_in_ms=-7_200_000)
+        counters["blind"] = True
+        counters["blind_reason"] = "its full result is no longer in the spill store"
+        spec.until_at = now - 60_000
+
+        _, out = await _paint([], [(spec, counters)])
+
+        assert "blind" not in out

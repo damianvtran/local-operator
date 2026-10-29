@@ -32,7 +32,12 @@ Design notes carried over from the reference engine:
 from __future__ import annotations
 
 import asyncio
+import json
+import urllib.parse
 import uuid
+from collections.abc import Iterable
+from dataclasses import dataclass
+from enum import Enum
 from typing import (
     Any,
     Awaitable,
@@ -42,6 +47,7 @@ from typing import (
     Mapping,
     Protocol,
     Sequence,
+    cast,
     runtime_checkable,
 )
 
@@ -50,6 +56,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    SecretStr,
     SerializerFunctionWrapHandler,
     field_validator,
     model_serializer,
@@ -363,22 +370,33 @@ class ImageContent(BaseModel):
     #: never emit this bookkeeping object, exactly as they never emit
     #: ``marker``.
     captured_frame: CapturedFrame | None = None
+    #: The file's ABSOLUTE ORIGIN PATH, when the client had one (a drag from
+    #: Finder, a picked file). Provenance and display only: no provider
+    #: serializer reads it, and it is persisted so history can show where the
+    #: picture came from. Omitted from every dump while unset, the same rule
+    #: ``captured_frame`` follows, so a pre-existing image row stays
+    #: byte-identical (a new null key would change every stored row and every
+    #: context hash).
+    path: str | None = None
 
     @model_serializer(mode="wrap")
     def _omit_absent_capture(self, handler: Any, info: Any) -> Any:
-        """Omit ``captured_frame`` from every dump while it is unset.
+        """Omit ``captured_frame`` and an unset ``path`` from every dump.
 
         Mirrors the ``_omit_absent_core_source``/``_omit_disabled_drag``
         pattern rather than a field-level ``exclude_if`` so the guarantee
         holds at EVERY dump site (plain dumps included, not only the
         ``exclude_defaults`` ones), which is what the byte-identical
-        absent-metadata contract needs. Only THIS key's unset is dropped;
-        ``marker`` keeps its own ``exclude=True`` rule.
+        absent-metadata contract needs. ``marker`` keeps its own
+        ``exclude=True`` rule.
         """
 
         data = handler(self)
-        if isinstance(data, dict) and data.get("captured_frame") is None:
-            data.pop("captured_frame", None)
+        if isinstance(data, dict):
+            if data.get("captured_frame") is None:
+                data.pop("captured_frame", None)
+            if data.get("path") is None:
+                data.pop("path", None)
         return data
 
 
@@ -412,6 +430,60 @@ class AudioContent(BaseModel):
     mime_type: str = "audio/wav"
     duration_ms: int | None = None
     marker: int | None = Field(default=None, exclude=True)
+
+
+class DocumentContent(BaseModel):
+    """A user-attached DOCUMENT block. ``data`` is base64 bytes of ``mime_type``.
+
+    The INPUT half of the attachment contract, and the reason it is a
+    first-class block rather than a filename in the prompt text: a provider
+    that can read a PDF natively must receive the bytes, and a provider that
+    cannot must receive an extraction the harness produced — not a path a
+    model would have to shell out to read, which it cannot do in every
+    deployment (a confined session has no filesystem tools at all).
+
+    WHERE THE BYTES LIVE. Live rows carry them inline in ``data``; durable
+    rows are externalised into the attachment store exactly like images
+    (``transcript._externalize_attachments`` writes ``attachment: <digest>``
+    and ``_resolve_attachments`` restores ``data`` AND ``digest``). The
+    store is the retention copy: moving or deleting the original at
+    ``path`` never loses the document, which is what the history surface
+    promises when it says the file moved but is still retained.
+
+    ``injection`` records HOW this turn was actually delivered to the model
+    (``native`` bytes, ``extracted`` text, or a ``reference``-only block),
+    stamped at admission from the session's model. It is HISTORICAL
+    metadata for the transcript and the path hint — never the serialization
+    authority: a later request re-decides from the model it will actually
+    call (a ``/model`` switch must not send a PDF natively to a provider
+    that has no document input).
+
+    ``marker`` is the composer chip number, the same presentation fact and
+    ``exclude=True`` rule :class:`ImageContent` documents.
+    """
+
+    type: Literal["document"] = "document"
+    data: str = ""
+    mime_type: str
+    filename: str
+    #: Origin absolute path, display/provenance only (never used to read).
+    path: str | None = None
+    #: Absolute path of THIS device's RETAINED copy in the attachment store,
+    #: set at admission for a document whose bytes were stored. The history
+    #: card needs it for its moved/deleted state: offering to copy the origin
+    #: path when that file no longer exists is a control whose copy is dead,
+    #: while the retained copy is the human next step. Serializers ignore it
+    #: (the wire reads ``data``; provenance reads ``path``), and
+    #: ``exclude_defaults`` omits it from dumps when unset so every row
+    #: written before this field stays byte-identical.
+    stored_path: str | None = None
+    bytes: int = 0
+    #: Store digest, set when the bytes were cached (admission or transcript
+    #: resolution). Kept on the live block so a path hint can name the
+    #: retained copy without a second content hash.
+    digest: str | None = None
+    marker: int | None = Field(default=None, exclude=True)
+    injection: Literal["native", "extracted", "reference"] | None = None
 
 
 class AttachmentContent(BaseModel):
@@ -486,8 +558,10 @@ class AttachmentContent(BaseModel):
     width: int | None = None
     height: int | None = None
     duration_s: float | None = None
-    #: A short human handle for labels and file-actions ("flux-dev-01.png").
-    #: Never a filesystem path: an artifact is not a file on the user's disk.
+    #: A short human handle for labels and file-actions, derived from the
+    #: REQUEST that produced the bytes (the prompt or an agent-supplied
+    #: filename stem) — never from a model id, and never a filesystem path:
+    #: an artifact is not a file on the user's disk.
     name: str | None = None
 
 
@@ -501,6 +575,13 @@ class AttachmentContent(BaseModel):
 #: unreachable from in-tree producers (``cache_media`` types its argument),
 #: and stated here rather than papered over (agent review round 1, F6).
 ATTACHMENT_KINDS = frozenset({"image", "video", "audio"})
+
+#: The reference key a durable document row carries in place of inline bytes.
+#: Spelled here as well as in ``session/transcript.py`` because the coercion
+#: below must recognise the legacy row shape without importing the encoder
+#: (that module imports this one). Deliberately the same string: it is the
+#: stored format, not a private convention.
+ATTACHMENT_KEY_FOR_DOCUMENTS = "attachment"
 
 
 def coerce_content_blocks(value: Any) -> Any:
@@ -539,11 +620,59 @@ def coerce_content_blocks(value: Any) -> Any:
                 and any(key in block for key in ("content_type", "attachment", "source_url"))
             ):
                 block = AttachmentContent.model_validate(block)
+            elif block.get("type") == "document" or (
+                "type" not in block
+                and "filename" in block
+                and "mime_type" in block
+                and ATTACHMENT_KEY_FOR_DOCUMENTS in block
+            ):
+                # DOCUMENTS ROUTE EXPLICITLY, on the same reasoning as the
+                # attachment branch above: the durable encoder drops ``type``
+                # (it is the model default) and a smart union resolves a
+                # typeless dict with ``data`` toward ``ImageContent`` — a PDF
+                # replayed as an image on every later turn. The legacy arm is
+                # for rows an earlier build wrote with the reference key but
+                # no discriminant (the shape contract §2 names): a document's
+                # durable identity is ``filename`` + ``mime_type`` +
+                # ``attachment``, facts an image row never carries together.
+                block = DocumentContent.model_validate(block)
         out.append(block)
     return out
 
 
-Content = TextContent | ImageContent | AudioContent | AttachmentContent
+Content = TextContent | ImageContent | AudioContent | AttachmentContent | DocumentContent
+
+
+def drop_blank_text_blocks(content: Sequence[Content]) -> list[Content]:
+    """``content`` without the text blocks that carry nothing a reader can use.
+
+    The ONE definition of a removable text block, shared by the constructor
+    (``Message.user``), the transcript encoder and the transcript reader so the
+    three cannot disagree about what is stored (#2460 follow-up):
+
+    - an EMPTY text block always goes. It persists as ``{}`` (the encoder dumps
+      with ``exclude_defaults``) and Anthropic refuses the whole request over it
+      on every later turn, because the row is in history.
+    - a WHITESPACE-ONLY text block goes only when the message carries media (an
+      image, audio, an artifact) AND no text block with anything to read. There
+      it is an artefact of the composer, not an utterance. On its own it is the
+      only thing the user sent, so it is kept and left to the wires, which drop
+      it and backfill the turn. Beside real text it may be a separator
+      (``line1``, ``\\n``, ``line2``) that ``Message.text`` joins, so it is kept
+      there too: dropping it would change the text a reader sees.
+
+    Order of the remaining blocks is preserved and nothing else is touched, so
+    ``Message.text`` loses only whitespace that has no readable text around it.
+    """
+    has_media = any(not isinstance(block, TextContent) for block in content)
+    has_words = any(isinstance(block, TextContent) and block.text.strip() for block in content)
+    drop_whitespace = has_media and not has_words
+    return [
+        block
+        for block in content
+        if not isinstance(block, TextContent)
+        or (block.text.strip() if drop_whitespace else block.text)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -560,6 +689,289 @@ class ToolCall(BaseModel):
     # Raw JSON argument string when the provider gives us one; wire clients
     # replay this verbatim for providers that require it.
     raw_arguments: str | None = None
+
+
+ONE_TURN_SECRET_RECEIPT = (
+    "Secret resolved for one model request; value redacted from session history."
+)
+
+#: Request fields the session's own decoration passes may set on an ARMED
+#: request. They are applied on every turn (effort fit, prompt-cache key,
+#: aggregator host pin) and carry no message content; refusing them made a real
+#: ``SessionStreamFn`` fail closed before dispatch (review S-9). ``with_model``
+#: deliberately does NOT consult this set: a change to the model contract —
+#: provider, model id, wire capability, fast mode or generation budget — still
+#: raises, so an armed secret cannot be re-aimed at another model.
+_CLONE_GUARD_FIELDS = frozenset(
+    {
+        "prompt_cache_key",
+        "provider_affinity",
+        "effort_override",
+        "effort_ceiling",
+        # Local native-accounting clone performed inside a wire builder
+        # (``providers/context.bind_native_context``); it changes admission
+        # bookkeeping for the same bytes, never the bytes themselves.
+        "context_tokens_hint",
+        "context_tokens_hint_model",
+        "context_tokens_hint_measured",
+        "context_binding",
+        "native_context_tokens",
+        # Cache-diagnostics opt-in stamped by ``SessionStreamFn``: it names a
+        # previous provider response for a server-side prefix comparison and
+        # never changes the prompt bytes the model reads.
+        "cache_diagnostics",
+        "cache_diagnostics_previous_id",
+        # Request role for the Anthropic cache-TTL policy, stamped by
+        # ``SessionStreamFn`` on every request (``anthropic_cache_ttl``). It
+        # selects a marker TTL, never message bytes, so an armed one-turn secret
+        # stays in the one body it was approved for.
+        "cache_role",
+        # Same policy input, same stamper: "this conversation already had a
+        # long-streaming turn" picks the marker TTL and nothing else.
+        "cache_after_long_call",
+    }
+)
+#: Model fields that same decoration may set: the per-turn effort fit.
+_CLONE_GUARD_MODEL_FIELDS = frozenset({"reasoning_effort"})
+
+
+def one_turn_secret_value_is_present(
+    values: Iterable[SecretStr], text: str, redact: Callable[[str], str] | None
+) -> bool:
+    """Recognize the raw and encoded spellings the existing scrub supports.
+
+    A no-op sink must not turn an opaque encoded value into an approved public
+    identity. These bounded comparison forms mirror the redactor's exact-value
+    JSON/URL coverage without trying to be a second credential-shape parser.
+    """
+    forms = {text}
+    try:
+        forms.add(json.loads('"' + text.replace('"', '\\"') + '"'))
+    except (ValueError, TypeError):
+        pass
+    # BOTH URL decoders: ``quote_plus`` spells a space as ``+`` and ``quote`` as
+    # ``%20``, and a canary with either character is only recognised by its own
+    # decoder (review Q-5 measured ``quote_plus`` surviving).
+    for decode in (urllib.parse.unquote, urllib.parse.unquote_plus):
+        try:
+            forms.add(decode(text))
+        except (TypeError, ValueError):
+            pass
+    for secret in values:
+        value = secret.get_secret_value()
+        if not value:
+            return True
+        encoded = json.dumps(value, ensure_ascii=False)[1:-1]
+        candidates = {
+            value,
+            encoded,
+            urllib.parse.quote(value, safe=""),
+            urllib.parse.quote_plus(value),
+        }
+        for candidate in candidates:
+            if any(candidate and candidate in form for form in forms):
+                return True
+        if redact is not None:
+            try:
+                if any(redact(form) != form for form in forms if isinstance(form, str)):
+                    return True
+            except Exception:
+                return True
+    return False
+
+
+#: Leaf-walk budget. Deep enough for message/tool-result trees, small enough
+#: that a hostile or cyclic structure cannot turn a refusal into a hang.
+_ONE_TURN_WALK_MAX_DEPTH = 64
+
+
+def one_turn_container_has_secret(
+    values: Iterable[SecretStr],
+    value: Any,
+    redact: Callable[[str], str] | None = None,
+) -> bool:
+    """Walk every LEAF of ``value`` with the coverage primitive.
+
+    Never ``json.dumps`` a container first: dumping escapes the quotes of an
+    already-escaped leaf, so an encoded value inside arguments, a tool result
+    or a forwarded prompt stops matching its own spelling (review S-12/R3-1,
+    measured as JSON-escaped args and results passing a no-op sink).
+
+    Scalars are checked because the WIRE can turn them into text: ``bytes``,
+    ``bytearray`` and ``memoryview`` are decoded as UTF-8 (and searched as raw
+    bytes as a fallback), and pydantic models are dumped in JSON mode so a
+    ``Path``, ``Enum``, UUID or similar renders exactly as it will in the body
+    (review S-15: a tool result's ``details={"blob": value.encode()}`` reached
+    the event stream, history and the later request because Python-mode dumps
+    leave those objects untouched). A model that refuses to dump cannot be
+    proven safe, so it counts as a hit. Depth and cycle bounds keep a
+    pathological structure from becoming a hang.
+    """
+    seen: set[int] = set()
+    limit = _ONE_TURN_WALK_MAX_DEPTH
+
+    def walk(item: Any, depth: int = 0) -> bool:
+        if depth > limit:
+            # Cannot be proven safe inside the budget: fail closed.
+            return True
+        if isinstance(item, str):
+            return one_turn_secret_value_is_present(values, item, redact)
+        if isinstance(item, (bytes, bytearray, memoryview)):
+            raw = bytes(item)
+            for secret in values:
+                needle = secret.get_secret_value()
+                if needle and needle.encode("utf-8", "surrogatepass") in raw:
+                    return True
+            try:
+                decoded = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                decoded = raw.decode("utf-8", "surrogateescape")
+            return one_turn_secret_value_is_present(values, decoded, redact)
+        if isinstance(item, Mapping):
+            if id(item) in seen:
+                return False
+            seen.add(id(item))
+            return any(
+                walk(key, depth + 1) or walk(entry, depth + 1) for key, entry in item.items()
+            )
+        if isinstance(item, (list, tuple, set, frozenset)):
+            if id(item) in seen:
+                return False
+            seen.add(id(item))
+            return any(walk(entry, depth + 1) for entry in item)
+        if isinstance(item, Enum):
+            # A plain Enum renders as its VALUE on the wire, and its value may
+            # itself be a container; ``str(member)`` would only show the name.
+            return walk(item.value, depth + 1) or walk(str(item.name), depth + 1)
+        dump = getattr(item, "model_dump", None)
+        if callable(dump):
+            if id(item) in seen:
+                return False
+            seen.add(id(item))
+            try:
+                return walk(dump(mode="json"), depth + 1)
+            except Exception:
+                return True
+        if isinstance(item, (int, float, bool, type(None))):
+            # JSON scalars with no text of their own. Rendering them would
+            # refuse ordinary counters while armed for a one-character secret.
+            return False
+        # Any remaining object (``Path``, UUID, datetime, a decoder's output)
+        # is rendered by the serializer rather than by this walker. Check the
+        # two spellings Python would produce for it.
+        try:
+            rendered = str(item)
+        except Exception:
+            return True
+        if one_turn_secret_value_is_present(values, rendered, redact):
+            return True
+        try:
+            return one_turn_secret_value_is_present(values, repr(item), redact)
+        except Exception:
+            return False
+
+    return walk(value)
+
+
+def one_turn_public_text(request: "ChatRequest", value: str | None) -> str | None:
+    """Return safe provider metadata, or None when it cannot be proven safe."""
+    if value is None or not request.has_one_turn_secrets:
+        return value
+    redact = request._one_turn_redact
+    if redact is None or one_turn_secret_value_is_present(
+        request._one_turn_secrets.values(), value, redact
+    ):
+        return None
+    return value
+
+
+def one_turn_scrubbed_text(request: "ChatRequest", value: str, fallback: str) -> str:
+    """Scrub provider prose; use static detail if coverage cannot be proven."""
+    redact = request._one_turn_redact
+    if redact is None:
+        return fallback
+    try:
+        scrubbed = redact(value)
+        if one_turn_secret_value_is_present(request._one_turn_secrets.values(), scrubbed, redact):
+            return fallback
+        return scrubbed
+    except Exception:
+        return fallback
+
+
+def one_turn_safe_log_detail(request: "ChatRequest", error: Any) -> str:
+    """Keep provider diagnostics only after active-sink coverage is proven."""
+    status = getattr(error, "status", None)
+    kind = getattr(error, "kind", None)
+    selector = getattr(error, "failing_selector", None)
+    if selector is None:
+        selector = getattr(error, "attempted_selector", None)
+    route = ""
+    if selector is not None:
+        provider = one_turn_public_text(request, getattr(selector, "provider", None))
+        model_id = one_turn_public_text(request, getattr(selector, "model_id", None))
+        if provider and model_id:
+            route = f" {provider}/{model_id}"
+    fallback = (
+        f"provider failure{route} "
+        f"(status={status!r}, kind={kind!r}, class={type(error).__name__}); "
+        "detail withheld for one-turn secret request"
+    )
+    redact = request._one_turn_redact
+    if redact is None:
+        return fallback
+    try:
+        describe = getattr(error, "describe", None)
+        detail = str(describe()) if callable(describe) else str(error)
+        scrubbed = redact(detail)
+        if one_turn_secret_value_is_present(request._one_turn_secrets.values(), scrubbed, redact):
+            return fallback
+        return scrubbed
+    except Exception:
+        return fallback
+
+
+class OneTurnSecretSerializationError(ValueError):
+    """An armed one-turn secret reached generic serialization."""
+
+
+class OneTurnSecretScopeError(ValueError):
+    """An armed one-turn secret escaped its exact request scope."""
+
+
+# Harness-owned channels that can carry a prompt into another agent's history.
+# This registry is shared by the native and nested-eval runner. Unknown future
+# verbs are dispatch-capable by default; only explicitly read-only verbs pass.
+_AGENT_FORWARDING_TOOLS = frozenset({"task", "hub", "send", "sessions", "network"})
+_FORWARDING_READ_OPS: dict[str, frozenset[str]] = {
+    "hub": frozenset({"list", "peek", "pause", "cancel"}),
+    "sessions": frozenset({"list", "info", "stop", "peek", "help"}),
+    "network": frozenset(
+        {
+            "status",
+            "ls",
+            "show",
+            "peers",
+            "log",
+            "doctor",
+            "ready",
+            "credentials",
+            "definitions_state",
+            "mcp_state",
+        }
+    ),
+}
+
+
+def is_agent_forwarding_call(tool_name: str, arguments: Mapping[str, Any]) -> bool:
+    if tool_name not in _AGENT_FORWARDING_TOOLS:
+        return False
+    operation = arguments.get("op", arguments.get("action"))
+    if tool_name == "network" and operation == "sessions":
+        return any(
+            arguments.get(field) for field in ("create", "engage", "send", "steer", "slash", "text")
+        )
+    return operation not in _FORWARDING_READ_OPS.get(tool_name, frozenset())
 
 
 class ToolResult(BaseModel):
@@ -593,6 +1005,62 @@ class ToolResult(BaseModel):
     duration_s: float | None = None
     is_error: bool = False
     useless: bool = False
+
+    # Private by construction: JSON/MCP producers cannot inject this marker, and
+    # the native loop must consume it before hooks or events can publish the row.
+    _one_turn_secret: SecretStr | None = PrivateAttr(default=None)
+
+    @classmethod
+    def one_turn_secret(
+        cls,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        value: str,
+        duration_s: float | None = None,
+    ) -> "ToolResult":
+        """Build the internal, not-yet-public form of a one-request secret.
+
+        Only the native loop may turn this into a provider overlay. The fixed
+        receipt prevents a producer from smuggling the value through public text
+        or renderer details; the serializer guard makes an unconsumed marker a
+        loud failure instead of a misleading redacted dump.
+        """
+        if not isinstance(value, str) or not value:
+            raise ValueError("One-turn secret value must be a non-empty string.")
+        result = cls(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            content=[TextContent(text=ONE_TURN_SECRET_RECEIPT)],
+            details=None,
+            duration_s=duration_s,
+            is_error=False,
+            useless=False,
+        )
+        result._one_turn_secret = SecretStr(value)
+        return result
+
+    def _assert_publicly_serializable(self) -> None:
+        if self._one_turn_secret is not None:
+            raise OneTurnSecretSerializationError(
+                "An armed one-turn secret result cannot be serialized."
+            )
+
+    @model_serializer(mode="wrap")
+    def _reject_unconsumed_secret(self, handler: Any) -> Any:
+        self._assert_publicly_serializable()
+        return handler(self)
+
+    # Pydantic wraps exceptions raised INSIDE a wrap serializer. These direct
+    # guards preserve the API's static exception type; the serializer above is
+    # still required for nested event/model serialization.
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self._assert_publicly_serializable()
+        return super().model_dump(*args, **kwargs)
+
+    def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+        self._assert_publicly_serializable()
+        return super().model_dump_json(*args, **kwargs)
 
     @property
     def text(self) -> str:
@@ -662,6 +1130,30 @@ class Message(BaseModel):
     # Stable id for transcript entries and cache memoization.
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
 
+    # Set only on the ephemeral raw copies returned by ChatRequest.wire_messages.
+    # Explicit provider encoders may read the content; generic serialization may
+    # not silently turn this raw-bearing row into apparently safe public JSON.
+    _one_turn_secret: SecretStr | None = PrivateAttr(default=None)
+
+    def _assert_publicly_serializable(self) -> None:
+        if self._one_turn_secret is not None:
+            raise OneTurnSecretSerializationError(
+                "An armed one-turn secret message cannot be serialized."
+            )
+
+    @model_serializer(mode="wrap")
+    def _reject_unconsumed_secret(self, handler: Any) -> Any:
+        self._assert_publicly_serializable()
+        return handler(self)
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self._assert_publicly_serializable()
+        return super().model_dump(*args, **kwargs)
+
+    def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+        self._assert_publicly_serializable()
+        return super().model_dump_json(*args, **kwargs)
+
     @property
     def text(self) -> str:
         return "".join(block.text for block in self.content if isinstance(block, TextContent))
@@ -671,6 +1163,7 @@ class Message(BaseModel):
         text: str,
         images: "Sequence[ImageContent] | None" = None,
         audio: "Sequence[AudioContent] | None" = None,
+        documents: "Sequence[DocumentContent] | None" = None,
         **extra: Any,
     ) -> "Message":
         """A user turn, optionally carrying attachments.
@@ -691,6 +1184,10 @@ class Message(BaseModel):
         turn, because the poisoned row is in history and therefore resent
         forever (#2460). Dropping it is what makes an image-only send store
         ``[{attachment, mime_type}]`` instead of ``[{}, {attachment, ...}]``.
+        Whitespace-only text BESIDE an attachment is dropped too (a composer
+        artefact, never an utterance); whitespace-only text on its own is kept,
+        because it is the whole of what the user sent — see
+        ``drop_blank_text_blocks`` for the one rule all writers share.
 
         A message with no text and no attachments is therefore empty, and every
         wire has to HANDLE that rather than receive a block it cannot use —
@@ -703,10 +1200,13 @@ class Message(BaseModel):
         ``_is_empty_assistant``, ``EMPTY_TOOL_RESULT_TEXT`` and
         ``EMPTY_USER_TEXT``.
         """
-        content: list[Content] = [TextContent(text=text)] if text else []
-        content.extend(images or ())
-        content.extend(audio or ())
-        return Message(role="user", content=content, **extra)
+        content: list[Content] = [
+            TextContent(text=text),
+            *(images or ()),
+            *(audio or ()),
+            *(documents or ()),
+        ]
+        return Message(role="user", content=drop_blank_text_blocks(content), **extra)
 
     @staticmethod
     def assistant(text: str = "", **extra: Any) -> "Message":
@@ -759,7 +1259,7 @@ class Message(BaseModel):
 
 
 def _omit_unset_usage_stamp(data: dict[str, Any]) -> dict[str, Any]:
-    """Drop ``at_ms`` from a serialized usage while it was never set.
+    """Drop unset optional provenance stamps without inflating attach frames.
 
     Every ``Usage`` subclass's own ``@model_serializer`` must route its result
     through here (see ``session/frontend_state``'s frozen wrappers), because a
@@ -772,8 +1272,9 @@ def _omit_unset_usage_stamp(data: dict[str, Any]) -> dict[str, Any]:
     invisibly, until the attach frame crosses its 1 MiB socket line limit again
     (review round 1, MINOR 2).
     """
-    if data.get("at_ms") is None:
-        data.pop("at_ms", None)
+    for field in ("at_ms", "billing_basis"):
+        if data.get(field) is None:
+            data.pop(field, None)
     return data
 
 
@@ -799,12 +1300,24 @@ _DECODE_WINDOW_ATTR = "_decode_window"
 
 
 class Usage(BaseModel):
-    """Token accounting reported by a provider (or estimated locally)."""
+    """Token accounting reported by a provider (or estimated locally).
+
+    ``billing_basis`` is durable per-call provenance stamped at dispatch from
+    the credential actually used. The same provider can serve subscription
+    and API-key calls in one turn; replay and child aggregation cannot recover
+    their payment relationship from its id or from today's logged-in account.
+    An unset stamp means legacy/unknown and is omitted from serialized usage.
+    """
 
     #: ``(decode_us, decode_tokens)`` for this call, or unset. See
     #: :data:`_DECODE_WINDOW_ATTR` — private so it costs the wire nothing, and read
     #: through :func:`decode_window_of` so a future shape change is one function.
     _decode_window: tuple[int, int] | None = PrivateAttr(default=None)
+    #: The Anthropic response id of the DIAGNOSED request this usage belongs
+    #: to, or unset. See :data:`CACHE_DIAGNOSTICS_ID_KEY` — private for the same
+    #: zero-frame-bytes reason as the decode window; the transcript encoder is
+    #: the one writer that puts it on disk.
+    _cache_diagnostics_id: str | None = PrivateAttr(default=None)
 
     @model_serializer(mode="wrap")
     def _serialize_usage_without_unset_stamp(
@@ -812,6 +1325,10 @@ class Usage(BaseModel):
     ) -> dict[str, Any]:
         """Serialize normally, then drop a stamp that was never set."""
         return _omit_unset_usage_stamp(handler(self))
+
+    # Durable per-call credential provenance: a provider can serve both plan and
+    # API-key traffic, so consumers cannot reconstruct this from its id later.
+    billing_basis: str | None = None
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -1144,6 +1661,10 @@ class VariableStoreProtocol(Protocol):
 
     def redact(self, text: str) -> str: ...
 
+    def acquire_scoped_redaction(self, value: str) -> str: ...
+
+    def release_scoped_redaction(self, token: str) -> bool: ...
+
 
 @runtime_checkable
 class BrowserSurfaceProtocol(Protocol):
@@ -1445,6 +1966,42 @@ class AskRowQuestion(AskQuestion):
 AskUserFn = Callable[[list[AskQuestion]], Awaitable[dict[str, list[str]] | None]]
 
 
+@dataclass(frozen=True)
+class DurableWriteIntent:
+    """One TOOL-proposed write that would change the user's ACCOUNT store.
+
+    The host's consent seam (:attr:`ToolContext.authorize_durable_write`) is
+    handed this value so it can show the user WHAT would become account-wide
+    before answering. It is deliberately a description and carries no authority:
+    a model cannot construct one on the wire, and the origin string the seam
+    returns is audit only.
+
+    Why a separate type rather than passing ``params``: the seam must not be able
+    to read or mutate the tool's payload, and the question the user answers is
+    this small — kind, operation, name — not a whole AgentParams (whose fields
+    would make the confirmation card a JSON dump).
+
+    ``operation`` names the act in the tool's own vocabulary. ``install`` and
+    ``reset`` are seed operations: they create a row from a packaged starter or
+    overwrite one the tool did not author, and both are account mutations when
+    they land in the account store.
+    """
+
+    kind: Literal["agent", "team"]
+    #: ``sync`` is here because syncing rewrites installed account rows and its
+    #: hub arm fetches account definitions — both are account mutations the
+    #: seam is asked about, even though the tool's own verb is a different one.
+    #: ``promote`` is the verb that copies a CONVERSATION definition into the
+    #: account (LOH-9 S4): the tool may propose it, and only the user's own
+    #: surface can authorise it, which is exactly what the seam answers.
+    operation: Literal["create", "update", "delete", "install", "reset", "sync", "promote"]
+    name: str
+    #: Always ``global`` today: a conversation-scoped write never asks. Kept
+    #: explicit so a future scope cannot be read as "no consent needed" by
+    #: omission.
+    scope: Literal["global"] = "global"
+
+
 class ToolContext(BaseModel):
     """Minimal host-provided context handed to tool execution.
 
@@ -1456,6 +2013,9 @@ class ToolContext(BaseModel):
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="allow")
+
+    # Host-owned presence only: never serialize a callback onto the tool wire.
+    note_waiting: Callable[[int], None] | None = Field(default=None, exclude=True, repr=False)
 
     cwd: str = "."
     #: Explicit host-owned attention-turn identity. No value means the host has
@@ -1491,6 +2051,15 @@ class ToolContext(BaseModel):
     #: may reach, and what the boundary explicitly does not cover, is stated in
     #: ``local_operator.tools.confinement``.
     confinement_root: str | None = None
+    #: The ONLY directory this session's SHELL may write to, or ``None`` for an
+    #: ordinary shell. Unlike ``confinement_root`` it confines nothing else:
+    #: reads stay open and ``read``/``glob``/``web_fetch`` are untouched. Set
+    #: for ``scout`` children (``harness.subagent._with_readonly_shell_floor``)
+    #: so a read-only role can run ``strings`` or unpack an archive into its
+    #: scratchpad and still change nothing; enforced by the kernel sandbox in
+    #: ``local_operator.tools.confinement.ShellWriteConfinement``, and a host
+    #: that cannot enforce it refuses the command rather than run it.
+    shell_write_root: str | None = None
     #: This session's own DIRECTORY on disk (``.../sessions/<id>``), absolute,
     #: or ``None`` wherever ``scratchpad_dir`` is ``None`` (agent directories
     #: are exported wholesale and stay free of runtime files). Its one consumer
@@ -1516,6 +2085,12 @@ class ToolContext(BaseModel):
     #: true for a busy session and a dormant one alike — a probe would either
     #: never fire or invent a second idle definition beside the runtime's.
     kernel_managed_by_session: bool = False
+    #: The guidance files this session's system prompt actually carries, as
+    #: ``(resolved path, sha256 of the injected head)`` pairs; empty on a host
+    #: that injects none. The ``read`` tool shapes a whole read of one into its
+    #: section index only when the file is listed here and its head is still
+    #: the injected one (``context_files.render_read_index``).
+    injected_guidance: tuple[tuple[str, str], ...] = ()
     # Session-owned transport and duplicate-read coordinator. Kept off wire
     # payloads; its lifecycle belongs to the session that constructs tools.
     web_io: Any | None = Field(default=None, exclude=True)
@@ -1634,6 +2209,27 @@ class ToolContext(BaseModel):
     # accepted (see harness/approval.py); call it through ``ask_approval``
     # rather than directly, which is what picks the one this host wrote.
     request_approval: ApprovalGate | None = None
+    # THE DURABLE-WRITE CONSENT SEAM (LOH-9 S2). A tool may create/update/delete
+    # a CONVERSATION-scoped role or team on its own; changing the user's ACCOUNT
+    # store is a user decision, and a model must not be able to stamp its own
+    # provenance (which is why no tool parameter carries a grant). A host that
+    # CAN show a specific, non-rememberable confirmation installs this callable;
+    # it returns an audit origin string when the user approved, or ``None`` when
+    # they did not. Declared rather than probed, per the class docstring.
+    #
+    # ``None`` IS NOT "ALLOW": with no seam a tool-issued account write is
+    # REFUSED, never silently permitted. There is no in-tree installer in S2:
+    # the existing approval card is satisfied by the session-scoped "approve
+    # all" latch without showing the specific intent, so wiring this to it would
+    # let a blanket shortcut authorize account-wide writes. The refusal names
+    # the user surfaces that ARE the user's own act (desktop editor, TUI form,
+    # CLI) plus the conversation-only retry.
+    #
+    # Off the tool wire, like every other host-owned presence field here: a
+    # callback is a capability, never payload a provider may see.
+    authorize_durable_write: Callable[[DurableWriteIntent], Awaitable[str | None]] | None = Field(
+        default=None, exclude=True, repr=False
+    )
     # Session-named variables behind the list_variables / read_variable tools.
     # Values are never baked into the prompt; the model lists names and reads
     # single values on demand. ``None`` degrades those tools to the process
@@ -1860,6 +2456,17 @@ class ToolContext(BaseModel):
     #: SENTENCE the model must act on (write text instead) or ``None`` when the
     #: quiet end is allowed. A refusal is never coerced into a message.
     quiet_end: Callable[[], Awaitable[str | None]] | None = None
+    #: THE INBOX DOOR (``docs/design/notifications-inbox.md`` §3.2): the
+    #: ``notify`` tool's whole availability fact, bound by
+    #: ``Session._notify_inbox_callable``. ``None`` for a delegated child (it
+    #: reports through ``hub`` and its parent decides), a session the operator's
+    #: own listings hide (``resume.is_user_session``), a one-shot host or an
+    #: output-contract session (the ``quiet_end`` exclusions), and under
+    #: ``LOP_NOTIFY=0``. Present, it is called with the validated arguments and
+    #: the tool call id, writes the item as unread, and returns
+    #: the sentence the model reads; it raises only for a store refusal the
+    #: tool reports as a retryable error.
+    notify_inbox: Callable[..., Awaitable[str]] | None = None
     #: Live read of "an interface is attached to the SESSION this tool is running
     #: in" — ``RuntimeServer.attached_surfaces`` seen through the session's own
     #: goal-state probe, so it is re-read per call rather than snapshotted per
@@ -2169,6 +2776,19 @@ class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     #: frame old readers already accept.
     cut_off: str = ""
     cut_off_cause: str = ""
+    #: WHICH model produced ``error``, as ``provider/model``, and the selector
+    #: the request started from when the failure came from a DIFFERENT target.
+    #:
+    #: The failover stamps this on the ``ProviderError`` it raises; the loop
+    #: copies it here. Without it the REPORTING layer could only read the
+    #: session's selected model, which is how an OpenAI ``cyber_policy``
+    #: refusal reached the operator attributed to Anthropic — a provider the
+    #: turn had already failed over FROM and never reached. Additive with a
+    #: ``""`` default: ``AgentEvent`` is ``extra="allow"``, so an old viewer
+    #: keeps them as extras and an old runtime's event simply carries no
+    #: attribution (the same story ``cut_off`` tells above).
+    failing_model: str = ""
+    failover_from: str = ""
     # A post-turn compaction happens after the loop creates this event but before
     # the session releases it. Keep the billed messages intact while letting the
     # session replace their now-invalid pre-compaction occupancy reading.
@@ -2717,6 +3337,9 @@ class SubagentEndEvent(AgentEvent[Literal["subagent_end"]]):
     #: field here needs no ``PROTOCOL_VERSION`` bump.
     cut_off: str = ""
     cut_off_cause: str = ""
+    last_step: str = ""
+    wip_ref: str = ""
+    death_cause: str = ""
 
 
 class CompactionStartEvent(AgentEvent[Literal["compaction_start"]]):
@@ -2866,6 +3489,11 @@ class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
     components: list[dict[str, Any]] = Field(default_factory=list)
     #: Like files, stored turn audio is ready at decided; do not wait for graphics.
     sounds: list[dict[str, Any]] = Field(default_factory=list)
+    #: How many sounds the row's ``SOUNDS_MAX`` bound (and the panel strip's byte
+    #: budget) held back -- the row's own disclosure, ``files_more``'s sound twin.
+    #: Zero means "nothing held back" and is OMITTED on the wire like the fields
+    #: above, so a beat from a turn inside the bound stays byte-identical.
+    sounds_more: int = 0
     model: str = ""
     model_source: str = ""
     attempts: list[str] = Field(default_factory=list)
@@ -2879,7 +3507,7 @@ class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
     ) -> dict[str, Any]:
         """Old event fixtures remain byte-identical when no new facts were observed."""
         value = handler(self)
-        for key in ("model", "model_source", "attempts", "detail", "sounds"):
+        for key in ("model", "model_source", "attempts", "detail", "sounds", "sounds_more"):
             if not value.get(key):
                 value.pop(key, None)
         return value
@@ -3031,6 +3659,18 @@ class LoopConfig(BaseModel):
     # One hook here covers every tool at the single choke point where a result
     # becomes a message. ``None`` means no credentials are stored.
     redact_tool_result: Callable[[str], str] | None = Field(default=None, exclude=True)
+
+    #: Mask credentials out of tool-call ARGUMENTS before the retained copy is
+    #: journaled and replayed. A SEPARATE hook from ``redact_tool_result`` because
+    #: arguments are CODE that the harness executes and the model later reads back:
+    #: a heuristic rewrite there is a rewrite of the program (session
+    #: 6ccea512c372: a Python keyword masked in a ``bash`` call was copied into new
+    #: cells, which died with ``NameError``). This pass runs the session's exact-value
+    #: scrub first and then a shape pass with a value-level confidence floor, so only
+    #: HIGH-CONFIDENCE credential values are masked; it never registers what it finds.
+    #: ``None`` means no argument scrubbing, and the loop then falls back to
+    #: ``redact_tool_result`` for backwards compatibility.
+    redact_tool_arguments: Callable[[str], str] | None = Field(default=None, exclude=True)
 
     #: Report one tool call's outcome to the host, as
     #: ``(tool_name, origin, fault, duration_ms)``. A CALLBACK rather than a
@@ -3226,6 +3866,24 @@ class LoopConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+#: Sentinel for the optional ``effort_choice`` argument on ``set_model``.
+#:
+#: THREE STATES, and the middle one is the reason this exists:
+#: * a level string — the caller DECIDED on that reasoning level;
+#: * ``None`` — the caller DECIDED to WITHDRAW it (``/effort auto``);
+#: * this sentinel — the call made no reasoning-level decision at all (a model
+#:   switch, a rehome, an adoption, a sampling override), so the conversation's
+#:   held choice must be left exactly as it was.
+#:
+#: Inferring the choice from the spec's level instead cannot separate a chosen
+#: level from one a failover CLAMP produced, nor see a withdrawal that did not
+#: move the level at all — both were real defects in review round 1 (M1/M3).
+#: Lives here, beside :class:`ModelSpec`, because every ``set_model``
+#: implementation and its Protocol need the same object and this module is the
+#: leaf they already share.
+EFFORT_CHOICE_UNSET = object()
+
+
 class ModelSpec(BaseModel):
     """A provider/model pair plus the knobs wire clients need."""
 
@@ -3241,6 +3899,20 @@ class ModelSpec(BaseModel):
     max_output_tokens: int = 8_192
     supports_tools: bool = True
     supports_images: bool = True
+    # Whether ``supports_images`` above was STATED by a source (a shipped row,
+    # a listing's modalities, a caller building the spec by hand) or merely
+    # DEFAULTED because nothing described the model. The two must stay apart:
+    # sending an undescribed model images is right (a text-only endpoint
+    # refuses, and the session's refusal degrade strips them from then on),
+    # but a decision that cannot be undone by that degrade must not bet on a
+    # default. Snapcompact is the one that matters: it archives history AS
+    # image frames, so an undescribed text-only model that compacted that way
+    # lost the archived middle of its conversation for good (PR #3071 QA Q2).
+    # Readers that need a positive answer gate on ``supports_images and
+    # supports_images_stated``. Default ``True`` so a spec written out by hand
+    # (tests, a bare ``ModelSpec(provider, model_id)``) keeps its meaning;
+    # only ``configure.build_model_spec`` knows when the value was a default.
+    supports_images_stated: bool = True
     # Whether the model takes AUDIO input on its wire (a recorded block, not a
     # transcription call). DEFAULT FALSE ON PURPOSE, and the asymmetry with
     # ``supports_images`` above is the whole argument: a wrong ``True`` sends a
@@ -3637,6 +4309,31 @@ def turn_output_budget(model: "ModelSpec", ceiling: int | None = None) -> int:
     return min(limit, advertised) if advertised > 0 else limit
 
 
+class ConsumerCut:
+    """A consumer's receipt that it cut one provider call short on purpose.
+
+    See ``ChatRequest._consumer_cut`` for why it exists and who reads it. A
+    plain mutable object rather than a model: it is local bookkeeping between
+    two layers of ONE process, never serialized, and every request copy must
+    share the SAME instance.
+    """
+
+    __slots__ = ("output_chars", "estimated_usage")
+
+    def __init__(self) -> None:
+        #: Output characters (reasoning + text) streamed before the cut, or
+        #: ``None`` while the call has not been cut.
+        self.output_chars: int | None = None
+        #: The recorder's estimated ``Usage`` for the cut call, handed BACK so the
+        #: loop can put the same figure on the cut message (the session's spend
+        #: band reads ``message.usage``). ``None`` until the recorder ran, and on
+        #: a host whose stream fn does not record (a bare test stream).
+        self.estimated_usage: "Usage | None" = None
+
+    def mark(self, output_chars: int) -> None:
+        self.output_chars = max(0, int(output_chars))
+
+
 class ChatRequest(BaseModel):
     """One provider call. System prompt is a LIST of blocks so providers can
     place cache breakpoints per block (stable instruction block first,
@@ -3731,9 +4428,48 @@ class ChatRequest(BaseModel):
     # Local, request-owned binding of the counted boundary to the native
     # protocol and credential selected by the wire client. Never serialized.
     context_binding: Any = Field(default=None, exclude=True, repr=False)
+    #: How many leading ``messages`` are Radient Saver epochs (contract §4).
+    #: Set ONLY by ``SessionStreamFn`` after a splice; ``None`` is today's
+    #: behaviour exactly, which is also Saver's fail-open state. When set, the
+    #: Anthropic and OpenAI-compatible wires put one cache marker on the last
+    #: block of the last epoch message and one on the final block, so the frozen
+    #: prefix is a byte-stable cache entry. Excluded from serialisation like
+    #: ``context_binding``: it is a wire-layout hint, never conversation content.
+    frozen_prefix_messages: int | None = Field(default=None, exclude=True, repr=False)
+    #: Opt this request into Anthropic's cache diagnostics, comparing it with
+    #: ``cache_diagnostics_previous_id`` (``None`` = the conversation's first
+    #: diagnosed request, sent as an explicit JSON ``null``, which is still an
+    #: opt-in: the API fingerprints only requests that carry the object).
+    #:
+    #: Stamped ONLY by ``SessionStreamFn`` for its own conversation turns, from
+    #: that stream's last Anthropic response id. That is what makes the chain
+    #: per-conversation: a forked subagent owns a separate ``SessionStreamFn``
+    #: and asides/naming/compaction are never stamped, so no request can be
+    #: compared against another conversation's response. Metadata, not
+    #: content: only ``AnthropicClient._build_body`` reads it, and only for the
+    #: first-party API (Bedrock/Vertex/proxies do not offer the feature).
+    #: Excluded from dumps and ``repr`` like the neighbouring transport
+    #: metadata: it is request policy for one wire, not conversation state.
+    cache_diagnostics: bool = Field(default=False, exclude=True, repr=False)
+    cache_diagnostics_previous_id: str | None = Field(default=None, exclude=True, repr=False)
     # Native reasoning is opaque: use provider-reported token counts rather
     # than treating encrypted bytes as text. Populated only after replay checks.
     native_context_tokens: int = Field(default=0, exclude=True, repr=False)
+    #: Who is asking, for the Anthropic prompt-cache TTL policy
+    #: (``providers/anthropic_cache_ttl.py``): ``"main"``, ``"subagent"`` or
+    #: ``"auxiliary"``. Stamped by ``SessionStreamFn``, the one place that knows
+    #: whether the conversation is a delegated child; ``None`` (a request built
+    #: outside a session stream) derives the role from ``purpose`` alone, as a
+    #: top-level conversation. Transport policy, never wire content.
+    cache_role: str | None = Field(default=None, exclude=True, repr=False)
+    #: This conversation has already had a turn that ran at least
+    #: ``anthropic_cache_ttl.SUBAGENT_LONG_CALL_1H_THRESHOLD_S`` from request
+    #: start to stream end. Stamped by ``SessionStreamFn`` from its own
+    #: per-instance history (a fork starts clean), read only by the cache-TTL
+    #: policy, which moves such a subagent to 1h because its next request
+    #: would otherwise find the 5m prefix expired. Transport policy, never
+    #: wire content.
+    cache_after_long_call: bool = Field(default=False, exclude=True, repr=False)
     #: This call's output has NOT been shown to anyone yet, so a failed attempt
     #: may be discarded and retried whole.
     #:
@@ -3891,6 +4627,47 @@ class ChatRequest(BaseModel):
             self._max_tokens_from_policy = True
         return self
 
+    def _one_turn_model_contract(self) -> dict[str, Any]:
+        """Provider-visible model contract protected by an armed request.
+
+        Context/output limits stay in scope even though they are metadata: they
+        govern admission and the effective generation bound. Pure discovery
+        markers such as ``context_metadata_resolved`` may resolve only when this
+        complete contract is unchanged.
+        """
+        return self.model.model_dump(
+            mode="python",
+            exclude={"context_metadata_resolved", "display_name"},
+        )
+
+    def _one_turn_safe_template(self, *, allow_local_decoration: bool = False) -> tuple[Any, ...]:
+        # Direct field reads, NOT an armed model_dump exemption. Generic callers
+        # must never be able to repeat the private comparison as a public dump.
+        # preparation_ms and same_route_retry are the only outer-retry
+        # normalizations; every other declared field is part of the contract.
+        #
+        # ``allow_local_decoration`` is the CLONE guard's view only (see
+        # ``model_copy``). It tolerates the two passes ``SessionStreamFn`` runs
+        # on every request -- the per-turn effort fit and the cache/routing
+        # decoration -- plus the wire builder's native accounting. Refusing
+        # those made a real session fail closed before dispatch (review S-9),
+        # which made the feature unreachable where it must work. They steer
+        # caching and host choice for the SAME model; none carries content.
+        # ``with_model`` stays strict, so an armed secret still cannot change
+        # model, provider, fast mode or generation budget.
+        excluded = {"preparation_ms", "same_route_retry"}
+        if allow_local_decoration:
+            excluded |= _CLONE_GUARD_FIELDS
+        values: list[Any] = []
+        for name in type(self).model_fields:
+            if name in excluded:
+                continue
+            value = getattr(self, name)
+            if name == "model" and allow_local_decoration:
+                value = value.model_dump(exclude=_CLONE_GUARD_MODEL_FIELDS)
+            values.append(value)
+        return tuple(values)
+
     def with_model(self, spec: "ModelSpec") -> "ChatRequest":
         """This request aimed at a DIFFERENT model, with its bound re-derived.
 
@@ -3922,7 +4699,106 @@ class ChatRequest(BaseModel):
         update: dict[str, Any] = {"model": spec}
         if self._max_tokens_from_policy:
             update["max_tokens"] = turn_output_budget(spec)
-        return self.model_copy(update=update)
+        candidate = cast("ChatRequest", BaseModel.model_copy(self, update=update))
+        if self.has_one_turn_secrets and (
+            candidate._one_turn_model_contract() != self._one_turn_model_contract()
+            or candidate.max_tokens != self.max_tokens
+        ):
+            # A secret overlay is authorized for one exact model/budget request.
+            # Failover and fast-mode downgrade must not re-aim or rewrite it.
+            # Stricter than the design's minimum ON PURPOSE (review M1): a
+            # context-window-only change with an equal output bound is refused
+            # too, because the window is part of what admitted this request and
+            # the design says not to blanket-allow context-window changes. The
+            # allowed relaxation is the METADATA marker handled by
+            # ``_one_turn_model_contract``, not the budget itself.
+            raise OneTurnSecretScopeError(
+                "An armed one-turn secret request cannot change model or generation budget."
+            )
+        return candidate
+
+    def model_copy(
+        self, *, update: Mapping[str, Any] | None = None, deep: bool = False
+    ) -> "ChatRequest":
+        """Copy an ordinary request, or prove an armed rewrite is inert.
+
+        Pydantic preserves private attributes on every bare clone. Enforcing the
+        scope HERE closes present and future post-arming decoration paths rather
+        than relying on every caller to remember ``with_model``.
+        """
+        candidate = cast("ChatRequest", BaseModel.model_copy(self, update=update, deep=deep))
+        if self.has_one_turn_secrets and (
+            candidate._one_turn_safe_template(allow_local_decoration=True)
+            != self._one_turn_safe_template(allow_local_decoration=True)
+        ):
+            raise OneTurnSecretScopeError("An armed one-turn secret request cannot be rewritten.")
+        return candidate
+
+    _one_turn_secrets: dict[str, SecretStr] = PrivateAttr(default_factory=dict)
+
+    @property
+    def has_one_turn_secrets(self) -> bool:
+        return bool(self._one_turn_secrets)
+
+    def arm_one_turn_secrets(
+        self,
+        values: Mapping[str, SecretStr],
+        *,
+        redact: Callable[[str], str] | None = None,
+    ) -> None:
+        """Attach request-private values and the metadata scrub callback."""
+        self._one_turn_secrets = dict(values)
+        self._one_turn_redact = redact
+
+    _one_turn_redact: Callable[[str], str] | None = PrivateAttr(default=None)
+
+    def wire_messages(self) -> list[Message]:
+        """Return public history, or narrowly scoped raw provider-bound copies.
+
+        With no overlay this is the historical zero-cost path: the original list
+        and message objects are returned untouched. An armed request instead
+        proves that every id identifies exactly one tool row before making only
+        those ephemeral copies; ambiguity fails before any provider call.
+        """
+        if not self._one_turn_secrets:
+            return self.messages
+        messages = list(self.messages)
+        for call_id, secret in self._one_turn_secrets.items():
+            matches = [
+                index
+                for index, message in enumerate(messages)
+                if message.role == "tool" and message.tool_call_id == call_id
+            ]
+            if len(matches) != 1:
+                raise OneTurnSecretScopeError(
+                    "An armed one-turn secret must resolve to exactly one tool message."
+                )
+            index = matches[0]
+            raw = messages[index].model_copy(
+                update={"content": [TextContent(text=secret.get_secret_value())]}
+            )
+            raw._one_turn_secret = secret
+            messages[index] = raw
+        return messages
+
+    def _assert_publicly_serializable(self) -> None:
+        if self._one_turn_secrets:
+            raise OneTurnSecretSerializationError(
+                "An armed one-turn secret request cannot be serialized."
+            )
+
+    @model_serializer(mode="wrap")
+    def _reject_armed_request_serialization(self, handler: Any) -> Any:
+        self._assert_publicly_serializable()
+        return handler(self)
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self._assert_publicly_serializable()
+        return super().model_dump(*args, **kwargs)
+
+    def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+        self._assert_publicly_serializable()
+        return super().model_dump_json(*args, **kwargs)
 
     #: True when ``max_tokens`` was filled from :func:`turn_output_budget`
     #: because the caller named nothing, False when a caller named a value --
@@ -3932,6 +4808,39 @@ class ChatRequest(BaseModel):
     #: ``providers.clients._effective_max_tokens`` needs to tell "nobody asked"
     #: from "the harness bounded it" when it prefers a provider's own default.
     _max_tokens_from_policy: bool = PrivateAttr(default=False)
+
+    #: The consumer's cut receipt for this call, or ``None`` when the consumer
+    #: never armed one. The loop arms it BEFORE dispatch (one fresh
+    #: :class:`ConsumerCut` per model call) and its in-stream degeneration guard
+    #: (``harness.degeneration``) fills it the moment it cancels the stream; the
+    #: usage recorder (``model.configure.SessionStreamFn._record_stream``) reads
+    #: it in its ``finally``.
+    #:
+    #: WHY A REQUEST-OWNED, SHARED OBJECT. Providers report usage only in the
+    #: stream's closing frames, so a call the guard cancels arrives at the
+    #: recorder with no usage at all -- and an unreported call is booked as
+    #: UNKNOWN spend, which for a call that really billed its whole input context
+    #: plus ~10 KB of output reads as free (review round 1, m3). The recorder is
+    #: the one place that sees every provider call, but it sits BELOW the loop
+    #: and cannot see why its stream stopped; the request is the one thing both
+    #: hold. It must be an OBJECT armed before dispatch, not a scalar set at the
+    #: cut: ``SessionStreamFn`` decorates the request with ``model_copy`` before
+    #: streaming, and a copy made before a scalar is set never sees it (measured
+    #: while writing this), whereas every copy shares the one armed object.
+    #: Private, so it never reaches a wire body, a serialized request or the
+    #: one-turn-secret template.
+    _consumer_cut: "ConsumerCut | None" = PrivateAttr(default=None)
+
+    def arm_consumer_cut(self) -> "ConsumerCut":
+        """Arm (once) and return this call's cut receipt; copies share it."""
+        if self._consumer_cut is None:
+            self._consumer_cut = ConsumerCut()
+        return self._consumer_cut
+
+    @property
+    def consumer_cut(self) -> "ConsumerCut | None":
+        """The armed receipt, or ``None`` when no consumer armed one."""
+        return self._consumer_cut
 
     @property
     def max_tokens_from_policy(self) -> bool:
@@ -3966,6 +4875,22 @@ class StreamStartEvent(BaseModel):
 
     type: Literal["start"] = "start"
     response_id: str | None = None
+    #: Anthropic cache diagnostics for THIS request, when it was opted in (see
+    #: ``ChatRequest.cache_diagnostics``). ``None`` = not diagnosed (another
+    #: provider, the conversation's first request, or the feature latched off).
+    #: Otherwise ``"unchanged"`` (compared, no divergence: a cache miss on such
+    #: a call is TTL expiry, not a prefix break; measure the gap that explains
+    #: it from the previous request's START, not its end — the TTL is
+    #: refreshed when a request starts, so a call that streams for over five
+    #: minutes expires its own prefix, and an end-to-start gap under five
+    #: minutes does not rule expiry out), ``"pending"`` (the comparison
+    #: had not finished when the response started), or the API's own
+    #: ``cache_miss_reason.type`` (``system_changed``, ``tools_changed``,
+    #: ``messages_changed``, ``model_changed``, ``previous_message_not_found``,
+    #: ``unavailable``). ``cache_missed_tokens`` is that reason's
+    #: ``cache_missed_input_tokens`` estimate, 0 when it gives none.
+    cache_miss_type: str | None = None
+    cache_missed_tokens: int = 0
 
 
 class StreamTextDelta(BaseModel):
@@ -4062,6 +4987,19 @@ class StreamEndEvent(BaseModel):
     #: request's model (after a sticky handoff or driver fallback the request
     #: can name A while B served the failure).
     attempted_selector: "ModelSpec | None" = None
+    #: Effective API selector of the attempt that produced THIS error end.
+    #: FAULT-ONLY, stamped by ``providers/failover.py`` on any end carrying
+    #: ``error``.
+    #:
+    #: The in-band twin of ``attempted_selector``, and it exists because the
+    #: other provenance carriers do not reach this frame: no exception is raised
+    #: (``clients.py`` composes a content-filter refusal onto the end event) and
+    #: ``StreamModelEvent`` is published only when the budget changed or the
+    #: credential is OAuth — never on an ordinary API-key hop. Without this
+    #: field an in-band refusal from a fallback was attributed to the SELECTED
+    #: model, which is the reported defect. ``None`` means UNKNOWN, and every
+    #: consumer then falls back to its previous behaviour rather than guessing.
+    failing_selector: "ModelSpec | None" = None
 
 
 class StreamModelEvent(BaseModel):
@@ -4087,6 +5025,46 @@ StreamEvent = (
     | StreamEndEvent
     | StreamModelEvent
 )
+
+
+#: The key a transcript row's ``usage`` payload carries the diagnosed Anthropic
+#: response id under (PR #2984 QA Q1). The cache-diagnostics chain
+#: (``SessionStreamFn._cache_diagnostics_previous_id``) is per-process state, so
+#: without a durable copy a RESUMED session restarted at ``previous_message_id:
+#: null`` and recorded a prefix break caused by an edited instruction file as
+#: ``baseline``. Persisted on the usage row because that row already IS the
+#: per-call provider record a resume reads (``at_ms`` seeds the provider clock
+#: from the same rows).
+#:
+#: Never in a ``Usage`` dump; present in served journal rows. The in-memory
+#: value is a PRIVATE attribute (:meth:`Usage._cache_diagnostics_id`), so every
+#: surface built from a ``Usage`` dump — the attach frame, the
+#: ``usage_components`` receipts, job snapshots — pays nothing. Surfaces that
+#: serve journal rows verbatim (desktop history pages, the peer
+#: ``net_session_history``) DO carry the key, ~40 bytes per assistant row; it is
+#: not a secret and their consumers ignore unknown keys (PR #3018 review round
+#: 1, n1). ``Usage`` ignores unknown keys on validation, so a row carrying it
+#: replays on this build and on older ones alike.
+CACHE_DIAGNOSTICS_ID_KEY = "cache_diagnostics_id"
+
+
+def stamp_cache_diagnostics_id(usage: Any, response_id: str) -> None:
+    """Record on ``usage`` that its request was diagnosed as ``response_id``.
+
+    Best-effort like the decode window: a frozen or foreign usage records
+    nothing, which a resume reads as "no chain to continue" — the pre-fix
+    behaviour, never a raise into the stream.
+    """
+    try:
+        usage._cache_diagnostics_id = response_id
+    except Exception:  # noqa: BLE001 — telemetry must never fail a call
+        pass
+
+
+def cache_diagnostics_id_of(usage: Any) -> str | None:
+    """The diagnosed response id stamped on ``usage``, or ``None``."""
+    value = getattr(usage, "_cache_diagnostics_id", None)
+    return value if isinstance(value, str) and value else None
 
 
 def decode_window_of(usage: Any) -> tuple[int, int] | None:

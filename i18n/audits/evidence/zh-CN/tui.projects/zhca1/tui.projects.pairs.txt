@@ -1,0 +1,75 @@
+# tui.projects — sampled en/zh pairs for attestation zhca1
+# 18/97 keys; all >120 chars and all plurals included
+
+## tui.projects.binding_preview_attachment  [7 chars]
+EN: Preview
+ZH: 预览
+
+## tui.projects.binding_zoom_in  [10 chars]
+EN: Finer time
+ZH: 细化时间
+
+## tui.projects.form.owner_placeholder  [5 chars]
+EN: owner
+ZH: 负责人
+
+## tui.projects.form.readback_error  [22 chars]
+EN: {label} error: {error}
+ZH: {label}错误: {error}
+
+## tui.projects.form.team_placeholder  [4 chars]
+EN: team
+ZH: 团队
+
+## tui.projects.notice_read_only  [103 chars]
+EN: Read-only: this conversation's runtime is on another device, so project changes are not available here.
+ZH: 只读：此会话的运行时位于另一台设备，无法在此修改项目。
+
+## tui.projects.refusal_done_gate  [57 chars]
+EN: cannot mark done while these milestones are open: {names}
+ZH: 这些里程碑尚未完成，无法标记为完成：{names}
+
+## tui.projects.render.next_clause  [17 chars]
+EN:  — next: {joined}
+ZH:  — 下一项：{joined}
+
+## tui.projects.render.no_dates_label  [29 chars]
+EN: no dates ({label}, {count}): 
+ZH: 无日期（{label}，{count}）： 
+
+## tui.projects.render.progress_reported  [37 chars]
+EN: progress reported {age} ago{suffix}: 
+ZH: {age}前报告进展{suffix}： 
+
+## tui.projects.render.todo_snapshots_none  [24 chars]
+EN: todo snapshots: none yet
+ZH: 待办快照：暂无
+
+## tui.projects.render.todos_counts  [23 chars]
+EN:  · todos {open}/{total}
+ZH:  · 待办{open}/{total}
+
+## tui.projects.send.empty  [48 chars]
+EN: no targets — esc closes · /project link adds one
+ZH: 无目标 — esc关闭 · /project link添加目标
+
+## tui.projects.send.more  [58 chars, PLURAL]
+EN: {count, plural, one {+{label} more} other {+{label} more}}
+ZH: {count, plural, other {+{label}项}}
+
+## tui.projects.this_session  [25 chars]
+EN:  · this session ({count})
+ZH:  · 本会话（{count}）
+
+## tui.projects.view_board  [5 chars]
+EN: board
+ZH: 看板
+
+## tui.projects.view_list  [4 chars]
+EN: list
+ZH: 列表
+
+## tui.projects.zoom  [15 chars]
+EN:  · zoom: {tier}
+ZH:  · 缩放：{tier}
+

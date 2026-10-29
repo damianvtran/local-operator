@@ -1,0 +1,17 @@
+# Real OperatorApp keyboard probe — source 956681f13e (source files identical at capture)
+# env -u NO_COLOR TERM=xterm-256color PYTHONPATH=. <venv>/bin/python scripts/run_bounded.py --timeout 300 -- <venv>/bin/python <scratch>/tag_keyboard_probe.py
+# Shared half (arrows/Escape write nothing, one Enter one assignment, inline draft kept) is
+# pinned by tests/unit/tui/test_tag_command.py::test_tag_keyboard_arrows_enter_escape_and_inline_draft;
+# the probe starts from an empty store, the test from an applied primary.
+[run_bounded] memory budget 5307 MiB (inherited); sampled owned child group only
+open: True text: '/tag '
+rows: ['Review', 'Ops']
+arrow: 'Review' -> 'Ops'
+store after arrow: {'tags': [], 'primary': None, 'revision': 0}
+escape open: False text: '/tag '
+store after escape: {'tags': [], 'primary': None, 'revision': 0}
+enter assignment: {'tags': ['03461bd8a5'], 'primary': '03461bd8a5', 'revision': 1}
+inline after enter text: 'keep this draft /tag ' open: True
+inline after escape text: 'keep this draft /tag ' open: False
+registry: ['Review', 'Ops']
+[run_bounded] python rc=0 wall=3.8s

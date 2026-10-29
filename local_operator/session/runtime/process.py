@@ -1235,7 +1235,14 @@ def _should_exit(handle: object, runtime: object) -> bool:
     return True
 
 
-async def _clean_exit(handle: object, runtime: object, *, reason: str = "idle-exit") -> None:
+async def _clean_exit(
+    handle: object,
+    runtime: object,
+    *,
+    reason: str = "idle-exit",
+    detail: str = "",
+    requested: bool | None = None,
+) -> None:
     """Dispose the quiescent session, then unpublish its owner record.
 
     The reaper reaches this only after ordinary gate timeouts and all resumed
@@ -1249,10 +1256,37 @@ async def _clean_exit(handle: object, runtime: object, *, reason: str = "idle-ex
     exiting runtime logged nothing about itself and no exit record survived
     (design §1.6/§5.3).
 
+    ``detail`` is the human sentence the calling path already computed — "no
+    work, no viewer, no wake within 90s", the retirement's why-now, the signal
+    that drained to the end of its turn. It is PASSED IN rather than re-derived
+    here because the caller is the only place that knows it, and a second
+    derivation in this module would be a second vocabulary for the same fact.
+    It is durable now (``journal.write_exit_record``) as well as logged, which is
+    what answers "when did it stop, and was it asked to" after the process is
+    gone: the boot record's withdrawal can only say the exit ordering ran, not
+    why it ran (2026-10-21 idle-exit left a session indistinguishable from a
+    crash).
+
     The turn journal is told the same fact before the boot record is withdrawn,
     and in that order: a row left OPEN by a runtime that leaves anyway is the
     evidence a successor reads, and withdrawing the boot record first would
     strip the half that says which build the row's pid was running.
+
+    THE EXIT RECORD IS WRITTEN BEFORE THE DISPOSE, not after it. Dispose is the
+    step that can take minutes (it awaits every viewer's writer), so a runtime
+    killed during it would otherwise leave a surviving boot record and nothing
+    saying it was already on its way out — the exact ambiguity this record
+    exists to remove. It is best-effort and never raises, like every instrument
+    here.
+
+    ``requested`` IS THE CALLER'S OWN VERDICT when it has one; ``None`` means
+    "ask the durable evidence" (``_deliberate_stop_covers``). The socket ``stop``
+    rung needs that override: the ladder deliberately stages its stop marker
+    AFTER the target's ack (``control._graceful_stop``), so a runtime reading the
+    marker at the instant it starts exiting races the write and reports
+    ``requested: false`` for a stop a client demonstrably asked for — measured
+    3/3 before this parameter existed. A signal keeps ``None``: its marker IS
+    staged before the signal, and an unattributed SIGTERM must stay False.
     """
     boot = getattr(runtime, "_boot_build", None)
     logger.info(
@@ -1262,6 +1296,17 @@ async def _clean_exit(handle: object, runtime: object, *, reason: str = "idle-ex
         boot.label() if boot is not None else "<unknown>",
     )
     _note_journal_exit(handle, reason)
+    wrote = _note_exit_record(handle, runtime, reason=reason, detail=detail, requested=requested)
+    # THE RUN RECORD GOES NOW, while this run still owns the lease (dispose
+    # releases it below). An absent run record and a written exit record are the
+    # pair that says "this session's latest run left through its own exit path";
+    # clearing first would let a kill before the write leave neither. AND IT GOES
+    # ONLY IF THE RECORD LANDED (review round 2, MINOR-2): a failed write leaves
+    # the previous run's record on disk, and a cleared marker would make the
+    # listing present it as this departure's — the borrowed-history verdict the
+    # fence exists to stop. Keeping the marker turns that case into "unknown".
+    if wrote:
+        _clear_run_record(handle, runtime)
     try:
         await handle.dispose()  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001 — dispose is best-effort at exit
@@ -1477,6 +1522,184 @@ def _note_journal_exit(handle: object, cause: str) -> None:
     note = getattr(writer, "note_exit", None)
     if callable(note):
         note(cause)
+
+
+def _run_identity(handle: object, runtime: object) -> "tuple[str, Path, int, float] | None":
+    """``(session_id, conversation_dir, pid, started_at)`` for THIS run, or ``None``.
+
+    ONE SPELLING of the run key, because three artifacts now have to agree about
+    it: the exit record (what happened), the run record it clears (which run was
+    the latest), and the boot-time run record the listing compares against. The
+    cheap ``getattr`` chain is the same one ``_note_exit_record`` always used.
+
+    ``None`` means this handle has no conversation to report about — an
+    in-process session, a reduced test double, a runtime whose transcript has no
+    directory. That guard is also what keeps the 40 ms exit-path timing tests
+    untouched: they run against handles with no ``_session`` at all.
+    """
+    session = getattr(handle, "_session", None)
+    directory = getattr(getattr(session, "_transcript", None), "directory", None)
+    record = getattr(runtime, "_record", None)
+    session_id = str(getattr(session, "session_id", "") or getattr(record, "session_id", "") or "")
+    if not session_id or directory is None:
+        return None
+    started_raw = getattr(record, "started_at", 0.0)
+    started_at = float(started_raw) if isinstance(started_raw, (int, float)) else 0.0
+    return session_id, Path(directory), os.getpid(), started_at
+
+
+def _note_exit_record(
+    handle: object,
+    runtime: object,
+    *,
+    reason: str,
+    detail: str,
+    requested: bool | None = None,
+) -> bool:
+    """Write this run's durable exit record. Best-effort, never raises.
+
+    Returns whether a record LANDED. The caller needs that answer to decide
+    whether it may also retire the run marker (``_clear_run_record``): the
+    listing reads "run marker absent" as the clean-exit pair and will then show
+    whatever exit record it finds, so clearing the marker after a FAILED write
+    would let the PREVIOUS run's record explain this departure (review round 2,
+    MINOR-2). A missing marker is honest only when the record beside it is
+    this run's own.
+
+    THE SAME SHAPE AS ``_note_journal_exit``, one rung stronger: the journal is
+    the statement about the TURN, this is the statement about the PROCESS, and
+    it is the one that answers the question a ``stored`` row raises — when did it
+    stop, and did anybody ask. ``journal.write_exit_record`` owns the artifact,
+    its staging and its schema; this function only collects the facts the
+    runtime itself holds and refuses to write a record it cannot qualify.
+
+    ``requested`` IS READ HERE rather than in the writer, because only this
+    process holds the run key (its own pid and its record's start), and the
+    marker's coverage rule is a session-plane rule this module already lives on
+    the far side of. A marker naming a PREVIOUS run of the same session must not
+    brand this departure as the user's own act — the wrong-verdict hole QA round
+    1 found in the attribution path.
+
+    THE ``requested`` PARAMETER IS THE CALLER'S OWN VERDICT (review round 1,
+    BLOCKER). The socket ``stop`` rung asks the target to stop and stages its
+    marker only after the target's ack (argued in ``control._graceful_stop``), so
+    a runtime that reads the marker while starting its exit — the same tick —
+    finds nothing and reports ``requested: false`` for a stop a client
+    demonstrably requested. Measured 3/3 before this parameter existed. The
+    caller that knows (the amain trigger naming ``socket-stop``) states it; every
+    other path passes ``None`` and gets the durable-evidence answer, which is
+    what keeps an unattributed SIGTERM at False.
+    """
+    try:
+        from local_operator.session.runtime import journal
+
+        identity = _run_identity(handle, runtime)
+        if identity is None:
+            return False
+        session_id, directory, _pid, started_at = identity
+        boot = getattr(runtime, "_boot_build", None)
+        landed = journal.write_exit_record(
+            session_id,
+            conversation_dir=directory,
+            pid=_pid,
+            started_at=started_at,
+            reason=reason,
+            detail=detail,
+            requested=(
+                _deliberate_stop_covers(directory, started_at) if requested is None else requested
+            ),
+            build=boot.label() if boot is not None else "",
+        )
+        return landed is not None
+    except Exception:  # noqa: BLE001 — an exit path never fails over an instrument
+        logger.debug("session runtime: could not write its exit record", exc_info=True)
+        return False
+
+
+def _note_run_start(handle: object, runtime: object) -> None:
+    """Announce this run in the conversation directory. Best-effort, never raises.
+
+    Called the moment the run has an identity (``RuntimeServer`` constructed) and
+    before the serving plane can make the process addressable. It is the boot half
+    of the pair the listing reads: a stored row is only allowed to show the exit
+    record when THIS marker names the same run (see ``info.collect._stored_lines``),
+    so a run that was killed instead of exiting leaves its marker behind and the
+    row reads unknown rather than borrowing the previous run's departure.
+
+    The bound is the window between process entry and ``RuntimeServer``'s
+    construction: a kill there leaves no marker for that attempt, so a listing in
+    that instant can still show an older record. Nothing above that line holds the
+    run's ``started_at``, so writing earlier is not possible.
+
+    A FAILED WRITE HERE IS THE SECOND BOUND, and it is stated at the call site
+    because no reader can see it (review round 2, MINOR-2): with no marker on
+    disk, the listing takes the absent-marker/record pair as a clean exit and can
+    surface an OLDER run's record. It is the same degraded-store class as a
+    failed exit-record write (disk full, read-only config root) and no positive
+    marker is cheap here — a second durable write would fail on exactly the store
+    that just refused the first. The alternative — degrading every listing by
+    requiring a marker that legitimately never exists on a store that predates
+    this build — would turn history into permanent unknowns to cover a store that
+    is already broken.
+    """
+    try:
+        from local_operator.session.runtime import journal
+
+        identity = _run_identity(handle, runtime)
+        if identity is None:
+            return
+        session_id, directory, pid, started_at = identity
+        journal.write_run_record(
+            session_id,
+            conversation_dir=directory,
+            pid=pid,
+            started_at=started_at,
+        )
+    except Exception:  # noqa: BLE001 — boot must not fail over an instrument
+        logger.debug("session runtime: could not write its run record", exc_info=True)
+
+
+def _clear_run_record(handle: object, runtime: object) -> None:
+    """Remove THIS run's boot-time run record on a clean exit. Best-effort.
+
+    Called BETWEEN the exit record's write and the dispose, while the lease is
+    still this process's: the pair "record written, run record gone" is what a
+    later listing reads as a completed departure, and a process killed before the
+    unlink still matches the record's run key (same pid, same start), so it is
+    never mistaken for an unexplained death.
+    """
+    try:
+        from local_operator.session.runtime import journal
+
+        identity = _run_identity(handle, runtime)
+        if identity is None:
+            return
+        _session_id, directory, pid, started_at = identity
+        journal.clear_run_record(directory, pid=pid, started_at=started_at)
+    except Exception:  # noqa: BLE001 — an exit path never fails over an instrument
+        logger.debug("session runtime: could not clear its run record", exc_info=True)
+
+
+def _deliberate_stop_covers(directory: Path, started_at: float) -> bool:
+    """Whether a durable stop marker attests to THIS run of this session.
+
+    The coverage RULE is ``attention._stop_marker_covers_run``'s, imported
+    lazily rather than restated: it is the rule that decides whether a stop
+    marker may narrate a death as deliberate, and a second copy here is free to
+    drift into the wrong-verdict direction. The carrier is a plain namespace
+    because that function reads exactly ``pid`` and ``started_at``.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.session.attention import _stop_marker_covers_run
+    from local_operator.session.runtime import registry
+
+    marker = registry.read_stop_marker(directory)
+    if marker is None:
+        return False
+    return _stop_marker_covers_run(
+        marker, directory, SimpleNamespace(pid=os.getpid(), started_at=started_at)
+    )
 
 
 def _clear_boot_record() -> None:
@@ -1753,6 +1976,11 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             continue
         # THE REASON NAMES THE TERM THAT ACTUALLY HELD; see ``_idle_exit_reason``.
         reason = _idle_exit_reason()
+        # THE SENTENCE THE EXIT PATH ALREADY COMPUTES, hoisted to a name so the
+        # log line and the durable exit record cannot drift: the record carries
+        # what the runtime SAID, not a re-rendering of the reason token (agent's
+        # rule — pass the detail in, never re-derive it in a reader).
+        detail = f"no work, no viewer, no wake within {WARM_WINDOW_S:.0f}s"
         # WHAT WAS MEASURED, not what was allowed (review round 1, F4). On the
         # ordinary path the two agree — the drain ran its window to the end — so
         # this prints the window. On a preemption (the LRU gave the slot up) the
@@ -1770,7 +1998,7 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             WARM_WINDOW_S,
             reason,
         )
-        await _clean_exit(handle, runtime, reason=reason)
+        await _clean_exit(handle, runtime, reason=reason, detail=detail)
         stop.set()  # amain's wait() returns; exit code stays 0
         return True
 
@@ -2085,7 +2313,17 @@ async def _refresh_for(
         # promise is what gets withdrawn instead. Its own docstring says why this leg
         # takes the total-duration form rather than the heartbeat's.
         exit_task = asyncio.ensure_future(
-            _clean_exit(handle, runtime, reason="retiring for " + newer.label())
+            _clean_exit(
+                handle,
+                runtime,
+                reason="retiring for " + newer.label(),
+                # THE WHY-NOW, composed once here from the pair this path is
+                # acting on (``_build_pair``) and carried into the durable
+                # record: a retirement that says only "retiring for 0.85.0"
+                # leaves the reader unable to tell a moved install from a
+                # deleted tree, and this path knew which at the latch.
+                detail=_build_pair(boot, newer),
+            )
         )
         try:
             await _await_live_window(exit_task, handle, bound, heartbeated=False)
@@ -3600,7 +3838,11 @@ async def _drain_for(
         return False
     logger.info("session runtime: %s; exiting cleanly", drain.reason)
     await _hand_wakes_to_successor(handle)
-    await _clean_exit(handle, runtime, reason=drain.reason)
+    # THE EXIT'S OWN WHY-NOW, re-read at the exit rather than replayed from the
+    # latch: ``_drain_detail_at_exit`` is already this path's answer, and the
+    # durable record now carries it so a later reader does not have to find the
+    # log line to learn why the build handover happened.
+    await _clean_exit(handle, runtime, reason=drain.reason, detail=_drain_detail_at_exit(drain))
     stop.set()  # amain's wait() returns; exit code stays 0
     return True
 
@@ -4040,6 +4282,9 @@ async def _drain_for_signal(
         SIGNAL_DRAIN_S,
     )
     if getattr(handle, "_draining", False) and not stop.is_set():
+        # The signal decides that this process ends; a gate parked on a person
+        # would hold the progress bound off forever (see ``_refuse_gates``).
+        _refuse_gates(handle, sig_name)
         # A departure is ALREADY committed to — the build on disk was replaced
         # first — so its own call site owns the exit and this signal adds only
         # the one thing that path does not have: a bound, judged on PROGRESS
@@ -4081,6 +4326,10 @@ async def _drain_for_signal(
         # then asserts no pair, which is what this path means).
         reasons=(f"{sig_name}: drained to the end of the turn in flight",),
     )
+    if drain is not None:
+        # AFTER the latch, never before: only a runtime that has committed to
+        # leaving may answer its gates on the operator's behalf.
+        _refuse_gates(handle, sig_name)
     if drain is None:
         if stop.is_set() or getattr(handle, "_disposing", False):
             # An exit is already under way and owns the ordering; a second
@@ -4120,6 +4369,37 @@ async def _drain_for_signal(
     stop.set()
 
 
+def _refuse_gates(handle: object, sig_name: str) -> None:
+    """Settle parked approvals/asks once a signal has committed this runtime to leave.
+
+    A gate-parked call is an EXECUTING step to :func:`_step_in_flight` (its tool
+    batch is open while it waits), so :class:`_SignalDrainBound` never sees the
+    silence it cuts on, and the published "cut if silent 2 min" was false for
+    exactly the state a headless node gets stuck in (agent review round 1 on
+    #3028, M1). Denying here — the socket stop's and a timeout's answer — lets
+    the turn reach its boundary and the drain end it. Chosen over "do not count
+    a parked gate as executing" because that would still hold the process for
+    the whole bound and then cut the turn, where denying ends it at once with
+    the model told the call did not run. Best-effort: a handle without the hook
+    (an older host, a test double) keeps today's behaviour.
+    """
+    refuse = getattr(handle, "refuse_gates_for_exit", None)
+    if not callable(refuse):
+        return
+    try:
+        denied = refuse()
+    except Exception:  # noqa: BLE001 — the drain still runs; it is only slower
+        logger.warning("session runtime: could not settle parked gates on %s", sig_name)
+        return
+    if denied:
+        logger.info(
+            "session runtime: %s settled %d parked gate(s) as refused; nobody can answer "
+            "them before this process exits",
+            sig_name,
+            denied,
+        )
+
+
 def _resume_consumed_ids(directory: Path) -> set[str]:
     """Inbox/job ids a predecessor already delivered, from the checkpoint record.
 
@@ -4147,6 +4427,32 @@ def _resume_consumed_ids(directory: Path) -> set[str]:
 
 
 async def _drain_inbox_into(handle: object) -> int:
+    from local_operator.session.runtime.inbox import (
+        claim_read_batch_or_defer,
+        settle_read_batch,
+        try_enter_read_batch,
+    )
+
+    directory = getattr(
+        getattr(getattr(handle, "_session", None), "transcript", None), "directory", None
+    )
+    if directory is None:
+        return 0
+    batch = try_enter_read_batch(directory)
+    if batch is None:
+        return 0  # nested queue-task reentry: no lease, settle or one-shot change
+    error: BaseException | None = None
+    delivered = 0
+    try:
+        if await claim_read_batch_or_defer(batch):
+            delivered = await _drain_inbox_into_claimed(handle, batch)
+    except BaseException as exc:
+        error = exc
+    await settle_read_batch(batch, error, cwd=str(getattr(handle, "_desktop_cwd", "") or ""))
+    return delivered
+
+
+async def _drain_inbox_into_claimed(handle: object, batch) -> int:
     """Deliver every message spooled while this session was cold. Count sent.
 
     Also the handover path: the same file is where a DRAINING runtime spools what
@@ -4180,6 +4486,7 @@ async def _drain_inbox_into(handle: object) -> int:
     Best-effort per message: one malformed or rejected row must not stop the
     rest, and none of it may prevent the runtime from starting.
     """
+
     session = getattr(handle, "_session", None)
     directory = getattr(getattr(session, "transcript", None), "directory", None)
     if directory is None:
@@ -4216,27 +4523,14 @@ async def _drain_inbox_into(handle: object) -> int:
         TRANSCRIPT_FILENAME,
         durable_conversation_path,
     )
-    from local_operator.session.runtime.inbox import (
-        SOURCE_USER,
-        append_inbox,
-        coalesce_wake_rows,
-        drain_inbox,
-        drop_owed_turn,
-    )
+    from local_operator.session.runtime.inbox import SOURCE_USER, admit_batch_row
 
     requires_engagement = not durable_conversation_path(directory / TRANSCRIPT_FILENAME)
-    try:
-        lines = await asyncio.to_thread(drain_inbox, directory)
-    except Exception:  # noqa: BLE001 — a bad spool must not block the runtime
-        logger.warning("inbox drain failed", exc_info=True)
-        return 0
-    # BEFORE the deferral split below, which re-spools what it will not deliver:
-    # a draining runtime spools one row per fired occurrence, so a schedule that
-    # repeats across a long handover arrives here as dozens of identical wake rows
-    # and each would be delivered as its own turn. Coalescing first means the
-    # deferral writes back ONE row per wake (carrying its fire count), which is
-    # also what keeps a later drain's merge from double-counting.
-    lines = coalesce_wake_rows(lines)
+    entries = batch.delivery_rows()
+    ordinals = {id(line): indices for indices, line in entries}
+    lines = [line for _, line in entries]
+    # Coalescing is structural and already done by batch.delivery_rows, which
+    # keeps the raw ordinals each delivered row covers.
     # SUCCESSOR RESUME (ready-successor handoff). A checkpointed move may have
     # already delivered some spooled rows on the predecessor; the record's
     # ``inbox_consumed_ids`` is the durable "delivered once" set. Dropping those
@@ -4247,17 +4541,13 @@ async def _drain_inbox_into(handle: object) -> int:
     # back only what it will not deliver.
     consumed = _resume_consumed_ids(directory)
     if consumed:
+        for line in lines:
+            if (getattr(line, "message_id", "") or "") in consumed:
+                batch.handled.update(ordinals[id(line)])
         lines = [line for line in lines if (getattr(line, "message_id", "") or "") not in consumed]
     if requires_engagement:
         keep = [line for line in lines if getattr(line, "source", "") != SOURCE_USER]
         lines = [line for line in lines if getattr(line, "source", "") == SOURCE_USER]
-        for line in keep:
-            # Best-effort and order-preserving among themselves; a row that cannot
-            # be re-spooled is logged rather than lost silently.
-            if not append_inbox(directory, line):
-                logger.warning(
-                    "could not re-spool a deferred inbox row for %s", directory.name, exc_info=True
-                )
         if not lines:
             logger.info(
                 "inbox drain deferred for %s: no durable history yet, so the person has "
@@ -4272,7 +4562,7 @@ async def _drain_inbox_into(handle: object) -> int:
             # turn. The rows stay in the spool (touch nothing else here) and that
             # turn still drains them, which is the deferral the sender's receipt
             # describes.
-            drop_owed_turn(directory)
+            batch.drop_after_release = True
             return 0
     probed = getattr(handle, "receive_peer_message", None)
     if not lines:
@@ -4300,7 +4590,9 @@ async def _drain_inbox_into(handle: object) -> int:
         owner_row = getattr(line, "source", "") == SOURCE_USER
         try:
             if owner_row:
-                await _run_owner_prompt(handle, line, seen=seen_owner_ids)
+                await admit_batch_row(
+                    batch, ordinals[id(line)], _run_owner_prompt(handle, line, seen=seen_owner_ids)
+                )
             elif callable(probed):
                 fields: dict[str, Any] = {
                     "mode": "mailbox",
@@ -4348,7 +4640,7 @@ async def _drain_inbox_into(handle: object) -> int:
                             )
                             candidate = None
                     fields["bridge_meta"] = candidate
-                await receive(line.text, **fields)
+                await admit_batch_row(batch, ordinals[id(line)], receive(line.text, **fields))
             else:
                 raise RuntimeError("this handle cannot receive a spooled peer message")
             delivered += 1
@@ -4370,12 +4662,7 @@ async def _drain_inbox_into(handle: object) -> int:
             # written by an older build have no id and still deliver at-least-once,
             # which remains the deliberate direction (a duplicated note is visible
             # and harmless, a dropped one is neither).
-            if not append_inbox(directory, line):
-                logger.error(
-                    "could not re-spool an undelivered inbox row (command_id=%s); it is lost",
-                    getattr(line, "command_id", "") or "<none>",
-                    exc_info=True,
-                )
+            # Failed/unstarted rows remain in the original journal.
             if owner_row:
                 # LOUDER, AND FOR A DIFFERENT REASON: the owner's message is
                 # the one whose receipt already told the user it would run, and
@@ -4397,9 +4684,6 @@ async def _drain_inbox_into(handle: object) -> int:
     # otherwise leave the supervisor raising a runtime for a session with nothing
     # to run. Placed AFTER the loop rather than in a wrapper so the deferral
     # branch above keeps its own, opposite, decision.
-    from local_operator.session.runtime.inbox import settle_owed_turn
-
-    settle_owed_turn(directory, cwd=str(getattr(handle, "_desktop_cwd", "") or ""))
     return delivered
 
 
@@ -4990,6 +5274,15 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # value this model cannot express is CLAMPED there rather than refused — a
     # stored choice may outlive the ladder that offered it.
     birth_effort = os.environ.get("LOP_MOBILE_CHILD_EFFORT") or None
+    # The FAST dial this conversation is BORN with, read from the same birth
+    # sample and for the same reason as the level above (ui#1265): the spec this
+    # process constructs has to CARRY it, or the first frontend snapshot, the
+    # first provider call and the selection row written at admission all report a
+    # tier the turn is not sending. PRESENCE of the key is the choice --
+    # ``launch._spawn_runtime`` writes it only when the model sells the tier and
+    # ``standby.CONTRACT_KEYS`` carries it to a warm spare -- and a value the
+    # model cannot serve is CLAMPED in the factory, never refused here.
+    birth_fast = os.environ.get("LOP_MOBILE_CHILD_FAST") == "1"
     resume = os.environ.get("LOP_MOBILE_CHILD_RESUME") or None
     if resume:
         # A runtime ADOPTS the id it was given rather than requiring a
@@ -5008,6 +5301,7 @@ async def amain(operator_cap: bytes | None = None) -> int:
             provider=provider,
             model_id=model_id,
             birth_effort=birth_effort,
+            birth_fast=birth_fast,
             resume=resume,
             model_selection_override=os.environ.get("LOP_MODEL_SELECTION_OVERRIDE") == "1",
         )
@@ -5120,6 +5414,18 @@ async def amain(operator_cap: bytes | None = None) -> int:
             logger.warning("wake scheduler did not arm at boot", exc_info=True)
 
     runtime = RuntimeServer(handle, kind=RUNTIME_RECORD_KIND, operator_cap=operator_cap)
+    # THE RUN KEY AT ITS OTHER END, announced the moment the run has an identity
+    # and before the serving plane can make this process addressable. Removed only
+    # by this run's own clean exit (``_clear_run_record``). A later listing
+    # compares it with the exit record and treats a different key as "a run died
+    # without one", which is what keeps a killed run from wearing its
+    # predecessor's time and reason (review round 1, MAJOR-1).
+    #
+    # ITS WINDOW IS BOUNDED AND STATED: a kill between process entry and this line
+    # leaves no run record for that attempt, so a listing in that instant can still
+    # show an older departure. It cannot be earlier than this, because the run key
+    # is the record's own ``started_at`` and nothing above ``RuntimeServer`` has it.
+    _note_run_start(handle, runtime)
     # EVERY WAY THIS RUNTIME CAN BE ASKED TO LEAVE IS ARMED HERE, BEFORE THE
     # SERVING PLANE CAN MAKE IT ADDRESSABLE. That order is the fix for a
     # measured race, not tidiness.
@@ -5266,6 +5572,21 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # as well; the answer would be "no control surface", and this path's
     # behaviour on a dead socket is what it always was.
     await runtime.wait_until_published()
+    # THE MEMORY STORE'S MAINTENANCE IS OFFERED HERE, once per runtime, after the
+    # record is published so it never sits inside the window a viewer waits on.
+    # A runtime is the long-lived host a one-shot command is not: the pass (plan
+    # +212 MB, up to 60 s) finishes here instead of being killed at exit, which
+    # is why ``lop exec``/``lop memory status`` do not offer it (PR #3057 QA
+    # round 1, Q1/Q2). The wake supervisor is the primary seat; this covers the
+    # hours it is retired. The pass gates itself (6 h interval, cross-process
+    # lock), so most runtime starts cost one stamp read on a daemon thread.
+    try:
+        from local_operator.memory_maintenance import start_background
+        from local_operator.paths import config_dir as _memory_config_dir
+
+        start_background(_memory_config_dir())
+    except Exception:  # noqa: BLE001 — housekeeping never fails a runtime boot
+        logger.debug("memory maintenance offer could not start", exc_info=True)
 
     # `SIGUSR1` is POSIX-only, so the debug dump is installed only where the
     # constant exists — an unguarded `signal.SIGUSR1` is an AttributeError that
@@ -5299,6 +5620,7 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # ``stall_watchdog``'s C-thread dump covers; this one is for the state the
     # C-thread dump cannot show — a loop that is RUNNING but has its turn parked
     # on an await (round 2, U6).
+    task_dump_installed = False
     if not procstate.is_windows() and debug_stacks_enabled() and debug_stacks is not None:
 
         # SIGUSR1 prints every asyncio task's stack to the child log. The child
@@ -5368,6 +5690,22 @@ async def amain(operator_cap: bytes | None = None) -> int:
         stall_watchdog.notify_on_evidence_signal(
             lambda: loop.call_soon_threadsafe(_dump_task_stacks)
         )
+        task_dump_installed = True
+    # THE READINESS LINE, and it exists because a TEST must not have to create the
+    # condition it is waiting for. The sibling runtime cells used to probe readiness
+    # by sending SIGUSR1 every 0.2 s from spawn until this block's effect appeared —
+    # a signal storm through boot's thread-churn window, and never a read of a fact
+    # the child had stated. Whether that storm or the runner produced the one SIGSEGV
+    # is NOT claimed; what the cell needed was a positive fact, and this line is it.
+    # One signal after it is the whole probe. (The #116008 all-threads walk is a
+    # constraint on the FATAL path added beside this one, not on this asyncio dump:
+    # see ``stall_watchdog._enable_fatal_report``.)
+    logger.info(
+        "signal handlers ready: clean stop on SIGTERM/SIGINT; SIGUSR1 evidence signal %s; "
+        "task-dump callback %s",
+        "installed" if stall_watchdog.evidence_signal() is not None else "not installed",
+        "installed" if task_dump_installed else "disabled",
+    )
     # The self-reaper: a phone session nobody watches and nothing runs is a
     # live process doing nothing, and before this it idled FOREVER. Runs
     # beside the signal wait; whichever fires first wins.
@@ -5408,6 +5746,10 @@ async def amain(operator_cap: bytes | None = None) -> int:
         # direct-dispose triggers (a signal, or the graceful ``stop`` op).
         boot = getattr(runtime, "_boot_build", None)
         receipt_line = ""
+        # ``described`` is read by the exit record below, so it is bound on BOTH
+        # arms — an unbound name here would raise on the exit path of every
+        # runtime that exited without a signal receipt, which is most of them.
+        described = ""
         if routing.receipts and routing.receipts[-1]:
             from local_operator.session.runtime import signal_receipt as _receipt
 
@@ -5425,6 +5767,36 @@ async def amain(operator_cap: bytes | None = None) -> int:
         # about itself (a signal name, the socket stop, "unknown") is the one
         # fact a successor cannot reconstruct from a corpse.
         _note_journal_exit(handle, trigger.get("why") or "unknown")
+        # THE DURABLE HALF OF THE SAME FACT, and it has to be written on THIS
+        # path too: a SIGTERM or the socket ``stop`` op converges on ``stop``
+        # without ever entering ``_clean_exit`` (the reaper's clean ordering is
+        # skipped as already-run), so without this line the two most common
+        # deliberate departures would leave no exit record at all — silently
+        # narrower than the contract that every planned exit is recorded.
+        # ``reason`` is the trigger's own token (``SIGTERM``/``SIGINT``/
+        # ``socket-stop``); ``detail`` is the receipt's sentence, which is the
+        # only human explanation this path computed.
+        #
+        # ``requested`` FOR THE SOCKET RUNG IS THE CALLER'S FACT, not the marker's
+        # (review round 1, BLOCKER): ``control._graceful_stop`` stages its marker
+        # after the ack this handler is answering, so the durable evidence is not
+        # on disk yet when the exit starts. A client asked this runtime to stop;
+        # saying so here is the truth, and every other trigger keeps ``None`` so
+        # an unattributed SIGTERM stays False.
+        why = trigger.get("why") or "unknown"
+        wrote = _note_exit_record(
+            handle,
+            runtime,
+            reason=why,
+            detail=described,
+            requested=True if why == "socket-stop" else None,
+        )
+        # The run record goes with the exit record on this path too: absent run
+        # record + written exit record is the pair a listing reads as a completed
+        # departure, and a SIGTERM/socket stop is one. Gated on the record having
+        # LANDED, for the reason in ``_clean_exit`` (review round 2, MINOR-2).
+        if wrote:
+            _clear_run_record(handle, runtime)
         try:
             handle._deny_pending_gates()
         except Exception:  # noqa: BLE001 — shutdown must proceed
@@ -5619,6 +5991,16 @@ async def _run_amain(operator_cap: bytes | None) -> int:
 
 
 def main() -> int:
+    # A WAKE MARKER IS THIS PROCESS'S IDENTITY, NOT ITS CHILDREN'S. Drop it from
+    # the live environment before anything can spawn, so a tool child (or a
+    # `lop serve` started from this session's shell) never carries the
+    # supervisor's token into runtimes no supervisor forked (#3028 review r4,
+    # MAJOR-2). The stop sweep reads this process's EXEC-TIME environment, which
+    # this does not rewrite. Stdlib-only import, so it costs nothing at boot.
+    from local_operator.wakes.owned_runtimes import forget_inherited_marker
+
+    forget_inherited_marker()
+
     # THE TOKENIZER WARM STARTS FIRST, before the log file, the imports and the
     # lease: it is the only piece of boot work that nothing else on this path
     # touches until the user's first message has already been sent, so
@@ -5685,6 +6067,16 @@ def main() -> int:
     # runtime child, so a reader has to be able to attribute a line to the
     # process that wrote it.
     logger.info("session runtime started: pid %d", os.getpid())
+    # OOM ORDERING (Linux): mark this runtime — and, by inheritance, every tool
+    # command and subagent it spawns — as a preferred OOM victim over the mesh
+    # relay, whose unit asks for the opposite (``network.relay.RELAY_OOM_SCORE_ADJUST``).
+    # A 2 GB node lost its relay to the OOM killer while session work survived,
+    # which took every session on the device off the mesh. Raising one's own score
+    # needs no privilege; a failure is logged and the runtime boots regardless.
+    from local_operator import memory_guard
+
+    if sys.platform.startswith("linux") and not memory_guard.raise_own_oom_score():
+        logger.info("session runtime could not raise its oom_score_adj; continuing")
     # THE TEARDOWN IS EXPLICIT so that its executor join can be bounded and, when
     # the bound expires, DIAGNOSED (:func:`_teardown_loop`, reached from the
     # ``finally`` below). ``asyncio.run`` is the implicit form of the same four
@@ -5745,5 +6137,12 @@ if __name__ == "__main__":
     # ``tests/unit/session/runtime/test_runtime_stall_watchdog.py``, which pins
     # both halves of that. Arming before ``main()`` also means a stall during
     # boot — the window nothing else can report — is bounded and named.
-    stall_watchdog.arm(probe=_progress_probe, busy=_busy_probe)
+    # ``fatal_report=True`` is the entry point's alone: it points CPython's fatal
+    # signal handler at the stall dump, so a native death of an armed runtime leaves
+    # a thread and a frame instead of an empty stderr. The handler is process-global
+    # and is deliberately NOT installed by an in-process caller of ``arm`` — see the
+    # argument's docstring. It covers the crash class measured on 2026-10-20 (run
+    # 39411075050: an armed runtime child died SIGSEGV before publication with no
+    # stack anywhere); the dump is the one artifact a reader already opens.
+    stall_watchdog.arm(probe=_progress_probe, busy=_busy_probe, fatal_report=True)
     sys.exit(main())

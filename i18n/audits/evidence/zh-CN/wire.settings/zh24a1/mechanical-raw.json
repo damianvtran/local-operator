@@ -1,0 +1,134 @@
+{
+  "namespace": "wire.settings",
+  "generated_by": "translation-auditor (lopdev team), independent read-only audit",
+  "checks": {
+    "key_parity": {
+      "en_keys": 818,
+      "zh_keys": 818,
+      "missing": [],
+      "extra": []
+    },
+    "argument_parity": {
+      "keys_checked": 818,
+      "failures": []
+    },
+    "plural_structure": {
+      "plural_keys": [],
+      "rows": [],
+      "failures": [],
+      "note": "zh-CN legally uses other-only where en has one/other (style guide: no plural agreement); only structural failures are counted."
+    },
+    "hard_token_parity": {
+      "patterns": {
+        "backtick_span": "`[^`\\n]+`",
+        "long_flag": "(?<![\\w/])--[a-zA-Z0-9][a-zA-Z0-9_-]*",
+        "angle_token": "<[a-zA-Z][^>\\n]*>",
+        "url": "(?:https?|ssh)://[^\\s，。；）)]+",
+        "path": "(?:~/[\\w./-]+|/(?:bin|Users|Volumes|tmp|var|etc)/[\\w./-]+)",
+        "percent_token": "%[sdif]"
+      },
+      "failures": []
+    },
+    "width": {
+      "rows": [
+        {
+          "key": "wire.settings.asks_lapsed_visible_for.help",
+          "mode": "dynamic_wrap_or_clip",
+          "maxCells": 58,
+          "measured_cells": 40,
+          "en_cells": 57,
+          "growth_25pct_cells": 50,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "wire.settings.asks_lapsed_visible_for.label",
+          "mode": "static",
+          "maxCells": 29,
+          "measured_cells": 16,
+          "en_cells": 23,
+          "growth_25pct_cells": 20,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "wire.settings.session_compression.title",
+          "mode": "static",
+          "maxCells": 34,
+          "measured_cells": 8,
+          "en_cells": 22,
+          "growth_25pct_cells": 10,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "wire.settings.session_compression_after_days.label",
+          "mode": "static",
+          "maxCells": 29,
+          "measured_cells": 18,
+          "en_cells": 23,
+          "growth_25pct_cells": 23,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "wire.settings.session_compression_enabled.label",
+          "mode": "static",
+          "maxCells": 29,
+          "measured_cells": 14,
+          "en_cells": 24,
+          "growth_25pct_cells": 18,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "wire.settings.session_scratchpad.title",
+          "mode": "static",
+          "maxCells": 12,
+          "measured_cells": 6,
+          "en_cells": 10,
+          "growth_25pct_cells": 8,
+          "fits": true,
+          "growth_fits": true
+        },
+        {
+          "key": "wire.settings.session_scratchpad_max_bytes.label",
+          "mode": "static",
+          "maxCells": 29,
+          "measured_cells": 18,
+          "en_cells": 27,
+          "growth_25pct_cells": 23,
+          "fits": true,
+          "growth_fits": true
+        }
+      ],
+      "over_budget": []
+    },
+    "punctuation": {
+      "failures": [
+        {
+          "key": "wire.settings.web_fetch_enrich.help",
+          "snippet": "TML之前，先尝试.md、llms."
+        }
+      ]
+    },
+    "latin_spacing": {
+      "failures": []
+    },
+    "register": {
+      "address": "你",
+      "nin_occurrences": []
+    },
+    "encoding": {
+      "non_nfc": [],
+      "bidi_controls": []
+    },
+    "numbers": {
+      "failures": []
+    },
+    "render": {
+      "keys_checked": 818,
+      "failures": []
+    }
+  }
+}

@@ -11,14 +11,22 @@ import time
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.providers.usage import META_MUSE_USAGE_NOTES
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.auth import get_desktop_auth
-from local_operator.server.routes.desktop_sessions import errors, host, reply
+from local_operator.server.routes.desktop_sessions import (
+    Input,
+    RequestID,
+    _refuse_remote_write,
+    errors,
+    host,
+    receipts,
+    reply,
+)
 from local_operator.server.utils.desktop_auth import DesktopAuth
 from local_operator.server.utils.desktop_commands import command_catalogue
 from local_operator.slash_commands import slash_command_for
@@ -618,7 +626,14 @@ async def session_report(
         # is blanked because one response must not ship two encodings for one
         # idea (the docstring above states the whole rule).
         payload = dataclasses.asdict(
-            dataclasses.replace(report, by_model={}, by_purpose={}, by_purpose_outcome={})
+            dataclasses.replace(
+                report,
+                by_model={},
+                by_model_basis={},
+                descendants_by_basis={},
+                by_purpose={},
+                by_purpose_outcome={},
+            )
         )
         payload["by_model"] = [
             {
@@ -627,6 +642,19 @@ async def session_report(
                 "aggregate": dataclasses.asdict(aggregate),
             }
             for (provider, model_id), aggregate in report.by_model.items()
+        ]
+        payload["by_model_basis"] = [
+            {
+                "provider": provider,
+                "model_id": model_id,
+                "billing_basis": basis,
+                "aggregate": dataclasses.asdict(aggregate),
+            }
+            for (provider, model_id, basis), aggregate in report.by_model_basis.items()
+        ]
+        payload["descendants_by_basis"] = [
+            {"billing_basis": basis, "aggregate": dataclasses.asdict(aggregate)}
+            for basis, aggregate in report.descendants_by_basis.items()
         ]
         payload["by_purpose"] = [
             {"purpose": purpose, "aggregate": dataclasses.asdict(aggregate)}
@@ -672,16 +700,46 @@ async def _read_skills(
         return discovered, warnings, digest.hexdigest()[:16]
 
     discovered, warnings, version = await asyncio.to_thread(read)
+    by_name = {item.name: item for item in discovered}
+
+    def project() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        # ``skill_library:1``: the additive per-row fields. Classification needs
+        # the config dir (the managed root and the link store both live under it,
+        # and ``LOCAL_OPERATOR_CONFIG_DIR`` may move them); a caller that supplied
+        # none gets the historical two-key rows.
+        if config_dir is None:
+            return [{"name": item.name, "description": item.description} for item in discovered], {}
+        from local_operator.server.utils import desktop_skills
+        from local_operator.skills.api import ecosystem_skill_roots
+
+        links = desktop_skills.link_index(config_dir)
+        classifier = desktop_skills.SourceClassifier(config_dir, ecosystem_skill_roots(), links)
+        return desktop_skills.build_rows(discovered, classifier, links), links
+
+    rows, links = await asyncio.to_thread(project)
     detail = None
+    skill_detail = None
     if name is not None:
-        by_name = {item.name: item for item in discovered}
-        if name not in by_name:
+        row = next((item for item in rows if item["name"] == name), None)
+        if row is None:
             raise HTTPException(404, _wd.skill_not_found().envelope())
-        detail = await asyncio.to_thread(resolve_skill_url, "skill://" + name, by_name)
+        if name in by_name:
+            detail = await asyncio.to_thread(resolve_skill_url, "skill://" + name, by_name)
+        if config_dir is not None:
+            from local_operator.server.utils import desktop_skills
+
+            skill_detail = await asyncio.to_thread(
+                desktop_skills.build_detail,
+                row,
+                by_name.get(name),
+                links.get(name),
+                detail,
+            )
     return {
-        "skills": [{"name": item.name, "description": item.description} for item in discovered],
+        "skills": rows,
         "scope": "discoverable",
         "detail": detail,
+        "skill_detail": skill_detail,
         "warning_count": len(warnings),
         "version": version,
     }
@@ -750,6 +808,201 @@ async def skills(
                 )
             }
         )
+
+
+# -- skill library writes (``skill_library:1``) ------------------------------------------
+#
+# Create/update/remove of a skill in the managed root, ``<config_dir>/skills`` and
+# nowhere else. The rules (one destination, read-only builtin/external/project,
+# baseline untouched by a local edit, kept backup on remove) live in
+# ``server/utils/desktop_skill_writes`` and ``ManagedSkillStorage.author``; these
+# handlers translate HTTP and refusals. Each mutation is receipted by
+# ``request_id`` exactly like the ``hub/skills/*`` writes, so a lost response is
+# replayed rather than applied twice.
+
+
+class SkillFileIn(Input):
+    path: str = Field(min_length=1, max_length=240)
+    #: Bounded BEFORE the storage layer measures bytes, so an absurd body is
+    #: refused at parse time instead of being fully decoded first. The real limit
+    #: (200 KiB per file, 1 MiB per skill, in BYTES) is enforced by SkillDocument.
+    content: str = Field(max_length=1024 * 1024)
+
+
+class SkillCreate(Input):
+    request_id: RequestID
+    name: str = Field(min_length=1, max_length=128)
+    #: The full file set (``SKILL.md`` required). Exactly one of ``files`` or
+    #: ``copy_from`` -- "Copy to my skills" of a read-only skill is a create whose
+    #: bytes come from the named skill.
+    files: list[SkillFileIn] | None = Field(default=None, max_length=64)
+    copy_from: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class SkillUpdate(Input):
+    request_id: RequestID
+    #: The fingerprint of the folder this edit was made against (``fingerprint`` on
+    #: the row / detail). A different current fingerprint is a 409 and the disk is
+    #: untouched -- the editor reloads rather than overwrites.
+    expected_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+    files: list[SkillFileIn] = Field(min_length=1, max_length=64)
+
+
+class SkillRemove(Input):
+    request_id: RequestID
+    #: A hub-linked skill's removal deletes its only copy of unpublished edits;
+    #: refused (409) unless the caller says so. STRICT: a lenient bool coerced
+    #: "yes", "true", "1" and 1 into a discard, so a client typo destroyed work.
+    discard_local_changes: StrictBool = False
+
+
+def _skill_write_refusal(error: Exception) -> HTTPException:
+    """The typed refusal for a skill-write failure; the code is the client's contract."""
+    code = getattr(error, "code", "") or ""
+    # (status, message, WIRE code). The wire code is the renderer's contract and is
+    # not always the storage code spelled with underscores: a stale fingerprint
+    # reaches storage as ``local-concurrent-edit`` but the client keys on
+    # ``skill_stale``, a name that says what happened to the SKILL.
+    typed: dict[str, tuple[int, Any, str]] = {
+        "skill-not-editable": (409, _wd.skill_not_editable, "skill_not_editable"),
+        "alias-occupied": (409, _wd.skill_alias_occupied, "skill_alias_occupied"),
+        "skill-local-changes-unpublished": (
+            409,
+            _wd.skill_local_changes_unpublished,
+            "skill_local_changes_unpublished",
+        ),
+        # Stale CAS, or another writer holds the skill right now: both mean "what
+        # you edited is not what is on disk", and the remedy is the same -- reload.
+        "local-concurrent-edit": (409, _wd.skill_stale, "skill_stale"),
+    }
+    if code in typed:
+        status, message, wire = typed[code]
+        return HTTPException(status, message().envelope(code=wire))
+    if code == "skill-not-found":
+        return HTTPException(404, _wd.skill_not_found().envelope(code="skill_not_found"))
+    # Validation failures carry the hub vocabulary's own sentence (they name the
+    # constraint, never file bytes); anything else the storage names is a state
+    # refusal of a well-formed request.
+    status = 422 if code in ("skill-validation", "skill-too-large") else 409
+    return HTTPException(
+        status, _wd.desktop_refusal(error=str(error)).envelope(code=code.replace("-", "_") or None)
+    )
+
+
+async def _skill_write(request: Request, key: str, body: Input, work: Any) -> CRUDResponse[Any]:
+    """Run ``work(config_dir)`` off the loop, receipted, with refusals typed."""
+    from local_operator.hub_sync.identity import LinkError
+    from local_operator.hub_sync.skill_document import SkillValidationError
+    from local_operator.hub_sync.transactions import TransactionError
+
+    config_dir = pathlib.Path(request.app.state.config_manager.config_dir)
+
+    async def mutate() -> dict[str, Any]:
+        def run() -> dict[str, Any]:
+            try:
+                return work(config_dir)
+            except (LinkError, SkillValidationError, TransactionError) as error:
+                raise _skill_write_refusal(error) from None
+
+        return await asyncio.to_thread(run)
+
+    async with errors(request):
+        return reply(
+            await receipts(request).run(
+                key + body.request_id,  # type: ignore[attr-defined]
+                body.model_dump(),
+                mutate,
+                retry_safe=True,
+            )
+        )
+
+
+@router.post("/v1/desktop/skills", response_model=CRUDResponse)
+async def skill_create(body: SkillCreate, request: Request):
+    """``skills.create``: a new skill in ``<config_dir>/skills`` (or a copy of a read-only one).
+
+    409 ``skill_alias_occupied`` when the name is taken (by a folder or by a hub
+    link that owns it); 404 when ``copy_from`` names nothing; 422 for any
+    invalid name, path, size or SKILL.md.
+    """
+    from local_operator.server.utils import desktop_skill_writes as writes
+
+    if (body.files is None) == (body.copy_from is None):
+        raise HTTPException(
+            422,
+            _wd.desktop_refusal(error="send exactly one of files or copy_from").envelope(
+                code="skill_invalid"
+            ),
+        )
+
+    def work(config_dir: pathlib.Path) -> dict[str, Any]:
+        return writes.create(
+            config_dir,
+            body.name,
+            files=[item.model_dump() for item in body.files or ()],
+            copy_from=body.copy_from,
+        )
+
+    return await _skill_write(request, "skill-create:", body, work)
+
+
+@router.put("/v1/desktop/skills/{name}", response_model=CRUDResponse)
+async def skill_update(name: str, body: SkillUpdate, request: Request):
+    """``skills.update``: replace a managed skill's file set, guarded by its fingerprint.
+
+    A linked skill's baseline and policy are NOT touched (the edit is a local
+    change the hub link then reports and merges); the answer carries the
+    unchanged ``baseline_fingerprint`` and, for a linked skill, ``publish_budget``.
+    409 ``skill_stale`` on a stale fingerprint; 409 ``skill_not_editable`` for a
+    builtin / external / project skill.
+    """
+    from local_operator.server.utils import desktop_skill_writes as writes
+
+    def work(config_dir: pathlib.Path) -> dict[str, Any]:
+        return writes.update(
+            config_dir, name, [item.model_dump() for item in body.files], body.expected_fingerprint
+        )
+
+    return await _skill_write(request, f"skill-update:{name}:", body, work)
+
+
+@router.delete("/v1/desktop/skills/{name}", response_model=CRUDResponse)
+async def skill_remove(name: str, body: SkillRemove, request: Request):
+    """``skills.remove``: take a managed skill out of use WITHOUT destroying its bytes.
+
+    An unlinked skill is MOVED to ``hub/backups/skill-local-<name>-<op>``. A
+    hub-linked skill is unpulled (the link stays, so it can be pulled again); its
+    folder is refused with 409 ``skill_local_changes_unpublished`` when it differs
+    from the baseline, unless ``discard_local_changes`` is true.
+    """
+    from local_operator.hub_sync import provenance as prov
+    from local_operator.hub_sync.identity import LinkError
+    from local_operator.server.utils import desktop_skill_writes as writes
+
+    def work(config_dir: pathlib.Path) -> dict[str, Any]:
+        from local_operator.hub_sync import service as svc
+        from local_operator.hub_sync.skill_document import validate_name
+
+        validate_name(name)
+        owner = prov.alias_owner(config_dir, "skill", name)
+        if owner is None:
+            return writes.remove_local(config_dir, name)
+        record = prov.read_baseline(config_dir, "skill", owner)
+        if record is None or record.identity is None:
+            raise LinkError("baseline-unknown", "the skill's link baseline is unreadable")
+        ctx = svc.HubSyncContext(
+            config_dir=config_dir,
+            config_manager=request.app.state.config_manager,
+            client_for_tenant=lambda _tenant: None,
+        )
+        try:
+            return writes.remove_linked(
+                ctx, record, discard_local_changes=body.discard_local_changes
+            )
+        except svc.HubBusy as busy:
+            raise LinkError("hub-busy", str(busy)) from None
+
+    return await _skill_write(request, f"skill-remove:{name}:", body, work)
 
 
 @router.get("/v1/desktop/sessions/{session_id}/failovers", response_model=CRUDResponse[Report])
@@ -828,11 +1081,24 @@ async def entities(
                 raise HTTPException(503, _wd.profile_registry_unavailable().envelope())
             if spec.name == "team":
                 from local_operator.org_chart import resolve_org
+                from local_operator.profile_scope import row_scope
 
-                rows = [
-                    item.model_dump(mode="json") | {"value": item.name}
-                    for item in registry.list_teams()
-                ]
+                # The team rows bypass ``team_catalogue`` here, so the additive
+                # scope fact has to be added in this assembly too (LOH-9 S2).
+                # AND they dedupe like the agent path (QA round 2): a session
+                # team racing an account team of the same name is ONE row, and
+                # the composite lists the session one first — the row in force.
+                seen_teams: set[str] = set()
+                rows = []
+                for item in registry.list_teams():
+                    key = str(getattr(item, "name", "") or "").strip().casefold()
+                    if key in seen_teams:
+                        continue
+                    seen_teams.add(key)
+                    rows.append(
+                        item.model_dump(mode="json")
+                        | {"value": item.name, "scope": row_scope(registry, item)}
+                    )
                 if name:
                     current = dataclasses.asdict(
                         resolve_org(name, teams=registry, agents=remote.agent_registry)
@@ -847,3 +1113,141 @@ async def entities(
                 if name:
                     current = profile_detail(registry, name)
         return reply({"command": spec.name, "entities": rows, "current": current})
+
+
+class SessionPromote(Input):
+    """One promotion: copy a CONVERSATION definition into the account (S4).
+
+    ``as_name`` rather than the design's ``as`` because ``as`` is a Python
+    keyword — one spelling on the wire, the tool schema and the composite, so no
+    layer translates it.
+
+    ``confirm_replace`` is the user's answer, not a preference: it is the only
+    way this body can authorise overwriting a definition they already own, and
+    the composite refuses a collision without it.
+    """
+
+    request_id: RequestID
+    kind: Literal["agent", "team"]
+    name: str = Field(min_length=1, max_length=128)
+    as_name: str | None = Field(default=None, min_length=1, max_length=128)
+    confirm_replace: bool = False
+    #: A REHEARSAL: run the whole preflight and answer the plan, writing nothing.
+    #: Exists so a client can name every row a ``confirm_replace`` would overwrite
+    #: — a team ``replace`` cascades to colliding members and nested teams, which
+    #: the client cannot see from its own screen (agent review round 1, MINOR-3).
+    dry_run: bool = False
+
+
+@router.post("/v1/desktop/sessions/{session_id}/promote", response_model=CRUDResponse)
+async def promote_session_definition(body: SessionPromote, session_id: str, request: Request):
+    """Copy this conversation's role or team into the account ("use everywhere").
+
+    WHY THIS ROUTE IS ADDRESSED BY SESSION and lives beside the catalogues rather
+    than in ``desktop_profiles``: a promotion's SOURCE is a conversation-scoped
+    row, and that scope is reachable only through the session bridge (the same
+    seam ``/command-entities`` uses). The account-only profile routes are handed
+    a plain registry and could not see the row at all; giving them a session
+    parameter would make every one of them session-capable, which is a different
+    contract.
+
+    The write is the composite's: it preflights everything, copies the row and
+    its instructions verbatim, expands a team's conversation-scoped members, and
+    rolls back exactly what it created on failure. This handler translates the
+    HTTP shape and the surface's authorization origin, nothing else.
+
+    RESPONSE: the new ACCOUNT detail row (the same projection ``GET
+    /v1/desktop/profiles/{name}`` and ``/teams/{name}`` return), plus an additive
+    ``promoted`` object carrying what the operation created, expanded and
+    replaced. The client's confirmation named those rows; this is the receipt
+    that says what actually happened.
+
+    STATUS: 404 for an unknown session or name, 409 for a collision (or any
+    composite refusal — the body was well-formed, the conversation's state said
+    no), 422 for a malformed body. A session that lives on a PEER answers 409
+    ``session_is_remote``: the conversation's roles are on that device, and this
+    build cannot write them there, so the family's 404 would be a lie about a row
+    the user can see (agent review round 1, MINOR-4).
+
+    ``request_id`` makes a failed-and-retried request idempotent: the second call
+    replays the first answer. A ``dry_run`` does not enter that journal at all —
+    nothing was written, so there is nothing to replay, and a journal entry would
+    claim a promotion that did not happen.
+    """
+
+    async with errors(request):
+        await _refuse_remote_write(request, session_id, noun="promotion")
+        async with host(request).session(session_id) as bridge:
+            remote = bridge.remote
+            assert remote is not None
+
+            def mutate() -> dict[str, Any]:
+                agents = remote.agent_registry
+                teams = remote.team_registry
+                if agents is None or teams is None:
+                    raise HTTPException(503, _wd.profile_registry_unavailable().envelope())
+                if body.kind == "agent":
+                    result = agents.promote(
+                        body.name,
+                        as_name=body.as_name,
+                        replace=body.confirm_replace,
+                        authorized_by="surface:desktop",
+                        dry_run=body.dry_run,
+                    )
+                else:
+                    result = teams.promote(
+                        body.name,
+                        as_name=body.as_name,
+                        replace=body.confirm_replace,
+                        authorized_by="surface:desktop",
+                        agents=agents,
+                        dry_run=body.dry_run,
+                    )
+                promoted = {
+                    "kind": body.kind,
+                    "created": result.created,
+                    "expanded": result.expanded,
+                    "replaced": result.replaced,
+                    "provenance_ids": result.provenance_ids,
+                    "authorized_by": "surface:desktop",
+                }
+                if body.dry_run:
+                    # No row was written, so there is no account detail to read
+                    # — and no receipt to journal. The plan names every row the
+                    # confirmed call would write or overwrite, which is exactly
+                    # what the client's confirmation needs to say.
+                    return {"dry_run": True, "promoted": promoted}
+                # The DETAIL row is read from the ACCOUNT store, not the composite:
+                # the conversation still holds its own copy, and session-first
+                # resolution would hand back the row this call did not write.
+                target = body.as_name or body.name
+                if body.kind == "agent":
+                    from local_operator.server.utils.desktop_profiles import (
+                        profile_detail,
+                    )
+
+                    account_agents = getattr(agents, "global_registry", agents)
+                    detail = profile_detail(account_agents, target)
+                else:
+                    from local_operator.hub_sync.definition import definition_revision
+
+                    account_teams = getattr(teams, "global_registry", teams)
+                    row = account_teams.get_team_by_name(target)
+                    if row is None:
+                        raise KeyError(target)
+                    detail = row.model_dump(mode="json") | {"scope": "global"}
+                    detail["definition_revision"] = definition_revision(
+                        "team", str(row.id), row.model_dump(mode="json")
+                    )
+                return detail | {"promoted": promoted}
+
+            if body.dry_run:
+                return reply(await asyncio.to_thread(mutate))
+            return reply(
+                await receipts(request).run(
+                    "profile-promote:" + body.request_id,
+                    body.model_dump(),
+                    lambda: asyncio.to_thread(mutate),
+                    retry_safe=True,
+                )
+            )

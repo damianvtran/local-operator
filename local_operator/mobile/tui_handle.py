@@ -850,7 +850,8 @@ class TuiSessionHandle(SessionHandle):
                 self._app._run_slash_command(f"/effort {effort}")
 
         await self._on_app(apply)
-        self._refresh_state()
+        # No roster pass on a switch: see ``_refresh_state``.
+        self._refresh_state(roster=False)
         return f"model: {self._projection.model_label}"
 
     async def receive_peer_model(
@@ -1003,7 +1004,7 @@ class TuiSessionHandle(SessionHandle):
             self._app._run_slash_command(f"/effort {effort}")
 
         await self._on_app(apply)
-        self._refresh_state()
+        self._refresh_state(roster=False)
         return f"effort: {effort}"
 
     async def slash(
@@ -1673,6 +1674,24 @@ class TuiSessionHandle(SessionHandle):
         if pending is None:
             pending = self._fold.projection.pending
         payload = pending.to_json() if pending is not None else None
+        if payload is not None:
+            # This handle publishes on the APP thread (it reads `_app._session`
+            # above), so the app's own policy view is the authority for the two
+            # keys — the same view the card paints, not a re-derivation here.
+            policy = getattr(self._app, "_approval_policy_view", None)
+            if callable(policy):
+                # `getattr` because a test host / older app may expose a policy
+                # view without both fields; an absent half is "not stated".
+                view = policy()
+                payload["approval_mode"] = str(getattr(view, "mode", "") or "")
+                payload["approval_provenance"] = str(getattr(view, "provenance", "") or "")
+                # The FILE default this pane follows when no override exists;
+                # an attached phone needs both halves to say "session Ask;
+                # global Auto" without guessing the complement (U4).
+                default_auto = getattr(self._app, "_approvals_default_auto", None)
+                payload["approval_global_mode"] = (
+                    ("auto" if default_auto else "ask") if default_auto is not None else ""
+                )
         store.mutate(pending_gate=payload)
 
     def _request_id_for_card(self, card: Any) -> str | None:
@@ -1918,7 +1937,7 @@ class TuiSessionHandle(SessionHandle):
             if task is asyncio.current_task():
                 self._detail_tasks.pop(job_id, None)
 
-    def _refresh_state(self) -> None:
+    def _refresh_state(self, *, roster: bool = True) -> None:
         session = self._session()
         self._fold.set_state(
             model_label=_effective_label(session),
@@ -1963,7 +1982,11 @@ class TuiSessionHandle(SessionHandle):
                 usage=usage,
                 spend_channels=store.spend_channels_copy(),
             )
-        comms = getattr(session, "_subagent_comms", None)
+        # ``roster=False`` is the model/effort switch's call: the child roster
+        # does not depend on the parent's model, and this registry pass is the
+        # part of the refresh that grows with the roster. Every folded event
+        # still runs it (the handler's call), so the roster stays current.
+        comms = getattr(session, "_subagent_comms", None) if roster else None
         if comms is not None:
             self._fold.set_subagent_details(comms)
 
@@ -2050,12 +2073,13 @@ def _load_subagent_detail(
     full child history here only to discard it duplicated, per child, the exact
     work the /history endpoint already does on fetch, so it is not built.
     """
-    from local_operator.session.transcript import (
-        TRANSCRIPT_FILENAME,
-        read_latest_custom,
-    )
+    from local_operator.session import compression
+    from local_operator.session.transcript import read_latest_custom
 
-    path = Path(session_dir) / TRANSCRIPT_FILENAME
+    # The fingerprint is of the PHYSICAL source — the archive for a compressed
+    # child, stamped with the journal's own mtime — so "did it change during
+    # hydration" is still answerable, while the rows come from the resolver.
+    path = compression.transcript_source(Path(session_dir))[0]
     before = path.stat()
     # One bounded backward scan instead of a whole ``Transcript`` construction:
     # hydration runs per child per event, and the reader stops at the newest

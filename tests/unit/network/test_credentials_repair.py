@@ -15,6 +15,7 @@ The predicate, the row shape and the two surfaces that carry it are pinned here:
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Any
 
@@ -265,15 +266,13 @@ def test_the_relays_doctor_carries_the_row_and_a_later_grant_clears_it(root: Pat
     assert [c for c in findings if c["check"] == "credential_repair"] == []
 
 
-def test_the_doctor_summary_turns_unhealthy_for_an_open_repair(
+def test_the_doctor_summary_degrades_without_failing_the_link_for_an_open_repair(
     monkeypatch: pytest.MonkeyPatch, root: Path, capsys: Any
 ) -> None:
-    """The row is not decoration: an open repair makes ``doctor`` answer unhealthy.
-
-    ``ok`` is derived from the rows (QA round 1), so a repair row must flip it —
-    and the human line must carry the sentence, not a raw token: the detail is
-    prose, and ``doctor_detail_words`` passes it through whole.
-    """
+    """A failed credential stays red without claiming a transport failure."""
+    monkeypatch.setattr(
+        relay, "supervision_state", lambda: {"platform": "none", "persistent": False}
+    )
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     record = _record()
     store.save(record, root)
@@ -281,11 +280,22 @@ def test_the_doctor_summary_turns_unhealthy_for_an_open_repair(
     _report(log)
     log.flush()
 
-    assert net_cli._cmd_doctor(argparse.Namespace(json=True, peer="")) == 1  # noqa: SLF001
+    # Use the ledger's real repair derivation, but supply a healthy link so this
+    # assertion isolates the payload fold from missing local identity/endpoints.
+    findings = repair_mod.repair_checks(record, log=log)
+    monkeypatch.setattr(
+        net_cli, "_relay_call", lambda *a, **k: {"identity_present": True, "checks": findings}
+    )
+    assert net_cli._cmd_doctor(argparse.Namespace(json=True, peer="")) == 0  # noqa: SLF001
     machine = capsys.readouterr().out
     assert '"check": "credential_repair"' in machine
+    result = json.loads(machine)
+    assert result["ok"] and result["link_ok"] and result["degraded"]
+    assert result["code"] == "degraded"
+    assert result["checks"][0]["class"] == "payload"
+    assert result["checks"][0]["ok"] is False
 
-    assert net_cli._cmd_doctor(argparse.Namespace(json=False, peer="")) == 1  # noqa: SLF001
+    assert net_cli._cmd_doctor(argparse.Namespace(json=False, peer="")) == 0  # noqa: SLF001
     human = capsys.readouterr().out
     # The human line carries the sentence WHOLE — the detail is prose, and
     # ``doctor_detail_words`` passes prose through rather than tokenising it.

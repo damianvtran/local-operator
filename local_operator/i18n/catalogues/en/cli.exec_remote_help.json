@@ -1,0 +1,13 @@
+{
+  "cli.exec_remote_help.budget_usd": "Spending cap for this run in US dollars (default: the server's admission default)",
+  "cli.exec_remote_help.cancel": "Cancel a remote run and exit",
+  "cli.exec_remote_help.detach": "Print the run id and idempotency key, then exit instead of watching the run",
+  "cli.exec_remote_help.idempotency_key": "Idempotency key to reuse instead of minting a fresh one, so a retry of a submitted run cannot run twice",
+  "cli.exec_remote_help.max_hours": "Hours the remote run may execute before the server stops it (default: 2; the server caps the maximum)",
+  "cli.exec_remote_help.network": "Network to submit the run through, by name or id. Required when this device is in more than one network",
+  "cli.exec_remote_help.remote": "Run this task on Radient remote compute (tier 1: short-lived runs) instead of this machine",
+  "cli.exec_remote_help.repo": "Git URL the remote run checks out. Required with --remote: local files are never uploaded",
+  "cli.exec_remote_help.sha": "Commit to check out in --repo. Required with --remote",
+  "cli.exec_remote_help.size": "Compute size for the remote run: s, m or l (default: m)",
+  "cli.exec_remote_help.status": "Print one remote run as JSON and exit"
+}

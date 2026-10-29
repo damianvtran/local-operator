@@ -48,6 +48,9 @@ __all__ = [
     "cap_preserved_user_turns",
     "CappedPreservedTurns",
     "elision_notice_text",
+    "CARRIED_TIER_ID_PREFIX",
+    "CARRIED_TIER_KEY",
+    "is_carried_tier",
 ]
 
 
@@ -92,6 +95,16 @@ PreservedTurn = dict[str, "str | int"]
 #: true across generations, because it records where the message CAME FROM
 #: instead of inferring it from what it currently looks like.
 RENDERED_INJECTION_KEY = "harness_injected"
+
+#: ``provider_payload`` key beside :data:`RENDERED_INJECTION_KEY` on the ONE
+#: injected row whose body carries the operator's own words: a queued ask's
+#: answer (``ask_response``). Its value is the LIST of operator-typed answer
+#: values, taken from the row's structured ``answers`` by the renderer (never
+#: re-parsed from the report, whose text also holds the model's prompts and
+#: harness sentences — review round 3, M1). The snapcompact serializer emits
+#: exactly these values under ``[User]`` so the carry keeps them as operator asks
+#: while the envelope stays injected (review round 2 m1, QA Q8).
+OPERATOR_ANSWER_KEY = "operator_answer"
 
 #: Id of the synthetic turn that reports an elision. Stable rather than
 #: count-suffixed: the count is carried STRUCTURALLY beside the block (see
@@ -175,6 +188,40 @@ def _is_preserved_user_turn(message: AgentMessage) -> bool:
         and bool(message.provider_payload)
         and bool(message.provider_payload.get(PRESERVED_USER_TURN_KEY))
     )
+
+
+#: Id prefix of the CARRIED TIER: the synthetic row every pass re-synthesizes
+#: from the marker payload (see ``compaction.carry``). It is never journalled,
+#: so it is not a replayable entry and must never be a cut candidate — a cut
+#: landing on it makes ``first_kept_entry_id`` name a row the transcript does
+#: not have, and the session refuses the pass (``cut_not_replayable``).
+CARRIED_TIER_ID_PREFIX = "compaction-carried"
+
+#: ``provider_payload`` flag on the rendered carried row. Provenance is stored
+#: at the point of minting rather than inferred from shape, the same reason
+#: :data:`RENDERED_INJECTION_KEY` exists.
+CARRIED_TIER_KEY = "compaction_carried"
+
+
+def is_carried_tier(message: AgentMessage) -> bool:
+    """True for the synthetic carried-tier row (asks + decisions).
+
+    Deliberately lives beside :func:`_is_preserved_user_turn` rather than in
+    ``compaction.carry``: the cut-point rules are what must refuse it, and the
+    predicate has to be importable from here without a cycle through the
+    renderer module.
+
+    Two tests, because the id is what the live commit filters on while the
+    payload flag survives a host that re-mints ids. Either one is enough; the
+    redundancy is deliberate (a block that slips through accumulates one copy
+    per pass, the exact ratchet class this tier must not become).
+    """
+    if not isinstance(message, Message):
+        return False
+    if str(getattr(message, "id", "")).startswith(CARRIED_TIER_ID_PREFIX):
+        return True
+    payload = getattr(message, "provider_payload", None)
+    return isinstance(payload, dict) and bool(payload.get(CARRIED_TIER_KEY))
 
 
 def is_rendered_injection(message: AgentMessage) -> bool:
@@ -315,6 +362,11 @@ def _is_role_valid_cut(
     message = messages[index]
     if _is_compaction_marker(message):
         return True
+    # The carried tier is synthesized on both paths and never journalled. A cut
+    # here would name a ``first_kept_entry_id`` no entry backs, and the session
+    # refuses the pass outright (``cut_not_replayable``).
+    if is_carried_tier(message):
+        return False
     if not isinstance(message, Message):
         return False
     if message.role == "user":
@@ -384,7 +436,11 @@ def _snap_to_valid_cut(
     counts = [0]
     prefix_tokens = [0]
     for message in messages:
-        real = not _is_compaction_marker(message) and not _is_preserved_user_turn(message)
+        real = (
+            not _is_compaction_marker(message)
+            and not _is_preserved_user_turn(message)
+            and not is_carried_tier(message)
+        )
         counts.append(counts[-1] + int(real))
         prefix_tokens.append(prefix_tokens[-1] + (_message_tokens(message) if real else 0))
     # Replayed marker/preserved rows survive the rewrite regardless of the
@@ -509,7 +565,9 @@ def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) ->
                 [
                     m
                     for m in messages[:snapped]
-                    if not _is_compaction_marker(m) and not _is_preserved_user_turn(m)
+                    if not _is_compaction_marker(m)
+                    and not _is_preserved_user_turn(m)
+                    and not is_carried_tier(m)
                 ]
                 if snapped is not None
                 else []
@@ -543,7 +601,11 @@ def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) ->
             ):
                 index = forward
                 break
-            if not _is_compaction_marker(message) and not _is_preserved_user_turn(message):
+            if (
+                not _is_compaction_marker(message)
+                and not _is_preserved_user_turn(message)
+                and not is_carried_tier(message)
+            ):
                 prefix_tokens += _message_tokens(message)
                 real_messages += 1
 
@@ -612,7 +674,9 @@ def find_cut_point(messages: Sequence[AgentMessage], keep_recent_tokens: int) ->
     summarizable = [
         m
         for m in messages[:index]
-        if not _is_compaction_marker(m) and not _is_preserved_user_turn(m)
+        if not _is_compaction_marker(m)
+        and not _is_preserved_user_turn(m)
+        and not is_carried_tier(m)
     ]
     if not summarizable:
         return None
@@ -1212,7 +1276,11 @@ def cap_preserved_user_turns(
     # Walk NEWEST first and stop at the budget; the surviving prefix is then
     # re-reversed so the block keeps chronological order.
     for turn in reversed(real_turns):
-        cost = _encode_len(str(turn.get("text", "")))
+        # ``memo=True``: a stored turn is immutable journal content, so its exact
+        # length is worth keeping across the replays every open performs. Opt-in
+        # because the same ruler serves provisional text — see
+        # ``tokens._TEXT_LENGTH_CACHE``.
+        cost = _encode_len(str(turn.get("text", "")), memo=True)
         if kept and used + cost > cap:
             break
         kept.append(turn)

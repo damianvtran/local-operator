@@ -1,0 +1,36 @@
+tui.team_authoring.create | new team | نئی ٹیم
+tui.team_authoring.edit | edit team · {name} | ٹیم میں ترمیم · {name}
+tui.team_authoring.name | name | نام
+tui.team_authoring.label | label | لیبل
+tui.team_authoring.description | when to use | کب استعمال کریں
+tui.team_authoring.manager | manager | منیجر
+tui.team_authoring.members | members | ارکان
+tui.team_authoring.aliases | aliases | عرفی نام
+tui.team_authoring.instructions | instructions | ہدایات
+tui.team_authoring.project | project brief | پروجیکٹ بریف
+tui.team_authoring.members_hint | comma-separated: coder, coder:2, team:pod | کاما سے الگ: coder, coder:2, team:pod
+tui.team_authoring.aliases_hint | comma-separated names · empty clears aliases | کاما سے الگ نام · خالی سے عرفی نام ہٹ جائیں گے
+tui.team_authoring.instructions_hint | standing team guidance · Tab moves to the next field | مستقل ٹیم ہدایات · Tab سے اگلا خانہ
+tui.team_authoring.overrides_hint | Existing member overrides are preserved. Edit overrides on the desktop. | ارکان کی موجودہ اووررائیڈس برقرار رہتی ہیں؛ ترمیم ڈیسک ٹاپ پر کریں۔
+tui.team_authoring.legend | ctrl+s save · tab move · esc cancel | ctrl+s محفوظ · tab منتقلی · esc منسوخ
+tui.team_authoring.discard | Discard changes? y discard · n keep editing | تبدیلیاں چھوڑیں؟ y چھوڑیں · n ترمیم جاری رکھیں
+tui.team_authoring.invalid_name | Use a team name without spaces or path separators. | ایسا ٹیم نام رکھیں جس میں اسپیس یا پاتھ کے جداکار نہ ہوں۔
+tui.team_authoring.required_manager | A manager is required. | منیجر ضروری ہے۔
+tui.team_authoring.required_instructions | Instructions are required for a new team. | نئی ٹیم کے لیے ہدایات ضروری ہیں۔
+tui.team_authoring.invalid_members | Use comma-separated role, role:2 or team:pod entries. | کاما سے الگ role، role:2 یا team:pod اندراج استعمال کریں۔
+tui.team_authoring.invalid_aliases | Use comma-separated names without spaces or empty entries. | کاما سے الگ نام رکھیں؛ اسپیس یا خالی اندراج نہ ہوں۔
+tui.team_authoring.saved | saved team {name} | ٹیم {name} محفوظ ہو گئی
+tui.team_authoring.no_change | no changes to save | محفوظ کرنے کے لیے کوئی تبدیلی نہیں
+tui.team_authoring.revision_changed | Someone else changed this team; reopen to edit. | کسی اور نے یہ ٹیم بدل دی ہے؛ ترمیم کے لیے دوبارہ کھولیں۔
+tui.team_authoring.missing | No installed team named {name}. | {name} نام کی کوئی ٹیم انسٹال نہیں۔
+tui.team_authoring.usage_edit | Use /team edit <name>. | /team edit <name> استعمال کریں۔
+tui.team_authoring.usage_new | Use /team new with no extra arguments. | /team new بغیر اضافی دلائل کے استعمال کریں۔
+tui.team_authoring.registry_missing | No team registry is attached to this session. | اس سیشن سے کوئی ٹیم رجسٹری منسلک نہیں۔
+tui.team_authoring.footer | /team chart <name> · /team new · /team edit <name> | /team chart <name> · /team new · /team edit <name>
+tui.team_authoring.save_error | Could not save: {reason} | محفوظ نہیں ہو سکا: {reason}
+tui.team_authoring.notice_read_only | Read-only: this conversation’s runtime is on another device, so team changes are not available here. | صرف پڑھنے کے لیے: اس گفتگو کا رن ٹائم دوسرے ڈیوائس پر ہے، اس لیے یہاں ٹیم کی تبدیلیاں دستیاب نہیں۔
+tui.team_authoring.new_hint | Create a team | ٹیم بنائیں
+tui.team_authoring.edit_hint | Edit an installed team | انسٹال شدہ ٹیم میں ترمیم کریں
+tui.team_authoring.subcommand | subcommand | ذیلی کمانڈ
+tui.team_authoring.talk_hint | talk to team · {detail} | ٹیم سے بات کریں · {detail}
+tui.team_authoring.promote_hint | Copy this conversation's team into your account | اس گفتگو کی ٹیم اپنے اکاؤنٹ میں کاپی کریں

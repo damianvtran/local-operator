@@ -85,6 +85,8 @@ class PlacementState:
         self.network_id = network_id
         self.root = _config_root(root)
         self._observations: dict[str, dict[str, Any]] = {}
+        #: ``(key, owner_device, credential_id) -> row`` — see :meth:`cool_down`.
+        self._cooldowns: dict[tuple[str, str, int], dict[str, Any]] = {}
 
     # -- reads --------------------------------------------------------------
 
@@ -206,6 +208,128 @@ class PlacementState:
         mine = [k for k, row in self._observations.items() if row.get("owner_device") == device]
         for key in mine:
             del self._observations[key]
+        # Its cooldowns too (review round 1, M2): they name rows in THAT device's id
+        # space, which mean nothing — or a different account — anywhere else.
+        for slot in [s for s in self._cooldowns if s[1] == device]:
+            del self._cooldowns[slot]
+
+    # -- borrower-side cooldowns --------------------------------------------
+
+    def cool_down(
+        self,
+        key: str,
+        *,
+        owner_device: str,
+        credential_id: int,
+        block_scope: str,
+        until: float,
+        label: str = "",
+        rested_at: float | None = None,
+    ) -> None:
+        """Remember that the owner's row ``credential_id`` answered a usage limit.
+
+        WHY THE BORROWER KEEPS THIS AND THE OWNER DOES NOT: a local row that
+        answers ``429 … retry in 24h`` is blocked for that window by
+        ``AuthStore.rotate_sibling`` and the cascade moves to a sibling. A
+        BORROWED row's verdict is reported to the owner instead, and the owner
+        deliberately writes at most a 60 s, family-scoped block on a peer's word
+        (``owner.REMOTE_QUOTA_BLOCK_MAX_MS``, F3: one report must never lock the
+        owner out of its own login) — and nothing at all for a report it cannot
+        scope. So the next grant re-served the same spent row and the turn ended
+        on the same 429. This row is the borrower's OWN routing preference: it
+        travels on the grant frame as ``exclude_credential_ids`` (hide these rows
+        from THIS resolve only) and never touches the owner's row, so F3 holds.
+
+        The window comes from ``auth_store.failure_block_window`` — the rule a
+        local row follows — so the two cannot drift. ``label`` is the account's
+        non-secret identity label (email or account id), kept so the refusal can
+        name WHICH account is resting; it is never a token.
+
+        ``rested_at`` is when the rest began: ``None`` means now, ``0.0`` unknown (a
+        row an older build wrote). It exists for the listing (review round 1, m2): a
+        grant recorded AFTER every rest began was lent from a sibling row — the
+        rested ones travel as exclusions — so the key is only partly rate-limited,
+        and without the start time "a sibling serves" and "the only account just hit
+        its limit" read the same. Routing never reads it.
+        """
+        from local_operator.providers.auth_store import MAX_CREDENTIAL_BLOCK_MS
+
+        now = time.time()
+        if credential_id <= 0 or until <= now:
+            return
+        # RE-CAPPED ON EVERY WRITE, INCLUDING A LOAD (review round 1, m2): the file is
+        # self-authored, but a backward clock step or a garbled row must not rest an
+        # account past the one-hour ceiling the shared rule keeps on purpose.
+        until = min(float(until), now + MAX_CREDENTIAL_BLOCK_MS / 1000.0)
+        self._cooldowns[(key, owner_device, int(credential_id))] = {
+            "key": key,
+            "owner_device": owner_device,
+            "credential_id": int(credential_id),
+            "block_scope": block_scope,
+            "until": float(until),
+            "label": label,
+            "rested_at": now if rested_at is None else float(rested_at),
+        }
+
+    def cooldowns(
+        self,
+        key: str,
+        model_id: str = "",
+        *,
+        owner_device: str,
+        now: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """The live cooldowns ``owner_device`` holds for ``key`` that gate ``model_id``.
+
+        ``owner_device`` IS REQUIRED (review round 1, M2): row ids are integers in
+        ONE owner's ``auth.db``, so after the key moves to another owner, id N there
+        is a different account — a rest recorded against the old owner must never
+        hide (or be named for) a row of the new one. Earliest-ending first.
+
+        The scope test is ``auth_store.block_scope_gates`` — the predicate the
+        local store's ``is_blocked_for_model`` applies — so an account-wide
+        cooldown gates every model and a ``model:<family>`` one only that family.
+        """
+        from local_operator.providers.auth_store import block_scope_gates
+
+        stamp = time.time() if now is None else now
+        live = [
+            dict(row)
+            for (row_key, row_owner, _id), row in self._cooldowns.items()
+            if row_key == key
+            and row_owner == owner_device
+            and float(row.get("until") or 0.0) > stamp
+            and block_scope_gates(str(row.get("block_scope") or ""), model_id)
+        ]
+        return sorted(live, key=lambda row: float(row["until"]))
+
+    def resting_any_scope(
+        self, key: str, *, owner_device: str, now: float | None = None
+    ) -> list[dict[str, Any]]:
+        """Every live rest ``owner_device`` holds for ``key``, whatever its scope. DISPLAY ONLY.
+
+        ``lop network credentials`` lists a key, not a request, so it has no model to
+        test a ``model:<family>`` scope against — and :meth:`cooldowns` with ``""``
+        would show only account-wide rests. A SEPARATE METHOD rather than a nullable
+        ``model_id`` on :meth:`cooldowns` (review round 1, m3): that signature feeds the
+        grant frame's ``exclude_credential_ids``, and a routing caller that passed
+        ``None`` by accident would hide every rested row for every model. Nothing that
+        routes may call this. Owner-scoped for the same reason :meth:`cooldowns` is.
+        """
+        stamp = time.time() if now is None else now
+        live = [
+            dict(row)
+            for (row_key, row_owner, _id), row in self._cooldowns.items()
+            if row_key == key
+            and row_owner == owner_device
+            and float(row.get("until") or 0.0) > stamp
+        ]
+        return sorted(live, key=lambda row: float(row["until"]))
+
+    def _prune_cooldowns(self, now: float | None = None) -> None:
+        stamp = time.time() if now is None else now
+        for slot in [s for s, row in self._cooldowns.items() if float(row["until"]) <= stamp]:
+            del self._cooldowns[slot]
 
     # -- persistence --------------------------------------------------------
 
@@ -215,6 +339,11 @@ class PlacementState:
             "network_id": self.network_id,
             "observations": [row for _, row in sorted(self._observations.items())],
         }
+        # Omitted when empty, so a device that never cooled a borrowed row writes
+        # the file it always wrote; expired rows are dropped rather than carried.
+        self._prune_cooldowns()
+        if self._cooldowns:
+            payload["cooldowns"] = [row for _, row in sorted(self._cooldowns.items())]
         # The same guard the placement document uses, and for the same reason: the
         # cheapest way to prove this file cannot hold a bearer is to refuse one at
         # the writer. See this module's docstring.
@@ -251,6 +380,28 @@ class PlacementState:
         for row in payload.get("observations") or []:
             if isinstance(row, dict) and row.get("key"):
                 state._observations[str(row["key"])] = dict(row)
+        for row in payload.get("cooldowns") or []:
+            # A malformed row is skipped, never guessed at: the failure mode of a
+            # bad cooldown must be one more ask of the owner, not a hidden login.
+            # ``rested_at`` is parsed OUTSIDE that rule (QA round 2, R2-Q3): it is a
+            # display field, and a garbled value must cost the "partly" reading,
+            # never the routing rest itself.
+            try:
+                rested_at = float(row.get("rested_at") or 0.0)
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                rested_at = 0.0
+            try:
+                state.cool_down(
+                    str(row["key"]),
+                    owner_device=str(row.get("owner_device") or ""),
+                    credential_id=int(row["credential_id"]),
+                    block_scope=str(row.get("block_scope") or ""),
+                    until=float(row["until"]),
+                    label=str(row.get("label") or ""),
+                    rested_at=rested_at,
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
         return state
 
     @classmethod

@@ -64,18 +64,77 @@ async def _boot(pilot, app: OperatorApp) -> None:
             return
 
 
+# Idle ticks a prompt wait may spend before it gives up. A deadlock guard, not a
+# timing assumption: every measured caller settles in a handful of ticks.
+_WAIT_PROMPT_TICKS = 200
+
+
 async def _wait_prompt(pilot, app: OperatorApp) -> None:
-    """Settle until the in-flight gate's question is mounted.
+    """Settle until the in-flight gate's question is mounted AND its focus is decided.
 
     Replaces a fixed `pilot.pause(0.3)` that bet on how long the gate takes to
-    arm and raise its card; the observable the next assertion needs is the
-    ``ApprovalPrompt`` on screen, so wait for exactly that. The ceiling is a
-    deadlock guard, not a timing assumption.
+    arm and raise its card. The ceilings are deadlock guards, not timing
+    assumptions.
+
+    "In the widget tree" is NOT enough, which is the race this guards
+    (CI failure triage on PR #3104, 2026-10-28): a card is queryable before its
+    Mount is dispatched, and its ``on_mount`` decides focus by calling
+    ``Widget.focus()``, which in Textual 8.x only QUEUES the change on the app
+    via ``call_later``. A caller that returned early and then ran
+    ``app.query_one(Editor).focus()`` queued the editor's focus FIRST; the
+    card's mount then queued its own and won, so the next Enter answered the
+    highlighted "Allow" instead of submitting the composer (4/15 failures of
+    ``test_auto_leaves_a_parked_prompt_unanswered_and_notes_it`` run alone).
+
+    So wait for the two things the next step actually depends on:
+
+    1. A card ARRIVED and every card on screen is mounted. Textual sets
+       ``is_mounted`` only after ``on_mount`` has returned, so such a card's
+       focus decision has been made and, if it chose to take focus, its
+       request is already on the app's queue. The arrival test is against the
+       count seen on entry, not a bare "some card is mounted": answered cards
+       leave ``#prompt-host`` through a DEFERRED ``card.remove()`` and can sit
+       there beside the next question, so a retained card must not be able to
+       satisfy the wait while the card this gate just raised is still about to
+       mount and steal focus. Every caller measured so far enters with no card
+       on screen, where the two tests coincide; the comparison is there for the
+       day they stop coinciding.
+    2. A barrier posted to that same queue afterwards. The queue is FIFO, so
+       when the barrier runs the card's queued focus change has been applied.
+
+    The barrier deliberately does not assert WHO holds focus. The card yields
+    to a composer with a draft and honours ``CARET_KEEP``/``CARET_TAKE``
+    (``AskPickerScreen.on_mount``), so "card focused" would be the wrong
+    condition for callers that set those up; "mount's focus request settled"
+    is correct for all of them.
+
+    It also deliberately does not target one card by identity. The callers
+    drive ``app.query(ApprovalPrompt).first()``, so with a retained card
+    present "the newest card" and "the card the caller presses into" are not
+    the same widget; "every card present is settled" is true for both.
+
+    An expired ceiling RETURNS rather than raising, on purpose: the callers
+    assert what they need next (a card to press into, a gate that stays
+    parked) and those assertions name the failure better than a generic
+    timeout here. An expiry therefore means the app never raised the card at
+    all — read the caller's failure as the symptom, not this return.
     """
-    for _ in range(200):
+    before = len(app.query(ApprovalPrompt))
+    for _ in range(_WAIT_PROMPT_TICKS):
         await pilot.pause()
-        if app.query(ApprovalPrompt):
+        cards = app.query(ApprovalPrompt)
+        if len(cards) > before and all(card.is_mounted for card in cards):
+            break
+    else:
+        # Gave up: no card arrived, or one arrived and never finished mounting.
+        return
+    settled = asyncio.Event()
+    app.call_later(settled.set)
+    for _ in range(_WAIT_PROMPT_TICKS):
+        await pilot.pause()
+        if settled.is_set():
             return
+    # Gave up: the barrier never drained, so the app's queue is wedged.
 
 
 async def _settle(pilot, ticks: int = 6) -> None:
@@ -243,7 +302,13 @@ async def test_the_default_form_writes_the_config_and_names_the_file(config_dir:
         assert app._approvals_default_auto is True
         receipt = _notices(app)[-1]
         assert "config.yml" in receipt and "tool_approval_mode auto" in receipt
-        assert "every new one" in receipt
+        # The claim that used to stand here — "(this session and every new one)"
+        # — was false in the attached topology and silent about the one case
+        # the command now handles: this conversation's own record is cleared, so
+        # it inherits the default, while another conversation's recorded choice
+        # is untouched. The receipt states exactly those three facts.
+        assert "this conversation follows it" in receipt
+        assert "other conversations with their own choice keep it" in receipt
 
 
 @pytest.mark.asyncio
@@ -788,6 +853,18 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # Enter on the bare command does something useful, which is the line
         # `/login` sits on the other side of.
         "move": ArgumentMode.OPTIONAL,
+        # REQUIRED: the TUI-only viewer needs a path before it can open a file;
+        # bare /view reports usage rather than performing a useful default.
+        "view": ArgumentMode.REQUIRED,
+        # REQUIRED: the list IS the command here — bare `/tag` opens the
+        # picker, and Enter on the row opens that list and stops rather than
+        # submitting an empty word over it. The space is where a tag NAME
+        # starts; names may contain spaces, so the whole trailing text is one
+        # argument (ArgumentShape.ANY).
+        "tag": ArgumentMode.REQUIRED,
+        # OPTIONAL like `/notifications`: bare `/tags` reports the current mode,
+        # and the space offers the two words (`on`, `off`) that change it.
+        "tags": ArgumentMode.OPTIONAL,
         # OPTIONAL like `/mcp`: bare `/team` lists the teams, and the space
         # opens the team-name argument list with roster details.
         "team": ArgumentMode.OPTIONAL,
@@ -824,6 +901,8 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # unreachable from the completion path, which is the `/login` line this
         # sits on the other side of.
         "notifications": ArgumentMode.OPTIONAL,
+        # The receipt listing's new name (decision D2): same row, same reason.
+        "unread": ArgumentMode.OPTIONAL,
         # OPTIONAL like `/mcp`, whose shape this family borrows: bare `/network`
         # opens the panel (this device's networks, peers and relay state) and the
         # space opens the subcommand vocabulary. NOT REQUIRED — the listing is
@@ -843,6 +922,11 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # from the completion path, which is the `/login` line this sits on the
         # other side of.
         "delete": ArgumentMode.OPTIONAL,
+        # OPTIONAL like `/aida`, whose shape this command mirrors: bare
+        # `/librarian` reports status (or opens the pinned conversation), and
+        # the space offers the package's verb list (`open`, `status`, `pause`,
+        # `resume`, `run`) — the handler refuses anything else with that list.
+        "librarian": ArgumentMode.OPTIONAL,
         # OPTIONAL like `/mcp`: bare `/project` LISTS (the listing is the
         # receipt), and the space opens the reserved subcommand vocabulary
         # (`PROJECT_SUBCOMMANDS`) — the words the route validates and the picker
@@ -1132,3 +1216,101 @@ async def test_a_remote_gate_card_names_the_device_and_a_local_one_does_not() ->
         assert not any("runs on" in row for row in rows), rows
         await pilot.press("n")
         assert await asyncio.wait_for(task, 2) is False
+
+
+@pytest.mark.asyncio
+async def test_auto_leaves_a_parked_prompt_unanswered_and_notes_it(
+    config_dir: Path,
+) -> None:
+    """A MODE CHANGE IS NOT AN ANSWER (2026-10-23).
+
+    `/approvals auto` used to answer the visible prompt as allowed, through the
+    widget so the transcript kept a receipt. The receipt was honest about what
+    the code did and dishonest about what the user did: they asked to stop being
+    asked, on a frame where "answer this request" was still the only decision
+    the card was for. The card now stays parked, states in its own reserved slot
+    that the mode was saved, and the NEXT gate is the one that skips.
+    """
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        pending = asyncio.ensure_future(_gate(session)("bash", "run: one"))
+        await _wait_prompt(pilot, app)
+        card = app.query(ApprovalPrompt).first()
+
+        # The card holds focus, so Enter there would ANSWER the selected row.
+        # A user reaches the composer the same way: focus it first. (The
+        # routing that lets answer letters work from the composer is covered
+        # elsewhere; this test is about the command's effect on the card.)
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        await _submit(pilot, app, "/approvals auto")
+        await pilot.pause()
+
+        assert not pending.done(), "the command answered a request nobody answered"
+        assert not card.answered
+        assert "Auto saved for this session, with this conversation" in "\n".join(
+            card.render_lines_for_test()
+        )
+        assert app._explicit_approvals_mode == "auto"
+
+        # The parked request still takes its own answer…
+        await pilot.press("n")
+        assert await asyncio.wait_for(pending, 2) is False
+        # …and the NEXT gate is auto, so it raises no card at all.
+        second = asyncio.ensure_future(_gate(session)("bash", "run: two"))
+        assert await asyncio.wait_for(second, 2) is True
+        await _settle(pilot)
+        assert not app.query(ApprovalPrompt)
+
+
+@pytest.mark.asyncio
+async def test_the_session_choice_survives_readoption_from_the_sidecar(
+    config_dir: Path,
+) -> None:
+    """The choice is remembered WITH the conversation, not in this process.
+
+    Simulated re-adoption clears the in-memory bit and reloads from the session
+    directory: a resume builds a fresh app, so a choice that lived only in
+    `_explicit_approvals_mode` was the "resumed into the machine default"
+    defect the sidecar exists to remove.
+    """
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/approvals auto")
+        assert app._explicit_approvals_mode == "auto"
+
+        # Exactly what a new process starts with: no memory, gate on the file.
+        app._explicit_approvals_mode = None
+        app._set_approve_all(False)
+        # A fresh process: the source has no in-memory mode yet, so the FIRST
+        # adoption is where the sidecar must win.
+        app._adopt_approval_override(session, first_adoption=True)
+
+        assert app._explicit_approvals_mode == "auto"
+        assert app._approve_all is True
+
+
+@pytest.mark.asyncio
+async def test_default_ask_clears_this_conversations_record(config_dir: Path) -> None:
+    """`default` is the one form that follows the FILE it names.
+
+    A stale record would make the receipt's "this conversation follows it" false
+    — the exact two-truths split the new precedence creates if clearing is
+    forgotten.
+    """
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/approvals auto")
+        assert app._explicit_approvals_mode == "auto"
+
+        await _submit(pilot, app, "/approvals default ask")
+        assert app._explicit_approvals_mode is None
+        assert app._approve_all is False
+        assert app._approvals_default_auto is False
+        assert "this conversation follows it" in _notices(app)[-1]

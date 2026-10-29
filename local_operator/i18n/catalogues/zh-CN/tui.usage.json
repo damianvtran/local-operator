@@ -1,0 +1,23 @@
+{
+  "tui.usage.paid.continue": "包含的配额已用尽；将继续使用积分",
+  "tui.usage.paid.family_caps": "模型系列上限仍然适用",
+  "tui.usage.paid.blocked": "无法付费使用",
+  "tui.usage.paid.eligibility_unknown": "付费使用资格未知",
+  "tui.usage.paid.unlimited": "付费额度不限",
+  "tui.usage.windows_count": "{count, plural, other {{shown}个窗口}}",
+  "tui.usage.exhausted": "{value}个已用尽",
+  "tui.usage.near_limit": "{value}个接近上限",
+  "tui.usage.reported_balance": "{count, plural, other {{shown}项已报告余额}}",
+  "tui.usage.not_reported": "{value}项未报告",
+  "tui.usage.unavailable": "  ·  用量不可用",
+  "tui.usage.resets_in": "，{value}后重置",
+  "tui.usage.no_windows": "  未报告窗口",
+  "tui.usage.fetching": "正在获取……",
+  "tui.usage.title": "用量",
+  "tui.usage.sign_in_expired": "{value}项登录已过期",
+  "tui.usage.stale": "{value}项数据已过期",
+  "tui.usage.refreshing": "正在刷新……",
+  "tui.usage.refresh_failed": "刷新失败 — 显示上次获取的数据",
+  "tui.usage.showing_prefix": "显示 ",
+  "tui.usage.of_separator": " / "
+}

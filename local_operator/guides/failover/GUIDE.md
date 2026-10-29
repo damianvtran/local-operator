@@ -372,7 +372,10 @@ PY
 
 `local_operator/providers/failover.py` is authoritative. It carries the routing
 loop, the cooldown rules, and the comments recording which regression each rule
-exists to prevent; this guide is a reading of it and can fall behind.
+exists to prevent; this guide is a reading of it and can fall behind. Read those
+comments in the source on GitHub at your release's tag
+(`https://github.com/damianvtran/local-operator/blob/v<version>/local_operator/providers/failover.py`):
+the installed copy has its `#` comments stripped to keep the PyPI wheel small.
 
 For anything not answerable here, read the source on GitHub:
 <https://github.com/damianvtran/local-operator>.

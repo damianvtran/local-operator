@@ -63,7 +63,6 @@ from local_operator.session.transcript import (
     ENTRY_CUSTOM,
     ENTRY_MESSAGE,
     ENTRY_PRUNE,
-    TRANSCRIPT_FILENAME,
     TranscriptEntry,
     _compaction_marker,
     _entry_to_message,
@@ -296,7 +295,17 @@ class DurableFoldCache:
         :attr:`DurableFoldState.scan_from_bof`."""
         state = self.get(directory)
         with state.lock:
-            path = directory / TRANSCRIPT_FILENAME
+            # A compressed transcript folds from its materialised copy: the
+            # bytes are the same journal, so the offsets and the inode-keyed
+            # incremental path keep their meaning, and a cache copy that is
+            # re-made simply reads as a new inode (a rebuild, never a wrong
+            # fold).
+            from local_operator.session import compression
+
+            path = compression.transcript_for_read(directory)
+            if path is None:
+                self.invalidate(directory)
+                raise FileNotFoundError(compression.plain_path(directory))
             try:
                 stat = os.stat(path)
             except OSError:
@@ -655,8 +664,8 @@ def _compaction_prefix(
     compaction: TranscriptEntry,
     injection_ids: Container[str] | None = None,
 ) -> list[AgentMessage]:
-    """The marker summary plus preserved user turns, exactly as
-    ``build_llm_history`` injects them (see its docstring for why the turns
+    """The marker summary, preserved user turns and the carried tier, exactly
+    as ``build_llm_history`` injects them (see its docstring for why the turns
     ride the payload verbatim).
 
     ``injection_ids`` carries the same journal-resolved provenance the
@@ -694,6 +703,23 @@ def _compaction_prefix(
                 message.id = turn_id
             message.provider_payload = preserved_turn_payload(turn)
             prefix.append(message)
+    # The carried tier comes from the SAME renderer the live commit and the
+    # transcript replay use; a third hand-kept copy is where a later fix lands
+    # in two places out of three. It sits after the verbatim turns and before
+    # the kept window, on every path.
+    from local_operator.compaction.carry import (
+        CARRIED_ASKS_KEY,
+        CARRIED_DECISIONS_KEY,
+        render_carried_tier,
+    )
+
+    if compaction.payload.get(CARRIED_ASKS_KEY) or compaction.payload.get(CARRIED_DECISIONS_KEY):
+        carried = render_carried_tier(
+            compaction.payload.get(CARRIED_ASKS_KEY),
+            compaction.payload.get(CARRIED_DECISIONS_KEY),
+        )
+        if carried is not None:
+            prefix.append(carried)
     return prefix
 
 
@@ -764,7 +790,9 @@ def _fold(history: list[AgentMessage], directory: Path | None = None) -> list[An
 
     # The existing cache supplies the selected raw window. Only deterministic
     # record IDs for its bounded roots use the existing index; no journal scan.
-    transcript = Transcript(directory)
+    # READ-ONLY: this fold never writes, and the writer variant would restore a
+    # compressed session into a plain file just to replay it (review m2).
+    transcript = Transcript(directory, read_only=True)
     records = discover_records(transcript, history[-4096:], directory.name)
     return fold_messages_to_entries(
         history,
@@ -845,6 +873,17 @@ def _cursor_candidates(row_id: str) -> Iterator[str]:
     while ":" in head:
         head = head.rsplit(":", 1)[0]
         yield head
+    # A REASONING ROW'S ID CARRIES THE MESSAGE IT BELONGS TO. The live fold
+    # mints ``rz-<message id>`` (``projection.py:_reasoning_row``) and reasoning
+    # is never written to the journal at all, so a client holding one has a
+    # cursor no journal row can ever match — it was answered as end-of-history,
+    # which made the conversation's middle unreachable. That message IS a
+    # journal row, and the fold renders it directly BELOW the reasoning row, so
+    # the cursor resolves one journal position newer than the row the caller
+    # holds: the page is exactly the rows older than the message, which is what
+    # the caller lacks, and the caller's own rows de-dup.
+    if row_id.startswith("rz-"):
+        yield row_id[3:]
 
 
 #: The needle a prune entry's line carries, exactly as the journal writes it:
@@ -888,7 +927,11 @@ def _journal_prunes(directory: Path, *, fallback: Mapping[str, str]) -> dict[str
     file answers with: the walk's own read is about to fail on the same file, so
     refusing to page would trade a real answer for no answer.
     """
-    path = directory / TRANSCRIPT_FILENAME
+    from local_operator.session import compression
+
+    path = compression.transcript_for_read(directory)
+    if path is None:
+        return dict(fallback)
     try:
         stat = os.stat(path)
     except OSError:
@@ -1044,7 +1087,10 @@ def journal_rows_older_than(
     each prefix cut at a colon from the right, so an id that carries a colon in
     EITHER half — a ``subagent-launch:<job>`` entry, a
     ``call_00_x7:06c08d4847`` call id — is located by whichever attempt names a
-    real row, and a miss is a miss only once every attempt has failed.
+    real row, and a miss is a miss only once every attempt has failed. A
+    reasoning row's ``rz-`` prefix is stripped for one last attempt: that id
+    exists only in the projection (reasoning is never journaled), while the
+    message it names does.
 
     Returns ``None`` when ``before_id`` names no journal row — the cursor a
     client holds can outlive the file it came from (a compaction that landed
@@ -1210,7 +1256,13 @@ class CustomSnapshotCache:
         grew or was replaced — a dead child's transcript never changes, so the
         scan runs once per daemon lifetime per child.
         """
-        path = directory / TRANSCRIPT_FILENAME
+        from local_operator.session import compression
+
+        path = compression.transcript_for_read(directory)
+        if path is None:
+            with self._lock:
+                self._entries.pop(str(directory), None)
+            return None
         try:
             stat = os.stat(path)
         except OSError:

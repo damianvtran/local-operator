@@ -7,13 +7,15 @@ runtimes and imports this function to answer the same question the desktop
 renderer answers over the wire. ONE map for every reader -- a second copy
 would drift the way every restated rule does.
 
-The ``references`` import stays INSIDE :func:`feature_flags`, and that is
+The ``references`` import stays INSIDE :func:`live_feature_flags`, and that is
 load-bearing rather than stylistic: ``local_operator.references`` reaches
 ``local_operator.tools.builtin`` (~160 ms), and a module-scope import here
 would put that back on every ``lop serve`` startup before the first request --
 the server-shape guard in ``tests/unit/test_import_graph.py`` fails outright
 on it. Deferred, the cost is paid once per process, on the first caller, and
-the surface it serves is cold negotiation, not a hot path.
+the surface it serves is cold negotiation, not a hot path. The build facts live
+beside it in :func:`static_feature_flags`, which a caller may cache precisely
+because it reads no switch.
 """
 
 from __future__ import annotations
@@ -25,21 +27,47 @@ from local_operator.supplements.contract import (
     SUPPLEMENTS_FEATURE_VERSION,
 )
 
+#: Keys this map holds that ONLY the desktop routes serve. The phone relay
+#: (``mobile/daemon.py``) republishes this map as its own capabilities, but it
+#: validates notifications with the legacy ``NotificationsQuery`` (unknown keys
+#: ignored) and ``NotificationsPatch``: a relay ``preview=true`` answers a plain
+#: first page with no ``selection``, the silent first-page fallback the
+#: ``notification_bulk_selection`` key exists to rule out. The relay drops these
+#: keys rather than reshaping its validators, so its behaviour stays as it was.
+#: ``notification_bulk_ask_read`` is listed on its own because the contract
+#: calls it a SEPARATE additive capability a client may test without also
+#: checking ``notification_bulk_selection``; the relay's ``extra="ignore"`` query
+#: drops ``include_ask_reads`` and answers the same plain first page.
+DESKTOP_ONLY_FEATURES = frozenset({"notification_bulk_selection", "notification_bulk_ask_read"})
+
 
 def feature_flags() -> dict[str, Any]:
     """The versioned feature map, resolved per call.
 
     A pure function of PROCESS state -- no request, no session, no arguments --
     which is what lets a non-HTTP surface import it and read exactly what the
-    route publishes: ``references`` follows its kill switch, everything else is
-    a build fact.
-    """
-    # IMPORTED HERE, NOT AT MODULE SCOPE -- see the module docstring. The
-    # precedents the guard names are ``routes.desktop_profiles`` (imports
-    # ``tools.agent_tool`` per profile write) and ``routes.auth`` (imports
-    # ``tunnels.report`` per request).
-    from local_operator.references import at_references_enabled
+    route publishes.
 
+    TWO HALVES, and the split is load-bearing: :func:`static_feature_flags` is
+    every BUILD fact and may be memoised for the life of a process;
+    :func:`live_feature_flags` is every key whose PRESENCE is a runtime fact and
+    must be re-read on each call. A caller that memoised the MERGED map keeps
+    advertising a switch that has since been turned off -- for
+    ``remote_compute`` that switch is the consent gate for sending work off the
+    device, so the stale direction is the dangerous one.
+    """
+    return {**static_feature_flags(), **live_feature_flags()}
+
+
+def static_feature_flags() -> dict[str, Any]:
+    """Every BUILD fact in the map: what this backend can do, not what it is set to.
+
+    SAFE TO MEMOISE, and that is the contract its callers rely on (the mobile
+    daemon caches this dict for the life of the process): nothing here reads
+    config, the environment or a kill switch, so the answer cannot change
+    without a restart. :func:`live_feature_flags` is the disjoint other half --
+    no key appears in both -- and must never be memoised.
+    """
     return {
         "auth": 1,
         "settings": 1,
@@ -85,19 +113,77 @@ def feature_flags() -> dict[str, Any]:
         # working surface because a newer one is missing.
         "skill_catalogue": 1,
         "profile_catalogue": 1,
+        # THE SCOPE FACT ON PROFILE/TEAM ROWS (LOH-9 S2). Its own key, by the rule
+        # stated below: nothing existing is withheld, and a renderer that reads it
+        # knows it may send ``session_id`` to a picker route and paint a badge for
+        # a conversation-scoped row. A client that predates it keeps the fields it
+        # already parsed.
+        "profile_scope": 1,
+        # PROMOTION (LOH-9 S4): `POST /v1/desktop/sessions/{session_id}/promote`
+        # copies one conversation-scoped role or team into the account. Its own key
+        # beside `profile_scope`, by the rule below: a renderer that does not see
+        # it keeps rendering conversation rows without an action, and a renderer
+        # that does may offer "use in all conversations" on exactly those rows.
+        "profile_promote": 1,
         "team_catalogue": 1,
         # Agent Hub update availability: GET /v1/desktop/hub/updates (a store read,
         # no network) plus check/apply/apply-all/retry. A renderer gates the
         # sidebar indicator on this so it never polls a backend that lacks it.
         "hub_updates": 1,
+        # ADDRESSING ONE HUB ITEM BY ITS LOCAL ID: check/apply/retry under
+        # `/v1/desktop/hub/updates/*` accept `local_id` (with `kind`) beside
+        # `name`. Display names are not unique, and the name arm matches
+        # case-insensitively, so `name: "coder"` reaches both `Coder` and
+        # `coder`; a renderer that sees this key sends the `local_id` its
+        # `/hub/links` row carries and touches exactly one item. Its OWN key
+        # rather than a bump of `hub_updates`: older cores refuse the field as
+        # an unknown key (422), so a renderer must keep sending `name` there.
+        "hub_items_by_id": 1,
         # The full local-only LINKS inventory: GET /v1/desktop/hub/links plus
         # PATCH /v1/desktop/hub/links/{link_id} (independent subscribe/auto_push
         # with a policy-revision CAS). Its OWN key rather than a bump of
         # `hub_updates`: a renderer gated on `hub_updates` keeps its existing
         # pending-only sidebar and never polls this, while a renderer that sees
         # `hub_links` may show the healthy inventory with a direct source-scoped
-        # toggle. The legacy `/hub/updates` projection stays compatible.
+        # toggle. The legacy `/hub/updates` projection keeps its SHAPE, but it
+        # now also lists rows with `kind: "skill"` (the operator's brief: a
+        # skill failure must be visible and retryable on the same channel as
+        # agents and teams). A consumer of that projection must tolerate the
+        # third kind; it was a deliberate contract change, not a silent one.
         "hub_links": 1,
+        # THE COMPLETE INITIAL SKILLS ADAPTER: public/org remote reads, the
+        # `org_skills.list`/`org_skill.get` credential proxy, local pull/install,
+        # and initial publication (dry-run preview receipt + confirm) with the
+        # baseline/policy link row it materializes. Its OWN key rather than a
+        # bump of `hub_links`: a renderer gated on `hub_links` keeps its working
+        # agents/teams inventory and never offers a Skills surface whose pull or
+        # publish half would 404 on this backend. The key is a promise about the
+        # WHOLE adapter, so it is advertised only while every route below exists;
+        # the pin in tests/unit/server/test_desktop_hub_skill_publish.py fails if
+        # one is removed without also removing this key.
+        "hub_skills": 1,
+        # THE SKILL LIBRARY ROWS: `GET /v1/desktop/skills` rows carry the
+        # additive `source`/`link_id`/`editable`/`installed`/`fingerprint`/`form`
+        # fields, the list also lists a subscribed-but-not-installed link, and the
+        # `name` arm adds `skill_detail` (body, files, fingerprint, publish budget).
+        # Its OWN key rather than a bump of `hub_skills` or `skill_catalogue`: a
+        # renderer gated on those keeps the plain name/description list and never
+        # draws a card from a field this backend does not send. Read-only: the
+        # write routes advertise their own key, `skill_write`, below.
+        "skill_library": 1,
+        # THE SKILL LIBRARY WRITES: `POST /v1/desktop/skills` (create, or a copy
+        # of a read-only skill via `copy_from`), `PUT /v1/desktop/skills/{name}`
+        # (replace the whole file set, guarded by `expected_fingerprint`) and
+        # `DELETE /v1/desktop/skills/{name}` (backup-move of a local skill, unpull
+        # of a hub-linked one, with `discard_local_changes`). Every write carries
+        # a `request_id` and is receipted. Its OWN key rather than a bump of
+        # `skill_library`: v0.90.17 already shipped `skill_library: 1` as the READ
+        # side, and those cores answer these routes with 405/404, so a renderer
+        # that offered create/edit/remove on `skill_library >= 1` would draw
+        # controls that fail on every released core. It implies nothing about
+        # `skill_library`: a renderer that draws the editor needs BOTH (the rows
+        # and fingerprints it edits come from the read side).
+        "skill_write": 1,
         # 3 adds POST /v1/desktop/sessions/{id}/warm, which starts a
         # session's runtime without submitting work to it.
         #
@@ -116,6 +202,18 @@ def feature_flags() -> dict[str, Any]:
         # Own key: release-skewed clients must fail closed without hiding the
         # catalogue itself when durable tags are unavailable.
         "session_tags": 1,
+        # The OPTIONAL auto-tag half of a desktop fork: the `auto_tag` body key
+        # on POST /v1/desktop/sessions/{id}/fork and the naming call's tag
+        # contract behind it. Its own key rather than a bump of `session_tags`,
+        # and it exists for the STRICTER direction of skew: `Fork` inherits
+        # `extra="forbid"` (as the whole desktop plane does), so an OLDER
+        # daemon answers 422 to a body carrying `auto_tag` — a refused fork,
+        # not a degraded one. A client must therefore ask THIS key before it
+        # sends the field; absent, it omits it and the fork is byte- and
+        # behaviour-identical to today's. `session_tags` stays the gate for the
+        # tag catalogue, so a backend with the catalogue and without
+        # auto-tagging still shows tags and simply never tags a fork itself.
+        "session_tags_auto_tag": 1,
         # A catalogue that can be asked for ONE scope at a time, resumed
         # by an opaque cursor, and counted per group: the
         # `scope_kind`/`scope_name`/`cursor`/`with_counts` parameters on
@@ -189,6 +287,18 @@ def feature_flags() -> dict[str, Any]:
         # field, and a pick that silently did nothing would be worse than
         # a chip that never offered itself).
         "draft_selection": 1,
+        # Whether a draft may be born on the FAST tier: `fast_mode` on
+        # `DraftModel`, accepted by create and reported by preview
+        # (ui#1265). Its own key rather than a bump of `draft_selection`,
+        # by that entry's rule — and because the two gate different
+        # controls: a renderer on a backend without this one keeps its
+        # model and effort chips exactly as they are and holds the SPEED
+        # toggle inert. The hazard it removes is the same one, one field
+        # over: `DraftModel` is `extra="forbid"`, so an unknown field
+        # refuses the WHOLE create body — a toggle that dispatched into it
+        # would take the pair and level the user had just picked down with
+        # it, where a toggle that never offered itself costs nothing.
+        "draft_fast": 1,
         # The provider registry VIEW: `brand` / `capabilities` / `state` /
         # `identity` / `account_count` on the rows of
         # `GET /v1/auth/providers` (a.k.a. the census), AND the licence
@@ -244,6 +354,13 @@ def feature_flags() -> dict[str, Any]:
         # meaningful answer, which is why this is a plain integer
         # rather than a boolean with a default.
         "notification_contract": 1,
+        # Unlike the original observed-id writes, filtered selections cover
+        # unloaded pages and carry server-side Undo receipts. Clients must not
+        # silently fall back to a first-page action against an older backend.
+        "notification_bulk_selection": 1,
+        # V2 freezes ask notification read marks too, but never grants ask
+        # settlement authority. Older selection tokens retain update-only counts.
+        "notification_bulk_ask_read": 1,
         "mcp": 1,
         "mcp_auth": 1,
         # Sessionless MCP management: `GET/POST /v1/desktop/mcp` and
@@ -305,6 +422,86 @@ def feature_flags() -> dict[str, Any]:
         # The number is the READ SHAPE's version, not a gate: 1 is ids, states
         # and coarse codes with no message body.
         "team_bridge_read": 1,
+        # The CONVERSATION domain (docs/TEAM-BRIDGE-CONVERSATIONS.md): DMs,
+        # groups and channels with human and agent participants, over
+        # `/v1/desktop/team-bridge/conversations` and `/unread`. Its own key by
+        # the same rule: a renderer that does not see it must keep the surface
+        # it has (settings/inbox) rather than mount a page whose every call
+        # 404s. 1 is the shape version -- list/detail/messages/unread with a
+        # live body read, never a cached one. The server dark gate still answers
+        # 503, which the status route renders as a state.
+        "team_bridge_conversations": 1,
+        # Optional captured DATA-owner receipts on conversation create/send
+        # (including retry), join/read+notify/consent/admit, archive/unarchive,
+        # member add/remove and leave. New renderers require this capability AND
+        # supply expected_account_id + explicit target tenant_id on every write.
+        # Legacy omission remains compatible on THESE routes. The thread and
+        # reaction routes are covered by their own keys below, where the receipt
+        # is REQUIRED rather than optional.
+        "team_bridge_conversation_owner_guard": 1,
+        # THREADS: `GET .../conversations/{id}/messages/{message_id}/replies`
+        # (read one thread) plus `thread_root_id` on the send above. BOTH halves
+        # REQUIRE the captured-owner receipt (`expected_account_id` + explicit
+        # `tenant_id`), compared atomically against the exact dispatch bearer,
+        # and both answer `409 account_mismatch` when the machine has since
+        # signed in as someone else: a thread read (or a delayed retry of one)
+        # started as account A can never answer B's thread, and a reply composed
+        # as A is never posted as B. The UI held threads closed until this guard
+        # existed (`TEAM_BRIDGE_THREADS_SHIPPED_IN_THIS_BUILD`, the #1304
+        # cache/retry isolation defects), so this key PROMISES the guard, not
+        # only the route: never advertise it on a build whose replies read or
+        # threaded send accepts a receipt-less call. An ordinary top-level send
+        # keeps the legacy optional receipt under the owner-guard key above.
+        # `test_conversation_owner_guard.py` pins the pair.
+        # Its own key by the `radient_org` rule: a renderer that does not see it
+        # mounts no thread affordance and sends no thread request.
+        "team_bridge_threads": 1,
+        # REACTIONS: `PUT`/`DELETE .../messages/{message_id}/reactions/{emoji}`,
+        # the signed-in HUMAN's reaction only (no actor endpoint on this plane).
+        # Both REQUIRE the captured-owner receipt (PUT in the body, DELETE in
+        # the query) under the same atomic compare and the same coded refusal.
+        # Same promise as threads: this key means "reaction routes exist AND
+        # they refuse an unguarded or mismatched call", never route presence
+        # alone, because the UI's reaction hold was lifted on exactly that
+        # condition. A renderer that does not see it shows no reaction controls.
+        "team_bridge_reactions": 1,
+        # The OWNER AUDIT ("{chief of staff}'s messages"): the read-only
+        # `/v1/desktop/team-bridge/owner-audit/...` family over agent-server
+        # #221, where the signed-in owner reads every conversation their own
+        # agent is or was in, with full bodies and per-message
+        # `agent_delivery_status`. Its own key by the `radient_org` rule: a
+        # renderer that does not see it hides the section rather than mounting
+        # one whose every call 404s. 1 is the shape version
+        # (`server/models/desktop_team_bridge_owner_audit.py`). The renderer
+        # keys the section's AVAILABILITY on this capability, never on a 404:
+        # `conversation_not_found` is also what a non-owner or an out-of-window
+        # conversation answers, so treating a 404 as "no audit here" would hide
+        # the section over one conversation (#3022 R1-N2). A hub that predates
+        # #221 is detected on the LIST route only (its 404 there).
+        "team_bridge_owner_audit": 1,
+        # The chief-of-staff read grant (agent-server §17): `PUT`/`DELETE
+        # /v1/desktop/team-bridge/conversations/{id}/cos-read`, both guarded
+        # (tenant_id + expected_account_id required). The renderer shows
+        # "Share with my chief of staff" only when this key is present; a hub
+        # that predates §17 answers the PUT 404/405, which the UI reports as
+        # unsupported rather than hiding the conversation.
+        "team_bridge_cos_read": 1,
+        # The owner's agent-invitation surface over agent-server #227: the
+        # `GET /v1/desktop/team-bridge/agents/owned/invitations` read (metadata
+        # only, receipt required, `private, no-store`) and `decision=withdraw`
+        # (no consent_version) plus an optional `endpoint_id` pin on the
+        # consent route. Its own key by the `radient_org` rule: a renderer that
+        # does not see it neither mounts the invitations list nor offers
+        # "Remove my agent", because a build without this key would 404 the
+        # read and 422 the decision. It promises the RUNTIME only; a hub that
+        # predates #227 answers either with 409 `outdated_hub`, which the
+        # renderer shows as "the server needs an update" rather than probing.
+        "team_bridge_owner_invitations": 1,
+        # `GET /v1/desktop/team-bridge/accounts/{id}/notification-avatar`: one
+        # precomposed PNG (photo or initials, LO corner badge, agent marker)
+        # for a Team Bridge OS notification's image slot. Own key so a desktop
+        # facing an older core keeps today's app icon instead of 404-probing.
+        "team_bridge_notification_avatar": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key
@@ -522,6 +719,15 @@ def feature_flags() -> dict[str, Any]:
         # and are deliberately not re-declared here: a client requires the
         # conjunction, it does not get a second spelling of the same fact.
         "agents_config": 1,
+        # The configuration run can also revise the operator's OWN skills: its
+        # declaration names the opt-in `skill` tool (list/show/create/update,
+        # through the same write path as `skill_write`). ITS OWN KEY for the
+        # reason `agents_config` states: an older backend has `agents_config`
+        # but builds no `skill` tool, so a run there would answer "I can't edit
+        # skills" -- the Skills tab must not mount its composer against it.
+        # The renderer requires it together with `agents_config` and
+        # `skill_library` (its settle diff reads the skills list).
+        "agents_config_skills": 1,
         # Durable conversation pins: the `pinned` flag on every catalogue
         # row, and POST /v1/desktop/sessions/{id}/pin.
         #
@@ -648,71 +854,6 @@ def feature_flags() -> dict[str, Any]:
         # nothing.
         "peers": 1,
         "session_transfer": 1,
-        # ``@path`` in an ordinary submitted message, which
-        # :meth:`Session.prompt` expands into an
-        # ``<operator-references>`` block before the model sees the turn
-        # (`references.expand_references`; `prompt` is the single
-        # expansion site EVERY NON-ASIDE SURFACE reaches — the CLI,
-        # headless runs, the server, the scheduler, the mobile service and
-        # every subagent — and `references.py`'s docstring counts the
-        # other expanding caller, the TUI's aside worker, beside it).
-        #
-        # WHAT THIS KEY DOES NOT COVER, stated because a client that
-        # assumed otherwise would paint a chip over literal text: this
-        # server's send route takes ``mode: "prompt" | "steer"``, and a
-        # STEER bypasses `prompt` — :meth:`Session.steer` queues the
-        # message and expands nothing. `session/session.py` lists the
-        # three entry paths that predate the feature and leave an `@path`
-        # as inert prose: `steer`, a wake delivery, and an aside FORK —
-        # and that last one is true only of the adopted ROW, because the
-        # TUI's own aside worker expands the text it hands the model
-        # (`tui/app.py`'s `_expand_references` is that call, and
-        # `references.py` names it as one of the TWO expanding callers).
-        # So the key means "this backend expands a reference in a
-        # PROMPT", never "in any text a client sends", and a composer
-        # that can send either must withhold the affordance for the
-        # steer — which is what the shipped one does, `!busy` beside
-        # this gate.
-        #
-        # THIS IS THE WRITER THE RENDERER HAS BEEN WAITING FOR. The app
-        # ships the `@` picker, the inline chips and the composer tip,
-        # and withholds all three until a backend advertises this key —
-        # so on every backend older than this line the affordance is
-        # dark BY DESIGN, `@path` stays the plain text such a backend
-        # sends, and the composer says why. The key is the whole switch;
-        # nothing else about the app changed to light it up.
-        #
-        # CONDITIONAL, and it is the only key in this map whose PRESENCE
-        # is a runtime fact rather than a build fact.
-        # ``LOCAL_OPERATOR_AT_REFERENCES``
-        # (:data:`local_operator.references.AT_REFERENCES_ENV`) is a kill
-        # switch read per call, so a process told not to expand must not
-        # advertise a picker that paints chips for an expansion it will
-        # not perform: a client that believed the key would show the
-        # user a reference the model never receives, which is the one
-        # lie this gate exists to prevent. That variable has exactly ONE
-        # reader, :func:`~local_operator.references.at_references_enabled`,
-        # which is called here rather than re-read, so this payload and
-        # the expansion THIS PROCESS performs cannot disagree.
-        #
-        # AND THAT LAST CLAUSE IS SCOPED TO THIS PROCESS, which is a real
-        # boundary rather than a hedge: a turn is admitted over a socket
-        # to whichever process OWNS the session, and a runtime's
-        # environment is the snapshot it was spawned with. So a daemon
-        # whose switch is on can advertise the key while an owner engaged
-        # from a shell that exported the switch off sends the literal
-        # `@path`. No value read here can fix that, and it needs no new
-        # handling: the owner's behaviour is the same absent-key
-        # behaviour a client already implements, and the case that
-        # matters — every backend older than this line — is decided by
-        # presence alone.
-        #
-        # ITS OWN KEY rather than a bump, by the rule `session_search`
-        # states above: the composer renders perfectly well without it —
-        # an unexpanded `@path` is prose the model reads as prose — so
-        # gating that working composer on a newer version would take a
-        # surface away to advertise nothing. A client that does not see
-        # the key must send the draft as typed and offer no affordance.
         # The PROJECT primitive (`/v1/desktop/projects*`, the ``project``
         # tool and ``/project``). ONE key gating both the affordance and
         # the reads: the Projects tab, its CRUD dialogs and the
@@ -751,6 +892,12 @@ def feature_flags() -> dict[str, Any]:
         # command surface changes shape — an older renderer simply
         # never hears of this word.
         "aida": 1,
+        # THE LIBRARIAN: the Library header's status/"Organize now" row and the
+        # `/v1/desktop/librarian` pair. ONE key for both halves by the same rule
+        # `projects` states — a row that opened a route an older backend does
+        # not serve is a dead end, and a served route with no row is an orphan.
+        # `1` is the feature's first version; the route shape is frozen.
+        "librarian": 1,
         "projects": 2,
         # THE ONBOARDING APPROVAL SURFACE: GET /v1/desktop/approvals plus the two
         # decision posts (POST /v1/desktop/approvals/{id}/approve|deny). ONE key
@@ -763,6 +910,15 @@ def feature_flags() -> dict[str, Any]:
         # POST would 404 on a backend without it. Absent, the tab simply has no
         # approval affordance, which is the pre-onboarding state.
         "approvals": 1,
+        # Existing signed SSH onboarding, surfaced without a new trust engine.
+        "mesh_onboard": 1,
+        # TYPED CREDENTIAL APPROVAL: `POST /v1/desktop/approvals/{id}/approve-credential`
+        # (review -> sign -> apply in one call, phase-by-phase answer) and
+        # `.../apply-credential` (the retry of a signed card), plus the `typed_approval`
+        # block on a credential row. ITS OWN KEY, not a bump of `approvals`: a renderer
+        # without it keeps the CLI-remedy card (`can_approve_here: False`) and never
+        # POSTs a body this backend would not understand.
+        "credential_approvals": 1,
         # THE ONE DIAL on the projects surface: `POST
         # /v1/desktop/projects/{key}/request-update`, which asks the linked
         # sessions for a progress update through the same peer-send core the
@@ -818,6 +974,23 @@ def feature_flags() -> dict[str, Any]:
         # daemon that serves this route, so this key being present does not prove
         # the owner behind a given session can keep the pictures).
         "ask_attachments": 1,
+        # PUTTING A QUEUED ASK AWAY from the desktop: `dismiss` + `reason` on the
+        # `POST /v1/desktop/sessions/{id}/answers` body, accepted on an OPEN ask
+        # while the agent is running (SA-D5, design §15, 2026-10-23).
+        #
+        # WHY A KEY -- the `ask_attachments` argument verbatim: `Answer` is
+        # `extra="forbid"`, so a renderer that offered Dismiss against an older
+        # backend would 422 the user's own tap. Gated, the card draws no Dismiss
+        # affordance and behaves exactly as today, which is also the pre-feature
+        # state for an operator whose runtime predates the engine half.
+        #
+        # THE OWNER-SIDE HALF is not negotiated separately, and that is deliberate
+        # rather than an omission: unlike an answer's attachments (which a runtime
+        # must be able to keep, so `ask-attachments-v1` rides the owner record),
+        # the dismissal is settled by whichever door answers -- the no-boot cold
+        # door on this device, or the live op on the owner -- and an older owner
+        # simply refuses in the queue's own words, which the card shows inline.
+        "ask_dismiss": 1,
         # THE SPEECH SURFACE: `GET /v1/stt/paths` (the ordered cascade report)
         # and `POST /v1/stt/transcriptions` (the executor, with its 409
         # `stt_unavailable` structured refusal), plus the audio-accepting
@@ -889,6 +1062,16 @@ def feature_flags() -> dict[str, Any]:
         # `1` is the feature's first contract revision; new row fields are additive and do not
         # bump it.
         "session_files": 1,
+        # THE USER-ATTACHMENT INVENTORY: `GET /v1/desktop/sessions/{id}/user-attachments`,
+        # every document and picture the PERSON attached to the conversation, scanned from the
+        # whole journal (`session/user_attachments.py`). Its OWN key rather than a bump of
+        # `session_files`: that index is the agent's OUTPUT and its key promises nothing about
+        # inputs, so a backend with `session_files` but not this route must be recognisable.
+        # ADDITIVE: an older renderer never calls it. ABSENT MEANS the canvas builds its
+        # Attachments section from the history rows it has loaded and must not call the route
+        # (it would 404) - nor present that partial list as complete.
+        # `1` is the first contract revision; item fields are additive and do not bump it.
+        "session_attachments": 1,
         # The global, cross-conversation Library: list/detail/metadata/tags/
         # content. Its OWN key rather than a bump of `session_files`: the
         # surfaces (desktop sidebar, TUI /library, phone web, Expo) are new
@@ -898,6 +1081,38 @@ def feature_flags() -> dict[str, Any]:
         # `1` is the first contract revision; row/occurrence fields are
         # additive and do not bump it.
         "library": 1,
+        # THE OPERATOR'S INBOX (`docs/design/notifications-inbox.md`): the
+        # `/v1/desktop/notifications` routes (list, count, detail, PATCH, seen)
+        # over the items agents raise with `notify` plus the open asks, and the
+        # `notifications` invalidation frame on `GET /v1/desktop/events`. Its OWN
+        # key: the page, the sidebar destination, the `/notifications` slash
+        # destination and the feed branch are all NEW surfaces, so a renderer
+        # must recognise an older backend as "no inbox" and offer none of them
+        # (the sidebar strips the `notifications` id on save unless this key is
+        # present, decision D10). `1` is the first contract revision; item and
+        # answer fields are additive and do not bump it. Served to the relay
+        # through `_feature_flags()` like every key here.
+        "notifications": 1,
+        # THE NATIVE SEEN DOOR (D11): this core's inbox accepts per-item
+        # ``evidence.surface: "native"`` receipts — touch/press/scroll edges
+        # re-checked exactly like the desktop's, recorded as ``in_view`` with
+        # their surface. It exists as its own key because the CONSUMER is the
+        # relay: the phone turns its receipt feed on only when this is present,
+        # and a core that predates it must be recognisable as "no native
+        # receipts" rather than silently refusing every one (the refusal native
+        # #117 would retry every 500 ms). ``1`` is the first contract revision.
+        "notifications_seen": 1,
+        # THE DESKTOP SIDEBAR'S DESTINATION LAYOUT: the route pair
+        # `GET`/`PUT /v1/desktop/sidebar-layout` over one stored preference (the
+        # rows above the `More` fold and the rows below it). ADDITIVE — an older
+        # renderer never calls either route — so it gates nothing for an old
+        # client; it is how a renderer learns the surface EXISTS before it
+        # offers drag handles or a row menu whose save would 404. Absent, the
+        # client MUST NOT offer customisation at all and draws the fixed default
+        # order: a drag the backend cannot persist is worse than no drag.
+        # `1` is the first contract revision; a future stored field is additive
+        # and does not bump it.
+        "sidebar_layout": 1,
         # THE PRE-EMPTIVE QUOTA NOTICE: `GET /v1/desktop/quota-notice`, the
         # empty-session advisory that the selected account has no quota left
         # (design: "pre-emptive no-quota notice"). Its OWN key rather than a
@@ -930,5 +1145,116 @@ def feature_flags() -> dict[str, Any]:
         # returns one WAV segment by `(source, segment)`, and 429s carry
         # `voice_rate_limited`. A renderer on 1 has no speech route.
         "voice": 2,
+        # REMOTE COMPUTE (preview): the affordance that offers to run work on
+        # Radient-hosted compute. CONDITIONAL, because unlike every build fact
+        # above this one must not be advertised while it is switched off: the
+        # bit is what a renderer gates its remote destination on, and a client
+        # that saw it on an install whose owner has not opted in would offer to
+        # send that owner's work off the device. It follows the LIVE setting
+        # (``remote_compute.is_enabled`` reads ``config.yml`` per call, the way
+        # ``references`` follows its kill switch), so disabling withdraws the
+        # affordance at the next negotiation, not the next restart.
+        # Absent ⇒ no remote destination and no request to build — the
+    }
+
+
+def live_feature_flags() -> dict[str, Any]:
+    """The keys whose PRESENCE is a live runtime fact, resolved on EVERY call.
+
+    The imports stay INSIDE this function, not at module scope -- see the
+    module docstring: ``local_operator.references`` reaches ``tools.builtin``
+    (~160 ms), and deferring it keeps that off ``lop serve`` startup. Each
+    reader is the single owner of its switch and is CALLED rather than re-read,
+    so this map and the behaviour of THIS process cannot disagree.
+
+    Never memoise the result: a caller that pinned it would keep advertising a
+    feature after its switch was turned off.
+    """
+    # IMPORTED HERE, NOT AT MODULE SCOPE -- see the module docstring. The
+    # precedents the guard names are ``routes.desktop_profiles`` (imports
+    # ``tools.agent_tool`` per profile write) and ``routes.auth`` (imports
+    # ``tunnels.report`` per request).
+    from local_operator.references import at_references_enabled
+    from local_operator.remote_compute import is_enabled as remote_compute_enabled
+
+    return {
+        # REMOTE COMPUTE (preview): the affordance that offers to run work on
+        # Radient-hosted compute. CONDITIONAL, because unlike every build fact
+        # above this one must not be advertised while it is switched off: the
+        # bit is what a renderer gates its remote destination on, and a client
+        # that saw it on an install whose owner has not opted in would offer to
+        # send that owner's work off the device. It follows the LIVE setting
+        # (``remote_compute.is_enabled`` reads ``config.yml`` per call, the way
+        # ``references`` follows its kill switch), so disabling withdraws the
+        # affordance at the next negotiation, not the next restart.
+        # Absent ⇒ no remote destination and no request to build — the
+        # pre-feature state, not a degraded one.
+        **({"remote_compute": 1} if remote_compute_enabled() else {}),
+        # ``@path`` in an ordinary submitted message, which
+        # :meth:`Session.prompt` expands into an
+        # ``<operator-references>`` block before the model sees the turn
+        # (`references.expand_references`; `prompt` is the single
+        # expansion site EVERY NON-ASIDE SURFACE reaches — the CLI,
+        # headless runs, the server, the scheduler, the mobile service and
+        # every subagent — and `references.py`'s docstring counts the
+        # other expanding caller, the TUI's aside worker, beside it).
+        #
+        # WHAT THIS KEY DOES NOT COVER, stated because a client that
+        # assumed otherwise would paint a chip over literal text: this
+        # server's send route takes ``mode: "prompt" | "steer"``, and a
+        # STEER bypasses `prompt` — :meth:`Session.steer` queues the
+        # message and expands nothing. `session/session.py` lists the
+        # three entry paths that predate the feature and leave an `@path`
+        # as inert prose: `steer`, a wake delivery, and an aside FORK —
+        # and that last one is true only of the adopted ROW, because the
+        # TUI's own aside worker expands the text it hands the model
+        # (`tui/app.py`'s `_expand_references` is that call, and
+        # `references.py` names it as one of the TWO expanding callers).
+        # So the key means "this backend expands a reference in a
+        # PROMPT", never "in any text a client sends", and a composer
+        # that can send either must withhold the affordance for the
+        # steer — which is what the shipped one does, `!busy` beside
+        # this gate.
+        #
+        # THIS IS THE WRITER THE RENDERER HAS BEEN WAITING FOR. The app
+        # ships the `@` picker, the inline chips and the composer tip,
+        # and withholds all three until a backend advertises this key —
+        # so on every backend older than this line the affordance is
+        # dark BY DESIGN, `@path` stays the plain text such a backend
+        # sends, and the composer says why. The key is the whole switch;
+        # nothing else about the app changed to light it up.
+        #
+        # CONDITIONAL, and — beside ``remote_compute`` above — one of the
+        # two keys in this map whose PRESENCE is a runtime fact rather than
+        # a build fact.
+        # ``LOCAL_OPERATOR_AT_REFERENCES``
+        # (:data:`local_operator.references.AT_REFERENCES_ENV`) is a kill
+        # switch read per call, so a process told not to expand must not
+        # advertise a picker that paints chips for an expansion it will
+        # not perform: a client that believed the key would show the
+        # user a reference the model never receives, which is the one
+        # lie this gate exists to prevent. That variable has exactly ONE
+        # reader, :func:`~local_operator.references.at_references_enabled`,
+        # which is called here rather than re-read, so this payload and
+        # the expansion THIS PROCESS performs cannot disagree.
+        #
+        # AND THAT LAST CLAUSE IS SCOPED TO THIS PROCESS, which is a real
+        # boundary rather than a hedge: a turn is admitted over a socket
+        # to whichever process OWNS the session, and a runtime's
+        # environment is the snapshot it was spawned with. So a daemon
+        # whose switch is on can advertise the key while an owner engaged
+        # from a shell that exported the switch off sends the literal
+        # `@path`. No value read here can fix that, and it needs no new
+        # handling: the owner's behaviour is the same absent-key
+        # behaviour a client already implements, and the case that
+        # matters — every backend older than this line — is decided by
+        # presence alone.
+        #
+        # ITS OWN KEY rather than a bump, by the rule `session_search`
+        # states above: the composer renders perfectly well without it —
+        # an unexpanded `@path` is prose the model reads as prose — so
+        # gating that working composer on a newer version would take a
+        # surface away to advertise nothing. A client that does not see
+        # the key must send the draft as typed and offer no affordance.
         **({"references": 1} if at_references_enabled() else {}),
     }

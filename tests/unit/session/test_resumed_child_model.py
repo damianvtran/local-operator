@@ -830,6 +830,7 @@ async def test_a_legacy_role_pinned_manager_still_decides_its_workers_model(tmp_
             delegate=True,
         ),
         creating=True,
+        scope="global",
     )
 
     stream = HangingThenDoneStream(hold="MANAGE-HOLD")

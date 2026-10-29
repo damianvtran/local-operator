@@ -146,16 +146,18 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     not type any of them, and painting one attributes the harness's words to
     them. The live path never shows them, so replay must not either.
 
-    The SEVEN, and why each is persisted:
+    The NINE, and why each is persisted:
 
     - ``LOOP_PROMPT`` — the goal loop's self-continuation.
-    - ``_CONTINUATION_PROMPT`` — the session's auto-continuation after a
+    - ``CONTINUATION_AFTER_COMPACTION`` — the session's auto-continuation after a
       turn hit its step budget.
     - ``CONNECTIVITY_CONTINUATION_PROMPT`` — records why ONE answer arrived
       in two pieces across a network interruption; the live run showed a
       notice instead.
     - ``NAMELESS_CALL_RECOVERY_PROMPT`` — the re-ask after a tool call arrived
       with no name and was dropped; the live run showed a notice instead.
+    - ``NO_PROGRESS_RECOVERY_PROMPT`` — the steer after unchanged tool calls
+      repeat; persisted so replay records the harness intervention.
     - ``WORDLESS_STOP_RECOVERY_PROMPT`` — the re-ask after a turn arrived with
       no text and no tool calls on a clean stop; the live run showed a notice
       instead.
@@ -166,6 +168,10 @@ def harness_chrome_prompts() -> tuple[str, ...]:
       limit cut a delegated CHILD's answer off mid-prose; the live run showed a
       notice instead, and the child finishes the deliverable rather than its
       parent paying a resume for the rest.
+    - ``DEGENERATE_STREAM_RECOVERY_PROMPT`` — the steer after the in-stream
+      degeneration guard cut a response that had become one passage repeated
+      verbatim; the looping message itself is dropped, so this is the only
+      record of why the conversation continues.
 
     This is the EXACT-match half of the decision, and it is no longer the whole
     of it: two fixed prompts that look like the user's words do not, because the
@@ -190,24 +196,31 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     decision, and it is this function plus those recognisers, not a list per
     surface.
     """
-    from local_operator.harness.loop import (
+    from local_operator.harness.chrome_prompts import (
         CONNECTIVITY_CONTINUATION_PROMPT,
+        CONTINUATION_AFTER_COMPACTION,
         CONTINUE_TRUNCATED_ANSWER_PROMPT,
+        DEGENERATE_STREAM_RECOVERY_PROMPT,
         LENGTH_STOP_RECOVERY_PROMPT,
         NAMELESS_CALL_RECOVERY_PROMPT,
+        NO_PROGRESS_RECOVERY_PROMPT,
         WORDLESS_STOP_RECOVERY_PROMPT,
     )
     from local_operator.session.goal_loop import LOOP_PROMPT
-    from local_operator.session.session import _CONTINUATION_PROMPT
 
+    # Appended LAST, never inserted: tests and hosts index this tuple
+    # (``harness_chrome_prompts()[2]``), so a new member must not shift the
+    # positions the earlier ones hold.
     return (
         LOOP_PROMPT,
-        _CONTINUATION_PROMPT,
+        CONTINUATION_AFTER_COMPACTION,
         CONNECTIVITY_CONTINUATION_PROMPT,
         NAMELESS_CALL_RECOVERY_PROMPT,
+        NO_PROGRESS_RECOVERY_PROMPT,
         WORDLESS_STOP_RECOVERY_PROMPT,
         LENGTH_STOP_RECOVERY_PROMPT,
         CONTINUE_TRUNCATED_ANSWER_PROMPT,
+        DEGENERATE_STREAM_RECOVERY_PROMPT,
     )
 
 
@@ -222,7 +235,7 @@ def is_harness_chrome(text: str) -> bool:
     words the moment a persisted prompt gained a trailing newline.
 
     Two legs, one decision. Exact membership covers the prompts that are
-    single fixed strings (the seven listed above); a producer-side recogniser covers each family the
+    single fixed strings (the nine listed above); a producer-side recogniser covers each family the
     producer composes and therefore cannot enumerate — the loop's
     :func:`~local_operator.harness.loop.is_connectivity_continuation_instruction`
     for the "prose then an aborted tool call" instruction, the goal judge's
@@ -237,7 +250,9 @@ def is_harness_chrome(text: str) -> bool:
     changes with the goal. The goal-mode loop's turn was the third instance of
     exactly that, and it had no recogniser at all.
     """
-    from local_operator.harness.loop import is_connectivity_continuation_instruction
+    from local_operator.harness.chrome_prompts import (
+        is_connectivity_continuation_instruction,
+    )
     from local_operator.session.goal_judge import is_goal_continuation_instruction
     from local_operator.session.goal_loop import is_loop_goal_instruction
 
@@ -528,6 +543,23 @@ def is_ask_gate_divert_row(row: Any) -> bool:
     return is_ask_gate_divert_details(provider_payload.get("details"))
 
 
+def is_binding_notice_row(row: Any) -> bool:
+    """Credential-change notices are diagnostics, not desktop conversation rows.
+
+    Filter at the backend so older desktop reducers cannot paint legacy floods
+    as ``<wire type>: <text>``. This is display projection only: the original
+    journal and the separate binding audit metadata stay intact and accessible.
+    Both message/custom envelopes occur in historical journals.
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+
+    payload = row.get("payload") if isinstance(row, Mapping) else None
+    return (
+        isinstance(payload, Mapping)
+        and payload.get("custom_type") == SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    )
+
+
 def visible_transcript_rows(rows: list[Any]) -> list[Any]:
     """Drop the rows a human transcript must never serve.
 
@@ -554,6 +586,8 @@ def visible_transcript_rows(rows: list[Any]) -> list[Any]:
     """
     out: list[Any] = []
     for row in rows:
+        if is_binding_notice_row(row):
+            continue
         payload = row.get("payload") if isinstance(row, Mapping) else None
         if isinstance(payload, Mapping) and is_hidden_wake_delivery(payload):
             continue
@@ -768,6 +802,75 @@ def typed_line_of(text: str) -> str | None:
         return None
 
 
+def _strip_spans(text: str, spans: Sequence[tuple[int, int]]) -> str:
+    """``text`` without ``spans``, separated the way the blocks were joined.
+
+    The single join rule for every block grammar a user row has to hide, so the
+    reference strip and the skill strip cannot disagree about spacing. The
+    resolver appends a block as ``JOIN + block``, so the separator BEFORE one
+    belongs to the block rather than to the operator's prose: each segment is
+    right-stripped, or the row paints a blank line where the block stood.
+
+    A SEPARATOR goes back where two surviving segments would otherwise fuse. A
+    caller that appends text to an expanded message with no space of its own
+    painted `first @a.txtand next` (review round 2, NIT-1). One space only when
+    the next segment starts on a non-space character: the ordinary shapes
+    already carry their own leading whitespace, so they are joined
+    byte-identically to before.
+
+    Spans are sorted and clipped to each other, because the two grammars can
+    nest: a SKILL.md body may quote a complete reference block, and then one
+    span lies inside the other.
+    """
+    kept: list[str] = []
+    cursor = 0
+    for start, end in sorted(spans):
+        if end <= cursor:
+            continue
+        start = max(start, cursor)
+        kept.append(text[cursor:start].rstrip())
+        cursor = end
+    kept.append(text[cursor:].rstrip())
+    joined = ""
+    for segment in kept:
+        if not segment:
+            continue
+        if joined and not segment[0].isspace():
+            joined += " "
+        joined += segment
+    return joined
+
+
+def _skill_block_spans(text: str) -> list[tuple[int, int]]:
+    """Complete skill-block spans, or none when the grammar cannot load.
+
+    Lazy-imported and failure-swallowing for the same reason
+    :func:`typed_line_of` is: a transcript replay must never fail on this, and
+    the grammar lives in a host-free module rather than under ``skills/`` so
+    this is a leaf import, not the discovery tree.
+    """
+    try:
+        from local_operator.sigils import skill_block_spans
+    except Exception:  # noqa: BLE001 — replay must never fail on this
+        return []
+    return skill_block_spans(text)
+
+
+def _reference_block_spans(text: str) -> list[tuple[int, int]]:
+    """Complete reference-block spans, or none when the resolver cannot load.
+
+    Lazy-imported and failure-swallowing by contract, like :func:`typed_line_of`
+    above and for the same reason: this module stays host-free, and a broken or
+    absent resolver must never stop a transcript replaying. Every failure
+    degrades to "no block here", so the caller paints the text verbatim.
+    """
+    try:
+        from local_operator.references import reference_block_spans
+    except Exception:  # noqa: BLE001 — replay must never fail on this
+        return []
+    return reference_block_spans(text)
+
+
 def reference_block_stripped(text: str) -> str:
     """``text`` without the ``<operator-references>`` blocks appended to it.
 
@@ -826,54 +929,27 @@ def reference_block_stripped(text: str) -> str:
     absent resolver must never stop a transcript replaying. Every failure
     degrades to "no block here", so the caller paints the text verbatim.
     """
-    try:
-        from local_operator.references import reference_block_spans
-    except Exception:  # noqa: BLE001 — replay must never fail on this
-        return text
-    spans = reference_block_spans(text)
+    spans = _reference_block_spans(text)
     if not spans:
         return text
-    kept: list[str] = []
-    cursor = 0
-    for start, end in spans:
-        # The resolver appends a block as ``JOIN + block``, so the separator
-        # before one belongs to the block rather than to the operator's prose:
-        # keeping it would paint a blank line where the block stood, turning
-        # "first @a.txt and now @b.txt" into a two-paragraph row.
-        kept.append(text[cursor:start].rstrip())
-        cursor = end
-    kept.append(text[cursor:].rstrip())
-    # A SEPARATOR where two segments would otherwise fuse. Each segment is
-    # right-stripped, because the separator BEFORE a block belongs to the block
-    # rather than to the operator's prose, so a segment can end at a word — and
-    # a caller that appends text to an expanded message with no space of its own
-    # then painted `first @a.txtand next` (review round 2, NIT-1). A single
-    # space only when the next segment starts on a non-space character: the
-    # ordinary shapes already carry their own leading whitespace, so they are
-    # joined byte-identically to before.
-    joined = ""
-    for segment in kept:
-        if not segment:
-            continue
-        if joined and not segment[0].isspace():
-            joined += " "
-        joined += segment
-    return joined
+    return _strip_spans(text, spans)
 
 
 def user_row_text(text: str) -> str:
     """What a surface paints for a ``role="user"`` message.
 
-    Collapses a skill payload to the line the user actually typed, strips an
-    expanded reference block, and leaves every other message alone. Kept beside
-    :func:`is_harness_chrome` because the two are the whole of the "what did the
-    user really say" decision, and splitting them across hosts is how one
-    surface got the skill rule and the other did not.
+    Collapses the old ``$skill`` payload shape to the line the user actually
+    typed, strips the expanded reference and skill blocks, and leaves every
+    other message alone. Kept beside :func:`is_harness_chrome` because the two
+    are the whole of the "what did the user really say" decision, and splitting
+    them across hosts is how one surface got the skill rule and the other did
+    not.
 
-    The reference block is removed FIRST, before the skill fallback: a
-    `$skill` invocation whose request cited a file carries both, and
-    :func:`typed_line_of` parses the payload envelope, which a trailing block
-    would sit outside of and survive.
+    BOTH blocks go in ONE pass (the union of their spans), then the legacy
+    fallback runs: an old payload's typed line lives in its tag, not in prose,
+    so :func:`typed_line_of` still has to recover it. A new payload needs no
+    recovery — its user text sits verbatim before the block — which is what
+    makes live and replay rows agree by construction.
 
     Strips for the same reason :func:`is_harness_chrome` does: the two hosts
     normalise differently, so an envelope with surrounding whitespace would
@@ -881,7 +957,8 @@ def user_row_text(text: str) -> str:
     phone. The fallback returns the stripped text so both surfaces paint one
     row, not one padded and one not.
     """
-    stripped = reference_block_stripped(text).strip()
+    spans = _reference_block_spans(text) + _skill_block_spans(text)
+    stripped = _strip_spans(text, spans).strip()
     return typed_line_of(stripped) or stripped
 
 
@@ -935,6 +1012,11 @@ def gate_waited_text(details: Mapping[str, Any] | None) -> str:
     return f"{int(seconds // 86400)}d"
 
 
+#: The surface words an ``ask_response`` dismissal receipt shows. ``remote`` is what
+#: the relay stamps for the phone's tap (an empty ``by`` on the wire).
+_DISMISS_SURFACE_WORDS = {"remote": "phone", "tui": "terminal"}
+
+
 def ask_response_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeSeverity]:
     """The human one-liner for an ``ask_response`` row: ``(text, kind)``.
 
@@ -956,6 +1038,19 @@ def ask_response_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeS
         return (f"Ask {ask_id} declined — the agent was told", "info")
     if status == "late":
         return (f"Answered late — the agent was told (ask {ask_id})", "warning")
+    if status == "dismissed":
+        # The audit receipt of an operator dismissal (design §15): who, through
+        # which surface, and why. Without this branch the row would fall through
+        # to "Answered — delivering", which is false for a dismissal.
+        by = details.get("by")
+        surface = str(by.get("surface") or "") if isinstance(by, Mapping) else ""
+        surface = _DISMISS_SURFACE_WORDS.get(surface, surface)
+        # One source for the labels: the response text and this receipt must not drift.
+        from local_operator.asks.render import DISMISS_REASON_LABELS
+
+        reason = DISMISS_REASON_LABELS.get(str(details.get("reason") or ""), "no longer needed")
+        via = f" ({surface})" if surface else ""
+        return (f"Dismissed by you{via} — {reason} (ask {ask_id})", "info")
     return (f"Answered — delivering (ask {ask_id})", "info")
 
 
@@ -1246,7 +1341,15 @@ def wake_display_name(wake_id: str) -> str:
     try:
         from local_operator.aida import proactive as aida_proactive
 
-        return aida_proactive.wake_display_label(wake_id)
+        label = aida_proactive.wake_display_label(wake_id)
+        if label != wake_id:
+            return label
+        # THE LIBRARIAN'S ROWS ride the same one-lookup contract: Aida's mapper
+        # answers unknown ids with the id itself, so an unchanged answer is the
+        # hand-off point, not a fallback.
+        from local_operator.librarian import proactive as librarian_proactive
+
+        return librarian_proactive.wake_display_label(wake_id)
     except Exception:  # noqa: BLE001 — a label is never worth a receipt
         return wake_id
 
@@ -1548,6 +1651,21 @@ def assistant_stop_notice(
             "model refused the request (no details recorded)"
         )
         return refusal, "error"
+    if stop_reason == "length" and (provider_payload or {}).get("degenerate_stream"):
+        # THE DEGENERATION GUARD'S CUT (``harness.degeneration``), not the
+        # output limit. The loop ends a guard-cut turn as ``length`` so no
+        # surface reads it as a complete answer, but every sentence in the arm
+        # below names the OUTPUT LIMIT or BUDGET -- false here: the guard stopped
+        # the stream after ~10 KB precisely so the budget was not spent (review
+        # round 1, m2). The cut message is dropped from durable history, so this
+        # is reached by a fold over LIVE rows: an attached viewer's
+        # ``_live_history`` re-prepared mid-run, or the phone/TUI replay of the
+        # same window. ``interrupted`` is the existing, cause-neutral word for a
+        # turn that ended before it finished, and it claims nothing about why.
+        # Warning tier, like the length arm: the harness recovered the turn, it
+        # did not fail. (A properly worded, translated notice is a follow-up:
+        # a new message needs a new catalogue key in every carried locale.)
+        return "interrupted", "warning"
     if stop_reason == "length":
         # Tier `warning`, not `error`: the turn produced what it produced and
         # stopped where the limit sits, which is a statement about the reply's

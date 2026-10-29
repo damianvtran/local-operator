@@ -1108,6 +1108,39 @@ class McpTokenStorage:
             return None
         return any(row.identity_key == self.server_url for row in rows)
 
+    def holds_grant(self) -> bool | None:
+        """Whether this device was ever ISSUED a grant for the URL it still holds.
+
+        The three-valued twin of :meth:`has_stored_row` for the OWNER-side
+        questions — the share verb's refusal, the join-time admission re-check
+        and readiness's "this device holds a login" — which asked
+        :meth:`has_stored_row` and so counted a registration-only row (the
+        ``client_info`` the SDK writes on discovery). That let a device share,
+        and readiness tell it to share, a login nobody ever signed into; the
+        peer then borrowed and failed (F-READY-1 round 1, M1).
+
+        :func:`payload_carries_grant`, NOT :func:`payload_has_usable_grant`, on
+        purpose: a tombstoned grant is still the owner's login, and placing it is
+        deliberate — the holder's borrow then answers ``interactive_required`` and
+        says "sign in again on <owner>", the one remedy that works
+        (``test_repair_grants_a_dead_owner_grant_on_purpose``). Whether the
+        RUNTIME would use the row locally is the other question, answered by
+        :func:`server_has_stored_grant`. ``None`` = the store could not be read.
+        """
+        store = self._store
+        if store is None:
+            return False
+        try:
+            rows = store.list_credentials(MCP_OAUTH_PROVIDER)
+        except Exception:
+            logger.debug("MCP grant lookup failed for %s", self.credential_id, exc_info=True)
+            return None
+        for row in rows:
+            if row.identity_key == self.server_url:
+                data = getattr(row, "data", None)
+                return payload_carries_grant(data if isinstance(data, dict) else None)
+        return False
+
     def _read(self) -> dict[str, Any] | None:
         """Row payload for this server URL, or ``None`` (no store/no row)."""
         row = self._read_row()
@@ -1995,7 +2028,44 @@ def server_has_stored_grant(server_url: str, store: StructuralAuthStore | None =
     except Exception:  # noqa: BLE001 — the store is best-effort here
         logger.debug("stored-grant lookup failed for %s", server_url, exc_info=True)
         return False
-    return payload_carries_grant(payload)
+    return payload_has_usable_grant(payload if isinstance(payload, dict) else None)
+
+
+def payload_has_usable_grant(payload: dict[str, Any] | None) -> bool:
+    """Whether a row payload holds a grant the runtime would USE before borrowing.
+
+    THE ONE RULE behind :func:`server_has_stored_grant` and the value-free
+    ``usable_grant`` boolean :func:`mcp_grant_diagnostics` exports to readiness.
+    Readiness must answer the same question the runtime does: when it counted any
+    row as a login, a registration-only row (the ``client_info`` the SDK writes on
+    first discovery) told a non-technical operator to "sign in again on <node>"
+    while that node's sessions were quietly borrowing a working share (F-READY-1).
+    Two copies of this test are how the two answers drift apart again.
+
+    Deliberately NOT the diagnostics' wider ``fenced`` test: a live
+    unconfirmed-send marker does not stop the runtime choosing the local grant,
+    so it must not stop readiness from calling the row local either.
+    """
+    if not isinstance(payload, dict) or not payload_carries_grant(payload):
+        return False
+    # A ROW IS NOT A USABLE CREDENTIAL (real-node QA). A registration-only row,
+    # an emptied row left by a failed write, or a row whose refresh token the
+    # provider already rejected all HAVE a row and none of them can serve a
+    # bearer. Counting them as a local grant made the local path win over the
+    # broker and produced a bare 401 with no borrow attempted — the server a peer
+    # could have served stayed dead. A dead marker is the row's own tombstone and
+    # outranks the token fields: it is only cleared by a NEW interactive grant.
+    dead = payload.get(GRANT_DEAD_AT_KEY)
+    if isinstance(dead, (int, float)) and not isinstance(dead, bool) and dead > 0:
+        return False
+    tokens = payload.get("tokens")
+    if not isinstance(tokens, dict):
+        return False
+    for field in ("access_token", "refresh_token"):
+        value = tokens.get(field)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
 
 
 def _live_unconfirmed_send(marker: Any, target: Any) -> bool:
@@ -2037,12 +2107,17 @@ def mcp_grant_diagnostics(
     """
     unknown: dict[str, Any] = {
         "has_row": None,
+        # ``has_row`` is ANY row (registration included); ``usable_grant`` is the
+        # runtime's own answer (:func:`payload_has_usable_grant`). Readiness reads
+        # the latter so it never sends an operator to repair a login nobody holds.
+        "usable_grant": None,
         "provenance": "unknown",
         "identity_verified": False,
         "identity_state": "scope_unknown",
         "sharing_mode": "unavailable",
         "refresh_presence": "unknown",
         "expiry_known": False,
+        "grant_chain_at": None,
         "scopes_known": False,
         "access_state": "unknown",
     }
@@ -2083,10 +2158,14 @@ def mcp_grant_diagnostics(
     )
     metadata = data.get(GRANT_PROVENANCE_KEY)
     metadata = metadata if isinstance(metadata, dict) else {}
+    # Refresh rotations CONTINUE this chain; a new local grant moves it. Export
+    # the value-free stamp so readiness can tell a newer local login from older
+    # broker evidence without inferring either fact from a mutable row timestamp.
+    chain_stamp = _chain_stamp_of(data)
     bound_native = (
         metadata.get("kind") == "native"
         and metadata.get("resource_url") == server_url
-        and metadata.get("native_event_at") == _chain_stamp_of(data)
+        and metadata.get("native_event_at") == chain_stamp
     )
     provenance = (
         "copied"
@@ -2110,6 +2189,7 @@ def mcp_grant_diagnostics(
     return {
         **unknown,
         "has_row": row is not None,
+        "usable_grant": row is not None and payload_has_usable_grant(data),
         "provenance": provenance,
         "sharing_mode": (
             "finite_only"
@@ -2118,6 +2198,7 @@ def mcp_grant_diagnostics(
         ),
         "refresh_presence": "present" if refresh else "absent",
         "expiry_known": expiry is not None,
+        "grant_chain_at": chain_stamp if math.isfinite(chain_stamp) and chain_stamp > 0 else None,
         "scopes_known": bound_native and metadata.get("scopes_known") is True,
         "access_state": access,
     }

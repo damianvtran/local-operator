@@ -967,6 +967,87 @@ async def test_stalled_notice_once_then_restored_notice(tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_blind_outcome_keeps_the_baseline_and_notifies_once(tmp_path: Any) -> None:
+    """A check whose full result cannot be compared must never look like a quiet tick.
+
+    The live failure: a spilled Slack thread was compared as its display
+    projection, the projection's only visible change was the spill footer, the
+    gate suppressed it and the baseline advanced — seven replies became
+    unrecoverable. A blind outcome keeps the old baseline, charges no strike,
+    and tells the operator once per episode.
+    """
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.append({"text": "A", "error": None})
+        await rill(harness, 60_000)  # baseline
+        before = harness.counters()
+
+        reason = "its full result is no longer in the spill store"
+        harness.results.append({"error": reason, "kind": "blind"})
+        await rill(harness, 60_000)
+
+        counters = harness.counters()
+        assert counters["blind"] is True
+        assert counters["blind_reason"] == reason
+        assert counters["content_hash"] == before["content_hash"]
+        assert counters["consecutive_failures"] == 0
+        assert counters["checks"] == before["checks"] + 1
+        assert counters["disabled"] is False
+        assert counters["next_due_at"] is not None
+        assert harness.deliveries == []
+        assert [notice.kind for notice in harness.notices] == ["blind"]
+        assert harness.notices[0].detail == reason
+        # The row every listing surface reads carries the state and the reason.
+        row = harness.scheduler.index_rows()[0]
+        assert row["blind"] is True and row["blind_reason"] == reason
+        assert row["suppressed"] == counters["suppressed"]
+
+        # A second blind tick is not a second notice.
+        harness.results.append({"error": reason, "kind": "blind"})
+        await rill(harness, 60_000)
+        assert [notice.kind for notice in harness.notices] == ["blind"]
+
+        # Seeing again: the comparison resumes from the LAST GOOD baseline, so
+        # the change since then arrives as one delta, plus the matching clear.
+        harness.results.append({"text": "B", "error": None})
+        await rill(harness, 60_000)
+
+        resumed = harness.counters()
+        assert resumed["blind"] is False and resumed["blind_reason"] == ""
+        assert resumed["blind_notified"] is False
+        assert [notice.kind for notice in harness.notices] == ["blind", "seeing"]
+        assert [delivery.monitor_id for delivery in harness.deliveries] == ["m1"]
+        delta = harness.deliveries[0].delta_text
+        assert "- A" in delta and "+ B" in delta, delta
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_blind_tick_that_was_never_announced_resumes_silently(tmp_path: Any) -> None:
+    """No matching notice for an episode nobody was told about."""
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.append({"text": "A", "error": None})
+        await rill(harness, 60_000)
+        harness.results.append({"error": "its full result is gone", "kind": "blind"})
+        await rill(harness, 60_000)
+        assert [notice.kind for notice in harness.notices] == ["blind"]
+        # Clear the latch to model a notice that never reached a session: the
+        # state was blind, but no clear was earned.
+        entry = harness.scheduler._entries["m1"]
+        entry.counters["blind_notified"] = False
+        harness.results.append({"text": "B", "error": None})
+        await rill(harness, 60_000)
+        assert [notice.kind for notice in harness.notices] == ["blind"]
+        assert harness.counters()["blind"] is False
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
 async def test_unavailable_past_24h_disables(tmp_path: Any) -> None:
     """ "Genuinely gone" is settled by time, not by a strike count: a server
     that reconnects comes back; one that was uninstalled does not.
@@ -1268,3 +1349,119 @@ def test_disabled_clause_covers_every_cause_the_counters_can_describe() -> None:
         == "2 consecutive failed checks"
     )
     assert disabled_clause({}) == "repeated failed checks"
+
+
+@pytest.mark.asyncio
+async def test_a_first_check_that_is_blind_says_there_is_no_baseline(tmp_path: Any) -> None:
+    """Review round 1, F4 / QA round 1, Q1: do not promise a delta that cannot come.
+
+    The live m2 monitor's first check was blind (a 4.5 MB result exceeded the
+    spill cap), so the recovery captured the first comparable result silently
+    while the notice claimed a kept baseline. Both notices now carry the fact.
+    """
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.append({"error": "its full result is gone", "kind": "blind"})
+        await rill(harness, 60_000)
+        harness.results.append({"text": "A", "error": None})
+        await rill(harness, 60_000)
+
+        assert [notice.kind for notice in harness.notices] == ["blind", "seeing"]
+        assert harness.notices[0].no_baseline is True
+        assert harness.notices[1].no_baseline is True
+        counters = harness.counters()
+        assert counters["content_hash"] != ""
+        # The first comparable result became the baseline; there is no delta.
+        assert counters["deliveries"] == 0
+        assert "blind_no_baseline" not in counters
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_changed_blind_reason_refreshes_the_index(tmp_path: Any) -> None:
+    """Review round 1, F3: a mid-episode reason change is stale on the wire."""
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.append({"text": "A", "error": None})
+        await rill(harness, 60_000)
+        assert harness.changes == 0
+
+        harness.results.append({"error": "its full result is gone", "kind": "blind"})
+        await rill(harness, 60_000)
+        assert harness.changes == 1
+
+        # Same reason, same episode: no rewrite.
+        harness.results.append({"error": "its full result is gone", "kind": "blind"})
+        await rill(harness, 60_000)
+        assert harness.changes == 1
+
+        # A different reason is new information for the index row.
+        harness.results.append({"error": "its result was stored incompletely", "kind": "blind"})
+        await rill(harness, 60_000)
+        assert harness.changes == 2
+        assert harness.counters()["blind_reason"] == "its result was stored incompletely"
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_rate_capped_change_refreshes_the_index(tmp_path: Any) -> None:
+    """Review round 1, F3: the rate-cap suppression count must reach the row."""
+    settings = dataclasses.replace(MonitorSettings(), max_deliveries_per_hour=1)
+    harness = Harness(tmp_path, settings=settings)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.extend([{"text": "A", "error": None}, {"text": "B", "error": None}])
+        await rill(harness, 60_000)  # baseline
+        await rill(harness, 60_000)  # delivered
+        after_delivery = harness.changes
+        assert harness.counters()["deliveries"] == 1
+
+        harness.results.append({"text": "C", "error": None})
+        await rill(harness, 60_000)  # rate capped
+        counters = harness.counters()
+        assert counters["suppressed"]["rate_cap"] == 1
+        assert counters["deliveries"] == 1
+        assert harness.changes == after_delivery + 1
+        row = harness.scheduler.index_rows()[0]
+        assert row["suppressed"]["rate_cap"] == 1
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_diff_bound_also_covers_the_no_hash_recovery_path(tmp_path: Any) -> None:
+    """Review round 2, F1: the bound must apply to EVERY baseline source.
+
+    With the counters lost and a whole snapshot on disk, the recovery path sets
+    ``diff_base`` from the snapshot — and used to feed the quadratic matcher
+    unbounded, measured at 8.13 s synchronously under the write lock for a
+    600 KB / 60,000-line result. The checksum path is milliseconds and is
+    delivered without the gate.
+    """
+    import time
+
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.append({"text": "same line\n" * 1_000, "error": None})
+        await rill(harness, 60_000)  # baseline + snapshot
+        entry = harness.scheduler._entries["m1"]
+        # The counters are lost: no hash, no handle, but the snapshot is whole.
+        entry.counters["content_hash"] = ""
+        entry.counters["last_handle"] = ""
+
+        huge = ("x" * 9 + "\n") * 60_000
+        started = time.monotonic()
+        change = harness.scheduler._apply_success(entry, huge, harness.now_ms)
+        elapsed = time.monotonic() - started
+
+        assert change is not None
+        assert change.hidden is True
+        assert "beyond the stored snapshot window" in change.delta_text
+        assert elapsed < 5.0, f"the matcher ran unbounded: {elapsed:.2f}s"
+    finally:
+        harness.scheduler.dispose()

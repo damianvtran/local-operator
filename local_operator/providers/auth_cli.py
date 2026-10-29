@@ -418,7 +418,12 @@ def run_login(
             # tidy about the teardown.
             pass
         try:
-            return await _login_or_cancel(login, callbacks, aborted)
+            result = await _login_or_cancel(login, callbacks, aborted)
+            # Profile verification adds an await after exchange. A completion
+            # that arrived after abandonment must not reach persistence.
+            if aborted.aborted:
+                raise LoginCancelledError(aborted.reason or "Login cancelled")
+            return result
         finally:
             # The handler outlives the flow otherwise, and a later Ctrl+C would
             # abort a signal nobody is watching instead of interrupting.
@@ -467,7 +472,36 @@ def run_login(
 
     # OAuth credentials dict; stamp authorized_at if missing.
     result.setdefault("authorized_at", int(time.time() * 1000))
-    row = auth_store.upsert_credential(storage_provider, result)
+    try:
+        row = (
+            auth_store.complete_radient_login(result)
+            if storage_provider == "radient"
+            else auth_store.upsert_credential(storage_provider, result)
+        )
+    except LoginError as exc:
+        if isinstance(exc, LoginCancelledError):
+            print(_cancelled_message(definition))
+            return 130
+        print(f"Login failed: {exc}")
+        return 1
+    if storage_provider == "radient" and row.disabled_cause is not None:
+        # Design round 2, D2: "unavailable" is reserved for the unverified
+        # retained block; a preserved disablement says exactly that. The CLI is
+        # a surface the reader can act from, so it is the one host that names
+        # the terminal command in the shared retained block (D5).
+        print(
+            "Sign-in verified. This Radient sign-in stays disabled; "
+            "its saved state was preserved."
+        )
+        print("Nothing else changed.")
+        for line in format_retained_radient_logins(
+            auth_store.retained_radient_login_ids(),
+            action="To restore a retained record, run: local-operator login radient",
+        ):
+            print(line)
+        # Verification is not activation: do not change provider/model defaults
+        # or operator profile while the requested credential remains disabled.
+        return 1
     _invalidate_cached_listing(storage_provider)
     _invalidate_cached_usage(storage_provider, auth_store)
     # The ONE identity derivation (``credential_identity``): the login receipt
@@ -479,6 +513,14 @@ def run_login(
     identity = credential_identity(result) or ""
     suffix = f" ({identity})" if identity else ""
     print(f"Logged in to '{storage_provider}'{suffix}.")
+    if storage_provider == "radient":
+        # The CLI's reader is in a terminal, so this host names the command;
+        # every other host gets the shared block's neutral restore line (D5).
+        for line in format_retained_radient_logins(
+            auth_store.retained_radient_login_ids(),
+            action="To restore a retained record, run: local-operator login radient",
+        ):
+            print(line)
     if result.get("grant_note"):
         print(f"Note: {result['grant_note']}")
     if storage_provider == "radient":
@@ -729,8 +771,42 @@ def stored_login_key_names(config_dir: "Path | None") -> list[str]:
         return []
 
 
-def format_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> list[str]:
-    """The status listing as LINES: one per active credential plus env/legacy keys.
+def format_retained_radient_logins(
+    row_ids: tuple[int, ...], *, action: str | None = None
+) -> list[str]:
+    """One recovery explanation for CLI/status and controller login receipts.
+
+    THE RESTORE LINE IS SCOPED TO THE RETAINED RECORD and host-neutral unless a
+    host supplies its own gesture (design round 2, D3 and D5). The same block is
+    published to the desktop, where neither a slash command nor a shell command
+    is an instruction that reader can follow; only the CLI, whose reader is
+    already in a terminal, passes its own command.
+
+    Row ids print as stored row numbers rather than bare brackets (D4): a usable
+    row [2] above retained row [1] otherwise reads as an inverted list, even
+    though usable-first is the correct precedence.
+    """
+    if not row_ids:
+        return []
+    restore = action or "To restore a retained record, sign in again to that account."
+    return [
+        "Retained Radient sign-ins (unavailable):",
+        *(
+            f"  Account could not be verified; record retained (stored row {row_id})."
+            for row_id in row_ids
+        ),
+        f"  {restore}",
+        "  Older records have not been deleted or assigned to that account.",
+    ]
+
+
+def format_logins(
+    auth_store: "AuthStore",
+    config_dir: "Path | None" = None,
+    *,
+    action: str | None = None,
+) -> list[str]:
+    """Active credentials and separate retained-state notices, plus key names.
 
     Returned rather than printed so the CLI (``list_logins``, stdout) and the
     TUI's ``/login status`` (a transcript block) render ONE derivation: a
@@ -738,11 +814,21 @@ def format_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> 
     full-screen app, and a second copy of the listing is how two surfaces come
     to disagree about who is signed in. Secrets never appear: identities and
     env-var NAMES only.
+
+    ``action`` is the HOST's own recovery gesture, passed straight to the
+    retained block (design round 2, D5). ``list_logins`` supplies the terminal
+    command because its reader is in a shell; the TUI and the desktop pass
+    nothing and get the neutral restore sentence. Defaulting to neutral here is
+    deliberate: a slash command printed to a desktop user is not an instruction
+    they can follow, and the shared formatter cannot know which host called it.
     """
     from local_operator.providers.auth_store import credential_identity
 
     lines: list[str] = []
     rows = auth_store.list_credentials()
+    retained = format_retained_radient_logins(
+        auth_store.retained_radient_login_ids(), action=action
+    )
     if rows:
         lines.append("Stored credentials:")
         now_ms = int(time.time() * 1000)
@@ -761,7 +847,9 @@ def format_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> 
                 detail = f"api_key ({source})"
             lines.append(f"  [{row.id}] {row.provider:<14} {detail:<22} identity={identity}")
     else:
-        lines.append("No stored credentials.")
+        lines.append("No usable stored credentials." if retained else "No stored credentials.")
+    if retained:
+        lines.extend(["", *retained])
 
     lines.append("")
     lines.append("Environment keys visible to the cascade:")
@@ -786,7 +874,17 @@ def format_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> 
 
 
 def list_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> int:
-    """Print the status listing (:func:`format_logins`), one line per row."""
-    for line in format_logins(auth_store, config_dir):
+    """Print the status listing (:func:`format_logins`), one line per row.
+
+    This host's reader is at a terminal, so it names the command that restores a
+    retained record; the shared formatter stays neutral for the TUI and desktop
+    (design round 2, D5). Dropping it here is what made ``login-status`` lose
+    its only actionable line.
+    """
+    for line in format_logins(
+        auth_store,
+        config_dir,
+        action="To restore a retained record, run: local-operator login radient",
+    ):
         print(line)
     return 0

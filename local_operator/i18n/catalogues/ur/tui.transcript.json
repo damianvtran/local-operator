@@ -1,0 +1,19 @@
+{
+  "tui.transcript.ask.key_name": "{keys} (کلید کا نام)",
+  "tui.transcript.ask.not_answered": "جواب نہیں دیا گیا",
+  "tui.transcript.ask.not_provided": "فراہم نہیں کیا گیا",
+  "tui.transcript.attach.receipt": "↑ {count, plural, one {# تصویر} other {# تصویریں}} منسلک",
+  "tui.transcript.catchup.headline": "بیداری کا خلاصہ — {label}",
+  "tui.transcript.catchup.missed": "{count, plural, one {# چھوٹی ہوئی بیداری} other {# چھوٹی ہوئی بیداریاں}}",
+  "tui.transcript.queued.newest": "· اگلے رن ٹائم کے لیے قطار میں — esc سے واپس لیں",
+  "tui.transcript.queued.older": "· اگلے رن ٹائم کے لیے قطار میں",
+  "tui.transcript.sender.pid": "pid {pid}",
+  "tui.transcript.sender.unknown": "کوئی اور سیشن",
+  "tui.transcript.group.messages": "پیغامات · {count}",
+  "tui.transcript.group.actions": "{count, plural, one {{label} کارروائی} other {{label} کارروائیاں}}",
+  "tui.transcript.group.reply_requested": "{count, plural, one {{label} جواب کی درخواست} other {{label} جواب کی درخواستیں}}",
+  "tui.transcript.group.steered": "{count, plural, one {{label} رخ بدلنے والا پیغام} other {{label} رخ بدلنے والے پیغامات}}",
+  "tui.transcript.hub.reply_requested": "جواب کی درخواست",
+  "tui.transcript.hub.steered": "رخ بدلا گیا",
+  "tui.transcript.hub.from": "{identity} کی طرف سے"
+}

@@ -21,14 +21,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import contextlib
 import functools
 import inspect
 import json
 import logging
+import re
 import secrets
+import threading
 import time
+import unicodedata
 import uuid
+import weakref
 from asyncio import InvalidStateError
 from collections import deque
 from collections.abc import Mapping, Sequence
@@ -57,6 +62,9 @@ from local_operator.harness.approval import (
     LOOSENING_REFUSED_NOTICE as _LOOSENING_REFUSED_NOTICE,
 )
 from local_operator.harness.approval import (
+    REARM_KEPT_BY_AUTO_NOTICE as _REARM_KEPT_BY_AUTO_NOTICE,
+)
+from local_operator.harness.approval import (
     loosening_is_authorised as _loosening_is_authorised,
 )
 from local_operator.harness.approval import transition_authority
@@ -73,7 +81,7 @@ from local_operator.harness.wire import bound_agent_end_for_wire
 from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 
 if TYPE_CHECKING:
-    from local_operator.harness.types import AudioContent, ImageContent
+    from local_operator.harness.types import AudioContent, DocumentContent, ImageContent
     from local_operator.secrets.session import SessionRegistration
     from local_operator.session.errors import RuntimeRetiring
     from local_operator.session.runtime.publication import PublicationGate
@@ -86,6 +94,19 @@ from local_operator.mobile.types import (
     ask_pending_request,
 )
 
+# The conversation's own recorded approval choice: read at construction, written
+# by ``/approvals``. Module-scope because the module is stdlib-only (its docstring
+# explains why it must stay that way for the resume path).
+from local_operator.session.approval_policy import (
+    OVERRIDE_FILENAME as _APPROVAL_OVERRIDE_FILENAME,
+)
+from local_operator.session.approval_policy import (
+    read_override as _read_approval_override,
+)
+from local_operator.session.approval_policy import (
+    write_override as _write_approval_override,
+)
+
 # The `/loop` argument vocabulary, imported rather than spelled out: `--stop` and
 # `--clear` have to mean the same thing in this dispatcher as in the TUI's two
 # handlers, and a second copy of the words is how `--stop` would cancel a loop in
@@ -94,6 +115,7 @@ from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
 from local_operator.session.runtime.inbox import SOURCE_PEER, SOURCE_USER
 from local_operator.session.runtime.server import AckDetail, SessionHandle
 from local_operator.session.runtime.server import audio_blocks as _audio_blocks
+from local_operator.session.runtime.server import document_blocks as _document_blocks
 from local_operator.session.runtime.server import (
     image_blocks_in_thread as _image_blocks_async,
 )
@@ -108,7 +130,6 @@ from local_operator.session.runtime.types import (
     runtime_must_complete,
 )
 from local_operator.session.transcript import (
-    TRANSCRIPT_FILENAME,
     Transcript,
     is_bookkeeping_entry,
     is_bookkeeping_message,
@@ -266,6 +287,89 @@ DEFAULT_UNATTENDED_GATE_TIMEOUT_H = 24
 #: Kept as a module-level name here because it is part of this module's
 #: published surface — the tests and the mobile bridge import it from here.
 GATE_TIMEOUT_CUSTOM_TYPE = _GATE_TIMEOUT_CUSTOM_TYPE
+
+#: What an ask reports when the host that owns this run has NOBODY to put the
+#: question in front of. Model-facing English, like every tool refusal.
+#:
+#: It exists for the arm where a resume worker's ask surface is present but the
+#: queued engine is not (`LOP_ASK_NONBLOCKING=0`, the operator's kill switch):
+#: the `ask` tool is gated on the HOOK, so a hook is what makes the tool exist,
+#: and on that arm `execute_ask` awaits it instead of enqueueing. Returning
+#: ``None`` there would report "the user closed the question without answering"
+#: — a picker nobody was ever shown — so the one honest answer is to refuse.
+#:
+#: Shaped after :class:`~local_operator.harness.approval.ApprovalUnavailableError`,
+#: which is the same defect one subsystem over: a gate that cannot ask anyone
+#: must not render as a decision somebody made.
+ASK_UNAVAILABLE_NOTICE = (
+    "No one can be asked on this run: it is a resumed conversation running "
+    "headless, so it has no interactive ask surface ({reason}). Nothing was "
+    "shown to the operator and nothing was chosen — decide yourself, or say "
+    "what you need and carry on."
+)
+
+
+#: The ask gate's shape: a coroutine FUNCTION, not the wider ``AskUserFn``
+#: (``Awaitable``) spelling. ``handle._ask_gate`` is what tests and the parked-gate
+#: timeout schedule directly, and ``asyncio.create_task`` accepts a coroutine and
+#: not an arbitrary awaitable — widening the annotation here would push that
+#: distinction out to every caller.
+_AskGateFn = Callable[[list[Any]], Coroutine[Any, Any, dict[str, list[str]] | None]]
+
+
+def _quoted_echo_within_cells(text: str, budget: int = 20) -> str:
+    """Bound the echoed unknown language by rendered display cells.
+
+    Mirrors the terminal's helper, including the ``repr`` detail: the row shows
+    the ESCAPED payload, so twenty backslashes cost forty cells. This module
+    deliberately does not import ``rich`` (the runtime has no console), so
+    width comes from the East Asian Width property: wide and fullwidth
+    characters cost two cells.
+    """
+
+    def width(value: str) -> int:
+        total = 0
+        for char in value:
+            total += 2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+        return total
+
+    shown = repr(text)[1:-1]
+    if width(shown) <= budget:
+        return f"'{shown}'"
+    out = ""
+    for char in shown:
+        if width(out + char) > budget - 1:
+            break
+        out += char
+    return f"'{out}…'"
+
+
+class AskUnavailableError(RuntimeError):
+    """A host with no ask surface was asked a question it cannot present.
+
+    Raised only by :func:`_unanswerable_ask`, the handler a resume worker
+    installs so its queued-ask surface exists. A host that CAN present a
+    question never raises this; it returns the answer or ``None``.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(ASK_UNAVAILABLE_NOTICE.format(reason=reason))
+
+
+async def _unanswerable_ask(questions: list[Any]) -> dict[str, list[str]] | None:
+    """The queued-only surface's handler: refuse in words if it is ever awaited.
+
+    Under the queued engine this closure is never called at all — `execute_ask`
+    only awaits ``ask_user`` on the BLOCKING arm (``builtin.py``'s queued door
+    returns at once with a receipt) — so its presence is a capability flag, not
+    a behaviour. It is awaited only if the queued engine is switched off under a
+    worker that still has no human: then nothing can present the questions, and
+    a raise is the only answer that does not invent a user.
+    """
+    raise AskUnavailableError("the queued-ask engine is off for this process")
+
+
 # Socket admission is intentionally bounded: many front ends may produce input,
 # but an abandoned automation loop must not grow one owner's memory forever.
 MAX_QUEUED_PROMPTS = 32
@@ -274,6 +378,49 @@ MAX_QUEUED_PROMPTS = 32
 #: as ``RuntimeServer._push_later`` (the repaint it feeds) and
 #: ``Session._schedule_frontend_jobs``; see ``_schedule_roster_refresh``.
 _ROSTER_REFRESH_COALESCE_S = 0.05
+
+#: Floor between two disk re-reads of the ask fold on the ``_notify`` path (see
+#: ``ServingSessionHandle._refresh_ask_projection``). Only another process's
+#: change to this session's ``asks.jsonl`` waits on it; this process's own ask
+#: changes are installed immediately through ``_ask_state_changed``.
+_ASK_REFRESH_MIN_S = 1.0
+
+#: The worker pool a model switch's blocking reads run on, built on first use.
+#:
+#: WHY NOT ``asyncio.to_thread``. That is the loop's DEFAULT executor, and on a
+#: busy manager it is shared with every lane's blocking work (transcript and
+#: ledger writes, token counting, store reads). A switch that queued its spec
+#: build and its credential read there waited for that backlog: measured with
+#: ``scripts/bench_model_switch.py --condition busy`` (12 lanes, a 1,000-child
+#: roster, a 110 MB transcript), the build started up to 750 ms and the read up
+#: to 690 ms after the handler asked, for work that takes ~1 ms and ~15 ms. The
+#: switch is the one request the user is actively waiting on, so its reads get a
+#: pool nothing else queues on.
+#:
+#: TWO workers, sized for the process, not one connection. The pool is shared
+#: process-wide, so two connections (desktop and phone) can switch at the same
+#: time, and a superseded credential read is not awaited by its reply, so it
+#: holds a worker until it finishes even though its result is discarded. Two is
+#: still enough: a switch needs at most one build and one read, the read takes
+#: ~15 ms, so a transient queue behind a superseded read or a second
+#: connection's switch costs milliseconds, and a deeper pool would mostly hold
+#: idle threads. Lazy because most runtimes never switch, and the test suite
+#: builds hundreds of handles that never do.
+_SWITCH_EXECUTOR_WORKERS = 2
+_switch_executor_pool: concurrent.futures.ThreadPoolExecutor | None = None
+_switch_executor_lock = threading.Lock()
+
+
+def _switch_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """The dedicated pool for a switch's blocking reads (see above)."""
+    global _switch_executor_pool
+    with _switch_executor_lock:
+        if _switch_executor_pool is None:
+            _switch_executor_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=_SWITCH_EXECUTOR_WORKERS, thread_name_prefix="lop-switch"
+            )
+        return _switch_executor_pool
+
 
 #: THE RUNG-4 RETRY LADDER (review round 1, R7).
 #:
@@ -435,6 +582,10 @@ class _PromptCommand:
     #: recording to carry. The blocks are ALREADY sniffed (``audio_blocks``):
     #: this queue never re-derives the format.
     audio: list["AudioContent"] | None = None
+    #: The resolved document blocks that ride this admission onto
+    #: ``Message.user(..., documents=...)``. Resolved from ``Prompt.files`` in
+    #: the synchronous prelude, so nothing here touches the store again.
+    documents: list["DocumentContent"] | None = None
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         # Tuple compatibility for older diagnostics that inspect the queue.
@@ -451,14 +602,15 @@ def _read_child_todo_snapshot(directory: Any) -> list[dict[str, Any]] | None:
     is the one-row backward scan over the tail, so this costs the distance from
     EOF to the newest snapshot rather than a decode of the child's whole history.
     """
+    from local_operator.session import compression
     from local_operator.session.frontend_state import TodoItemState, TodoPhaseState
-    from local_operator.session.transcript import (
-        TRANSCRIPT_FILENAME,
-        read_latest_custom,
-    )
+    from local_operator.session.transcript import read_latest_custom
 
     try:
-        if not (Path(directory) / TRANSCRIPT_FILENAME).is_file():
+        # ``has_transcript`` answers for both forms. A plain-name probe here
+        # answered "no journal" for a compressed child, which this function's
+        # own contract reserves for a session that was never engaged.
+        if not compression.has_transcript(Path(directory)):
             return None
         payload = read_latest_custom(directory, "todo_snapshot") or {}
         raw = payload.get("items", [])
@@ -486,6 +638,22 @@ def _read_child_todo_snapshot(directory: Any) -> list[dict[str, Any]] | None:
 #: (deferred, with the measurements, on the PR); telling the operator is one
 #: clause, on the surface where the state changes, and that is what this is.
 _GATE_MARKER_CLAUSE = "; the band's ! will not follow this — /approvals re-reports the gate"
+
+
+def _approval_failure_class(clause: str | None) -> str:
+    """The exception CLASS out of a persistence clause, or ``""``.
+
+    ``_persist_approval_override`` returns a sentence ending in
+    ``(OSError)``-style text because the receipt is prose. The routed result
+    carries the same fact for a machine reader in ``approval_reason``, and this
+    is the one extraction point so the two cannot name different failures.
+    Deliberately the class and not the message: that text lands in a chat
+    transcript, and an errno path is noise there.
+    """
+    if not clause:
+        return ""
+    match = re.search(r"\(([A-Za-z_][\w.]*)\)\s*$", clause)
+    return match.group(1) if match else ""
 
 
 #: The decorated method's own type, returned unchanged. A decorator that instead
@@ -720,6 +888,7 @@ class ServingSessionHandle(SessionHandle):
         auto_approve: bool = False,
         approval_pinned: bool = False,
         install_gates: bool = True,
+        install_ask_surface: bool = False,
         config_dir: Path | None = None,
         mcp_publication_gate: PublicationGate | None = None,
     ) -> None:
@@ -779,6 +948,15 @@ class ServingSessionHandle(SessionHandle):
         # ``config.yml`` change (:meth:`follow_config`) move it without
         # reconstructing the handle.
         self._auto_approve = auto_approve
+        #: The FILE's ``tool_approval_mode`` as last known, independent of the
+        #: live gate (which an explicit conversation choice may override). The
+        #: pending-gate projection publishes it beside the mode so a viewer can
+        #: say "session Ask; global Auto" truthfully; without it the card can
+        #: only guess the complement of the live mode (UX round 2, U4). Unknown
+        #: for a pinned run with no watcher, which reads as "not stated".
+        self._default_approvals_mode: str = (
+            "" if approval_pinned else ("auto" if auto_approve else "ask")
+        )
         # ``approval_pinned`` marks the value as an explicit FLAG (``lop exec
         # --yolo``), which outranks the config key: a ``tool_approval_mode``
         # edit must not re-arm a gate the operator disabled on the command
@@ -802,11 +980,17 @@ class ServingSessionHandle(SessionHandle):
         #: setting I want it to go into effect for all my agents") reappearing
         #: on the very key this change is centred on.
         #:
-        #: INVARIANT: non-``None`` only while the gate in force is the mode a
-        #: human typed here. :meth:`_on_config_change` clears it whenever a
-        #: file write MOVES the gate, because at that moment the file, not the
-        #: human, owns the value \u2014 which is also what keeps the keep notice's
-        #: "set with /approvals in this session" a true statement.
+        #: PERSISTED AND AUTHORITATIVE IN BOTH DIRECTIONS (2026-10-23). The mode
+        #: a human typed here is written to the conversation's ``approvals.json``
+        #: (``session/approval_policy.py``) and read back at construction, so a
+        #: resume reopens in it. Because it is the human's decision about THIS
+        #: conversation, :meth:`_on_config_change` no longer lets a file write
+        #: overrule it in either direction — not a loosening (the hardening
+        #: the keep notice protects) and not a tightening either (a session the
+        #: human chose ``auto`` must not be re-armed behind their back; that is
+        #: the mirror of the surviving case and reads the same way). A session
+        #: that never chose keeps following the file exactly as before, with
+        #: loosening still requiring operator authority.
         self._explicit_approvals_mode: str | None = None
         self._unsubscribe_config_watch: Callable[[], None] | None = None
         #: The (kind, title, detail) of the gate currently parked, or None.
@@ -860,6 +1044,12 @@ class ServingSessionHandle(SessionHandle):
         from local_operator.harness.rows import queued_ask_engine_live
 
         self._fold = ProjectionFold(self._projection, queued_engine=queued_ask_engine_live(session))
+        #: ``time.monotonic()`` of the last ask-fold install; ``-inf`` so the
+        #: first ``_refresh_ask_projection`` always reads.
+        self._ask_fold_installed_at = float("-inf")
+        #: One trailing re-read armed for a throttled ``_refresh_ask_projection``
+        #: (see ``_schedule_ask_refresh``).
+        self._ask_refresh_scheduled = False
         #: The broker registration that authorizes THIS process's descendants to
         #: retrieve secrets, or ``None`` (§6). Held so teardown can deregister
         #: promptly rather than waiting for the process's socket to close: a
@@ -912,6 +1102,10 @@ class ServingSessionHandle(SessionHandle):
         # so the event loop cannot garbage-collect one mid-flight and drop the
         # title silently. Each task removes itself on completion.
         self._background_tasks: set[asyncio.Future[Any]] = set()
+        #: The access-claim publish in flight, if any: see
+        #: :meth:`_schedule_model_access_publish`.
+        self._model_access_publish: asyncio.Task[None] | None = None
+        self._model_access_publish_selector = ""
         #: ``(selected_selector, provider, model_id)`` of a re-home this owner
         #: REFUSED because the conversation was busy, retried at the turn end
         #: (``_retry_deferred_rehome``). Also serves as the reply classified by
@@ -929,6 +1123,10 @@ class ServingSessionHandle(SessionHandle):
         self._rehome_retry_task: asyncio.Task[None] | None = None
         # request_id -> Future the gate/ask call is parked on.
         self._pending_futures: dict[str, asyncio.Future[Any]] = {}
+        #: Set by :meth:`refuse_gates_for_exit` once a SIGNAL has committed this
+        #: runtime to leaving: every gate opened afterwards answers at once with
+        #: the deny/escape answer instead of parking. See that method for why.
+        self._gates_closed_for_exit = False
         # request_id -> (monotonic instant, settled value) for gates that LANDED
         # recently. The desktop answer path retries ONCE under the same id when an
         # acknowledgement is lost, so a repeat that finds no parked future is a
@@ -949,6 +1147,15 @@ class ServingSessionHandle(SessionHandle):
         # completed duplicates are recognized from transcript-backed history.
         self._prompt_commands: dict[str, _PromptCommand] = {}
         self._prompt_drain_task: asyncio.Task[None] | None = None
+        # STEER ADMISSION IS SERIALIZED, and the reason is ordering rather than
+        # exclusion. A steer is admitted through an awaited durable write (the
+        # successor spool — see ``steer``), so without this lock two corrections
+        # submitted together (``asyncio.gather``, or two clients in the same
+        # tick) could reach ``Session.steer`` in the order their spool writes
+        # finished rather than the order they arrived. The queue's own order is
+        # a pinned property (``test_distinct_concurrent_steers_keep_fifo_order``),
+        # and an ``asyncio.Lock`` hands its waiters the slot in arrival order.
+        self._steer_admission_lock = asyncio.Lock()
         # Prompt and steer share one identity namespace. In particular, an idle
         # projection may race a turn start and transfer the rejected prompt's
         # identity to steer rather than admitting the same producer twice.
@@ -1082,6 +1289,11 @@ class ServingSessionHandle(SessionHandle):
             session._publish_session_started = (
                 self._publish_session_started
             )  # Discovery/attachment does not authorize replacing a headless deny
+        if hasattr(session, "_publish_turn_admitted"):
+            # The pipeline calls this while its shared restart fence is held and
+            # ``_turn_lock`` makes this predicate true, so admission is durable
+            # before an exclusive relay restart can re-read the registry.
+            session._publish_turn_admitted = self._publish_busy
         # gate with a parked interactive gate. Exec opts into that separately.
         #: Why the most recent admitted turn failed, for a headless caller that
         #: has no front end reading the projection. See the drain's handler.
@@ -1093,9 +1305,27 @@ class ServingSessionHandle(SessionHandle):
         #: written by a host that cannot die that way would be noise on every
         #: boot rather than evidence.
         self._turn_journal: Any | None = None
+        # THE CONVERSATION'S OWN CHOICE OUTRANKS THE MACHINE DEFAULT, and it is
+        # read back from the session DIRECTORY rather than carried in memory
+        # because a resume builds a brand-new handle (``/approvals auto`` in a
+        # conversation used to be lost the moment that conversation reopened).
+        # Adopted BEFORE the gates exist so the FIRST decision already sees it,
+        # which is what makes a resumed conversation start ungated rather than
+        # park one card first and loosen after it. Must run after
+        # ``_mcp_reload_tasks`` exists: a read warning is emitted as a notice
+        # through the same fire-and-forget seam every other notice uses.
+        self._adopt_persisted_approval_override()
         self._gates_installed = install_gates
         if install_gates:
             self._install_gates()
+        elif install_ask_surface:
+            # A RESUMED, UNSUPERVISED run with the queued engine ON (#2803): the
+            # conversation owes its ask queue, but no approval gate — nothing can
+            # answer a parked card here, which is why `lop sessions` withholds
+            # `--control` from a resume worker. The caller also requires
+            # `asks.policy.enabled()`, so the kill-switch arm advertises no tool
+            # at all (review round 1, MINOR-1). See `_install_ask_surface`.
+            self._install_ask_surface()
         # THE ACCESS CLAIM IS PUBLISHED AT SESSION OPEN, before this host serves
         # a single frame, so a desktop session is never read with no claim at
         # all (the band's sentence is unrenderable then) — the same fact the
@@ -1123,6 +1353,11 @@ class ServingSessionHandle(SessionHandle):
             # turn never stalls on a card no front end would present.
             if self._auto_approve:
                 return True
+            if self._gates_closed_for_exit:
+                # Leaving on a signal: nobody will be asked before the exit, and
+                # a card parked now would hold the drain open (see
+                # ``refuse_gates_for_exit``). The same answer a stop gives.
+                return False
             request_id = secrets.token_hex(8)
             future: asyncio.Future[bool] = self._loop.create_future()
             self._pending_futures[request_id] = future
@@ -1140,10 +1375,14 @@ class ServingSessionHandle(SessionHandle):
             )
             self._notify()
             self._announce_pending("approval", tool_name, description)
+            # Read ONCE, here: `asyncio.wait_for` fixes its deadline when the
+            # wait begins, so this is the wait that applies even if a surface
+            # attaches later and flips the policy (see `_record_gate_timeout`).
+            timeout_s = self._gate_timeout_s()
             try:
-                return await asyncio.wait_for(future, timeout=self._gate_timeout_s())
+                return await asyncio.wait_for(future, timeout=timeout_s)
             except TimeoutError:
-                await self._record_gate_timeout(tool_name, description)
+                await self._record_gate_timeout(tool_name, description, waited_s=timeout_s or 0.0)
                 return False
             finally:
                 self._pending_futures.pop(request_id, None)
@@ -1155,6 +1394,9 @@ class ServingSessionHandle(SessionHandle):
             if not questions:
                 # Nothing to ask: answer NOTHING (the harness's "user escaped"
                 # signal) rather than parking a card with no question on it.
+                return None
+            if self._gates_closed_for_exit:
+                # Same rule as the approval gate: leaving on a signal.
                 return None
             total = len(questions)
             if total > 1:
@@ -1169,6 +1411,13 @@ class ServingSessionHandle(SessionHandle):
             # ask_answer resolves the FRONT one, and we advance to the next.
             answers: dict[str, list[str]] = {}
             for index, question in enumerate(questions):
+                if self._gates_closed_for_exit:
+                    # RE-CHECKED PER QUESTION (agent review round 2 on #3028, m1):
+                    # a person answering question N in the same tick a signal
+                    # commits the exit would otherwise park question N+1 after
+                    # the refusal, holding the drain open. Same partial answer
+                    # a timeout reports.
+                    return answers or None
                 request_id = secrets.token_hex(8)
                 future: asyncio.Future[dict[str, list[str]] | None] = self._loop.create_future()
                 self._pending_futures[request_id] = future
@@ -1218,10 +1467,15 @@ class ServingSessionHandle(SessionHandle):
                 # ``BODIES["ask"]`` vocabulary is the right fallback for it.
                 announced = "" if getattr(question, "secret", False) else prose
                 self._announce_pending("ask", prose, announced)
+                # Read once per question, for the same reason as the approval
+                # gate: the deadline `wait_for` enforces is fixed right here.
+                timeout_s = self._gate_timeout_s()
                 try:
-                    answer = await asyncio.wait_for(future, timeout=self._gate_timeout_s())
+                    answer = await asyncio.wait_for(future, timeout=timeout_s)
                 except TimeoutError:
-                    await self._record_gate_timeout("ask", prose, kind="ask")
+                    await self._record_gate_timeout(
+                        "ask", prose, kind="ask", waited_s=timeout_s or 0.0
+                    )
                     # A timed-out question ends the whole ask: report whatever
                     # earlier questions collected (partial, like the terminal's
                     # Escape) rather than blocking forever on the next one.
@@ -1246,9 +1500,38 @@ class ServingSessionHandle(SessionHandle):
         # lets tests (and any future direct caller) exercise the exact closure
         # the harness will await, rather than a re-implementation of it.
         self._approval_gate = approval_gate
-        self._ask_gate = ask_gate
         self._session.set_approval_handler(approval_gate)
-        self._session.set_ask_handler(ask_gate)
+        self._install_ask_surface(ask_gate)
+
+    def _install_ask_surface(self, handler: "_AskGateFn | None" = None) -> None:
+        """Install the queued-ask surface — the ask half of ``_install_gates``.
+
+        FACTORED OUT so a run that must NOT install approval gates can still own
+        an ask queue (#2803): a resumed conversation's open asks and its deadline
+        wakes belong to the conversation, and without this hook the queue is
+        never built (``Session.ask_queue`` returns ``None`` without a handler),
+        so `ask`/`ask_withdraw` never reach the model and every owed response
+        row waits for some later turn that may never come.
+
+        ``handler`` is the host's real ask gate when the approval gates exist
+        (:meth:`_install_gates` passes its closure in). Absent it, the surface is
+        QUEUED-ONLY: the handler is :func:`_unanswerable_ask`, which can refuse
+        but never present, because a run that reaches this arm has nobody at a
+        keyboard. That arm is BELT-AND-BRACES now: `exec_control` installs this
+        surface only while the queued engine is on, and the queued arm of
+        `execute_ask` never awaits the hook — its presence is what makes the
+        tools exist. The refusal is what a host that installs the surface
+        directly gets instead of a fabricated "the user closed the question".
+
+        The reach probe and the state sink ride along for the reason they were
+        installed with the gate in the first place: the receipt may name where an
+        ask is showing, and the phone projection is repainted by the host. A
+        resume worker publishes a discovery record like every other exec run, so
+        both answers are real there — a client may be attached.
+        """
+        gate: _AskGateFn = handler if handler is not None else _unanswerable_ask
+        self._ask_gate = gate
+        self._session.set_ask_handler(gate)
         # The queued-ask RECEIPT may name where the ask is showing, and only this
         # handle can answer that: a Session cannot see the attach table. The probe
         # is the SAME predicate the parked-gate timeout uses -- ``_attached_surfaces``
@@ -1283,6 +1566,9 @@ class ServingSessionHandle(SessionHandle):
         """
         try:
             self._fold.set_asks(list(rows) if rows is not None else None, outstanding_count)
+            # Fresh from the queue itself: the throttled re-read in
+            # ``_refresh_ask_projection`` need not repeat it.
+            self._ask_fold_installed_at = time.monotonic()
         except Exception:  # noqa: BLE001 -- a repaint is never worth a turn
             logger.debug("ask: could not install the wire fold", exc_info=True)
         self._publish_pending_gate()
@@ -1305,6 +1591,47 @@ class ServingSessionHandle(SessionHandle):
 
     # -- live config -------------------------------------------------------------
 
+    def _adopt_persisted_approval_override(self) -> None:
+        """Adopt this conversation's recorded ``/approvals`` choice, if any.
+
+        Read ONCE at construction, from the session DIRECTORY rather than from
+        memory, because the memory does not survive: a resume builds a fresh
+        handle around the same conversation, and that is exactly the run whose
+        gate used to come back on the machine default (``session/
+        approval_policy.py`` carries the operator's case). A resumed session
+        therefore starts in the mode its human left it in, on the FIRST
+        decision, instead of parking one card and loosening after it.
+
+        ``--yolo`` outranks the record both ways: a flag on this run is an
+        instruction about this run, and a stored conversation choice is not.
+
+        An unreadable record emits ONE warning notice and leaves the reader's
+        ``ask`` in place — the boot path must not fail because a sidecar is
+        truncated, and dropping a protective record (and so inheriting
+        ``auto``) is the unsafe direction. Best-effort on the notice too: a
+        reduced host with no emit seam just logs it (``_emit_notice``).
+        """
+        if self._approval_pinned:
+            return
+        directory = self._session_directory()
+        if directory is None:
+            return
+        override, warning = _read_approval_override(directory)
+        if warning:
+            # FAIL CLOSED, but do NOT claim a choice: the record is unusable, so
+            # this is "we could not read one", not "the human typed ask".
+            # Marking it explicit would make a later attributed loosening emit
+            # the keep-by-ask notice, which would tell the user they had chosen
+            # something they never typed. The safe gate is `ask`; the file may
+            # still move it, exactly as for a conversation with no record.
+            self._auto_approve = False
+            self._emit_notice(warning, "warning", headline="Approvals: record unreadable")
+            return
+        if override is None:
+            return
+        self._explicit_approvals_mode = override
+        self._auto_approve = override == "auto"
+
     def follow_config(self, watcher: Any) -> None:
         """Subscribe the gate to ``tool_approval_mode`` changes on ``watcher``.
 
@@ -1326,32 +1653,38 @@ class ServingSessionHandle(SessionHandle):
         A ``config.yml`` write is the operator's machine-wide intent ("if I
         change a setting I want it to go into effect for all my agents"), so a
         session that never made a choice of its own follows the file in BOTH
-        directions — with ONE exception, the loosening rule below, which is what
-        makes the SOURCE of a policy change part of the authorization decision
-        and not merely its value.
+        directions — with the exceptions below: a choice made in THIS
+        conversation (first), and a loosening this process cannot attribute
+        (last).
 
-        **The rule is asymmetric, and its loosening half has two refusal
-        reasons** (review round 1 R1, UX round 1 U1; issue #1282):
-
-        * **Tightening (``auto`` → ``ask``) always follows the file**,
-          unconditionally, in every session. Safety propagates without
+        * **A session that DID choose is not the file's to move**, in EITHER
+          direction (2026-10-23). ``/approvals ask|auto`` is recorded with the
+          conversation (``_explicit_approvals_mode``, persisted by
+          :mod:`local_operator.session.approval_policy`) and outranks the
+          default both ways: the human's decision is about THIS conversation
+          and the file is about the next one. A global ``ask`` therefore does
+          not re-arm a session its human set to ``auto`` — the mirror of the
+          hardening case below, and the operator's complaint in reverse (a
+          setting they chose must not be undone by a default they did not) —
+          and a global ``auto`` does not loosen one they set to ``ask``. Each
+          direction emits its own keep notice naming the command that adopts
+          the file, and a config write never clears the record: the file cannot
+          win a session back by being written. Only the operator's own
+          ``/approvals default`` IN THAT CONVERSATION clears it, because that
+          command sets the default this conversation then follows.
+        * **Otherwise, tightening (``auto`` → ``ask``) always follows the
+          file**, unconditionally, in every session. Safety propagates without
           exception; a user ends up safer than they asked, which is never the
           wrong surprise.
-        * **Loosening (``ask`` → ``auto``) is refused unless it is attributed**
-          (#1282). Only a write THIS process made through the operator's own
-          settings facade (``source="local"``) is an operator action; a model
-          tool's own file write, an editor, another pane, the settings API in
-          another process, and ``lop config edit`` are all unattributable from
-          here, and unattributed writes may only tighten. See
-          :func:`local_operator.harness.approval.loosening_is_authorised` for
-          the rule itself and why it is `source == "local"` rather than "not
-          disk".
-        * **Loosening does not move a session whose human typed ``/approvals
-          ask`` in it** either, and that branch is checked FIRST so the more
-          specific reason is the one printed. It is the CHOSEN MODE that is
-          consulted, not merely the fact of a choice: a session whose human
-          chose ``auto`` has no hardening to protect, but this process still
-          refused the unattributed write that would have moved it.
+        * **Otherwise, loosening (``ask`` → ``auto``) is refused unless it is
+          attributed** (#1282). Only a write THIS process made through the
+          operator's own settings facade (``source="local"``) is an operator
+          action; a model tool's own file write, an editor, another pane, the
+          settings API in another process, and ``lop config edit`` are all
+          unattributable from here, and unattributed writes may only tighten.
+          See :func:`local_operator.harness.approval.loosening_is_authorised`
+          for the rule itself and why it is `source == "local"` rather than
+          "not disk".
 
         The asymmetry is the whole point. The operator asked for settings to
         REACH running sessions, which was broken and is what this change fixes;
@@ -1398,34 +1731,39 @@ class ServingSessionHandle(SessionHandle):
             logger.warning("tool_approval_mode=%r ignored; use ask or auto", mode)
             return
         wanted_auto = mode == "auto"
+        # Record the file's truth BEFORE any keep/equality return: a session
+        # holding its own override still needs the correct global half for its
+        # provenance sentence, and the gate may not move this tick.
+        self._default_approvals_mode = mode
         if wanted_auto == self._auto_approve:
             return
-        if wanted_auto and self._explicit_approvals_mode == "ask":
-            # LOOSENING against a human's explicit hardening: keep the gate and
-            # say so. Shaped like the model half's keep notice — what is kept,
-            # why, and the exact command that adopts the file — so the two
-            # conflicts read as one rule rather than two behaviours.
+        if self._explicit_approvals_mode is not None:
+            # THE HUMAN'S OWN CHOICE OUTRANKS THE FILE IN BOTH DIRECTIONS
+            # (2026-10-23). The previous revision let a tightening through,
+            # on the reasoning that safety propagates without exception. It
+            # does not propagate through a CONVERSATION'S OWN DECISION: a
+            # session its human deliberately set to `auto` (a long unattended
+            # run, a CI-shaped task) was re-armed by a default about OTHER
+            # sessions, mid-turn and silently. The rule is now symmetric where
+            # the choice is the human's and asymmetric where it is the file's
+            # — the shape the model half already has for an explicit
+            # `/model` pick.
             #
-            # `== "ask"` and not a bare truth test: only a typed `ask` is a
-            # hardening this may refuse a file for. A typed `auto` is an
-            # opinion about the same key, but refusing a loosening on its
-            # behalf would pin a session to a mode its human never asked for.
-            self._emit_notice(
-                _LOOSENING_KEPT_BY_ASK_NOTICE,
-                # `warning`, one rung above the routine `config.yml changed:`
-                # receipt's `info`: this sentence is the whole user-visible trace
-                # of a refused policy change, and `info` renders `dim` — the same
-                # ink as the routine receipt it must be told apart from (design
-                # round 1, D2). `note` would be the designer's preferred rung and
-                # is NOT available to a runtime notice: `NoticeEvent.kind` is
-                # ``Literal["info", "warning", "error"]``, so a `note` refusal
-                # would be representable only in the embedded topology — and in
-                # production (`lop` always attaches) the sentence below is the
-                # one the user actually reads. Both keep notices carry the same
-                # rung so the two refusal reasons cannot look like two events.
-                "warning",
-                headline="Approvals unchanged",
-            )
+            # `warning` for both, the same rung as the refusal family: this
+            # sentence is the whole user-visible trace of a policy change that
+            # did NOT take effect.
+            if self._explicit_approvals_mode == "ask":
+                self._emit_notice(
+                    _LOOSENING_KEPT_BY_ASK_NOTICE,
+                    "warning",
+                    headline="Approvals unchanged",
+                )
+            else:
+                self._emit_notice(
+                    _REARM_KEPT_BY_AUTO_NOTICE,
+                    "warning",
+                    headline="Approvals unchanged",
+                )
             return
         if wanted_auto and not _loosening_is_authorised(
             source=getattr(change, "source", "disk"), gate_is_here=True
@@ -1447,13 +1785,16 @@ class ServingSessionHandle(SessionHandle):
             # edit``, of a model-run shell command and of that same operator's
             # click a process away.
             #
-            # Checked AFTER the explicit-`ask` branch so that branch keeps
-            # meaning "the human typed ask" and so the more specific reason is
-            # the one printed. Refusing means exactly one thing: ``_auto_approve``
-            # does not move and no ``tool approvals: auto`` receipt is emitted.
-            # Nothing in this process writes this key through the settings
-            # facade today (`/approvals auto` here sets the flag directly), so
-            # in practice every file-originated loosening is refused here.
+            # Checked AFTER the explicit-choice branch so that branch keeps
+            # meaning "the human chose this conversation's mode" and so the more
+            # specific reason is the one printed. Refusing means exactly one
+            # thing: ``_auto_approve`` does not move and no ``tool approvals:
+            # auto`` receipt is emitted. Since 2026-10-23 ``/approvals default
+            # <mode>`` DOES write this key through the settings facade in this
+            # process (the operator-authorised control-plane transition), so
+            # the attributed loosening is now a real route rather than a
+            # theoretical one — it reaches every session that never chose,
+            # which is the "goes into effect for all my agents" promise.
             self._emit_notice(
                 _LOOSENING_REFUSED_NOTICE,
                 # `warning` for the reason the sibling keep notice documents.
@@ -1462,13 +1803,13 @@ class ServingSessionHandle(SessionHandle):
             )
             return
         self._auto_approve = wanted_auto
-        # The FILE now owns the value in force, so a mode the human typed here
-        # earlier no longer describes this gate. Clearing keeps the invariant on
-        # `_explicit_approvals_mode` exact (review round 2, R6): without it, a
-        # session tightened off a typed `auto` would still be carrying that
-        # `auto`, and the keep notice's "set with /approvals in this session"
-        # would be describing a choice the file, not the human, had made.
-        self._explicit_approvals_mode = None
+        # ``_explicit_approvals_mode`` is deliberately NOT cleared here any
+        # more (2026-10-23). It used to be, on the invariant that the file owns
+        # the value once it moves the gate. The record is now the
+        # conversation's durable choice and the file only ever reaches a
+        # session that made none, so this branch is unreachable while a choice
+        # exists — and clearing here would resurrect the ``/approvals auto`` →
+        # file write → resume forgetfulness this change removes.
         self._notify()
         self._emit_notice(
             (
@@ -1615,6 +1956,11 @@ class ServingSessionHandle(SessionHandle):
         task = self._completion_task
         if task is not None and not task.done():
             task.cancel()
+        # The access-claim read is additive state about a session that is going
+        # away; nothing may publish into its store after disposal.
+        publish = self._model_access_publish
+        if publish is not None and not publish.done():
+            publish.cancel()
         # The supplement job is droppable by contract: shutdown never waits on it.
         await self._supplements.cancel()
         # The dispose rung of EVERY exit that is not a viewer-driven retirement:
@@ -1860,8 +2206,13 @@ class ServingSessionHandle(SessionHandle):
             # helper cannot vouch for — absent, empty, unparseable, or holding
             # even one real row — keeps the old "a write happened" verdict.
             directory = Path(getattr(transcript, "directory", "") or "")
-            transcript_path = directory / TRANSCRIPT_FILENAME
-            if transcript_path.exists() and not transcript_is_bookkeeping_only(transcript_path):
+            # Resolve THROUGH the codec, not by the plain name: a compressed
+            # transcript's rows live in an archive and a plain-name probe would
+            # answer "no file" for a session that does have one.
+            from local_operator.session import compression
+
+            transcript_path = compression.transcript_for_read(directory)
+            if transcript_path is not None and not transcript_is_bookkeeping_only(transcript_path):
                 return False
             # The attachment sidecar is durable state the user asked for with
             # no transcript row to show for it: a routed `/team <name>` or
@@ -2565,6 +2916,7 @@ class ServingSessionHandle(SessionHandle):
         message_id: str = "",
         custom_type: str = "",
         bridge_meta: dict[str, Any] | None = None,
+        raise_reader: bool = True,
     ) -> str:
         """Spool one message for the successor runtime, and receipt it.
 
@@ -2626,7 +2978,6 @@ class ServingSessionHandle(SessionHandle):
             SPOOL_RECEIPT_PROMPT,
             SPOOL_RECEIPT_WAKE,
             InboxLine,
-            append_inbox,
         )
 
         session = getattr(self, "_session", None)
@@ -2634,9 +2985,14 @@ class ServingSessionHandle(SessionHandle):
         directory = getattr(transcript, "directory", None)
         if directory is None:
             raise self._retiring_refusal()
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime.inbox import append_for_successor
+        from local_operator.wakes.spooled import await_spool_write
+
         try:
-            written = await asyncio.to_thread(
-                append_inbox,
+            written = await await_spool_write(
+                append_for_successor,
+                config_dir(),
                 Path(directory),
                 InboxLine(
                     text=text,
@@ -2664,6 +3020,7 @@ class ServingSessionHandle(SessionHandle):
                     # owner-prompt paths, whose rows stay byte-identical.
                     bridge_meta=bridge_meta or {},
                 ),
+                raise_reader=raise_reader,
             )
         except Exception:  # noqa: BLE001 — a broken spool is a refusal, not a crash
             logger.warning("could not spool a message for the successor", exc_info=True)
@@ -2674,49 +3031,31 @@ class ServingSessionHandle(SessionHandle):
             "session runtime: spooled a %s for the successor",
             "prompt" if source == SOURCE_USER else "peer message",
         )
-        if source == SOURCE_USER or wake:
-            # THE PROMISE IN THE RECEIPT IS KEPT HERE, and this is the only
-            # writer of it. The two receipts returned below are promises about a
-            # runtime THIS process cannot start: it holds the transcript lease
-            # until it exits, so the successor has to be raised by someone else
-            # — and until this call existed, that someone was "whoever engages
-            # next", which on this fleet is nobody for a headless session with no
-            # wake due. Measured 2026-09-21: a session retired for a newer build
-            # with rows in its spool and no successor, and the receipt it had
-            # handed the sender ("held for the next runtime — it runs it") was
-            # true of no process at all.
-            #
-            # ONLY TURN-ASKING ROWS CREATE THE OBLIGATION. A quiet note does not:
-            # ``wake=False`` means "read this on your next turn", which is a
-            # deferral the sender asked for rather than work a successor owes
-            # (``peer_send.deliver_peer_message`` argues the trade), and raising a
-            # runtime for every note is the process churn that argument declines.
-            # A ``SOURCE_USER`` row always owes one: it is the OWNER's own prompt,
-            # and its receipt says the next runtime runs it.
-            #
-            # Best-effort in both directions, like every evidence write on this
-            # path: the row is already in the spool, so a failure here loses the
-            # RAISING and not the message, and it must not fail a delivery the
-            # sender is about to be told succeeded.
-            # NOTE_SPOOLED_TURN ALSO RAISES THE READER, and that argument lives in
-            # ONE place — see ``wakes.spooled.note_spooled_turn`` (review round 5,
-            # R5-1; round 6, R6-2; rationale deduplicated in round 7, R7-1). What
-            # matters at this call site: the supervisor is normally DOWN and
-            # nothing on the spool path used to revive it, so a row spooled for a
-            # successor waited for an unrelated schedule persist to raise the only
-            # process that can act on it.
-            from local_operator.paths import config_dir
-            from local_operator.wakes.spooled import note_spooled_turn
-
-            noted = str(getattr(session, "session_id", "") or "") or Path(directory).name
-            note_spooled_turn(
-                config_dir(),
-                noted,
-                cwd=str(getattr(self, "_desktop_cwd", "") or ""),
-            )
         if source == SOURCE_USER:
             return SPOOL_RECEIPT_PROMPT
         return SPOOL_RECEIPT_WAKE if wake else SPOOL_RECEIPT_NOTE
+
+    async def _forget_spooled_owner_row(self, command_id: str) -> None:
+        """Drop the spooled copy of an owner message that is now durable elsewhere.
+
+        The undo of :meth:`_spool_for_successor` for the one caller that must not
+        leave a copy behind: a steer this runtime went on to accept, whose row a
+        successor would otherwise deliver a second time. Best-effort by contract —
+        a removal lost to a crash is covered by the successor's own dedupe
+        (``has_admitted_command``, see ``process._run_owner_prompt``), and this
+        runs on an admission path where a bookkeeping failure must not turn an
+        accepted message into an error.
+        """
+        directory = self._session_directory()
+        if directory is None or not command_id:
+            return
+        from local_operator.session.runtime.inbox import remove_owner_row
+        from local_operator.wakes.spooled import await_spool_write
+
+        try:
+            await await_spool_write(remove_owner_row, directory, command_id)
+        except Exception:  # noqa: BLE001 — a stale spool row is deduped at replay
+            logger.warning("could not drop the spooled copy of %s", command_id, exc_info=True)
 
     def may_refresh(self) -> str:
         """Why this runtime must NOT retire for a newer build right now, or
@@ -2771,7 +3110,15 @@ class ServingSessionHandle(SessionHandle):
         # this class of failure a degraded-but-alive runtime instead of a
         # wedged one.
         try:
-            if _wake_within_window(self):
+            if _wake_within_window(self) and not getattr(self, "_draining", False):
+                # A committed departure is not residency. An idle signalled
+                # runtime must leave at its boundary, not wait out the 120 s
+                # progress bound merely because a recurring wake is due soon;
+                # the successor owns that delivery (#3028 node control (c)).
+                # Read through getattr like the file's other latch reads: a
+                # direct attribute read raised on a handle without the latch,
+                # and the fail-open except below turned that into "no wake",
+                # silently disabling the warm-window term (#3028 CI shard 2).
                 return "wake due within the warm window"
         except Exception:  # noqa: BLE001 — uncertainty must not pin the runtime
             logger.debug("warm-window probe failed; treating as no wake", exc_info=True)
@@ -2903,6 +3250,31 @@ class ServingSessionHandle(SessionHandle):
         note = getattr(self._session, "note_deliberate_stop", None)
         if callable(note):
             note()
+
+    def refuse_gates_for_exit(self) -> int:
+        """Deny every parked gate and refuse new ones: a signal committed this runtime to leave.
+
+        WHY (agent review round 1 on #3028, M1; QA Q5). The signal drain
+        (``process._drain_for_signal``) waits for the turn to end, cutting it
+        only after ``SIGNAL_DRAIN_S`` with NO progress. A call parked on an
+        approval counts as a step executing (its tool batch is open), so that
+        bound never fired: a SIGTERMed runtime parked on an approval nobody
+        could answer stayed up until the gate's own day-long timeout, while its
+        record promised "cut if silent 2 min" — and systemd's 90 s SIGKILL was
+        the only thing that ended it. A signal means this process is ending; no
+        answer can arrive in time to be acted on, so the drain answers the
+        gate now with the same deny the socket stop (``request_stop``) and a
+        timeout give, and the turn reaches its boundary and exits.
+
+        Gates opened AFTER this answer immediately too, without parking: the
+        model's next step after a denial is often another gated call, and a
+        fresh card would hold the drain open exactly as the first one did.
+        One-way for the life of the process — it is only called on an exit
+        that has already been committed to. Returns how many parked gates were
+        settled, for the log.
+        """
+        self._gates_closed_for_exit = True
+        return self._deny_pending_gates()
 
     def _deny_pending_gates(self) -> int:
         """Refuse every parked approval/ask so teardown cannot hang on them.
@@ -3348,7 +3720,12 @@ class ServingSessionHandle(SessionHandle):
             if isinstance(event, ModelChangeEvent):
                 # Fallback/recovery is an access edge too: publishing only at
                 # primary selection leaves a signed-out Meta claim on OpenAI.
-                self.publish_model_access()
+                # SCHEDULED, never inline: this handler runs on the session
+                # loop, and the synchronous form is a SQLite read there (PR
+                # #3053 review round 1, R1-1). A switch made through
+                # ``set_model_effort`` has already scheduled the same read, and
+                # the schedule coalesces onto it rather than reading twice.
+                self._schedule_model_access_publish()
                 self._retry_naming_after_route_change()
             self._notify()
             # LAST, and guarded inside, because it is additive: the goal judge
@@ -3419,6 +3796,7 @@ class ServingSessionHandle(SessionHandle):
         input_mode: str | None = None,
         input_path: str | None = None,
         audio: list[dict[str, str]] | list["AudioContent"] | None = None,
+        files: list[dict[str, Any]] | None = None,
         *,
         wait_complete: bool = False,
         harness_injected: bool = False,
@@ -3438,6 +3816,14 @@ class ServingSessionHandle(SessionHandle):
         ingest images already use) or pass through already-decoded, and the
         blocks reach ``Session.prompt`` only when its signature takes the
         keyword — same probe, same reasoning.
+
+        ``files`` are ``Prompt.files``' references; they are resolved against
+        THIS owner's attachment store in the synchronous prelude below, so a
+        missing digest is an :class:`AttachmentMissing` refusal raised where
+        this method's caller can report it (contract amendment 3) rather than
+        a detached failure. A session whose ``prompt`` predates the
+        ``documents`` keyword is refused (``DocumentCarriageUnsupported``),
+        never forwarded without its files.
 
         ``wait_for_turn`` makes an accepted prompt WAIT for a turn this queue
         did not open instead of failing after admission (see
@@ -3513,6 +3899,20 @@ class ServingSessionHandle(SessionHandle):
             if _already_bounded(audio)
             else _audio_blocks(cast(list[dict[str, str]] | None, audio))
         )
+        # Documents are resolved in the same synchronous prelude, for the same
+        # measured reason audio is (no thread hop: ``_admit_without_waiting_
+        # for_the_turn`` budgets a few loop turns for reportable refusals), and
+        # deliberately NOT with the image path's drop-on-bad-entry contract: a
+        # missing digest raises ``AttachmentMissing`` naming the file. The
+        # store read is bounded by the upload cap (32 MB/file, 8 files).
+        document_blocks_decoded = _document_blocks(files, getattr(self._session, "model", None))
+        if document_blocks_decoded:
+            parameters = inspect.signature(self._session.prompt).parameters
+            if "documents" not in parameters:
+                from local_operator.session.errors import DocumentCarriageUnsupported
+
+                self._command_reservations.reject(command_id)
+                raise DocumentCarriageUnsupported()
         if not self._command_reservations.reserve(command_id, kind="prompt"):
             return "already admitted"
         # Restore intentionally keeps missing attachments readable. Admission is
@@ -3570,13 +3970,14 @@ class ServingSessionHandle(SessionHandle):
         # (``process._refresh_for``), so the queue is never a promise to a
         # successor that does not come.
         if self._updating:
-            if blocks:
-                # An inbox row is text, so carrying an image-carrying prompt
-                # would shed the user's file while promising it was queued. The
-                # refusal returns the draft, which is true here — the text IS
-                # still theirs — and it names no build: the window's own phrase
-                # would claim "the one it loaded is gone from disk", which is
-                # false for a superseded tree (the D10/MAJOR-2 class).
+            if blocks or document_blocks_decoded:
+                # An inbox row is text, so carrying an image- or document-
+                # carrying prompt would shed the user's file while promising it
+                # was queued. The refusal returns the draft, which is true here
+                # — the text IS still theirs — and it names no build: the
+                # window's own phrase would claim "the one it loaded is gone
+                # from disk", which is false for a superseded tree (the
+                # D10/MAJOR-2 class).
                 self._command_reservations.reject(command_id)
                 raise self._retiring_refusal()
             try:
@@ -3624,7 +4025,12 @@ class ServingSessionHandle(SessionHandle):
             # prompt would return a receipt for a message that arrives without
             # its attachment — losing the user's file while telling them it was
             # queued. It takes the refusal, which returns both to the composer.
-            if self._draining and not self._exit_committed and not blocks:
+            if (
+                self._draining
+                and not self._exit_committed
+                and not blocks
+                and not document_blocks_decoded
+            ):
                 try:
                     receipt = await self._spool_for_successor(
                         text,
@@ -3666,6 +4072,7 @@ class ServingSessionHandle(SessionHandle):
             input_mode=input_mode,
             input_path=input_path,
             audio=audio_blocks_decoded,
+            documents=document_blocks_decoded,
         )
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
@@ -4166,13 +4573,13 @@ class ServingSessionHandle(SessionHandle):
         and run the call as a background task so the title arrives ALONGSIDE
         the turn rather than after it.
 
-        ``text`` is the SENT message, and for a ``$skill`` invocation that is
-        the EXPANDED payload rather than the line the user typed: expansion is
-        the CLIENT's duty (a desktop renders ``skills.invoke.render_invocation``'s
-        payload itself, in ``local-operator-ui``'s ``skill-invocation.ts``), so
-        the harness never sees the typed line on its own. Naming from the
-        payload titles the conversation "The user invoked the `research`
-        skill…" and puts the whole SKILL.md body in the list row — the defect
+        ``text`` is the SENT message, and a ``$skill`` invocation is the line
+        the user typed followed by a tail block carrying the bodies. Expansion
+        is the CLIENT's duty, so the harness sees that payload rather than the
+        typed line alone; ``harness.rows.user_row_text`` strips complete blocks,
+        which is what keeps the title on the user's words instead of titling the
+        thread "The user invoked the `research` skill…" and putting the whole
+        SKILL.md body in the list row — the defect
         ``docs/design/history-fold-convergence.md`` row D8 calls out.
 
         Collapsed HERE rather than at the one call site today, because this is
@@ -4254,8 +4661,19 @@ class ServingSessionHandle(SessionHandle):
         the standing fallback (that is its whole purpose — a normal landing
         never displaces a stored title) and never re-arms itself.
         """
-        from local_operator.session import naming
+        from local_operator.session import auto_tag, naming
 
+        # Auto-tagging is a FIRST-NAME path only. The heal's job is to upgrade
+        # a Tier 3 fallback title, and the attempt that stored that fallback
+        # already settled the intent; reading the sidecar again here would let
+        # a retry claim tags after the row has been visible — and corrected —
+        # in the list.
+        intent = None if heal else self._auto_tag_intent()
+        tag_contract = (
+            await asyncio.to_thread(auto_tag.live_contract, intent.root)
+            if intent is not None
+            else None
+        )
         try:
             acceptance = await naming.generate_title_acceptance(
                 text,
@@ -4264,10 +4682,20 @@ class ServingSessionHandle(SessionHandle):
                 # classification layer has no attribute and the cascade hedges
                 # instead of asking. See ``naming.title_fit_check``.
                 fit_check=getattr(self._session, "title_fit_check", None),
+                tag_contract=tag_contract,
             )
         except Exception:  # noqa: BLE001 — naming is decoration; never fail a turn
             logger.debug("mobile conversation naming failed", exc_info=True)
             return
+        if intent is not None and acceptance.title:
+            # Any returned title spends the intent — including the Tier 3
+            # opener fallback, which carries no model tags but is still the
+            # answer this attempt settled on. Only a title-less answer (the
+            # sentinel, a failed call) keeps the sidecar for a retry. ``settle``
+            # is the one write and it never raises; a revision conflict inside
+            # it is a human edit winning rather than a failure worth surfacing
+            # from a detached task, and the heal path never reads the intent.
+            await asyncio.to_thread(auto_tag.settle, intent, acceptance.tags)
         title = acceptance.title
         existing = getattr(self._session, "conversation_name", "")
         if not title or (existing and not heal):
@@ -4295,6 +4723,32 @@ class ServingSessionHandle(SessionHandle):
         self._session.set_conversation_name(title, user_set=False)
         self._refresh_state()
         self._notify()
+
+    def _auto_tag_intent(self) -> Any:
+        """The child's fork-time auto-tag intent, or ``None`` when not asked for.
+
+        Read from the session's OWN store, the same root the fork branch lands
+        a clone in (:func:`_fork_store`): the desktop route writes the sidecar
+        beside the child it created, so a runtime served out of another store
+        must look there rather than at this process's default root. The
+        sidecar is READ, not spent — :func:`auto_tag.settle` clears it only
+        after the naming attempt that accepted a title, which leaves a failed
+        call's intent for the next prompt's naming retry.
+
+        This ONE read stays on the loop deliberately. It is a bounded read of
+        a sub-kilobyte sidecar, and the first-name worker's latency is pinned
+        by the serving tests' loop-turn budget: a ``to_thread`` hop here delays
+        the title by a full thread round trip even on the no-intent path. The
+        registry read (``auto_tag.live_contract``) is the unbounded one and
+        stays off the loop.
+        """
+        from local_operator.session import auto_tag
+
+        session_id = str(getattr(self._session, "session_id", "") or "")
+        if not session_id:
+            return None
+        root = self._config_dir or _fork_store(self._session)
+        return auto_tag.read(root, session_id)
 
     def _maybe_heal_name(self) -> None:
         """Spend the one-shot Tier 3 self-heal at a completed turn, if armed.
@@ -4472,7 +4926,24 @@ class ServingSessionHandle(SessionHandle):
             unsubscribe_outcome = self._session.subscribe(observe_end)
             try:
                 if command.wait_for_turn:
-                    await self._await_turn_lock_free()
+                    # A person's prompt is visible to the Team Bridge body path
+                    # while it waits out a foreign turn, so a body follow-up
+                    # does not start one more body turn ahead of it. Harness
+                    # rows (goal continuations) are not a person and do not
+                    # hold it; a session without the seam keeps the plain wait.
+                    # Annotated because ``getattr`` on the probe yields ``Any |
+                    # None`` and ``callable()`` narrows that to a callable
+                    # returning ``object``, which a ``with`` cannot enter. The
+                    # seam is ``Session.person_prompt_waiting``, a
+                    # ``contextlib.contextmanager``.
+                    waiting: Callable[[], contextlib.AbstractContextManager[object]] | None = (
+                        getattr(self._session, "person_prompt_waiting", None)
+                    )
+                    if callable(waiting) and not command.harness_injected:
+                        with waiting():
+                            await self._await_turn_lock_free()
+                    else:
+                        await self._await_turn_lock_free()
                 parameters = inspect.signature(self._session.prompt).parameters
                 if "message_id" in parameters:
                     fields: dict[str, Any] = {
@@ -4498,6 +4969,13 @@ class ServingSessionHandle(SessionHandle):
                     # this command's prelude.
                     if "audio" in parameters:
                         fields["audio"] = command.audio
+                    # Documents, probed the same way. The reservation path
+                    # already refused a session without this keyword when the
+                    # command carried documents, so the probe cannot silently
+                    # drop them here; it keeps a reduced test session that
+                    # never sees documents on its exact old call shape.
+                    if "documents" in parameters:
+                        fields["documents"] = command.documents
                     await self._session.prompt(command.text, command.images, **fields)
                 else:
                     # Legacy tests/third-party handles have no admission seam;
@@ -4570,6 +5048,7 @@ class ServingSessionHandle(SessionHandle):
         input_mode: str | None = None,
         input_path: str | None = None,
         audio: list[dict[str, str]] | list["AudioContent"] | None = None,
+        files: list[dict[str, Any]] | None = None,
         harness_injected: bool = False,
     ) -> str:
         self._check_loop_thread()
@@ -4594,8 +5073,138 @@ class ServingSessionHandle(SessionHandle):
             if _already_bounded(audio)
             else _audio_blocks(cast(list[dict[str, str]] | None, audio))
         )
+        # Documents ride a steer exactly as they ride a prompt: resolved in the
+        # same synchronous prelude (a missing digest refuses the correction
+        # before it is queued), and refused when this session's ``steer``
+        # predates the keyword rather than dropped on the floor.
+        document_blocks_decoded = _document_blocks(files, getattr(self._session, "model", None))
+        if document_blocks_decoded:
+            parameters = inspect.signature(self._session.steer).parameters
+            if "documents" not in parameters:
+                from local_operator.session.errors import DocumentCarriageUnsupported
+
+                self._command_reservations.reject(command_id)
+                raise DocumentCarriageUnsupported()
+        # ATTACHMENTS KEEP THEIR PRE-CHANGE CARRIAGE, and the fact is computed
+        # here rather than inside the admission for the same reason the blocks
+        # are: it is part of what the caller submitted, before any await. An
+        # ``InboxLine`` is text, so an image/recording/document steer has no
+        # durable home on the successor spool — it is admitted into the live
+        # queue exactly as before this seam and stays lossy on a runtime swap,
+        # which is a known gap listed on the PR rather than papered over with a
+        # refusal (refusing it broke the tree's own mid-turn ``/goal`` e2e).
+        carries_attachments = bool(images or audio or document_blocks_decoded)
+        # ONE STEER AT A TIME, in arrival order: the durable spool write below
+        # is awaited, so without this lock two corrections submitted together
+        # could reach the queue in the order their writes finished rather than
+        # the order they arrived. See ``_steer_admission_lock``.
+        async with self._steer_admission_lock:
+            # The admission is its OWN task because the message is owed once its
+            # spool write lands: a cancelled client must not abandon it between
+            # that write and the queue insert (see ``_await_steer_admission``).
+            admission = asyncio.ensure_future(
+                self._admit_steer(
+                    text,
+                    blocks,
+                    command_id=command_id,
+                    input_mode=input_mode,
+                    input_path=input_path,
+                    audio_blocks=audio_blocks_decoded,
+                    document_blocks=document_blocks_decoded,
+                    carries_attachments=carries_attachments,
+                    harness_injected=harness_injected,
+                )
+            )
+            receipt, raise_successor = await self._await_steer_admission(admission)
+        # OUTSIDE the lock: raising the read side is a ``launchctl`` hop (15 s
+        # worst case), and holding the arrival-order mutex across it would
+        # serialize every other steer behind a system call.
+        if raise_successor:
+            await self._raise_successor_reader()
+        return receipt
+
+    async def _await_steer_admission(
+        self, admission: "asyncio.Task[tuple[str, bool]]"
+    ) -> tuple[str, bool]:
+        """Join one admission even when the caller is cancelled mid-flight.
+
+        THE MESSAGE IS OWED ONCE ITS SPOOL WRITE LANDS, and the pre-change code
+        had no await between reserving the producer identity and queueing the
+        message — this seam added one. A cancellation delivered there used to
+        abandon the admission halfway: the row was on disk, the live queue never
+        saw it, and the reservation stayed pending forever, so a retry of the
+        same id answered "already admitted" for a message nobody would deliver.
+
+        Shielding alone is not enough: the caller must also not release
+        ``_steer_admission_lock`` while the owed admission is still running, or
+        the next steer can overtake it. The cancellation is remembered and
+        re-raised AFTER the admission settles — the same join-then-re-raise shape
+        ``wakes.spooled.await_spool_write`` uses one layer down.
+        """
+        cancellation: asyncio.CancelledError | None = None
+        while True:
+            try:
+                await asyncio.wait((admission,))
+            except asyncio.CancelledError as error:
+                if admission.cancelled():
+                    raise
+                if cancellation is None:
+                    cancellation = error
+                if not admission.done():
+                    continue
+            if cancellation is not None:
+                # Read the outcome so a task exception is not left unretrieved;
+                # the client is gone, so its receipt is not ours to deliver.
+                if not admission.cancelled():
+                    admission.exception()
+                raise cancellation
+            return admission.result()
+
+    async def _raise_successor_reader(self) -> None:
+        """Nudge the wake supervisor after the steer admission lock is released.
+
+        ``inbox.append_for_successor`` raises the reader inline, but that work is
+        a ``launchctl`` hop — 15 s worst case — and must not run under
+        ``_steer_admission_lock``. The row and its obligation are already durable
+        when this runs; the raise only asks the supervisor to look, so a failure
+        here delays a boot rather than losing a message (``_raise_reader`` is
+        best-effort by contract).
+        """
+        directory = self._session_directory()
+        if directory is None:
+            return
+        from local_operator.paths import config_dir
+        from local_operator.wakes.spooled import _raise_reader
+
+        await asyncio.to_thread(_raise_reader, config_dir(), directory.name)
+
+    async def _admit_steer(
+        self,
+        text: str,
+        blocks: list["ImageContent"],
+        *,
+        command_id: str,
+        input_mode: str | None,
+        input_path: str | None,
+        audio_blocks: list["AudioContent"],
+        document_blocks: list[Any],
+        carries_attachments: bool,
+        harness_injected: bool,
+    ) -> tuple[str, bool]:
+        """The admission half of :meth:`steer`, once its blocks are decoded.
+
+        Runs as its own task so a cancelled client cannot abandon a spooled
+        message halfway (see ``_await_steer_admission``), and the caller holds
+        ``_steer_admission_lock`` across the whole body — the reserve, the
+        durable spool write, the queue insert and the echoed row are one step
+        for ordering purposes.
+
+        Returns the receipt and whether the successor reader must be raised; the
+        caller does that AFTER releasing the lock, because it is a ``launchctl``
+        hop that must not serialize other admissions.
+        """
         if not self._command_reservations.reserve(command_id, kind="steer"):
-            return "already admitted"
+            return "already admitted", False
         # THE UPDATE WINDOW, and a steer is the one admission that cannot simply
         # wait: ``Session.steer`` queues against a TURN, and this runtime is idle
         # by construction (the window only opens when ``may_refresh`` reports
@@ -4604,15 +5213,12 @@ class ServingSessionHandle(SessionHandle):
         # then dispose it. It is the owner's own words, so it takes the spool and
         # the owner's receipt: the successor runs it, at the head of the turn the
         # prompt above it opens.
-        #
-        # IMAGES (AND NOW A RECORDING) ARE THE ONE THING THE VEHICLE CANNOT
-        # CARRY and take the refusal, exactly as an attachment-carrying prompt
-        # does (see that arm for why an inbox row cannot hold them). Checked on
-        # the RAW argument rather than on the decoded blocks because the
-        # decision has to happen before the attach, and a non-empty ``images``
-        # or ``audio`` is the same fact one decode earlier.
+        # ATTACHMENTS CANNOT RIDE THE SPOOL in this window, and this window has
+        # no other vehicle — so an attachment steer keeps the refusal it has
+        # always taken here. The normal path below keeps its pre-change in-memory
+        # carriage instead (see that block).
         if self._updating:
-            if images or audio:
+            if carries_attachments:
                 self._command_reservations.reject(command_id)
                 raise self._retiring_refusal()
             try:
@@ -4624,13 +5230,58 @@ class ServingSessionHandle(SessionHandle):
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
+                    raise_reader=False,
                 )
             finally:
                 # A spooled steer is not in this session's transcript, so its
                 # producer identity must stay retryable — the same rule the
                 # refusal's reject keeps below.
                 self._command_reservations.reject(command_id)
-            return receipt
+            return receipt, True
+        # THE UPDATE WINDOW WAS THE ONLY SPOOLING STEER; EVERY PLAIN ACCEPTED
+        # STEER NOW TAKES THE SPOOL (an attachment steer keeps its in-memory
+        # carriage, see the block below). The steering queue is in memory, and
+        # the transcript row
+        # that makes a steer durable is only written at the next tool boundary
+        # (``Session._drain_steering``) — so a runtime replaced before that boundary
+        # took an ACKED message with it, leaving the producer a 200, the session no
+        # row, and nobody an error (operator report, 2026-10-28: two command ids
+        # from session ``1cfce255afc3`` appeared nowhere but a frontend
+        # checkpoint). The spool is the one channel that survives the handover, and
+        # the window's arm above already treats it as the answer to exactly this
+        # question — so it is written BEFORE the queue is touched and before
+        # "steering queued" can be returned. A crash after the ack then leaves a row
+        # the successor replays (``process._run_owner_prompt``), exactly once,
+        # keyed on the command id that is also the transcript's
+        # ``producer_command_id``.
+        #
+        # IT INSURES THE QUEUE, IT DOES NOT REPLACE IT: the live turn still gets the
+        # correction through ``Session.steer``, and the drain removes the spool
+        # copy once the row it wrote is durable, so normal operation leaves nothing
+        # for a successor to deliver twice.
+        #
+        # AN ATTACHMENT STEER IS NOT SPOOLED (the decision is in ``steer``): the
+        # vehicle is text, so the row would drop the image/recording/document and
+        # a successor would deliver a message the user did not send. It keeps the
+        # pre-change in-memory carriage instead.
+        if not carries_attachments:
+            try:
+                await self._spool_for_successor(
+                    text,
+                    mode="mailbox",
+                    wake=True,
+                    sender={},
+                    source=SOURCE_USER,
+                    command_id=command_id,
+                    harness_injected=harness_injected,
+                    raise_reader=False,
+                )
+            except Exception:
+                # Nowhere durable to put the message, so it is refused rather than
+                # queued — and the producer identity stays retryable, which is what
+                # lets the same id be admitted once the spool can be written.
+                self._command_reservations.reject(command_id)
+                raise
         # Images ride the steer too. Producer identity follows the queued user
         # row so a reconnect cannot inject the same correction twice.
         fields: dict[str, Any] = {}
@@ -4651,7 +5302,12 @@ class ServingSessionHandle(SessionHandle):
         # row, and a session that predates the keyword gets none rather than a
         # keyword it would drop.
         if "audio" in parameters:
-            fields["audio"] = audio_blocks_decoded
+            fields["audio"] = audio_blocks
+        # Documents ride the correction's keyword, probed like the rest; the
+        # reservation path above already refused a session without it when
+        # documents were present.
+        if "documents" in parameters:
+            fields["documents"] = document_blocks
         # The structural stamp rides the steer for the same reason it rides a
         # prompt: a MID-TURN delivery is one of the two ways a spooled owner
         # prompt replays (``process._run_owner_prompt``'s steer fallback), and
@@ -4665,6 +5321,9 @@ class ServingSessionHandle(SessionHandle):
         except Exception:
             # No queue insertion means no durable acceptance exists; the same
             # producer identity must remain retryable after this terminal reject.
+            # The spool copy goes with the rejection: replaying it would deliver a
+            # message the producer was just told failed.
+            await self._forget_spooled_owner_row(command_id)
             self._command_reservations.reject(command_id)
             raise
         self._command_reservations.accept(command_id)
@@ -4683,7 +5342,7 @@ class ServingSessionHandle(SessionHandle):
             message_id=command_id if "message_id" in fields else None,
         )
         self._notify()
-        return "steering queued"
+        return "steering queued", not carries_attachments
 
     @_on_session_loop
     async def receive_peer_message(
@@ -5124,7 +5783,25 @@ class ServingSessionHandle(SessionHandle):
             established=established,
             native=native_chat_provider_ids(),
         )
-        spec = await asyncio.to_thread(build_model_spec, provider, model_id)
+        # INLINE when the model's metadata is already in memory, which is every
+        # switch back to a model this process has run: the build is then pure
+        # CPU (well under 1 ms) and needs no thread hop at all. Only a cold
+        # build can reach discovery's synchronous HTTP legs, and that one goes
+        # to the switch's own pool rather than the default executor the lanes
+        # saturate (see :data:`_SWITCH_EXECUTOR_WORKERS` for the measurement).
+        # The memo's row is HANDED to the build so the inline path performs no
+        # lookup of its own: a warm check against one cache followed by a build
+        # that resolves through another is how a "warm" switch used to run the
+        # cold body on the loop anyway (review round 2, R2-1).
+        from local_operator.model.configure import warm_model_info
+
+        warm_info = warm_model_info(provider, model_id)
+        if warm_info is not None:
+            spec = build_model_spec(provider, model_id, info=warm_info)
+        else:
+            spec = await self._loop.run_in_executor(
+                _switch_executor(), build_model_spec, provider, model_id
+            )
         if provider == "meta-muse":
             from local_operator.harness.types import ModelSpec
 
@@ -5146,10 +5823,19 @@ class ServingSessionHandle(SessionHandle):
                     )
                 }
             )
-        elif (
-            current is not None
-            and current.reasoning_effort
-            and current.reasoning_effort != current.reasoning_default_effort
+        elif current is not None and (
+            (
+                current.reasoning_effort
+                and current.reasoning_effort != current.reasoning_default_effort
+            )
+            # OR THE CONVERSATION'S HELD CHOICE, which is the half that was
+            # missing. A trip through a route that cannot express the level
+            # leaves the SPEC at ``None``; the choice is still real (see
+            # ``Session.chosen_effort``), and a switch made from that route
+            # used to arrive here with nothing to carry and fall to the new
+            # model's seed — the observed "switch away from an aggregator and
+            # Max becomes High".
+            or getattr(self._session, "chosen_effort", None)
         ):
             # A PAIR WITH NO LEVEL IS NOT A REQUEST TO FORGET THE LEVEL (#2471).
             #
@@ -5178,26 +5864,162 @@ class ServingSessionHandle(SessionHandle):
             # model that cannot express it lands on its nearest rung instead
             # of one it rejects -- the same stale-level clamp the ``if effort``
             # arm above applies.
+            # THE CHOICE OUTRANKS THE SPEC. The spec's level can be a CLAMP
+            # (a carry onto a narrower ladder leaves `xhigh` there while the
+            # conversation still chose `max`), and preferring it here carried
+            # the clamp onward — the reverse of the defect M1a named, and what
+            # made a round trip through a narrow route lose `max` even after
+            # the clamp stopped being RECORDED as the choice. The spec is
+            # consulted only when no choice is held (a legacy sender that set
+            # a non-seed level through `set_model` directly).
+            carry_level = getattr(self._session, "chosen_effort", None) or (
+                current.reasoning_effort
+                if current.reasoning_effort
+                and current.reasoning_effort != current.reasoning_default_effort
+                else None
+            )
             carried = resolve_effort_in(
                 spec.reasoning_efforts,
                 spec.reasoning_default_effort,
-                current.reasoning_effort,
+                carry_level,
             )
             if carried is not None:
                 spec = spec.model_copy(update={"reasoning_effort": carried})
+        # THE DIAL SURVIVES A PAIR RE-PICK, and a re-pick is the ONLY case
+        # (ui#1266, ui#1265). ``build_model_spec`` never seeds ``fast_mode`` -- a
+        # premium tier must not arrive by inference -- and ``Session.set_model``
+        # assigns the rebuilt spec BEFORE its same-pair early return, so a
+        # re-pick of the row already in force cleared a dial the user had set.
+        # That is exactly the RPC a draft created with the toggle on sends on its
+        # first turn (``attached._consume_model_override``), so the owner dropped
+        # to standard speed at the moment its viewer expected the tier it had
+        # just chosen.
+        #
+        # The carry lives HERE, in the spec this method rebuilds, and not inside
+        # ``Session.set_model``: that surface is also how the toggle itself lands
+        # (``/fast off`` is a same-pair ``model_copy``), so a blanket preserve
+        # there would erase the user's own OFF one edge later.
+        #
+        # A GENUINE switch does NOT carry it -- the tier is bought per model, and
+        # re-arming it on a different route is how a switch costs money nobody
+        # agreed to -- and it is carried only onto a route that SELLS the tier,
+        # the same ``supports_fast_mode`` clamp the journal restore and the spawn
+        # environment apply, because the alternative is a 400 on the next turn.
+        if (
+            current is not None
+            and getattr(current, "fast_mode", False)
+            and (spec.provider, spec.model_id) == (current.provider, current.model_id)
+            and spec.supports_fast_mode
+        ):
+            spec = spec.model_copy(update={"fast_mode": True})
         # ``explicit``: the phone's model switch is a deliberate choice, so a
         # pinned fallback route is withdrawn even when it re-selects the model
         # the fallback displaced — see ``Session.set_model``.
-        self._session.set_model(spec, explicit=True)
-        self._refresh_state()
+        #
+        # ``effort_choice`` is passed ONLY when the CALLER named a level: a
+        # level-less switch carries one (or clamps it for display) without
+        # deciding anything, and letting ``set_model`` infer a choice from the
+        # resulting spec would record a failover clamp as the user's choice
+        # (review round 1, M1). An explicit ``auto`` is a withdrawal, which
+        # ``_normalise_effort_choice`` turns into ``None``.
+        switch: dict[str, Any] = {"explicit": True}
+        if effort:
+            switch["effort_choice"] = effort
+        self._session.set_model(spec, **switch)
+        # ``roster=False``: the child roster does not depend on the parent's
+        # model, and the full registry pass is the one cost here that grows
+        # with the roster (2.7 MB on the reported manager). The scheduled
+        # coalescer keeps the roster current on its own cadence.
+        self._refresh_state(roster=False)
         # The claim follows the model it is about: a switch can land on a
         # provider this host has no credential for, and a reader must not keep
         # reading the previous model's answer. ALL switch routes land here —
         # the phone's sheet, a peer's ``peer_set_model``, the desktop's
         # ``rehome_if_current`` — so this is the one place the claim can go
-        # stale from a model change.
-        self.publish_model_access()
+        # stale from a model change. Its credential read is SQLite, so it runs
+        # off the session loop, and the reply does NOT wait for it: the switch
+        # has already landed above, the selection publish has already withdrawn
+        # a claim about a different provider (``refresh_model_selection``), and
+        # under load each extra await is another wait for a saturated loop to
+        # come back round. The claim follows within one read.
+        self._schedule_model_access_publish()
         return f"model: {self._projection.model_label}"
+
+    def _schedule_model_access_publish(self) -> "asyncio.Task[None] | None":
+        """Start (or join) the off-loop access-claim publish for the serving model.
+
+        ONE READ PER MODEL EDGE. A genuine switch reaches this twice — from
+        ``set_model_effort`` and from the ``ModelChangeEvent`` the switch emits —
+        and both are asking about the same selector. A publish already in flight
+        for that selector is returned rather than duplicated; a different
+        selector starts a new one (the old one's stale guard then drops its
+        answer). Kept on ``self`` for a strong reference, and deliberately NOT in
+        ``_background_tasks``: that set is what ``is_busy`` reads as work a clean
+        exit would destroy, and an additive claim read is not that.
+
+        Outside a running loop (a synchronous host or test) it publishes inline,
+        the historical behaviour.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.publish_model_access()
+            return None
+        spec = getattr(self._session, "effective_model", None) or getattr(
+            self._session, "model", None
+        )
+        selector = f"{spec.provider}/{spec.model_id}" if spec is not None else ""
+        pending = self._model_access_publish
+        if (
+            pending is not None
+            and not pending.done()
+            and self._model_access_publish_selector == selector
+        ):
+            return pending
+        task = loop.create_task(self._publish_model_access_off_loop())
+        self._model_access_publish = task
+        self._model_access_publish_selector = selector
+        return task
+
+    async def _publish_model_access_off_loop(self) -> None:
+        """:meth:`publish_model_access` with the credential read on a worker thread.
+
+        WHY. The read is a SQLite open + query against the auth store, and on
+        the session loop of a busy manager it was measured at up to 1.0 s
+        (``scripts/bench_model_switch.py --condition parked``) — a stall every
+        other client of that loop shared, during the one request the user is
+        actively waiting on. The read moves to a thread; the store write stays
+        on the loop that owns the store.
+
+        STALE-READ GUARD. Another switch can land while the read is in flight
+        (a second connection, a fallback edge); the claim is applied only if
+        the model it was computed for is still the one serving, so a slow read
+        can never overwrite a newer claim with an older model's answer. The
+        newer switch publishes its own. The invariant is selector EQUALITY, not
+        switch identity: an A→B→A sequence inside one read applies the first
+        read's answer, which is correct because the claim is a function of the
+        selector and the credential store alone (review round 1, R1-2).
+
+        Never raises, like the synchronous form.
+        """
+        store = getattr(self._session, "_frontend_state_store", None)
+        if store is None:
+            return
+        try:
+            from local_operator.providers.model_access import serving_model_access_here
+
+            spec = getattr(self._session, "effective_model", None) or self._session.model
+            selector = f"{spec.provider}/{spec.model_id}"
+            claim = await self._loop.run_in_executor(
+                _switch_executor(),
+                functools.partial(serving_model_access_here, selector, config_dir=self._config_dir),
+            )
+            now = getattr(self._session, "effective_model", None) or self._session.model
+            if f"{now.provider}/{now.model_id}" != selector:
+                return
+            store.refresh_model_access(claim)
+        except Exception:  # noqa: BLE001 — additive state never fails its edge
+            logger.debug("model access publication failed", exc_info=True)
 
     def publish_model_access(self) -> None:
         """Publish "can the session's model actually run here" (the composer band).
@@ -5617,8 +6439,12 @@ class ServingSessionHandle(SessionHandle):
                 raise ValueError(f"{spec.model_id} has no reasoning-effort levels; drop --effort")
             ladder = ", ".join(spec.reasoning_efforts)
             raise ValueError(f"{spec.model_id} accepts {ladder} \u2014 not '{effort}'")
-        self._session.set_model(spec.model_copy(update={"reasoning_effort": effort}))
-        self._refresh_state()
+        self._session.set_model(
+            spec.model_copy(update={"reasoning_effort": effort}), effort_choice=effort
+        )
+        # No roster pass: an effort change cannot move a child row (see
+        # ``set_model_effort``), and that pass is what scaled with the roster.
+        self._refresh_state(roster=False)
         return f"effort: {effort}"
 
     @_on_session_loop
@@ -5846,14 +6672,18 @@ class ServingSessionHandle(SessionHandle):
         return "declined"
 
     @_on_session_loop
-    async def ask_dismiss(self, ask_id: str, by: str = "") -> str:
-        """Dismiss a timed-out ask from the view. Asks the model nothing, ever.
+    async def ask_dismiss(self, ask_id: str, by: str = "", reason: str | None = None) -> str:
+        """Dismiss an ask from the view. Asks the model nothing, ever.
 
-        The dismissal's own act injects nothing; the deadline notice the ask had
-        not delivered is a separate, still-owed row (fork A, 2026-10-16, design
-        §14), and ``dismiss_ask``'s ``_settled`` reconcile is what delivers it.
+        An OPEN ask is accepted in EVERY live state (SA-D4, design §15, replacing
+        D6's stopped-session gate); the refusal arrives as the ``ValueError`` below,
+        in the queue's own words. Mid-turn the response row rides the steering
+        queue to this turn's next boundary; the dismissal's own act injects
+        nothing, and the deadline notice the ask had not delivered is a separate,
+        still-owed row (fork A, 2026-10-16, design §14). ``dismiss_ask``'s
+        ``_settled`` reconcile is what delivers either one.
         """
-        outcome = self._session.dismiss_ask(ask_id, by=by or "remote")
+        outcome = self._session.dismiss_ask(ask_id, by=by or "remote", reason=reason)
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the dismissal was refused"))
         return "dismissed"
@@ -6003,6 +6833,17 @@ class ServingSessionHandle(SessionHandle):
             self._session._aida_attended_probe = lambda: bool(self._attended_surfaces())
         except Exception:  # noqa: BLE001 — a session without the slot keeps its default
             logger.debug("could not install the attended probe", exc_info=True)
+        # R2-2: the item ladder's rung-4 stand-down reads the same surface table,
+        # through the session's own `_notify_tui_evidence` seam. A TUI ATTACHED to
+        # this session is a TUI RENDERING it (an attach names the one conversation
+        # the front end shows), which is the watched half of the predicate; the
+        # ACTIVE half needs the TUI's input evidence, and with none reported the
+        # probe answers None — unknown, which notifies rather than suppresses
+        # (contract §6.3). Installed here so the answer is live, not captured.
+        try:
+            self._session._notify_tui_probe = self._tui_viewer_active
+        except Exception:  # noqa: BLE001 — an unsettable slot keeps its default
+            logger.debug("could not install the inbox TUI probe", exc_info=True)
         holder = getattr(self._session, "_goal_state", None)
         if holder is None or not hasattr(holder, "interactive_probe"):
             return
@@ -6010,6 +6851,41 @@ class ServingSessionHandle(SessionHandle):
             holder.interactive_probe = lambda: bool(self._attached_surfaces())
         except Exception:  # noqa: BLE001 — an unsettable holder is not fatal
             logger.debug("could not install the interactivity probe", exc_info=True)
+
+    def _tui_viewer_active(self) -> bool | None:
+        """Is a TUI showing THIS conversation with the operator active in it?
+
+        ``None`` when the answer cannot be established — no TUI attached, or a
+        TUI that reports no input evidence — and the caller treats that as "raise
+        the banner" (contract §6.3: every unknown fails toward notifying).
+
+        THE TWO HALVES ARE DELIBERATELY SEPARATE. An attach proves a terminal is
+        RENDERING this session; it says nothing about whether anyone is at the
+        keyboard. The activity half is the TUI's own ``activity`` report (its
+        Key/MouseDown edges, throttled, contract §6.1); a runtime that predates
+        it, or a TUI that has sent none, leaves the answer unknown — which
+        suppresses nothing.
+        """
+        reader = getattr(self._registrant, "tui_input_age_s", None)
+        if not callable(reader):
+            return None
+        watching = "attach" in self._attached_surfaces() or "tui" in self._watching_surfaces()
+        if not watching:
+            return None
+        try:
+            age = reader()
+        except Exception:  # noqa: BLE001 — an unreadable probe is unknown
+            return None
+        if not isinstance(age, (int, float)) or isinstance(age, bool):
+            # A registrant whose probe answers something other than a number is
+            # "cannot tell", not "active": the fail-open direction is to notify.
+            return None
+        # Imported here, not at module scope: `tui.attention` is a UI-tier
+        # module and this file must stay importable without it (same rule as
+        # every other server→tui read).
+        from local_operator.tui.attention import ATTENTION_INPUT_EVIDENCE_S
+
+        return float(age) <= float(ATTENTION_INPUT_EVIDENCE_S)
 
     def _attended_surfaces(self) -> frozenset[str]:
         """Local human front ends on this runtime (``RuntimeServer.attended_surfaces``).
@@ -6126,7 +7002,7 @@ class ServingSessionHandle(SessionHandle):
             return 0
 
     async def _record_gate_timeout(
-        self, tool: str, description: str, kind: str = "approval"
+        self, tool: str, description: str, kind: str = "approval", *, waited_s: float
     ) -> None:
         """Append the row that says NOBODY WAS THERE.
 
@@ -6134,6 +7010,15 @@ class ServingSessionHandle(SessionHandle):
         are different facts: one is the user's decision, the other is the
         absence of one. Without this row the next turn reads "the user denied
         this" and adjusts its plan around a choice nobody made.
+
+        ``waited_s`` IS THE CALLER'S, never re-derived here. It must be the
+        timeout the gate passed to ``asyncio.wait_for`` when its wait began.
+        This used to call ``_gate_timeout_s()`` again at write time, and that
+        policy is live: a gate that opened with nothing attached waited the
+        short cap, a phone attaching mid-wait flipped the policy to the
+        day-long park, and a 30-second expiry was recorded — and replayed to
+        the model and the phone — as ``waited_s: 86400`` (PR #3030 QA, X1).
+        Keyword-only and required so no caller can fall back to the re-read.
         """
         transcript = getattr(self._session, "transcript", None)
         append = getattr(transcript, "append_message", None)
@@ -6159,7 +7044,7 @@ class ServingSessionHandle(SessionHandle):
                         # and describing it in the approval gate's vocabulary
                         # told the user something that did not happen (D12).
                         "kind": kind,
-                        "waited_s": self._gate_timeout_s() or 0.0,
+                        "waited_s": waited_s,
                     },
                 )
             )
@@ -6754,6 +7639,45 @@ class ServingSessionHandle(SessionHandle):
             front = self._projection.pending
             payload = front.to_json() if front is not None else None
             if payload is not None:
+                # The policy in force rides WITH the card: a viewer cannot
+                # derive it (the per-conversation record outranks the file), and
+                # "Ask — session override; global Auto" is the one line that
+                # explains why this gate is asking while the file says auto.
+                from local_operator.session.approval_policy import resolve_effective
+
+                # DEFENSIVE BY CONSTRUCTION: several tests (and any partially
+                # built handle) construct this class with `__new__` and only
+                # `_session`/`_projection`. A missing policy field must not
+                # abort the publish — the card is the reason this method runs,
+                # and the policy keys degrade to "not stated" rather than to a
+                # guessed mode.
+                explicit = getattr(self, "_explicit_approvals_mode", None)
+                remembered = getattr(self, "_default_approvals_mode", "")
+                try:
+                    configured = self._configured_approval_mode()
+                except Exception:  # noqa: BLE001 — a card is never worth failing
+                    configured = None
+                global_mode = configured if configured is not None else remembered
+                live_auto = getattr(self, "_auto_approve", None)
+                pinned = bool(getattr(self, "_approval_pinned", False))
+                # A pinned run states its provenance even when the file half is
+                # unknown: `pin` is a fact about THIS process, not a guess.
+                if global_mode or explicit is not None or pinned:
+                    mode, provenance = resolve_effective(
+                        explicit,
+                        global_mode or ("auto" if live_auto else "ask"),
+                        pinned_auto=(bool(live_auto) if pinned else None),
+                    )
+                    payload["approval_mode"] = mode
+                    payload["approval_provenance"] = provenance
+                    # The default the mode outranks, published separately: a
+                    # session-ask card over a global-auto file would otherwise
+                    # have to invent "global Ask" (the U4 defect).
+                    payload["approval_global_mode"] = global_mode
+                else:
+                    payload["approval_mode"] = ""
+                    payload["approval_provenance"] = ""
+                    payload["approval_global_mode"] = ""
                 # The card gains the session's name so a DESKTOP banner for it
                 # can be triaged: "Waiting for approval" with three sessions
                 # open names none of them (design round 1, D3). Stamped here
@@ -6780,9 +7704,32 @@ class ServingSessionHandle(SessionHandle):
         """
         from local_operator.session.frontend_state import ask_wire
 
+        # THROTTLED RE-READ. This runs on EVERY ``_notify`` (every relayed
+        # event), and ``ask_wire`` re-reads ``asks.jsonl`` from disk each time:
+        # ~950 reads per 40 s on a 12-lane manager, each a syscall that costs
+        # the loop a GIL re-acquire behind the lanes (measured ~40 ms apiece
+        # under 12 busy threads; ~1 s of loop wall per 40 s, the top sampled
+        # blocker after the evidence writes moved off-loop). This process's OWN
+        # ask changes do not depend on it: ``_ask_state_changed`` installs the
+        # fresh fold immediately and stamps it. What the re-read catches is a
+        # change made by ANOTHER process, which was only ever noticed when an
+        # unrelated event happened to arrive. A skipped read arms ONE trailing
+        # re-check at the end of the floor (``_schedule_ask_refresh``), so the
+        # bound is a true "at most ``_ASK_REFRESH_MIN_S`` late" even when the
+        # session goes quiet right after the skip (review round 1, R1-2/Q1:
+        # without it a skipped change stayed off the phone fold and the
+        # mirrored card until the next unrelated event, however long).
+        now = time.monotonic()
+        # ``getattr``: a handle built without ``__init__`` (a test double)
+        # has no stamp, and reads as never installed.
+        elapsed = now - getattr(self, "_ask_fold_installed_at", float("-inf"))
+        if elapsed < _ASK_REFRESH_MIN_S:
+            self._schedule_ask_refresh(_ASK_REFRESH_MIN_S - elapsed)
+            return
         try:
             rows, outstanding_count = ask_wire(self._session)
             self._fold.set_asks(rows, outstanding_count)
+            self._ask_fold_installed_at = now
         except Exception:  # noqa: BLE001 -- the card is chrome; the gate is not
             logger.debug("could not publish the ask fold", exc_info=True)
 
@@ -6929,6 +7876,10 @@ class ServingSessionHandle(SessionHandle):
         if not recalled:
             raise ValueError("that steering message is no longer queued")
         self._command_reservations.reject(command_id)
+        # THE SPOOL IS THE OTHER HALF OF THE RETRACTION: every accepted steer is
+        # spooled before it is acknowledged, so dropping only the live queue entry
+        # would let a successor deliver the message the user just recalled.
+        await self._forget_spooled_owner_row(command_id)
         self._notify()
         return "steering recalled"
 
@@ -7549,7 +8500,8 @@ class ServingSessionHandle(SessionHandle):
             return self._approvals_slash(session, args, SlashResult, may_loosen=may_loosen)
         if command == "language":
             # The terminal's funnel, served: one `settings_io.write_setting`
-            # against the `language` key; receipts word for word (see
+            # against the `language` key; the receipt keeps the terminal's
+            # voice but enumerates the values for the phone (see
             # `_language_slash`).
             return self._language_slash(args, SlashResult)
         # THE DELETE-SCOPED VERBS ARE GATED HERE, where the verb is chosen.
@@ -8513,6 +9465,26 @@ class ServingSessionHandle(SessionHandle):
         """
         registry = getattr(session, "team_registry", None)
         if arg:
+            # ``promote`` is a RESERVED first token, exactly as ``class`` is on
+            # the ``/agent`` side and for the same reason: a live terminal's
+            # line lands HERE, not in the app (`/team` is authoritative-session),
+            # so reading the verb as a team name answered "no team named
+            # 'promote'" to a user who had just been offered the verb (QA round
+            # 1, Q1). The shared grammar lives in ``promote_slash``, below both
+            # hosts, so the two cannot word the confirmation differently.
+            # ``=promote`` still reaches a team literally named ``promote`` via
+            # the escape the attach path applies.
+            first, _, rest = arg.partition(" ")
+            if first.strip().casefold() == "promote":
+                from local_operator.promote_slash import promote_receipt
+
+                return promote_receipt(
+                    session,
+                    "team",
+                    rest.strip(),
+                    SlashResult,
+                    agents=getattr(session, "agent_registry", None),
+                )
             # Routed BEFORE the availability guard below (agent review round 1,
             # NIT-3): the DETACH verb needs the SESSION (``attach_team(None)``)
             # and not the registry, so a session whose registry read is
@@ -8590,7 +9562,13 @@ class ServingSessionHandle(SessionHandle):
         """
         name, _, request = arg.partition(" ")
         name = name.strip()
-        if name.startswith("="):
+        # A leading ``=`` means "literal name, never a verb": captured before
+        # the strip so the detach below cannot fire on a team literally named
+        # ``clear``/``none``. Without this the TUI and the owner disagreed —
+        # `/team =clear` attached locally but detached on an attached session
+        # (command-palette round 3, MAJOR).
+        escaped = name.startswith("=")
+        if escaped:
             name = name[1:]
         request = request.strip()
         # ``clear``/``none`` is the DETACH verb, mirroring ``_cmd_team`` and
@@ -8598,7 +9576,7 @@ class ServingSessionHandle(SessionHandle):
         # #2014), so detaching it is the ONE way to free that slot again, and a
         # request after the verb is a mistyped attach that falls through to the
         # ordinary name lookup below (which reports the unknown name).
-        if name.lower() in ("clear", "none") and not request:
+        if not escaped and name.lower() in ("clear", "none") and not request:
             detach = getattr(session, "attach_team", None)
             if not callable(detach):
                 # Same shape as the attach guard below: state what this session
@@ -8766,12 +9744,15 @@ class ServingSessionHandle(SessionHandle):
         instructions ride the volatile tail) and nothing consumed the
         ``agent_mutate`` receipt, so `/agent <name>` on a viewer was silent.
 
-        ``class`` is a RESERVED first token here for the same reason it is one
-        in ``tui/app.py::_cmd_agent``: ``/agent`` is authoritative-session, so
-        a live (attached) terminal's command lands in THIS method — the
-        TUI-local branch only runs where nothing routes. The two implement one
-        grammar (review/UX round 1, U1: the switch was unreachable live because
-        only the local half existed).
+        ``class`` and ``promote`` are RESERVED first tokens here for the same
+        reason they are in ``tui/app.py::_cmd_agent``: ``/agent`` is
+        authoritative-session, so a live (attached) terminal's command lands in
+        THIS method — the TUI-local branch only runs where nothing routes. The
+        two implement one grammar (review/UX round 1, U1: the class switch was
+        unreachable live because only the local half existed; QA round 1, Q1
+        repeated that history for ``promote``). Both tokens now dispatch to
+        package-level code the local half also calls, so no second
+        implementation is left to drift.
         """
         # Imported here rather than at module scope, matching every other
         # ``session.errors`` reader on this path (see ``_team_slash``'s
@@ -8804,6 +9785,15 @@ class ServingSessionHandle(SessionHandle):
         first, _, rest = arg.partition(" ")
         if first.strip().casefold() == "class":
             return await self._agent_class_slash(session, rest.strip(), SlashResult)
+        if first.strip().casefold() == "promote":
+            # The second reserved token here, and reserved for the same reason as
+            # ``class``: this is the method a live terminal's line reaches, so a
+            # grammar implemented only beside the app's own handler is
+            # unreachable (QA round 1, Q1). ``=promote`` still names a role
+            # literally called ``promote`` through the escape below.
+            from local_operator.promote_slash import promote_receipt
+
+            return promote_receipt(session, "agent", rest.strip(), SlashResult)
         name, _, request = arg.partition(" ")
         name = name.strip()
         # The ``=`` escape, mirroring ``_team_attach_slash`` and the TUI-local
@@ -8815,13 +9805,14 @@ class ServingSessionHandle(SessionHandle):
         # review round 4, R4-2). The local seam has had this since U1; without
         # it here the routed owner refused ``/agent =class`` while the same
         # command worked locally — the drift class U1 found.
-        if name.startswith("="):
+        escaped = name.startswith("=")
+        if escaped:
             name = name[1:]
         request = request.strip()
         # ``clear``/``none`` is the DETACH verb, mirroring ``_cmd_agent``: only
         # the bare verb detaches, so ``/agent clear <text>`` stays a (mistyped)
         # attach and reports the unknown name rather than silently detaching.
-        if name.lower() in ("clear", "none") and not request:
+        if not escaped and name.lower() in ("clear", "none") and not request:
             detach = getattr(session, "clear_agent_profile", None)
             if not callable(detach):
                 return SlashResult(kind="notice", text="nothing to detach", style="info")
@@ -9163,9 +10154,12 @@ class ServingSessionHandle(SessionHandle):
         cannot diverge. Refusing this while the picker's identical mutation
         succeeded over the same socket was the sharpest edge of R2/U13.
 
-        The persist half is declined for the machine-locality reason
-        `/approvals default` gives: a default belongs to the terminal whose
-        launches it governs, not to a runtime that outlives it. ``saved`` is
+        The persist half is declined for the machine-locality reason: a model
+        default belongs to the terminal whose launches it governs, not to a
+        runtime that outlives it. (``/approvals default`` no longer shares this
+        rule — its persist is honoured since 2026-10-23 because the per-session
+        record gives every conversation its own line of defence; a model has no
+        such record, so the file here would be the only copy.) ``saved`` is
         NOT declined on those grounds — it only READS that default and switches
         this session, which is this handle's own mutation (QA round 2, Q49).
         """
@@ -9200,8 +10194,8 @@ class ServingSessionHandle(SessionHandle):
             # runtime, and contradicted the `/help` text round 1's U5 added.
             #
             # UNLIKE `/model default`, this is a READ of config, not a write, so
-            # the machine-locality reason that declines the persist above does
-            # not apply: adopting a value is a switch on this session, which is
+            # the machine-locality reason for declining that persist does not
+            # apply: adopting a value is a switch on this session, which is
             # exactly what this handle owns. The read is direct rather than a
             # cached boot value, matching `OperatorApp._cmd_model_saved`, so a
             # default written during this session is what gets adopted.
@@ -9287,9 +10281,15 @@ class ServingSessionHandle(SessionHandle):
         ITS spec: a phone toggling the dial must reach the spec the next
         provider call is built from, and the app's copy of the rule is not
         loaded in a headless process. Bare toggles, ``on``/``off`` name the
-        resulting state, ``status`` only reports. Session-scoped and never
-        persisted — fast mode is billed at a premium, so it must not outlive
-        the task it was switched on for.
+        resulting state, ``status`` only reports.
+
+        CONVERSATION-scoped, and now DURABLE within that scope: ``set_model``
+        journals the dial beside the model and its level, so a reopen comes back
+        on the speed the operator chose instead of silently reverting
+        (``damianvtran/local-operator-ui#1266``). It is still NOT a global
+        default — nothing here writes config, so a new conversation starts at
+        the model's standard speed and premium pricing never becomes the
+        machine's resting state. This command only names the resulting state.
         """
         spec = getattr(session, "model", None)
         label = getattr(session, "model_label", "") or "this model"
@@ -9354,8 +10354,11 @@ class ServingSessionHandle(SessionHandle):
         from its config watcher (slice C's external-change path announces
         it), which is why this branch writes and receipts but never repaints.
 
-        The receipts mirror the terminal's word for word — the ``/effort``
-        precedent — the option list and the "already" no-op included.
+        The receipts keep the terminal's VOICE but not its bytes: the phone
+        sheet has no argument picker, so this client enumerates the accepted
+        values where the terminal names the space key instead (see the 70-cell
+        notice row in ``OperatorApp._cmd_language``). The "already" no-op stays
+        word for word.
         """
         from local_operator import settings_io
         from local_operator.i18n.resolve import (
@@ -9373,9 +10376,11 @@ class ServingSessionHandle(SessionHandle):
         if not wanted:
             return SlashResult(
                 kind="notice",
+                # The phone sheet has no argument picker, so this client DOES
+                # enumerate the value space; the terminal receipt (which has
+                # the space picker) does not, for its 70-cell notice row.
                 text=(
-                    f"language: {resolved} ({language_name(resolved)}) — "
-                    f"/language <{'|'.join(options)}>; space"
+                    f"language: {resolved} ({language_name(resolved)}) — " f"{', '.join(options)}"
                 ),
                 style="info",
             )
@@ -9389,7 +10394,10 @@ class ServingSessionHandle(SessionHandle):
             # unaudited locale keys no catalogue and would render codes.
             return SlashResult(
                 kind="notice",
-                text=f"unknown language {wanted!r} — available: {', '.join(options)}",
+                text=(
+                    f"unknown language {_quoted_echo_within_cells(wanted)} — "
+                    f"available: {', '.join(options)}"
+                ),
                 style="warning",
             )
         stored = config_value()
@@ -9482,9 +10490,13 @@ class ServingSessionHandle(SessionHandle):
 
         `self._auto_approve` is the real gate here (see `_install_gates`), so
         unlike the viewer's own widget flag this switch is the one the engine
-        honours. The persist half is declined for the same machine-locality
-        reason the app gives: a default belongs to the terminal that launches
-        sessions, not to a runtime that outlives it.
+        honours. Both writes that used to be declined here are now honoured
+        deliberately (2026-10-23): the mode is PERSISTED with the conversation
+        (``_persist_approval_override``) so a resume reopens in it, and
+        ``default <mode>`` writes the machine default through this process's
+        settings facade (``_approvals_default_slash``). The machine-locality
+        rule those refusals cited protected the file's ownership; the operator
+        asking for the change is the owner of both files.
         """
         argument = (arg or "").strip().lower()
         if not self._gates_installed:
@@ -9516,25 +10528,13 @@ class ServingSessionHandle(SessionHandle):
                 style="warning" if argument else "info",
             )
         if argument == "default" or argument.startswith("default "):
-            # TWO TRUTHS, ONE SENTENCE (design round 2, D10 = UX round 2, U7).
-            # This half persists to the local machine's config file and is
-            # refused from ANY control connection — a runtime cannot edit the
-            # machine that launched it — so "run it on a terminal" was advice for
-            # someone who is not at one, and the second half promised `auto`
-            # "now" on a connection that may not loosen this session at all. The
-            # wording is now SHARED with the app's routed half, and it names the
-            # machine the SESSION runs on rather than "this machine", which reads
-            # as the reader's own filesystem from a phone (design round 3, D16).
-            from local_operator.harness.approval import approvals_default_notice
-            from local_operator.operator import operator_authority_unusable
-
-            return SlashResult(
-                kind="notice",
-                text=approvals_default_notice(
-                    may_loosen=may_loosen, anchor_unusable=operator_authority_unusable()
-                ),
-                style="warning",
-            )
+            # THE PERSIST HALF IS HONOURED NOW (2026-10-23). It used to answer
+            # with the notice this method now writes — "a default belongs to the
+            # terminal whose launches it governs" — which was the machine-
+            # locality rule and is documented in full on
+            # :meth:`_approvals_default_slash`, together with why the operator
+            # on a phone or an attached pane is the same owner the desktop is.
+            return self._approvals_default_slash(argument, SlashResult)
         if not argument:
             live = "auto" if self._auto_approve else "ask"
             effect = (
@@ -9638,12 +10638,13 @@ class ServingSessionHandle(SessionHandle):
                 style="warning",
             )
         self._auto_approve = wanted_auto
-        # A human typed the mode in this session, so a later LOOSENING disk
-        # write leaves this gate alone (see :meth:`_on_config_change`). The MODE
-        # is recorded, not merely the fact of a choice (review round 2, R6):
-        # both directions are worth recording, but only a recorded `ask` is a
-        # hardening a file loosening must not revoke.
+        # A human typed the mode in this session, so the FILE no longer moves
+        # this gate in either direction (see :meth:`_on_config_change`). The MODE
+        # is recorded, not merely the fact of a choice (review round 2, R6) —
+        # and since 2026-10-23 it is recorded with the CONVERSATION too, so the
+        # choice survives a resume instead of living in this handle's memory.
         self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
+        saved_failure = self._persist_approval_override("auto" if wanted_auto else "ask")
         self._notify()
         # "(this session)" on the LIVE half, matching the app's own receipt word
         # for word (UX round 1, U5): the two hosts answer the same gesture, and
@@ -9662,8 +10663,236 @@ class ServingSessionHandle(SessionHandle):
                 if wanted_auto
                 else "tool approvals: ask — write and command tools prompt before running "
                 "(this session)"
-            ),
+            )
+            # The NOT-SAVED clause is the honest half of the new persist: the
+            # live switch above already happened, so a failed write must say
+            # exactly that rather than reporting a receipt the resume will not
+            # keep (the error CLASS, never a stack — this is a sentence).
+            + (saved_failure or ""),
             style="warning" if wanted_auto else "info",
+            # MACHINE-READABLE OUTCOME, because a receipt's first four words are
+            # not a status code. The attached card used to infer success from
+            # ``text.startswith("tool approvals: auto")`` — and the FAILURE
+            # receipt for a default write starts with those same words, so a
+            # failed loosening was acknowledged as saved on the one surface the
+            # user was reading (agent review, 2026-10-23). ``ok`` is whether the
+            # command took effect; ``approval_saved_for_resume`` is whether the
+            # conversation record was written, which a session-scope switch can
+            # fail independently of the live mode.
+            data={
+                "approval_mode": "auto" if wanted_auto else "ask",
+                "approval_provenance": "session",
+                "ok": True,
+                "approval_saved_for_resume": saved_failure is None,
+                "approval_reason": _approval_failure_class(saved_failure),
+            },
+        )
+
+    def _persist_approval_override(
+        self, mode: str | None, *, had_record: bool = True
+    ) -> str | None:
+        """Record (or clear) this conversation's choice; return a failure clause.
+
+        ``mode`` is ``"ask"``, ``"auto"`` or ``None`` — ``None`` writes the
+        explicit "no choice" document, which is how ``/approvals default`` makes
+        the ISSUING conversation follow the new global: leaving this
+        conversation's own record in place would make the receipt's "this
+        conversation follows it" false for the one surface the user is looking
+        at.
+
+        ``had_record`` distinguishes "the stored choice could not be released"
+        from "there was nothing stored": a read-only config dir fails the
+        no-choice write too, and telling the reader their saved choice could not
+        be cleared when none existed is a false alarm (agent review round 1,
+        n1).
+
+        ``None`` is also returned for there being nothing to disclose: either
+        the record was written, or this handle has no session directory at all
+        (a test double, an embed with no transcript). The second case is NOT a
+        failure and must not read like one — a conversation that does not exist
+        cannot be resumed, so "not saved for resume" would alarm the user about
+        a durability they were never offered.
+
+        A real write failure is returned as a sentence fragment because the
+        caller's receipt is the only place this can be said; the mode IS in
+        force for this session either way, and the failure is deliberately not
+        raised: refusing the switch would leave the live gate disagreeing with
+        the answer just given. The error CLASS and not its message or a stack —
+        this text lands in a chat transcript.
+        """
+        directory = self._session_directory()
+        if directory is None:
+            return None
+        try:
+            _write_approval_override(directory, mode)
+        except Exception as error:  # noqa: BLE001 — surfaced in the receipt, never fatal
+            logger.warning(
+                "could not save %s beside the transcript",
+                _APPROVAL_OVERRIDE_FILENAME,
+                exc_info=True,
+            )
+            if mode is None:
+                if not had_record:
+                    return None
+                return (
+                    " — this conversation follows it now, but its saved choice could not be "
+                    f"cleared ({error.__class__.__name__})"
+                )
+            return (
+                " — applied for this session but NOT saved for resume "
+                f"({error.__class__.__name__})"
+            )
+        return None
+
+    def _approvals_default_slash(self, argument: str, SlashResult: Any) -> Any:
+        """Persist the machine-wide default from this control connection.
+
+        WHY THE REFUSAL IS GONE (2026-10-23). This used to answer that "a
+        default belongs to the terminal that launches sessions, not to a
+        runtime that outlives it". That is true of the FILE and false about the
+        OPERATOR: the person on the phone, or attached to a background runtime,
+        is the same owner the desktop writes this key for, and refusing made the
+        one surface they were looking at the only one that could not honour
+        their choice. It is an operator-authorised control-plane transition —
+        the seam in ``harness/approval.py`` classifies ``default auto|off|yolo``
+        as authority-INCREASING, so it only reaches here with that authority.
+
+        The write goes through ``settings_io.write_setting`` in THIS process on
+        purpose: this process owns the gate (``gate_is_here=True``), so the
+        facade's ``source="local"`` attribution is what lets the change loosen
+        it, and its watcher delivers the value to every handle that inherits
+        the same config. The flag is therefore NOT set directly when a watcher
+        is subscribed — a direct write would move sessions that must not move
+        (the ones with their own recorded choice) and would race the delivery
+        that does it correctly. The one fallback covers a host with no watcher
+        at all, and says so in its receipt instead of claiming a propagation
+        nothing performed.
+        """
+        word = argument[len("default") :].strip()
+        # Bare `/approvals default` is REFUSED here, unlike the app's own command.
+        # The app reads it as "keep the mode I am in", which is fine where that
+        # mode is a local flag the same process holds. Over the control plane the
+        # resulting write can be a loosening of the MACHINE default (current mode
+        # auto), and ``transition_authority`` cannot classify a frame whose effect
+        # depends on server state — it reads a bare ``default`` as ordinary. Rather
+        # than let an unclassifiable frame reach a loosening sink, the mode is
+        # named; the seam stays exact and the receipt teaches the two spellings.
+        if word in ("ask", "on", "prompt"):
+            mode = "ask"
+        elif word in ("auto", "off", "yolo"):
+            mode = "auto"
+        else:
+            return SlashResult(
+                kind="notice",
+                text=(
+                    f"unknown approval default {word!r} — use /approvals default ask "
+                    "or /approvals default auto"
+                ),
+                style="warning",
+            )
+        from local_operator import settings_io
+        from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
+
+        setting = settings_io.resolve_key("tool_approval_mode")
+        if setting is None:  # pragma: no cover — the registry is static
+            return SlashResult(
+                kind="notice",
+                text="tool approvals: unchanged — this build has no tool_approval_mode setting",
+                style="warning",
+            )
+        # THE ISSUING CONVERSATION ADOPTS THE NEW GLOBAL (design round,
+        # 2026-10-23). `/approvals default <mode>` has always been described as
+        # "this session and every new one", so leaving this conversation's own
+        # record in place would make the receipt false on the one surface the
+        # user is looking at — the popup's "Set auto for all sessions" would
+        # claim success while this conversation kept asking. Other
+        # conversations' records are NOT touched: a global preference is a
+        # default, not a forced rewrite, and revoking someone else's choice is
+        # the consent expansion the fork rule also refuses.
+        #
+        # The override is cleared BEFORE the facade write because the watcher
+        # delivery happens INSIDE that call, and `_on_config_change` would
+        # otherwise take the explicit-choice branch and (correctly) refuse to
+        # move a gate this handle is about to stop claiming. The previous state
+        # is restored if the write fails, so a failed command leaves the
+        # conversation exactly as it was.
+        previous_override = self._explicit_approvals_mode
+        previous_auto = self._auto_approve
+        self._explicit_approvals_mode = None
+        try:
+            manager = ConfigManager(config_dir())
+            settings_io.write_setting(manager, setting, mode)
+        except Exception as error:  # noqa: BLE001 — the receipt must carry the truth
+            logger.warning("could not persist tool_approval_mode", exc_info=True)
+            self._explicit_approvals_mode = previous_override
+            self._auto_approve = previous_auto
+            live = "auto" if self._auto_approve else "ask"
+            return SlashResult(
+                kind="notice",
+                text=(
+                    f"tool approvals: {mode} — NOT saved ({error.__class__.__name__}); this "
+                    f"session keeps {live} and no other session was told"
+                ),
+                style="warning",
+                # NOT a save. The live gate was restored above, so this reads as
+                # a failure on the invoker's card rather than as the saved
+                # acknowledgement its text prefix would otherwise match.
+                data={
+                    "approval_mode": live,
+                    "approval_provenance": (
+                        "session" if previous_override is not None else "global"
+                    ),
+                    "ok": False,
+                    "approval_saved_for_resume": False,
+                    "approval_reason": error.__class__.__name__,
+                },
+            )
+        # The file now holds this value; the projection's global half follows
+        # even if this conversation keeps (or loses) its own record below.
+        self._default_approvals_mode = mode
+        cleared = self._persist_approval_override(None, had_record=previous_override is not None)
+        direct = False
+        if self._auto_approve != (mode == "auto"):
+            # The delivery inside ``write_setting`` is SYNCHRONOUS, so a gate
+            # that still disagrees means one of exactly two things: this host
+            # subscribes to no watcher, or the file already held this value and
+            # there was no change to announce. Either way the conversation has
+            # to follow the command it just issued, so apply it here — after
+            # the delivery, never instead of one that would have run.
+            direct = True
+            self._auto_approve = mode == "auto"
+            self._notify()
+        if self._unsubscribe_config_watch is None:
+            scope = (
+                "this conversation follows it (applied here; this host follows no config watcher)"
+            )
+        elif direct:
+            scope = (
+                "this conversation follows it (applied directly; the file already held "
+                "this value)"
+            )
+        else:
+            scope = "this conversation now follows it"
+        return SlashResult(
+            kind="notice",
+            text=(
+                f"tool approvals: {mode} — saved to {manager.config_file} "
+                f"(tool_approval_mode); {scope}; other conversations with their own "
+                "choice keep it" + (cleared or "")
+            ),
+            style="warning" if mode == "auto" else "info",
+            # See the session switch above for why this is data rather than a
+            # sentence the invoker parses. ``cleared`` failing with the default
+            # saved is the one partial success here: the file moved, but this
+            # conversation's old record still outranks it on resume.
+            data={
+                "approval_mode": mode,
+                "approval_provenance": "global",
+                "ok": True,
+                "approval_saved_for_resume": cleared is None,
+                "approval_reason": _approval_failure_class(cleared),
+            },
         )
 
     def _configured_approval_mode(self) -> str | None:
@@ -9962,6 +11191,13 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — a stale marker is not worth a turn
             logger.debug("could not publish the busy state", exc_info=True)
         self._publish_subagents()
+        for name, value in (("set_waiting", self.waiting_on()), ("set_jobs", self.job_counts())):
+            publish = getattr(server, name, None)
+            if callable(publish):
+                try:
+                    publish(value)
+                except Exception:  # noqa: BLE001 — presence must not fail a turn
+                    logger.debug("could not publish the job presence", exc_info=True)
 
     def _publish_session_started(self) -> None:
         """Flip the record's ``started`` bit once a real turn has run.
@@ -9980,6 +11216,19 @@ class ServingSessionHandle(SessionHandle):
             setter(True)
         except Exception:  # noqa: BLE001 — a stale flag is not worth a turn
             logger.debug("could not publish the started state", exc_info=True)
+
+    def waiting_on(self) -> int:
+        """Read the foreground wait snapshot, never infer it from busy."""
+        return getattr(self._session, "_waiting_on", 0)
+
+    def job_counts(self) -> int | None:
+        """Count only background tools: task rows already belong to the roster."""
+        try:
+            return sum(
+                row.status == "running" and row.type != "task" for row in self._session.jobs.list()
+            )
+        except Exception:  # noqa: BLE001 — unknown is not a measured zero
+            return None
 
     def subagent_counts(self) -> tuple[int | None, int | None]:
         """``(running, queued)`` subagent trajectories, or ``(None, None)``.
@@ -10155,6 +11404,49 @@ class ServingSessionHandle(SessionHandle):
         if running is self._loop:
             return
         raise RuntimeError("this session cannot accept that op right now")
+
+    def _schedule_ask_refresh(self, delay: float) -> None:
+        """Arm one trailing ask re-read ``delay`` from now; coalesced.
+
+        A burst of skipped reads arms a single timer (the flag), mirroring
+        ``_schedule_roster_refresh``. When it fires it republishes through
+        ``_notify``, whose ``_publish_pending_gate`` re-runs
+        ``_refresh_ask_projection`` with the floor elapsed — so the read, the
+        mirrored card and the viewer push happen together. If a fresh install
+        (``_ask_state_changed``) re-stamps the fold meanwhile, that call skips
+        once more and re-arms for the remainder: at most one read per floor.
+        """
+        if getattr(self, "_ask_refresh_scheduled", False):
+            return
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            # A handle built without ``__init__`` (a test double) has no loop
+            # to defer onto; the next ``_notify`` still re-checks.
+            return
+        self._ask_refresh_scheduled = True
+        # WEAKLY, for the same reason as the channel re-check in ``Session``:
+        # the loop's timer must not pin a disposed handle (and its session).
+        ref = weakref.ref(self)
+
+        def fire() -> None:
+            handle = ref()
+            if handle is not None:
+                handle._flush_ask_refresh()
+
+        try:
+            loop.call_later(max(delay, 0.0), fire)
+        except RuntimeError:
+            # A closing loop: nothing left to publish to.
+            self._ask_refresh_scheduled = False
+
+    def _flush_ask_refresh(self) -> None:
+        self._ask_refresh_scheduled = False
+        if getattr(self, "_disposing", False):
+            return
+        try:
+            self._notify()
+        except Exception:  # noqa: BLE001 — a card refresh never fails the loop
+            logger.debug("deferred ask refresh failed", exc_info=True)
 
     def _schedule_roster_refresh(self) -> None:
         """Republish the child roster once per :data:`_ROSTER_REFRESH_COALESCE_S`.
@@ -10416,6 +11708,7 @@ async def spawn_owned_session(
     provider: str | None = None,
     model_id: str | None = None,
     birth_effort: str | None = None,
+    birth_fast: bool = False,
     resume: str | None = None,
     model_selection_override: bool = True,
 ) -> ServingSessionHandle:
@@ -10432,6 +11725,13 @@ async def spawn_owned_session(
     ``--effort`` is applied by ``exec_session`` AFTER construction and RAISES on
     a level the model cannot express, where a stored birth choice must clamp.
     Two different contracts, so two different names.
+
+    ``birth_fast`` is the same kind of sample one field over (ui#1265): the SPEED
+    its viewer chose before the conversation existed, when there is no session to
+    hold a dial yet. It rides ``args.birth_fast`` into ``create_session``, which
+    clamps it on the route's own ``supports_fast_mode`` -- a pick can outlive the
+    catalogue that offered it, and refusing a birth record here would turn a
+    stale tier into a conversation that cannot open.
     """
     # These imports MUST stay function-local, and ``create_session`` most of
     # all. Do not "tidy" them to the top of the file.
@@ -10508,6 +11808,7 @@ async def spawn_owned_session(
         train=False,
         resume=resume,
         birth_effort=birth_effort,
+        birth_fast=birth_fast,
         model_selection_override=model_selection_override,
     )
 

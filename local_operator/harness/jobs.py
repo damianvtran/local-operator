@@ -25,9 +25,10 @@ import inspect
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Literal, Mapping, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from local_operator.harness.types import AbortSignal, Usage
 
@@ -415,7 +416,7 @@ def job_subtree_summary(
     disagree on ``at_ms`` is priced at the wall clock (see the merge). The footer
     total has always been priced that way, and the row now agrees with it.
     """
-    grouped: dict[tuple[str | None, str | None, str], Usage] = {}
+    grouped: dict[tuple[str | None, str | None, str, str | None], Usage] = {}
     for component in job_subtree_components(job, detach=False, live=live, problems=problems):
         if type(component) is not Usage:
             # A follower's rows carry frozen ``Usage`` subclasses; the merge
@@ -426,7 +427,7 @@ def job_subtree_summary(
 
 
 def _merge_accounting_component(
-    grouped: dict[tuple[str | None, str | None, str], Usage], component: Usage
+    grouped: dict[tuple[str | None, str | None, str, str | None], Usage], component: Usage
 ) -> None:
     """Bound a subtree summary without erasing receipt-vs-estimate provenance."""
     from local_operator.model.configure import _usage_cost
@@ -435,7 +436,7 @@ def _merge_accounting_component(
     estimate = _usage_cost({"usd_cost": component.estimated_usd_cost})
     mode = "reported" if receipt is not None else "estimated" if estimate is not None else "unknown"
     component = component.model_copy(update={"usd_cost": receipt, "estimated_usd_cost": estimate})
-    key = (component.provider, component.model_id, mode)
+    key = (component.provider, component.model_id, mode, component.billing_basis)
     total = grouped.get(key)
     if total is None:
         total = component.model_copy(deep=True)
@@ -471,11 +472,28 @@ def _merge_accounting_component(
         total.estimated_usd_cost = (total.estimated_usd_cost or 0.0) + (estimate or 0.0)
 
 
+@dataclass
+class _ProjectionRevision:
+    """Owner-issued invalidation token; never serialized with a durable row."""
+
+    value: int = 0
+
+
 class AsyncJob(BaseModel):
     """One registered background job. ``agent_id`` names the subagent the job
     RUNS (when applicable); ``registrant_id`` names who registered it."""
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    # Only a manager-owned row can promise notification-complete invalidation.
+    # Plain/extension rows keep None and readers must rebuild them. Sharing a
+    # tiny token avoids retaining the manager (and its tasks) from a UI memo.
+    _projection_source: _ProjectionRevision | None = PrivateAttr(default=None)
+
+    @property
+    def projection_revision(self) -> int | None:
+        source = self._projection_source
+        return source.value if source is not None else None
 
     id: str
     type: JobType
@@ -759,6 +777,9 @@ class AsyncJob(BaseModel):
     #: validated by STRICT ``extra="forbid"`` models, so persisting a field an
     #: older owner does not know would make it drop the whole row at resume — a
     #: worse degradation than losing the cause. It costs nothing to re-derive.
+    last_step: str = ""
+    wip_ref: str = ""
+    death_cause: str = ""
     cut_off_cause: str = ""
     # The subagent ROLE this job runs ("task", "scout", ...) and the effort
     # TIER it was launched with ("lo"/"med"/"hi"), stamped at REGISTRATION
@@ -918,6 +939,7 @@ class AsyncJobManager:
         self._on_job_change = on_job_change
         self._job_listeners: set[Callable[[], None]] = set()
         self._jobs: dict[str, AsyncJob] = {}
+        self._projection_revision = _ProjectionRevision()
         # Historical attempt ids remain valid after a resume replaces the
         # visible row. Values point directly at the current attempt; flattening
         # on every bind avoids alias chains whose meaning depends on order.
@@ -925,7 +947,7 @@ class AsyncJobManager:
         # Terminal rows hand their subtree into this bounded accumulator before
         # retention can remove them. The owning parent runner later copies this
         # snapshot onto its AsyncJob; polling never participates in durability.
-        self._settled_accounting: dict[tuple[str | None, str | None, str], Usage] = {}
+        self._settled_accounting: dict[tuple[str | None, str | None, str, str | None], Usage] = {}
         # The status band reads this ledger every second. Cache the bounded
         # aggregate and propagate invalidations through live manager edges so
         # unchanged reads never recurse through the subagent tree.
@@ -1102,7 +1124,7 @@ class AsyncJobManager:
         """
         if self._tasks:
             raise RuntimeError("accounting restore requires a fresh job manager")
-        grouped: dict[tuple[str | None, str | None, str], Usage] = {}
+        grouped: dict[tuple[str | None, str | None, str, str | None], Usage] = {}
         for component in components:
             _merge_accounting_component(grouped, component)
         self._settled_accounting = grouped
@@ -1134,6 +1156,9 @@ class AsyncJobManager:
             return
         visited.add(identity)
         self._accounting_revision += 1
+        # Descendant accounting can change without a local lifecycle event.
+        # Invalidate before parent listeners can synchronously project the row.
+        self._projection_revision.value += 1
         for listener in tuple(self._accounting_listeners):
             listener(visited)
 
@@ -1242,6 +1267,7 @@ class AsyncJobManager:
 
     def _notify_job_change(self, *, persist_roster: bool) -> None:
         """Publish every job mutation and persist only durable task fields."""
+        self._projection_revision.value += 1
         callbacks = (
             ([self._on_roster_change] if persist_roster else [])
             + [self._on_job_change]
@@ -1281,7 +1307,7 @@ class AsyncJobManager:
                     f"logical task {logical_id!r} is already running as job {prior.id}"
                 )
             inherited = [*prior.attempt_aliases, prior.id, *inherited]
-            grouped: dict[tuple[str | None, str | None, str], Usage] = {}
+            grouped: dict[tuple[str | None, str | None, str, str | None], Usage] = {}
             for component in [
                 *current.prior_attempt_usage,
                 *prior.prior_attempt_usage,
@@ -1394,6 +1420,7 @@ class AsyncJobManager:
                 # spinner forever and invite a cancel that finds nothing.
                 row.status = "interrupted"
             row.restored = True
+            row._projection_source = self._projection_revision
             self._jobs[row.id] = row
             for alias in row.attempt_aliases:
                 if alias != row.id:
@@ -1448,6 +1475,7 @@ class AsyncJobManager:
             queued=queued,
         )
         signal = AbortSignal()
+        job._projection_source = self._projection_revision
         self._jobs[job_id] = job
         self._signals[job_id] = signal
         if on_cancel is not None:
@@ -1732,6 +1760,10 @@ class AsyncJobManager:
         # reads it. Stamping it later would leave a window where the coroutine
         # is running and the row still says it never started.
         job.started_at = time.time()
+        # Registration may already have been projected before this task gets
+        # its first loop slice. The runner then awaits user work, so waiting
+        # for its next progress/settle notification would freeze started_at.
+        self._projection_revision.value += 1
         # The runner is now entered, so its own teardown (its ``finally``, its
         # CancelledError handler) is authoritative for the resources it owns.
         # Dropping the pre-start cleanup here is what keeps a cancel from

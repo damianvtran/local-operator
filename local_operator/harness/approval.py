@@ -266,6 +266,28 @@ LOOSENING_KEPT_BY_ASK_NOTICE = (
     "now says auto, /approvals auto adopts it"
 )
 
+#: The MIRROR sentence (2026-10-23): the file tightened to ``ask`` while this
+#: conversation carries a recorded ``auto``, so the gate stays loose and the
+#: user reads why plus the one command that follows the file.
+#:
+#: It lives here, beside its sibling and for the same reason: the runtime emits
+#: it as a :class:`NoticeEvent` and the embedded pane writes it into its own
+#: transcript, and a second copy is a second chance for the two surfaces to
+#: describe one rule differently. The shape is deliberately identical —
+#: "keeping <state> — <why>, <what the file says>, <the command that adopts
+#: it>" — because the two sentences report the same event in opposite
+#: directions and the reader should be able to tell that at a glance.
+#:
+#: It names ``/approvals ask`` as the remedy rather than the file, and that is
+#: the point of the constant: under the new precedence the file cannot re-arm
+#: this session at all, so a sentence that stopped at "config.yml now says
+#: ask" would leave the user with no way to follow their own default from the
+#: one surface that is out of step with it.
+REARM_KEPT_BY_AUTO_NOTICE = (
+    "keeping tool approvals: auto — set with /approvals in this session; config.yml "
+    "now says ask, /approvals ask re-arms this session"
+)
+
 
 # ---------------------------------------------------------------------------
 # The control plane's operator capability (issue #1310)
@@ -304,14 +326,26 @@ Authority = Literal["authority-increasing", "ordinary"]
 #: bytes so the comparison is over two equal-length byte strings.
 OPERATOR_CAP_BYTES = 32
 
-#: The arguments that move a live gate from ``ask`` to ``auto``. The SAME set
-#: both ``/approvals`` handlers already compare against — a deliberate
-#: duplication of three string literals rather than an import, because the
-#: handlers' ``elif argument in (...)`` is the SINK's own spelling of the rule
-#: and this module must classify exactly the frames that reach it. A test pins
-#: the two in step (``tests/unit/harness/test_approval_authority.py``), so
-#: widening one alone fails the suite rather than silently leaving a loosening
-#: word unguarded.
+#: The arguments that move a live gate from ``ask`` to ``auto``, BARE or as a
+#: ``default <word>`` tail. The SAME set both ``/approvals`` handlers already
+#: compare against — a deliberate duplication of three string literals rather
+#: than an import, because the handlers' ``elif argument in (...)`` is the
+#: SINK's own spelling of the rule and this module must classify exactly the
+#: frames that reach it. A test pins the two in step
+#: (``tests/unit/harness/test_approval_authority.py``), so widening one alone
+#: fails the suite rather than silently leaving a loosening word unguarded.
+#:
+#: WHY ``default …`` IS HERE (2026-10-23): the runtime used to REFUSE
+#: ``/approvals default auto`` on machine-locality grounds ("a default belongs
+#: to the terminal whose launches it governs"), so the frame was ordinary by
+#: construction. The sink now HONOURS it as an operator-authorised
+#: control-plane transition — it writes ``tool_approval_mode`` through this
+#: process's settings facade, which loosens every live session that never made
+#: a choice of its own — so the same frame now increases authority and must
+#: demand the capability like the bare form. Classifying it ordinary while the
+#: sink honours it is exactly the "client believes it is authorising, server
+#: believes the frame is ordinary" divergence ``AUTHORITY_OPS`` exists to
+#: prevent.
 APPROVALS_LOOSENING_WORDS = frozenset({"auto", "off", "yolo"})
 
 
@@ -324,15 +358,21 @@ def transition_authority(command: str, args: str, *, approved: bool | None = Non
     * ``/approvals auto|off|yolo`` sets the running gate's ``_auto_approve`` to
       ``True`` — in the runtime's handle, or in the TUI app for the gate the
       app owns;
+    * ``/approvals default auto|off|yolo`` writes ``tool_approval_mode: auto``
+      through this process's settings facade, which moves every live session
+      that never recorded a choice of its own (and leaves every one that did
+      alone). It loosens the gate from the MACHINE's side, so it is the same
+      concession as the bare form and is classified with it — while
+      ``default ask|on|prompt`` only ever hardens and stays ordinary;
     * ``approval_answer(approved=True)`` resolves the parked card, which is the
       same concession one card at a time.
 
     Everything else is ORDINARY and stays on the record key exactly as before:
     ``ask``/``on``/``prompt`` (and any other unknown word, which the sinks
-    answer with a notice), a bare ``/approvals`` (a report), ``default …`` (a
-    persist the runtime declines anyway), ``read``/``status``/``stop``/
-    ``prompt``/``model``/``rename``, ``peer_message``, and ``ask_answer`` —
-    answering a question the MODEL asked is not a concession to the model.
+    answer with a notice), a bare ``/approvals`` (a report), ``read``/
+    ``status``/``stop``/``prompt``/``model``/``rename``, ``peer_message``, and
+    ``ask_answer`` — answering a question the MODEL asked is not a concession
+    to the model.
 
     ``approved=False`` is deliberately NOT increasing: a deny settles the card
     in the safe direction, so it must keep working from every surface that can
@@ -353,8 +393,19 @@ def transition_authority(command: str, args: str, *, approved: bool | None = Non
 
     if primary_slash_name(str(command)) != "approvals":
         return "ordinary"
-    if str(args or "").strip().lower() in APPROVALS_LOOSENING_WORDS:
+    argument = str(args or "").strip().lower()
+    if argument in APPROVALS_LOOSENING_WORDS:
         return "authority-increasing"
+    # ``default <word>`` is split HERE rather than compared as a whole string:
+    # ``default auto`` loosens the same gate the bare ``auto`` does (one call
+    # targets this session, the other the machine default that reaches the
+    # sessions which never chose), so the words carry the class and the
+    # ``default`` prefix only says WHICH file the concession is written to.
+    # Spelled as a prefix match on the same word set so a future loosening word
+    # is added in one place and both forms follow.
+    if argument.startswith("default "):
+        if argument[len("default ") :].strip() in APPROVALS_LOOSENING_WORDS:
+            return "authority-increasing"
     return "ordinary"
 
 
@@ -768,7 +819,15 @@ CARD_APPROVAL_REFUSED_UNCONFIGURED_NOTICE = (
 )
 
 
-#: The `/approvals default …` receipt, in ONE wording for both hosts.
+#: The `/approvals default …` receipt still printed by the app's ROUTED path.
+#:
+#: The RUNTIME no longer emits it (2026-10-23): its ``default <mode>`` sink now
+#: honours the write and answers with the file-and-effect receipt in
+#: ``ServingSessionHandle._approvals_default_slash``. The app's ROUTED handler
+#: (``OperatorApp._approvals_slash_result``) still declines, and correctly: the
+#: gate it would be moving lives in ANOTHER process, and the report is what
+#: tells that pane where the file is. The app's own local command
+#: (``_cmd_approvals``) is the gate owner and writes it directly.
 #:
 #: Written here rather than twice in the two handles because the same clause had
 #: drifted into two forms, and because the reader can be a PHONE: "this
@@ -778,50 +837,6 @@ CARD_APPROVAL_REFUSED_UNCONFIGURED_NOTICE = (
 #: where the reader is — and ``None`` means the connection has not PROVED it may
 #: loosen, which takes the conservative form (agent review round 3, R3-1).
 #:
-#: THE CONSERVATIVE FORM NAMES THE REAL LEVERS, NOT THE SPAWNER (revision 2, §5).
-#: It used to read "/approvals auto has to come from the window that started it",
-#: and under the spawner-authority model that was true. Under this one it is the
-#: user-visible regression the redesign exists to delete: a background-started
-#: runtime HAS no window that started it, so the sentence sent its reader looking
-#: for something that does not exist, and the remedy behind it — retire the
-#: runtime and reopen it here — is exactly the capability loss being repaired.
-#: The replacement names the three levers that work from anywhere, in the order a
-#: reader can act on them: this machine's presence store, a paired phone, and the
-#: launch-time lever for a NEW session. It is deliberately the same set
-#: ``OPERATOR_AUTHORITY_REQUIRED_NOTICE`` names, because a reader who has seen one
-#: of these sentences has seen the other.
-#:
-#: It stays under the 400-character error-frame cap (``server.py``'s
-#: ``str(exc)[:400]``) so it travels whole rather than truncated mid-remedy.
-def approvals_default_notice(*, may_loosen: bool | None, anchor_unusable: bool = False) -> str:
-    switch = (
-        "/approvals ask|auto switches this session now"
-        if may_loosen
-        else "/approvals ask switches this session now; /approvals auto needs the "
-        "operator's own consent — from this machine (Touch ID) or your paired phone "
-        "— and a NEW session can start loosened with --yolo or tool_approval_mode: auto"
-    )
-    if not may_loosen and anchor_unusable:
-        # THE HOST STATE IS NAMED BEFORE THE LEVERS IT DISABLES (UX round 6, U1/U2).
-        # Naming two remedies on a host where neither can run is the same defect as
-        # the refusal above, on the surface an operator reads BEFORE acting: they
-        # take the sentence at its word, try, and are refused. ``anchor_unusable``
-        # is the caller's answer (it is the only side that can read the level) and
-        # defaults False so an implementation that does not pass it keeps the
-        # pre-existing sentence rather than acquiring a claim it did not compute.
-        switch = (
-            "/approvals ask switches this session now; /approvals auto needs the operator's "
-            "own consent, but authority is not installed here yet: ask Local Operator to "
-            "set up operator authority (one approval and one admin password prompt); a new "
-            "session can start loosened via --yolo"
-        )
-
-    return (
-        "/approvals default writes the config file of the machine this session runs on — "
-        f"a file edit or the app's settings. {switch}"
-    )
-
-
 #: Runtime pid -> capability, for the runtimes THIS process spawned.
 #:
 #: This is "the console's memory" the design names, and a module-level dict
@@ -1616,9 +1631,9 @@ __all__ = [
     "CARD_APPROVAL_REFUSED_NOTICE",
     "OPERATOR_AUTHORITY_REQUIRED_NOTICE",
     "OPERATOR_FD_FLAG",
+    "REARM_KEPT_BY_AUTO_NOTICE",
     "SUPERVISOR_FD_FLAG",
     "SupervisorCapChannel",
-    "approvals_default_notice",
     "deliver_operator_cap_to",
     "open_supervisor_cap_channel",
     "OperatorCapHandoff",

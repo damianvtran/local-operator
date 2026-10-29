@@ -65,13 +65,14 @@ requirement exists to prevent. So a report may, at most:
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from local_operator.network.credentials import github as github_app
 from local_operator.network.credentials import placement as placement_mod
@@ -79,18 +80,27 @@ from local_operator.network.credentials.client import MeshCredentialClient
 from local_operator.network.credentials.messages import render_repair_notice
 from local_operator.network.credentials.placement import PlacementDocument
 from local_operator.network.credentials.types import (
-    DEVICE_BOUND_PROVIDERS,
+    QUOTA_REASON_HOLDER_EXCLUDED,
+    QUOTA_REASON_POOL_DEPLETED,
     BrokerError,
     CredentialPlacementEntry,
     CredentialRef,
     Grant,
     GrantScope,
     device_bound_refusal,
+    is_device_bound_provider,
     is_mcp_key,
     mcp_url_from_key,
+    peer_affinity,
+    peer_credential_ids,
     peer_int,
     synthetic_credential_id,
 )
+
+if TYPE_CHECKING:  # the store is imported lazily (_auth_store_instance)
+    from local_operator.providers.auth_store import QuotaEligibility
+
+logger = logging.getLogger("local_operator.network.credentials.owner")
 
 #: How long a second asker joins an in-flight resolve for the same key. Short on
 #: purpose: it exists to catch the CONCURRENT case (several provider calls in one
@@ -132,6 +142,21 @@ REPORT_BLOCK_MIN_INTERVAL_S = 300.0
 #: Small: the only blocking work is the file-lock acquire inside the MCP refresh.
 LOOP_EXECUTOR_THREADS = 2
 
+#: Bounded join for :meth:`_BrokerLoop.close` (the #2913 shape). A broker loop
+#: serves only submitted coroutines, so a healthy stop is immediate; the bound is a
+#: promptness claim for a wedged loop, not a wait a healthy relay ever pays.
+BROKER_LOOP_STOP_TIMEOUT_S = 5.0
+
+
+class _BrokerLoopClosed(RuntimeError):
+    """A request reached a broker loop its relay had already closed (teardown).
+
+    A named type, not a bare ``RuntimeError``: the borrow path maps it to the
+    broker's own ``unavailable`` refusal (review round 1, R1-2), because a peer
+    must not read a handler answered ``internal`` at the moment the operator shut
+    the relay down as a broker bug.
+    """
+
 
 class _BrokerLoop:
     """ONE long-lived event loop and its thread, for every brokered request.
@@ -147,9 +172,21 @@ class _BrokerLoop:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        #: Terminal once ``close`` runs: a stopped relay's broker must not start a
+        #: fresh loop behind the stop hook that was meant to quiet it.
+        self._closed = False
+        #: The #2913 warning latch: the thread object already reported, so repeated
+        #: closes still join/re-check but name the survivor only once.
+        self._survivor: threading.Thread | None = None
 
     def loop(self) -> asyncio.AbstractEventLoop:
         with self._lock:
+            # A CLOSED LOOP IS TERMINAL, and the check is what stops a late request
+            # resurrecting one after the relay's stop hooks ran: the broker is still
+            # reachable on the server while links finish tearing down, and a fresh
+            # ``_BrokerLoop`` generation there would outlive the relay by definition.
+            if self._closed:
+                raise _BrokerLoopClosed("the credential broker's event loop is closed")
             if self._loop is not None and self._thread is not None and self._thread.is_alive():
                 return self._loop
             ready = threading.Event()
@@ -170,7 +207,35 @@ class _BrokerLoop:
                 )
                 self._loop = loop
                 ready.set()
-                loop.run_forever()
+                try:
+                    loop.run_forever()
+                finally:
+                    # CLOSED ON THIS THREAD, for ``RelayServer._page_loop_main``'s
+                    # reason: ``loop.stop`` only ends ``run_forever``, and the
+                    # selector, self-pipe and default executor stay open until
+                    # ``close()`` — which also shuts that executor down. Issuing the
+                    # close from the stopping thread would race a coroutine still
+                    # being submitted to the loop; after ``run_forever`` returns
+                    # this thread is the one place the loop is provably idle.
+                    #
+                    # PENDING TASKS ARE CANCELLED FIRST (the page loop's M-2/M-R-1
+                    # teardown): a task still awaiting ``run_in_executor`` would
+                    # otherwise be destroyed pending, and its
+                    # ``run_coroutine_threadsafe`` completion would never be
+                    # delivered. The extra drain is unconditional because a task
+                    # that completed before the stop still has its completion
+                    # callback queued, and ``close`` clears the ready queue.
+                    try:
+                        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+                        for task in pending:
+                            task.cancel()
+                        if pending:
+                            loop.run_until_complete(
+                                asyncio.gather(*pending, return_exceptions=True)
+                            )
+                        loop.run_until_complete(asyncio.sleep(0))
+                    finally:
+                        loop.close()
 
             self._thread = threading.Thread(
                 target=run, name=f"mesh-broker-loop-{self.name}", daemon=True
@@ -195,13 +260,71 @@ class _BrokerLoop:
             future.cancel()
             raise
 
-    def close(self) -> None:
+    def close(self, *, timeout: float = BROKER_LOOP_STOP_TIMEOUT_S) -> None:
+        """Stop the loop and JOIN it, bounded, keeping a survivor findable (#2913).
+
+        ``Thread.join(timeout)`` returns ``None`` whether or not the thread stopped,
+        so the old body — schedule ``loop.stop`` and return — could not tell a
+        wedged loop from a clean stop, and the caller saw success either way. Read
+        the outcome from ``is_alive()`` after the join; a clean stop clears the
+        handle and is silent, a survivor is REPORTED ONCE with its thread name and
+        the timeout and keeps its handle.
+
+        IDEMPOTENT, INCLUDING THE WARNING. A second ``close`` still joins and
+        re-checks — that re-check is the only path that clears the handle once the
+        survivor dies — but the latch (the ``_survivor`` thread object) makes it
+        warn only once per episode. A thread that ignores its stop cannot be killed
+        from here; this makes the condition visible, not impossible.
+
+        THE BOUND IS PER JOIN, NOT A STOP CEILING. Five seconds is what this join
+        waits once it holds ``_lock``; acquiring that lock can itself wait out the
+        loop thread's ``ready.wait(10.0)`` startup gate. A relay stop composes the
+        broker's join, the sync engine's identical one, and the definitions /
+        rollout hooks (5 s each): roughly 40 s worst case for one relay, not five.
+        """
         with self._lock:
+            self._closed = True
             loop = self._loop
+            thread = self._thread
             self._loop = None
-        if loop is None:
+        if loop is not None and not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(loop.stop)
+            except RuntimeError:
+                # Closed between the check and the call. The join below is still the
+                # right next step: the thread either exited (clean) or is wedged
+                # somewhere outside the loop (survivor).
+                pass
+        if thread is None:
             return
-        loop.call_soon_threadsafe(loop.stop)
+        if thread is threading.current_thread():
+            # A close issued FROM the loop thread (a coroutine doing its own
+            # teardown) cannot join itself. The stop is already queued, the thread's
+            # own ``finally`` closes the loop, and the handle stays set so a later
+            # close from another thread can reap and clear it.
+            return
+        thread.join(timeout=timeout)
+        with self._lock:
+            if not thread.is_alive():
+                if self._thread is thread:
+                    self._thread = None
+                if self._survivor is thread:
+                    self._survivor = None
+                return
+            # The handle is the only thing that can observe or retry this thread
+            # later, so it is KEPT while the thread is alive. An identity check
+            # keeps a replacement registered meanwhile (a new generation) untouched.
+            self._thread = thread
+            if self._survivor is thread:
+                return
+            self._survivor = thread
+        logger.warning(
+            "mesh credentials: broker loop %s did not stop within the %.1fs timeout "
+            "and is still running; nothing can kill it, so its handle is kept for a "
+            "later stop",
+            thread.name,
+            timeout,
+        )
 
 
 class MeshCredentialBroker:
@@ -444,7 +567,7 @@ class MeshCredentialBroker:
         #    answer does not depend on placement, and refusing it late would mean a
         #    document written before this rule could still broker it. (Checked again
         #    against the entry's own provider below, which is the one served.)
-        if provider in DEVICE_BOUND_PROVIDERS or key in DEVICE_BOUND_PROVIDERS:
+        if is_device_bound_provider(provider) or is_device_bound_provider(key):
             return self._refuse(
                 link, key, provider, by, "device_bound", device_bound_refusal(provider)
             )
@@ -469,7 +592,7 @@ class MeshCredentialBroker:
         # ``provider`` instead let a holder of one key name another of the owner's
         # logins and be served it (found auditing F1's class).
         provider = entry.provider or provider
-        if provider in DEVICE_BOUND_PROVIDERS:
+        if is_device_bound_provider(provider):
             return self._refuse(
                 link, key, provider, by, "device_bound", device_bound_refusal(provider)
             )
@@ -553,6 +676,32 @@ class MeshCredentialBroker:
                     f"on {self.self_device_name or self.self_device}; nothing was lent",
                 )
 
+        # 2d. THE BORROWER'S RESTING ROWS (``PlacementState.cool_down``): rows the
+        #     requester saw answer a usage limit, hidden from THIS resolve exactly as
+        #     the derived-holder exclusion above hides rows — nothing on the owner is
+        #     blocked, demoted or repointed (§2.1, F3), so a peer's word still cannot
+        #     take a login out of the owner's own rotation. It only narrows what this
+        #     one peer is offered, which is the same thing a local row's block does
+        #     for a local session. Peer ids are validated like every peer number;
+        #     an id the owner does not have hides nothing.
+        peer_excluded = peer_credential_ids(frame.get("exclude_credential_ids"))
+        if peer_excluded:
+            excluded_ids = tuple(sorted(set(excluded_ids) | set(peer_excluded)))
+
+        # 2e. THE BORROWER'S SELECTION INPUTS, so a remote session is load-balanced
+        #     the way a local one is (``lend_selection_context``): its warm-account
+        #     anchor (from ITS success receipt) and the rows its own requests just
+        #     saw fail server-side (5xx/529). Both only reorder THIS resolve, among
+        #     rows the peer may already be lent — nothing on the owner is pinned,
+        #     demoted or blocked on a peer's word (§2.1, F3). Absent from an older
+        #     borrower, which keeps today's lend exactly.
+        anchor = peer_affinity(frame.get("affinity"))
+        peer_demoted = peer_credential_ids(frame.get("demote_credential_ids"))
+        # The OWNER's ``retry.accountSelectionPolicy`` — the setting its own local
+        # sessions obey over the same pool. Read per lend, so a settings change
+        # reaches remote sessions as it reaches local ones, without a relay restart.
+        policy = self._selection_policy()
+
         # 3-5. Coalesce, resolve, audit. All on the owner's ONE loop.
         try:
             outcome = self._loop.submit(
@@ -565,6 +714,10 @@ class MeshCredentialBroker:
                     holder_scope=holder.scope if holder is not None else "session",
                     by=by,
                     excluded_ids=excluded_ids,
+                    peer_excluded=peer_excluded,
+                    anchor=anchor,
+                    peer_demoted=peer_demoted,
+                    policy=policy,
                 ),
                 timeout=max(1.0, self._op_deadline_s - HANDLER_WAIT_MARGIN_S),
             )
@@ -580,6 +733,18 @@ class MeshCredentialBroker:
             )
         except MeshRefusal as exc:
             return self._refuse(link, key, provider, by, exc.code, str(exc))
+        except _BrokerLoopClosed:
+            # THE RELAY SHUT DOWN BETWEEN THE DISPATCH AND THE SUBMIT. This is not
+            # a broker bug: answer with the same by-name ``unavailable`` the other
+            # late paths give, and never start a loop behind the stop hook.
+            return self._refuse(
+                link,
+                key,
+                provider,
+                by,
+                "unavailable",
+                "this relay is shutting down, so no credential was refreshed or lent",
+            )
         except Exception as exc:  # noqa: BLE001 — a broker bug must answer, not close the link
             return self._refuse(link, key, provider, by, "internal", exc.__class__.__name__)
         if isinstance(outcome, BrokerError):
@@ -591,6 +756,9 @@ class MeshCredentialBroker:
                 outcome.code,
                 outcome.message,
                 retry_after_ms=outcome.retry_after_ms,
+                # The arm marker must survive the re-shaping into the wire reply, or
+                # the borrower falls back to the 0-remainder rule (#3108 m1).
+                reason=outcome.reason,
             )
         grant: Grant = outcome
         # Recheck the actual requester after the asynchronous/coalesced result;
@@ -602,21 +770,31 @@ class MeshCredentialBroker:
         except MeshRefusal as exc:
             return self._refuse(link, key, provider, by, exc.code, str(exc))
         grant.latency_ms = int((time.monotonic() - started) * 1000)
+        ref = grant.credential_ref
+        detail: dict[str, Any] = {
+            "credential_key": key,
+            "act": self.self_device,
+            "sub": by,
+            "grant_id": grant.grant_id,
+            "credential_kind": ref.kind,
+            "scope": grant.scope.kind,
+            "refreshed": grant.refreshed,
+            "latency_ms": grant.latency_ms,
+            # The owner row lent (an id, never an email) and whether the borrower's
+            # anchor chose it. ``anchored`` is read off the RESULT: the selector
+            # puts an honoured anchor first, so the lent row equal to the anchor is
+            # exactly "the anchor was eligible and won".
+            "credential_id": int(ref.credential_id),
+            "anchored": anchor is not None
+            and (ref.credential_id, ref.account_created_at) == anchor,
+            "policy": policy,
+        }
         self._audit(
             "credential.grant",
             actor=self.self_device,
             subject=by,
             session_id=for_session,
-            detail={
-                "credential_key": key,
-                "act": self.self_device,
-                "sub": by,
-                "grant_id": grant.grant_id,
-                "credential_kind": grant.credential_ref.kind,
-                "scope": grant.scope.kind,
-                "refreshed": grant.refreshed,
-                "latency_ms": grant.latency_ms,
-            },
+            detail=detail,
         )
         return grant.to_detail()
 
@@ -639,6 +817,12 @@ class MeshCredentialBroker:
             # A derived holder's exclusion set is part of WHAT is being asked: two askers
             # with different permitted rows must never share one resolve.
             tuple(fields.get("excluded_ids", ())),
+            tuple(fields.get("peer_excluded", ())),
+            # The anchor and the peer's demotions change which row wins, so they
+            # are part of the question too.
+            fields.get("anchor"),
+            tuple(fields.get("peer_demoted", ())),
+            fields.get("policy", ""),
         )
         loop = asyncio.get_running_loop()
         slot = self._inflight.get(ckey)
@@ -677,8 +861,18 @@ class MeshCredentialBroker:
         holder_scope: str,
         by: str,
         excluded_ids: tuple[int, ...] = (),
+        peer_excluded: tuple[int, ...] = (),
+        anchor: tuple[int, int] | None = None,
+        peer_demoted: tuple[int, ...] = (),
+        policy: str | None = None,
     ) -> Any:
-        """The owner's own read-only resolve. Returns a :class:`Grant` or a refusal."""
+        """The owner's own read-only resolve. Returns a :class:`Grant` or a refusal.
+
+        ``peer_excluded`` is the subset of ``excluded_ids`` the REQUESTER named (its
+        resting rows). It changes what may win: see the guard after the resolve.
+        ``anchor`` / ``peer_demoted`` are the requester's affinity anchor and 5xx
+        demotions, applied through ``lend_selection_context``.
+        """
         if github_app.is_github_key(key):
             return await self._resolve_github(
                 key=key,
@@ -696,29 +890,69 @@ class MeshCredentialBroker:
                 holder_scope=holder_scope,
                 by=by,
             )
+        from local_operator.providers.account_affinity import lend_selection_context
+
         store = self._auth_store_instance()
         before = self._row_stamps(provider)
         try:
-            access = await store.get_oauth_access(
-                provider,
-                for_session or None,
-                force_refresh=force,
-                # READ-ONLY ON THE OWNER (§2.1). A peer's request never writes
-                # stickiness and never blocks one of the owner's rows: a lender that
-                # let a borrower re-point the owner's own account would be a
-                # delegation that is not narrower than the delegator's, which is the
-                # rule §3.3 states. A successful refresh still persists the rotated
-                # token — that is the same account's own bookkeeping, and dropping it
-                # would throw away a single-use refresh token.
-                read_only=True,
-                model_id=model_id,
-                # Rows a derived holder's approval does not cover are hidden from THIS
-                # resolve only (nothing is blocked or repointed): they are neither
-                # picked nor refreshed on a peer's behalf.
-                exclude_credential_ids=excluded_ids or None,
-            )
+            # THE SAME SELECTOR A LOCAL TURN RUNS, fed the inputs a local turn has:
+            # the operator's selection policy, the borrower's warm-account anchor,
+            # and its 5xx demotions.
+            with lend_selection_context(policy, anchor, frozenset(peer_demoted)):
+                access = await store.get_oauth_access(
+                    provider,
+                    for_session or None,
+                    force_refresh=force,
+                    # READ-ONLY ON THE OWNER (§2.1). A peer's request never writes
+                    # stickiness and never blocks one of the owner's rows: a lender
+                    # that let a borrower re-point the owner's own account would be a
+                    # delegation that is not narrower than the delegator's, which is
+                    # the rule §3.3 states. A successful refresh still persists the
+                    # rotated token — that is the same account's own bookkeeping, and
+                    # dropping it would throw away a single-use refresh token.
+                    read_only=True,
+                    model_id=model_id,
+                    # Rows a derived holder's approval does not cover are hidden from
+                    # THIS resolve only (nothing is blocked or repointed): they are
+                    # neither picked nor refreshed on a peer's behalf.
+                    exclude_credential_ids=excluded_ids or None,
+                )
         except Exception as exc:  # noqa: BLE001 — classified below, never propagated
             return self._classify_refresh_failure(exc, key)
+        if (
+            peer_excluded
+            and access is not None
+            and int(getattr(access, "credential_id", 0) or 0) <= 0
+        ):
+            # A PEER'S EXCLUSION MAY ONLY NARROW, NEVER REACH A NON-ROW TIER (review
+            # round 1, M1). ``exclude_credential_ids`` hides stored rows (tiers 3, 4,
+            # 6); with every row hidden the cascade fell through to the env/provider
+            # API key (tier 5) or the fallback resolver (tier 7), whose id is 0 — so a
+            # holder that named every row was lent a key the owner's own routing would
+            # never have served it (typically pay-as-you-go, not the shared login).
+            # Under a peer exclusion only a stored row (id > 0) may win; anything
+            # else reads as "nothing left", answered below.
+            access = None
+        if access is None and peer_excluded:
+            # EVERY LENDABLE ROW WAS EXCLUDED BY THE HOLDER (QA round 1, Q3). Not
+            # "nothing signed in": the rows exist and the holder saw them answer a
+            # usage limit. Judged on the owner's own id space — only an excluded id
+            # this device really has counts, so a stale list over a logged-out owner
+            # still reads as the logout it is. ``retry_after_ms`` stays 0: the window
+            # is the HOLDER's evidence, and the borrower renders it from its own
+            # cooldowns (``client._resting_refusal``) rather than caching this.
+            if set(peer_excluded) & set(self._row_stamps(provider)):
+                return BrokerError(
+                    code="quota_blocked",
+                    key=key,
+                    owner_device=self.self_device,
+                    owner_device_name=self.self_device_name,
+                    message=(
+                        f"every lendable login for {provider!r} was excluded by the holder, "
+                        "which saw them rate-limited; nothing was lent"
+                    ),
+                    reason=QUOTA_REASON_HOLDER_EXCLUDED,
+                )
         if access is None:
             # THE EMPTY ANSWER IS SPLIT BY ITS CAUSE (audit Q5 #9). ``quota_blocked``
             # had no producer: the owner's cascade excludes blocked rows
@@ -728,17 +962,36 @@ class MeshCredentialBroker:
             # heals on its own. When EVERY row this provider has is blocked for the
             # requested model, that block is the reason, and the remainder travels
             # with the code so the borrower waits the real time instead of guessing.
-            blocked_ms = self._quota_remaining_ms(provider, model_id)
-            if blocked_ms:
+            #
+            # AND THE USAGE GATE, NOT ONLY THE SQL BLOCK (2026-10-28 follow-up): the
+            # selector also drops rows whose cached usage reads ``depleted``, so once
+            # one block timer lapsed while the evidence still said spent, a fully
+            # spent pool answered ``no_local_credential`` and sent the borrower to
+            # re-login. The verdict now comes from the store's own eligibility read,
+            # over the same rows this resolve could pick (the holder's exclusions are
+            # not candidates), so the broker carries no quota policy of its own. An
+            # ``unknown`` usage verdict is not a limit, so mixed or unread evidence
+            # still answers ``no_local_credential``; a remainder travels only when
+            # every row's reopening is proven, otherwise the code goes alone.
+            quota = self._quota_eligibility(provider, model_id, excluded_ids)
+            if quota is not None and quota.all_quota_limited:
+                blocked_ms = quota.retry_after_ms
                 return BrokerError(
                     code="quota_blocked",
                     key=key,
                     owner_device=self.self_device,
                     owner_device_name=self.self_device_name,
                     retry_after_ms=blocked_ms,
+                    # The OWNER's state, not the holder's exclusion: marked so a
+                    # borrower never renders its own cooldowns for it (#3108 m1).
+                    reason=QUOTA_REASON_POOL_DEPLETED,
                     message=(
                         f"every login for {provider!r} is rate-limited on this device "
-                        f"for another {max(1, blocked_ms // 1000)} s"
+                        + (
+                            f"for another {max(1, blocked_ms // 1000)} s"
+                            if blocked_ms
+                            else "until its usage window resets"
+                        )
                     ),
                 )
             return BrokerError(
@@ -779,6 +1032,7 @@ class MeshCredentialBroker:
             provider=provider,
             token=str(access.access_token),
             credential_id=int(access.credential_id),
+            account_created_at=int(getattr(access, "account_created_at", 0) or 0),
             kind=str(getattr(access, "kind", "oauth") or "oauth"),
             token_exp_ms=token_exp_ms,
             refreshed=refreshed,
@@ -1030,6 +1284,7 @@ class MeshCredentialBroker:
         holder_scope: str,
         for_session: str,
         identity: dict[str, str],
+        account_created_at: int = 0,
     ) -> Grant:
         """Build the grant, applying §3.3's narrowing rule to the expiry.
 
@@ -1054,6 +1309,7 @@ class MeshCredentialBroker:
                 provider=provider,
                 kind=kind,
                 credential_id=credential_id,
+                account_created_at=account_created_at,
             ),
             served_by=self.self_device,
             refreshed=refreshed,
@@ -1642,7 +1898,7 @@ class MeshCredentialBroker:
             )
         for item in entries:
             key = item["credential_key"]
-            if key in DEVICE_BOUND_PROVIDERS:
+            if is_device_bound_provider(key):
                 # Like ``grant``: the device-bound answer does not depend on placement
                 # (and placement refuses to declare such a key at all).
                 continue
@@ -1697,8 +1953,8 @@ class MeshCredentialBroker:
                 out.append(row)
                 continue
             entry = self._entry(key)
-            if key in DEVICE_BOUND_PROVIDERS or (
-                entry is not None and entry.provider in DEVICE_BOUND_PROVIDERS
+            if is_device_bound_provider(key) or (
+                entry is not None and is_device_bound_provider(entry.provider)
             ):
                 row["state"] = lifecycle_mod.STATE_NON_PORTABLE
                 out.append(row)
@@ -1893,6 +2149,27 @@ class MeshCredentialBroker:
             self._auth_store = AuthStore(config_dir=self.root)
         return self._auth_store
 
+    def _selection_policy(self) -> str:
+        """The owner's effective ``retry.accountSelectionPolicy`` for a lend.
+
+        Resolved by ``effective_account_selection_policy`` — the function a local
+        session's settings go through, legacy ``usageAwareAccountPick`` included —
+        from the owner's own config root. A missing or unreadable config is the
+        shipped default, which is what the lend ran under before this was read.
+        """
+        from local_operator.network import store as net_store
+        from local_operator.providers.account_policy import (
+            DEFAULT_ACCOUNT_SELECTION_POLICY,
+            effective_account_selection_policy,
+        )
+
+        try:
+            retry = net_store.read_config(("retry",), {}, self.root)
+        except Exception:  # noqa: BLE001 — a config read must not fail a lend
+            logger.debug("lend: could not read the selection policy", exc_info=True)
+            return DEFAULT_ACCOUNT_SELECTION_POLICY
+        return effective_account_selection_policy({"retry": retry})
+
     def _credential_id_for(self, key: str, reported_id: int = 0) -> int | None:
         """The owner's row id for ``key``, for the report arms. Prefers the lent row.
 
@@ -1925,26 +2202,24 @@ class MeshCredentialBroker:
             return reported_id if reported_id in ids else None
         return ids[0] if ids else None
 
-    def _quota_remaining_ms(self, provider: str, model_id: str) -> int:
-        """How long every row for ``provider`` is quota-blocked for ``model_id``, ms.
+    def _quota_eligibility(
+        self, provider: str, model_id: str, excluded_ids: tuple[int, ...] = ()
+    ) -> QuotaEligibility | None:
+        """The store's quota eligibility for ``provider``, or ``None`` when unreadable.
 
         The producer ``quota_blocked`` never had (audit Q5 #9), read only when the
-        owner's own cascade came back EMPTY and only when EVERY row the provider has
-        is blocked for the requested model — the exact reason ``_usable_key_rows``
-        could not offer one. A row that is still servable means the empty answer has
-        another cause, and the caller keeps ``no_local_credential``. The earliest
-        unblock is the wait worth reporting: it is when something can be served
-        again, whatever happened to the other rows.
+        owner's own cascade came back EMPTY. The judgement — which rows a live block
+        or spent usage keeps out, and when the earliest one is PROVEN to reopen — is
+        ``AuthStore.quota_eligibility``'s, made from the same evidence the selection
+        applies; this only asks. An unreadable store explains nothing, and the caller
+        keeps ``no_local_credential``.
         """
         try:
-            store = self._auth_store_instance()
-            rows = store.list_credentials(provider)
-            waits = [int(store.blocked_remaining_ms(row.id, provider, model_id)) for row in rows]
+            return self._auth_store_instance().quota_eligibility(
+                provider, model_id, exclude_credential_ids=excluded_ids
+            )
         except Exception:  # noqa: BLE001 — an unreadable store explains nothing
-            return 0
-        if not waits:
-            return 0
-        return min(waits) if all(wait > 0 for wait in waits) else 0
+            return None
 
     def _row_stamps(self, provider: str) -> dict[int, int]:
         """``{credential_id: updated_at}`` for a provider, to observe a refresh.
@@ -2021,6 +2296,7 @@ class MeshCredentialBroker:
         message: str,
         *,
         retry_after_ms: int = 0,
+        reason: str = "",
     ) -> dict[str, Any]:
         """One refusal, audited on the owner and shaped as §3.2's failure reply."""
         error = BrokerError(
@@ -2030,6 +2306,7 @@ class MeshCredentialBroker:
             owner_device_name=self.self_device_name,
             retry_after_ms=retry_after_ms,
             message="",
+            reason=reason,
         )
         # The peer gets the CODE and the owner's own words; the SENTENCE the operator
         # reads is rendered where the operator is (``client.py`` →
@@ -2078,11 +2355,18 @@ class MeshCredentialBroker:
         except Exception:  # noqa: BLE001
             return None
 
-    def close(self) -> None:
-        """Stop the broker's loop. For tests and for a relay shutting down."""
+    def close(self, *, timeout: float = BROKER_LOOP_STOP_TIMEOUT_S) -> None:
+        """Stop the broker's loop; joined, bounded and reported by ``_BrokerLoop``.
+
+        This method used to schedule ``loop.stop()`` and return, so a caller could
+        not tell a wedged loop from a clean stop. The join-and-report lives in
+        :meth:`_BrokerLoop.close` so the relay's teardown and a direct call share
+        one implementation; its closed latch makes a second call a no-op (and stops
+        a late request restarting the loop).
+        """
         if self._github_lender is not None:
             self._github_lender.close()
-        self._loop.close()
+        self._loop.close(timeout=timeout)
 
 
 #: The private attribute a relay server carries its one broker under.
@@ -2121,6 +2405,19 @@ def broker_for_relay(server: Any) -> MeshCredentialBroker | None:
     started must be served without a restart (``for_relay``'s docstring).
     """
     with _BROKER_LOCK:
+        # THE CHECK SHARES THE LOCK WITH THE STOP HOOK, and that is the whole fix
+        # (review round 1, R1-1). Read outside it, an accessor that passed just
+        # before ``_stop`` was set still built and stashed after the hook's stash
+        # read — a loop started behind the reaper, on a relay that cannot restart.
+        # Holding the same lock makes the two orders the only two: the accessor
+        # builds first (the hook then closes it), or the hook runs first and this
+        # check refuses. Python's lock is not reentrant, so ``stop_broker_for_relay``
+        # takes it for its read and closes outside it.
+        stop = getattr(server, "_stop", None)
+        if stop is not None and stop.is_set():
+            # The by-name refusal a device that owns nothing already gets; the
+            # handler's caller answers it honestly instead of starting a loop.
+            return None
         broker = getattr(server, _BROKER_ATTR, None)
         if broker is not None:
             return broker
@@ -2133,6 +2430,29 @@ def broker_for_relay(server: Any) -> MeshCredentialBroker | None:
                 # growing a module-level table that outlives it.
                 pass
         return broker
+
+
+def stop_broker_for_relay(server: Any, *, timeout: float = BROKER_LOOP_STOP_TIMEOUT_S) -> None:
+    """Close the broker this relay created, if it created one (slice ``on_stop``).
+
+    THE STASH IS READ, NOT ``broker_for_relay``: that accessor builds on first
+    need, and a relay that never brokered anything has no loop to stop — creating
+    one during teardown would be the exact leak this hook exists to prevent.
+
+    THE STASH IS KEPT after the close. The server is what the broker belongs to,
+    and the closed broker is the object a late request must reach (its loop
+    refuses to restart) rather than a fresh one built behind the stop. The server
+    dies with the relay; nothing module-level retains it.
+    """
+    with _BROKER_LOCK:
+        # SAME LOCK AS THE ACCESSOR (R1-1): a build that passed its ``_stop`` check
+        # cannot land between this read and the close. The close runs OUTSIDE the
+        # lock because it joins a thread, and holding the build lock across a join
+        # would serialise every late request behind a wedged loop.
+        broker = getattr(server, _BROKER_ATTR, None)
+    if broker is None:
+        return
+    broker.close(timeout=timeout)
 
 
 def _already_expired(expiry: float | None, *, now: float | None = None) -> bool:

@@ -54,12 +54,22 @@ from local_operator.harness.message_types import (
 )
 from local_operator.harness.types import (
     ATTACHMENT_KINDS,
+    CACHE_DIAGNOSTICS_ID_KEY,
     AgentMessage,
     AudioContent,
     CustomMessage,
+    DocumentContent,
     Message,
     TextContent,
+    cache_diagnostics_id_of,
+    drop_blank_text_blocks,
 )
+
+# The read-side resolver for a transcript that may be stored compressed. Imported
+# at module scope because this module's READERS all need it and ``compression`` is
+# stdlib-only by contract (whose own lazy imports keep the harness out of ITS
+# graph), so this adds no cycle and no weight to the CLI path.
+from local_operator.session import compression
 from local_operator.session.attachments import AttachmentStore
 
 # The engagement reader — and the transcript filename it looks for — live in
@@ -493,8 +503,11 @@ def encode_message_payload(
     # Also cover direct journal producers/alternate provider payloads that did
     # not pass through the loop's retained-copy seam. Never mutate execution.
     message = retained_message(message)
+    message = _without_blank_user_text(message)
     payload = message.model_dump(exclude_defaults=True, exclude={"id"})
     _stamp_audio_discriminants(message, payload)
+    _stamp_document_discriminants(message, payload)
+    _stamp_cache_diagnostics_id(message, payload)
     _externalize_attachments(payload, attachments)
     for call in payload.get("tool_calls") or ():
         raw = call.get("raw_arguments")
@@ -507,6 +520,61 @@ def encode_message_payload(
         if redundant:
             call.pop("raw_arguments")
     return payload
+
+
+def _stamp_cache_diagnostics_id(message: Message | CustomMessage, payload: dict[str, Any]) -> None:
+    """Write the turn's diagnosed Anthropic id into the row's ``usage``, in place.
+
+    The id rides ``Usage`` as a PRIVATE attribute so no frame or receipt pays
+    for it, which also means ``model_dump`` above never sees it: this encoder is
+    the one place it reaches disk (see ``CACHE_DIAGNOSTICS_ID_KEY``). A row
+    without a diagnosed call gains nothing, so every other row stays
+    byte-identical.
+    """
+    usage_payload = payload.get("usage")
+    if not isinstance(usage_payload, dict):
+        return
+    diagnosed = cache_diagnostics_id_of(getattr(message, "usage", None))
+    if diagnosed:
+        usage_payload[CACHE_DIAGNOSTICS_ID_KEY] = diagnosed
+
+
+def newest_cache_diagnostics_id(entries: Sequence[TranscriptEntry]) -> str | None:
+    """The newest persisted cache-diagnostics id in ``entries``, or ``None``.
+
+    Read by a resumed ``Session`` to continue the diagnostics chain. Newest row
+    wins, uncut by compaction: the API compares against the last REQUEST it
+    fingerprinted, which a later rewrite of the local context does not change.
+    """
+    for entry in reversed(entries):
+        if entry.type != ENTRY_MESSAGE:
+            continue
+        usage_payload = entry.payload.get("usage")
+        if isinstance(usage_payload, dict):
+            value = usage_payload.get(CACHE_DIAGNOSTICS_ID_KEY)
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def _without_blank_user_text(message: Message | CustomMessage) -> Message | CustomMessage:
+    """A user ``message`` with its removable blank text blocks dropped.
+
+    Applied in the encoder so NO producer can persist an empty text block
+    (``{}`` on disk; #2460 was one producer, ``Message.user``, and fixing the
+    constructor alone leaves every hand-built ``Message(role="user", ...)``
+    able to write it again). User rows only: assistant and tool rows have
+    their own emptiness rules at the wire (``_is_empty_assistant``,
+    ``EMPTY_TOOL_RESULT_TEXT``), and a pruned tool row's text is a notice.
+    Returns the same object when nothing changes, so an unaffected row is
+    byte-identical and keeps its compaction-cache identity.
+    """
+    if not isinstance(message, Message) or message.role != "user":
+        return message
+    content = drop_blank_text_blocks(message.content)
+    if len(content) == len(message.content):
+        return message
+    return message.model_copy(update={"content": content})
 
 
 #: Key a content block carries when its media lives in the attachment store
@@ -559,6 +627,32 @@ def _stamp_audio_discriminants(message: Message | CustomMessage, payload: dict[s
             encoded["type"] = block.type
 
 
+def _stamp_document_discriminants(
+    message: Message | CustomMessage, payload: dict[str, Any]
+) -> None:
+    """Re-add ``type: "document"`` to encoded document blocks, in place.
+
+    Same trap as audio (see :func:`_stamp_audio_discriminants`): the encoder
+    dumps with ``exclude_defaults`` and ``type`` IS the model default, so a
+    typeless durable row with a ``data`` string parses back as
+    :class:`ImageContent` — a PDF replayed as an image on every later turn.
+    Stamped from the SOURCE blocks rather than guessed from ``filename``/
+    ``mime_type``: a live block is the authority on what it is.
+
+    Documents are stamped ALWAYS (unlike audio, which only needs the stamp
+    when it exists): the contract's durable shape carries the discriminant,
+    which is also what lets a reader tell a document row from an attachment
+    reference without inferring from key combos.
+    """
+    content = payload.get("content")
+    source = getattr(message, "content", None)
+    if not isinstance(content, list) or not isinstance(source, list):
+        return
+    for block, encoded in zip(source, content):
+        if isinstance(block, DocumentContent) and isinstance(encoded, dict):
+            encoded["type"] = block.type
+
+
 def _externalize_attachments(payload: dict[str, Any], attachments: AttachmentStore | None) -> None:
     """Move inline base64 image payloads out of ``payload`` into the store.
 
@@ -575,6 +669,26 @@ def _externalize_attachments(payload: dict[str, Any], attachments: AttachmentSto
         return
     for block in content:
         if not isinstance(block, dict):
+            continue
+        # DOCUMENTS are externalized like images but on their own arm, because
+        # the identifying key is ``type`` (stamped just above) and the durable
+        # row also drops the live ``digest`` field: the reference lives under
+        # ``attachment``, mirroring the image convention. Below the floor the
+        # bytes stay inline -- a small text file costs less than a reference
+        # plus a store round-trip on every replay.
+        if block.get("type") == "document" or (
+            "filename" in block and "mime_type" in block and "data" in block
+        ):
+            data = block.get("data")
+            if not isinstance(data, str) or len(data) < _ATTACHMENT_FLOOR_BYTES:
+                continue
+            ref = attachments.put(data, str(block.get("mime_type", "application/octet-stream")))
+            if ref is None:
+                continue
+            block.pop("data", None)
+            block.pop("digest", None)
+            block[ATTACHMENT_KEY] = ref.digest
+            block["mime_type"] = ref.mime_type
             continue
         # An ARTIFACT block is ref-based by construction — its bytes were
         # cached by its producer before the block existed — so there is
@@ -621,6 +735,42 @@ def _resolve_attachments(payload: dict[str, Any], attachments: AttachmentStore) 
         return
     for block in content:
         if not isinstance(block, dict):
+            continue
+        # DOCUMENTS: the mirror of the externalize arm above, and the digest is
+        # RESTORED onto the block rather than popped (amendment 4) -- a
+        # resolved document row keeps naming its retained copy, which the path
+        # hint and a later compaction manifest both read. A missing blob
+        # becomes a named TEXT notice: an empty document block would render as
+        # nothing at all, which is how the operator's PDF silently vanished in
+        # the first place.
+        if block.get("type") == "document" or (
+            "filename" in block and "mime_type" in block and ATTACHMENT_KEY in block
+        ):
+            digest = block.get(ATTACHMENT_KEY)
+            if not isinstance(digest, str):
+                continue
+            resolved_document = attachments.get(digest)
+            if resolved_document is None:
+                filename = str(block.get("filename") or "an attached file")
+                mime = str(block.get("mime_type") or "unknown type")
+                logger.warning("transcript references missing attachment %s", digest)
+                block.clear()
+                block.update(
+                    {
+                        "type": "text",
+                        "text": (
+                            f"[The attached file {filename} ({mime}) could not be loaded from "
+                            "the attachment store; its retained copy is missing. Ask the user "
+                            "to attach the file again.]"
+                        ),
+                    }
+                )
+                continue
+            data, mime_type = resolved_document
+            block.pop(ATTACHMENT_KEY, None)
+            block["data"] = data
+            block["mime_type"] = mime_type
+            block["digest"] = digest
             continue
         # Artifact blocks are NOT resolved here, deliberately. This pass
         # inlines bytes for consumers that need them in memory and, for a
@@ -697,7 +847,11 @@ _BACKWARD_CHUNK_BYTES = 1 << 20
 
 
 def _iter_complete_lines_backward(
-    handle: BinaryIO, end_of_file: int, *, chunk_bytes: int = _BACKWARD_CHUNK_BYTES
+    handle: BinaryIO,
+    end_of_file: int,
+    *,
+    chunk_bytes: int = _BACKWARD_CHUNK_BYTES,
+    max_bytes: int | None = None,
 ) -> Iterator[tuple[int, list[bytes]]]:
     """Yield ``(chunk_start, lines)`` pairs reading backward from ``end_of_file``.
 
@@ -733,11 +887,17 @@ def _iter_complete_lines_backward(
     row's bytes, however many chunks it spans.
     """
     position = end_of_file
+    # A bounded consumer must not read a giant unterminated row to BOF merely
+    # to learn it exceeded its budget. Never yield the partial leading row at
+    # this floor: only BOF proves that fragment is a complete journal row.
+    floor = max(0, end_of_file - max_bytes) if max_bytes is not None else 0
     # Fragments of one row, in READ order (newest first), each piece contiguous
     # with the next. Never joined until the boundary that ends the row arrives.
     carried: list[bytes] = []
     while True:
-        chunk_start = max(0, position - chunk_bytes)
+        if position <= floor:
+            return
+        chunk_start = max(floor, position - chunk_bytes)
         handle.seek(chunk_start)
         chunk = handle.read(position - chunk_start)
         position = chunk_start
@@ -1156,6 +1316,20 @@ def _read_around_page(
         return TranscriptPage(page, has_older, False, has_newer, source_signature=verified)
 
 
+def _resolved_transcript_path(directory: str | Path) -> Path | None:
+    """The path a READER may open for ``directory``, or ``None`` when there is none.
+
+    THE read-side resolver for this module: a plain transcript is returned
+    unchanged; an archive is decompressed into the bounded cache (or restored in
+    place when free space is tight) and that path is returned. Callers keep their
+    byte arithmetic — offsets, backward walks, seeks — untouched, because the
+    materialised copy is byte-identical to the journal the archive was made from.
+    ``None`` means the session has neither form, which every caller already maps
+    to its own "empty history" answer.
+    """
+    return compression.transcript_for_read(Path(directory))
+
+
 def read_transcript_page(
     directory: str | Path,
     *,
@@ -1265,9 +1439,12 @@ def read_transcript_page(
       the two readers of the same file no longer disagree about a damaged row.
     """
     validate_page_request(before_id, through_id, around_id, before, after, limit)
-    path = Path(directory) / TRANSCRIPT_FILENAME
-    if not path.exists():
-        raise FileNotFoundError(path)
+    path = _resolved_transcript_path(directory)
+    if path is None:
+        # Same answer the plain-only reader gave for an absent file: the
+        # callers distinguish "no journal" with FileNotFoundError, and a
+        # compressed journal is NOT absent.
+        raise FileNotFoundError(Path(directory) / TRANSCRIPT_FILENAME)
     if around_id is not None:
         return _read_around_page(path, around_id, before=before, after=after, limit=limit)
     # Newest-first, holding at most ``limit + 1`` rows: the extra row is the
@@ -1370,7 +1547,9 @@ def find_row_for_custom_type(
     if encoded != f'"{custom_type}"':
         return None
     needle = b'"custom_type":' + encoded.encode("utf-8")
-    path = Path(directory) / TRANSCRIPT_FILENAME
+    path = _resolved_transcript_path(directory)
+    if path is None:
+        return None
     try:
         handle = path.open("rb")
     except OSError:
@@ -1428,7 +1607,9 @@ def read_custom_entries(
     if max_rows is not None and max_rows <= 0:
         return []
     needle = b'"custom_type":' + encoded.encode("utf-8")
-    path = Path(directory) / TRANSCRIPT_FILENAME
+    path = _resolved_transcript_path(directory)
+    if path is None:
+        return []
     try:
         handle = path.open("rb")
     except OSError:
@@ -1566,8 +1747,8 @@ def read_latest_custom_entry(directory: str | Path, custom_type: str) -> Transcr
     located = find_row_for_custom_type(directory, custom_type)
     if located is not None:
         return located[1]
-    path = Path(directory) / TRANSCRIPT_FILENAME
-    if not path.exists():
+    path = _resolved_transcript_path(directory)
+    if path is None:
         return None
     with path.open("rb") as handle:
         handle.seek(0, os.SEEK_END)
@@ -1611,7 +1792,9 @@ def read_entry_by_id(directory: str | Path, entry_id: str) -> TranscriptEntry | 
         # An escaped spelling cannot be searched for by bytes; the walk answers.
         return _walk_entry_by_id(directory, entry_id)
     needle = b'{"id":' + encoded.encode("utf-8")
-    path = Path(directory) / TRANSCRIPT_FILENAME
+    path = _resolved_transcript_path(directory)
+    if path is None:
+        return None
     try:
         handle = path.open("rb")
     except OSError:
@@ -1641,8 +1824,8 @@ def read_entry_by_id(directory: str | Path, entry_id: str) -> TranscriptEntry | 
 def _walk_entry_by_id(directory: str | Path, entry_id: str) -> TranscriptEntry | None:
     """Parse-walk fallback for :func:`read_entry_by_id` (re-serialized rows)."""
 
-    path = Path(directory) / TRANSCRIPT_FILENAME
-    if not path.exists():
+    path = _resolved_transcript_path(directory)
+    if path is None:
         return None
     with path.open("rb") as handle:
         handle.seek(0, os.SEEK_END)
@@ -1711,6 +1894,372 @@ class ReplaySuffix:
     #: own EOF — a window that stopped short can then look like a full read,
     #: which is the unsafe direction for every consumer of "I saw everything".
     reached_bof: bool = False
+    #: Parsed rows actually visited by a bounded metadata scan.
+    rows_read: int = 0
+    #: :func:`read_cold_tail` only: the journal holds NO usage receipt at all —
+    #: none in the tail and the spelling absent from every byte below it. This
+    #: is what lets a caller tell "no seed is eager's own answer" apart from
+    #: "the tail met receipts but none parsed", which must still decline
+    #: because eager would keep looking further back for a parseable one.
+    usage_proven_absent: bool = False
+    #: :func:`read_cold_tail` only: bytes the absence proof scanned below the
+    #: tail, for the caller's evidence; not a contract.
+    absence_scan_bytes: int = 0
+
+
+#: Ceiling on the bytes BELOW the bounded tail that :func:`read_cold_tail` will
+#: scan to prove a type absent. Above it the tail declines to eager, which is no
+#: faster on such a journal but is the established answer. Measured warm:
+#: 2.9 ms for 8 MB and 15.5 ms for 51.7 MB, so 128 MiB is about 40 ms warm; a
+#: cold page cache pays a sequential read up to this cap (L7 design, risk 1).
+ABSENCE_SCAN_MAX_BYTES = 128 << 20
+
+#: Read granularity of :func:`_spellings_absent`. Matches the eager reader's
+#: chunk so the scan costs the same per byte as the walk it replaces.
+_ABSENCE_SCAN_WINDOW_BYTES = 1 << 20
+
+#: The ``key: value`` separators a JSON row can carry around a needle. The
+#: repo's one writer is compact; ``json.dumps``' default is ``": "``. Both are
+#: searched for, so absence does not rest on which writer produced the row
+#: (review round 1, MAJOR-1). A JSONL row cannot hold a raw newline, so an
+#: indented writer cannot produce a third spelling inside one row.
+_KEY_SEPARATORS = (b":", b": ")
+
+#: The byte spellings every persisted usage receipt carries: the message payload
+#: key ``usage`` holding an object (see :func:`read_cold_tail`).
+_USAGE_SPELLINGS = tuple(b'"usage"' + sep + b"{" for sep in _KEY_SEPARATORS)
+
+
+def _spellings_absent(
+    handle: BinaryIO,
+    start: int,
+    end: int,
+    needles: tuple[bytes, ...],
+    *,
+    window_bytes: int = _ABSENCE_SCAN_WINDOW_BYTES,
+) -> bool:
+    """Whether none of ``needles`` occurs in the byte range ``[start, end)``.
+
+    Streams fixed windows forward and never holds more than one window plus
+    the overlap, so the cost in memory does not grow with the journal. Each
+    window reads ``len(longest needle) - 1`` bytes past its end: a needle
+    written across a window boundary has its first byte in one window and
+    its last in the next, and only that overlap lets one of them see it whole.
+    The overlap never reads past ``end``. A match that only overlaps ``end``
+    is outside the range and must not count.
+
+    Raises ``OSError`` from the handle. A caller proving absence must treat an
+    unreadable byte as "not proven", never as "absent".
+    """
+    if not needles or start >= end:
+        return True
+    overlap = max(len(needle) for needle in needles) - 1
+    position = start
+    while position < end:
+        stop = min(end, position + window_bytes)
+        handle.seek(position)
+        window = handle.read(min(end, stop + overlap) - position)
+        if any(needle in window for needle in needles):
+            return False
+        position = stop
+    return True
+
+
+def _custom_type_spellings(custom_type: str) -> tuple[bytes, ...] | None:
+    """``"custom_type":"<type>"`` under every separator in ``_KEY_SEPARATORS``.
+
+    ``None`` when the type's JSON-escaped spelling differs from its literal
+    one, because then no fixed byte string is safe to search for. Same rule
+    as :func:`find_row_for_custom_type`.
+    """
+    encoded = json.dumps(custom_type)
+    if encoded != f'"{custom_type}"':
+        return None
+    return tuple(b'"custom_type"' + sep + encoded.encode("utf-8") for sep in _KEY_SEPARATORS)
+
+
+def custom_type_proven_absent(
+    directory: str | Path,
+    custom_type: str,
+    *,
+    max_scan_bytes: int = ABSENCE_SCAN_MAX_BYTES,
+) -> bool:
+    """Whether NO byte of the plain journal spells a ``custom_type`` row, proven by scan.
+
+    ``True`` is a proof that :func:`read_latest_custom_entry` would answer ``None``;
+    ``False`` means only "not proven" and the caller walks as before.
+
+    WHY (L10): ``DesktopSessions._locate`` asks for the frontend checkpoint of a
+    session with no ``desktop.json`` marker, and a legacy journal has none, so the
+    backward walk JSON-decodes the whole file to find nothing — 81-90 ms of a
+    117-191 ms open on the 8 MB legacy fixture. The tail-anchor sidecar answers the
+    same question only after core-start prewarm has written it. This is the same
+    proof made on the spot with :func:`read_cold_tail`'s scanner: a row the walk
+    could match must carry ``"custom_type"`` and the type's spelling under one of
+    ``_KEY_SEPARATORS`` (the walk's ``str(payload["custom_type"]) == custom_type``
+    has no other byte form this format writes), so if neither spelling occurs the
+    walk's answer is ``None``. A spelling found anywhere — including inside message
+    text — proves nothing, and the walk decides.
+
+    DECLINES (``False``) rather than guesses: an archive (the walk materialises it,
+    and this scan reads plain bytes only), a type with no fixed spelling, a journal
+    larger than ``max_scan_bytes``, and any read error. The scan covers the file's
+    size at its ``fstat``, torn final row included. A row appended after that
+    instant is one this proof did not cover — the walk, starting LATER, could have
+    seen it — so the fallback cwd answered is the one the walk would have given had
+    it started at that same instant (#3001 review NIT-1).
+
+    PURE READ: nothing is written. The tail-anchor sidecar stays prewarm's to
+    publish (its module contract), and at ~3 ms warm per 8 MB this scan is cheaper
+    than the sidecar write's fsync it would otherwise motivate on the open path.
+    """
+    spellings = _custom_type_spellings(custom_type)
+    if spellings is None:
+        return False
+    path, codec = compression.transcript_source(Path(directory))
+    if codec is not None:
+        return False
+    try:
+        with path.open("rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            if size > max_scan_bytes:
+                return False
+            return _spellings_absent(handle, 0, size, spellings)
+    except OSError:
+        return False
+
+
+def read_cold_tail(
+    directory: str | Path,
+    *,
+    checkpoint_types: tuple[str, ...],
+    max_bytes: int = 4 * 1024 * 1024,
+    max_rows: int = 256,
+    max_scan_bytes: int = ABSENCE_SCAN_MAX_BYTES,
+) -> ReplaySuffix | None:
+    """Prove first-frame facts from a bounded plain-journal suffix, or decline.
+
+    This is NOT replay: entries are only the evidence for the newest usage
+    receipt, never a message-list substitute. Each fact (every checkpoint
+    type, plus the usage seed) is either MET in the newest 4 MiB / 256 rows,
+    or PROVEN ABSENT from every byte below them. Damaged or incomplete lines,
+    archives and a shrink row met before a usage receipt keep the exact eager
+    path. A bound alone is never taken as proof of absence.
+
+    WHY the absence proof (L7 design R1): legacy journals carry no checkpoint
+    and no spend row at all. Requiring the tail to *meet* them sent every such
+    journal to the eager reader, which read to BOF because nothing stopped it:
+    about 1 s for an 8 MB journal. Scanning the bytes below the tail for each
+    missing type's spelling costs milliseconds at memchr speed. It needs no
+    prefix witness or stored offsets, because it reads the very bytes it
+    reasons about.
+
+    WHY the facts equal eager's under ANY eager window. A type met in the tail
+    is its newest row: no compaction separates it from EOF, so eager's buffer,
+    which always reaches back to the newest compaction, holds it as well.
+    That is the #2974 argument. A type whose spelling is absent from
+    ``[0, tail)`` and that was not met in the tail exists nowhere in the file,
+    so eager finds none however far it reads, with or without a sidecar or
+    chunk alignment. A parseable usage receipt met before any shrink row is
+    newer than every shrink, so it survives
+    :func:`usages_since_newest_shrink` in eager's suffix and is the newest
+    parseable reading there too.
+
+    THE SPELLINGS, and why a false absence is impossible for this repo's
+    writers:
+
+    * A checkpoint type is ``"custom_type":"<type>"``, a custom row's payload
+      key followed by the type literal in quotes. The ``"type":"custom"``
+      envelope is deliberately not matched. The type string is the one piece
+      no format change can move. A usage receipt is ``"usage":{``. Each is
+      ALSO searched with ``json.dumps``' default ``": "`` separator, so a row
+      written by a writer that forgot ``separators=`` is still seen (review
+      round 1, MAJOR-1). That costs only false presences, which decline.
+    * Every journal row is written by :meth:`TranscriptEntry.to_json`, whose
+      ``json.dumps(..., separators=(",", ":"))`` with the default
+      ``ensure_ascii`` has been unchanged since the format was introduced
+      (381377fe82d). Checked: ``git log -S'separators='`` and ``-S'json.dumps('``
+      on ``transcript.py``, and ``-S`` on the two type constants in
+      ``frontend_state.py`` / ``spend.py``. Each constant was introduced once,
+      with the same literal: ``"frontend_state_checkpoint_v1"`` (b0bde07e4a6)
+      and ``"session_spend.v1"`` (f31d50929e5). Rewriters (``compact_file``
+      folds, the import service's ``append_imported``) and the mobile
+      projection also serialise through ``to_json``. Neither type literal
+      contains a character JSON escapes, so ``ensure_ascii`` cannot change its
+      bytes. A type whose escaped spelling does differ is never scanned for:
+      the tail declines, as :func:`find_row_for_custom_type` does.
+    * A FALSE PRESENCE is always safe. When the spelling appears without being
+      a real row (a nested object in another row, for instance), the scan says
+      "present" and the tail declines to eager. A conversation that merely
+      quotes the type inside message TEXT does not even match, because the
+      quotes in a JSON string are escaped as ``\\"``.
+    * The assumption that remains: a row's key/value separator is ``:`` or
+      ``": "``, the only two ``json.dumps`` produces on one line (a JSONL row
+      holds no raw newline, so ``indent=`` cannot appear). A writer emitting
+      other whitespace (``" : "``, tabs) would defeat it; none exists, and
+      ``to_json`` is still the repo's only row writer.
+    * The spend type does not need special handling: it reaches this function
+      as one of ``checkpoint_types`` (``build_cold_tail_metadata`` passes the
+      required AND opportunistic types), so a spend row below the tail is
+      scanned for like the checkpoint and declines when present.
+
+    Bounds: the scan covers ``[0, low + longest - 1)``, where ``low`` is the
+    start of the oldest row the tail consumed. The overlap is redundant,
+    since the byte before ``low`` is a newline that no spelling contains, but
+    it keeps the bound conservative. Above ``max_scan_bytes``
+    (:data:`ABSENCE_SCAN_MAX_BYTES`) the tail declines.
+
+    When the walk stops: once every fact is met (as before), at the
+    4 MiB / 256-row bound, or at a shrink row met AFTER a parseable usage
+    receipt. That shrink is older than the seed, so the seed stays exact, and
+    walking on would only refuse. The shrink row itself is not consumed, so
+    it lies in the scanned range, and any unmet type below it is still
+    looked for. A shrink met BEFORE a parseable receipt still declines.
+
+    What each guard protects, because two of them look alike:
+
+    * The usage SEED's soundness is owned by :func:`usages_since_newest_shrink`,
+      which the caller runs over these entries: it drops every reading older
+      than the newest shrink, so a pre-shrink context figure can never be
+      seeded whether or not this function refuses.
+    * The shrink refusal below is deliberate CONSERVATISM on top of that. It
+      declines any window containing a shrink rather than reasoning about
+      which facts survive one, so the deferred path only ever serves journals
+      with no shrink near EOF. Removing it would not make a seed wrong; it
+      would make the tail serve opens it is not tested for. Pinned by
+      ``test_tail_declines_a_shrink_straddling_the_needed_facts``.
+    """
+    from local_operator.session.compression import transcript_source
+
+    # Lazy: usage_seed -> model_selection -> this module.
+    from local_operator.session.usage_seed import parse_usage
+
+    path, codec = transcript_source(Path(directory))
+    if codec is not None:
+        return None
+    spellings = {name: _custom_type_spellings(name) for name in checkpoint_types}
+    checkpoints: dict[str, dict[str, Any]] = {}
+    order: dict[str, int] = {}
+    parsed: list[TranscriptEntry] = []
+    have_usage = False
+    # A receipt that VALIDATES. Only that one may stop the walk at a shrink,
+    # because only a parseable reading is guaranteed to be eager's seed.
+    have_seed = False
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            end = handle.tell()
+            # Start of the oldest row consumed. The walker yields chunk
+            # starts rather than row starts, so this is priced per row: each
+            # consumed line is its bytes plus the newline that ends it.
+            low = end
+            first = True
+            stopped = False
+            for start, lines in _iter_complete_lines_backward(
+                handle, end, chunk_bytes=64 * 1024, max_bytes=max_bytes
+            ):
+                # A complete JSON object without its terminating newline can
+                # still be an interrupted append. Let eager replay decide it.
+                if first and (not lines or lines[0] != b""):
+                    return None
+                for index, raw in enumerate(lines):
+                    # The first chunk's leading b"" is the zero bytes after
+                    # the final newline, not a row.
+                    width = 0 if first and index == 0 else len(raw) + 1
+                    if not raw.strip():
+                        low -= width
+                        continue
+                    if len(parsed) >= max_rows:
+                        stopped = True
+                        break
+                    entry = TranscriptEntry.from_json(raw.decode("utf-8"))
+                    if entry is None:
+                        return None
+                    provider = entry.payload.get("provider_payload") or {}
+                    if not isinstance(provider, dict):
+                        return None
+                    # Conservatism, not the seed's boundary (see docstring):
+                    # every shrink spelling usages_since_newest_shrink honours.
+                    if (
+                        entry.type in (ENTRY_COMPACTION, ENTRY_PRUNE)
+                        or provider.get(SHRUNK_KEY)
+                        or (entry.type == ENTRY_MESSAGE and provider.get("pruned"))
+                    ):
+                        if not have_seed:
+                            return None
+                        stopped = True
+                        break
+                    parsed.append(entry)
+                    low -= width
+                    if entry.type == ENTRY_CUSTOM:
+                        name = entry.payload.get("custom_type")
+                        if name in checkpoint_types and name not in checkpoints:
+                            checkpoints[name] = dict(entry.payload.get("details", {}))
+                            order[name] = len(parsed)
+                    if entry.type == ENTRY_MESSAGE and isinstance(entry.payload.get("usage"), dict):
+                        have_usage = True
+                        if not have_seed and parse_usage(entry.payload["usage"]) is not None:
+                            have_seed = True
+                    # Stop on a PARSEABLE receipt, not merely a usage dict: an
+                    # unparseable newest one is skipped by the seed, and the
+                    # older parseable one eager would seed from must be in hand.
+                    if have_seed and all(name in checkpoints for name in checkpoint_types):
+                        # A SYNTHETIC suffix: ``through_present=True`` is not a
+                        # cursor search (this reader takes no cursor), only the
+                        # field's required value. Nothing consumes it from a
+                        # tail result today — the caller reads the checkpoints,
+                        # their order, the entries' usage and ``bytes_read`` —
+                        # so never hand this to a replay consumer as if it were
+                        # a :func:`read_replay_suffix` result.
+                        return ReplaySuffix(
+                            entries=tuple(reversed(parsed)),
+                            through_present=True,
+                            checkpoint=checkpoints[checkpoint_types[0]],
+                            checkpoints=checkpoints,
+                            checkpoint_order=order,
+                            bytes_read=end - start,
+                            rows_read=len(parsed),
+                        )
+                first = False
+                if stopped:
+                    break
+            # Here the walk stopped (row bound, or a shrink below a seed) or
+            # the walker ran out (byte bound, or BOF with ``low == 0``).
+            bytes_read = end - low
+            if low >= end:
+                return None
+            # What is still unproven. A usage receipt that the tail met but
+            # could not parse is not proven absent: eager would look further
+            # back for a parseable one. So this declines (design row 15).
+            if have_usage and not have_seed:
+                return None
+            missing = [name for name in checkpoint_types if name not in checkpoints]
+            needles: list[bytes] = []
+            for name in missing:
+                spelling = spellings[name]
+                if spelling is None:
+                    return None
+                needles.extend(spelling)
+            if not have_usage:
+                needles.extend(_USAGE_SPELLINGS)
+            scan_end = min(end, low + max(len(n) for n in needles) - 1)
+            if scan_end > max_scan_bytes:
+                return None
+            if not _spellings_absent(handle, 0, scan_end, tuple(needles)):
+                return None
+            return ReplaySuffix(
+                entries=tuple(reversed(parsed)),
+                through_present=True,
+                checkpoint=checkpoints.get(checkpoint_types[0]),
+                checkpoints=checkpoints,
+                checkpoint_order=order,
+                bytes_read=bytes_read,
+                rows_read=len(parsed),
+                usage_proven_absent=not have_usage,
+                absence_scan_bytes=scan_end,
+            )
+    except (OSError, UnicodeError, TypeError, ValueError):
+        return None
 
 
 def read_replay_suffix(
@@ -1762,8 +2311,8 @@ def read_replay_suffix(
     :func:`_iter_complete_lines_backward`, shared with the display page reader
     so the two cannot drift on where a row begins.
     """
-    path = Path(directory) / TRANSCRIPT_FILENAME
-    if not path.exists():
+    path = _resolved_transcript_path(directory)
+    if path is None:
         # ``Transcript(directory)`` treats an absent journal as empty history
         # — a session that has not written yet, or whose directory a sweep
         # removed. The attach path relies on that, so the suffix reader
@@ -1900,15 +2449,40 @@ def read_replay_suffix(
     )
 
 
+class ReadOnlyTranscript(RuntimeError):
+    """A write was attempted on a ``Transcript(..., read_only=True)`` view.
+
+    A read-only view exists so a pure reader (the phone's image fetch, the
+    mobile projection fold) can read a compressed session WITHOUT restoring it
+    into a plain file for good. Reads behave exactly as they do on a writer; a
+    write is a programming error at the caller, not a condition to handle, so it
+    fails loudly instead of appending to whatever copy the resolver handed back.
+    """
+
+
 class Transcript:
     """Append-only JSONL store, thread/async-safe via an asyncio lock.
 
     Message entries reuse the message's own ``id`` as the entry id so
     compaction can reference ``first_kept_entry_id`` without a second mapping.
+
+    ``read_only=True`` is the PURE READER variant: no writer lock, no restore,
+    rows served from the bounded decompressed cache, and every write API raising
+    :class:`ReadOnlyTranscript`. It is what a caller that only folds history
+    wants — constructing the writer variant turns an archive back into a plain
+    file for good, so merely browsing a 280 MB conversation re-inflated it on
+    the serving device (review m2).
     """
 
-    def __init__(self, directory: str | Path, *, defer_materialise: bool = False) -> None:
+    def __init__(
+        self,
+        directory: str | Path,
+        *,
+        defer_materialise: bool = False,
+        read_only: bool = False,
+    ) -> None:
         self.directory = Path(directory)
+        self._read_only = read_only
         # ``defer_materialise`` is what makes a speculative runtime leave
         # nothing behind: a viewer's first keystroke warms a runtime BEFORE
         # the user has committed to a message, and an abandoned draft must not
@@ -1922,12 +2496,79 @@ class Transcript:
         # The flag is NOT sticky: the first real append materialises the
         # directory through that same self-healing path, after which this
         # object behaves identically to an eagerly-materialised one.
-        self.path = self.directory / TRANSCRIPT_FILENAME
+        self._writer_lock_held = False
+        if not defer_materialise and not read_only:
+            self.directory.mkdir(parents=True, exist_ok=True)
+        if read_only:
+            # No lock and no restore: rows come from the bounded cache
+            # (``compression.transcript_for_read``), which is what keeps a read
+            # from rewriting the store. ``read_only=True`` is passed THROUGH:
+            # without it the resolver's last resort is ``restore_for_write``,
+            # which publishes the plain file back into the store without the
+            # lock — a viewing device would silently undo the compression, on
+            # the very device whose cache-miss path is a full disk. An archive
+            # this build cannot decode (or cannot copy for want of space) raises
+            # the resolver's typed error here rather than loading an empty
+            # conversation — the same honesty the writer path gets below.
+            resolved = compression.transcript_for_read(self.directory, read_only=True)
+            self.path = resolved if resolved is not None else self.directory / TRANSCRIPT_FILENAME
+        else:
+            self.path = self.directory / TRANSCRIPT_FILENAME
+        # THE WRITER LOCK, held for this object's whole lifetime, and taken
+        # BEFORE the first read or create.
+        #
+        # Why the lock comes first: a compressed transcript is the LIVE copy of
+        # the conversation, and the compression pass takes this same lock
+        # non-blocking before it touches a session. A writer that opened the
+        # plain path without it could read an empty directory while an archive
+        # held the whole body, or create a fresh empty file that shadows it.
+        # Holding it is also the statement the compressor tests: this session is
+        # in use, so its transcript is not rewritten under a live writer.
+        #
+        # ``restore_for_write`` is unconditional on an existing directory: it is
+        # a no-op when the plain file is present, and a verified in-place restore
+        # when an archive is. Reading before restoring is the one ordering that
+        # can turn a compressed session into an empty one.
+        if not read_only and self.directory.is_dir():
+            # BOUNDED WAIT, not a single try: the lock's other holder can be the
+            # COMPRESSOR, and the loser of that race silently loses the
+            # conversation. The compressor publishes its archive and unlinks the
+            # plain file after the restore below looked and found the plain file
+            # present; this runtime would then append to a fresh empty file that
+            # every reader prefers over the archive holding the real history. A
+            # single-session compress takes well under a second, so a few
+            # seconds of waiting closes the realistic window.
+            #
+            # Still bounded, and still proceed-with-a-warning when it expires:
+            # the remaining holder then is a second real runtime, which is the
+            # harness's documented two-writer hazard (``resume.live_runtime_pid``
+            # exists so a second front end attaches instead of opening another
+            # writer) — not something a longer wait resolves, and refusing here
+            # would turn a transient contention into a session that cannot open.
+            self._writer_lock_held = compression.acquire_writer(
+                self.directory, wait_s=compression.WRITER_LOCK_WAIT_S
+            )
+            if not self._writer_lock_held:
+                logger.warning(
+                    "transcript: %s stayed locked for %.1fs; opening WITHOUT the "
+                    "writer lock (a second runtime holds it)",
+                    self.directory,
+                    compression.WRITER_LOCK_WAIT_S,
+                )
+            if not compression.restore_for_write(self.directory):
+                # An archive that EXISTS but cannot be made readable must fail
+                # this open, not load zero rows: a live runtime over an empty
+                # conversation reads as "this session lost its history" and only
+                # the next append would say otherwise (review m4). Same class of
+                # fact as a byte-corrupt plain journal, which already raises.
+                error = compression.unreadable_archive_error(self.directory)
+                if error is not None:
+                    self.close()
+                    raise error
         # Claims can precreate the directory; the journal distinguishes a legacy
         # conversation from new work. Keep birth in memory across directory loss.
         self._created_at = session_created_at(self.directory) if self.path.exists() else None
-        if not defer_materialise:
-            self.directory.mkdir(parents=True, exist_ok=True)
+        if not defer_materialise and not read_only:
             self._created_at = ensure_session_created_at(
                 self.directory, self._created_at if self._created_at is not None else time.time()
             )
@@ -1996,7 +2637,54 @@ class Transcript:
                             if command_id is not None:
                                 self._admitted_command_ids.add(command_id)
 
+    # -- lifetime -----------------------------------------------------------
+
+    def close(self) -> None:
+        """Release this instance's hold on the session's writer lock.
+
+        Idempotent and safe from a finaliser: the released kernel lock is what
+        lets the compression pass treat the session as idle again, so a runtime
+        that left it held would keep the session permanently uncompressed. The
+        call never raises — ``__del__`` can run during interpreter shutdown, and
+        a finaliser that raises turns a clean exit into a traceback — and the
+        in-process refcount in ``compression.release_writer`` makes closing one
+        of two ``Transcript`` objects on the same directory keep the lock for
+        the one that is still open.
+        """
+        self._release_writer_lock(finalising=False)
+
+    def __del__(self) -> None:
+        # The finaliser path, not ``close``: the GC can run this on a thread
+        # that is inside ``compression.acquire_writer`` holding the writer
+        # guard, and ``release_writer`` would wait on that guard forever.
+        self._release_writer_lock(finalising=True)
+
+    def _release_writer_lock(self, *, finalising: bool) -> None:
+        if not getattr(self, "_writer_lock_held", False):
+            return
+        self._writer_lock_held = False
+        try:
+            if finalising:
+                compression.release_writer_from_finaliser(self.directory)
+            else:
+                compression.release_writer(self.directory)
+        except Exception:  # noqa: BLE001 — a finaliser must never raise
+            logger.debug("transcript: writer lock release failed", exc_info=True)
+
     # -- append -------------------------------------------------------------
+
+    def _require_writable(self) -> None:
+        """Refuse a write on a read-only view, naming the directory.
+
+        One guard for every write entry point: the append methods all funnel
+        through :meth:`_append`, and compaction is the other writer. Reads on a
+        read-only view are untouched.
+        """
+        if getattr(self, "_read_only", False):
+            raise ReadOnlyTranscript(
+                f"{self.directory}: this transcript was opened read-only; "
+                "writes need a writer Transcript"
+            )
 
     async def append_message(
         self,
@@ -2175,6 +2863,8 @@ class Transcript:
         preserved_turns_cap: int | None = None,
         preserved_turns_dropped: int = 0,
         preserved_turns_shed: int = 0,
+        carried_asks: list[dict[str, Any]] | None = None,
+        carried_decisions: list[dict[str, Any]] | None = None,
     ) -> TranscriptEntry:
         """Record a compaction marker. Replay treats the LATEST one as the
         boundary: summary marker + entries from ``first_kept_entry_id`` on.
@@ -2211,6 +2901,16 @@ class Transcript:
         turn: when it WAS a stored turn, the persist path journalled it inside
         the replayed suffix and each pass re-counted it, doubling the reported
         figure on every resume.
+
+        ``carried_asks`` / ``carried_decisions`` are the pass's COUNT-bounded
+        retention tiers: the asks still waiting on the operator and the most
+        recently created decision facts. They ride the marker rather than the
+        verbatim user-turn block because that block is token-capped with
+        oldest-first eviction, and a still-blocked question must never lose a
+        slot to newer chatter. Both lists are OPTIONAL and additive: a record
+        without them (every record written before this existed) replays with no
+        carried tier, which is the old behaviour. Re-reading live state on every
+        pass is the writer's job — this method only stores what it was handed.
         """
         payload: dict[str, Any] = {
             "summary": summary,
@@ -2230,6 +2930,12 @@ class Transcript:
             payload["preserved_turns_dropped"] = preserved_turns_dropped
         if preserved_turns_shed > 0:
             payload["preserved_turns_shed"] = preserved_turns_shed
+        # Omitted rather than spelled as empty lists: "nothing to carry" and
+        # "this record predates the tier" must read the same on replay.
+        if carried_asks:
+            payload["carried_asks"] = carried_asks
+        if carried_decisions:
+            payload["carried_decisions"] = carried_decisions
         return await self._append(ENTRY_COMPACTION, payload)
 
     async def append_custom(
@@ -2276,6 +2982,7 @@ class Transcript:
         preserve_mtime: bool = False,
     ) -> TranscriptEntry:
         entry = TranscriptEntry(entry_id or uuid.uuid4().hex, time.time(), type, payload)
+        self._require_writable()
         return (await self._commit(lambda: [entry], preserve_mtime=preserve_mtime))[0]
 
     async def _commit(
@@ -2293,6 +3000,7 @@ class Transcript:
         that reached disk. Callers must await this boundary before exposing a
         message to a model/fork; notably Session's aside drain does so too.
         """
+        self._require_writable()
         async with self._lock:
 
             def write() -> tuple[list[TranscriptEntry], tuple[int, int, float]]:
@@ -2550,6 +3258,23 @@ class Transcript:
         opening a second writer.
         """
         written: os.stat_result | None = None
+        previous: os.stat_result | None = None
+        appended_tail = ""
+        # A VANISHED PLAIN FILE WITH AN ARCHIVE BESIDE IT IS NOT A MISSING
+        # JOURNAL. The rebuild below writes this object's in-memory rows over the
+        # plain name; when the file went away because a compression pass replaced
+        # it, that rebuild would publish a journal starting at whatever this
+        # runtime happened to replay while the archive — the actual conversation
+        # — sat beside it, and every reader prefers the plain name. So the
+        # archive is restored first, and an archive this build cannot decode
+        # REFUSES the append: a failed turn is recoverable, a shadowed
+        # conversation is not.
+        if not self.path.exists() and compression.archive_path(self.directory) is not None:
+            if not compression.restore_for_write(self.directory):
+                raise OSError(
+                    f"{self.directory} holds an archived transcript this build cannot "
+                    "restore; refusing to rebuild the journal from memory over it"
+                )
         rebuild = not self.path.exists()
         if self._created_at is None and not rebuild:
             # Another runtime may have materialized a speculative transcript
@@ -2572,7 +3297,11 @@ class Transcript:
                 try:
                     with self.path.open("a", encoding="utf-8") as handle:
                         for entry in entries:
-                            handle.write(entry.to_json() + "\n")
+                            # Retain the LAST row's bytes: the selection ledger's
+                            # boundary digest is otherwise a 2 MB backward read of
+                            # a file this writer already holds in memory, per turn.
+                            appended_tail = entry.to_json() + "\n"
+                            handle.write(appended_tail)
                         handle.flush()
                         os.fsync(handle.fileno())
                         written = os.fstat(handle.fileno())
@@ -2623,6 +3352,16 @@ class Transcript:
             current = written
         if (current.st_ino, current.st_size) == (written.st_ino, written.st_size):
             written = current
+        # Shared by _append and append_imported, after journal fsync. A failed
+        # sidecar write cannot reject committed rows; stale hints fail validation.
+        from local_operator.session.tail_anchor import update_selection_after_commit
+
+        update_selection_after_commit(
+            self.directory,
+            previous_source=None if rebuild else previous,
+            appended_end=None if rebuild else written.st_size,
+            tail_row=None if rebuild else appended_tail.encode("utf-8"),
+        )
         return _page_source_signature(written)
 
     def _restore_mtime(self, previous_mtime: float | None) -> None:
@@ -3101,6 +3840,7 @@ class Transcript:
         the old one and moved over it with an atomic ``os.replace``, so an
         interrupted compaction leaves the original transcript intact.
         """
+        self._require_writable()
         async with self._lock:
             prunes = self.pending_prunes()
             superseded = self._superseded_custom_indices()
@@ -3710,6 +4450,14 @@ def read_indexed_raw_rows(
         raise ValueError("positive byte budget required")
     source = (index.sig.get("inode"), index.sig.get("size"), index.sig.get("mtime"))
     path = directory / "transcript.jsonl"
+    if compression.archive_path(directory) is not None:
+        # An indexed read's spans are byte offsets into the PLAIN journal and its
+        # witness is that journal's inode. A compressed session has neither:
+        # the bytes are the same conversation, but no file exists whose identity
+        # can be re-checked under the read. The honest answer is "unavailable"
+        # (None) — never an invented absence — and answering it here avoids
+        # decompressing an archive only to fail the witness on the cache copy.
+        return None
     rows, missing, remaining, unavailable = [], [], [], []
     used = 0
 
@@ -4175,6 +4923,28 @@ def replay_entries(
                     message.id = turn_id
                 message.provider_payload = preserved_turn_payload(turn)
                 prefix.append(message)
+        # The carried tier — asks still waiting and the newest decisions — rides
+        # BESIDE the verbatim block, never inside it. That block is token-capped
+        # with oldest-first eviction, so a still-blocked question placed there
+        # could be pushed out by newer chatter; this tier is count-bounded and
+        # is rebuilt from live state on every pass. It is synthesized here from
+        # the marker payload by the SAME renderer the live commit used, so a
+        # resumed context matches the one it resumed from message for message.
+        from local_operator.compaction.carry import (
+            CARRIED_ASKS_KEY,
+            CARRIED_DECISIONS_KEY,
+            render_carried_tier,
+        )
+
+        if compaction.payload.get(CARRIED_ASKS_KEY) or compaction.payload.get(
+            CARRIED_DECISIONS_KEY
+        ):
+            carried = render_carried_tier(
+                compaction.payload.get(CARRIED_ASKS_KEY),
+                compaction.payload.get(CARRIED_DECISIONS_KEY),
+            )
+            if carried is not None:
+                prefix.append(carried)
         # The first kept entry normally sits BEFORE the compaction marker
         # (messages are persisted as they happen; the marker comes last),
         # so the scan covers the whole transcript. If the id no longer
@@ -4199,6 +4969,14 @@ def replay_entries(
             _apply_prune(message, notice)
         kept.append(message)
     if compaction is not None:
+        # A carried block is synthesized by every pass, never stored; filter a
+        # stray copy out of the kept window so a build that once journalled one
+        # cannot accumulate a second copy per resume (the elision-notice class
+        # of defect, with the sign flipped: silent growth instead of a wrong
+        # count).
+        from local_operator.compaction.carry import is_carried_tier
+
+        kept = [message for message in kept if not is_carried_tier(message)]
         # Reapply the epoch's capture-elision record to the KEPT window. The
         # live pass elided superseded captures from the projection it sent
         # and recorded their stable addresses (producer scope, stream,
@@ -4287,7 +5065,13 @@ def _entry_to_message(
     try:
         if kind == CUSTOM_KIND_CUSTOM:
             return CustomMessage.model_validate(payload)
-        return Message.model_validate(payload)
+        # Healed on the way IN as well as kept off the disk on the way out:
+        # rows written before the encoder guard (any build up to 0.73.2 stored
+        # an image-only send as ``[{}, {attachment...}]``) are still on disk,
+        # and this is the transcript's one row decoder — replay and the by-id
+        # readers all call it — so repairing here heals the row for every
+        # consumer of the transcript, not one wire serializer at a time.
+        return _without_blank_user_text(Message.model_validate(payload))
     except Exception:
         logger.warning("dropping unparseable transcript message entry %s", entry.id)
         return None

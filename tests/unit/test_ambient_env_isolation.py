@@ -94,6 +94,14 @@ _HARMLESS: dict[str, str] = {
     "COLORTERM": "colour-capability probe; reported by /info, names no machine resource",
     "TERM_PROGRAM": "terminal identity for tab-title / notification routing",
     "NO_COLOR": "colour probe; tests pin it themselves",
+    # Set by pytest for the duration of each test phase and read by the
+    # live-store guard (``session/cleanup.py::_test_run_reason``) as ONE of its
+    # three test-run signals. Not scrubbed, deliberately: scrubbing would delete
+    # the runner's own variable mid-test, and an INHERITED value can only make
+    # production code treat a process as a test run — the conservative
+    # direction, since that path refuses store deletions. It names no machine
+    # resource and no credential, so nothing can be damaged or re-pointed by it.
+    "PYTEST_CURRENT_TEST": "runner's per-test marker; inherited, it only tightens refusals",
     # Textual reads this once as a ``Final`` at ``textual.constants`` import;
     # ``guard_pixel_mouse_latch`` sets it to 0 and DEFERS only to an inherited
     # value Textual itself honours (one that parses as an int), treating an

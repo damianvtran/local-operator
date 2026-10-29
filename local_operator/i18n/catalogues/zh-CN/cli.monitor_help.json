@@ -1,0 +1,8 @@
+{
+  "cli.monitor_help.monitor": "检查持续监控，并取消已关闭会话中的某项监控",
+  "cli.monitor_help.status": "此机器上的所有监控，按下次检查时间从早到晚排序",
+  "cli.monitor_help.json": "机器可读输出",
+  "cli.monitor_help.cancel": "取消没有运行时打开的会话中的监控（活动会话在内部更改自己的监控）",
+  "cli.monitor_help.session": "监控所属的会话ID",
+  "cli.monitor_help.monitor_id": "监控ID（m1、m2、……）"
+}

@@ -211,7 +211,15 @@ class Forge(Protocol):
         ...
 
     def ci(self, pieces: Mapping[str, Any]) -> dict[str, Any]:
-        """The combined CI payload: ``{status, passed, failed, pending, total, url}``.
+        """The combined CI payload.
+
+        ``{status, passed, failed, skipped, neutral, pending, total, url}``.
+        ``passed`` is SUCCESS ONLY: a completed check that was skipped or
+        neutral did not pass, and counting it as one is how a run with zero
+        successes came to publish a pass count. ``status`` names the worst
+        thing true of the set -- ``success`` only when every check concluded
+        success -- so a merge gate reading this payload can never be told a
+        queued or skipped run is green.
 
         Counters are ``None`` where the host does not carry them — never a
         guessed number (the design's "unknown is never a guess" rule).

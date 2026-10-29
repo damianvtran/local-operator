@@ -43,6 +43,7 @@ from local_operator.harness.types import (
     ChatRequest,
     ImageContent,
     ModelSpec,
+    OneTurnSecretScopeError,
     RenderedStreamError,
     StreamEndEvent,
     StreamEvent,
@@ -51,6 +52,9 @@ from local_operator.harness.types import (
     StreamStartEvent,
     StreamUsageEvent,
     TextContent,
+    one_turn_public_text,
+    one_turn_safe_log_detail,
+    one_turn_scrubbed_text,
 )
 from local_operator.model.effort import (
     EFFORT_ORDER,
@@ -835,6 +839,9 @@ class ProviderError(RenderedStreamError):
         transport: bool = False,
         transport_cause: BaseException | None = None,
         fail_closed: bool = False,
+        provider: str = "",
+        model: str = "",
+        failover_from: str = "",
     ) -> None:
         provider_text = message.strip() if isinstance(message, str) else str(message)
         #: Classified BEFORE the floor text is substituted, so the classifier only
@@ -933,6 +940,71 @@ class ProviderError(RenderedStreamError):
         #: merely means waiting patiently on one that is genuinely unwell, and
         #: changing it would alter behaviour this fix has no business touching.
         self.connectivity_loss = transport and is_connectivity_loss(self)
+        #: WHICH TARGET PRODUCED THIS — not which model the user selected.
+        #:
+        #: The distinction is the whole of the attribution bug this pair
+        #: exists to prevent. A turn can START on one model and be served,
+        #: or refused, by another: an exhausted Anthropic quota hands the
+        #: attempt to OpenAI, and OpenAI then answers with a ``cyber_policy``
+        #: content filter. The text of that failure names no provider (the
+        #: refusal is prose), so every surface downstream fell back to the
+        #: SESSION's model and reported an OpenAI refusal against Anthropic —
+        #: sending the reader to debug a provider that was never reached.
+        #:
+        #: Stamped by ``stream_with_failover`` at the one place that holds
+        #: both facts (the per-attempt ``target`` and the walk's entry
+        #: selector), so logs, telemetry, the session record and the incident
+        #: card all read one answer instead of each re-deriving it.
+        self.provider = provider
+        self.model = model
+        #: The selector the WALK STARTED FROM (the user's selection), and only
+        #: when this error came from a different target. Empty for a primary
+        #: failure, which is what keeps the rendered sentence short when there
+        #: was no failover to describe.
+        self.failover_from = failover_from
+
+    @property
+    def selector(self) -> str:
+        """``provider/model`` of the target that produced this, or ``""``.
+
+        Empty for every error the harness built about itself ("No API key
+        configured for provider 'openai'") and for anything constructed by a
+        caller that has no target to name — ``describe()`` then degrades to
+        exactly ``str()``, so attribution never invents a model.
+        """
+        if self.provider and self.model:
+            return f"{self.provider}/{self.model}"
+        return ""
+
+    @property
+    def provenance(self) -> str:
+        """The sentence that names the failing model, and how it was reached.
+
+        ``"failed on openai/gpt-5 after failing over from anthropic/..."`` —
+        the selection first, because the reader needs to know the model they
+        chose was not the one that answered.
+        """
+        selector = self.selector
+        if not selector:
+            return ""
+        if self.failover_from and self.failover_from != selector:
+            return f"failed on {selector} after failing over from {self.failover_from}"
+        return f"failed on {selector}"
+
+    def describe(self) -> str:
+        """The durable error text: attribution, then the unchanged failure.
+
+        The kind/status (``content-filter``, ``cyber_policy``, ``HTTP 400``)
+        is NOT reprinted here — it is preserved verbatim by ``str(self)``,
+        which stays the second half. A retry on the same model fails the same
+        way and a retry elsewhere may not, so the reader needs both facts in
+        one line, each intact: which model, and what class of refusal.
+        """
+        provenance = self.provenance
+        rendered = str(self)
+        if not provenance:
+            return rendered
+        return f"{provenance}: {rendered}"
 
     def __str__(self) -> str:
         """``<kind> (HTTP <status>, retry in <wait>): <the provider's words>``.
@@ -966,6 +1038,29 @@ class ProviderError(RenderedStreamError):
         detail = f" ({', '.join(facts)})" if facts else ""
         return f"{label}{detail}: {self.message}"
 
+
+#: Provider wordings that mean "THIS MODEL takes no images at all", as opposed
+#: to "this image block is bad". They became reachable when the registry stopped
+#: denying images to models nothing has described (an undescribed model's
+#: capability is unknown, and an unknown model is sent images): a text-only
+#: endpoint behind such an id answers with one of these, and without a marker
+#: the session re-sent the image and failed every turn (PR #3071 review round 1,
+#: M1 / QA Q1). Stable substrings, not whole messages, because the surrounding
+#: text carries indices and codes. Part of :data:`_IMAGE_REJECTION_MARKERS`
+#: (the strip is the same), and also a set of its own because the strip's
+#: LIFETIME differs: see :func:`is_image_modality_rejection`.
+_IMAGE_MODALITY_REJECTION_MARKERS = (
+    # OpenRouter, HTTP 404: "No endpoints found that support image input".
+    "support image input",
+    # DeepSeek direct, HTTP 400/422: "Failed to deserialize the JSON body into
+    # the target type: messages[0]: unknown variant `image_url`, expected `text`".
+    "unknown variant `image_url`",
+    # OpenAI-compatible gateways, HTTP 400: "Invalid content type. image_url is
+    # only supported by certain models." and the terser "image_url is not
+    # supported".
+    "image_url is only supported",
+    "image_url is not supported",
+)
 
 #: Provider wordings that mean "an image block in this request is unusable".
 #: Matched on the provider's OWN message, because no status distinguishes it:
@@ -1005,7 +1100,60 @@ _IMAGE_REJECTION_MARKERS = (
     # ceiling are covered by one marker, since the number is the part that
     # moves.
     "image dimensions exceed max allowed size",
+    # The per-request image COUNT refusal: "Too much media: 0 document pages +
+    # 101 images > 100" (measured live on claude-haiku-4-5, PR #3004 QA round
+    # 1). Like the many-image dimension refusal it is reached by the
+    # conversation growing, not by a bad block, and without a marker it
+    # repeated on every prompt. The stale-frame batch flush
+    # (``compaction.pruning.stale_flush_due``) keeps requests under the limit;
+    # this is the backstop for images it cannot reach (user pastes, recent
+    # frames). Unlike every other entry it is a property of the PROVIDER's
+    # limit, not of a block, so the session scopes the resulting strip to
+    # the provider (see :func:`is_image_count_rejection`).
+    "too much media",
+    # The MODALITY refusals ("this model takes no images at all"); see
+    # :data:`_IMAGE_MODALITY_REJECTION_MARKERS`.
+    *_IMAGE_MODALITY_REJECTION_MARKERS,
 )
+
+#: The subset of :data:`_IMAGE_REJECTION_MARKERS` that names a per-request
+#: image COUNT limit rather than a bad block (see :func:`is_image_count_rejection`).
+_IMAGE_COUNT_REJECTION_MARKERS = ("too much media",)
+
+
+def is_image_count_rejection(error: BaseException | str) -> bool:
+    """Did the provider refuse the request for carrying too MANY images?
+
+    A subset of :func:`is_image_rejection` (same kind gate), split out because
+    the remedy differs: no block is poisoned, the request crossed THIS
+    provider's per-request limit (100 images on 200k-window Anthropic models,
+    600 on 1M ones). The session still strips images so the next turn
+    succeeds, but marks the strip provider-scoped, so a switch to a provider
+    with a higher limit lifts it, exactly like the size strip (agent review
+    round 2, R2-m2).
+    """
+    if not is_image_rejection(error):
+        return False
+    text = error.message if isinstance(error, ProviderError) else str(error)
+    haystack = text.lower()
+    return any(marker in haystack for marker in _IMAGE_COUNT_REJECTION_MARKERS)
+
+
+def is_image_modality_rejection(error: BaseException | str) -> bool:
+    """Did the provider refuse images because THIS MODEL takes none at all?
+
+    A subset of :func:`is_image_rejection` (same kind gate), split out for the
+    same reason as :func:`is_image_count_rejection`: no block is poisoned, so
+    the session's strip is evidence about the model it was talking to, not
+    about the bytes. Scoping it that way lets a ``/model`` switch onto a
+    vision model lift the strip instead of leaving the session blind on a
+    model that would have seen the images.
+    """
+    if not is_image_rejection(error):
+        return False
+    text = error.message if isinstance(error, ProviderError) else str(error)
+    haystack = text.lower()
+    return any(marker in haystack for marker in _IMAGE_MODALITY_REJECTION_MARKERS)
 
 
 def is_image_rejection(error: BaseException | str) -> bool:
@@ -1374,6 +1522,10 @@ def _next_input_refusal_degrade(
     names in ``applied`` are the tokens recorded on the end event and mapped
     to user-facing copy by the harness loop.
     """
+    if request.has_one_turn_secrets:
+        # Input narrowing is a NEW request, not an identical transport retry.
+        # The raw overlay is authorized only for the original safe template.
+        raise OneTurnSecretScopeError("An armed one-turn secret request cannot be degraded.")
     if "screenshots_removed" not in applied:
         stripped = _request_without_images(request)
         if stripped is not None:
@@ -1397,6 +1549,8 @@ def _request_with_degradations(request: ChatRequest, applied: Sequence[str]) -> 
     ladder-order prefixes (its producer appends as rungs run), so a rung that
     no longer applies on the rebuilt request simply keeps the prior state.
     """
+    if applied and request.has_one_turn_secrets:
+        raise OneTurnSecretScopeError("An armed one-turn secret request cannot be degraded.")
     for name in applied:
         if name == "screenshots_removed":
             stripped = _request_without_images(request)
@@ -2213,6 +2367,29 @@ _KIND_DIAGNOSTIC_RANK: dict[str, int] = {
     "unknown": 1,
     "aborted": 0,  # they already know; never worth reporting over a real failure
 }
+
+
+def _attribute_failure(
+    error: ProviderError, target: "FallbackTarget", primary_selector: str
+) -> ProviderError:
+    """Stamp WHICH target produced ``error``, and what it failed over from.
+
+    Called at every point the walk turns "an exception" into "a failure of
+    this target" — ``record()`` for the errors that compete for the reported
+    slot, and the transport wrap for the errors that are re-raised directly.
+    One helper rather than four inline assignments because the THREE facts
+    have to agree: a stale ``provider``/``model`` beside a fresh
+    ``failover_from`` would render a sentence that names the wrong pair.
+
+    ``failover_from`` is empty when this IS the selection: there was no
+    failover to narrate, and saying "failed on X after failing over from X"
+    would be noise in the one case a reader least needs it.
+    """
+    provider, _, model_id = target.selector.partition("/")
+    error.provider = provider
+    error.model = model_id
+    error.failover_from = "" if target.selector == primary_selector else primary_selector
+    return error
 
 
 def error_report_score(error: ProviderError, *, primary: bool) -> int:
@@ -3814,7 +3991,9 @@ def wrap_transport_error(exc: BaseException) -> ProviderError:
     )
 
 
-def _stamp_serving_spec(event: StreamEvent, spec: ModelSpec) -> StreamEvent:
+def _stamp_serving_spec(
+    event: StreamEvent, spec: ModelSpec, *, access: Any = None, key: str | None = None
+) -> StreamEvent:
     """Copy the on-the-wire serving spec onto a usage-bearing event.
 
     ``stream_with_failover`` rewrites ``current_request.model`` to the fallback
@@ -3830,7 +4009,22 @@ def _stamp_serving_spec(event: StreamEvent, spec: ModelSpec) -> StreamEvent:
     if usage is None:
         return event
     try:
-        stamped = usage.model_copy(update={"provider": spec.provider, "model_id": spec.model_id})
+        from local_operator.providers.registry import env_secret_is_oauth
+        from local_operator.session.spend import inference_billing_labels
+
+        # Credential choice belongs to this dispatch, not the provider registry:
+        # two attempts on the same provider may spend different payment pools.
+        kind = getattr(access, "kind", None)
+        if key and (kind is None or not getattr(access, "credential_id", 0)):
+            # Env credentials have no stored row and older access wrappers call
+            # them api_key even when the resolver selected an OAuth-named env.
+            kind = "oauth" if env_secret_is_oauth(key) else (kind or "api_key")
+        basis, _ = inference_billing_labels(
+            spec.provider, getattr(usage, "usd_cost", None), credential_kind=kind
+        )
+        stamped = usage.model_copy(
+            update={"provider": spec.provider, "model_id": spec.model_id, "billing_basis": basis}
+        )
         return event.model_copy(update={"usage": stamped})
     except Exception:  # noqa: BLE001 — a stamp failure must not drop the event
         return event
@@ -3876,7 +4070,114 @@ def _stamp_attempted_selector(event: StreamEvent, spec: ModelSpec) -> StreamEven
     return event.model_copy(update={"attempted_selector": spec})
 
 
+def _stamp_failing_selector(event: StreamEvent, spec: ModelSpec) -> StreamEvent:
+    """Carry the serving selector on an end that REPORTS a failure.
+
+    FAULT-ONLY: an unmarked end is returned unchanged, so an ordinary turn's
+    events stay byte-for-byte what they were.
+
+    WHY the end event and not ``StreamModelEvent``: that frame is published only
+    when the context budget changed or the credential is OAuth (see the yield
+    above the attempt loop), so on the ordinary API-key path NOTHING tells the
+    loop which target served. An in-band refusal — a content filter, which
+    ``clients.py`` reports as ``refusal``/``error`` prose rather than an
+    exception — therefore had no provenance at all and was attributed to the
+    session's SELECTED model. This is the one frame that holds the truth here:
+    it is the attempt's own ``spec``, and the same place the sibling stampers
+    read it from.
+    """
+    if not isinstance(event, StreamEndEvent) or not event.error:
+        return event
+    return event.model_copy(update={"failing_selector": spec})
+
+
+def _one_turn_scrub_stream_event(request: ChatRequest, event: StreamEvent) -> StreamEvent:
+    """Sanitize provider-controlled metadata before any public subscriber.
+
+    Content/argument deltas still flow privately to AgentLoop for final assembly.
+    This boundary covers every production provider and retry, so response ids,
+    upstream hosts, usage stamps, and errors cannot bypass the final scrub.
+    """
+    if isinstance(event, StreamStartEvent):
+        return event.model_copy(
+            update={"response_id": one_turn_public_text(request, event.response_id)}
+        )
+    if isinstance(event, StreamUsageEvent):
+        usage = event.usage.model_copy(
+            update={
+                "provider": one_turn_public_text(request, event.usage.provider),
+                "model_id": one_turn_public_text(request, event.usage.model_id),
+            }
+        )
+        return event.model_copy(update={"usage": usage})
+    if isinstance(event, StreamModelEvent):
+        provider = one_turn_public_text(request, event.model.provider)
+        model_id = one_turn_public_text(request, event.model.model_id)
+        if provider is None or model_id is None:
+            # Model identity is required by this lifecycle event. Unknown is a
+            # fixed safe replacement, never a transformed provider identity.
+            provider = provider or "unknown"
+            model_id = model_id or "unknown"
+        return event.model_copy(
+            update={
+                "model": event.model.model_copy(update={"provider": provider, "model_id": model_id})
+            }
+        )
+    if isinstance(event, StreamEndEvent):
+        update: dict[str, Any] = {
+            "provider_payload": None,
+            "served_provider": one_turn_public_text(request, event.served_provider),
+        }
+        if event.usage is not None:
+            update["usage"] = event.usage.model_copy(
+                update={
+                    "provider": one_turn_public_text(request, event.usage.provider),
+                    "model_id": one_turn_public_text(request, event.usage.model_id),
+                }
+            )
+        if event.error is not None:
+            update["error"] = one_turn_scrubbed_text(
+                request,
+                event.error,
+                "Provider detail withheld for one-turn secret request.",
+            )
+        for field in ("attempted_selector", "failing_selector"):
+            selector = getattr(event, field)
+            if selector is not None and (
+                one_turn_public_text(request, selector.provider) is None
+                or one_turn_public_text(request, selector.model_id) is None
+            ):
+                update[field] = None
+        return event.model_copy(update=update)
+    return event
+
+
 async def stream_with_failover(
+    request: ChatRequest,
+    auth: FailoverAuthStore,
+    settings: Mapping[str, Any] | None,
+    client_for: ClientFactory,
+    *,
+    session_id: str | None = None,
+    signal: AbortSignal | None = None,
+    route_state: FailoverRouteState | None = None,
+) -> AsyncIterator[StreamEvent]:
+    """Forward ordinary events unchanged; contain armed metadata at the boundary."""
+    async for event in _stream_with_failover_events(
+        request,
+        auth,
+        settings,
+        client_for,
+        session_id=session_id,
+        signal=signal,
+        route_state=route_state,
+    ):
+        yield (
+            _one_turn_scrub_stream_event(request, event) if request.has_one_turn_secrets else event
+        )
+
+
+async def _stream_with_failover_events(
     request: ChatRequest,
     auth: FailoverAuthStore,
     settings: Mapping[str, Any] | None,
@@ -4030,7 +4331,7 @@ async def stream_with_failover(
     clients: dict[tuple[str, str | None], "WireClient"] = {}
     rng = random.Random()
 
-    def record(error: ProviderError, *, primary: bool) -> None:
+    def record(error: ProviderError, *, primary: bool, target: FallbackTarget) -> None:
         """Offer ``error`` the reported-error slot, keeping the best so far.
 
         ``>=`` so that at equal rank the LATEST attempt wins, which is the
@@ -4045,14 +4346,29 @@ async def stream_with_failover(
         nowhere at all.
         """
         nonlocal reported, reported_score
+        # BEFORE the slot decision, and before every log line below: an error
+        # that loses the slot is only ever read by whoever follows the log, so
+        # a model name attached only on the winning branch would leave exactly
+        # the failures nobody else can see unattributed.
+        _attribute_failure(error, target, primary_selector)
         score = error_report_score(error, primary=primary)
+
+        def diagnostic(error: ProviderError) -> str:
+            # Provider prose can quote the raw request. The loop's later scrub
+            # cannot retract a line already written by credential rotation.
+            if request.has_one_turn_secrets:
+                return one_turn_safe_log_detail(request, error)
+            return error.describe()
+
         if score >= reported_score:
             if reported is not None:
-                logger.warning("superseded by a more diagnostic failure: %s", reported)
+                logger.warning("superseded by a more diagnostic failure: %s", diagnostic(reported))
             reported, reported_score = error, score
         else:
             logger.warning(
-                "%s failed: %s", "requested model" if primary else "fallback selector", error
+                "%s failed: %s",
+                "requested model" if primary else "fallback selector",
+                diagnostic(error),
             )
 
     # One walk down the cascade, then AT MOST one more. The second sweep exists
@@ -4372,7 +4688,7 @@ async def stream_with_failover(
                     # already had -- the reported `No API key configured for
                     # provider 'openai'` on an account signed in via OAuth.
                     missing = _no_credential_error(auth, provider)
-                    record(missing, primary=is_primary)
+                    record(missing, primary=is_primary, target=target)
                     if missing.retryable:
                         # Retryable means blocked-not-absent: backoffs expire on
                         # their own (and other processes release credentials),
@@ -4463,9 +4779,10 @@ async def stream_with_failover(
                                 # inference. No exception text: it can carry SQL
                                 # metadata or credential material.
                                 logger.warning("Muse allowance receipt could not be retained")
-                    stamped = _stamp_serving_spec(event, spec)
+                    stamped = _stamp_serving_spec(event, spec, access=access, key=key)
                     stamped = _stamp_input_refusal_recovery(stamped, input_refusal_degradations)
                     stamped = _stamp_attempted_selector(stamped, spec)
+                    stamped = _stamp_failing_selector(stamped, spec)
                     if buffered is not None:
                         buffered.append(stamped)
                         continue
@@ -4537,13 +4854,21 @@ async def stream_with_failover(
             except asyncio.CancelledError:
                 raise
             except ProviderError as exc:
+                # ATTRIBUTE FIRST, before every exit from this handler. Three of
+                # them raise past the walk without ever reaching `record()` —
+                # `fail_closed`, the mid-stream `forwarded_any` re-raise, and
+                # the provider-specific re-asks below — and an unattributed
+                # error is the exact defect this PR exists to fix, one arm
+                # further along. Stamping here rather than at each `raise` is
+                # what keeps the next exit someone adds from inheriting it.
+                exc = _attribute_failure(exc, target, primary_selector)
                 if not request.isolated:
                     _invalidate_account_affinity(auth, provider, session_id, access, sent_at_ms)
                 if exc.fail_closed:
                     # A local generated-output envelope is not bad credentials
                     # or provider weather: replaying it on another account/route
                     # repeats the resource failure and hides the original cause.
-                    record(exc, primary=is_primary)
+                    record(exc, primary=is_primary, target=target)
                     raise
                 if forwarded_any:
                     # Partial output already reached the caller, so this attempt
@@ -4625,11 +4950,15 @@ async def stream_with_failover(
                     # surfaced with the provider's own words.
                     model_flap_retries += 1
                     logger.warning(
-                        "model routing flap from %s/%s (%s: %s); re-asking in %dms (%d/%d)",
+                        "model routing flap from %s/%s (%s%s); re-asking in %dms (%d/%d)",
                         spec.provider,
                         spec.model_id,
                         exc.status,
-                        exc.message,
+                        (
+                            "; " + one_turn_safe_log_detail(current_request, exc)
+                            if current_request.has_one_turn_secrets
+                            else ": " + exc.message
+                        ),
                         MODEL_FLAP_RETRY_DELAY_MS,
                         model_flap_retries,
                         MAX_MODEL_FLAP_RETRIES,
@@ -4692,7 +5021,7 @@ async def stream_with_failover(
                         degradations=input_refusal_degradations,
                         policy_declined=degraded is not None and not retry.enabled,
                     )
-                    record(exc, primary=is_primary)
+                    record(exc, primary=is_primary, target=target)
                     raise exc
                 if is_media_download_failure(exc):
                     # A provider refused a request carrying media because its
@@ -4737,9 +5066,9 @@ async def stream_with_failover(
                         attempts=media_download_retries,
                         policy_declined=not retry.enabled,
                     )
-                    record(exc, primary=is_primary)
+                    record(exc, primary=is_primary, target=target)
                     raise exc
-                record(exc, primary=is_primary)
+                record(exc, primary=is_primary, target=target)
                 target_retry_after_ms = max(target_retry_after_ms, exc.retry_after_ms or 0)
                 # A pre-wrapped connectivity loss (a client that turns httpx into
                 # a ProviderError itself) takes the PATIENT path, ahead of the
@@ -4951,7 +5280,7 @@ async def stream_with_failover(
             except Exception as exc:  # network errors et al.
                 if not request.isolated:
                     _invalidate_account_affinity(auth, provider, session_id, access, sent_at_ms)
-                wrapped = wrap_transport_error(exc)
+                wrapped = _attribute_failure(wrap_transport_error(exc), target, primary_selector)
                 if forwarded_any:
                     # Partial output already reached the caller, so this attempt
                     # cannot be retried — but the failure still has to arrive
@@ -4972,7 +5301,7 @@ async def stream_with_failover(
                     # this arm could classify an in-band gateway failure.
                     _mark_mid_stream_connectivity(wrapped)
                     raise wrapped from exc
-                record(wrapped, primary=is_primary)
+                record(wrapped, primary=is_primary, target=target)
                 # This is the arm a CONNECTIVITY LOSS actually arrives on: no
                 # client in clients.py catches httpx, so a DNS/route/connect
                 # failure on a closed-then-reconnecting laptop reaches here raw

@@ -562,6 +562,22 @@ that fallback, so one gate does not produce both an Electron and runtime toast.
 sends it once the last live lease has run out (45 s with no beat), never at a
 transient stream end.
 
+`activity` is the terminal's input half of that same question, and it exists
+because `viewer_watch` alone could not answer it (R6-1). `viewer_watch` says
+WHICH conversation a multiplexing terminal is displaying; a conversation can be
+on screen while the operator is away from the keyboard. The item ladder stands
+its rung 4 down only for a conversation that is BOTH displayed and being typed
+in, so an attached TUI sends `{"op": "activity", "input_at_ms": <epoch ms>}` on a
+real `Key`/`MouseDown` edge, throttled by the client to one report per 10 s. The
+payload is one positive integer and nothing else: the age of the newest edge is
+the whole of what routing needs, and keystroke content never leaves the UI. A
+runtime keeps, per attach connection, the newest stamp; the rung-4 check reads
+the newest stamp among connections that have not declared they are away, and
+answers `None` — "cannot tell" — when no such connection ever reported. `None`
+falls through to notifying, so an old client, a silent client and a stale stamp
+all keep today's behaviour. A frame whose `input_at_ms` is not a positive
+integer is refused, and a refused frame is never stored.
+
 A lease is also the one signal that CREATES residency rather than only
 preserving it. While a live lease says `visible`, the HTTP bridge starts the
 session's runtime in the background (`refresh_watch`), because that is term 3 of
@@ -765,11 +781,13 @@ readings.
 | GET `/v1/desktop/sessions/{id}` | optional `entry_ts=1`, `open_frame=1` | snapshot frame below (**read envelope**); both flags also apply to the page embedded in `payload.history` (`open_frame=1` = §"The open frame") |
 | GET `.../{id}/history` | optional `before_id`, `limit` 1..500, `entry_ts=1`, `open_frame=1` | `{entries,has_more,cursor_missing}` (**read envelope**); for a peer-owned id a cold page is served from the OWNER's stored journal, and an unservable one is `cursor_missing: true` (read envelope, §"A read never needs an answering owner"). `entry_ts=1` asks for the per-row `ts_source` vocabulary — see §"The history entry envelope" |
 | GET `.../{id}/files` | optional `scope=family\|self`, `kind`, `origin`, `highlighted=0\|1`, `q`, `sort=recent\|name\|kind\|modified\|created\|size`, `order=asc\|desc`, `limit` 1..200 (default 100), `cursor` | `{state,revision,scope,sort,order,total,counts,rows,next_cursor,cursor_reset,stat_complete,scan}` — the per-session file index (`session_files`); see §"The per-session file index" |
+| GET `.../{id}/user-attachments` | — | `{state:ready\|unsupported\|unavailable,items,truncated}` — every document and picture the USER attached, oldest first, metadata only (`session_attachments`); see §"The user-attachment inventory" |
+| POST `.../{id}/user-attachments/{digest}/materialise` | — | `{path,name,size_bytes,created}`; copies a user attachment's retained bytes to `<session scratchpad>/generated/` so open/reveal/copy-path have a real, correctly named file (`session_attachments`) |
 | POST `.../{id}/files/{file_id}/materialise` | — | `{path,name,size_bytes,created}`; copies a digest-only artifact to `<session scratchpad>/generated/` (`session_files`) |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
 | POST `.../{id}/commands` | `{request_id,command,args?,images?}` | `{command,result:SlashResult,replayed?}` |
-| POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` OR `{ask_id,answers,images?}` / `{ask_id,decline:true}` | runtime receipt; stale runtime/request/question409. A **queued ask** is answered by `ask_id` with NO epoch check (an ask outlives the owner that queued it), and the refusal is the ask's own sentence (expired / already answered by `<surface>` / already declined) as a `409`. A body with neither answers nor `decline:true` is a `422`: `decline:false` is not a way to answer with nothing **`images`** (`features.ask_attachments >= 1`): at most 8 `{question_id,data_b64,mime_type}` objects, valid only beside `answers` (never with `decline`, `revise` or a gate body); every `question_id` must be a key of `answers`; the whole body is capped at 900,000 B. A violation of those shapes is the route's generic `422` (`The request has invalid fields.` — the validator's own sentence is not surfaced, so a client pre-gates the shapes). An owner runtime that predates image answers refuses the answer in words (`this session's runtime predates image answers; update the runtime or send the answer as text`, a `409`) and records **nothing** — the text is not kept without its pictures; a secret question refuses images. The images are stored once and the ask row publishes REFS only (`attachments: {question_id:[{attachment,mime_type,bytes}]}`, `null`/absent when none); the model receives them in question order. Revisions stay text-only |
-| GET `/v1/desktop/asks` | — | `{asks:[PendingAsk + {session_id,cwd}]}`, index-backed: served with nothing running, from `<config_dir>/asks/<sid>.json`. **The key is a plain list here**: unlike a session frame, its presence is NOT the queued-ask capability proxy — this route only exists on a build that has the feature, and an empty list is the ordinary "nothing is waiting" answer |
+| POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` OR `{ask_id,answers,images?}` / `{ask_id,decline:true}` | runtime receipt; stale runtime/request/question409. A **queued ask** is answered by `ask_id` with NO epoch check (an ask outlives the owner that queued it), and the refusal is the ask's own sentence (expired / already answered by `<surface>` / already declined) as a `409`. **`dismiss`** (`features.ask_dismiss >= 1`): `{ask_id,dismiss:true,reason?}` with `reason` one of `answered_in_chat` \| `moot` (default `moot`) puts an OPEN ask away — the fourth body shape, and the same epoch-free queued-ask door. It carries no `answers`/`decline`/`revise`/`images` (a body that does is a `422`), it is accepted while the agent is RUNNING (mid-turn the receipt reaches the model at the runner's next boundary; an idle live session holds it with no turn), and it **boots nothing**: a session with no live owner is settled by the no-boot door, and only an owner that is present is dialled. `200 {detail:"dismissed"}`; the ask's own sentence as a `409` (already answered / already dismissed / relayed / team-bridge / not in this session's queue). `dismiss:false` is the same statement as omitting it; `reason` without `dismiss` is a `422`. A relayed or team-bridge OPEN ask stays refused — it is settled where its own model reads it. A body with neither answers nor `decline:true` is a `422`: `decline:false` is not a way to answer with nothing **`images`** (`features.ask_attachments >= 1`): at most 8 `{question_id,data_b64,mime_type}` objects, valid only beside `answers` (never with `decline`, `revise` or a gate body); every `question_id` must be a key of `answers`; the whole body is capped at 900,000 B. A violation of those shapes is the route's generic `422` (`The request has invalid fields.` — the validator's own sentence is not surfaced, so a client pre-gates the shapes). An owner runtime that predates image answers refuses the answer in words (`this session's runtime predates image answers; update the runtime or send the answer as text`, a `409`) and records **nothing** — the text is not kept without its pictures; a secret question refuses images. The images are stored once and the ask row publishes REFS only (`attachments: {question_id:[{attachment,mime_type,bytes}]}`, `null`/absent when none); the model receives them in question order. Revisions stay text-only |
+| GET `/v1/desktop/asks` | — | `{asks:[PendingAsk + {session_id,cwd}]}`. An OPEN row also carries `user_messages_since` and `last_user_message_at` (ms) when the writing runtime could count them — how many operator messages were admitted after the ask was raised, and when the latest one arrived, for the card's "N messages from you since this was asked" line. ABSENT (never `0`) means the writer could not count it: an older runtime, a session with no operator message yet, or an ask older than the runtime's retained window. `0` is a fact and draws no line. Index-backed: served with nothing running, from `<config_dir>/asks/<sid>.json`. **The key is a plain list here**: unlike a session frame, its presence is NOT the queued-ask capability proxy — this route only exists on a build that has the feature, and an empty list is the ordinary "nothing is waiting" answer |
 | GET `.../{id}/events` | optional `epoch`, `after_seq`, `frontend_replace=1`, `entry_ts=1`, `open_frame=1` | authenticated SSE, `data: <DesktopSessionFrame>` (**read envelope**). `entry_ts=1` and `open_frame=1` govern the page embedded in the open frame's snapshot, exactly as on `GET .../{id}` |
 | POST `.../{id}/watch` | `{subscription_id,visible,can_notify}` | `{lease_seconds:45}`; disconnected/wrong-session ID404 (**read envelope**; the visible lease still creates residency) |
 | POST `.../{id}/notified` | `{completion_token}` | `{claimed:bool}`; cold, never marks read |
@@ -916,7 +934,7 @@ that clears nothing is still `200` — a non-2xx would make a client discard the
 partial result it did get — while a per-item failure is `unknown` for that item
 rather than a 404 for the call. A store failure (`sqlite3.Error`) goes through the
 shared classifier (`session/store_failures.py` — the same module the TUI's
-`/notifications` consumes, so one store cannot be described two ways), which
+`/unread` (formerly `/notifications`) consumes, so one store cannot be described two ways), which
 splits it by condition: contention (`SQLITE_BUSY`) answers the retryable `503`,
 a full volume `507` `store_out_of_space`, and a store this process cannot read or
 open `500` `store_unavailable`. Each call writes inside a single transaction, so
@@ -1820,6 +1838,34 @@ and two shapes for one page is the defect the capability exists to prevent.
    which is why a warm index stays cheap and why an unchanged journal costs a
    stat.
 
+#### Scheduling the index behind the first frame
+
+The desktop `GET /v1/desktop/sessions/{id}/checkpoints` manifest reads the index
+without attaching a session or constructing a cold facade. It uses the pool's
+same identity/draft/peer checks and retirement predicate; peer rows still return
+`unsupported`, registered drafts return an empty `ready` manifest, and a latched
+daemon still refuses the read. It does not acquire the bridge lock, so the
+parallel `/events` request never queues behind the manifest's facade build.
+
+The desktop `/events` route takes a **per-session paint hold** before its attach
+and releases it after writing the snapshot frame. While held, a cold index
+refresh whose full scan cannot fit the existing first-paint scan-rate budget
+waits instead of competing with the first frame for CPU/GIL time. This is the
+same size/rate predicate as the manifest's bounded wait, not another threshold.
+Small journals and existing index caches are not deferred. Unpayable scans
+already answered `building` before this scheduling change; clients must re-read
+a `building` manifest to obtain the completed ticks. There is no query flag and
+no change to the manifest or frame schema.
+
+Holds are reference-counted: two concurrent opens of the same session release
+the scan after the last snapshot (or teardown). Acquire failures, stream errors,
+disconnects and unconsumed response bodies release their own hold idempotently;
+a 15-second ceiling also prevents a missed release from starving the scan.
+The frame does not wait on a scan deferred by its own hold. Other sessions are
+independent. The TUI and mobile relay never take a desktop paint hold, so their
+index scheduling remains unchanged. `LOP_OPEN_TRACE` records
+`index.refresh_start` alongside `a.wire.frame kind=snapshot` for timing evidence.
+
 #### The anchored read keeps the reader's own counts
 
 `around_id` is the renderer's FAR JUMP: it asks for a POSITION, and its
@@ -1974,6 +2020,22 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    delta, and `event` carries a typed canonical AgentEvent. Apply the snapshot
    after replay so an old cumulative record cannot repaint newer snapshot text.
    Preserve runtime sequence/epoch checks independently of semantic event dedupe.
+   A roster tick is a MERGE, not a replacement: `frontend.update` carries
+   `job_deltas: {upserted: [row, …], removed: [job_id, …]}` and the receiver
+   merges those rows by `id` into the roster it holds (unchanged rows keep their
+   position and identity). `job_deltas.order: [job_id, …]` is present ONLY on a
+   tick whose order the merge cannot derive (a job re-added anywhere but the
+   end); when present it is authoritative. `changes["jobs"]` remains the
+   REPLACEMENT form and is what a snapshot/seed carries; a renderer that has
+   never heard of `job_deltas` ignores it and keeps its last snapshot until the
+   next sync, which is safe. Rows in both forms are the same bounded summaries.
+   A DEGRADED frame says so rather than going silent: `frontend.update` with
+   `degraded: true, paused: true` + `degraded_reason`, and an `event` whose
+   type is `notice` with `paused: true, action: "reload"`. `paused` means the
+   stream is no longer describing canonical state; CLEAR it on the next
+   complete frame — a `frontend_sync`/`frontend.replace` snapshot or the next
+   non-degraded `frontend.update` — and re-sync rather than painting the last
+   delta. No new frame op is needed for the clear.
    `frontend.replace` is the desktop-only REPLACEMENT of that projection,
    published once per accepted move and ordered by the BRIDGE's outer `seq`
    rather than the owner's clock (see "The replacement frame" under the move
@@ -2355,6 +2417,42 @@ that blanks `content`. Older sessions backfill from the `AttachmentContent` bloc
 `content` while those are unpruned; an old row that was already pruned is the one thing the
 index cannot recover.
 
+### The user-attachment inventory (`session_attachments: 1`)
+
+`GET /v1/desktop/sessions/{id}/user-attachments` answers *which files and pictures did the
+person attach to this conversation?* A renderer cannot answer that from loaded history: pages
+arrive newest-first on demand, so a PDF from the first turn of a long conversation is not in
+memory when the canvas opens, and listing only the loaded rows would claim "nothing attached".
+The route scans the whole journal (`local_operator/session/user_attachments.py`).
+
+Each item: `{message_id, ts, index, kind: document|image, attachment, filename, mime_type,
+bytes, path, exists, stored_path, stored, injection, materialisable}`. `index` is the block's position in its
+message's `content`; `attachment` is the store digest (`null` when the row's inline bytes are
+not in the store); `path` is the ORIGIN path and `exists` whether it is still a file (`null` with no origin),
+`stored_path`/`stored` the retained
+store copy and whether it is on disk now. `materialisable` is `false` when the sensitive-path
+denylist (the file index's `make_deny`) refuses the origin path, the original filename or the
+name a copy would get (`~/.ssh/id_rsa`, `.env`, `<config>/master.key`) — and for every row
+sharing a refused digest. Such a row is still listed (the person attached it), but no
+open/reveal/copy-path action may be offered for it. **Metadata only:** bytes stay on
+`…/attachments/{digest}`; there is no second transport. User rows only, and never a
+harness-injected row (`provider_payload.harness_injected`).
+
+States: `ready` (complete), `unsupported` (a peer's conversation), `unavailable` (an archive
+this host cannot decode). `truncated: true` past 2000 items. Admission is the file index's
+(404 unknown id, 409 silent peer, empty `ready` for a draft). Absent key: the renderer
+aggregates loaded rows and must not call the route.
+
+`POST …/user-attachments/{digest}/materialise` copies a listed attachment's RETAINED bytes to
+`<session scratchpad>/generated/<name>` (the file index's hardened copy: pinned no-follow
+directories, sanitised name, MIME-derived extension, idempotent, never overwrites). The
+digest must be one the person attached to this conversation (the store is shared, so a bare
+digest proves nothing). Refusals reuse the file index's codes: `404
+session_files_file_not_found` (also for a `materialisable: false` row — the file index
+answers the same for a denied path, which it never lists — checked before any byte is read,
+so nothing is written), `410 session_files_artifact_missing`, `409
+session_files_unsafe_destination`.
+
 ### Verification
 
 `tests/e2e/test_desktop_sessions.py` drives real loopback HTTP and the production
@@ -2376,6 +2474,423 @@ reset. The test-owned runtime exits through its own stop protocol. Neither test
 uses operator credentials or connects to operator sessions. Unit tests exercise
 receipt crash ambiguity, byte/count overflow, lease aggregation, cache isolation
 and the inclusive history paging boundary.
+
+## The Notifications inbox (`notifications: 1`)
+
+The operator's machine-wide inbox: items agents post with the `notify` tool plus
+the OPEN asks agents are blocked on (`docs/design/notifications-inbox.md`). Every
+route is cold — none opens a session, dials or starts a runtime — because items
+outlive the runtime that raised them. All need the desktop bearer (401 without).
+Absent `features.notifications`, a renderer must offer no page, sidebar row,
+slash destination or feed branch, and must strip the `notifications` sidebar id
+on save (an older core refuses it).
+
+| Route | Body / query | Answer (`result`) |
+|---|---|---|
+| `GET /v1/desktop/notifications` | `state=unread\|all\|dismissed` (default `unread`), `source=notify\|ask`, `priority=high\|normal\|low`, `session_id`, `cursor`, `through_seq` (freeze first-page boundary), `limit` 1..100 (default 50) | `{items, next_cursor, observed:[{id,revision}], unread_count, waiting_count, waiting_unread_count, high_water, waiting?}` — `waiting` (open asks, not paged) rides the first page only |
+| `GET /v1/desktop/notifications/count` | — | `{unread_count, waiting_count, waiting_unread_count, high_water}` |
+| `GET /v1/desktop/notifications/{id}` | `id` = `n_<16 base32>` or `ask:<session_id>:<ask_id>` | `{item, history, session, anchor, projects, asks}`; 404 `wire.errors.notifications.unknown_item`, 422 for a malformed id |
+| `PATCH /v1/desktop/notifications` | `{op: read\|unread\|dismiss\|undismiss}` plus EXACTLY ONE target: `ids:[{id, revision}]` (1..500), or `session_id`+`through_seq`+`observed`, or `all:true`+`through_seq`+`observed` (0..500 tokens) | `{changed, skipped:[{id, reason}], unread_count, waiting_count, waiting_unread_count, high_water}` |
+| `POST /v1/desktop/notifications/seen` | `{items:[{id, revision, anchor_id, visible_since_ms?}] (1..100), evidence:{surface, session_id, input_kind, input_at_ms, visible_since_ms}}` | same shape as PATCH |
+
+**Item shape** (`notifications/items.py`, one shape for both sources): `id`,
+`source` (`notify`/`ask`), `priority`, `title`, `excerpt`, `created_at`,
+`updated_at`, `seq`, `revision`, `read`, `read_via`
+(`explicit`/`in_view`/`null`; creation is always unread), `dismissed`, `repeat_count`, `key`,
+`anchor_id`, `session{id, title, agent_id, live}`, `projects[{key, name,
+status}]`, `ask` (the open ask's question/dismissibility, else `null`) and
+`actions{dismiss, answer, read}`. An open ask always reports `high` and
+`actions.dismiss=false`. `live_state` is core's own vocabulary
+(`busy`/`idle`/`attached`/`wedged`, and `""` for a cold row); this path is a
+cold reader, so it reports `idle` when the liveness marker shows a resident
+runtime and `""` otherwise, with `live` as the boolean beside it. The detail
+route's `session` adds `cwd`.
+
+**Writes are token-bound (R10), never sweeps.** A by-id write names the
+`revision` it rendered — a newer revision is `skipped: stale_revision` and stays
+unread. A by-session or all-items write must carry `through_seq` AND the
+`observed:[{id,revision}]` tokens the list returned. Tokens bound both source
+stores and the rendered filters/page; the scalar bound alone cannot identify
+asks. Missing observations are 422, not a legacy sweep. Session scope only
+narrows that set. Concurrent new revisions are skipped, never silently cleared.
+
+**Seen evidence is per item, and focus is not an edge.** `input_kind` is
+`pointerdown`, `keydown` or `wheel`; a focus-only report is 422 (D12). When an
+item supplies its own `visible_since_ms`, the server checks that stamp against
+THAT row's current `updated_at`, then `visible_since <= input_at <= now` and the
+120 s freshness/dwell rules. The batch field remains the fallback for clients
+that have not added per-item stamps; a mixed batch is judged row by row (D13).
+
+**Banners (`high` only) and the `update` feed branch.** `normal` and `low`
+never raise a native notification; they are the badge and the page. A `high`
+item is claimed at most once per revision by any banner producer
+(`claim_delivery`), and only while the row is still unread AND still
+UNDISMISSED — a dismissed row is never claimed, which is what keeps a keyed
+update to something the operator put away out of view (contract §1.3). The
+claim is released when a delivery attempt produces nothing
+(`release_delivery`), so an owed banner is never lost, and a later content
+change bumps `revision`, which makes the row claimable again.
+
+EVERY RUNG HOLDS A REVISION FOR `delivery.BANNER_GRACE_MS` (2500 ms) from its
+last content change before claiming it. The desktop's in-view receipt needs a
+1 s dwell after a fresh input (`POST .../notifications/seen`), so a raise at the
+write could never be cancelled by the operator already looking at the item;
+the hold is bounded, it only ever suppresses a banner for a revision ALREADY
+READ when it expires, and an unread revision always raises. An unchanged
+or dismissed update (`action` `unchanged`/`absorbed`) never raises and so never
+suppresses its run's completion banner.
+
+The desktop leg raises it on the `notification` frame with `kind: "update"`
+(`notification_contract` stays `1`; a renderer that does not know the kind
+renders it as text):
+`{kind, notification_id, item_revision, priority, title, body, session_id,
+focus_policy, dedupe_key}`. It is published only while a live desktop lease
+advertises `update` in `can_notify_kinds` — and only to the subscriptions of
+THIS feed that advertised it, never to every subscriber on the machine.
+
+The burst ceiling is a WINDOW, not a tick: at most `desktop_feed.BURST_LIMIT`
+(3) individual banners per `ITEM_BURST_WINDOW_S` (10 s), then ONE digest frame
+`{kind, overflow: true, count, notification_ids, priority, dedupe_key}` which
+claims the WHOLE remainder of that window in the same pass. A per-tick ceiling
+re-armed every 100 ms, so ten items became ten banners in a third of a second;
+a window is what makes "one interruption that says ten" true. The same two
+gates the completion leg applies — the `display.notifications` switch and the
+identity guard — refuse before any claim, so a gated revise is neither published
+nor stranded. A runtime run that raised (or handed off) an item banner does not also
+raise its own completion banner; `error` ends always do.
+
+**All means the entire explicitly requested scope, not the first 50 rows.**
+With `notification_bulk_selection: 1`, use the server-side selection contract
+below. The following enumeration protocol remains supported for legacy clients:
+on an explicit mark-all/dismiss-session gesture, clients enumerate every page of
+that state/source/priority/session scope with progress/count feedback, freeze
+the FIRST response's `high_water`, pass it as `through_seq` on every later GET,
+and union each page's `observed` tokens. Keep the first page's ask refs; do not
+refresh them into a later ask set. Then PATCH batches of at most 500 tokens with
+the same boundary. A filtered action must name its filtered scope; it never
+silently widens to the whole inbox. Read/unread applies to observed live ask
+marks as well as notify revisions, without touching ask logs.
+
+#### Filtered bulk selection and guarded Undo (`notification_bulk_selection: 1`)
+
+This additive desktop capability uses the **existing GET and PATCH routes**.
+Legacy bodies and the relay's shared legacy validator retain their exact
+behavior. The CLI has no new command family; its existing observed-id gestures
+are unchanged. Without this capability, a client must not silently treat the
+loaded page as the entire filtered selection.
+
+Preview an entire scope (not just its loaded pages):
+
+```http
+GET /v1/desktop/notifications?preview=true&state=all&kind=all&bulk_priority=normal_up&count_session_ids=aaaaaaaaaaaa&count_session_ids=bbbbbbbbbbbb
+```
+
+Filters: `state=unread|all|dismissed` (default unread),
+`kind=all|asks|updates` (default all),
+`bulk_priority=any|high|normal_up` (default any; normal_up means high OR normal),
+and optional `session_id` (one exact 12-hex session). `all` excludes dismissed
+updates, just like the ordinary list. Open asks remain visible under unread
+regardless of their read mark; they are always high priority. Preview refuses
+legacy `source`/`priority`, cursor, and client `through_seq` rather than widening
+or ambiguously merging the scope. `count_session_ids` is an optional repeated
+query key, at most 50 session ids: it requests aggregates only, never broadens
+the selection. All response examples use the existing CRUDResponse **`result`**
+wrapper, not a new envelope:
+
+```json
+{"selection":{"token":"<43 URL-safe characters>","through_seq":725,
+ "expires_at":1793200000000,"eligible_count":620,"eligible_unread_count":400,
+ "skipped_ask_count":2,"session_counts":{
+   "aaaaaaaaaaaa":{"eligible_count":300,"eligible_unread_count":200},
+   "bbbbbbbbbbbb":{"eligible_count":0,"eligible_unread_count":0}}},
+ "unread_count":700,"waiting_count":2,"waiting_unread_count":1,"high_water":725}
+```
+
+Preview does not change notification or ask state. It stores only bounded
+selection metadata. Its update count and server watermark are captured in one
+SQLite transaction. **Every content or state write advances `seq`**, including
+read-state changes, so a later arrival, content revision or state ABA cycle
+cannot enter the selected set at commit. Delivery claims deliberately do not
+advance `seq`; that is safe because no bulk path, Undo included, reads or
+writes the delivery fields. A bearer-hash binding plus the
+store-local token namespace prevents reuse after auth rotation or in another
+config/account store. Neither bearer nor notification bodies are stored in the
+selection metadata.
+
+Apply with one request, including any unchecked rows as subtractive exclusions:
+
+```json
+{"op":"dismiss","selection_token":"<token>","excluded_ids":["n_aaaaaaaaaaaaaaaa"]}
+```
+
+`op` is `read|unread|dismiss|undismiss`. `excluded_ids` is optional (0..500
+validated item ids, canonicalized as a sorted set); it can only remove matches,
+never grant access to another row/revision. The token is mutually exclusive
+with all legacy targets. For partial selection, use
+`{op,ids:[{id,revision}],through_seq:<list high_water>,receipt:true}`. This
+opt-in path requires both the list watermark and each observed content revision;
+it excludes asks even for read/unread. Legacy `ids` without `receipt:true`
+keeps its earlier behavior.
+
+Receipts are compact at every result size; they contain no full matching-id list:
+
+```json
+{"changed_count":618,"skipped_count":1,"excluded_count":1,
+ "eligible_count":619,"skipped_ask_count":2,"unread_delta":-399,
+ "session_counts":{"aaaaaaaaaaaa":{"changed_count":299,"unread_delta":-199},
+                   "bbbbbbbbbbbb":{"changed_count":0,"unread_delta":0}},
+ "operation_token":"<token>","through_seq":725,"expires_at":1793200000000,
+ "replayed":false,"unread_count":301,"waiting_count":2,
+ "waiting_unread_count":1,"high_water":1343}
+```
+
+`changed_count` counts actual state transitions only; `skipped_count` counts
+updates that became stale/unavailable or already had the requested state.
+`excluded_count` counts excluded rows still eligible under the frozen boundary
+at commit (a subsequently changed excluded row is stale, not falsely counted
+as changed). `eligible_count` is the original update count minus that exclusion
+count. `unread_delta` is the actual change to the undismissed-update badge;
+per-session deltas cover only the at-most-50 requested scopes. Global badge
+counts are freshly queried after commit and can include concurrent arrivals.
+Replay returns the saved receipt with `replayed:true` and fresh global badges:
+**do not apply its deltas a second time**. The same selection token with a
+different op or exclusion set returns 409 `selection_operation_conflict`.
+
+An optional recount never broadens a frozen selection or extends its expiry.
+Send exclusions in a body, with the read-only `preview` op on the same PATCH
+route:
+
+```json
+{"op":"preview","selection_token":"<token>","excluded_ids":["n_aaaaaaaaaaaaaaaa"]}
+```
+
+`excluded_ids` is optional, at most 500, validated exactly as on a mutation.
+`op:"preview"` changes no item, mints no receipt and is not a replay: the token
+can still be applied afterwards. Its result is the same `{selection, ...counts}`
+shape preview returns, with identical counts to the GET form below. The GET
+recount remains for no or a few exclusions:
+
+```http
+GET /v1/desktop/notifications?preview=true&selection_token=<token>&excluded_ids=n_aaaaaaaaaaaaaaaa&excluded_ids=n_bbbbbbbbbbbbbbbb
+```
+
+**Clients must use the body form for exclusions.** 500 ids in a URL is 16-50 KB,
+and uvicorn/h11 refuse a request head over 16 KiB with `400` whenever it arrives
+in more than one read, before the route runs. No new filters are accepted with an
+existing token. Counts reflect the still-eligible subset; the token, watermark,
+expiry and original informational ask count remain unchanged. Recount after
+commit returns 409 `selection_already_committed`.
+
+Undo uses `PATCH {"op":"undo","operation_token":"<receipt token>"}`. Row
+post-images and complete prior read/dismiss state are persisted **atomically
+with the mutation**, and only actually changed rows are recorded. Undo restores
+only rows whose post-write sequence AND content revision still match. It
+restores read provenance too, never undismisses an entire current filter, never
+rewinds the global sequence, and skips intervening content/state/delivery
+writes. Undo itself is atomic and replayable; its response has the same compact
+counts and deltas (no `excluded_count`). A selection replay after Undo remains
+a replay of the original receipt, not permission to redo it.
+
+**Asks are excluded unconditionally on every receipt-backed path.**
+`skipped_ask_count` is informational: preview counts matching live asks, including
+read asks in unread scope; partial selection counts the supplied ask refs. It
+is not settlement authority, nor a durable enumeration of those asks. The UI
+may offer the existing separately confirmed, reasoned per-ask `moot` settlement
+flow, explicitly labelled irreversible. Neither generic notification dismissal
+nor Undo settles/restores an ask. No `include_asks` flag exists.
+
+Bounds: selection handles expire after 10 minutes; committing starts a 10-minute
+Undo/replay lifetime. At most **128 live handles per store** and **100,000 retained
+row snapshots across all receipts**. Preview matching over 100,000 updates
+returns 413 `selection_too_large`, never a truncated success. Capacity exhaustion
+returns 429 `selection_capacity` or `receipt_capacity` before any item mutation.
+Expired metadata is reclaimed opportunistically by preview/apply; active
+receipts are never evicted. An expired, foreign-scope, or unknown token returns
+409 `selection_unavailable` (intentionally indistinguishable). Malformed or
+mixed targets/filters are 422; ordinary desktop auth/origin gates still apply.
+
+#### Frozen ask-notification reads (`notification_bulk_ask_read: 1`)
+
+The v1 contract above remains update-only, including previously issued tokens
+and receipts. A client that sees this **separate additive capability** may opt
+into v2 at the **initial select-all gesture**, before choosing an operation:
+
+```http
+GET /v1/desktop/notifications?preview=true&include_ask_reads=true&state=all&kind=all
+```
+
+This captures bounded pending-ask identities and their notification read marks
+alongside the update watermark. It does not mark, answer, settle or withdraw an
+ask. There is no second snapshot when the user later chooses read/unread/dismiss:
+the same token is used, and its first mutation binds op/exclusions as in v1.
+Omitting `include_ask_reads` (or setting false) returns the exact v1 semantics.
+Clients must gate combined counts on **both the capability and
+`selection_version: 2`**, not reinterpret v1 update-only counts.
+
+**V2 preview additions** (inside the existing `result.selection`):
+
+```typescript
+type AskReadSelectionCounts = {
+  selection_version: 2;
+  eligible_count: number;              // updates + asks; read/unread targets
+  eligible_unread_count: number;       // unread updates + unread ask marks
+  eligible_update_count: number;
+  eligible_unread_update_count: number;
+  eligible_ask_count: number;
+  eligible_unread_ask_count: number;
+  skipped_ask_count: 0;                // supported read targets, not permission to dismiss
+  operation_counts: Record<"read" | "unread" | "dismiss" | "undismiss", {
+    eligible_count: number;
+    skipped_ask_count: number;
+  }>;
+};
+```
+
+`operation_counts.read` and `.unread` include both populations, with zero
+excluded asks. `.dismiss` and `.undismiss` count updates only and report the
+captured ask population as skipped. Counts are targets, not a prediction that
+already-read/already-unread rows will change. The existing bounded
+`session_counts` entries also gain the four update/ask subtotal fields above;
+their `eligible_count` and `eligible_unread_count` become combined totals.
+Pending asks remain selectable in Unread even after read acknowledgement, just
+like the existing list. `kind=asks`, `kind=updates`, priority and From filters
+retain their current list meaning; Dismissed has no live asks.
+
+Recount uses the **same** body form as v1:
+`PATCH {"op":"preview","selection_token":"<token>","excluded_ids":[...]}`.
+V2 exclusions are mostly ask refs (up to 81 bytes each), so 500 of them in the
+GET query is ~50 KB of URL that h11 refuses with `400`. The GET
+`preview=true&selection_token=...` form answers identically for no or a few
+exclusions. No `include_ask_reads` or other filters may be added to a recount,
+and `reconcile_ids` is refused (`422`): a recount mints no receipt.
+It revalidates only captured refs; new asks/updates never enter, and neither
+watermark nor expiry advances. Exclusions subtract both kinds of identity.
+
+**V2 mutation/Undo additions** (inside existing `result`):
+
+```typescript
+type AskReadMutationCounts = {
+  selection_version: 2;
+  changed_count: number;              // changed_update_count + changed_ask_count
+  changed_update_count: number;
+  changed_ask_count: number;
+  unread_delta: number;               // UPDATE unread badge delta, unchanged meaning
+  waiting_unread_delta: number;       // ASK notification unread badge delta
+  counts_high_water: number;          // POST-OP transaction fence for operation + scope counts
+  reconciliation?: {
+    items: NotificationListItem[];    // existing list projection, real per-row seq
+    absent_ids: string[];             // requested ids not present/readable in this store
+    high_water: number;               // separate coherent notification read snapshot
+  };
+};
+```
+
+The at-most-50 requested session entries gain `changed_update_count`,
+`changed_ask_count` and `waiting_unread_delta`; their existing `changed_count`
+becomes combined, while `unread_delta` stays update-only. Each requested session
+entry additionally carries authoritative **`unread_count`**, counting all
+undismissed unread updates in that session (not only the selection filter),
+queried inside the mutation/Undo transaction after all writes. Its fence is
+`counts_high_water`. Replay returns the original operation's counts and fence;
+a newer client count must not be overwritten by this older snapshot.
+`eligible_count` in a
+mutation is op-specific: combined for read/unread, updates only for dismissal.
+`skipped_count` includes stale, settled or already-at-target acknowledgements.
+`skipped_ask_count` means **asks excluded by the operation**, not failed read
+marks: zero for read/unread and Undo, captured non-excluded asks for dismissal.
+`waiting_count` remains actionable pending questions, unaffected by read state.
+`waiting_unread_count` changes with acknowledgements. Fresh badge counts may
+also reflect concurrent settlement/arrival; neither delta is an authority to
+change actionable waiting count. Apply replay deltas at most once.
+
+**Bounded visible-row reconciliation:** receipt-backed PATCH targets may also
+include `reconcile_ids: ItemID[]` (0..500, validated like the existing id target).
+This is read metadata, never a mutation target: it cannot expand frozen scope,
+change exclusions, or give an ask settlement authority. It is intentionally
+excluded from replay identity, so a replay may refresh a different bounded set
+of cached rows. The optional `result.reconciliation` carries the existing list
+row projection, not detail bodies or ask answers, and authoritative absent IDs.
+**`reconciliation.items` combines notify rows and pending-ask rows**: ask entries
+use the unchanged waiting-row `ask_item` projection (`source: "ask"`, same
+id/read/seq/ask metadata); there is no separate reconciliation `waiting` array.
+Only requested `reconcile_ids` appear. A settled requested ask is in
+`absent_ids`, including when its local journal has settled before the derived
+index catches up.
+The desktop's existing read authorization is store-wide: a requested row outside
+the selected filter may be read without being changed; unknown and other-store
+IDs are uniformly absent. Receipt expiry/auth/scope checks finish before any
+reconciliation read. Legacy requests without this opt-in keep their shape.
+
+Watermark distinctions (no separate `operation_high_water` field exists):
+- `through_seq`: the original **pre-operation selection** boundary.
+- `counts_high_water`: **post-operation** notification transaction boundary,
+  also fencing the authoritative requested-session counts. Saved on replay.
+- `result.high_water`: the existing fresh global badge read, after commit.
+- `reconciliation.high_water`: a **fresh read snapshot** for requested update
+  rows/ask marks; may be newer than the saved operation/count fence on replay.
+  Every row retains its actual `seq`; it is never relabelled with the operation
+  watermark. Ask lifecycle projection follows the existing list's derived
+  index, without claiming a cross-store atomic snapshot.
+
+For example, selection `through_seq=100`, operation `counts_high_water=110`,
+fresh global `high_water=112` and reconciliation `high_water=113` are compatible.
+A reconciled row can legitimately carry `seq=113`. Consumers compare per-row
+sequence before replacement and use the reconciliation fence for removals;
+they must not overwrite a newer cached row/removal with an older response.
+Session badge reconciliation uses `counts_high_water`, not either fresh read's
+newer fence. No unbounded ID list or all-page invalidation is necessary.
+
+**Receipt safety:** a v2 preview stores each ask ref, a lifecycle fingerprint
+(created timestamp, deadline, questions), and its `ref_state` preimage/sequence
+in the notification DB. Apply/Undo revalidate current open refs and mark seq.
+The derived index is checked once; where local ask logs exist, each selected
+session's journal is read/folded once too, so a committed settlement beats a
+stale index. Missing local logs retain the existing mirrored/legacy index path;
+an existing unreadable log fails closed. No per-ref journal scans are used.
+
+Update state, ask **notification marks**, and their receipt post-images commit
+atomically in one notification-DB transaction. **Ask-log reads are not atomic
+with settlement in the separate store.** A settlement racing acknowledgement
+may leave a harmless read mark, never reopen or notify an ask. No code on this
+path writes `asks.jsonl`, queues a notification or changes ask lifecycle.
+Undo restores only actually changed marks whose post-sequence still matches
+and whose ask remains valid/open; settled, revised or subsequently marked refs
+are skipped. A formerly absent mark is restored as an unread tombstone with a
+new seq, preserving the ABA fence. Neither dismissal nor its Undo touches asks,
+even when their refs were included in the initial v2 snapshot.
+
+The existing 100,000-row store-wide receipt bound now covers **both** captured
+ask refs and retained update post-images. Combined selections over100,000 are
+413; retained-capacity exhaustion is429 before mutation. Same auth/store scope,
+128-handle bound,10-minute selection/receipt TTL, expiry cleanup and replay
+fencing. SQLite schema3 adds only `bulk_ask_refs`; v1 handles remain usable.
+A rollback to a backend without the capability cannot promise v2 Undo support;
+clients must not send an outstanding v2 token to a capability-absent server.
+Partial explicit ask reads continue through the existing observed-id path;
+this capability does not broaden v1 `ids+receipt:true`.
+
+`waiting_count` is all pending asks (the group); `waiting_unread_count` is its
+unread subset. The sidebar badge is `unread_count + waiting_unread_count`.
+Reading an ask clears that badge half but never removes its pending group row.
+
+An
+ask id under `dismiss`/`undismiss` is `skipped: live_ask` and the ask log is not
+written; under `read`/`unread` only its reel-side mark moves. Other skip
+reasons: `unknown`, `already`. `seen` re-checks its evidence per item (see
+`docs/ATTENTION.md`, "Inbox items") and adds `anchor_mismatch` and
+`stale_evidence`. Undo reuses the original by-id revision tokens, not the
+mutation receipt's newer high-water mark; an intervening content update makes
+that Undo `stale_revision`, not permission to affect a new revision.
+
+Consumers invalidate on EVERY `notifications` frame, not only a changed
+payload `revision`: replacing an ask can keep both SQLite high-water and all
+counts unchanged while the frame's envelope sequence advances.
+
+**Refusals** go through the shared classifier (`session/store_failures.py`)
+with this surface's own sentences (`wire.errors.notifications.*`, the
+`receipts_refusal` precedent): contention answers the retryable `503`
+`store_busy`, a full volume `507` `store_out_of_space`, and a store this process
+cannot read or open `500` `store_unavailable`.
 
 ## The machine-wide event feed
 
@@ -2420,7 +2935,9 @@ to.
 {"epoch":"…","seq":16,"type":"authoring","payload":{"revision":7}}
 {"epoch":"…","seq":17,"type":"session_status","session_id":"<12 hex>",
  "payload":{"code":"approval","label":"Approval needed","revision":3}}
-{"epoch":"…","seq":18,"type":"heartbeat","payload":{"ts":1699999999.5}}
+{"epoch":"…","seq":18,"type":"notifications",
+ "payload":{"revision":42,"unread_count":3,"waiting_count":1,"waiting_unread_count":0}}
+{"epoch":"…","seq":19,"type":"heartbeat","payload":{"ts":1699999999.5}}
 {"epoch":"…","seq":19,"type":"gap","payload":{"reason":"overflow","subscription_id":"…"}}
 ```
 
@@ -2567,14 +3084,24 @@ to.
   refetch on window focus and on mount is the backstop for both. What a row's
   file being READ costs is bounded the same way: a probe re-reads a row only when
   that row's stat moved.
+- `notifications` (`features.notifications`) is the inbox's INVALIDATION frame:
+  `{revision, unread_count, waiting_count}`, where `revision` is the store's
+  `high_water`. No `session_id` (the inbox is machine-wide) and never item
+  bodies — a client refetches `GET /v1/desktop/notifications` when `revision`
+  moved past what it painted, and draws the badge from the counts. Two
+  doorbells feed it: `notifications.db` and its sidecars on every tick (an item
+  write lands within one tick), and the asks index directory on the 1 s probe
+  (the badge also counts open asks). Published only when the triple changed, at
+  most once per tick; the connection's first read is a baseline, so a
+  reconnect replays nothing.
 - One live subscriber backlog bound (256 frames / 8 MiB), 32 subscribers;
   overflow emits `gap` and closes.
 
 ### The polling cadence
 
 One task per process, started with the first subscriber and stopped with the
-last. Each tick is FIVE `os.stat` calls — `attention.db` with its two journal
-sidecars, plus `run/mobile`, the discovery-record directory, which is where the
+last. Each tick is EIGHT `os.stat` calls — `attention.db` with its two journal
+sidecars, `notifications.db` with the same two (the inbox doorbell), plus `run/mobile`, the discovery-record directory, which is where the
 status channel's edges come from — the doorbell `config_watch` already uses for
 `config.yml` — plus `config.yml` ITSELF, the settings doorbell: its movement
 publishes a `config` frame naming the changed keys and the freshly resolved
@@ -2630,7 +3157,7 @@ row**; a row's metadata file is READ only when that row's stat moved, so an idle
 probe reads nothing at all (measured on this fleet: a warm probe over 34 profiles
 is 36 `stat`/`scandir` calls and ZERO file reads, 0.31 ms; the same probe with
 its stat memory cold is 1.16 ms). It runs on the catalogue probe's 1 s clock, not
-on the 100 ms tick — a quiet tick still pays exactly the five stats the doorbell
+on the 100 ms tick — a quiet tick still pays exactly the eight stats the doorbell
 is budgeted for — and it is off the event loop (`asyncio.to_thread`), like every
 other probe here. The projection is a line filter rather than a YAML parse for
 the same reason: `yaml.safe_load` + re-dump of those 34 rows measures 56.95 ms,
@@ -2943,11 +3470,50 @@ something alive or ready until then.
 | `subagent_trajectory` | 1 | `POST`/`DELETE /v1/desktop/sessions/{id}/children/{job}/trajectory` and the per-job `job_trajectory_appends`/`job_trajectory_replacements` fields they turn on | the child reader keeps its durable pager, opens no watch, and its session's frames carry the empty pair they always have (the opt-in is per session, so an app that opens no reader for ANY child gets exactly today's frames) |
 | `session_draft_warm` | 1 | `POST /v1/desktop/sessions/draft`, the `draft_id` field on `POST /v1/desktop/sessions`, and the five-door resolution of a registered draft id (`snapshot`, `history`, `watch`, `warm`, `events`) | the app never mints a draft and sends every create exactly as today (`draft_id` omitted), paying the cold engage on a new chat's first send; it must NOT gate any existing surface on this key — the warm is an optimisation on a send path that already works |
 | `session_catalogue_page` | 1 | `scope_kind`/`scope_name`/`cursor`/`with_counts` on `GET `/v1/desktop/sessions``, and `next_cursor`/`cursor_missing`/`scope`/`counts` in its answer | the app keeps today's exact behaviour: one unscoped `limit=500` request is the only shape it may send. It must NOT send a scope or a cursor to a daemon that does not advertise this key -- unknown query parameters are IGNORED rather than refused, so a scope would be answered with the unfiltered listing drawn under that group's name, and a cursor with page one again |
+| `ask_dismiss` | 1 | the optional `dismiss:true` + `reason` on `POST .../{id}/answers` (`{ask_id,dismiss:true,reason?}`), for putting an OPEN ask away from its card — accepted while the agent runs and boots nothing (see the answers row). The key is a BUILD fact; whether the OWNER can settle the ask is the queue's own verdict, answered in words rather than stripped | the card draws no Dismiss door and the row behaves exactly as today. A renderer that sent `dismiss` to an old backend gets a `422` (`Answer` forbids unknown keys) — never a silent drop |
 | `ask_attachments` | 1 | the optional `images` list on `POST .../{id}/answers` (and the identical `images` key of the `ask_respond` socket frame), and the `attachments` refs on a `PendingAsk` row. The key is a BUILD fact; whether the owner behind a given session can keep the pictures is a separate, per-owner `ask-attachments-v1` runtime capability, and its absence is refused in words rather than stripped | the answer card offers no attach affordance and sends text only. A new UI that sends `images` to an old backend gets a `422` (`Answer` forbids unknown keys) — never a silent drop |
 | `entry_ts` | 1 | `entry_ts=1` on `GET .../{id}/history`, `GET .../{id}` and `GET .../{id}/events`, which turns on the per-row `ts_source` vocabulary for wire rows (`ts: null` + `"unstated"` where the owner shipped no true entry time) | the renderer sends no `entry_ts` and reads no `ts_source`, keeping today's serve-stamp ordering exactly. It must NOT gate any existing surface on this key: `ts_source` itself is additive and ignored by an older reader, so nothing breaks in either direction — the key only lets a NEW renderer tell whether asking is worthwhile |
 | `open_frame` | 1 | `open_frame=1` on `GET .../{id}`, `GET .../{id}/history` and `GET .../{id}/events`: a page counted in PAINTABLE rows, cut back to the oldest included run's opening user row under a hard cap (with `head_cut` when the cap binds), with non-painted bytes stripped and `runs[]` / `runs_state` carry the per-run facts the bar needs — see [the open frame](#the-open-frame-a-turn-aligned-paint-only-page-open_frame-1) | the renderer sends no `open_frame` and receives today's page byte-for-byte: counts in journal entries, unstripped rows, no `runs`. It must NOT send the flag unless it reads `runs`/`head_cut`, because the unit of `limit` changes with it |
 | `supplements` | 1 | `features.supplements: 1` — the turn-supplement ("Highlights") contract is in the build: the `supplement_progress` event family, the `supplement_v1` journal row, the `supplements-v1` attach capability and the document assembler. It is a BUILD fact, NOT the attach gate: live events and the history projection reach a viewer only under the two-half `supplements-v1` gate (the owner's own capability string ANDed with the viewer's declaration — `auth["supplements"] = true`, or `?supplements=1` on the desktop live path). See [Turn supplements](#turn-supplements-the-supplement_v1-row-and-the-supplement_progress-event) | the renderer draws nothing supplement-shaped and is never refused for it: a viewer that does not declare is not sent a `supplement_progress` event or a supplement projection, and rows are journaled either way. It must NOT gate any existing surface on this key |
+| `profile_scope` | 1 | `scope: "global" \| "session"` on the rows of `GET /v1/desktop/profiles`, `GET /v1/desktop/profiles/{name}`, `GET /v1/desktop/teams`, `GET /v1/desktop/teams/{name}` and the `agent`/`team` rows of `GET /v1/desktop/sessions/{id}/command-entities` | the renderer paints no scope badge and sends no session id to a picker route; the fields are additive, so an older reader parses the same payload it did before |
+| `profile_promote` | 1 | `POST /v1/desktop/sessions/{session_id}/promote` — copy one CONVERSATION-scoped role or team into the account. Body `{request_id, kind: "agent" \| "team", name, as_name?, confirm_replace?, dry_run?}`; a confirmed call answers the new ACCOUNT detail row (`GET /v1/desktop/profiles/{name}` / `/teams/{name}` shape) plus an additive `promoted` object naming what was created, expanded and replaced; a `dry_run` answers `{dry_run: true, promoted}` with the same plan and writes nothing | the renderer offers no "use in all conversations" action on conversation-scoped rows and calls nothing. On a backend that does not advertise the key the session rows are still rendered, only without that action — do not send a `session_id` to any profile route to approximate it |
 | `session_files` | 1 | `GET /v1/desktop/sessions/{id}/files` and `POST …/files/{file_id}/materialise` — the authoritative per-session file inventory (written, edited, command outputs, screenshots, downloads, generated images/videos, subagent files, Highlights callouts), and the `details.artifacts` list the image/video tools now write | the Files view builds from its own transcript scan exactly as today, and the renderer MUST NOT call the route (an older backend answers 404). A 404 from a backend that DID advertise the key is a broken backend: treat it as definitive "unsupported" for the session |
+
+`profile_scope` STATES A ROW'S STORE, not a caller's permission. `GET /v1/desktop/profiles`,
+`GET /v1/desktop/profiles/{name}`, `GET /v1/desktop/teams` and `GET /v1/desktop/teams/{name}`
+stay ACCOUNT-ONLY (they are built over the global registry): their rows carry
+`scope: "global"` today, including packaged starters, which have no row yet and are
+installed into one of the two stores. The session picker route,
+`GET /v1/desktop/sessions/{id}/command-entities?command=agent|team`, reads the session's
+composite and can therefore return `scope: "session"` rows: a role or team created for
+THIS conversation, invisible to every other one and gone with it. Clients paint the badge
+from the field, never from a name or description; the mobile sheet reads the same field
+on the same route. On a backend that does not advertise the key, do not send `session_id`
+for a badge and keep the current rendering: the rows are the same, only unlabelled.
+
+PROMOTION IS SESSION-ADDRESSED FOR THE SAME REASON. `POST
+/v1/desktop/sessions/{session_id}/promote` copies a conversation-scoped row into the
+account; its SOURCE is the session's composite, which only the session bridge can
+reach, so it is addressed by session and lives beside `/command-entities` rather than
+in the account-only profile routes. It is a MUTATION, so it takes the control envelope
+(an answering owner), a `request_id` (a retry replays the first answer), and it is the
+desktop's own authorization origin. `kind` names which store the source is in; `name`
+is the source definition; `as_name` copies under another name (`as` is a Python
+keyword, so every surface spells it `as_name`); `confirm_replace` is the user's answer
+to "overwrite what is already there". A team expands: every conversation-scoped role or
+nested team its roster needs is copied in the same call, so the copy launches in
+another conversation, and `promoted.expanded` names them. The origin conversation keeps
+its own row — resolution is session-first, so it still launches its own copy, and the
+answer says so. `dry_run` is the client's own rehearsal: it runs the same preflight and
+answers the same `promoted` plan (`created` — only rows that would be CREATED — and
+`replaced`) writing nothing, which is how a client can name every row a team
+`confirm_replace` would overwrite before asking. It skips the `request_id` journal: no
+write happened, so there is nothing to replay. Statuses: 404 unknown session or name,
+409 any refusal (name already in the account without `confirm_replace`, an unusable
+roster, a rollback that could not finish) and 409 `session_is_remote` for a
+conversation that lives on a peer — its roles are on that device and this build cannot
+write them there, so the family's 404 would be a lie about a row the user can see,
+422 a malformed body.
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
 except for the derived `focus_policy` routing field, which the client already
@@ -3157,3 +3723,108 @@ before new-domain adoption. Later unavailable units retain known/provisional
 records and require explicit source-unconfirmed reconcile; unavailable is not
 missing, reset, or a reason to poll an old peer. Metadata bootstrap remains
 lookup facts/domain only, never rank/causal-owner admission on an old body.
+
+### Signed remote-server onboarding (`mesh_onboard: 1`)
+
+This is **direct mesh / add remote server**, not phone access or a new tunnel.
+It exposes the existing nine-step signed SSH runner with a **new restricted
+network-enrollment-only authority**, not the legacy card's credential/tool
+provisioning policy. Older `approvals: 1` list/approve/deny behavior stays intact.
+Clients hide the new form and make **no new calls** when `mesh_onboard` is absent;
+there is no fallback to a legacy provisioning request. Bearer/Origin checks are
+the existing desktop boundary; the renderer never receives the bearer or keys.
+
+| Method/path | Input | `result` / effect |
+|---|---|---|
+| `POST /v1/desktop/approvals/probe` | `{host,user?,port?}` | `{host,user,port,host_key_fp,banner,reachable,detail,identity:"observed_tofu"}`. Public banner/keyscan only, original 6s/8s bounds; no credential resolution/login. Returned `host` includes the observed port using the existing parser. Conflicting explicit ports refuse. |
+| `POST /v1/desktop/approvals/request` | `{request_id,host,user?,name?,network_id,credential_ref,host_key_fp,unattended?,grant?}` | `{approval_id,state,device,what,expires_at}`. Only restricted kind; backend owns requester/root/window. `grant` is `[]` or `["approve"]` (default); explicit empty stays empty. Role is drive, never admin/broker. |
+| `POST /v1/desktop/approvals/{apn_id}/approve-network-enrollment` | Exactly `{authority_version:1,scope:"network_only",request_digest:"sha256:<64hex>"}` | Existing decision response. Validate the displayed snapshot, kind/namespace/version/scope/state/original expiry and commitment BEFORE the SAME presence signer, then recheck under record lock at write. Strict integers, no boolean/string coercion/extras. Stale acknowledgment requires redisplay, not automatic re-signing. |
+| `POST /v1/desktop/approvals/{id}/run` | No body | 202 after the existing signature/state/expiry/begin-run gate and shared target lease accept the owner. Full work continues beyond HTTP/window lifetime. Active/same-target conflict409, never a second worker. |
+| `GET /v1/desktop/approvals/{id}` | None | Local-only `{approval_id,kind,state,authority_version,scope,request_digest,expires_at,run_id,run_active,receipts,next,replacement_id}`. Bounded sanitized fields only; no bootstrap reference/path, raw record, signature or arbitrary step data. |
+
+Before signing, new clients render **Network enrollment only; account logins are
+not shared**, target/observed SSH key, exact public operator-anchor trio,
+network/drive role, control grants/unattended choice and original finite window.
+Generic merged rows contain `can_approve_here:false`, an actionable remedy, and
+`typed_approval:{action:"approve-network-enrollment",authority_version:1,
+scope:"network_only",request_digest}`. Generic `/approve` rejects ANY `apn_`
+prefix/restricted kind before presence regardless of body. Ignoring capability
+or row metadata cannot turn an older UI's generic action into a new signature.
+This acknowledgment is compatibility admission, not proof of rendered pixels or
+resistance to arbitrary malicious same-UID code. Existing credential-inheritance
+terminal-only approval safeguards and optional row fields remain unchanged.
+
+`credential_ref` is an existing SSH bootstrap reference, NOT private key/password
+text or a request to clone model/MCP logins. Stored/agent names reuse existing
+name validation; key paths stay references. Obvious PEM/key-shaped or multiline
+material refuses before card persistence; protected422 responses do not echo it.
+This new format requires an explicit reference; legacy optional/default SSH
+configuration behavior is unchanged. A probe observes **TOFU**, not independently
+verified identity. No automatic operator-anchor bootstrap/approval occurs.
+
+The closed internal authority uses kind `device_onboard_network_only`, ID
+`apn_<existing Crockford identifier>`, and **only**
+`network/enrollment-approvals/<id>.json`. The exact envelope is
+`{format:"lop-network-enrollment",version:1,record:<logical record>}`, with no
+legacy top-level ID/aliases/flat fallback. All existing lifecycle writers wrap;
+lookup/index/locks/tombstones/retention use this namespace parametrically, not a
+second engine. Legacy `ap_` records remain flat, with unchanged key/domains/policy.
+
+New request commitment is `sha256:` + SHA256 of
+`b"lop-network-enrollment-request-v1\0" + canonical_json({authority_version:1,
+approval_id,request_id,request:legacy_immutable_request(record)})`.
+It binds the original full scope/target/bootstrap reference/requester and finite
+creation/expiry window, plus the explicit new ID/version/request ID. Lookup
+FIRST under the namespace request lock returns the original ID/window/digest on
+same intent; only a true miss mints. Reusing a changed/spent request conflicts;
+retry never renews expiry. New decisions use `b"lop-network-enrollment-v1\0"`
+plus the original length-prefixed fields, with no legacy-domain fallback.
+
+An unchanged copied/renamed ENVELOPED pending card fails an old reader before
+presence because it has no top-level ID. Deliberately unwrapping/transformation
+loses that structural protection: old presence may run, but the new commitment
+and decision domain prevent replay execution. A local owner fully rebuilding a
+legacy request and obtaining fresh legacy approval creates different authority;
+no same-UID arbitrary-code/key-compromise defense is claimed.
+
+All nine runner stages remain. Restricted provision is a truthful **SKIPPED**
+receipt before offers/placement/broker/definitions/MCP/git/model provisioning.
+The existing pairing pre-answer selects `shares=[]`: no logins/access are
+shared. This does not claim passive masked sealed offer metadata never exists in
+the unchanged ceremony, and does not revoke earlier access on a trusted device.
+The signed control grants remain directional: the remote node grants those
+controls to this operator device; it does not silently become admin/broker.
+
+Restricted verify requires fresh known-positive targeted identity, both-sided
+membership in the signed network, reachability/build and operator-anchor proof.
+Empty/unknown/malformed/foreign-target evidence fails closed. Git/model/MCP/tool
+shortcomings remain equipment warnings, not repairs; normal `network ready`
+verdict is unchanged. A restricted final receipt alone may add bounded data
+`{enrollment_verified,ready_ok,task_ready:false,equipment_warnings:[{capability,code}]}`
+associated with the current run. Raw `ready_ok:false` survives GET/reopen; no
+file paths/diagnostics are in structured data. Legacy six-field400-character
+receipts/calls remain unchanged. Membership/enrollment is NOT task completion.
+No originating conversation ID is supplied to target readiness.
+
+Changed target facts fail before install/admission and file a corrected unsigned
+restricted card when possible. Its failed receipt carries only a safely validated
+replacement ID. Durable GET returns `next:"review_replacement"` plus
+`replacement_id`, or `next:"start_new_review"` if missing/unusable; do not blindly
+retry the old facts, mint repeatedly, or autoapprove the replacement. Ordinary
+eligible failures retry the same approval/new run ID and reuse active admission.
+
+The backend owns admitted work across window close/response cancellation and
+drains on shutdown. Process death uses existing stale-run rules. One shared
+CLI/desktop per-network/host/user nonblocking target lease spans BOTH namespaces;
+other targets are not globally serialized. Old0.73.1 has no such target lease,
+so no cross-runtime serialization claim is made for independently issued legacy
+cards. Do not automatically repeat run on409 or transport loss: reconcile GET.
+
+404 is missing card;409 is an actionable state/authority/target/snapshot conflict;
+422 is invalid strict input. A backend root different from `paths.config_dir()`
+refuses BEFORE mutation, credential resolution, invite or SSH with
+`onboard_root_mismatch`: restart with `LOCAL_OPERATOR_CONFIG_DIR` naming its
+configured profile. Normal app startup resolves both from the same path; no
+process-global environment switch or profile fallback occurs. Protocol/SAS/
+expiry/step deadlines, trust keys and deny rules are unchanged. Normal Radient
+tunnel/phone access remains separate and unchanged.

@@ -33,6 +33,7 @@ still rewrite the cache so the next splash is free.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -81,6 +82,7 @@ from local_operator.helpers import retention_label
 from local_operator.install_defaults import (
     DEFAULT_KEEP_GENERATIONS as DEFAULT_KEEP_GENERATIONS,
 )
+from local_operator.install_defaults import STABLE_ROOT_RELATIVE
 from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.procstate import PLATFORM_LABEL
 
@@ -125,6 +127,315 @@ class InstallKind(str, Enum):
 # One error identity lets primitive transaction refusals reach existing CLI/TUI
 # handlers without circular imports or a traceback from an ordinary conflict.
 UpdateError = install_transaction.InstallTransactionError
+
+
+class PublicationError(UpdateError):
+    """PyPI's live answer disagrees with the release this run set out to install.
+
+    A CLASS because the update report says ``kind: publication`` for exactly
+    this cause: the index knows the version but its project document (or the
+    version it calls latest) has not caught up yet, which is a propagation
+    window rather than a network fault. :func:`_fresh_publication` raises it
+    after its bounded re-read; nothing else does.
+    """
+
+
+class PublicationFetchError(UpdateError):
+    """PyPI could not be READ at the publication gate at all.
+
+    The sibling of :class:`PublicationError`, and a different fact: ``None``
+    from a fetch means "no answer" as well as "no version", and only the read
+    object can tell them apart (:func:`_fetch_pypi_read`). A transport fault is
+    ``kind: network`` and is refused immediately — waiting 10 s for a cached
+    version that a dead route will never return is not a retry, it is a delay.
+    """
+
+
+class LayoutRefusal(UpdateError):
+    """This platform/install cannot finish the generation layout; nothing ran.
+
+    Structural for the same reason as the two above: the report's ``kind`` is
+    ``refused`` (the updater declined), never ``network``/``unknown`` — and the
+    gate is raised before any install step, so the step must say
+    ``environment``.
+    """
+
+
+#: The stages the frozen failure report may name, in the order a healthy run
+#: reaches them. ``lock`` is a stage only in the sense that no stage ran — a
+#: writer held the root — and ``report`` covers a failure while assembling the
+#: report itself. The vocabulary is FROZEN with the schema token above.
+_UPDATE_STEPS = (
+    "check",
+    "publish",
+    "download",
+    "environment",
+    "install",
+    "promote",
+    "services",
+    "lock",
+    "report",
+)
+
+#: The cause vocabulary. ``unknown`` is the honest fallback: a failure the
+#: updater cannot attribute is still reported, with the step that was running.
+_UPDATE_FAILURE_KINDS = (
+    "network",
+    "publication",
+    "lock",
+    "disk",
+    "ownership",
+    "serve",
+    "refused",
+    "unknown",
+)
+
+#: How many times the publish step re-reads PyPI's live version before it
+#: refuses, and how long it waits between reads.
+#:
+#: THE MEASURED FAILURE (2026-10-24): 0.89.0's wheels landed on PyPI at
+#: 20:38:40-20:38:45Z. A `lop update` at 20:42:08Z built the 0.89.0 candidate
+#: correctly and then refused because the project-JSON endpoint (CDN-cached,
+#: unlike the files) still named 0.88.4; a second attempt at 20:42:26Z refused
+#: identically, and the attempt that worked ran at 20:43:22Z. So the stale
+#: answer persisted for at least 74 s after the first refusal (and at most
+#: ~4 m 42 s after upload).
+#:
+#: WHAT THIS BOUND DOES AND DOES NOT DO: three reads ~5 s apart cover 10 s of
+#: that 74 s window, so they NARROW it — a press near the end recovers without
+#: a second command — and do not close it. A healthy run pays nothing (the
+#: first read agrees, no sleep happens), and an exhausted bound still refuses
+#: in the same sentence.
+_PUBLICATION_CONFIRM_ATTEMPTS = 3
+_PUBLICATION_CONFIRM_DELAY_S = 5.0
+
+#: Indirection so a test can replace the wait without patching the global
+#: ``time.sleep`` (which any concurrent thread also calls).
+_sleep = time.sleep
+
+
+class _UpdateProgress:
+    """The structural stage tracker for ONE update run in ONE thread.
+
+    The failure report must say which stage failed without inferring it from
+    the messages already printed (the 2026-10-24 modal proves that inference
+    loses to unrelated chatter). Each stage boundary assigns :attr:`step`
+    where the work actually starts, so the value at raise time is the last
+    stage entered, not a guess made afterwards.
+
+    THREAD-LOCAL because the TUI's update worker and a CLI run can share this
+    module in one process, and a report must describe its own run.
+    """
+
+    __slots__ = ("step", "install_version", "target")
+
+    def __init__(self) -> None:
+        self.step = "check"
+        self.install_version = ""
+        self.target = ""
+
+
+_PROGRESS = threading.local()
+
+
+def _progress() -> _UpdateProgress:
+    state = getattr(_PROGRESS, "state", None)
+    if state is None:
+        state = _PROGRESS.state = _UpdateProgress()
+    return state
+
+
+def _begin_update(*, install_version: str = "") -> _UpdateProgress:
+    """Start a run's tracker at ``check``; every failing exit reads this one."""
+    state = _UpdateProgress()
+    state.install_version = install_version
+    _PROGRESS.state = state
+    return state
+
+
+def _reach(step: str) -> None:
+    """Record that the run has ENTERED ``step``. Not a claim it finished."""
+    _progress().step = step
+
+
+def _note_versions(*, install_version: str | None = None, target: str | None = None) -> None:
+    state = _progress()
+    if install_version is not None:
+        state.install_version = install_version
+    if target is not None:
+        state.target = target
+
+
+def _causes(exc: BaseException | None) -> list[BaseException]:
+    """``exc`` and every explicit cause/context behind it, nearest first.
+
+    Wrappers in this module re-raise with ``from exc`` precisely so the
+    original failure stays reachable; the classifier walks that chain instead
+    of asking every raise site to name its own kind.
+    """
+    found: list[BaseException] = []
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        found.append(exc)
+        exc = exc.__cause__ or exc.__context__
+    return found
+
+
+def _classify_failure(step: str, exc: BaseException | None) -> str:
+    """The frozen ``kind`` for a failure, from the exception source and stage.
+
+    A small table, deliberately: the exception class is checked first (lock and
+    publication have dedicated classes), then the errno family, then the stage
+    as the last structural signal. ``unknown`` is returned rather than inventing
+    a cause the updater cannot support.
+    """
+    chain = _causes(exc)
+    for candidate in chain:
+        if isinstance(
+            candidate, (install_transaction.LockBusy, install_transaction.LockUnsupported)
+        ):
+            return "lock"
+        if isinstance(candidate, PublicationError):
+            return "publication"
+        if isinstance(candidate, PublicationFetchError):
+            return "network"
+        if isinstance(candidate, LayoutRefusal):
+            return "refused"
+    for candidate in chain:
+        if isinstance(candidate, PermissionError):
+            return "ownership"
+        if isinstance(candidate, OSError) and candidate.errno in (errno.ENOSPC, errno.EDQUOT):
+            return "disk"
+        if isinstance(candidate, OSError) and candidate.errno in (errno.EACCES, errno.EPERM):
+            return "ownership"
+    if step == "check":
+        return "network"
+    if step == "publish":
+        return "publication"
+    if step == "download":
+        return "network"
+    if step == "services":
+        return "serve"
+    return "unknown"
+
+
+def _failure_step(step: str, kind: str) -> str:
+    """A lock failure names ``lock``; every other stage keeps its own name."""
+    return "lock" if kind == "lock" else step
+
+
+def _installed_version_or_empty() -> str:
+    """The version this install names right now, or ``""`` if it cannot say.
+
+    A report is emitted on a failing path; a second failure while measuring it
+    must not replace the first one with a traceback.
+    """
+    try:
+        return installed_version()
+    except Exception:  # noqa: BLE001 — a report must still be emitted
+        return ""
+
+
+def _failure_payload(
+    *,
+    step: str,
+    kind: str,
+    exit_code: int,
+    error: str,
+    detail: str = "",
+    install_version: str | None = None,
+    target: str | None = None,
+) -> dict[str, Any]:
+    """The frozen ``update.report.v1`` failure shape, built in ONE place.
+
+    ``install_version``/``target``/``serve``/``daemons`` are present even on a
+    failure because the desktop parser validates them on every report; ``serve``
+    and ``daemons`` are empty because no census was taken, not because none
+    exists.
+    """
+    state = _progress()
+    return {
+        "update_report": {
+            "schema": _UPDATE_REPORT_SCHEMA,
+            "ok": False,
+            "install_version": (
+                install_version
+                if install_version is not None
+                else state.install_version or _installed_version_or_empty()
+            ),
+            "target": target if target is not None else state.target,
+            "serve": [],
+            "daemons": [],
+            "failure": {
+                "step": _failure_step(step, kind),
+                "kind": kind,
+                "exit_code": int(exit_code),
+                "error": error,
+                "detail": detail,
+            },
+        }
+    }
+
+
+def _emit_update_failure(
+    *,
+    step: str,
+    kind: str,
+    exit_code: int,
+    error: str,
+    detail: str = "",
+    install_version: str | None = None,
+    target: str | None = None,
+) -> None:
+    """Emit the ONE machine-readable failure line, last on stdout.
+
+    Mirrors :func:`_emit_update_report`: JSON, one line, ``flush=True``, so the
+    desktop app's per-line ``json.loads`` consumer sees it after the human
+    sentences and before the process exits.
+    """
+    payload = _failure_payload(
+        step=step,
+        kind=kind,
+        exit_code=exit_code,
+        error=error,
+        detail=detail,
+        install_version=install_version,
+        target=target,
+    )
+    print(json.dumps(payload, separators=(",", ":")), flush=True)
+
+
+def _fail(
+    step: str,
+    kind: str,
+    sentence: str,
+    *,
+    detail: str = "",
+    exit_code: int = 1,
+    target: str | None = None,
+    human: str | None = None,
+) -> int:
+    """Print the human refusal, emit the frozen failure report, return ``code``.
+
+    ONE call so a new failing exit cannot print a sentence and forget the
+    machine-readable half, which is the defect this change exists to end.
+
+    ``human`` carries the console text when it differs from the report's one
+    sentence: ``error`` must be ONE sentence (it is what the modal shows), while
+    the terminal keeps every line the pre-existing refusal printed — a remedy
+    the reader was already being given is not dropped to fit the contract.
+    """
+    print(human if human is not None else sentence, file=sys.stderr)
+    _emit_update_failure(
+        step=step,
+        kind=kind,
+        exit_code=exit_code,
+        error=sentence,
+        detail=detail,
+        target=target,
+    )
+    return exit_code
 
 
 #: Bound the child so a hung ``launchctl kickstart`` cannot stall the
@@ -664,16 +975,16 @@ def _downloadable_wheel(files: Any, version: str) -> bool:
 
     WHY THIS IS THE READINESS GATE: PyPI flips ``info.version`` when a
     release is created, before its files finish uploading (the publish
-    workflow uploads the pure wheel, the macOS wheel and the sdist in one
-    sequential pass). A checker that reads only the version string
-    therefore advertises a release the installer cannot yet download — the
-    operator's 2026-10-12 report, where the update offer appeared and
-    ``lop update`` exited 1 for 0.70.13 minutes after publication. The file
-    list in the SAME JSON document is the earliest signal that can agree
-    with the installer — provided it asks for the wheel the installer
-    would take (:func:`_installer_wheel`), not just any wheel. An sdist
-    alone does not count: this project always publishes wheels, so an
-    sdist-only moment is a release still mid-upload.
+    workflow uploads the pure wheel and the macOS wheel in one sequential
+    pass; the sdist is attached to the GitHub Release instead). A checker
+    that reads only the version string therefore advertises a release the
+    installer cannot yet download — the operator's 2026-10-12 report, where
+    the update offer appeared and ``lop update`` exited 1 for 0.70.13
+    minutes after publication. The file list in the SAME JSON document is
+    the earliest signal that can agree with the installer — provided it
+    asks for the wheel the installer would take (:func:`_installer_wheel`),
+    not just any wheel. An sdist alone does not count: this project always
+    publishes wheels, so an sdist-only moment is a release still mid-upload.
     """
     if not isinstance(files, list):
         return False
@@ -1491,7 +1802,13 @@ def build_marker_age_s(prefix: str | Path | None = None) -> float | None:
 #: ``Path(_STABLE_ROOT).expanduser()`` at every use so a redirected ``HOME``
 #: (an isolated test, a sandbox) moves it — an absolute path captured at import
 #: time would write into the operator's real home from inside a sandbox.
-_STABLE_ROOT = "~/.local/share/lop"
+#:
+#: Bound from :mod:`local_operator.install_defaults` rather than spelled here,
+#: because :mod:`local_operator.procname` resolves the same directory against
+#: the PASSWD home (SDK children get ``HOME`` rewritten) and the two spellings
+#: must not be able to drift. The ``~`` is added here because THIS module keeps
+#: the redirect-friendly reading; ``procname`` deliberately does not follow it.
+_STABLE_ROOT = "~/" + STABLE_ROOT_RELATIVE
 
 #: Where the console scripts uv would normally write land, so the stable
 #: launchers can be recognised and refreshed without a second constant.
@@ -1572,10 +1889,45 @@ if [ -z "$gen" ]; then
     echo "lop: no current install generation ($here/../current is unreadable)" >&2
     exit 78
 fi
-# Prefer the branded image when it is planted, because that is what Activity
-# Monitor reads (p_comm); the interpreter is the always-present fallback.
-if [ -x "$gen/tools/local-operator/bin/Local Operator" ]; then
-    exec "$gen/tools/local-operator/bin/Local Operator" "$@"
+# Prefer the branded image when it can actually START. It is normally a symlink
+# to the stable runtime clone, and through it the image path -- the identity
+# macOS's privacy prompts key on -- is ONE path for every generation, instead of
+# one new client per update. A symlink whose target's stdlib does not resolve
+# dies with "No module named 'encodings'" before any of our code runs, so ask
+# that question before naming it; the interpreter below always starts.
+branded="$gen/tools/local-operator/bin/Local Operator"
+use_branded=""
+if [ -x "$branded" ]; then
+    use_branded=1
+    if [ -L "$branded" ]; then
+        target=$(readlink "$branded") || target=""
+        case $target in
+            /*) ;;
+            *) target="$(dirname -- "$branded")/$target" ;;
+        esac
+        found=""
+        # The probe is the IMAGE's directory, not the link's: the plant publishes
+        # ``<key>/lib`` beside ``<key>/bin/...``, so ``dirname`` of the target's
+        # parent is where the stdlib link lives. Probing ``<key>/bin/lib`` (one
+        # dirname short) never matched, so every supervised unit silently took
+        # the fallback interpreter and stayed a separate macOS privacy client.
+        for enc in "$(dirname -- "$(dirname -- "$target")")"/lib/python3*/encodings/__init__.py; do
+            if [ -f "$enc" ]; then found=1; break; fi
+        done
+        if [ -z "$found" ]; then use_branded=""; fi
+    fi
+fi
+# A truncated or replaced image passes both checks above and then dies with
+# "Exec format error". The image is a byte copy of the interpreter beside it,
+# so a size mismatch (both read through their symlinks) means it is not one.
+fallback="$gen/tools/local-operator/bin/python3"
+if [ -n "$use_branded" ]; then
+    if [ "$(wc -c < "$branded" 2>/dev/null)" != "$(wc -c < "$fallback" 2>/dev/null)" ]; then
+        use_branded=""
+    fi
+fi
+if [ -n "$use_branded" ]; then
+    exec "$branded" "$@"
 fi
 exec "$gen/tools/local-operator/bin/python3" "$@"
 """
@@ -2263,15 +2615,54 @@ def _fresh_publication(target: str, mode: str) -> PublicationEvidence | None:
     The installer is pinned to the returned artifact URL AND SHA256, not just a
     version/name. Refreshing before promotion must still describe those bytes.
     Background cache fallback intentionally remains unchanged and is not proof.
+
+    A ``latest`` disagreement is re-read before it is refused. PyPI's
+    project-JSON endpoint is CDN-cached while the release FILES are not, so a
+    run pressed inside the propagation window sees a stale ``info.version``
+    for a release it has already downloaded and built — measured 2026-10-24:
+    the 0.89.0 wheels were on the index at 20:38:40-45Z, a correct 0.89.0 build
+    was refused at 20:42:08Z and again at 20:42:26Z, and a manual retry at
+    20:43:22Z succeeded. Three reads ~5 s apart ride that window out; a
+    healthy run pays nothing (the first read agrees and never sleeps), and an
+    exhausted bound still refuses in the same sentence, so the guard's
+    semantics do not move.
     """
+    _reach("publish")
     if mode == "source":
         return None
     if not target:
         raise UpdateError("cannot promote an unversioned PyPI candidate; retry lop update")
     if mode == "latest":
-        latest = _fetch_pypi_version()
+        latest: str | None = None
+        for attempt in range(1, _PUBLICATION_CONFIRM_ATTEMPTS + 1):
+            # READ, not ``_fetch_pypi_version``: the read object separates "the
+            # index did not answer" (a network fault, refuse now) from "the
+            # index answered with another version" (the cache window, retry).
+            # Collapsing both to ``None`` is what made a dead route look like a
+            # publication race in the first report.
+            read = _fetch_pypi_read()
+            if read.version is None and not read.answered:
+                raise PublicationFetchError(
+                    f"could not reach PyPI to confirm {target} is published; retry lop update"
+                )
+            latest = read.version
+            if latest == target:
+                break
+            if attempt < _PUBLICATION_CONFIRM_ATTEMPTS:
+                # INFO, not WARNING: this is a wait, not a failure, and the
+                # observed version is the one fact the next occurrence needs.
+                logger.info(
+                    "PyPI still reports %s as latest, not %s; re-reading in %.0fs "
+                    "(attempt %d/%d)",
+                    latest or "unconfirmed",
+                    target,
+                    _PUBLICATION_CONFIRM_DELAY_S,
+                    attempt,
+                    _PUBLICATION_CONFIRM_ATTEMPTS,
+                )
+                _sleep(_PUBLICATION_CONFIRM_DELAY_S)
         if latest != target:
-            raise UpdateError(
+            raise PublicationError(
                 f"fresh PyPI latest is {latest or 'unconfirmed'}, not {target}; retry lop update"
             )
     document, complaint = _pypi_release_document(target)
@@ -2353,6 +2744,7 @@ def _download_candidate_artifact(generation: Path, built: PublicationEvidence) -
     """
     import httpx
 
+    _reach("download")
     destination = _candidate_artifact(generation, built)
     destination.parent.mkdir()
     staging = destination.with_name(destination.name + ".tmp")
@@ -2484,6 +2876,10 @@ def _promotion_transaction(
             raise UpdateError(
                 "published candidate artifact changed while building; retry lop update"
             )
+        # The gate above re-read the index, which marks ``publish``; from here
+        # the run is promoting (the pointer flip and marker writes happen inside
+        # the yield), so a failure there must not be reported as a stale index.
+        _reach("promote")
         with install_transaction.transaction(stable_root(), operation="promote candidate") as held:
             if evidence is not None and time.monotonic() >= evidence.fresh_until:
                 continue
@@ -3398,8 +3794,11 @@ def install_into_generation(
     refusal). Step 5 is best-effort by design: the build is already current at
     that point, and a machine whose sandbox denies a write must not be told the
     upgrade failed. PRUNING IS THE CALLER'S, not this function's: it is a
-    deletion, and every caller that wants it says so where it can report what
-    went (see ``perform_upgrade``).
+    deletion, so a caller that wants one asks for it explicitly where it can
+    report what went (``lop install prune``). No update tail prunes
+    automatically: automatic generation collection is frozen (AGENTS.md,
+    "Immutable rolling promotion"), because a complete record census is not proof
+    that a runtime will never read another file from its loaded generation.
 
     NO STAGING RENAME, deliberately. Building in ``<id>.partial`` and renaming
     it into place looks tidier and is WRONG here: uv bakes the installation path
@@ -3407,17 +3806,29 @@ def install_into_generation(
     one of them would name the renamed-away directory and dangle. Reserved-and-
     built-in-place keeps uv's own artefacts pointing at paths that survive.
     """
+    # BEFORE the gate: a refusal here is an ENVIRONMENT fact, and the caller's
+    # step must not still name whatever it was doing (``download``, on the
+    # snapshot path).
+    _reach("environment")
     if not generation_layout_supported():
         # REFUSED BEFORE the reservation, the installer and the flip: the reason
         # this gate exists is that the same refusal discovered later costs a
         # whole built venv, and leaves nothing behind to show for it.
-        raise UpdateError(generation_layout_refusal())
+        raise LayoutRefusal(generation_layout_refusal())
     token = commit[:12] or version or "pypi"
     mode = "source" if source is not None else target_mode
+    # The publication gate is its own stage, marked by the caller as well as by
+    # the helper: the boundary belongs to the pipeline, so a failure raised BY
+    # the gate (or by anything that replaces it) is still reported as publish.
+    _reach("publish")
     built = _fresh_publication(version, mode)
     reused = _reuse_exact_current(built)
     if reused is not None:
         return reused
+    # Everything from here to the installer's exit is preparation: reserve the
+    # tree, persist the recovery operation, assemble the argv. A failure here
+    # is an environment failure, not a failed install — nothing ran yet.
+    _reach("environment")
     generation, nonce, baseline = _register_candidate(
         token, version, mode, commit or (str(source) if source is not None else "")
     )
@@ -3447,6 +3858,7 @@ def install_into_generation(
         if built is not None:
             artifact = _download_candidate_artifact(generation, built)
             argv = [*argv[:-1], "--from", str(artifact), DISTRIBUTION_NAME]
+        _reach("install")
         code = (runner or _run_installer_env)(argv, _generation_env(generation))
     except OSError as exc:
         # A missing ``uv``, an unwritable generations dir: the caller gets one
@@ -3459,6 +3871,7 @@ def install_into_generation(
         _discard_candidate(generation, nonce)
         raise
     operation.advance("prepared", candidate=str(generation))
+    _reach("promote")
     try:
         with _promotion_transaction(generation, version, mode, built):
             try:
@@ -3575,7 +3988,7 @@ def clone_into_generation(
         # Same gate as the other builder, and it has to be here too: the
         # migration copies a tree and flips the pointer, so a platform that
         # cannot link would build a 136 MB copy and then fail on the pointer.
-        raise UpdateError(generation_layout_refusal())
+        raise LayoutRefusal(generation_layout_refusal())
     origin = Path(source) if source is not None else Path(sys.prefix)
     if not origin.is_dir():
         raise UpdateError(f"nothing to clone: {origin} is not a directory")
@@ -3748,6 +4161,10 @@ class ReferencedTrees:
 #: Spelled once: the prune's own report and the tests that read a decision's text
 #: must not be free to disagree about what the safe direction was called.
 _UNREADABLE_RECORD_REASON = "a record could not be read, so it may name this tree"
+
+#: Why a prune keeps a candidate a session record names. Spelled once so the
+#: snapshot keep and the per-candidate fresh-census veto cannot drift apart.
+_RECORD_NAMES_REASON = "a live or saved session record names it"
 
 
 def referenced_install_roots() -> ReferencedTrees:
@@ -4416,37 +4833,30 @@ MECHANISM_GENERATION_PRUNE = "generation-prune"
 MECHANISM_IN_PLACE_INSTALL = "in-place-install"
 
 
-def _record_index() -> list[tuple[Any, Path]]:
-    """``(record, config root)`` for every record published under every config root.
+def _record_index_with_status() -> tuple[list[tuple[Any, Path]], tuple[Path, ...], tuple[str, ...]]:
+    """One fresh census, retaining both provenance and uncertainty.
 
-    The same traversal :func:`referenced_install_roots` makes, carrying the config
-    root alongside because a marker must be written into the CONVERSATION DIR that
-    lives under it — the run key alone says which session died, not where its
-    evidence goes.
-
-    GATHERED ONCE PER REMOVAL PASS AND REUSED FOR EVERY CANDIDATE, which is a
-    window rather than an accident (review round 1, NIT 3): the caller holds one
-    index for the whole pass, so a runtime that publishes between candidate *k* and
-    candidate *k+1* is attested by nothing for the candidates already behind it.
-    Re-gathering per candidate would close that window in one direction and open a
-    wider one in the other — a scan per candidate on a machine with two hundred
-    sessions, inside a removal pass — so the window is stated rather than closed,
-    and it is bounded by what the caller snapshot BEFORE the pass began: a tree
-    named by a record that existed then is not removed at all.
-
-    AN INCOMPLETE READ IS NOT A REASON TO ATTEST LESS. The flag is dropped here on
-    purpose: an unreadable record means fewer victims can be NAMED, and a marker
-    written for the ones this read did see is still a name where there would
-    otherwise be none. The prune does not reach this function at all on an
-    incomplete read — it removes nothing — so this is the in-place install's own
-    path, where the choice is "name what we can" or "name nothing".
+    Destructive generation collection needs the same read's references AND
+    gaps. Dropping gaps was acceptable for best-effort attribution, never for
+    deciding whether a tree may be removed. No process-lifetime guarantee is
+    implied by a complete census; later or undiscoverable consumers remain a
+    separate admission/removal problem.
     """
     index: list[tuple[Any, Path]] = []
+    roots: list[Path] = []
+    gaps: list[str] = []
     for config_root in _config_roots():
-        records, _gaps = _records_under(config_root)
-        for record, _value in records:
+        records, missing = _records_under(config_root)
+        gaps.extend(missing)
+        for record, value in records:
             index.append((record, config_root))
-    return index
+            roots.append(_real(Path(value)))
+    return index, tuple(roots), tuple(gaps)
+
+
+def _record_index() -> list[tuple[Any, Path]]:
+    """Best-effort attribution index; callers authorizing removal need status."""
+    return _record_index_with_status()[0]
 
 
 def note_doomed_runtimes(
@@ -4477,8 +4887,9 @@ def note_doomed_runtimes(
     the returned list is the records a marker was actually written for and not the
     records that named the tree.
 
-    ``records`` lets a caller that has already made the traversal hand it over; the
-    prune does, so one removal pass costs one scan rather than one per candidate.
+    ``records`` lets a caller hand over the exact traversal used for its
+    decision. The prune now checks a fresh complete census per candidate and
+    vetoes removal whenever that same read names the tree.
 
     THE RETURN VALUE IS ``(record, config root)`` PAIRS, not bare records, and the
     second element is carried for the one caller that has to take an attestation
@@ -4487,14 +4898,11 @@ def note_doomed_runtimes(
     ``control.withdraw_involuntary_stop``, which the prune and the in-place install
     call when the act they attested does not complete).
 
-    THE ONLY TREE THIS CAN STILL FIRE FOR is one the reader could not see, because a
-    tree any record names is now kept by :func:`prune_generations` itself. The window
-    that remains is real rather than theoretical: the caller takes its ``referenced``
-    snapshot before the removal pass, so a runtime that publishes its boot record in
-    between — the ~1.2 s a starting runtime spends with no heartbeat — is named by the
-    fresh index here and by nothing in that snapshot. This is the SECOND line of
-    defence for exactly the case the first one cannot see, and its output is what turns
-    a lost race from an unattributed wave into a named act.
+    An attestation is not permission to delete a referenced generation. The
+    collector's fresh census is a veto before this call, including references
+    absent from its initial snapshot. Consumers publishing after that final
+    census, or absent from all supported namespaces, still require a lifetime
+    lease design; attribution alone does not make their removal safe.
     """
     target = _real(tree)
     attested: list[tuple[Any, Path]] = []
@@ -4938,20 +5346,29 @@ def prune_generations(
     order — the in-flight rule below — and that direction is fail-closed (a
     fresher mtime keeps the tree).
 
-    EVERY REMOVAL IS ATTESTED FIRST (:func:`note_doomed_runtimes`), because this is
-    the one place in the harness that deletes an install out from under runtimes
-    that are importing from it: a live record can only protect a tree the reader
-    COULD SEE, and the incidents where it did not — a boot record in its first
-    second, a record already reaped to the sidecar — are exactly the ones that left
-    no artifact naming an actor. ``actor`` is the front end's own name for the
-    request (see :data:`ACTOR_PRUNE`), recorded in the marker beside the acting
-    process's pid.
+    EVERY CANDIDATE GETS A FRESH CENSUS IMMEDIATELY BEFORE REMOVAL, AND A
+    REFERENCE IT FINDS VETOES THE REMOVAL. The ``referenced`` snapshot the caller
+    passes is taken before the pass, so a runtime that publishes its boot record
+    afterwards — or between two candidates — is invisible to it. The per-candidate
+    read (:func:`_record_index_with_status`) keeps the candidate when a record
+    names it and also when any namespace could not be read, and a candidate that
+    survives is never attested (a marker for a tree that survives would be a false
+    attribution).
 
-    Deletion is what makes the layout affordable rather than a leak — each
-    generation is a whole venv — so it runs after every successful install as
-    well as on demand from ``lop install prune``. Removals are returned rather
-    than only logged, because both callers report them: a silent 136 MB delete is
-    not something this tool gets to do. The KEEPS are returned too, with their
+    WHAT THIS DOES NOT GIVE. It is a census, not a lease: a runtime that publishes
+    after the final read, or one no supported namespace describes (a resource
+    helper, an attached process), is not protected, and nothing here claims
+    otherwise. It also does not name who removed a tree: ``actor`` is the front
+    end's own name for the request (see :data:`ACTOR_PRUNE`), recorded in a marker
+    only when :func:`note_doomed_runtimes` still finds a runtime to attest, which
+    the veto above now makes rare.
+
+    THIS RUNS ONLY ON DEMAND (``lop install prune``) and, as ``dry_run``, from
+    capacity measurement. No update tail calls it: automatic collection is frozen
+    in the PyPI, snapshot and mesh promotion paths. Deletion is what keeps the
+    layout from being a leak — each generation is a whole venv — so removals are
+    returned rather than only logged, because the caller reports them: a silent
+    136 MB delete is not something this tool gets to do. The KEEPS are returned too, with their
     reasons, for the same argument in the other direction (design review D3).
 
     ``.lop-source``-less generations are skipped unless they are older than
@@ -5084,11 +5501,10 @@ def prune_generations(
 
     removed: list[Path] = []
     decisions: list[PruneDecision] = []
-    # GATHERED AT MOST ONCE, AND ONLY IF SOMETHING IS ACTUALLY REMOVED: a caller
-    # that already passed ``referenced`` has paid for one traversal, and a prune
-    # that keeps everything must not pay for a second one to attest nothing. The
-    # same traversal is reused for every doomed candidate below.
-    index: list[tuple[Any, Path]] | None = None
+    # Keep paths pay no additional scan. Each removal candidate gets a fresh
+    # census: a boot record can appear after the caller's initial snapshot or
+    # after an earlier candidate. That newly observed holder is a veto, never
+    # merely a reason to record the harm before deleting its generation.
     for path in entries:
         resolved = _real(path)
         if install_transaction.attempt_protected(path):
@@ -5101,7 +5517,7 @@ def prune_generations(
             decisions.append(PruneDecision(path, False, "the tree this process is running from"))
             continue
         if resolved in named_by_a_record:
-            decisions.append(PruneDecision(path, False, "a live or saved session record names it"))
+            decisions.append(PruneDecision(path, False, _RECORD_NAMES_REASON))
             continue
         removal_reason = "superseded, unreferenced"
         if not _marker(path):
@@ -5127,8 +5543,15 @@ def prune_generations(
             # attested below either — with no removal there is no act to name.
             decisions.append(PruneDecision(path, False, _UNREADABLE_RECORD_REASON))
             continue
-        if index is None:
-            index = _record_index()
+        index, fresh_roots, fresh_gaps = _record_index_with_status()
+        if fresh_gaps:
+            references_complete = False
+            references_gaps = tuple(dict.fromkeys((*references_gaps, *fresh_gaps)))
+            decisions.append(PruneDecision(path, False, _UNREADABLE_RECORD_REASON))
+            continue
+        if any(root == resolved or resolved in root.parents for root in fresh_roots):
+            decisions.append(PruneDecision(path, False, _RECORD_NAMES_REASON))
+            continue
         # DRY RUN STOPS HERE: the decision is made, the tree is not touched, and
         # no attestation is written — a marker for a tree that survives would be a
         # false attribution, the same argument the keep paths above make.
@@ -5136,15 +5559,15 @@ def prune_generations(
             removed.append(path)
             decisions.append(PruneDecision(path, True, removal_reason))
             continue
-        # ATTEST BEFORE THE TREE GOES. This is the one place in the harness that
-        # deletes an install out from under runtimes that are importing from it,
-        # and until this call existed the deletion was silent: the runtimes died
-        # torn and wrote no exit record of their own (AGENTS.md, "Installing over a
-        # live fleet"), so the artifact an investigation needs was the one nobody
-        # wrote. It goes HERE rather than at the top of the function because a
-        # candidate that is kept — by the pointer, by a record, by the age rule, by
-        # the margin — is not a doom, and a marker for a tree that survives would be
-        # a false attribution, which is worse than none.
+        # ATTEST BEFORE THE TREE GOES, for whatever the fresh census above still
+        # leaves to attest. That set is now normally empty: any record that names
+        # this tree vetoed it, and ``note_doomed_runtimes`` reads the same index
+        # with the same match, so it is expected to find nothing; it stays as a
+        # second line rather than being removed in a comment-only change. It sits
+        # HERE rather than at the top because a kept candidate is not a doom, and a
+        # marker for a tree that survives would be a false attribution. Records
+        # published after the census above, before the removal below, are not
+        # covered: that window is real and bounded, not closed.
         attested = note_doomed_runtimes(
             path,
             mechanism=MECHANISM_GENERATION_PRUNE,
@@ -6896,6 +7319,7 @@ def refresh_service_daemons_after_upgrade(*, deadline: float | None = None) -> D
                 "installed daemons were not refreshed; run lop browser restart, "
                 "lop mobile restart and lop tunnel restart to pick it up",
             ),
+            statuses=_completed_statuses(name, ()),
         )
     argv, executable = invocation
     timeout = _bounded_timeout(_DAEMON_REFRESH_TIMEOUT_S, deadline)
@@ -6917,18 +7341,20 @@ def refresh_service_daemons_after_upgrade(*, deadline: float | None = None) -> D
         return DaemonRefresh(
             name,
             warnings=(_bound_fired_sentence(exc.stdout, exc.stderr, bound=timeout),),
-            statuses=_child_daemon_statuses(exc.stdout, exc.stderr),
+            statuses=_completed_statuses(name, _child_daemon_statuses(exc.stdout, exc.stderr)),
         )
     except Exception as exc:  # noqa: BLE001 — a failed repair must not fail the update
         warning = f"warning: could not refresh installed daemons: {exc}"
-        return DaemonRefresh(name, warnings=(warning,))
+        return DaemonRefresh(name, warnings=(warning,), statuses=_completed_statuses(name, ()))
     lines = _result_lines(completed.stdout)
     statuses = _child_daemon_statuses(completed.stdout, completed.stderr)
     if completed.returncode != 0:
         tail = "\n".join(_result_lines(completed.stderr or completed.stdout))
         detail = tail.splitlines()[-1][:200] if tail else f"exit {completed.returncode}"
         warning = f"warning: could not refresh installed daemons: {detail}"
-        return DaemonRefresh(name, warnings=(warning,), statuses=statuses)
+        return DaemonRefresh(
+            name, warnings=(warning,), statuses=_completed_statuses(name, statuses)
+        )
     warnings = _result_lines(completed.stderr)
     return DaemonRefresh(name, lines=lines, warnings=warnings, statuses=statuses)
 
@@ -7108,6 +7534,10 @@ def refresh_daemons_after_upgrade() -> list[DaemonRefresh]:
             results[key] = DaemonRefresh(
                 label,
                 warnings=(f"warning: the {label} refresh failed unexpectedly: {exc}",),
+                # A STATUS-LESS ENTRY IS NOT AN ABSENT ONE (review round 1, B3):
+                # without this, the other unit's statuses were the whole report
+                # and a half-measured stage could read as complete.
+                statuses=(DaemonStatus(label, "failed"),),
             )
 
     def _services() -> None:
@@ -7637,6 +8067,17 @@ def _run_daemon_repair(*, services_only: bool) -> int:
     child reports a refusal as a printed warning and exit 0, which the caller cannot
     tell from "nothing needed repairing"). A repair that is not allowed to rewrite a
     plist must not restart the operator's daemon as a consolation.
+
+    NO REPORTS ON THIS FLAG'S STDOUT, DELIBERATELY. This command is spawned by
+    :func:`refresh_daemons_after_upgrade` with its stdout as a LINE PROTOCOL —
+    ``refreshing:`` announcements and ``daemon_report:`` results — which the
+    parent parses and re-emits as the update's summary; the parent also copies
+    the child's last line into its one-line failure sentence. A machine report
+    here would be a third protocol on that channel and could be spliced into a
+    human sentence. The failure is not silent: every exit code is turned into a
+    ``daemons[].status`` row by the parent, and an update that then continues
+    reports it (``central_services_complete`` false, reason named). The report
+    belongs to the update run, and that is where it is emitted.
     """
     code = daemons_refresh_command()
     if services_only or _repair_refusal() is not None:
@@ -7677,6 +8118,13 @@ def mobile_refresh_command() -> int:
     ``not-addressable`` outcome) and the bounce succeeded — or was skipped because
     the daemon was already on the current generation; 1 when either half did — the
     last stderr line is what the parent's failure sentence carries.
+
+    NO REPORT LINE, for the same protocol reason as :func:`_run_daemon_repair`:
+    this command IS a child of :func:`refresh_mobile_after_upgrade`, whose
+    stdout carries ``daemon_report:`` lines and whose last stderr line becomes
+    the parent's failure sentence. The parent turns this exit into
+    ``daemons[].status = "failed"``, which is the machine-readable trace the
+    update's own report carries.
     """
     refusal = _repair_refusal()
     if refusal is not None:
@@ -7854,6 +8302,20 @@ def _serve_moves(before: dict[int, Any], after: dict[int, Any]) -> tuple[ServeMo
     return tuple(moves)
 
 
+def _completed_statuses(name: str, statuses: tuple[DaemonStatus, ...]) -> tuple[DaemonStatus, ...]:
+    """A refresh unit that did not complete reports ITSELF as failed.
+
+    A unit that could not run (its interpreter vanished, the spawn raised, the
+    bound killed it before it named a daemon) has no per-daemon rows to report.
+    That must not read as "nothing to report": the update report's ``daemons``
+    is the census, and an empty census is exactly what made
+    ``central_services_complete`` able to be right about a partial stage
+    (review round 1, B3). ``failed`` is the vocabulary's own word for a repair
+    that was attempted and did not complete.
+    """
+    return statuses or (DaemonStatus(name, "failed"),)
+
+
 def _collect_daemon_statuses(refreshes: Sequence[Any]) -> tuple[DaemonStatus, ...]:
     """Every machine-readable status the given refresh entries carry, in order.
 
@@ -7864,7 +8326,7 @@ def _collect_daemon_statuses(refreshes: Sequence[Any]) -> tuple[DaemonStatus, ..
     return tuple(status for refresh in refreshes for status in refresh.statuses)
 
 
-def _services_stage(*, wait_s: float | None = None) -> StageReport:
+def _services_stage(*, wait_s: float | None = None, supervised: bool = True) -> StageReport:
     """Bring the non-runtime fleet onto the build the pointer now names.
 
     THE STEP THAT MAKES AN UPDATE ACTUALLY AN UPDATE. Replacing the install used
@@ -7886,6 +8348,11 @@ def _services_stage(*, wait_s: float | None = None) -> StageReport:
     ``ServiceRefresh`` pass-through. A refusal or a failed stage returns an
     EMPTY report — the warning already carries what happened, and the report
     must not claim moves nobody made.
+
+    ``supervised=False`` is :func:`move_serve_after_upgrade`'s arm (the mesh
+    member pass): the same refusal, the same rolling contract and the same
+    serve reload, minus the supervised units that caller must roll after its
+    reply. See ``services.restart_services`` for why that half cannot run here.
     """
     from local_operator.services import print_refreshes, restart_services
 
@@ -7933,11 +8400,14 @@ def _services_stage(*, wait_s: float | None = None) -> StageReport:
     # contract, so that is all the argument carries.
     rolling = _is_generation_install()
     try:
-        refreshes = (
-            restart_services(rolling=rolling)
-            if wait_s is None
-            else restart_services(wait_s=wait_s, rolling=rolling)
-        )
+        # Only the arguments a caller set are passed: `restart_services`'s own
+        # defaults stay its own, and the `lop update` call is unchanged.
+        options: dict[str, Any] = {"rolling": rolling}
+        if wait_s is not None:
+            options["wait_s"] = wait_s
+        if not supervised:
+            options["supervised"] = False
+        refreshes = restart_services(**options)
     except Exception as exc:  # noqa: BLE001 — the install already succeeded
         print(
             f"warning: the installed services could not be moved onto the new build: {exc}; "
@@ -7950,6 +8420,35 @@ def _services_stage(*, wait_s: float | None = None) -> StageReport:
         serve=_serve_moves(before, _live_serve_records()),
         daemons=_collect_daemon_statuses(refreshes),
     )
+
+
+def move_serve_after_upgrade(*, wait_s: float | None = None) -> StageReport:
+    """Move this machine's ``serve`` daemons onto the build just installed.
+
+    THE ROLLOUT'S HALF OF ``lop update``'s SERVICES STAGE, and deliberately
+    that stage itself rather than a copy (2026-10-28, lop-remote-node-2): a
+    mesh rollout installed 0.91.1 and then 0.91.2 on a member, restarted its
+    relay, audited ``update_completed`` — and left ``lop serve`` running the
+    previous build both times, because the member pass rolled only the
+    supervised units. ``lop update`` on the same node moved serve in place.
+    A remote node has no operator watching it, so a serve left behind runs
+    pre-fix code silently until somebody happens to read ``lop services
+    status``; the move has to be the pass's own act.
+
+    Same refusal (:func:`_services_refusal`), same rolling contract and same
+    keep-conversations reload as the ``lop update`` path; only the supervised
+    units are left out, because the member pass runs INSIDE the relay those
+    units include and rolls them after its reply. Never raises; the caller
+    judges the outcome by reading the fleet afterwards
+    (``services.stale_serve_daemons``), never from this report alone — a
+    refused or failed stage returns an empty report, which is not a verdict.
+    """
+    try:
+        report = _services_stage(wait_s=wait_s, supervised=False)
+    except Exception:  # noqa: BLE001 — the install already succeeded
+        logger.warning("the serve move after the update did not run", exc_info=True)
+        return StageReport()
+    return report if report is not None else StageReport()
 
 
 def _run_services_tail(*, services: bool) -> StageReport:
@@ -7969,6 +8468,134 @@ def _run_services_tail(*, services: bool) -> StageReport:
     return StageReport(daemons=_collect_daemon_statuses(refreshes))
 
 
+def _runtime_census(image: Path | None) -> tuple[dict[str, int], bool, tuple[str, ...]]:
+    """Count live session runtimes by the tree they name, and whether the read was whole.
+
+    THE NAMESPACE BUG THIS REPLACES (2026-10-24, `lop-update v0.90.0` report):
+    the listing asked for ``"run"`` while ``registry.scan`` reads ``RUN_DIRNAME``
+    (``run/mobile``), so the verdict compared **0 names against 13 parsed rows**
+    and answered "unreadable" on every host with a session. ``measured`` was
+    therefore always false and ``central_services_complete`` could never be true
+    there, whatever the machine actually looked like.
+
+    WHY NOT ``_records_under``: that reader answers a PRUNE's question — which
+    trees are named by ANY artifact — and deliberately merges the reaped sidecars
+    (records whose process is dead; that is why they were moved there) and the
+    boot records (whose own contract says they are NOT liveness evidence, being
+    left behind by unclean exits too). A runtime CENSUS must not count a dead
+    session or an unclean exit's leftover as a live runtime, so it uses the
+    registry's own ``(record, state)`` pairs — the one place liveness is answered
+    — and brackets them with the listing of the SAME namespace.
+
+    ``run/host`` IS READ TOO, for the ~1.2 s window in which a runtime has a boot
+    record and no heartbeat yet: it appears nowhere else. A boot record is counted
+    ONLY while its pid is alive, and deduped by session id against the live
+    records (a healthy session eventually appears in both namespaces). Its own
+    docstring forbids reading the record as liveness evidence on its own; the pid
+    check is what makes this a measurement rather than a belief.
+    """
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import (
+        HOST_RUN_DIRNAME,
+        RUN_DIRNAME,
+        SessionRecord,
+    )
+
+    counts = {"known_old_busy": 0, "known_old_idle": 0, "unknown": 0}
+    measured = True
+    reasons: list[str] = []
+
+    def count(record: Any) -> None:
+        pinned = str(getattr(record, "install_root", "") or "")
+        if not pinned or image is None:
+            counts["unknown"] += 1
+        elif not Path(pinned).resolve().is_relative_to(generations_dir().resolve()):
+            counts["unknown"] += 1
+        elif Path(pinned).resolve() != image.resolve():
+            busy = bool(getattr(record, "busy", False))
+            counts["known_old_busy" if busy else "known_old_idle"] += 1
+
+    for root in _config_roots():
+        # DEDUPED BY PID, not session id: a RUNTIME is a process, and the same
+        # process is the one thing that can appear in both namespaces (its boot
+        # record, then its live record). Two pids that happen to share a session
+        # id are two processes — a resume window can publish both — and a census
+        # of runtimes must count both.
+        seen: set[int] = set()
+        unreachable = _unreachable_namespace(root, RUN_DIRNAME)
+        if unreachable is None:
+            try:
+                # THE LISTING AND THE SCAN TAKE THE SAME NAME. ``RUN_DIRNAME`` is
+                # the namespace ``registry.scan`` actually reads; spelling
+                # anything else here is the defect this helper exists for.
+                before = _entry_names(root, RUN_DIRNAME)
+                rows = registry.scan(
+                    root, parse=SessionRecord.from_json, reap=False, check_zombie=False
+                )
+                after = _entry_names(root, RUN_DIRNAME)
+                unreadable, note = _verdict_from_listing(
+                    root / RUN_DIRNAME, before, after, len(rows)
+                )
+                if unreadable:
+                    measured = False
+                    reasons.append(note or f"{root / RUN_DIRNAME} could not be read whole")
+                for record, state in rows:
+                    if state == "stale":
+                        # A dead pid names no running runtime. This is the ONLY
+                        # state that is excluded.
+                        continue
+                    pid = int(getattr(record, "pid", 0))
+                    seen.add(pid)
+                    if state in ("live", "wedged"):
+                        # ``wedged`` IS A LIVE PROCESS: pid alive, owner stopped
+                        # beating (``registry``'s own vocabulary). A long turn on
+                        # an old generation is exactly the population
+                        # ``known_old_busy`` exists for, so it is counted in its
+                        # busy/idle bucket — not ``unknown``, which means "live but
+                        # its tree cannot be classified".
+                        count(record)
+                    else:
+                        # A state this build does not know: the record parsed, so a
+                        # runtime likely exists, but its liveness cannot be placed.
+                        counts["unknown"] += 1
+            except Exception:  # noqa: BLE001 — unreadable is a reason, never a zero
+                measured = False
+                reasons.append(f"{root / RUN_DIRNAME} could not be read")
+                logger.debug("runtime census unreadable under %s", root, exc_info=True)
+        elif unreachable.unreadable:
+            # AN OBSTRUCTED NAMESPACE IS A GAP, not an empty census: a regular
+            # file where ``run/mobile`` should be is the shape whose records are
+            # gone while every runtime still importing a generation has nothing
+            # left to name it (``_unreachable_namespace``).
+            measured = False
+            reasons.append(unreachable.note or f"{root / RUN_DIRNAME} could not be read")
+        # The pre-heartbeat window: a starting runtime is visible only here.
+        boot = _boot_records_under(root)
+        if boot.unreadable:
+            measured = False
+            reasons.append(boot.note or f"{root / HOST_RUN_DIRNAME} could not be read")
+        for record, _value in boot.entries:
+            try:
+                if not registry.pid_alive(record.pid):
+                    continue
+                pid = int(getattr(record, "pid", 0))
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                # ``count`` resolves the named tree; a path that cannot be
+                # resolved must degrade the CENSUS, not escape this helper and
+                # swallow the frozen report line (review round 1, R1-2).
+                count(record)
+            except Exception:  # noqa: BLE001 — one record costs the gap, not the report
+                measured = False
+                reasons.append(
+                    f"{root / HOST_RUN_DIRNAME} record {getattr(record, 'pid', '?')} "
+                    "names a tree this build could not read"
+                )
+                logger.debug("runtime census: unreadable boot record under %s", root, exc_info=True)
+    return counts, measured, tuple(reasons)
+
+
 def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any]:
     """Loaded/serving/pending are measurements, never aliases for current.
 
@@ -7976,41 +8603,31 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
     and one row per supervised status the stage reported (D2). The supervised rows
     used to be the ``pending`` ones only, so a generation install — the layout
     this host runs — recorded nothing about units that had just been moved, or
-    about the ones that were not. ``refreshed`` proves a new pid, not the build
-    (see ``launchd.restart_if_build_moved``'s Q5 note), which is why
-    ``central_services_complete`` stays False below.
+    about the ones that were not.
+
+    ``central_services_complete`` USED TO BE THE LITERAL ``False``, which made it
+    a constant rather than a reading. The 2026-10-24 0.89.0 run proved the
+    difference: it recorded ``core_installed: true`` and
+    ``central_services_complete: false`` while the report's own ``serve`` row
+    said the daemon had moved to 0.89.0 and all five supervised units said
+    ``refreshed`` — two contradictory accounts of one run. It is now computed
+    from those same rows, and ``central_services_incomplete_reason`` names which
+    condition failed, so the pair can never read as a contradiction: True means
+    every reported daemon is ``refreshed``/``already``, every serving row is
+    ``current``, and BOTH censuses were actually measured; anything less is
+    False with a reason.
     """
     from local_operator import services
-    from local_operator.session.runtime import registry
-    from local_operator.session.runtime.types import SessionRecord
 
     current = current_generation()
     image = _generation_install_root(current) if current is not None else None
-    counts = {"known_old_busy": 0, "known_old_idle": 0, "unknown": 0}
-    measured = True
-    for root in _config_roots():
-        try:
-            before = _entry_names(root, "run")
-            rows = registry.scan(
-                root, parse=SessionRecord.from_json, reap=False, check_zombie=False
-            )
-            after = _entry_names(root, "run")
-            unreadable, _note = _verdict_from_listing(root / "run", before, after, len(rows))
-            measured = measured and not unreadable
-            for record, state in rows:
-                if state == "stale":
-                    continue
-                pinned = getattr(record, "install_root", "")
-                if state != "live" or not pinned or image is None:
-                    counts["unknown"] += 1
-                elif not Path(pinned).resolve().is_relative_to(generations_dir().resolve()):
-                    counts["unknown"] += 1
-                elif Path(pinned).resolve() != image.resolve():
-                    counts["known_old_busy" if record.busy else "known_old_idle"] += 1
-        except Exception:  # noqa: BLE001 — unknown never becomes []/zero
-            measured = False
+    counts, measured, census_reasons = _runtime_census(image)
     serving: list[dict[str, Any]] = []
     serving_measured = True
+    # DISTINCT FROM ``serving_measured``: whether the census could be READ at
+    # all. An empty-but-readable listing is not an unreadable one, and the
+    # reason string must not call it that (review round 1, B3).
+    serving_readable = True
     try:
         from local_operator.server import registry as serve_registry
         from local_operator.session.runtime.types import SERVE_RUN_DIRNAME
@@ -8024,6 +8641,7 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
                 root / SERVE_RUN_DIRNAME, before, after, len(rows)
             )
             serving_measured = serving_measured and not unreadable
+            serving_readable = serving_readable and not unreadable
             serving_rows.extend((record, state) for record, state in rows if state != "stale")
         if not serving_rows:
             # Empty discovery does not prove no pre-protocol API is serving.
@@ -8048,7 +8666,45 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
             )
     except Exception:  # noqa: BLE001 — failed inventory is explicit
         serving_measured = False
+        serving_readable = False
     supervised = [{"name": item.name, "state": item.status, "reason": ""} for item in stage.daemons]
+    # Completeness is a CONJUNCTION of measurements, never an assumption:
+    # a census that could not be read cannot prove anything, and an empty
+    # daemon list is not an authoritative "all clear" (the same rule the old
+    # constant over-applied by refusing every run).
+    incomplete: list[str] = []
+    if not stage.daemons:
+        incomplete.append("no supervised daemons reported")
+    for item in stage.daemons:
+        if item.status in ("refreshed", "already"):
+            continue
+        # THE WORD IS NOT A SYNONYM FOR failed (review round 1, B3):
+        # unsupervised means no LaunchAgent owns the daemon, pending means the
+        # stage did not finish it, and an entry with no usable status is the
+        # census saying it could not answer.
+        if item.status == "failed":
+            incomplete.append(f"daemon {item.name} failed")
+        elif item.status == "unsupervised":
+            incomplete.append(f"daemon {item.name} is unsupervised")
+        elif item.status == "pending":
+            incomplete.append(f"daemon {item.name} is pending")
+        else:
+            incomplete.append(f"daemon {item.name} reported no usable status ({item.status!r})")
+    pending_serve = [row for row in serving if row["state"] != "current"]
+    if pending_serve:
+        incomplete.append(f"{len(pending_serve)} serving row(s) pending")
+    if not serving_measured:
+        incomplete.append(
+            "serving census unreadable" if not serving_readable else "no serving rows discovered"
+        )
+    if not measured:
+        # Name the namespace(s) the read could not finish: "unreadable" alone
+        # sends the reader to the wrong log (review: the 0-listed/13-parsed line
+        # named ``run`` while the records lived in ``run/mobile``).
+        detail = "; ".join(census_reasons)
+        incomplete.append(
+            f"runtime census unreadable: {detail}" if detail else "runtime census unreadable"
+        )
     return {
         "contract": "rolling-no-kill-v1",
         "mode": "rolling-immutable",
@@ -8061,9 +8717,10 @@ def _rolling_receipt(promoted: Path | None, stage: StageReport) -> dict[str, Any
             "version": generation_version(current),
         },
         "core_installed": promoted is not None and generation_version(promoted) != "",
-        # Unsupported supervisor units / old12 FIRST activation are not an
-        # empty authoritative census. Never announce overall COMPLETE.
-        "central_services_complete": False,
+        "central_services_complete": not incomplete,
+        # Always present, "" when complete: the sibling that stops the boolean
+        # from reading as an observation the run never made.
+        "central_services_incomplete_reason": "; ".join(incomplete),
         "serving_measured": serving_measured,
         "services": serving + supervised,
         "runtimes": {
@@ -8109,6 +8766,7 @@ def _emit_update_report(
     payload = {
         "update_report": {
             "schema": _UPDATE_REPORT_SCHEMA,
+            "ok": True,
             "install_version": install_version,
             "target": target,
             "serve": [
@@ -8203,8 +8861,10 @@ def _generation_upgrade(
     _print_current_generation()
     # Match perform_upgrade's no-collection tail. A snapshot/controller caller
     # must not silently reintroduce deletion after immutable promotion succeeds.
+    _reach("services")
     stage = _run_services_tail(services=services)
     _roll_after_update(before=before_version, after=install_version, via=via, roll=roll)
+    _reach("report")
     _emit_update_report(
         install_version=install_version,
         target=target,
@@ -8247,20 +8907,19 @@ def _snapshot_command(
     """
     kind = install_kind()
     if kind is InstallKind.EDITABLE:
-        print(editable_refusal(), file=sys.stderr)
-        return 1
+        return _fail("environment", "refused", editable_refusal())
     if kind is not InstallKind.UV_TOOL:
         # The generation layout is uv-tool only, and so is this command: a pip
         # or pipx install has no per-generation root for a snapshot to land in,
         # and pretending otherwise would rewrite site-packages under the
         # running fleet — the failure this change exists to remove.
-        print(
+        return _fail(
+            "environment",
+            "refused",
             "lop update --from-snapshot installs into a uv-tool generation, "
             f"and this install is {kind.value} — install it with `uv tool "
             "install --force --from <dir> local-operator` instead.",
-            file=sys.stderr,
         )
-        return 1
     # THE HOOK'S ``before`` (S3b), captured before any install work: by the
     # time the hook runs, ``disk_build`` describes the generation just
     # installed, and the trigger's strictly-newer gate must compare the MOVE,
@@ -8269,11 +8928,14 @@ def _snapshot_command(
     # ref has nothing for members to do (note §3, condition 1).
     stamp_before = disk_build()
     before_version = str(stamp_before.version) if stamp_before is not None else ""
+    _reach("download")
     try:
         snapshot = resolve_snapshot(value)
     except UpdateError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+        # These are input refusals (not a directory, not a ref, no
+        # pyproject.toml), not transfer failures: the fetch, if any, succeeded
+        # and the updater declined what it found.
+        return _fail("download", "refused", str(exc))
     try:
         # THE DOWNGRADE GATE, asked before the route is even classified: a
         # refusal must not be buried under (or pay for) the route announcement
@@ -8283,10 +8945,17 @@ def _snapshot_command(
         # does.
         downgrade = classify_snapshot_downgrade(snapshot, allow_downgrade=allow_downgrade)
         if downgrade.is_downgrade:
-            for line in snapshot_downgrade_lines(downgrade, value=value):
-                print(line, file=sys.stderr)
+            lines = snapshot_downgrade_lines(downgrade, value=value)
             if not downgrade.allowed:
-                return 1
+                return _fail(
+                    "check",
+                    "refused",
+                    lines[0] if lines else "refusing to install an older build",
+                    detail="\n".join(lines[1:]),
+                    human="\n".join(lines),
+                )
+            for line in lines:
+                print(line, file=sys.stderr)
         # THE ROUTE DECISION, made before any install work so the loud fallback
         # notice (or the wheel announcement) cannot end up buried behind a
         # bundle build or a refusal — see :func:`classify_snapshot_install` for
@@ -8311,15 +8980,33 @@ def _snapshot_command(
         note = route.reason
         if downgrade.allowed:
             note = " ".join(part for part in (note, DOWNGRADE_NOTE) if part)
+        # THE CANDIDATE THIS RUN PROMOTED, kept for the report. The PyPI path
+        # collects the same value through ``on_promoted``; without it here the
+        # rolling receipt could only read the POINTER, and a snapshot install
+        # that landed correctly still reported ``core_installed: false`` and an
+        # empty ``promoted`` (2026-10-24, v0.90.0 wheel route). "This operation
+        # promoted a candidate" is not a property of the pointer — a concurrent
+        # actor may have flipped it — so the value travels from the install call.
+        promoted_generation: Path | None = None
         if route.install_from_wheel:
             # THE PyPI PATH: no source tree and no mobile-bundle step (the
             # wheel ships the built bundle), and the marker records
             # ``pypi <version>`` — this build genuinely has no git ref.
             try:
-                install_into_generation(None, version=route.version, note=note)
+                promoted_generation = install_into_generation(
+                    None, version=route.version, note=note
+                )
             except UpdateError as exc:
-                print(str(exc), file=sys.stderr)
-                return 1
+                # The sibling of the source-tree branch below: this route used
+                # to print and return, which was the one failing update exit
+                # with no report at all (review round 1, B1).
+                step = _progress().step
+                return _fail(
+                    step,
+                    _classify_failure(step, exc),
+                    str(exc),
+                    target=route.version,
+                )
             installed_version = route.version
         else:
             # The mobile bundle, built INTO the snapshot before uv copies it: a
@@ -8403,15 +9090,21 @@ def _snapshot_command(
                 # (range) as a single paragraph of nested parentheses — a wall, at the
                 # one moment the reader's portal has already broken (design round 1,
                 # D1/D3).
-                print(
+                return _fail(
+                    "environment",
+                    "refused",
                     "lop-update: refusing to install this build — it has no mobile "
-                    f"web UI to serve (bundle status above).\n  Fix the build with {remedy}",
-                    file=sys.stderr,
+                    "web UI to serve (bundle status above).",
+                    detail=f"Fix the build with {remedy}",
+                    human=(
+                        "lop-update: refusing to install this build — it has no mobile "
+                        f"web UI to serve (bundle status above).\n  Fix the build with {remedy}"
+                    ),
                 )
-                return 1
+            _note_versions(target=snapshot.version)
             print(f"installing {snapshot.install_label} ({shape})")
             try:
-                install_into_generation(
+                promoted_generation = install_into_generation(
                     snapshot.path,
                     version=snapshot.version,
                     commit=snapshot.commit,
@@ -8420,8 +9113,13 @@ def _snapshot_command(
                     note=note,
                 )
             except UpdateError as exc:
-                print(str(exc), file=sys.stderr)
-                return 1
+                step = _progress().step
+                return _fail(
+                    step,
+                    _classify_failure(step, exc),
+                    str(exc),
+                    target=snapshot.version,
+                )
             installed_version = snapshot.version
     finally:
         if snapshot.temporary:
@@ -8440,10 +9138,11 @@ def _snapshot_command(
         roll=roll,
         before_version=before_version,
         via="snapshot",
+        promoted_generation=promoted_generation,
     )
 
 
-def update_command(
+def _update_command_body(
     *,
     check: bool = False,
     refresh_daemons: bool = False,
@@ -8471,9 +9170,22 @@ def update_command(
     ``--refresh-mobile`` (:func:`mobile_refresh_command`), which owns that daemon's
     plist repair and its bounce as one actor.
 
-    A successful exit prints ONE machine-readable line last (:func:`_emit_update_report`),
-    the ``update_report`` the desktop app parses; the human sentences above it
-    are unchanged and it is additive to them.
+    A successful UPDATE exit prints ONE machine-readable line last
+    (:func:`_emit_update_report`), and every failing update exit prints one too
+    (:func:`_emit_update_failure`); the human sentences above it are unchanged
+    and both are additive to them.
+
+    THE TWO HIDDEN REFRESH FLAGS ARE NOT UPDATE RUNS, and they are the one
+    exception: ``--refresh-daemons`` / ``--refresh-mobile`` are children whose
+    stdout is the parent's marker protocol (``refreshing:`` / ``daemon_report:``
+    lines, see :data:`_PROGRESS_PREFIX`). A JSON line there would be a third
+    protocol on the same channel, and the parent copies the child's LAST line
+    into its one-line failure sentence — so it would either corrupt the parse
+    or the sentence. Their failure is carried by the parent's own report
+    instead: the refresh entry that did not complete appears as
+    ``daemons[].status = "failed"`` and, for the update's run,
+    ``central_services_complete`` is false with a reason naming it. See
+    :func:`_run_daemon_repair`.
 
     ``--from-snapshot`` is checked before the PyPI call for the same reason: it
     installs a build that is already on this machine, so a host with no route to
@@ -8489,6 +9201,7 @@ def update_command(
     ever installs NEWER versions, so "allow a downgrade" is a question nothing
     on that path can answer.
     """
+    _begin_update()
     if refresh_daemons:
         return _run_daemon_repair(services_only=services_only)
 
@@ -8497,35 +9210,39 @@ def update_command(
 
     if from_snapshot is not None:
         if check:
-            print("--check compares against PyPI; --from-snapshot installs a tree", file=sys.stderr)
-            return 1
+            return _fail(
+                "check",
+                "refused",
+                "--check compares against PyPI; --from-snapshot installs a tree",
+            )
         return _snapshot_command(
             from_snapshot, services=services, allow_downgrade=allow_downgrade, roll=roll
         )
 
     if allow_downgrade:
-        print(
+        return _fail(
+            "check",
+            "refused",
             "--allow-downgrade applies to --from-snapshot; "
             "the PyPI path only installs newer versions",
-            file=sys.stderr,
         )
-        return 1
 
+    _reach("check")
     result = check_latest(force=True)
+    _note_versions(install_version=result.installed, target=result.latest or "")
     if result.latest is None:
         if result.pending_version is not None:
             # PyPI answered; the release exists and is still publishing.
             # Naming a connection fault here would send the reader to debug
             # a healthy network (UX round 1, M1) — coherent with the desktop
             # app's sentence for the same state.
-            print(
+            return _fail(
+                "check",
+                "publication",
                 f"PyPI has named {result.pending_version} but its files are still "
                 "publishing, so there is no update to install yet — try again in a few minutes",
-                file=sys.stderr,
             )
-        else:
-            print("could not reach PyPI to learn the latest version", file=sys.stderr)
-        return 1
+        return _fail("check", "network", "could not reach PyPI to learn the latest version")
 
     if check:
         if result.behind:
@@ -8533,6 +9250,9 @@ def update_command(
             print(f"latest on PyPI: {result.latest}")
             print("run `lop update` to install")
             return 2
+        # NOT a report exit: ``--check`` answers a question and installs
+        # nothing, so the update report (which says an update ran) stays out.
+        # Exit 2 for "behind" is the documented answer, not a failure.
         print(f"local-operator {result.installed} is the latest")
         return 0
 
@@ -8550,17 +9270,17 @@ def update_command(
         # current build is reported as such and not touched, so the cost of
         # running it on every `lop update` is a health probe per daemon.
         print(f"local-operator {result.installed} is the latest")
+        _reach("services")
         stage = _run_services_tail(services=services)
+        _reach("report")
         _emit_update_report(install_version=result.installed, target=result.latest, stage=stage)
         return 0
 
     kind = install_kind()
     if kind is InstallKind.EDITABLE:
-        print(editable_refusal(), file=sys.stderr)
-        return 1
+        return _fail("environment", "refused", editable_refusal())
     if kind is InstallKind.UNKNOWN:
-        print(unknown_refusal(), file=sys.stderr)
-        return 1
+        return _fail("environment", "refused", unknown_refusal())
 
     if is_git_snapshot():
         print(git_snapshot_notice())
@@ -8569,6 +9289,7 @@ def update_command(
     print(f"upgrading via {installer_label(kind)}…")
     pruned: list[str] = []
     promoted: list[Path] = []
+    _reach("install")
     try:
         installed = perform_upgrade(
             target=result.latest,
@@ -8577,8 +9298,13 @@ def update_command(
             on_promoted=promoted.append,
         )
     except UpdateError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+        step = _progress().step
+        return _fail(
+            step,
+            _classify_failure(step, exc),
+            str(exc),
+            target=result.latest,
+        )
     print(f"installed {installed}")
     # Names the layout, not the build: on a machine with generations the build
     # now lives in its own tree and `current` names it, which is the one fact a
@@ -8590,8 +9316,10 @@ def update_command(
     _print_current_generation()
     for line in pruned:
         print(line)
+    _reach("services")
     stage = _run_services_tail(services=services)
     _roll_after_update(before=result.installed, after=installed, via="update", roll=roll)
+    _reach("report")
     _emit_update_report(
         install_version=installed,
         target=result.latest,
@@ -8599,3 +9327,54 @@ def update_command(
         promoted_generation=promoted[0] if promoted else None,
     )
     return 0
+
+
+def update_command(
+    *,
+    check: bool = False,
+    refresh_daemons: bool = False,
+    services_only: bool = False,
+    refresh_mobile: bool = False,
+    from_snapshot: str | None = None,
+    services: bool = True,
+    allow_downgrade: bool = False,
+    roll: bool = True,
+) -> int:
+    """``lop update``: the body's contract, plus the frozen failure report.
+
+    Every ordinary refusal inside :func:`_update_command_body` returns through
+    :func:`_fail`, which prints the human sentence and the machine-readable
+    line together. This wrapper is the second half of the same guarantee: an
+    ``UpdateError`` that ESCAPES the body (raised by a helper deep enough that
+    the body has no return statement to attach the report to, or by the
+    services tail after a successful install) is reported and turned into
+    exit 1, so no failing exit reaches the process boundary without a report.
+
+    A non-``UpdateError`` is reported with ``kind: unknown`` and the step that
+    was running, then RE-RAISED: an unexpected bug keeps its traceback, because
+    turning a crash into a tidy exit code is how a defect stops being visible.
+    """
+    _begin_update()
+    try:
+        return _update_command_body(
+            check=check,
+            refresh_daemons=refresh_daemons,
+            services_only=services_only,
+            refresh_mobile=refresh_mobile,
+            from_snapshot=from_snapshot,
+            services=services,
+            allow_downgrade=allow_downgrade,
+            roll=roll,
+        )
+    except UpdateError as exc:
+        step = _progress().step
+        return _fail(step, _classify_failure(step, exc), str(exc))
+    except Exception as exc:  # noqa: BLE001 — reported, then re-raised
+        step = _progress().step
+        _emit_update_failure(
+            step=step,
+            kind="unknown",
+            exit_code=1,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise

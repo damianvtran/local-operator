@@ -12,6 +12,7 @@ when the processes are real.
 
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import socket
@@ -26,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from local_operator.secrets import broker as broker_module
 from local_operator.secrets import client
 from local_operator.secrets.broker import BrokerError, SecretBroker
 from local_operator.secrets.errors import BrokerUnavailable
@@ -40,9 +42,10 @@ from local_operator.secrets.protocol import (
 from local_operator.secrets.store import SecretStore
 
 _SUPPORTED = sys.platform == "darwin" or sys.platform.startswith("linux")
-pytestmark = pytest.mark.skipif(
-    not _SUPPORTED, reason="the broker is implemented for macOS and Linux"
-)
+pytestmark = [
+    pytest.mark.skipif(not _SUPPORTED, reason="the broker is implemented for macOS and Linux"),
+    pytest.mark.allow_secret_broker,
+]
 
 SECRET_VALUE = b"s3cr3t-token-value"
 
@@ -1239,3 +1242,121 @@ def test_the_broker_stops_serving_a_key_a_rotation_superseded(
     assert install_master_key_if_current(superseded, config_root)
     with pytest.raises(BrokerError, match="rotated"):
         locked._master_key()
+
+
+class _AcceptThreadThatIgnoresTheStop(threading.Thread):
+    """A stand-in accept thread, driven without a real thread.
+
+    ``stop`` can only learn whether its join succeeded by asking
+    ``is_alive()``, so the failing branch is asserted by answering that question
+    directly: a real wedged thread would need a sleep and would still race the
+    assertion. Never started, so nothing runs here; ``join_timeout`` records what
+    ``stop`` handed to the wait, which is the caller's timeout rather than a
+    literal of its own.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(name="lo-broker-accept", daemon=True)
+        self.join_timeout: float | None = None
+        #: Flipped by a test to model the survivor finally dying.
+        self.alive = True
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_timeout = timeout
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+
+class _AcceptThreadThatStops(threading.Thread):
+    """The clean arm: the join returns and the thread is already gone."""
+
+    def __init__(self) -> None:
+        super().__init__(name="lo-broker-accept-clean", daemon=True)
+        self.join_timeout: float | None = None
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_timeout = timeout
+
+    def is_alive(self) -> bool:
+        return False
+
+
+def _broker_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.name == broker_module.logger.name and record.levelno == logging.WARNING
+    ]
+
+
+def test_stop_reports_an_accept_thread_that_will_not_stop(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A timed-out join is REPORTED and stays observable, not silently cleared.
+
+    ``Thread.join(timeout)`` returns ``None`` whether or not the thread stopped,
+    so the old ``join(); self._accept_thread = None`` could not tell a wedged
+    listener from a clean stop: it dropped the only handle and called it success.
+    ``stop()`` is also reached from ``serve_forever`` on the way out, which is
+    why this path warns instead of raising.
+    """
+    broker = SecretBroker(tmp_path / "cfg", idle_shutdown_s=0)
+    thread = _AcceptThreadThatIgnoresTheStop()
+    broker._accept_thread = thread
+    with caplog.at_level(logging.WARNING, logger=broker_module.logger.name):
+        broker.stop(timeout=1.5)
+    assert broker._accept_thread is thread, "a live accept thread must stay reachable"
+    assert thread.join_timeout == 1.5, "stop() must wait for the timeout it was given"
+    warnings = _broker_warnings(caplog)
+    assert len(warnings) == 1, caplog.text
+    message = warnings[0].getMessage()
+    assert "1.5s" in message, message
+    assert "still running" in message, message
+
+
+def test_stop_warns_once_per_survivor_episode(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Repeated stops re-check but do not re-warn, and a new survivor can (R1-1).
+
+    Re-entry must not become an early return: the third stop below is the only
+    thing that observes the survivor's death and clears the handle. Only the
+    warning is latched, and the latch is dropped with the handle so the next
+    listener is warned in its own right.
+    """
+    broker = SecretBroker(tmp_path / "cfg", idle_shutdown_s=0)
+    thread = _AcceptThreadThatIgnoresTheStop()
+    broker._accept_thread = thread
+    with caplog.at_level(logging.WARNING, logger=broker_module.logger.name):
+        broker.stop(timeout=1.5)
+        broker.stop(timeout=1.5)
+        assert broker._accept_thread is thread, "a live accept thread must stay reachable"
+        assert len(_broker_warnings(caplog)) == 1, caplog.text
+
+        thread.alive = False
+        broker.stop(timeout=1.5)
+        assert broker._accept_thread is None, "a stop that observes death must clear it"
+        assert len(_broker_warnings(caplog)) == 1, caplog.text
+
+        replacement = _AcceptThreadThatIgnoresTheStop()
+        broker._accept_thread = replacement
+        broker.stop(timeout=1.5)
+    assert broker._accept_thread is replacement
+    warnings = _broker_warnings(caplog)
+    assert len(warnings) == 2, caplog.text
+    assert "still running" in warnings[-1].getMessage()
+
+
+def test_stop_clears_the_accept_thread_and_stays_silent_when_it_stopped(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The normal path: the listener honoured the stop, the handle goes, no warning."""
+    broker = SecretBroker(tmp_path / "cfg", idle_shutdown_s=0)
+    thread = _AcceptThreadThatStops()
+    broker._accept_thread = thread
+    with caplog.at_level(logging.WARNING, logger=broker_module.logger.name):
+        broker.stop(timeout=1.5)
+    assert broker._accept_thread is None
+    assert thread.join_timeout == 1.5
+    assert _broker_warnings(caplog) == [], caplog.text

@@ -10,6 +10,7 @@ import {
 	answeredBySurface,
 	askStateLine,
 	blockingPending,
+	dismissedReasonKey,
 	dockAsk,
 	durationLabel,
 	headAsk,
@@ -22,6 +23,25 @@ import {
 	unansweredQuestions,
 } from "./asks";
 import type { PendingAsk } from "../types";
+import { BUNDLED_OWNED } from "../i18n/bundled.gen";
+import { createMessageRuntime } from "../i18n/runtime";
+
+/** The real English catalogue, not a stub: these assertions are the copy
+ *  contract, so a missing or renamed key must fail here rather than be
+ *  supplied by the test itself. */
+function englishRuntime() {
+	const runtime = createMessageRuntime(
+		() => ({ backendLocale: "en", uiLocale: "en", direction: "ltr", revision: 0 }),
+		() => {},
+	);
+	for (const [namespace, locales] of Object.entries(BUNDLED_OWNED)) {
+		for (const [locale, messages] of Object.entries(locales)) {
+			runtime.registerBundle(namespace, locale, { ...messages });
+		}
+	}
+	return runtime;
+}
+const t = englishRuntime().t;
 
 function ask(patch: Partial<PendingAsk> = {}): PendingAsk {
 	return {
@@ -37,18 +57,44 @@ function ask(patch: Partial<PendingAsk> = {}): PendingAsk {
 	};
 }
 
+describe("dismissedReasonKey", () => {
+	it("names the operator's own reason for a dismissed row", () => {
+		/* SA-D8 (design §17): a pre-deadline dismissal keeps a settled row, and the
+		   row says WHY. The keys are the receipt's own (#2841), so one act keeps one
+		   wording on the phone. */
+		expect(dismissedReasonKey(ask({ status: "dismissed", dismissed_reason: "moot" }))).toBe(
+			"relay.ask.dismiss.receipt_moot",
+		);
+		expect(
+			dismissedReasonKey(ask({ status: "dismissed", dismissed_reason: "answered_in_chat" })),
+		).toBe("relay.ask.dismiss.receipt_answered_in_chat");
+	});
+
+	it("says nothing for a row that is not dismissed, or recorded no reason", () => {
+		/* An older runtime sent no reason, and a legacy dismissal is hidden by the
+		   daemon — neither may be given a sentence it never recorded, so the card
+		   keeps its ordinary state line. */
+		expect(dismissedReasonKey(ask({ status: "open", dismissed_reason: "moot" }))).toBe(undefined);
+		expect(dismissedReasonKey(ask({ status: "dismissed" }))).toBe(undefined);
+		expect(dismissedReasonKey(ask({ status: "dismissed", dismissed_reason: "other" }))).toBe(
+			undefined,
+		);
+		expect(dismissedReasonKey(null)).toBe(undefined);
+	});
+});
+
 describe("askStateLine", () => {
 	it("states the open ask as queued, with a locally rendered countdown", () => {
-		const line = askStateLine(ask({ expires_at: 1000 + 42 * 60 * 1000 }), 1000);
+		const line = askStateLine(ask({ expires_at: 1000 + 42 * 60 * 1000 }), 1000, t);
 		expect(line.text).toBe("Queued — the agent is continuing; expires in 42 m");
 		expect(line.tone).toBe("waiting");
 	});
 
 	it("says delivering until the runtime has delivered the response rows", () => {
-		expect(askStateLine(ask({ status: "answered", delivered: false }), 1).text).toBe(
+		expect(askStateLine(ask({ status: "answered", delivered: false }), 1, t).text).toBe(
 			"Answered — delivering",
 		);
-		expect(askStateLine(ask({ status: "answered", delivered: true }), 1).text).toBe(
+		expect(askStateLine(ask({ status: "answered", delivered: true }), 1, t).text).toBe(
 			"Answered — the agent was told",
 		);
 	});
@@ -58,22 +104,22 @@ describe("askStateLine", () => {
 		   question the agent had already gone ahead without. The wording holds for
 		   every timeout notice, including a secret ask's, which has no default
 		   (design round 1, D3). */
-		const line = askStateLine(ask({ status: "timed_out" }), 1);
+		const line = askStateLine(ask({ status: "timed_out" }), 1, t);
 		expect(line.text).toBe("Timed out — the agent goes ahead without your answer");
 		expect(line.tone).toBe("gone");
 	});
 
 	it("names a dismissal as no reply at all, and an expiry as unfixable", () => {
-		expect(askStateLine(ask({ status: "dismissed" }), 1).text).toBe(
+		expect(askStateLine(ask({ status: "dismissed" }), 1, t).text).toBe(
 			"Dismissed — no reply was sent",
 		);
-		expect(askStateLine(ask({ status: "expired" }), 1).text).toBe(
+		expect(askStateLine(ask({ status: "expired" }), 1, t).text).toBe(
 			"Expired — this ask is too old to answer; ask the agent again",
 		);
 	});
 
 	it("names a withdrawal as the agent's own retraction, never a failure", () => {
-		const line = askStateLine(ask({ status: "withdrawn" }), 1);
+		const line = askStateLine(ask({ status: "withdrawn" }), 1, t);
 		expect(line.text).toBe("Withdrawn — the agent no longer needs an answer");
 		expect(line.tone).toBe("gone");
 		expect(isAnswerable("withdrawn")).toBe(false);
@@ -85,7 +131,7 @@ describe("askStateLine", () => {
 		   `timed_out`), so an `open` row stays answerable: the line says the
 		   deadline has passed locally without calling it over (review round 1,
 		   R3). */
-		const line = askStateLine(ask({ expires_at: 500 }), 1000);
+		const line = askStateLine(ask({ expires_at: 500 }), 1000, t);
 		expect(line.text).toBe("Queued — the agent is continuing; deadline passed");
 		expect(line.tone).toBe("attention");
 	});
@@ -93,16 +139,16 @@ describe("askStateLine", () => {
 
 describe("durationLabel", () => {
 	it("spaces its units, and never reads as more precise than it is", () => {
-		expect(durationLabel(42 * 60 * 1000)).toBe("42 m");
-		expect(durationLabel(3 * 3600 * 1000)).toBe("3 h");
-		expect(durationLabel(50 * 3600 * 1000)).toBe("2 d");
-		expect(durationLabel(0)).toBe("");
+		expect(durationLabel(42 * 60 * 1000, t)).toBe("42 m");
+		expect(durationLabel(3 * 3600 * 1000, t)).toBe("3 h");
+		expect(durationLabel(50 * 3600 * 1000, t)).toBe("2 d");
+		expect(durationLabel(0, t)).toBe("");
 		/* SUB-SECOND IS A BOUND, NOT A BLANK (agent review round 1, N1): the open
 		   line used to read "expires in" with no value at all for a deadline
 		   inside the next second. */
-		expect(durationLabel(400)).toBe("<1 m");
-		expect(durationLabel(30_000)).toBe("<1 m");
-		expect(durationLabel(60_000)).toBe("1 m");
+		expect(durationLabel(400, t)).toBe("<1 m");
+		expect(durationLabel(30_000, t)).toBe("<1 m");
+		expect(durationLabel(60_000, t)).toBe("1 m");
 	});
 });
 

@@ -14,7 +14,7 @@ vi.mock("./store", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("./store")>();
 	return {
 		...actual,
-		useSessions: () => ({ sessions: sessionList, connected: true }),
+		useSessions: () => ({ sessions: sessionList, connected: true, revision: 0 }),
 		retainSessionListStream: () => () => {},
 	};
 });
@@ -75,6 +75,6 @@ describe("session row outstanding asks", () => {
 		render(<SessionListScreen />);
 		/* No `needs_attention` was set: an outstanding ask is not a blocked run,
 		   so the row must not carry the decision state's ink or words. */
-		expect(screen.queryByText(/needs/i)).toBeNull();
+		expect(screen.getByRole("button", { name: /Session/ }).querySelector(".text-danger")).toBeNull();
 	});
 });

@@ -954,11 +954,22 @@ async def test_only_the_owning_process_prints_the_keep_notice(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_a_tightening_follows_the_file_over_an_explicit_choice(monkeypatch, tmp_path) -> None:
-    """THE ASYMMETRIC RULE, tightening half. Safety propagates without
-    exception: a pane that explicitly chose ``auto`` still follows the file to
-    ``ask``. This is the direction the rule does NOT make conditional, because
-    a user who ends up safer than they asked is never the wrong surprise."""
+async def test_a_tightening_does_not_rearm_an_explicit_approvals_auto(
+    monkeypatch, tmp_path
+) -> None:
+    """THE MIRROR RULE, tightening half (2026-10-23).
+
+    A conversation its human deliberately set to ``auto`` (a long unattended
+    run, a CI-shaped task) is NOT re-armed by a machine default about OTHER
+    sessions. The previous revision let a tightening through on the reasoning
+    that safety propagates without exception; it does not propagate through a
+    CONVERSATION'S OWN DECISION, and the change was mid-turn and silent.
+
+    The keep notice names the direction and the one command that follows the
+    file, and the recorded choice is NOT cleared: clearing it is what made the
+    old keep notice's "set with /approvals in this session" misattribute the
+    file's value.
+    """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     ConfigManager(tmp_path).set_config_value("hosting", "")
     _write_elsewhere(tmp_path, "tool_approval_mode", "auto")
@@ -972,47 +983,32 @@ async def test_a_tightening_follows_the_file_over_an_explicit_choice(monkeypatch
         _write_elsewhere(tmp_path, "tool_approval_mode", "ask")
         process_watcher(tmp_path).poll_now()
         await pilot.pause()
-        assert app._approve_all is False, "a tightening was refused; safety must always propagate"
-
-        # ...AND THE PANE CAN STILL FOLLOW THE FILE BACK (review round 2, R6).
-        # The human's only explicit act was choosing `auto`; the file tightened
-        # them off it, and a loosening guard that read merely "this pane chose
-        # something" pinned the pane to `ask` for the rest of its life. Nothing
-        # here is a hardening to protect: the only mode this human ever typed is
-        # the one the file is now returning them to. Reading the FILE's write as
-        # the human's own choice is precisely the operator's originating
-        # complaint reappearing on this change's central key.
-        assert app._explicit_approvals_mode is None, (
-            "a file write left the pane claiming the human had typed the mode; "
-            "the keep notice would then misattribute the file's value"
+        assert app._approve_all is True, "a file write re-armed a session the human chose auto"
+        assert app._explicit_approvals_mode == "auto", (
+            "the recorded choice was cleared by a global change; the keep notice "
+            "would then attribute the file's value to the human"
         )
-        # Since #1282 the way back is an ATTRIBUTED write (this pane's own page),
-        # not any file write: the unattributed one is refused, and refused for the
-        # ATTRIBUTION reason rather than by blaming a choice this human never
-        # made. Both halves are asserted, because "the refusal is for the right
-        # reason" is the part that keeps the R6 misattribution from coming back —
-        # and the round trip through the human's own facade below is what shows
-        # the pane is not PINNED to `ask`, which is what R6 protected. (The first
-        # of the two writes returns the file to the mode this gate already holds;
-        # the watcher diffs VALUES, so re-writing the value already on disk is not
-        # a delivery at all.)
-        _write_elsewhere(tmp_path, "tool_approval_mode", "auto")
-        process_watcher(tmp_path).poll_now()
-        await pilot.pause()
-        assert app._approve_all is False, "an unattributed loosening moved this pane's gate"
-        keeps = [n for n in _notices(app) if "keeping tool approvals" in n]
-        assert keeps, _notices(app)
-        assert not any("set with /approvals in this session" in n for n in keeps), keeps
+        keep = [n for n in _notices(app) if "keeping tool approvals" in n]
+        assert keep and "now says ask, /approvals ask re-arms this session" in keep[-1], _notices(
+            app
+        )
+        # The saved default DID follow the file — the pair is allowed to
+        # disagree, which is what `/approvals` reports.
+        assert app._approvals_default_auto is False
+        assert not [n for n in _notices(app) if "config.yml changed" in n], _notices(app)
 
+        # The page is the same global, so it is kept too; its own refusal
+        # record is what makes the page say so rather than claim success.
         _write_here(tmp_path, "tool_approval_mode", "ask")
-        _write_here(tmp_path, "tool_approval_mode", "auto")
         await pilot.pause()
-        assert app._approve_all is True, (
-            "a pane whose human only ever chose `auto` could not be loosened by the "
-            "human's own settings page afterwards (R6)"
-        )
-        # The attributed write landed, so it adds no refusal of its own.
-        assert [n for n in _notices(app) if "keeping tool approvals" in n] == keeps, _notices(app)
+        assert app._approve_all is True, "a settings-page write overrode the conversation"
+
+        # The way back is the command the notice names, which clears the record
+        # and lets this conversation inherit the file again.
+        app._cmd_approvals("default ask", app._notice)
+        assert app._explicit_approvals_mode is None
+        assert app._approve_all is False
+        assert app._configured_approvals_mode() == "ask"
 
 
 @pytest.mark.asyncio

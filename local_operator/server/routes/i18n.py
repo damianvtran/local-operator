@@ -1,4 +1,11 @@
-"""Message catalogues over HTTP: ``GET /v1/i18n/catalogues/{locale}/{namespace}``.
+"""Message catalogues over HTTP.
+
+``GET /v1/i18n/catalogues/{locale}/{namespace}`` serves one namespace.
+``GET /v1/i18n/catalogues/{locale}`` serves the per-locale eager bundle: every
+``wire.*`` namespace that client fetches may consume at startup, flattened, with
+a bundle hash/ETag and a manifest of the namespaces deliberately deferred
+to the per-namespace route (``wire.settings`` today; the policy lives in
+``local_operator.i18n.catalogues.DEFERRED_NAMESPACES``).
 
 The served half of the hybrid delivery decision (RFC §2.1): core owns the
 ``wire.*`` namespaces and the backend serves them, gated by
@@ -36,6 +43,46 @@ from local_operator.i18n.http import etag_matches as _etag_matches
 from local_operator.server.models.schemas import CRUDResponse
 
 router = APIRouter(tags=["I18n"])
+
+
+@router.get("/v1/i18n/catalogues/{locale}", response_model=CRUDResponse)
+async def get_wire_bundle(locale: str, request: Request) -> Response:
+    """One locale's eager ``wire.*`` messages plus the deferred manifest.
+
+    Same public negotiation-data contract and the same eligibility rules as the
+    per-namespace route: an ineligible or unshipped locale is a 404 BEFORE any
+    disk work, so a conditional request cannot activate held bytes. A shipped
+    locale with no wire files is a valid, empty answer, not a 404: the client
+    then holds no catalogue and every identity degrades to the envelope's own
+    ``text`` (design §6), which is what an empty translation set means.
+    """
+    if not resolve.is_shipped(locale) or resolve.eligible_locale(locale) != locale:
+        detail = f"No catalogue for {locale}."  # i18n: ignore wire.errors slice owns it
+        raise HTTPException(status_code=404, detail=detail)
+    try:
+        result = catalogues.wire_bundle(locale)
+    except catalogues.CatalogueNotFound:
+        # A shipped locale can still lose a file between the listing and the
+        # read (a bad deployment). Same 404 shape as the sibling route: the
+        # namespace inventory is not described through error bodies.
+        detail = f"No catalogue for {locale}."  # i18n: ignore wire.errors slice owns it
+        raise HTTPException(status_code=404, detail=detail) from None
+    except catalogues.CatalogueInvalid as exc:
+        # Committed data is validated by the `i18n` check at build time, so a
+        # malformed file here is a deployed-artifact bug: fail loudly rather
+        # than serve a half-typed map a renderer would trip over.
+        raise HTTPException(status_code=500, detail=str(exc)) from None
+
+    etag = f'"{result["content_sha256"]}"'
+    headers = {"ETag": etag, "Cache-Control": "no-cache"}
+    if _etag_matches(request.headers.get("if-none-match", ""), result["content_sha256"]):
+        return Response(status_code=304, headers=headers)
+    body = CRUDResponse(
+        status=200,
+        message="Catalogues retrieved.",  # i18n: ignore wire.errors slice owns it
+        result=result,
+    )
+    return JSONResponse(body.model_dump(), headers=headers)
 
 
 @router.get("/v1/i18n/catalogues/{locale}/{namespace}", response_model=CRUDResponse)

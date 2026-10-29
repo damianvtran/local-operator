@@ -49,6 +49,7 @@ ACTIONS = (
     # ask one peer to move to this device's build.
     "update",
     "identity",
+    "install",
     "uninstall",
     # The inviter's half of the pairing human step (mesh-transport-identity §5.3).
     "confirm",
@@ -71,6 +72,15 @@ ACTIONS = (
     # answer it, run it — six verbs under one group, the shape the design froze.
     "approvals",
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_supervision(monkeypatch: pytest.MonkeyPatch) -> None:
+    # CLI fixtures describe their own host; diagnostics must not query the real
+    # user's service manager just because this suite runs on a supported OS.
+    monkeypatch.setattr(
+        relay, "supervision_state", lambda: {"platform": "none", "persistent": False}
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -165,6 +175,41 @@ def test_the_mcp_push_receipt_names_the_next_step_for_a_withheld_row(
     assert out.count("sent 1 MCP server definition") == 1, out
     assert "withheld server 'leaky': looks like an authorization-bearer" in out, out
     assert "— not sent;" in out and "push again" in out, out
+
+
+def test_network_update_names_the_sessions_a_peer_left_on_its_old_build(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Q2/Q3 (QA round 1 on #3028): both the human line and ``--json`` carry ``left_busy``.
+
+    A generation-layout member updates past a busy or approval-parked session;
+    the operator who asked must be told which sessions stayed on the old build,
+    and the plain-text ``done`` branch used to drop the member's sentence.
+    """
+    answer = {
+        "ok": True,
+        "code": "done",
+        "state": "done",
+        "message": "this device moved from 0.0.1 to 0.99.0; 1 busy session(s) stay on 0.0.1",
+        "method": "uv-tool-generation",
+        "version": "0.99.0",
+        "sessions": {"moved": 0, "kept": 1},
+        "left_busy": [{"session_id": "p4rk-cli-0001", "name": "Librarian", "pending": "approval"}],
+        "device_id": "d_a",
+        "name": "device-a",
+    }
+    monkeypatch.setattr(net_cli, "_relay_answer", lambda op, **fields: dict(answer))
+    assert net_cli.main(_parser().parse_args(["network", "update", "device-a"])) == 0
+    out = capsys.readouterr().out
+    assert "device-a updated to 0.99.0" in out, out
+    assert (
+        "1 busy session(s) there stay on their old build until they settle: "
+        "Librarian (p4rk-cli-0001, waiting for approval)"
+    ) in out, out
+
+    assert net_cli.main(_parser().parse_args(["network", "update", "device-a", "--json"])) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["left_busy"] == answer["left_busy"], payload
 
 
 def test_mcp_state_render_marks_a_row_that_will_not_travel(
@@ -494,9 +539,183 @@ def test_resolve_names_an_unknown_network(root: Path, monkeypatch: pytest.Monkey
     assert net_cli._resolve("").network_id == NETWORK  # noqa: SLF001
 
 
+def test_resolve_device_refuses_a_duplicated_member_name(tmp_path: Path) -> None:
+    """Names are cosmetic and unauthenticated, so two members may share one.
+
+    A first-match here is a MISTARGET: `member rm` or `credential share --with`
+    acts on whichever device happened to be listed first, and the operator sees
+    no sign the other device exists. The refusal must name BOTH short ids so the
+    reader can act with an id immediately.
+    """
+    first, second = "d_" + "a" * 32, "d_" + "b" * 32
+    record = _record_in(tmp_path)
+    record.members.append(types.MemberRecord(device_id=first, name="helper"))
+    record.members.append(types.MemberRecord(device_id=second, name="helper"))
+    with pytest.raises(types.MeshRefusal) as excinfo:
+        net_cli._resolve_device(record, "helper")  # noqa: SLF001
+    assert excinfo.value.code == "ambiguous_member"
+    assert first[:8] in excinfo.value.sentence and second[:8] in excinfo.value.sentence
+    assert "use the device id" in excinfo.value.sentence
+    # Either exact id is still unambiguous, and a unique id-tail still resolves.
+    assert net_cli._resolve_device(record, first) == first  # noqa: SLF001
+    assert net_cli._resolve_device(record, second) == second  # noqa: SLF001
+
+
+def test_resolve_device_still_answers_a_unique_name_and_an_id_tail(tmp_path: Path) -> None:
+    """The refusal is scoped to real collisions; ordinary spellings keep working."""
+    solo = "d_" + "c" * 32
+    record = _record_in(tmp_path)
+    record.members.append(types.MemberRecord(device_id="d_" + "a" * 32, name="helper"))
+    record.members.append(types.MemberRecord(device_id=solo, name="research node"))
+    assert net_cli._resolve_device(record, "research node") == solo  # noqa: SLF001
+    assert net_cli._resolve_device(record, solo[-8:]) == solo  # noqa: SLF001
+    assert net_cli._resolve_device(record, "nobody") is None  # noqa: SLF001
+    # An ambiguous id TAIL stays refused, exactly as before this change: two ids
+    # sharing their last eight characters cannot be told apart by that spelling.
+    record.members.append(types.MemberRecord(device_id="d_" + "1" * 24 + "deadbeef", name="a"))
+    record.members.append(types.MemberRecord(device_id="d_" + "2" * 24 + "deadbeef", name="b"))
+    assert net_cli._resolve_device(record, "deadbeef") is None  # noqa: SLF001
+
+
+def test_resolve_device_refuses_a_name_that_is_another_devices_id(tmp_path: Path) -> None:
+    """The same collision from the other side: one query, two different devices.
+
+    Someone who names a device after another member's visible id can make a
+    query identify one device and name a different one. Neither reading may win
+    silently, because both interpretations are plausible to the operator.
+    """
+    identified, named = "d_" + "1" * 32, "d_" + "2" * 32
+    record = _record_in(tmp_path)
+    record.members.append(types.MemberRecord(device_id=identified, name="laptop"))
+    record.members.append(types.MemberRecord(device_id=named, name=identified))
+    with pytest.raises(types.MeshRefusal) as excinfo:
+        net_cli._resolve_device(record, identified)  # noqa: SLF001
+    assert excinfo.value.code == "ambiguous_member"
+    assert identified[:8] in excinfo.value.sentence
+    assert named[:8] in excinfo.value.sentence
+    # A member matching by BOTH its own id and its own name is one device, not
+    # a collision, so it must still resolve.
+    record.members[-1] = types.MemberRecord(device_id=named, name=named)
+    assert net_cli._resolve_device(record, named) == named  # noqa: SLF001
+
+
 # ---------------------------------------------------------------------------
 # Output contracts
 # ---------------------------------------------------------------------------
+
+
+def _show_with_members(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    members: list[types.MemberRecord],
+    *,
+    json_output: bool = False,
+) -> str:
+    """Run ``show`` against real stored member rows, with no live relay to contact."""
+    record = _save_network(root, NETWORK, "home")
+    record.members.extend(members)
+    store.save(record, root)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    # Only the unavailable transport is stubbed: the command still resolves and
+    # loads the real NetworkRecord through store.load before rendering its rows.
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: None)
+    args = Namespace(network=record.network_id, json=json_output)
+    assert net_cli._cmd_show(args) == 0  # noqa: SLF001
+    return capsys.readouterr().out
+
+
+def test_show_renders_a_member_name_after_its_full_device_id(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    device_id = "d_" + "1" * 32
+    name = "laptop-" + "x" * 180
+    out = _show_with_members(
+        root,
+        monkeypatch,
+        capsys,
+        [types.MemberRecord(device_id=device_id, name=name)],
+    )
+
+    row = next(line for line in out.splitlines() if device_id in line)
+    # A name longer than a terminal must not displace or abbreviate the identity.
+    assert f"{device_id}  {json.dumps(name)}" in row, row
+    assert row.index(device_id) < row.index(name), row
+
+
+def test_show_marks_a_nameless_member_without_borrowing_another_members_name(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    named_id = "d_" + "1" * 32
+    nameless_id = "d_" + "2" * 32
+    literal_id = "d_" + "3" * 32
+    fallback_literal_id = "d_" + "4" * 32
+    fallback_literal = f"({resume.UNNAMED_DEVICE})"
+    out = _show_with_members(
+        root,
+        monkeypatch,
+        capsys,
+        [
+            types.MemberRecord(device_id=named_id, name="laptop"),
+            types.MemberRecord(device_id=nameless_id, name=""),
+            types.MemberRecord(device_id=literal_id, name=resume.UNNAMED_DEVICE),
+            types.MemberRecord(device_id=fallback_literal_id, name=fallback_literal),
+        ],
+    )
+
+    row = next(line for line in out.splitlines() if nameless_id in line)
+    assert f"{nameless_id}  ({resume.UNNAMED_DEVICE})" in row, row
+    assert "laptop" not in row, row
+    literal_row = next(line for line in out.splitlines() if literal_id in line)
+    expected_literal = json.dumps(resume.UNNAMED_DEVICE)
+    assert f"{literal_id}  {expected_literal}  drive" in literal_row, literal_row
+    fallback_literal_row = next(line for line in out.splitlines() if fallback_literal_id in line)
+    expected_fallback_literal = json.dumps(fallback_literal)
+    assert f"{fallback_literal_id}  {expected_fallback_literal}  drive" in fallback_literal_row
+    assert fallback_literal_row.split(maxsplit=2)[2] != row.split(maxsplit=2)[2]
+
+
+def test_show_keeps_same_named_members_distinguishable_by_full_device_id(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first_id = "d_" + "1" * 32
+    second_id = "d_" + "2" * 32
+    out = _show_with_members(
+        root,
+        monkeypatch,
+        capsys,
+        [
+            types.MemberRecord(device_id=first_id, name="shared-laptop"),
+            types.MemberRecord(device_id=second_id, name="shared-laptop"),
+        ],
+    )
+
+    rows = [line for line in out.splitlines() if "shared-laptop" in line]
+    assert len(rows) == 2, out
+    # This is the anti-spoof contract: the label may collide, the identity may not.
+    assert {row.split()[1] for row in rows} == {first_id, second_id}, rows
+    assert all(row.split()[2] == json.dumps("shared-laptop") for row in rows), rows
+
+
+def test_show_json_carries_each_member_name_and_device_id(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    named_id = "d_" + "1" * 32
+    nameless_id = "d_" + "2" * 32
+    out = _show_with_members(
+        root,
+        monkeypatch,
+        capsys,
+        [
+            types.MemberRecord(device_id=named_id, name="laptop"),
+            types.MemberRecord(device_id=nameless_id, name=""),
+        ],
+        json_output=True,
+    )
+
+    members = {row["device_id"]: row for row in json.loads(out)["members_detail"]}
+    assert members[named_id]["name"] == "laptop"
+    assert members[nameless_id]["name"] == ""
 
 
 def test_json_output_is_json_and_nothing_else(
@@ -1347,14 +1566,17 @@ def test_doctor_marks_a_remote_unusable_address_informational_and_keeps_repairs_
     )
     payload = {"identity_present": True, "checks": checks}
     monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: payload)
-    assert net_cli._cmd_doctor(Namespace(json=True, peer="")) == 1  # noqa: SLF001
+    assert net_cli._cmd_doctor(Namespace(json=True, peer="")) == 0  # noqa: SLF001
     machine = json.loads(capsys.readouterr().out)
-    assert machine["ok"] is False and machine["code"] == "unhealthy"
+    assert machine["ok"] is True and machine["link_ok"] is True
+    assert machine["degraded"] is True and machine["code"] == "degraded"
+    repair = next(row for row in machine["checks"] if row["check"] == "credential_repair")
+    assert repair["ok"] is False and repair["class"] == "payload"
     assert "minerva-qa" in machine["message"]
     assert "172.31.22.23" not in machine["message"]
 
     # The human line names the address that works, same treatment as ready's.
-    assert net_cli._cmd_doctor(Namespace(json=False, peer="")) == 1  # noqa: SLF001
+    assert net_cli._cmd_doctor(Namespace(json=False, peer="")) == 0  # noqa: SLF001
     human = capsys.readouterr().out
     # The shared clause rides the line behind ONE separator spelling, note
     # included (design round 1, D3): the doctor reader gets the provenance too.
@@ -1439,8 +1661,20 @@ def test_ready_without_a_relay_never_passes_a_check_it_could_not_run(
     assert {row["capability"] for row in caps} == {
         readiness.CAPABILITY_BUILD,
         *readiness.PEER_SIDE_CHECKS,
+        readiness.CAPABILITY_PEER_RESTART,
     }
-    assert all(row["ok"] is False and row["code"] == "not_asked" for row in caps)
+    not_asked = [row for row in caps if row["code"] == "not_asked"]
+    assert {row["capability"] for row in not_asked} == {
+        readiness.CAPABILITY_BUILD,
+        *readiness.PEER_SIDE_CHECKS,
+    }
+    assert all(row["ok"] is False for row in not_asked)
+    restart = next(row for row in caps if row["capability"] == readiness.CAPABILITY_PEER_RESTART)
+    assert restart["code"] == readiness.CODE_UNKNOWN
+    assert restart["remedies"] == [
+        f"if restart is refused, on cloud-node-1, run "
+        f"`lop network member grant {NETWORK} {'d_' + 'a' * 32} update`"
+    ]
     assert payload["ok"] is False and payload["code"] == "unhealthy"
 
     # F1: offline readiness retains the selected session, without inferring
@@ -2023,6 +2257,43 @@ def test_an_unproven_comparison_names_the_build_and_declines_a_verdict(
     assert "behind" not in out, out
 
 
+def test_a_generation_pinned_unit_names_the_condition_and_install_remedy(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A unit fixed to an old generation needs reinstall, not another restart."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    old = "20261025T122513Z-0.90.1"
+    new = "20261025T123000Z-0.90.2"
+    generations = root / "generations"
+    old_image = generations / old / "venv" / "bin" / "python3"
+    old_image.parent.mkdir(parents=True)
+    old_image.write_text("", encoding="utf-8")
+    monkeypatch.setattr(update_mod, "generations_dir", lambda: generations)
+    monkeypatch.setattr(update_mod, "current_generation", lambda: generations / new)
+    payload = _generation_status(
+        root,
+        monkeypatch,
+        running=old,
+        installed=new,
+        unit=old_image,
+        running_build="0.90.1",
+        installed_build="0.90.2",
+    )
+
+    assert payload["relay_unit_generation_pinned"] is True, payload
+    out = _render_status(monkeypatch, payload, capsys)
+    expected = "build:      0.90.1 — pinned generation; run lop network install"
+    assert expected in out, out
+    line = next(line for line in out.splitlines() if line.startswith("build:"))
+    assert len(line) <= 80, line
+    assert "restart the relay" not in line
+
+    doctor_line, up = net_cli._relay_state()  # noqa: SLF001
+    assert up is True
+    assert "pinned generation; run lop network install" in doctor_line, doctor_line
+    assert len(doctor_line) <= 80, doctor_line
+
+
 def test_a_flow_installed_node_names_the_real_builds_and_never_claims_health(
     root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2350,7 +2621,14 @@ class _FakeCredentialStore:
 def _mcp_login_row(url: str) -> Any:
     from types import SimpleNamespace
 
-    return SimpleNamespace(id=1, identity_key=url, updated_at=0)
+    # A row carrying a token, as a real login does: the ledger counts only a grant
+    # the runtime would use (F-READY-1), so a data-less row reads as no login.
+    return SimpleNamespace(
+        id=1,
+        identity_key=url,
+        updated_at=0,
+        data={"tokens": {"access_token": "synthetic-access"}},
+    )
 
 
 def _radient_login_row(email: str = "owner@example.test") -> Any:
@@ -2784,3 +3062,247 @@ def test_the_explain_frame_renders_inherited_readings_as_codes_and_token_first()
     assert lines[1] == "           expiry failed (invite_expired)"
     assert lines[2] == "           secret_tag skipped (no_network_secret)"
     assert all("`" not in line for line in lines)
+
+
+def test_mcp_credentials_repair_reports_member_state_and_reason(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The member's ``--repair --json`` row carries the status word and its why.
+
+    The owner-side receipt was names and counts; a member's question is different
+    ("why does this server not work"), so every row carries the same
+    ``state``/``reason`` pair the page renders — and still no value: the sentinel
+    planted in the config must never reach the document.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    sentinel = "REPAIR" + "-VALUE-NEVER-PRINTED"
+    (root / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "linear": {
+                        "type": "http",
+                        "url": "https://linear.example.test/mcp",
+                        "auth": {"type": "oauth"},
+                    },
+                    "slack": {
+                        "type": "http",
+                        "url": "https://slack.example.test/mcp",
+                        "headers": {"Authorization": sentinel},
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # No relay answers in a unit root; the placement pull is reported, not raised.
+    monkeypatch.setattr(
+        net_cli,
+        "_relay_answer",
+        lambda op, **fields: {"ok": False, "state": "unknown", "code": "no_relay"},
+    )
+
+    code = net_cli._cmd_mcp_credentials(  # noqa: SLF001
+        Namespace(json=True, adopt=False, repair=True), root
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {row["server"]: row for row in payload["servers"]}
+    assert rows["linear"]["state"] == "needs_operator_login"
+    assert rows["linear"]["reason"]
+    # ``--repair`` ADOPTS first (slice A's rule): the literal header becomes a
+    # store row plus a ``${NAME}`` reference, so by the time the status rows are
+    # built this server resolves here. The value itself must never appear.
+    assert rows["slack"]["state"] == "synced"
+    assert sentinel not in json.dumps(payload)
+    assert "${" in (root / "mcp.json").read_text()
+
+
+def test_install_dispatches_to_the_restart_on_boot_installer(monkeypatch, capsys) -> None:
+    """The advertised recovery verb reaches the actual service installer."""
+    called = []
+    monkeypatch.setattr(
+        relay, "install", lambda: called.append(True) or {"ok": True, "steps": ["enabled"]}
+    )
+    args = _parser().parse_args(["network", "install", "--json"])
+    assert net_cli.main(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert called == [True]
+    assert payload == {
+        "ok": True,
+        "steps": ["enabled"],
+        "code": "installed",
+        "message": "relay service installed",
+    }
+
+
+@pytest.mark.parametrize("link_failed", [False, True])
+def test_doctor_separates_link_and_payload_failures(monkeypatch, capsys, link_failed) -> None:
+    """Payload red stays visible without falsifying transport health."""
+    checks = [
+        {
+            "check": "handshake",
+            "ok": not link_failed,
+            "detail": "synthetic handshake rejected" if link_failed else "ok",
+        },
+        {"check": "credential_repair", "ok": False, "detail": "sign in to mcp.qa.gominerva.com"},
+        {"check": "credential_repair", "ok": False, "detail": "sign in to mcp.cloudflare.com"},
+    ]
+    monkeypatch.setattr(
+        net_cli, "_relay_call", lambda *a, **k: {"identity_present": True, "checks": checks}
+    )
+    assert net_cli._cmd_doctor(Namespace(json=True, peer="")) == int(link_failed)
+    result = json.loads(capsys.readouterr().out)
+    assert result["ok"] is (not link_failed)
+    assert result["link_ok"] is (not link_failed)
+    assert result["degraded"] is True
+    assert result["code"] == ("unhealthy" if link_failed else "degraded")
+    assert len(result["payload_failures"]) == 2
+    assert "mcp.qa.gominerva.com" in result["message"]
+    assert "mcp.cloudflare.com" in result["message"]
+    assert result["checks"][0]["class"] == "link"
+    assert result["checks"][1]["ok"] is False
+    if link_failed:
+        assert "synthetic handshake rejected" in result["message"]
+    else:
+        assert result["message"].startswith("link healthy; credential checks need attention:")
+    net_cli._cmd_doctor(Namespace(json=False, peer=""))
+    human = capsys.readouterr().out
+    assert "FAIL credential_repair" in human
+    assert ("the link is healthy" in human) is (not link_failed)
+
+
+def test_doctor_supervision_warning_is_local_and_not_a_link_failure(monkeypatch, capsys) -> None:
+    """An older relay needs no wire-op change to expose local durability."""
+    monkeypatch.setattr(
+        net_cli, "_relay_call", lambda *a, **k: {"identity_present": True, "checks": []}
+    )
+    monkeypatch.setattr(
+        relay,
+        "supervision_state",
+        lambda: {"platform": "systemd", "addressable": True, "persistent": False},
+    )
+    assert net_cli._cmd_doctor(Namespace(json=True, peer="")) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["ok"] and result["link_ok"] and result["degraded"]
+    assert result["code"] == "degraded"
+    assert result["payload_failures"] == []
+    assert result["checks"][0]["class"] == "supervision"
+    assert result["checks"][0]["ok"] is False
+
+
+@pytest.mark.parametrize("persistent", [True, False])
+def test_status_warns_only_for_a_running_nonpersistent_relay(
+    monkeypatch, capsys, persistent
+) -> None:
+    """Healthy supervision keeps the steady-state human block unchanged."""
+    payload = {
+        "installed": True,
+        "supported": True,
+        "identity_present": True,
+        "relay_running": True,
+        "relay_answering": True,
+        "relay_persistent": persistent,
+        "relay": {"pid": 123},
+        "networks": [],
+        "log": "synthetic.log",
+    }
+    monkeypatch.setattr(relay, "status", lambda **kwargs: payload)
+    net_cli._cmd_status(Namespace(json=False))
+    human = capsys.readouterr().out
+    assert ("durability: not supervised" in human) is (not persistent)
+
+
+def test_credential_sync_failure_degrades_payload_not_link(monkeypatch, capsys):
+    """Sync confirmation is credential payload health, not a transport failure."""
+    checks = [{"check": "credential_sync", "ok": False, "detail": "holder confirmation missing"}]
+    monkeypatch.setattr(
+        net_cli,
+        "_relay_call",
+        lambda *a, **k: {
+            "identity_present": True,
+            "checks": checks,
+        },
+    )
+    assert net_cli._cmd_doctor(Namespace(json=True, peer="")) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["ok"] and result["link_ok"] and result["degraded"]
+    assert result["code"] == "degraded"
+    assert result["checks"][0]["class"] == "payload"
+    assert "credential checks need attention" in result["message"]
+    assert result["supervision_failures"] == []
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_install_receipt_carries_durability_and_warns_when_it_is_missing(
+    monkeypatch, capsys, persistent
+):
+    """A successful installation must not hide failed linger repair."""
+    monkeypatch.setattr(
+        relay,
+        "install",
+        lambda: {
+            "ok": True,
+            "steps": [],
+            "linger": persistent,
+            "persistent": persistent,
+        },
+    )
+    assert net_cli._cmd_install(Namespace(json=True)) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["persistent"] is persistent and result["linger"] is persistent
+    assert net_cli._cmd_install(Namespace(json=False)) == 0
+    assert ("durability:" in capsys.readouterr().out) is (not persistent)
+
+
+def test_set_name_reaches_its_handler_with_the_parsed_value(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The design names this exact failure mode (review round 1, F5).
+
+    `_guard_identity_subcommand` ends in ``return _cmd_identity_show(args)``, so a
+    verb added to the parser without its own arm answers the device's id and exits
+    0 — a rename that silently does nothing. The handler is replaced with a
+    recorder, so this proves DISPATCH and argument passing and nothing else: no
+    relay, no socket, no store write.
+    """
+    seen: list[tuple[str, bool]] = []
+
+    def record(args: argparse.Namespace) -> int:
+        seen.append((args.name, bool(args.json)))
+        return 0
+
+    monkeypatch.setattr(net_cli, "_cmd_identity_set_name", record)
+    args = _parser().parse_args(["network", "identity", "set-name", "build-box", "--json"])
+    assert net_cli._guard_identity_subcommand(args) == 0  # noqa: SLF001
+    assert seen == [("build-box", True)]
+    # Bare ``network identity`` still shows the device; it must not reach the verb.
+    bare = _parser().parse_args(["network", "identity"])
+    net_cli._guard_identity_subcommand(bare)  # noqa: SLF001
+    capsys.readouterr()
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize("no_color", [None, "1"])
+def test_a_refusal_is_red_unless_no_color_is_set(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], no_color: str | None
+) -> None:
+    """#3002 review r3 N1: ``_print_refusal`` honours ``NO_COLOR`` (design N4).
+
+    The sentence carries the ANSI wrapper only when ``NO_COLOR`` is absent; the commands
+    a finite refusal carries are never coloured either way.
+    """
+    if no_color is None:
+        monkeypatch.delenv("NO_COLOR", raising=False)
+    else:
+        monkeypatch.setenv("NO_COLOR", no_color)
+    refusal = types.MeshRefusal("busy", "Another change was in progress.")
+    refusal.commands_label = "Apply again:"  # type: ignore[attr-defined]
+    refusal.commands = ["lop network approvals apply ap_x"]  # type: ignore[attr-defined]
+    net_cli._print_refusal(refusal)  # noqa: SLF001
+    err = capsys.readouterr().err
+    assert "Another change was in progress." in err
+    assert ("\033[" in err) is (no_color is None)
+    assert "\nlop network approvals apply ap_x\n" in err

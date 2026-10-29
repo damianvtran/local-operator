@@ -1,0 +1,4 @@
+Original audit command output transcribed from its immutable source receipt; no new audit run is claimed.
+$ /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit_code=0

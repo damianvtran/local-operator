@@ -1,8 +1,8 @@
 {
-  "wire.settings.hub_defaults.agents.help": "Default for new agent links; existing links keep their own policies.",
-  "wire.settings.hub_defaults.agents.label": "Subscribe new agent links",
-  "wire.settings.hub_defaults.agents.off.description": "pause incoming updates for new agent links",
-  "wire.settings.hub_defaults.agents.on.description": "subscribe new agent links",
+  "wire.settings.hub_defaults.agents.help": "Off pauses updates for all agent/skill links; on subscribes new ones.",
+  "wire.settings.hub_defaults.agents.label": "Auto-update agent/skill links",
+  "wire.settings.hub_defaults.agents.off.description": "pause updates for all agent and skill links",
+  "wire.settings.hub_defaults.agents.on.description": "subscribe new agent and skill links",
   "wire.settings.hub_defaults.model_default.note": "Hub merges use your current default model. The old hub model override is ignored.",
   "wire.settings.hub_defaults.teams.help": "Default for new team links; existing links keep their own policies.",
   "wire.settings.hub_defaults.teams.label": "Subscribe new team links",

@@ -1,0 +1,217 @@
+{
+  "schema": 1,
+  "record_kind": "auditor_receipt",
+  "audit": {
+    "id": "UR-R3-AUDIT-001",
+    "name": "Round-3 scoped independent audit of core ur remediation",
+    "locale": "ur",
+    "surface": "core",
+    "round": 3,
+    "date": "2026-10-24",
+    "delta": "d3f5e21b6b01e82ff20faa4dc49f4f9420a5c40a..5eaddeff1d4cb9bfee9c2a831d1e48938c9cce9f",
+    "old_commit": "d3f5e21b6b01e82ff20faa4dc49f4f9420a5c40a",
+    "new_commit": "5eaddeff1d4cb9bfee9c2a831d1e48938c9cce9f",
+    "worktree": "/Users/damian/local-operator/.worktrees/i18n-ur-core",
+    "status": "passed",
+    "result": "passed",
+    "overall_verdict": "clean_with_followups",
+    "terminal": true
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team); independent scoped round-3 core auditor",
+    "session": "3e0f499dc2ee",
+    "model": "openrouter/moonshotai/kimi-k3.1-pro",
+    "fallback": "none observed; the served model recorded above performed this audit",
+    "date": "2026-10-24",
+    "result": "passed",
+    "findings": 0
+  },
+  "independence": {
+    "independent_of_all_translator_sessions": true,
+    "translator_sessions": [
+      "3f68f20b2cad",
+      "52136848d1fc",
+      "7a648afb0f8d",
+      "7c4a4229b011",
+      "ffc94c8cb17d"
+    ],
+    "other_new_audit_receipt_read": false,
+    "note": "The 13 dispositions were verified against current English/Urdu bytes and named neighbors, not accepted from translator notes."
+  },
+  "scope": {
+    "changed_namespace_count": 4,
+    "changed_key_count": 19,
+    "direct_neighbor_count": 8,
+    "keys_read": 27,
+    "review_rule": "Only the 19 changed values and eight named direct neighbors were read; unrelated values were not re-audited.",
+    "english_and_context_unchanged_in_delta": true,
+    "hash_algorithm": "SHA-256 over exact UTF-8 file bytes; context_sha256 is null when English has no sidecar",
+    "translator_provenance_hash_mismatch_count": 0
+  },
+  "verdicts": {
+    "overall": "clean_with_followups",
+    "namespace_count_by_verdict": {
+      "clean": 3,
+      "clean_with_followups": 1
+    },
+    "severity_counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    },
+    "round_2_dispositions": {
+      "total": 13,
+      "verified_fixed": 13,
+      "unresolved": 0,
+      "unresolved_ids": []
+    }
+  },
+  "checks": {
+    "repository": {
+      "generate_check": "91 artifact(s) byte-identical",
+      "catalogues_only": "0 problem(s)",
+      "log": "repository-checks.log"
+    },
+    "mechanical": {
+      "key_icu_mismatch_count": 0,
+      "technical_token_mismatch_count": 0,
+      "newline_mismatch_count": 0,
+      "non_nfc_count": 0,
+      "manual_bidi_control_count": 0,
+      "native_digit_count": 0,
+      "hindi_danda_count": 0,
+      "informal_tum_count": 0,
+      "literal_redaction_artifact_count": 0,
+      "scoped_plural_key_count": 0
+    },
+    "credential_safety": {
+      "established_native_plural": "کریڈینشلز",
+      "inline_uses_exact_native_plural": true,
+      "inline_literal_artifact_count": 0,
+      "inline_safety_predicates_preserved": true,
+      "all_scoped_literal_artifact_count": 0
+    },
+    "fit": {
+      "scoped_explicit_maxCells_count": 0,
+      "note": "No scoped value declares maxCells, so no budget pass is claimed. The changed /help value is measured separately against its approximate guide.",
+      "changed_approx_help_count": 1,
+      "approximate_help_overflow_risks": [
+        {
+          "key": "wire.slash.hub",
+          "cells": 57,
+          "approx_guide_cells": 55
+        }
+      ]
+    },
+    "native_semantics_register_glossary": "All 19 changed values and eight named neighbors are accurate and idiomatic in context; settled states, coordinated deny-prefix negation, Preview/operator/exit-code/display-rail/subscription/proactive/connectivity wording, and credential safety all pass.",
+    "rendered_rtl": "NOT PERFORMED and NOT CLAIMED. Native RTL/bidi/shaping, layout, fallback, long-text/design and approximate /help rendered evidence remain separate gates."
+  },
+  "namespaces": [
+    {
+      "namespace": "wire.errors.settings",
+      "namespace_total_keys": 12,
+      "changed_keys_reviewed": 1,
+      "direct_neighbors_reviewed": 1,
+      "keys_reviewed": 2,
+      "en_sha256": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+      "ur_sha256": "e5a010a1dbe5698c96b92d35f616e7dfc557c801b5e1eca1a6c84a543b92c91e",
+      "context_sha256": null,
+      "verdict": "clean",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "rendered_followups": []
+    },
+    {
+      "namespace": "wire.remote_compute",
+      "namespace_total_keys": 43,
+      "changed_keys_reviewed": 1,
+      "direct_neighbors_reviewed": 0,
+      "keys_reviewed": 1,
+      "en_sha256": "d1d9119a235c1a8c09306f42438115f5211ede16addf80a8f88d6f78860367a8",
+      "ur_sha256": "836d3410761ea771d3201602418322a8577b98681dbc946d590f9a8d48c6e509",
+      "context_sha256": "ef149146941e72c79a64446737a5d12be5016850b04df462f48e3a6eb0ae2e36",
+      "verdict": "clean",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "rendered_followups": []
+    },
+    {
+      "namespace": "wire.settings",
+      "namespace_total_keys": 818,
+      "changed_keys_reviewed": 16,
+      "direct_neighbors_reviewed": 7,
+      "keys_reviewed": 23,
+      "en_sha256": "c1e237c4dd3c2ea236f9e39d15cf4d0b34a231841357aee5a389f34201a73582",
+      "ur_sha256": "0bb60816444bcf86a6c2d93e9c6ee7211fd377dd080e8cb39ae7f7d39ec30840",
+      "context_sha256": "67662db2835ed0f6db3a65844efc318c79706735457eb974bb7c64cf34f861a9",
+      "verdict": "clean",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "rendered_followups": []
+    },
+    {
+      "namespace": "wire.slash",
+      "namespace_total_keys": 52,
+      "changed_keys_reviewed": 1,
+      "direct_neighbors_reviewed": 0,
+      "keys_reviewed": 1,
+      "en_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "ur_sha256": "e1897b69d355d05d44dd6761affb866749fa431630234421dfb31c65141c8cb1",
+      "context_sha256": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+      "verdict": "clean_with_followups",
+      "result": "passed",
+      "unresolved_blocker_major_count": 0,
+      "finding_ids": [],
+      "rendered_followups": [
+        {
+          "id": "UR-R3-FIT-001",
+          "kind": "approximate_help_rendered_fit",
+          "risks": [
+            {
+              "key": "wire.slash.hub",
+              "cells": 57,
+              "approx_guide_cells": 55
+            }
+          ],
+          "note": "Changed subscription wording measures 57 cells against the approximate 55-cell /help guide. This is retained for rendered review, not a silent pass or a measured rendered failure."
+        }
+      ]
+    }
+  ],
+  "findings": [],
+  "rendered_followups": [
+    {
+      "id": "UR-R3-FIT-001",
+      "severity": null,
+      "namespace": "wire.slash",
+      "key": "wire.slash.hub",
+      "actual_cells": 57,
+      "approx_guide_cells": 55,
+      "disposition": "rendered review required; not a silent pass and not a semantic audit finding"
+    }
+  ],
+  "dispositions_file": "dispositions.json",
+  "evidence": {
+    "portable_bundle": "All paths are sibling files in this receipt directory; .pairs files contain the complete 27-value scoped review workbook.",
+    "scope_file": "scope.json",
+    "verification_file": "verification.json",
+    "verification_summary_file": "verification-summary.json",
+    "hash_checks_file": "hash-checks.json",
+    "repository_checks_file": "repository-checks.log",
+    "human_report_file": "ur-core-round3-audit.md",
+    "reproduction_scripts": [
+      "scripts/audit_ur_round3.py",
+      "scripts/build_ur_round3_receipt.py"
+    ]
+  },
+  "not_claimed": [
+    "No source, catalogue, ledger, generated shipped.json, eligibility, hold, or PR was edited.",
+    "No unrelated value was semantically re-audited and no unrelated plural/fit suite was rerun.",
+    "No approximate /help fit risk is called rendered proof in either direction.",
+    "No native/rendered RTL or design sign-off is claimed."
+  ]
+}

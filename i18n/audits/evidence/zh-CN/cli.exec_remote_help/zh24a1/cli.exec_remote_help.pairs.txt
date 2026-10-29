@@ -1,0 +1,44 @@
+cli.exec_remote_help.budget_usd
+EN "Spending cap for this run in US dollars (default: the server's admission default)"
+ZH "本次运行的花费上限，单位为美元（默认：服务器的准入默认值）"
+CX {"note": "Help for budget_usd. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "argparse exec argument help for the --remote surface", "tone": "instructional, preserve the existing meaning"}
+cli.exec_remote_help.cancel
+EN "Cancel a remote run and exit"
+ZH "取消一次远程运行并退出"
+CX {"note": "Help for cancel. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "argparse exec argument help for the --remote surface", "tone": "instructional, preserve the existing meaning"}
+cli.exec_remote_help.detach
+EN "Print the run id and idempotency key, then exit instead of watching the run"
+ZH "打印运行ID和幂等键后退出，而不是监视该运行"
+CX {"note": "Help for detach. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "argparse exec argument help for the --remote surface", "tone": "instructional, preserve the existing meaning"}
+cli.exec_remote_help.idempotency_key
+EN "Idempotency key to reuse instead of minting a fresh one, so a retry of a submitted run cannot run twice"
+ZH "复用此幂等键而不生成新键，使已提交运行的重试不会运行两次"
+CX {"note": "Help for idempotency_key. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "argparse exec argument help for the --remote surface", "tone": "instructional, preserve the existing meaning"}
+cli.exec_remote_help.max_hours
+EN "Hours the remote run may execute before the server stops it (default: 2; the server caps the maximum)"
+ZH "远程运行在服务器停止它之前可执行的小时数（默认：2；最大值由服务器限制）"
+CX {"note": "Help for max_hours. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "argparse exec argument help for the --remote surface", "tone": "instructional, preserve the existing meaning"}
+cli.exec_remote_help.network
+EN "Network to submit the run through, by name or id. Required when this device is in more than one network"
+ZH "提交运行所用的网络，按名称或ID指定。本设备位于多个网络时必须指定"
+CX {"note": "Help for network. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "argparse exec argument help for the --remote surface", "tone": "instructional, preserve the existing meaning"}
+cli.exec_remote_help.remote
+EN "Run this task on Radient remote compute (tier 1: short-lived runs) instead of this machine"
+ZH "在Radient远程计算上运行此任务（第1档：短时运行），而非在本机运行"
+CX {"note": "Help for remote. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "argparse exec argument help for the --remote surface", "tone": "instructional, preserve the existing meaning"}
+cli.exec_remote_help.repo
+EN "Git URL the remote run checks out. Required with --remote: local files are never uploaded"
+ZH "远程运行检出的Git URL。配合--remote时必填：本地文件从不上传"
+CX {"note": "Help for repo. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "argparse exec argument help for the --remote surface", "tone": "instructional, preserve the existing meaning"}
+cli.exec_remote_help.sha
+EN "Commit to check out in --repo. Required with --remote"
+ZH "在--repo中检出的提交。配合--remote时必填"
+CX {"note": "Help for sha. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "argparse exec argument help for the --remote surface", "tone": "instructional, preserve the existing meaning"}
+cli.exec_remote_help.size
+EN "Compute size for the remote run: s, m or l (default: m)"
+ZH "远程运行的计算规格：s、m或l（默认：m）"
+CX {"note": "Help for size. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "argparse exec argument help for the --remote surface", "tone": "instructional, preserve the existing meaning"}
+cli.exec_remote_help.status
+EN "Print one remote run as JSON and exit"
+ZH "以JSON打印一次远程运行并退出"
+CX {"note": "Help for status. Product names, commands, --flags, identifiers and literal examples are syntax: keep them stable. This message has ZERO ICU arguments; doubled apostrophes and individually quoted braces preserve literal text. Preserve argparse percent substitutions/escaping exactly; argparse performs its own interpolation after rendering. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "argparse exec argument help for the --remote surface", "tone": "instructional, preserve the existing meaning"}

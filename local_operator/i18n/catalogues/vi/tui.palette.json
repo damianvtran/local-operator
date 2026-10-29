@@ -1,0 +1,9 @@
+{
+  "tui.palette.kind_agent": "tác nhân",
+  "tui.palette.kind_command": "lệnh",
+  "tui.palette.kind_session": "phiên",
+  "tui.palette.kind_setting": "cài đặt",
+  "tui.palette.kind_team": "nhóm",
+  "tui.palette.no_matches": "Không tìm thấy kết quả",
+  "tui.palette.placeholder": "Tìm kiếm lệnh, cài đặt, phiên, tác nhân…"
+}

@@ -21,7 +21,7 @@ vi.mock("./store", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("./store")>();
 	return {
 		...actual,
-		useSessions: () => ({ sessions: sessionList, connected: true }),
+		useSessions: () => ({ sessions: sessionList, connected: true, revision: 0 }),
 		retainSessionListStream: () => () => {},
 	};
 });
@@ -78,13 +78,15 @@ function conversation(session_id: string, completion_token: string) {
 /** The control by its accessible name — null while the pile is empty. The
     label carries the COUNT (design D2 / UX U4 / QA Q1). */
 function control(): HTMLButtonElement | null {
-	return screen.queryByRole("button", { name: /mark all \d+ read/ }) as HTMLButtonElement | null;
+	const unreadFilter = screen.queryByRole("button", { name: /^Unread ·/ });
+	if (unreadFilter && unreadFilter.getAttribute("aria-pressed") !== "true") fireEvent.click(unreadFilter);
+	return screen.queryByRole("button", { name: "Mark all read" }) as HTMLButtonElement | null;
 }
 
 /** The control when it has dropped the count (UX round 2, U11: after a read that
     could not be verified it stops asserting a number as fact). */
 function unnumberedControl(): HTMLButtonElement | null {
-	return screen.queryByRole("button", { name: "mark all as read" }) as HTMLButtonElement | null;
+	return screen.queryByRole("button", { name: "Mark all read" }) as HTMLButtonElement | null;
 }
 
 /** The sticky band the control sits in — its own element, the class list is what
@@ -103,7 +105,7 @@ afterEach(() => {
 	vi.mocked(markAllSeen).mockReset();
 });
 
-describe("mark all as read", () => {
+describe("Mark all read", () => {
 	it("is not rendered until a row is unseen", () => {
 		sessionList = [summary({ session_id: "a", conversation_name: "Alpha" })];
 		const { rerender } = render(<SessionListScreen />);
@@ -120,11 +122,11 @@ describe("mark all as read", () => {
 			summary({ session_id: "u2", conversation_name: "Beta", unseen: true }),
 		];
 		const { rerender } = render(<SessionListScreen />);
-		expect(control()?.textContent).toBe("mark all 2 read");
+		expect(control()?.textContent).toBe("Mark all read");
 
 		sessionList = [summary({ session_id: "u1", conversation_name: "Alpha", unseen: true })];
 		rerender(<SessionListScreen />);
-		expect(control()?.textContent).toBe("mark all 1 read");
+		expect(control()?.textContent).toBe("Mark all read");
 	});
 
 	it("posts only the rows it is painting, and reports the receipt", async () => {
@@ -197,6 +199,24 @@ describe("mark all as read", () => {
 		expect(vi.mocked(markAllSeen)).not.toHaveBeenCalled();
 	});
 
+	/* THE PER-ROW ACTION IS THE SAME READ (agent review round 1, C1-4 = QA
+	   Q1-3). It used to fall through on a degraded badge — no POST, no receipt,
+	   no error, no close — while the bulk control in the same file stated the
+	   refusal. A pressed control with no outcome is the silence this lane exists
+	   to remove. */
+	it("a per-row Mark read states a degraded read instead of doing nothing", async () => {
+		sessionList = [summary({ session_id: "u1", conversation_name: "Alpha", unseen: true })];
+		vi.mocked(getAttentionUnread).mockResolvedValue({ degraded: ["attention"] });
+		render(<SessionListScreen />);
+
+		fireEvent.click(screen.getByRole("button", { name: "More" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Mark as read" }));
+
+		const alert = await screen.findByRole("alert");
+		expect(alert.textContent).toBe("Could not read what is unread — nothing was cleared. Try again.");
+		expect(vi.mocked(markAllSeen)).not.toHaveBeenCalled();
+	});
+
 	it("surfaces a failed write in the reader's words, naming the recovery", async () => {
 		sessionList = [summary({ session_id: "u1", conversation_name: "Alpha", unseen: true })];
 		vi.mocked(getAttentionUnread).mockResolvedValue(
@@ -232,8 +252,8 @@ describe("mark all as read", () => {
 		// <body> the instant it is pressed, which is UX round 1's U3. The label
 		// changes to `marking…` here, so this queries by that name rather than
 		// the count label `control()` matches.
-		await screen.findByText("marking…");
-		const marking = screen.getByRole("button", { name: "marking…" }) as HTMLButtonElement;
+		await screen.findByText("Marking…");
+		const marking = screen.getByRole("button", { name: "Marking…" }) as HTMLButtonElement;
 		expect(marking.getAttribute("aria-disabled")).toBe("true");
 		expect(marking.disabled).toBe(false);
 		expect(document.activeElement).toBe(marking);
@@ -305,7 +325,7 @@ describe("mark all as read", () => {
 				vi.advanceTimersByTime(300);
 			});
 			expect(document.activeElement).not.toBe(document.body);
-			expect(document.activeElement?.tagName).toBe("BUTTON");
+			expect(document.activeElement).toBe(band());
 		} finally {
 			vi.useRealTimers();
 		}
@@ -322,19 +342,19 @@ describe("mark all as read", () => {
 		];
 		vi.mocked(getAttentionUnread).mockResolvedValue({ degraded: ["attention"] });
 		render(<SessionListScreen />);
-		expect(control()!.textContent).toBe("mark all 2 read");
+		expect(control()!.textContent).toBe("Mark all read");
 
 		fireEvent.click(control()!);
 		await screen.findByRole("alert");
-		expect(unnumberedControl()!.textContent).toBe("mark all as read");
-		expect(control()).toBeNull();
+		expect(unnumberedControl()!.textContent).toBe("Mark all read");
+		expect(control()!.textContent).not.toMatch(/\d/);
 
 		vi.mocked(getAttentionUnread).mockResolvedValue(
 			unread({ count: 2, conversations: [conversation("u1", "t1"), conversation("u2", "t2")] }),
 		);
 		vi.mocked(markAllSeen).mockResolvedValue(receipt({ read: [] }));
 		fireEvent.click(unnumberedControl()!);
-		await screen.findByRole("button", { name: "mark all 2 read" });
+		await screen.findByRole("button", { name: "Mark all read" });
 	});
 
 	it("pauses the receipt's window while the reader is away, and restarts it on return", async () => {
@@ -357,7 +377,7 @@ describe("mark all as read", () => {
 			render(<SessionListScreen />);
 			expect(screen.queryByText("Marked 2 read.")).toBeTruthy();
 			act(() => {
-				vi.advanceTimersByTime(MARK_NOTICE_TTL_MS - 1000);
+				vi.advanceTimersByTime(3000);
 			});
 			expect(screen.queryByText("Marked 2 read.")).toBeTruthy();
 
@@ -381,7 +401,7 @@ describe("mark all as read", () => {
 				summary({ session_id: "u2", conversation_name: "Beta", unseen: true }),
 			];
 			const view = render(<SessionListScreen />);
-			const search = screen.getByPlaceholderText("Search conversations…") as HTMLInputElement;
+			const search = openSearch() as HTMLInputElement;
 			search.focus();
 
 			sessionList = [
@@ -408,10 +428,11 @@ describe("mark all as read", () => {
 		try {
 			sessionList = [summary({ session_id: "u1", conversation_name: "Alpha", unseen: true })];
 			const view = render(<SessionListScreen />);
-			fireEvent.change(screen.getByPlaceholderText("Search conversations…"), {
+			control(); // Select Unread before the search replaces the chip row.
+			fireEvent.change(openSearch(), {
 				target: { value: "zzz-no-such-conversation" },
 			});
-			control()!.focus();
+			screen.getByRole("button", { name: "Mark all read" }).focus();
 
 			sessionList = [summary({ session_id: "u1", conversation_name: "Alpha" })];
 			act(() => {
@@ -436,7 +457,8 @@ describe("mark all as read", () => {
 		try {
 			sessionList = [summary({ session_id: "u1", conversation_name: "Alpha", unseen: true })];
 			const view = render(<SessionListScreen />);
-			expect(band().className).toContain("border-hairline");
+			expect(band().className).toContain("bg-canvas");
+		expect(document.querySelector("main")?.className).toContain("lo-fade-y");
 
 			// The edge goes with the band's content: while the control is still
 			// sliding out the band holds something, and an emptied band leaves no
@@ -445,7 +467,8 @@ describe("mark all as read", () => {
 			act(() => {
 				view.rerender(<SessionListScreen />);
 			});
-			expect(band().className).toContain("border-hairline");
+			expect(band().className).toContain("bg-canvas");
+		expect(document.querySelector("main")?.className).toContain("lo-fade-y");
 			act(() => {
 				vi.advanceTimersByTime(300);
 			});
@@ -455,3 +478,11 @@ describe("mark all as read", () => {
 		}
 	});
 });
+
+/** Search now expands in the app bar; exercise its real opening control. */
+function openSearch() {
+ const field = screen.queryByPlaceholderText("Search conversations…");
+ if (field) return field;
+ fireEvent.click(screen.getByRole("button", { name: "Search", hidden: true }));
+ return screen.getByPlaceholderText("Search conversations…");
+}

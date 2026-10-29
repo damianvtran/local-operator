@@ -438,9 +438,9 @@ in the fork is a new `job` id. Nothing else is needed.
 
 Why isolated: the generator needs the **evidence**, not the conversation. A warm-prefix
 request would put a design prompt in the session's cache lineage, and on a different model
-there is no prefix to share anyway. The system prompt is the Appendix A text: **1,140 o200k
-tokens** (1,137 cl100k), 4,672 chars, measured with tiktoken 0.14 on this exact text
-(re-measured for the body-only amendment; the pre-amendment text was 972/968 on 3,919 chars).
+there is no prefix to share anyway. The system prompt is the Appendix A text: **1,250 o200k
+tokens** (1,247 cl100k), 5,153 chars, measured with tiktoken 0.14 on this exact text
+(re-measured for the numeric-format amendment; the pre-amendment text was 972/968 on 3,919 chars).
 It is cache-stable across jobs.
 
 **Evidence.** The generator is given only:
@@ -1536,9 +1536,9 @@ Everything else in this memo is decided; a reviewer who disagrees should name th
 
 ## Appendix A — the generator prompt (the fork's system prompt, and only there)
 
-This doubles as the fork's design guidelines. Measured: **1,140 tokens (o200k_base), 1,137
-(cl100k_base), 4,672 chars**, with tiktoken 0.14 on this exact text (the pre-amendment text
-measured 972 / 968 / 3,919; §2.8's body-only clauses are what moved it). It is held verbatim in
+This doubles as the fork's design guidelines. Measured: **1,250 tokens (o200k_base), 1,247
+(cl100k_base), 5,153 chars**, with tiktoken 0.14 on this exact text (the pre-amendment text
+measured 972 / 968 / 3,919; body-only and numeric-format clauses are what moved it). It is held verbatim in
 `supplements/prompt.py` as `GENERATOR_SYSTEM_PROMPT`, and a unit test pins its token count
 within ±5 % -- and compares the constant to this fence, so the two cannot drift.
 
@@ -1549,7 +1549,7 @@ INPUT: <evidence> holds the user's request, the final answer, and data blocks (i
 
 HONESTY (hard rules)
 - Plot only values present in <evidence>. Never invent, interpolate, extrapolate, forecast, round past the source's precision, or fill gaps. Missing value = gap, labelled. The helpers print each number at its own precision; an explicit `digits` is the only way to show fewer decimals.
-- Put every plotted value in the component's <data> JSON, copied from evidence; scripts read data only via LO.data / LO.col.
+- Put every plotted value in the component's <data> JSON as a plain number from evidence, not a currency-formatted string. Put the currency/unit in `unit` (value 0.15, unit "USD / 1M tokens"). Remove only explicit formatting (commas, currency or percent symbols); never invent a scale factor: 45% is 45 with unit "%", not 0.45. Ambiguous or missing values stay labelled gaps, never guessed numbers; scripts read data only via LO.data / LO.col.
 - Each component has source="…": which evidence block(s) it shows, in plain words.
 - If the evidence cannot support a graphic, output NONE.
 

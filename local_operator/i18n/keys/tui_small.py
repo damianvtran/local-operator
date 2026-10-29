@@ -374,6 +374,70 @@ def spend_channel_not_itemised() -> Msg:
     return Msg("tui.small.spend.channel_not_itemised", {})
 
 
+def spend_no_charge() -> Msg:
+    return Msg("tui.small.spend.no_charge", {})
+
+
+def spend_unpriced_cancelled() -> Msg:
+    return Msg("tui.small.spend.unpriced_cancelled", {})
+
+
+def spend_unpriced_cancelled_short() -> Msg:
+    return Msg("tui.small.spend.unpriced_cancelled_short", {})
+
+
+def spend_unpriced_cancelled_shortest() -> Msg:
+    return Msg("tui.small.spend.unpriced_cancelled_shortest", {})
+
+
+def spend_unpriced_cancelled_wide() -> Msg:
+    return Msg("tui.small.spend.unpriced_cancelled_wide", {})
+
+
+def spend_unpriced_failed() -> Msg:
+    return Msg("tui.small.spend.unpriced_failed", {})
+
+
+def spend_unpriced_failed_mixed() -> Msg:
+    return Msg("tui.small.spend.unpriced_failed_mixed", {})
+
+
+def spend_unpriced_failed_mixed_mid() -> Msg:
+    return Msg("tui.small.spend.unpriced_failed_mixed_mid", {})
+
+
+def spend_unpriced_failed_mixed_short() -> Msg:
+    return Msg("tui.small.spend.unpriced_failed_mixed_short", {})
+
+
+def spend_unpriced_failed_short() -> Msg:
+    return Msg("tui.small.spend.unpriced_failed_short", {})
+
+
+def spend_unpriced_failed_wide() -> Msg:
+    return Msg("tui.small.spend.unpriced_failed_wide", {})
+
+
+def spend_unpriced_ok() -> Msg:
+    return Msg("tui.small.spend.unpriced_ok", {})
+
+
+def spend_unpriced_ok_short() -> Msg:
+    return Msg("tui.small.spend.unpriced_ok_short", {})
+
+
+def spend_unpriced_partial() -> Msg:
+    return Msg("tui.small.spend.unpriced_partial", {})
+
+
+def spend_unpriced_partial_short() -> Msg:
+    return Msg("tui.small.spend.unpriced_partial_short", {})
+
+
+def spend_unpriced_partial_shortest() -> Msg:
+    return Msg("tui.small.spend.unpriced_partial_shortest", {})
+
+
 def subagent_panel_ctrl_g_expand() -> Msg:
     return Msg("tui.small.subagent_panel.ctrl_g_expand", {})
 

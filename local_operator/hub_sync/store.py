@@ -331,9 +331,26 @@ def apply_check(
         # next one settles to ``up-to-date``. Without the stamp it was sticky.
         keep_applied = item.get("state") == "applied" and not item.get("applied_seen")
         item["applied_seen"] = keep_applied
+        # ONE VERDICT, TWO INDEPENDENT FACTS. ``local-only`` (L != R, R == B) folds
+        # onto the ``up-to-date`` verdict because there is nothing to FETCH -- the
+        # pull side owns nothing here. The classification is the PUBLISH side's
+        # fact: the hub has not seen these bytes. Blanking it with the verdict
+        # made a locally edited copy read clean-too after one check, so no client
+        # could show "Modified" / "local changes not published" until the hub
+        # happened to move on its own. It is kept while the row stays
+        # ``up-to-date``, which is exactly what keeps it out of apply/auto-push:
+        # those select on the verdict (``available``) and on ``auto_will_apply``,
+        # never on this field. An equal pair keeps nothing: equality is the absence
+        # of a fact. Every arm that makes L == R again retires it (an accepted
+        # publication of THIS link -- a link push or a manual publish/republish --
+        # a pull that WROTE the hub's bytes, an unpull), while an arm that leaves
+        # the local copy different from the hub stores it again: a write that kept
+        # the local side (``settle_applied(remote_differs=True)``) and a no-write
+        # keep-mine pass (``settle_unchanged(remote_differs=True)``).
+        local_only = classification == "local-only"
         item.update(
             state="applied" if keep_applied else "up-to-date",
-            classification=None,
+            classification="local-only" if local_only else None,
             error_class=None,
             last_error=None,
             attempts=0,
@@ -358,12 +375,24 @@ def settle_applied(
     summary: Mapping[str, int],
     backup: str | None,
     now: datetime | None = None,
+    *,
+    remote_differs: bool = False,
 ) -> None:
+    """A merge WROTE; ``remote_differs`` says the written copy is not the hub's.
+
+    A pull that integrated the hub's bytes leaves nothing to publish, so the mark
+    is cleared. A write that kept the LOCAL side (an explicit ``prefer=local`` or
+    ``replace=local`` on a both-changed row) is not that: the caller states the
+    comparison it already has, and the row keeps ``local-only`` -- otherwise it
+    would contradict the very next check, which classifies L != R as local-only
+    (round-1 m3).
+    """
+
     now = now or datetime.now(timezone.utc)
     item["applied_seen"] = False
     item.update(
         state="applied",
-        classification=None,
+        classification="local-only" if remote_differs else None,
         error_class=None,
         last_error=None,
         attempts=0,
@@ -378,12 +407,28 @@ def settle_applied(
     item.pop("updating_since", None)
 
 
-def settle_unchanged(item: dict[str, Any]) -> None:
-    """The merge produced exactly the local text: nothing to write, nothing pending."""
+def settle_unchanged(item: dict[str, Any], *, remote_differs: bool = False) -> None:
+    """The merge produced exactly the local text: nothing to write, nothing pending.
 
+    ``remote_differs`` says the LOCAL copy still differs from the hub's. A
+    replace/keep-mine pass on a both-changed row lands here (per-field "take
+    mine" reproduces the local document), and the row must then say
+    ``local-only``: the next check classifies L != R exactly that way, so storing
+    ``None`` would contradict it for one interval (round-2 m3).
+    """
+
+    # A NO-WRITE INBOUND PASS SAYS NOTHING ABOUT THE PUBLISH SIDE. "Keep my side"
+    # (an explicit ``replace=local``), a bundle whose remote already equalled the
+    # local tree, and a both-changed merge resolved to local all land here, and
+    # none of them published anything: a row whose bytes the hub has not seen
+    # keeps its ``local-only`` mark so the copy still reads Modified. Every other
+    # classification IS settled by the pass and is cleared below.
+    if remote_differs or item.get("classification") == "local-only":
+        item["classification"] = "local-only"
+    else:
+        item["classification"] = None
     item.update(
         state="up-to-date",
-        classification=None,
         error_class=None,
         error_subclass=None,
         last_error=None,
@@ -423,6 +468,20 @@ def clear_push_skipped(item: dict[str, Any]) -> None:
 
     item.pop("push_blocked_reason", None)
     item.pop("push_blocked_at", None)
+
+
+def clear_local_only(item: dict[str, Any]) -> None:
+    """An ACCEPTED publication retires the unpublished-changes mark.
+
+    ``local-only`` says "the hub has not seen these bytes". The moment a push the
+    hub ACCEPTED lands, that sentence is false, and the row would otherwise keep
+    claiming unpublished changes until the next check happened to reclassify it --
+    a wrong fact, not a stale one. Only this classification is retired; anything
+    else stays for the next check to overwrite.
+    """
+
+    if item.get("classification") == "local-only":
+        item["classification"] = None
 
 
 def record_failure(
@@ -561,11 +620,31 @@ def push_due(item: Mapping[str, Any], interval_min: int, now: datetime | None = 
     return last is None or (now - last) >= timedelta(minutes=max(0, interval_min))
 
 
-def prune_items(doc: dict[str, Any], live: set[str]) -> None:
-    """Drop items whose local row or baseline link is gone (B4.2)."""
+def prune_items(
+    doc: dict[str, Any],
+    live: set[str],
+    confirmed_gone: Callable[[str, str], bool] | None = None,
+) -> None:
+    """Drop items whose item is CONFIRMED gone (B4.2).
 
-    for key in [k for k in doc.get("items", {}) if k not in live]:
-        del doc["items"][key]
+    A row is durable bookkeeping -- the retry schedule, the pull/push cadence, the
+    ``applied`` backup pointer -- so a key missing from one pass's ``live`` set is
+    NOT evidence that its item is gone: that pass may simply have failed to READ
+    it (an unreadable ``agent.yml``, a team directory mid-swap while its registry
+    lock is held, a corrupt baseline file). ``confirmed_gone(kind, local_id)`` is
+    asked per key and only a True answer deletes the row; with no predicate nothing
+    is dropped (round-2 Q4: the same rule ``provenance.prune`` already applies to
+    baselines).
+    """
+
+    items = doc.get("items", {})
+    for key in [k for k in items if k not in live]:
+        item = items.get(key) or {}
+        kind, local_id = str(item.get("kind") or ""), str(item.get("local_id") or "")
+        if not kind or not local_id:
+            continue
+        if confirmed_gone is not None and confirmed_gone(kind, local_id):
+            del items[key]
 
 
 # -- cross-process lease (B3.3 layer 2) -------------------------------------------------

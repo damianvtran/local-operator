@@ -849,3 +849,336 @@ def test_the_record_lock_is_not_held_across_the_epoch_rehandshake(
     assert not worker.is_alive(), "the epoch frame must be answered once the peer is back"
     assert reply["detail"]["applied"] is True
     assert audit_mod.events_logged(log).count("epoch_rotated") == 1
+
+
+# ---------------------------------------------------------------------------
+# A name after the join: Rule N1, and the row it belongs to
+# ---------------------------------------------------------------------------
+
+
+def _renamable(root: Path) -> tuple[Any, types.NetworkRecord]:
+    """A network whose own row belongs to a REAL minted identity.
+
+    ``relay.rename_self`` writes the identity file and then the row of the device it
+    names, so the record's ``self_device_id`` has to be that device's id — a
+    hand-typed one would silently rename nothing and pass a weaker test.
+    """
+    me = identity.mint(root, name="ip-172-31-18-0")
+    record = types.NetworkRecord(
+        network_id=NETWORK,
+        name="home-net",
+        epoch=1,
+        self_device_id=me.device_id,
+        self_role="admin",
+        self_capabilities=sorted(types.capabilities_for_role("admin")),
+    )
+    record.members.append(
+        types.MemberRecord(
+            device_id=me.device_id,
+            public_key=me.public_key,
+            name=me.name,
+            role="admin",
+            capabilities=sorted(types.capabilities_for_role("admin")),
+            added_via="self",
+        )
+    )
+    record.members.append(
+        types.MemberRecord(
+            device_id=PEER,
+            public_key=wire.b64u(b"b" * 32),
+            name="laptop",
+            role="drive",
+            capabilities=sorted(types.capabilities_for_role("drive")),
+            added_via="invite",
+        )
+    )
+    store.save(record, root)
+    return me, record
+
+
+def test_rename_self_moves_only_the_row_it_owns(root: Path) -> None:
+    """The write is scoped to the renaming device: a peer's name is that peer's
+    statement about itself, and a local edit of it would be overwritten on the
+    next pull (Rule N1) and would be a lie in the meantime."""
+    me, record = _renamable(root)
+    digest_before = relay.members_digest_of(record)
+    receipt = relay.rename_self("build-box", root=root)
+    assert receipt.device_id == me.device_id
+    assert receipt.previous == "ip-172-31-18-0"
+    assert receipt.name == "build-box"
+    assert receipt.networks == (NETWORK,)
+    after = next(row for row in store.list_networks(root) if row.network_id == NETWORK)
+    own_row = after.member(me.device_id)
+    peer_row = after.member(PEER)
+    assert own_row is not None and peer_row is not None
+    assert own_row.name == "build-box"
+    assert peer_row.name == "laptop"
+    # THE DIGEST DOES NOT MOVE, and that is what makes a cosmetic rename safe: a
+    # digest that changed on a name would turn "did your list match mine" into a
+    # false mismatch, which is why ``members_digest_of`` excludes it by design.
+    assert relay.members_digest_of(after) == digest_before
+
+
+def test_rename_self_refuses_a_name_another_member_already_has(root: Path) -> None:
+    """The collision this design exists to stop is a WRITE mistarget, and the M1
+    finding on the resolver fix added the tombstone half: a row this device can
+    still be asked about holds its name even after it was removed."""
+    me, record = _renamable(root)
+    record.members.append(
+        types.MemberRecord(
+            device_id="d_" + "c" * 32,
+            public_key=wire.b64u(b"c" * 32),
+            name="removed-box",
+            lifecycle="expired",
+            removed_at=time.time(),
+        )
+    )
+    store.save(record, root)
+    with pytest.raises(types.MeshRefusal) as taken:
+        relay.rename_self("LAPTOP", root=root)  # case-folded: a display duplicate
+    assert taken.value.code == "name_taken"
+    assert PEER[:8] in taken.value.sentence
+    with pytest.raises(types.MeshRefusal) as tombstoned:
+        relay.rename_self("removed-box", root=root)
+    assert tombstoned.value.code == "name_taken"
+    # A name shaped like a REMOVED device's id is refused by the name rule itself,
+    # which is the blanket form of the same guard.
+    with pytest.raises(types.MeshRefusal) as as_id:
+        relay.rename_self("d_" + "c" * 32, root=root)
+    assert as_id.value.code == "invalid_device_name"
+    # Nothing moved: a refusal is not a partial write.
+    loaded = identity.load(root)
+    assert loaded is not None
+    assert loaded.name == "ip-172-31-18-0"
+
+
+def test_a_name_is_believed_only_from_the_device_it_names() -> None:
+    """Rule N1 at its own seam. The sender is the link's authenticated device id, so
+    the device's own row may move its name and a third party relaying the same row
+    may not — which is the whole reason no new wire op is needed."""
+    record, _state = _record()
+    _admit_peer(record)
+    peer_row = record.member(PEER)
+    assert peer_row is not None
+    own = peer_row.to_json()
+    own["name"] = "build-box"
+    changed, added = relay.adopt_members(record, [own], sender_device_id=PEER)
+    assert (changed, added) == (True, [])
+    assert peer_row.name == "build-box"
+    # A DIFFERENT device relays the same row with an invented name.
+    third_party = peer_row.to_json()
+    third_party["name"] = "impostor"
+    changed, added = relay.adopt_members(record, [third_party], sender_device_id=SELF)
+    assert (changed, added) == (False, [])
+    assert peer_row.name == "build-box"
+
+
+def test_a_rotation_frame_may_not_revert_a_rename() -> None:
+    """The other half of Rule N1: an epoch frame is a THIRD PARTY's table, and the
+    rotation statement it carries signs ids and the new key — never a name."""
+    record, _state = _record()
+    peer = _admit_peer(record)
+    peer.name = "build-box"
+    stale = peer.to_json()
+    stale["name"] = "laptop"  # the name this record admitted the device under
+    rows = [types.MemberRecord.from_json(stale)]
+    relay._keep_local_authority(record, rows)  # noqa: SLF001 — the rule's own seam
+    assert rows[0].name == "build-box"
+    # And the successor rule prefers the local name for a rotated row.
+    successor = types.MemberRecord.from_json(stale)
+    relay._take_over_standing(peer, successor)  # noqa: SLF001
+    assert successor.name == "build-box"
+
+
+def test_a_peer_cannot_store_an_invalid_label_as_its_name() -> None:
+    """The RECEIVING half of the guard (review round 1, F1). A signature proves who
+    sent a name, never that the text is usable — so a hostile or buggy build cannot
+    park another member's id in a row and make a later name query answer the wrong
+    device. The ROW IS KEPT: a cosmetic label is not a reason to drop a member."""
+    record, _state = _record()
+    _admit_peer(record)
+    peer_row = record.member(PEER)
+    assert peer_row is not None
+    hostile = peer_row.to_json()
+    hostile["name"] = "d_" + "a" * 32  # this record's OWN id, as a "name"
+    changed, added = relay.adopt_members(record, [hostile], sender_device_id=PEER)
+    assert (changed, added) == (False, [])
+    assert peer_row.name == "laptop"
+
+    # A NEWCOMER is still adopted — with no name at all when the frame's is invalid.
+    newcomer_id = "d_" + "d" * 32
+    newcomer = types.MemberRecord(
+        device_id=newcomer_id,
+        public_key=wire.b64u(b"d" * 32),
+        name="bad#name",
+        role="read",
+        capabilities=sorted(types.capabilities_for_role("read")),
+    ).to_json()
+    changed, added = relay.adopt_members(record, [newcomer], sender_device_id=PEER)
+    assert added == [newcomer_id]
+    newcomer_row = record.member(newcomer_id)
+    assert newcomer_row is not None
+    assert newcomer_row.name == ""
+
+    # The admission path applies the same rule to the join name.
+    joiner = "d_" + "e" * 32
+    row = relay.admit(
+        record,
+        device_id=joiner,
+        public_key=wire.b64u(b"e" * 32),
+        name="line\u2028sep",
+        added_by=SELF,
+        persist=False,
+    )
+    assert row.name == ""
+
+
+def test_a_row_write_that_fails_is_reported_as_a_partial_rename(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, F3. When the identity write lands and a row write does not,
+    the two surfaces disagree — ``identity show`` says the new name and every member
+    listing says the old one. That state is raised and named, never reported as a
+    success, so the operator knows to retry instead of believing the rename landed."""
+    me, _record = _renamable(root)
+    second = types.NetworkRecord(
+        network_id="n_ffffffffffffffffffffffff",
+        name="second-net",
+        epoch=1,
+        self_device_id=me.device_id,
+        self_role="admin",
+        self_capabilities=sorted(types.capabilities_for_role("admin")),
+    )
+    second.members.append(
+        types.MemberRecord(
+            device_id=me.device_id,
+            public_key=me.public_key,
+            name=me.name,
+            role="admin",
+            capabilities=sorted(types.capabilities_for_role("admin")),
+            added_via="self",
+        )
+    )
+    store.save(second, root)
+
+    real_mutate = store.mutate
+
+    def refuse_one(network_id: str, root: Path | None = None) -> Any:
+        if network_id == second.network_id:
+            raise RuntimeError("the record's lock is unavailable")
+        return real_mutate(network_id, root)
+
+    monkeypatch.setattr(store, "mutate", refuse_one)
+    with pytest.raises(types.MeshRefusal) as partial:
+        relay.rename_self("build-box", root=root)
+    assert partial.value.code == "rename_partial"
+    assert "build-box" in partial.value.sentence
+    assert "second-net" in partial.value.sentence
+    assert "NOT updated" in partial.value.sentence
+    # THE HALF THAT DID LAND IS REAL, and that is exactly why it must be reported:
+    # the identity file already carries the new name.
+    monkeypatch.setattr(store, "mutate", real_mutate)
+    loaded = identity.load(root)
+    assert loaded is not None
+    assert loaded.name == "build-box"
+    reread = next(row for row in store.list_networks(root) if row.network_id == second.network_id)
+    reread_row = reread.member(me.device_id)
+    assert reread_row is not None
+    assert reread_row.name == "ip-172-31-18-0"
+
+
+def test_a_rotation_frame_cannot_install_an_invalid_name(root: Path) -> None:
+    """Convergence round, F1 residual: the epoch install is a SECOND DOOR.
+
+    ``apply_epoch`` replaces the member table wholesale rather than merging row by
+    row, so the first receive-time guard did not cover it. A frame that could plant a
+    never-held row NAMED after a tombstoned id would make ``_resolve_device`` answer
+    that row for the burned id — ``member rm <stale-id>`` would remove the bystander
+    and ``credential share --with <stale-id>`` would hand it a credential.
+    """
+    record, state = _record()
+    peer = _admit_peer(record)
+    peer.name = ""  # a held row with NO local name: the frame's value would survive
+    tombstoned = "d_" + "c" * 32
+    record.removed_ids.append(tombstoned)
+    stranger = "d_" + "f" * 32
+    record.members.append(
+        types.MemberRecord(
+            device_id=stranger,
+            public_key=wire.b64u(b"f" * 32),
+            name="",
+            role="read",
+            capabilities=sorted(types.capabilities_for_role("read")),
+        )
+    )
+    incoming = relay.epoch_frame(record, state, reason="member_removed", target_device_id=SELF)
+    incoming["epoch"] = 2
+    incoming["rotation_id"] = PEER
+    incoming["secret"] = wire.b64u(b"n" * 32)
+    # NAMES ARE NOT IN THE DIGEST, so a hostile frame can carry any label it likes and
+    # still pass the digest check — which is exactly why the install must sanitise.
+    for row in incoming["members"]:
+        if row["device_id"] == stranger:
+            row["name"] = tombstoned  # (a) never-held row named after a tombstone
+        if row["device_id"] == PEER:
+            row["name"] = "d_" + "b" * 32  # (b) held row, empty local name
+    outcome = relay.apply_epoch(record, state, incoming, sender_device_id=PEER, root=root)
+    assert outcome.applied is True
+    # The ROWS SURVIVE — a cosmetic label never costs a member or refuses a frame.
+    stranger_row = record.member(stranger)
+    peer_row = record.member(PEER)
+    assert stranger_row is not None and peer_row is not None
+    # Neither invalid label is stored.
+    assert stranger_row.name == ""
+    assert peer_row.name == ""
+    stored = store.load(NETWORK, root)
+    stored_stranger = stored.member(stranger)
+    assert stored_stranger is not None
+    assert stored_stranger.name == ""
+
+
+def test_a_name_held_only_in_another_network_is_accepted(root: Path) -> None:
+    """QA round 1, Q1 — the narrowing the docstring promised, now implemented.
+
+    The collision check filtered only on ``self_device_id``, so a peer's name in a
+    record this device holds NO row in — a record ``rename_self`` never writes —
+    refused a rename that could not have collided with anything. This is the
+    two-network shape QA reproduced: the second record carries the device id but no
+    self row, and its peer's name must be accepted; a same-network collision must
+    still refuse.
+    """
+    me, _record = _renamable(root)
+    other = types.NetworkRecord(
+        network_id="n_ffffffffffffffffffffffff",
+        name="other-net",
+        epoch=1,
+        self_device_id=me.device_id,
+        self_role="read",
+        self_capabilities=sorted(types.capabilities_for_role("read")),
+    )
+    elsewhere = "d_" + "f" * 32
+    other.members.append(
+        types.MemberRecord(
+            device_id=elsewhere,
+            public_key=wire.b64u(b"f" * 32),
+            name="elsewhere-box",
+            role="drive",
+            capabilities=sorted(types.capabilities_for_role("drive")),
+            added_via="invite",
+        )
+    )
+    store.save(other, root)
+
+    # CROSS-NETWORK: accepted, because other-net has no row of this device to rename.
+    receipt = relay.rename_self("elsewhere-box", root=root)
+    assert receipt.networks == (NETWORK,)
+    home = next(row for row in store.list_networks(root) if row.network_id == NETWORK)
+    home_row = home.member(me.device_id)
+    assert home_row is not None
+    assert home_row.name == "elsewhere-box"
+
+    # SAME-NETWORK: still refused, and the sentence names the colliding row.
+    with pytest.raises(types.MeshRefusal) as taken:
+        relay.rename_self("laptop", root=root)
+    assert taken.value.code == "name_taken"
+    assert PEER[:8] in taken.value.sentence

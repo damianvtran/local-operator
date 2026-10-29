@@ -95,6 +95,8 @@ async def test_f_shows_the_state_sentence_and_refuses_every_editing_key() -> Non
         before = settings_io.read_setting(view._manager, setting)
         await pilot.press("space")
         after = settings_io.read_setting(view._manager, setting)
+        # The shipped default is OFF (consent hold); the point is that `space`
+        # still writes nothing at all.
         assert before is False and after is False
         assert view._error == NEUTRAL
 

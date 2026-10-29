@@ -31,21 +31,33 @@
  * ABSENT AT ZERO. The bar is not rendered (never rendered empty, never a zero
  * badge), so its presence is itself the statement.
  */
+import { useId } from "react";
 import { cn } from "../lib/cn";
 import { dockAsk, outstandingAsks, questionTally } from "../lib/asks";
+import { messageRuntime } from "../store";
 import type { PendingAsk } from "../types";
 
 export function AskDock({
 	rows,
 	onOpen,
+	compact = false,
 }: {
 	rows: PendingAsk[] | undefined | null;
 	/** Summon the asks sheet — the answer surface. */
 	onOpen: () => void;
+	/** The session tray's short form (operator finding B): the visible text is
+	    `relay.chrome.session.tray.questions` ("2 questions"), minted for this pill
+	    and already translated, while the accessible name stays the full existing
+	    sentence. The long visible sentence was what pushed the tray past one
+	    phone-width line. A lapsed-only queue keeps its own wording. */
+	compact?: boolean;
 }) {
+	const previewId = useId();
+	const head = dockAsk(rows);
+	const preview = String(head?.questions?.[0]?.question ?? "").trim();
 	const outstanding = outstandingAsks(rows);
 	if (outstanding.length === 0) return null;
-	const head = dockAsk(rows);
+	
 	/* Count QUESTIONS, not asks: "2 asks waiting" is true but tells a user
 	   nothing about how much they owe, and the design's own line counts
 	   questions (`? 3 questions waiting`).
@@ -59,17 +71,15 @@ export function AskDock({
 	const { waiting, lapsed } = questionTally(rows);
 	const quiet = waiting === 0;
 	const label = quiet
-		? lapsed === 1
-			? "1 question timed out"
-			: `${lapsed} questions timed out`
-		: waiting === 1
-			? "1 question waiting"
-			: `${waiting} questions waiting`;
-	const preview = String(head?.questions?.[0]?.question ?? "").trim();
+		? messageRuntime.t("relay.asks.dock.timed_out", { count: lapsed })
+		: messageRuntime.t("relay.asks.dock.waiting", { count: waiting });
+	
 
 	return (
 		<button
 			type="button"
+			aria-label={label}
+			aria-describedby={preview ? previewId : undefined}
 			data-testid="ask-dock"
 			data-ask-count={outstanding.length}
 			onClick={onOpen}
@@ -79,9 +89,9 @@ export function AskDock({
 			   `text-ink` — the ORDER the design asked for is that the thing being
 			   asked is the most legible mark on the line (design round 1, D3). */
 			className={cn(
-				"mx-2 mb-1 flex min-h-11 items-center gap-2",
-				"rounded-md border px-3 py-1.5 text-left active:bg-elevated",
-				quiet ? "border-hairline bg-surface" : "border-accent bg-accent-wash",
+				"lo-hit flex h-8 shrink-0 items-center gap-1",
+				"rounded-full px-3 text-start active:bg-elevated",
+				quiet ? "bg-surface" : "bg-accent-wash",
 			)}
 		>
 			{/* A persistent accent on the glyph, never animated: a pulse would be
@@ -93,22 +103,10 @@ export function AskDock({
 			>
 				?
 			</span>
-			<span className="shrink-0 text-body-sm text-ink-muted">{label}</span>
-			{preview ? (
-				<span
-					className={cn(
-						"min-w-0 flex-1 truncate text-body-sm",
-						quiet ? "text-ink-muted" : "text-ink",
-					)}
-				>
-					· {preview}
-				</span>
-			) : (
-				<span className="min-w-0 flex-1" />
-			)}
-			<span aria-hidden className={cn("shrink-0", quiet ? "text-ink-dim" : "text-accent")}>
-				▸
-			</span>
+			<span className="shrink-0 text-body-sm text-ink-muted">{compact && !quiet
+				? messageRuntime.t("relay.chrome.session.tray.questions", { count: waiting })
+				: label}</span>
+			{preview ? <span id={previewId} className="sr-only">{preview}</span> : null}
 		</button>
 	);
 }

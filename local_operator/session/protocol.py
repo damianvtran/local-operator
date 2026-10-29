@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol, runtime_chec
 
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.types import (
+    EFFORT_CHOICE_UNSET,
     AgentMessage,
     AskUserFn,
     EventHandler,
@@ -278,7 +279,13 @@ class SessionProtocol(Protocol):
         """``provider/model`` of the spec actually serving requests."""
         ...
 
-    def set_model(self, model: ModelSpec, *, explicit: bool = False) -> None:
+    def set_model(
+        self,
+        model: ModelSpec,
+        *,
+        explicit: bool = False,
+        effort_choice: object = EFFORT_CHOICE_UNSET,
+    ) -> None:
         """Swap the model spec; in force from the very next provider call.
 
         The TUI's ``/model <provider>/<id>`` path calls this after building a
@@ -963,7 +970,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         ...
 
     async def decline_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]: ...
-    async def dismiss_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]: ...
+
+    async def dismiss_ask(
+        self, ask_id: str, *, by: str = "unknown", reason: str | None = None
+    ) -> dict[str, Any]: ...
 
     async def bridge_decide(self, ask_id: str, question_id: str, word: str) -> dict[str, Any]:
         """Decide an agent-messages request — the OWNER's name, on the viewer's async side.
@@ -1430,7 +1440,13 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         ...
 
     async def admit_prompt(
-        self, text: str, *, command_id: str, images: list[dict[str, str]], steer: bool = False
+        self,
+        text: str,
+        *,
+        command_id: str,
+        images: list[dict[str, str]],
+        steer: bool = False,
+        files: list[dict[str, Any]] | None = None,
     ) -> tuple[str, bool]:
         """Submit a prompt and return the runtime's ADMISSION receipt.
 

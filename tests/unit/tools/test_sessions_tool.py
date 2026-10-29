@@ -245,9 +245,10 @@ def test_default_set_drops_sessions_without_a_launcher_and_appends_it_with_one()
     ]
     # Appended after everything that existed when it landed: appending never
     # shifts the provider-visible array prefix the prompt cache keys on. Newer
-    # appends may follow (wave 4 slice A's `setting` is the current last, and
-    # the host-gated entries between them are absent in this environment).
-    assert with_launcher[-2:] == ["sessions", "setting"]
+    # appends may follow, and the unconditional tail since is wave 4 slice A's
+    # `setting` then V2-4's `tags` (the current last; the host-gated entries
+    # between them are absent in this environment).
+    assert with_launcher[-3:] == ["sessions", "setting", "tags"]
 
 
 # --- 2/3. spawn: argv + environment, asserted at the executor seam ----------
@@ -529,6 +530,39 @@ async def test_list_reports_live_rows_and_details_carry_the_published_row(root: 
 
 
 @pytest.mark.asyncio
+async def test_list_marks_the_callers_own_row_and_only_that_row(root: Path) -> None:
+    """Self-identity: the caller's own row says ``(this session)``, in text.
+
+    The incident: an agent read its own live row as a DIFFERENT session working
+    the same topic, then spawned a duplicate. The marker is a text addend —
+    ``details['rows']`` hands back the published dicts untouched (an existing
+    test pins their key order, and no consumer should have to strip a display
+    word out of machine data).
+    """
+    from local_operator.info.collect import session_rows
+
+    _session(root, "aaaa11112222", "other-work")
+    record = _publish_record(root, REQUESTER_ID, "the caller")
+    try:
+        result = await execute_sessions(
+            "t", {"op": "list", "include_stored": True}, None, None, _context(root)
+        )
+        assert not result.is_error, result.text
+        lines = result.text.splitlines()
+        own_line = next(line for line in lines if REQUESTER_ID in line)
+        other_line = next(line for line in lines if "aaaa11112222" in line)
+        assert "(this session)" in own_line, result.text
+        assert "(this session)" not in other_line, result.text
+
+        rows = (result.details or {})["rows"]
+        assert all("(this session)" not in str(row) for row in rows), rows
+        published = {row["session_id"]: row for row in session_rows(root, include_stored=True)}
+        assert [list(row) for row in rows] == [list(published[row["session_id"]]) for row in rows]
+    finally:
+        registry.unpublish(record.pid, root)
+
+
+@pytest.mark.asyncio
 async def test_list_include_stored_appends_stored_rows_as_stored(root: Path) -> None:
     _session(root, "aaaa11112222", "stored-one")
     result = await execute_sessions(
@@ -606,6 +640,68 @@ async def test_info_reports_origin_visibility_and_opener(root: Path) -> None:
     assert details["session_dir"] == str(directory)
     assert details["transcript_path"] == str(directory / "transcript.jsonl")
     assert "origin: agent-workstream" in result.text
+
+
+@pytest.mark.asyncio
+async def test_info_says_plainly_when_the_target_is_the_callers_own_session(root: Path) -> None:
+    """``info`` on the caller's own id says so in words, and says nothing on a peer.
+
+    A matching id and a matching title are still inferable as two facts rather
+    than one identity, which is how the incident happened; the sentence removes
+    the inference. The negative arm is load-bearing: `sessions` is a tool for
+    OTHER sessions, so a self sentence on every row would be noise that trains
+    the model to ignore it.
+    """
+    _session(root, REQUESTER_ID, "my own run")
+    record = _publish_record(root, REQUESTER_ID, "my own run")
+    other_id = "ffff00001111"
+    _session(root, other_id, "someone else")
+    try:
+        own = await execute_sessions(
+            "t", {"op": "info", "target": REQUESTER_ID}, None, None, _context(root)
+        )
+        assert not own.is_error, own.text
+        assert (
+            "This is YOUR session — the one you are running in. It is not a duplicate." in own.text
+        ), own.text
+
+        other = await execute_sessions(
+            "t", {"op": "info", "target": other_id}, None, None, _context(root)
+        )
+        assert not other.is_error, other.text
+        assert "This is YOUR session" not in other.text, other.text
+    finally:
+        registry.unpublish(record.pid, root)
+
+
+@pytest.mark.asyncio
+async def test_info_says_plainly_its_your_own_hidden_session(root: Path) -> None:
+    """QA round 1, Q1: the disk-only arm carries the self sentence too.
+
+    An ``agent-shell`` session is dropped from every listing scan at any limit,
+    so ``info`` composes its answer from disk and never reaches the row-backed
+    body where the sentence landed first. That is the shape an exec-shell agent
+    runs as — and it is the one caller with no other surface identifying it.
+    """
+    directory = _session(root, REQUESTER_ID, "hidden own session")
+    mark_session_origin(directory, ORIGIN_AGENT_SHELL)
+    own = await execute_sessions(
+        "t", {"op": "info", "session": REQUESTER_ID}, None, None, _context(root)
+    )
+    assert not own.is_error, own.text
+    assert "origin: agent-shell" in own.text, own.text
+    assert (
+        "This is YOUR session — the one you are running in. It is not a duplicate." in own.text
+    ), own.text
+
+    other_id = "feedface0002"
+    other_dir = _session(root, other_id, "hidden, not mine")
+    mark_session_origin(other_dir, ORIGIN_AGENT_SHELL)
+    other = await execute_sessions(
+        "t", {"op": "info", "session": other_id}, None, None, _context(root)
+    )
+    assert not other.is_error, other.text
+    assert "This is YOUR session" not in other.text, other.text
 
 
 @pytest.mark.asyncio
@@ -717,6 +813,27 @@ async def test_list_query_uses_the_store_search(root: Path) -> None:
     assert "the shard report" in result.text
     assert "session aaaa11112222" in result.text
     assert "locates sessions, not positions" in result.text
+
+
+@pytest.mark.asyncio
+async def test_list_query_marks_the_callers_own_row(root: Path) -> None:
+    """The ``query=`` view marks the same way as the plain listing.
+
+    ``query`` is the other way an agent finds a session by name; leaving it
+    unmarked would make it the one view where its own session is again
+    indistinguishable from a peer whose title matches the same topic.
+    """
+    _session(root, REQUESTER_ID, "the caller's shard work")
+    _session(root, "eeee99990000", "shard work elsewhere")
+    result = await execute_sessions(
+        "t", {"op": "list", "query": "shard"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    lines = result.text.splitlines()
+    own_line = next(line for line in lines if REQUESTER_ID in line)
+    other_line = next(line for line in lines if "eeee99990000" in line)
+    assert "(this session)" in own_line, result.text
+    assert "(this session)" not in other_line, result.text
 
 
 # --- stop -------------------------------------------------------------------
@@ -1276,6 +1393,93 @@ async def test_peek_cursor_pages_round_trip_without_gaps_or_repeats(root: Path) 
 
 
 @pytest.mark.asyncio
+async def test_sessions_peek_hides_the_account_notice_and_keeps_cursors_aligned(
+    root: Path,
+) -> None:
+    """``sessions peek`` is model context too, and its cursors must not shift.
+
+    Round 1, R1. The account-change notice names the account, and this surface
+    rendered it as a ``system`` step — a sentence carrying an email, inside a tool
+    result. It is not a step now, and because the window arithmetic counts with the
+    SAME predicate (``_peek_message_entries``), the pages either side of a hidden
+    row still meet exactly: no gap, no repeat, and the footer's cursor is the
+    oldest SHOWN row rather than the oldest row the walk read past.
+
+    The journal is 20 message rows with the notice between rows 8 and 9, and the
+    page is anchored so the 12-step window STRADDLES it. Were the notice still a
+    step, that window would begin at row 2 and carry the label — so the shown rows,
+    the cursor and the absence of the label all discriminate.
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage, Message
+    from local_operator.session.transcript import Transcript
+
+    label = "bound-account@example.test"
+    session_id = "eeee55556666"
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "created_at.json").write_text("1700000000.0", encoding="utf-8")
+    # Seeded through the real writer: the hidden row must be the shape the
+    # transcript actually persists, or the cell would prove nothing about it.
+    journal = Transcript(directory)
+    for i in range(1, 21):
+        await journal.append_message(Message.user(f"row {i}"))
+        if i == 8:
+            await journal.append_message(
+                CustomMessage(
+                    custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+                    attribution="system",
+                    details={
+                        "text": (
+                            "[session credential] This session is now using " f"{label} on my-mac."
+                        ),
+                        "provider": "stub",
+                        "owner_device": "d_local",
+                        "credential_id": 125,
+                    },
+                ),
+                preserve_mtime=True,
+            )
+    # A stored title keeps ``session_name`` (derived from the first message) out
+    # of the header, exactly as ``_write_journal`` does for the other peek cells.
+    write_session_title(directory, "journal eeee", user_set=False, past_names=[])
+    ids = [
+        entry.id
+        for entry in journal.entries()
+        if (entry.payload or {}).get("custom_type") != SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    ]
+    assert len(ids) == 20
+
+    tail = await _peek(root, {"op": "peek", "session": session_id, "steps": 3})
+    assert not tail.is_error, tail.text
+    assert label not in tail.text
+    assert label not in json.dumps(tail.details or {})
+    assert _rows_in(tail.text) == {18, 19, 20}
+    assert (tail.details or {}).get("steps_shown") == 3
+
+    # A 12-step window anchored at row 15 is rows 3..14 — the notice sits inside
+    # it. Were it still a step, the window would begin at row 2 and carry the
+    # label, which is what makes this page the discriminating one.
+    first = await _peek(root, {"op": "peek", "session": session_id, "before_id": ids[14]})
+    assert not first.is_error, first.text
+    assert label not in first.text
+    assert _rows_in(first.text) == set(range(3, 15))
+    cursor = re.search(r"before_id=([0-9a-f]{32}) for earlier", first.text)
+    assert cursor is not None, first.text
+    assert cursor.group(1) == ids[2], "the cursor is the oldest SHOWN step, row 3"
+
+    second = await _peek(root, {"op": "peek", "session": session_id, "before_id": cursor.group(1)})
+    assert not second.is_error, second.text
+    assert _rows_in(second.text) == {1, 2}
+
+    # The digest counts the rows a reader can SEE: the hidden one is not a step.
+    digest = await _peek(root, {"op": "peek", "session": session_id, "digest": True})
+    assert not digest.is_error, digest.text
+    assert label not in digest.text
+    assert "20 steps seen" in digest.text
+
+
+@pytest.mark.asyncio
 async def test_peek_around_window_reports_both_edges(root: Path) -> None:
     directory, ids, _ = _big_journal(root, "dddd77778888", rows=100, pad=40)
     result = await _peek(root, {"op": "peek", "session": "dddd77778888", "around_id": ids[49]})
@@ -1333,6 +1537,70 @@ async def test_peek_search_budget_is_a_depth_and_moves_with_the_needle(
     details = miss.details or {}
     assert details["steps_shown"] == 0
     assert 64 * 1024 <= details["scanned_bytes"] <= 64 * 1024 + 2000
+
+
+@pytest.mark.asyncio
+async def test_peek_search_cannot_use_a_refused_row_as_an_oracle(root: Path) -> None:
+    """A query can neither print nor MATCH a row the peek refuses (QA r1, Q1).
+
+    The step filter is what keeps the account label out of a peek. Testing the
+    raw JSON of every row BEFORE that filter made the filter itself observable:
+    a query for a substring of a label this surface never prints still answered
+    yes/no, and QA rebuilt a whole email in 513 of them on `b6759d3be`. So a
+    refused row may neither match nor become an anchor — and the second half of
+    this cell proves the walk still finds a row it is allowed to show, which is
+    what stops the fix from being "search nothing".
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage, Message
+    from local_operator.session.transcript import Transcript
+
+    label = "qa.alpha.operator@example.test"
+    session_id = "eeee77778888"
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "created_at.json").write_text("1700000000.0", encoding="utf-8")
+    journal = Transcript(directory)
+    await journal.append_message(Message.user("an ordinary row about widgets"))
+    await journal.append_message(
+        CustomMessage(
+            custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": f"[session credential] This session is now using {label} on qa-node.",
+                "provider": "stub",
+                "owner_device": "d_local",
+                "credential_id": 125,
+            },
+        ),
+        preserve_mtime=True,
+    )
+    await journal.append_message(Message.user("another ordinary row"))
+    write_session_title(directory, "oracle case", user_set=False, past_names=[])
+
+    # A substring of the label the peek refuses to print: this must be a MISS.
+    oracle = await _peek(root, {"op": "peek", "session": session_id, "query": "qa.alpha.operator"})
+    assert not oracle.is_error, oracle.text
+    assert oracle.text.startswith("no match for 'qa.alpha.operator'"), oracle.text
+    assert (oracle.details or {})["steps_shown"] == 0
+    assert label not in oracle.text and label not in json.dumps(oracle.details or {})
+    # ...and it is not an anchor either, so the refusal cannot be walked around
+    # one id at a time: the id the row really has finds no window of its own.
+    refused_ids = [
+        entry.id
+        for entry in journal.entries()
+        if (entry.payload or {}).get("custom_type") == SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    ]
+    assert len(refused_ids) == 1
+    around = await _peek(root, {"op": "peek", "session": session_id, "around_id": refused_ids[0]})
+    assert not around.is_error, around.text
+    assert label not in around.text and label not in json.dumps(around.details or {})
+
+    # The control half: a row the peek MAY show is still found, and named.
+    hit = await _peek(root, {"op": "peek", "session": session_id, "query": "about widgets"})
+    assert not hit.is_error, hit.text
+    assert (hit.details or {})["mode"] == "search"
+    assert "about widgets" in hit.text and "← match" in hit.text
 
 
 @pytest.mark.asyncio
@@ -2285,7 +2553,7 @@ async def test_list_is_a_union_of_local_and_remote_rows_with_the_device_on_each(
     )
     assert not result.is_error, result.text
     assert "[stored] local-stored" in result.text
-    assert "[live] shared-one" in result.text and "on cloud-node-1" in result.text
+    assert "[Open] shared-one" in result.text and "on cloud-node-1" in result.text
     # The document's own-locality row is this device's catalogue, already in
     # hand — merging it would list local sessions twice.
     assert "fed-local" not in result.text
@@ -2850,6 +3118,7 @@ async def test_spawn_known_tags_written_after_publication(
     assert read_entity_tags(root, "session", sid) == {
         "tags": [a["id"], b["id"]],
         "primary": a["id"],
+        "revision": 1,
     }
     assert (result.details or {})["tags_applied"] is True
     assert (result.details or {})["tags"] == ["Review", "Fix"]
@@ -2912,6 +3181,7 @@ async def test_real_spawn_applies_existing_tags(root: Path) -> None:
         assert read_entity_tags(root, "session", sid) == {
             "tags": [category["id"]],
             "primary": category["id"],
+            "revision": 1,
         }
         assert (result.details or {})["tags_applied"] is True
         assert "tags: Review" in result.text
@@ -3055,3 +3325,30 @@ async def test_spawn_receipt_uses_prelaunch_category_names(
     assert (result.details or {})["tags"] == ["Review"]
     assert "tags: Review" in result.text
     assert "Renamed" not in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reachable", [False, True])
+async def test_mesh_presence_info_and_list_do_not_promote_cached_live_claims(
+    root: Path, monkeypatch: pytest.MonkeyPatch, reachable: bool
+) -> None:
+    """The relay may retain row identity after a link drops, not live authority."""
+    payload = _fed_doc()
+    row = payload["sessions"][1]
+    row.update(waiting_on=2, busy=True, subagents_running=1)
+    row["peer"]["reachable"] = reachable
+    _fake_mesh(monkeypatch, payload)
+    for args in (
+        {"op": "info", "peer": "synthetic-peer", "session": row["session_id"]},
+        {"op": "list", "scope": "remote"},
+    ):
+        result = await execute_sessions("synthetic", args, None, None, _context(root))
+        assert not result.is_error, result.text
+        if reachable:
+            assert "Waiting on 2 jobs · 1 subagent running" in result.text
+            if args["op"] == "info":
+                assert "waiting on 2 jobs" in result.text
+        else:
+            assert "link down; status unknown" in result.text
+            assert "[live]" not in result.text
+            assert "waiting on 2 jobs" not in result.text

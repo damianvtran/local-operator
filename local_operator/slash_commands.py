@@ -17,11 +17,16 @@ from local_operator.i18n.keys import (
     tui_import,
     tui_review,
     tui_schedule,
+    tui_tags,
+    tui_viewer,
     wire_memory,
     wire_slash,
+    wire_slash_library,
+    wire_slash_notifications_page,
 )
 from local_operator.i18n.messages import Msg, render
 from local_operator.tui.autocomplete import ArgumentMode, ArgumentShape, SlashCommand
+from local_operator.tui.librarian_control import VERBS as LIBRARIAN_VERBS
 
 #: ONE sentence for ONE instruction, carried verbatim by every surface that
 #: mentions ``/model default``: the bare-``/model`` notice, the switch receipt,
@@ -278,10 +283,13 @@ def project_subcommand_rows() -> tuple[tuple[str, str], ...]:
     return tuple((word, PROJECT_SUBCOMMAND_HELP[word]) for word in PROJECT_SUBCOMMANDS)
 
 
-AGENT_SUBCOMMANDS: tuple[str, ...] = ("class",)
+AGENT_SUBCOMMANDS: tuple[str, ...] = ("class", "new", "edit", "promote")
 
 AGENT_SUBCOMMAND_HELP: dict[str, str] = {
     "class": "Show or switch an agent's class (proactive|reactive)",
+    "new": "Create an agent role or specialist",
+    "edit": "Edit an installed agent profile",
+    "promote": "Copy this conversation's role into your account",
 }
 
 
@@ -434,6 +442,35 @@ def project_show_refusal_text(name: str) -> str:
     return f"no project named {name!r} — /project list shows every tracked project."
 
 
+def project_page_truncation_text(registry: Any) -> str:
+    """The partial-listing notice, or ``""`` when the store fits one page.
+
+    The store's snapshot is a recency PAGE over the rows (``projects._MAX_ROWS``),
+    not a visibility boundary, so a SET-returning surface must state what it left
+    out — otherwise "not listed" reads as "does not exist" for a project the
+    addressing verbs still resolve (the ordinal-502 incident). ONE copy for both
+    ``/project`` listing renderers (the `list` branch and the nameless `show`
+    overview), so the two receipts cannot disagree; the TUI page states the same
+    fact through its own renderer's existing overflow row. The count is the PAGE
+    CUT (``PageCounts.beyond_page``), never ``on_disk - loaded``: an unreadable
+    row is not hidden-by-page (QA Q1) — while a torn FILE hiding in the unparsed
+    tail is counted as not listed, so the sentence promises only what the store
+    can read.
+    """
+    counts = getattr(registry, "page_counts", None)
+    if counts is None:
+        return ""
+    hidden = counts.beyond_page
+    if hidden <= 0:
+        return ""
+    noun = "row is" if hidden == 1 else "rows are"
+    return (
+        f"showing the {counts.loaded} most recently active of {counts.total_rows} stored "
+        f"projects — {hidden} {noun} not listed; /project show <name> resolves "
+        "any project the store can read."
+    )
+
+
 def project_listing_hint_text() -> str:
     """The listing's FOOTER: the two page entries, named (S3b).
 
@@ -535,7 +572,9 @@ def project_overview_receipt(
         return (project_empty_text(), "info")
     states = scan_runtime_states(config_dir)
     rows = project_listing_rows(projects, states=states, now=now, window=stale_after_s(config_dir))
-    return ("\n".join([*rows, project_listing_hint_text()]), "info")
+    note = project_page_truncation_text(registry)
+    footer = [*([note] if note else []), project_listing_hint_text()]
+    return ("\n".join([*rows, *footer]), "info")
 
 
 def project_delete_rehearsal_text(name: str) -> str:
@@ -776,9 +815,12 @@ def run_project_slash_op(
         rows = project_listing_rows(
             projects, states=states, now=now, window=stale_after_s(config_dir)
         )
-        # The listing's footer (S3b): the two page entries, named. A FOOTER —
-        # after every row, absent on an empty store.
-        return ("\n".join([*rows, project_listing_hint_text()]), "info")
+        # The listing's footer (S3b): the two page entries, named — and, when
+        # the store outgrew the page, what the page left out. A FOOTER — after
+        # every row, absent on an empty store.
+        note = project_page_truncation_text(registry)
+        footer = [*([note] if note else []), project_listing_hint_text()]
+        return ("\n".join([*rows, *footer]), "info")
 
     if word in PROJECT_PAGE_VERBS:
         name = rest.strip()
@@ -1202,6 +1244,12 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # stays the path form's: it is the one every install has, and the mesh form
     # is taught where the mesh is (`/network`, the design's §1.6 strings).
     SlashCommand(
+        "view",
+        _tr(tui_viewer.description()),
+        arguments=ArgumentMode.REQUIRED,
+        argument_shape=ArgumentShape.ANY,
+    ),
+    SlashCommand(
         "move",
         # Names the two ways to answer it, because the argument form is the
         # half a picker cannot teach: a user who has only ever seen the list
@@ -1264,6 +1312,34 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # with it and the OWNER dispatch hands it to the runtime.
         argument_shape=ArgumentShape.ANY,
         desktop_destination="session.rename",
+    ),
+    # Beside `/rename` because both edit the CURRENT conversation's metadata,
+    # and because that is the family a user looks in. TUI-only on purpose: the
+    # desktop's tag surface is its own sidebar control, and a
+    # `desktop_destination` here would promise a destination this slice does not
+    # have. `/tag` edits only the conversation it is standing in, never the
+    # global tag manager.
+    #
+    # REQUIRED, not OPTIONAL: the list of tag rows IS the command's surface, and
+    # a bare `/tag` must open it rather than submit a no-op. The same choice
+    # `/view` makes above. ANY shape because a tag name may contain spaces, so
+    # the WHOLE trailing text is one name (the store trims and validates it).
+    SlashCommand(
+        "tag",
+        _tr(tui_tags.slash_tag()),
+        arguments=ArgumentMode.REQUIRED,
+        argument_shape=ArgumentShape.ANY,
+    ),
+    # The presentation sibling, and deliberately a different word from `/tag`: a
+    # command that both edits one conversation and changes the whole sidebar's
+    # shape would make the blast radius unreadable. TUI-only (it describes THIS
+    # terminal's list), OPTIONAL so bare reports the current state, WORD so
+    # `on`/`off` are selectors rather than prose.
+    SlashCommand(
+        "tags",
+        _tr(tui_tags.slash_tags()),
+        arguments=ArgumentMode.OPTIONAL,
+        argument_shape=ArgumentShape.WORD,
     ),
     # Beside the session-transition family because it is one: /fork is the entry
     # the table was missing, the one that carries history INTO a fresh session
@@ -1551,6 +1627,34 @@ SLASH_COMMANDS: list[SlashCommand] = [
     SlashCommand(
         "schedule",
         _tr(tui_schedule.slash_help()),
+    ),
+    # The Library page is a MODE over THIS machine's global asset catalog: the
+    # index is derived from this terminal's session journals and the metadata
+    # database lives under this config root. TUI-only on purpose — no
+    # `desktop_destination`, because the desktop already owns a Library pane
+    # reading its own view of the same catalog, and a destination here would
+    # offer that pane for a command this terminal paints itself. The owner
+    # argument is `/settings`' and `/import`'s: routing it would read another
+    # machine's files while the user looks at this one.
+    SlashCommand(
+        "library",
+        _tr(wire_slash_library.help()),
+    ),
+    # The Librarian's door, beside `/aida`'s shape: bare reports status, the
+    # verbs are the package's own hooks, and `open` is the pinned conversation.
+    # The module belongs to another work package; `librarian_control` keeps the
+    # import lazy and the absence a clear sentence. TUI-only for the same
+    # wrong-machine reason as `/library`, with `open` a session transition like
+    # `/resume` (which is frontend-local too).
+    SlashCommand(
+        "librarian",
+        _tr(wire_slash_library.librarian_help()),
+        arguments=ArgumentMode.OPTIONAL,
+        # `<verb>`, over this command's own vocabulary; the handler reads it and
+        # refuses anything else with the list. SUBCOMMAND, not ANY: a sentence
+        # after the verb is a message, not an organizing request.
+        argument_shape=ArgumentShape.SUBCOMMAND,
+        subcommands=LIBRARIAN_VERBS,
     ),
     SlashCommand(
         "sidebar",
@@ -1903,15 +2007,52 @@ SLASH_COMMANDS: list[SlashCommand] = [
         argument_shape=ArgumentShape.PROVIDER,
         desktop_destination="auth.logout",
     ),
-    # The listing is the receipt, and the argument is a WORD the command reads
-    # (`read`), never model text -- so no echo, and no prompt to consume.
-    # `desktop_destination` is deliberately UNSET, following `/mobile` above: the
-    # desktop's affordance for this is its own sidebar control, and a
-    # destination the renderer has no adapter for is an offered-but-broken row.
+    # THE NOTIFICATIONS PAGE (docs/design/notifications-inbox.md §7-§8;
+    # decision D2): the inbox of open asks and the items agents post with
+    # `notify`. The operator named the feature `/notifications`, so the page
+    # takes the name and the old completion-receipt listing moved to `/unread`
+    # below, unchanged.
     #
-    # 50 cells, inside the /help wrap budget (74 at 80 columns). The word
-    # `notifications` is long enough that the description has to stay short or
-    # the composed row wraps and the tail lands in the glyph gutter.
+    # `desktop_destination="notifications"`: on the desktop, typing the command
+    # NAVIGATES to the Notifications page and sends nothing (the renderer's
+    # navigate branch; an older renderer shows its existing "unknown
+    # destination" note). The renderer also gates the row on
+    # `features.notifications`.
+    #
+    # INTERIM, until the TUI page lands (lane L2): the terminal still routes
+    # `/notifications` to the receipt handler `/unread` uses, so a terminal user
+    # keeps a working command in the one release where the page does not exist
+    # yet. L2 replaces that dispatch with the page mode.
+    #
+    # The description is an English-only child namespace
+    # (`wire.slash.notifications_page`), the `/library` precedent: adding or
+    # rewording a key in the audited `wire.slash` catalogue would void every
+    # translated locale's ledger hash.
+    SlashCommand(
+        "notifications",
+        _tr(wire_slash_notifications_page.help()),
+        arguments=ArgumentMode.OPTIONAL,
+        # One word (`read`, mark all read through the painted high-water mark),
+        # refused by name otherwise — the same WORD criterion as `/unread`.
+        argument_shape=ArgumentShape.WORD,
+        desktop_destination="notifications",
+    ),
+    # THE COMPLETION-RECEIPT LISTING, formerly `/notifications` (decision D2):
+    # behaviour and receipt copy unchanged. The listing is the receipt, and the
+    # argument is a WORD the command reads (`read`), never model text -- so no
+    # echo, and no prompt to consume. `desktop_destination` is deliberately
+    # UNSET, following `/mobile` above: the desktop's affordance for this is its
+    # own sidebar control, and a destination the renderer has no adapter for is
+    # an offered-but-broken row.
+    #
+    # ITS DESCRIPTION KEEPS THE `wire.slash.notifications` KEY on purpose. The
+    # i18n rule is "change a value, not its identity; a new MEANING needs a new
+    # key", and the meaning did not change — the same listing moved to a new
+    # word. Reusing the audited key keeps every translated locale's text and
+    # ledger hash valid, where a new `wire.slash.unread` key would grow the
+    # audited catalogue and void them.
+    #
+    # 50 cells, inside the /help wrap budget (74 at 80 columns).
     #
     # THE VERB IS `read`, and neither rejected alternative is spelled here
     # (design round 1, D1): `clear` collides with `/clear` on the one surface a
@@ -1922,7 +2063,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # vocabulary it then rejects. The receipt below says "marks … read", so the
     # row and the answer now use one verb for one act.
     SlashCommand(
-        "notifications",
+        "unread",
         _tr(wire_slash.notifications()),
         arguments=ArgumentMode.OPTIONAL,
         # The vocabulary is one word (`read`). Declared `WORD` rather than
@@ -2113,7 +2254,19 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # parses with that tuple, so a verb missing here is a verb the desktop
         # spends as a model message (or 422s) while the TUI runs it.
         # tests/unit/test_memory_inspect.py pins the two lists together.
-        subcommands=("list", "show", "search", "edit", "forget", "status", "inspect"),
+        subcommands=(
+            "list",
+            "show",
+            "search",
+            "move",
+            "edit",
+            "forget",
+            "status",
+            "inspect",
+            "consolidate",
+            "compact",
+            "triage",
+        ),
     ),
     SlashCommand(
         "project",

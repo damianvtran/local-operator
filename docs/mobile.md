@@ -183,14 +183,87 @@ TUI's own dark/light brand themes included), mapped onto Tailwind `@theme`
 roles (`bg-surface`, `text-ink-muted`, `border-control`, `text-accent`, …) —
 never a raw hex in a component.
 
+#### Live streams over a tunnel
+
+The web store reads SSE with same-origin authenticated `fetch`, not
+`EventSource`: it needs HTTP status codes and keepalive bytes to distinguish
+routine rotation from a real outage. The gateway's **60-second security lease
+is unchanged**. A clean EOF after at least five seconds reopens with at most
+250 ms jitter without marking the retained view disconnected. Errors retry
+from 250 ms with jitter and exponential backoff capped at ten seconds; a 503
+honours `Retry-After`, bounded to thirty seconds. A 401 clears private browser
+state and reloads into the normal login flow instead of retrying forever.
+
+Every byte, including the unchanged `: keepalive` comment (now every fifteen
+seconds), resets a 35-second silence watchdog. A stalled socket is aborted and
+reopened. Returning to a visible page, a `pageshow`, or an `online` event also
+reopens a stream silent for twenty seconds, or skips pending error backoff.
+Only an outage lasting 2.5 seconds marks the view disconnected; the last good
+projection stays visible. Recovery requires an accepted snapshot and a leg
+continuously open for two seconds, so repeated seed-then-EOF failures retain
+both their exponential backoff and truthful outage state. A bare HTTP 200 or
+malformed snapshot cannot restore connectivity. Each connection's first snapshot
+resets its version fence, so a restarted daemon's lower counter is still
+authoritative.
+
+Frames are full snapshots, not event deltas. The daemon retains one pending
+projection per subscriber and sends at most ten per second, including the
+trailing snapshot after a burst. List frames are spaced by 400 ms, shared
+between subscribers where possible, and byte-identical frames are suppressed;
+keepalives continue even when busy sessions cause only identical list frames.
+The web validates snapshots in receive order before batching store notifications
+per animation frame. In particular, version 9 followed by version 8 in one
+paint must retain version 9; raw last-arrival coalescing would bypass that
+version fence. The daemon's rate limits bound this parsing work. Event names and
+JSON shapes are unchanged for native clients; transient reasoning rows are
+previews, not one-shot commands.
+
+List subscriptions linger ten seconds after their final mount and projection
+subscriptions five seconds, avoiding navigation churn. After the last phone
+projection stream closes, the daemon holds its attach client, watch count and
+generation fence for a twenty-second reconnect grace. Returning cancels that
+release without a second `watch`. A phone that really leaves can therefore
+count as watching for up to twenty more seconds (including notification routing
+and idle residency). Startup handoff remains separately bounded at sixty
+seconds; session moves still use the existing viewer for `retire_if_pristine`,
+so the relay never counts its own second connection against the move.
+
+**Borderless phone chrome** follows
+[`docs/design/mobile-relay-redesign.md`](design/mobile-relay-redesign.md): the
+52 px list app bar plus 40 px filter strip replace the persistent footer;
+Conversations, Questions, Past sessions, Projects, Library (capability-gated),
+Usage, Appearance and Settings live in the navigation drawer. New is a
+thumb-zone FAB; search expands in the bar. Appearance holds the persisted
+wide-view and group-by-tag preferences. Every row has a visible More action
+as well as its long-press and keyboard context-menu paths.
+
+The session keeps conversation space for conversation: a two-line liveness
+header replaces the separate status/working bands, a single status tray opens
+asks/tasks/agents in in-flow sheets, and the composer is one elevated object
+(field plus action/meta row). Directory, model/effort and spend/context keep
+labelled tap paths. Pending decision cards and ask auto-open policy retain
+their routing/lifetime rules. The ended/degraded banner takes the tray slot
+above the composer instead of overlaying transcript rows; offline state is a
+quiet subtitle reading the store’s `connected` flag with no extra grace.
+The transcript’s `topInset` contract remains available for overlays in other
+views, while this root view needs zero inset because it paints no health
+banner over the conversation. Scroll-follow and pending echoes are unchanged.
+
+New/changed copy is isolated in `relay.chrome`; old English values stay intact.
+Scroll edges use 24 px scroll-linked fades (zero at unclipped edges), with
+measured-bottom fallback where scroll timelines are unsupported. Sheet and
+drawer share focus trapping, inert background and opener restoration without
+portals; sheets remain visual-viewport anchored and add a decorative grabber
+with downward drag dismissal. All fields retain the 16 px focus-zoom floor.
+
 Screens, following branding.md §7's agent-output hierarchy:
 
 - **Login** — minimal, brand mark, password field, 16 px inputs.
-- **Session list** — one card per session: name, cwd, model label, streaming
-  shimmer, needs-attention badge (approval/ask pending), running-subagent
-  chip. New-session button with a cwd picker (home + recents). While any
-  conversation is unread, a **mark all as read** control rides above the
-  sections and clears the pile in one write (`POST /api/attention/seen`),
+- **Session list** — one fixed-minimum-height row per session: name, compact
+  tag/state/task/agent metadata and last folder segment (not an absolute path
+  or repeated model label). New starts directly with the daemon-resolved
+  directory. With the Unread filter selected, **Mark all read** rides above
+  its sections and clears the pile in one write (`POST /api/attention/seen`),
   answering the store's per-item verdicts.
 
   Rows are drawn in the SAME order the terminal sidebar and the desktop app use:
@@ -208,7 +281,7 @@ Screens, following branding.md §7's agent-output hierarchy:
   discovered is ranked as a live `idle` row so it lands in Active at once — the
   sidebar has no equivalent window, so no equivalent tier). The screen only
   GROUPS what it is sent:
-  **★ Pinned**, **Active Sessions**, **Previous Sessions**.
+  **Pinned**, **Active**, **Previous**.
 
   A conversation is pinned with a long-press on its row or from the ☆/★ control
   in the session view's header; either way the row ends up under **★ Pinned**,
@@ -477,6 +550,123 @@ JSON file under the config root (`mobile-transfer-receipts.json`); an
 unreadable journal refuses with a named 503 rather than resetting, because a
 reset would silently re-open every recorded id.
 
+### Conversation tags — central registry, rendered on the phone
+
+Tags are a CROSS-SURFACE contract, not a phone feature: the categories and the
+per-conversation assignment live in `local_operator/session/session_tags.py`,
+beside the desktop app, the TUI and agent callers (including auto-tagging), and
+this relay is one more reader of that store. Three additive pieces:
+
+* **Every local row carries `tags: [{id, name}]` and `primary: id | null` —
+  always present, on `GET /api/sessions`, on the `sessions` SSE frame and on
+  `GET /api/sessions/past` and `/api/sessions/search`.** Untagged is `[]` and
+  `null`; a client never needs a presence check to tell "no tags" from "this
+  relay is too old to send them". Assignment order is preserved (it is the
+  store's record, and the primary fallback), names come from ONE registry
+  snapshot per listing, and unknown/deleted category ids are pruned on read —
+  a deleted category never surfaces as an error.
+* **`GET /api/tags`** → `{tags: [{id, name, order, conversations}]}`, read only.
+  `conversations` is the store's own count of distinct EXISTING session
+  directories (archived/hidden included, deleted excluded). There is
+  deliberately no `PUT /api/tags`: identity (create/rename) stays where it
+  already lives — desktop and agent callers — because a second implementation
+  of category identity is how the two surfaces start disagreeing.
+* **`PUT /api/sessions/{id}/tags`**, body `{tags: [ids], primary: id | null}`
+  → `{session_id, tags: [{id, name}], primary}`. Desired state, applied
+  atomically: empty list plus `null` clears, and a retried request lands on
+  the same state. Exactly those two keys are required: a body without
+  `primary` (or with an unknown/extra key) is 422, never a silent re-primary.
+  Refusals are the desktop route's: 422 with the store's own
+  sentence (unknown id, duplicate ids, more than 8, primary outside `tags`)
+  and no file change; 404 `{"error": "unknown session"}` for an unknown,
+  badly shaped or REMOTE id, and for a live entry with no durable
+  `sessions/<id>/` directory (the desktop route's own rule — the tag store
+  prunes no orphans, so admitting one would store an assignment no surface
+  lists). Auth and the same-origin mutation gate are the pin route's. On
+  success the route invalidates the summaries cache and wakes the list
+  stream, so the writer sees the canonical read-back immediately and every
+  other client repaints.
+
+Remote/mesh rows (`?include_peers`) carry `tags: []` and `primary: null`
+explicitly: their assignment lives in the other device's store, and this relay
+has no local directory to write, hence a remote id earns the 404 rather than
+a special flag.
+
+The phone learns the routes exist from `capabilities.session_tags =
+{"available": true}` on the list frame — a RELAY capability, like `i18n`, and
+deliberately not `features.session_tags`, which is core's build fact and is
+`1` on released relays that have none of these routes (so it cannot gate a
+client). An older relay omits the key; absence means "no controls".
+
+Writes from the desktop, the TUI, an agent or auto-tagging reach an open phone
+within one scan tick (~2 s) without the tick walking the assignment directory:
+`session_tags` publishes an additive equality marker (`tags/revision`, bumped
+only by a REAL mutation — an identical re-write does not move it), and the
+scan pass reads that one small file, rebuilding the projection and waking the
+list only when it moved. The marker also carries cheap stats of the two write
+sites, compared even when the token exists: an older-build writer that
+replaces an assignment without bumping the token is still detected, and a
+no-op write moves neither the token nor the stats. No path scans on an
+unchanged tick. A read that repaints the list does not consume the change for
+other clients: the wake compares against what the daemon last published, not
+the list's own cache token.
+
+## Notifications inbox (`GET/PATCH /api/notifications`)
+
+The relay is a THIN ADAPTER over the same module the desktop routes call
+(`local_operator/notifications/items.py`), never a second description of the
+store: paging (`cursor`, the frozen `through_seq` boundary), the `observed`
+id/revision tokens a bulk write must echo, and the
+`waiting_count`/`waiting_unread_count` split are the desktop's own answers.
+
+- `GET /api/notifications` — the reel. Same query parameters and the same
+  payload as `GET /v1/desktop/notifications`, plus per-row `runtime_live` (this
+  relay can reach the conversation now) and `durable` (its transcript survives a
+  restart) — the two flags `GET /api/asks` established, so a row is never
+  presented as answerable when it is not.
+- `[redacted]/{id}` — one item, its context and its asks, carrying the SAME
+  per-row `runtime_live`/`durable` pair as the reel with the same meaning. The
+  detail answered `false`/`false` for every item until QA Q4, because it read a
+  top-level `session_id` the item does not have — an item holds a nested
+  `session` block — so both routes now share one reader.
+- `PATCH /api/notifications` — `read`/`unread`/`dismiss`/`undismiss` over
+  `ids[{id, revision}]`, or `session_id`+`through_seq`, or `all`+`through_seq`;
+  every bulk target also needs the `observed` tokens, at most 500 per batch. A
+  missing observation is `422`, never a legacy sweep.
+- `POST /api/notifications/seen` — the PHONE's in-view receipt (decision D11,
+  which supersedes round 1's blanket refusal). The body is
+  `{items:[{id, revision, anchor_id, visible_since_ms?}], evidence:{surface,
+  session_id, input_kind, input_at_ms, visible_since_ms}}` with `surface` pinned
+  to `"native"` and `input_kind` one of `touch`, `press` or `scroll`.
+  - The EVIDENCE is re-checked by the same store call the desktop uses: the row
+    belongs to `evidence.session_id`, names its current `revision` and
+    `anchor_id`, its own `visible_since` (or the batch fallback) sits between
+    that row's `updated_at` and the input edge, the edge is fresh (≤120 s) and at
+    least the dwell old, and a row already read answers `already`. Anything else
+    is `skipped` with its reason (`unknown`, `stale_revision`, `anchor_mismatch`,
+    `stale_evidence`, `already`), never a 500 and never a silent sweep.
+  - An accepted row records `read_via: "in_view"` with `read_surface: "native"`,
+    so provenance names the surface that produced it.
+  - ANY other surface — including the desktop's own `"desktop"`, and an absent
+    one — is refused `422 {code: "relay_surface_mismatch"}`. That is round 1's
+    R6 negative, kept: this door serves the phone and nothing else.
+  - Native keys on `capabilities.features.notifications_seen` (core's feature
+    registry) and turns its receipt feed on only when it is present.
+
+Every query the resource takes is validated by the DESKTOP route's own model
+(`NotificationsQuery`) and every PATCH body by `NotificationsPatch`, so a bound
+the app refuses is refused here with the same status. A store that cannot be read
+answers `500 {code: "store_unavailable", error}`, the desktop route's own code
+and sentence, never a bare "Internal Server Error".
+
+Every route carries the cookie gate and answers `401` without it. The badge rides
+the existing list stream: `notifications: {unread_count, waiting_unread_count,
+waiting_count, high_water}` is a SIBLING of `unread` on `/api/sessions` and on
+`/api/sessions/events`, and its key is ABSENT (never zeroed) when this relay has
+no inbox or the store cannot be read. One fingerprint per scan tick over
+`notifications.db` and its `-wal` wakes that stream, so a write from any process
+reaches the phone within one scan interval without a second timer.
+
 ## Failure modes and rules
 
 - **Daemon down, TUI up**: the TUI is unaffected; the record sits unpublished
@@ -559,7 +749,12 @@ never re-derived per surface.
 | Tool-card detail + copy actions | `tool_card`, `copy_picker` | run details / trace | partial — expand-on-tap exists, but the payload is a bounded window (8k output tail / 4k args); no copy actions (phase 2) |
 | Session info / report | `info_panel`, `report_view`, `session_panel` | info + session panels | missing (phase 3) |
 | Sidebar: pins, subagent layer | `session_sidebar` | chat sidebar | partial — subagent drill-down exists; pins and the layer view are missing (phase 3) |
+| Conversation tags | — | chat sidebar tag chips + `/v1/desktop/tags` | partial — S2a ships the row labels on both lists and the assignment sheet (checkboxes, primary radio, two-step clear); create/rename remains desktop/agent-only. S2b adds **view-only grouping by primary tag** on the session list: a capability-gated, opt-in local preference (`lo-mobile-group-tags`) that regroups the daemon's own order, with ★ Pinned kept as its own top section and no tag/placement writes |
 | Checkpoint rail (turn ticks) | — | checkpoint rail (`sessions.checkpoints`) | partial — the manifest is served read-only (`GET /api/sessions/{id}/checkpoints`); the phone's rail render is next (phase 4) |
+| Notifications inbox | `/notifications` page (L2) | notifications page | partial — the relay serves the reel read and write wire
+(`GET /api/notifications`, `GET /api/notifications/{id}`, `PATCH /api/notifications`, `POST /api/notifications/seen`), the
+`notifications` badge block on `/api/sessions` and `/api/sessions/events`, and the same token-bound bulk rules as the
+desktop; the phone's screens are next |
 | Wakes / schedules | `wake_panel` | schedules | partial — the armed index is served read-only (`GET /api/schedules`); the phone view and arm/cancel are next (phase 4) |
 | Settings | `settings_view` | settings | missing (phase 5) |
 | Move session | `move_picker` | move session | partial — the relay serves the peers' rows on the session list (`?include_peers`, SSE included) and the transfer verb (`POST /api/sessions/{id}/transfer`); the phone's move picker and remote-row render are next (phase 5) |

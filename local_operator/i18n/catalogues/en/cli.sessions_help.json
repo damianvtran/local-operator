@@ -44,5 +44,6 @@
   "cli.sessions_help.sync": "Pull a copy of a conversation another device owns",
   "cli.sessions_help.sync_description": "Bring this device's copy of a conversation it does not own up to date. The copy is stored outside the session store and is never opened as a session; `lop sessions move <id> --to local --from-replica` recovers it as a new one.",
   "cli.sessions_help.sync_session": "the conversation id to pull",
-  "cli.sessions_help.sync_owner": "the peer that holds it (default: ask)"
+  "cli.sessions_help.sync_owner": "the peer that holds it (default: ask)",
+  "cli.sessions_help.cleanup_scratchpads_only": "Audit pads with --dry-run; otherwise reclaim only scratchpad build/cache content (never transcripts, never your conversations)."
 }

@@ -28,6 +28,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+# Pin ``local_operator.mcp.manager`` at collection time. The manager binds
+# ``load_all_mcp_configs`` with a module-level import, so whichever import of
+# ``manager`` happens FIRST fixes that binding for the rest of the process. The
+# MCP login/logout tests below monkeypatch
+# ``local_operator.mcp.config.load_all_mcp_configs``; if one of them is what
+# first imports ``manager``, the manager keeps that test's lambda permanently.
+# That leak surfaced in CI shard 4: after this file ran,
+# ``test_session_factory.py::test_dispose_abandons_a_classification_call_still_in_flight``
+# triggered MCP discovery and logged ``TypeError: ...lambda() got an unexpected
+# keyword argument 'boundary'``, which that test asserts is absent (it fails on
+# any warning). Importing here, before any patch is applied, pins the real
+# function.
+import local_operator.mcp.manager  # noqa: F401  (import-order pin; see above)
 from local_operator import cli
 from local_operator.cli import (
     agents_create_command,
@@ -3284,7 +3297,15 @@ def test_resume_onto_a_refused_owner_keeps_the_compatibility_notice(
         "local_operator.session_factory.resolve_hosting_model",
         lambda *a, **k: ("test", "mock"),
     )
-    monkeypatch.setattr("local_operator.cli.ConfigManager", _fake_config_manager)
+    # A REAL ``config_dir`` on the fake manager. The paint-first decision is a
+    # filesystem question, and a MagicMock's auto-created ``config_dir`` answers
+    # it with a truthy mock — which passed while the check was
+    # ``(mock / "sessions" / …).is_file()`` (a mock is truthy) and stopped meaning
+    # anything once the check resolved the path through ``Path()``. The fake owes
+    # the production contract a Path.
+    fake_manager = _fake_config_manager()
+    fake_manager.config_dir = config
+    monkeypatch.setattr("local_operator.cli.ConfigManager", lambda *a, **k: fake_manager)
     monkeypatch.setattr("local_operator.agents.AgentRegistry", MagicMock())
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
 

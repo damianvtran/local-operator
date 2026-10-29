@@ -37,6 +37,8 @@ from .advisor import (
     validate_hint,
 )
 from .cutpoint import (
+    CARRIED_TIER_ID_PREFIX,
+    CARRIED_TIER_KEY,
     DEFAULT_PRESERVED_TURN_CAP,
     ELISION_GENUINE_COUNT_KEY,
     ELISION_INJECTION_COUNT_KEY,
@@ -51,6 +53,7 @@ from .cutpoint import (
     elision_notice_text,
     extract_preserved_user_turns,
     find_cut_point,
+    is_carried_tier,
     is_rendered_injection,
     prepare_partitions,
     preserved_turn_payload,
@@ -59,6 +62,7 @@ from .cutpoint import (
 )
 from .marker import split_leading_marker
 from .pruning import (
+    IDLE_FLUSH_MS,
     MIN_PRUNE_TOKENS,
     SUPERSEDED_NOTICE,
     USELESS_NOTICE,
@@ -68,6 +72,8 @@ from .pruning import (
     prune_stale_frames_in_place,
     prune_tool_outputs,
     shed_frames_to_wire_budget,
+    stale_flush_due,
+    stale_set,
 )
 from .thresholds import (
     DEFAULT_WIRE_BYTES_BUDGET,
@@ -111,6 +117,8 @@ __all__ = [
     "MAX_SUMMARY_TOKENS",
     "MIN_PRUNE_TOKENS",
     "DEFAULT_PRESERVED_TURN_CAP",
+    "CARRIED_TIER_ID_PREFIX",
+    "CARRIED_TIER_KEY",
     "ELISION_GENUINE_COUNT_KEY",
     "ELISION_INJECTION_COUNT_KEY",
     "PRESERVED_TURN_ELISION_ID",
@@ -123,6 +131,7 @@ __all__ = [
     "elision_counts_of",
     "elision_notice_text",
     "is_rendered_injection",
+    "is_carried_tier",
     "preserved_turn_payload",
     "replay_preserved_turns",
     "RECOVERY_BAND",
@@ -131,6 +140,7 @@ __all__ = [
     "DEFAULT_WIRE_BYTES_TRIGGER",
     "SUMMARIZATION_SYSTEM_PROMPT",
     "SUPERSEDED_NOTICE",
+    "IDLE_FLUSH_MS",
     "TOOL_ARGS_MAX_CHARS",
     "TOOL_RESULT_MAX_CHARS",
     "USELESS_NOTICE",
@@ -159,6 +169,8 @@ __all__ = [
     "prune_stale_frames_in_place",
     "prune_tool_outputs",
     "shed_frames_to_wire_budget",
+    "stale_flush_due",
+    "stale_set",
     "register_invalidator",
     "render_file_operations",
     "resolve_advisor_floor_tokens",
@@ -333,6 +345,11 @@ def _serialize_message(message: AgentMessage, drop_call_ids: set[str]) -> str | 
 
     parts: list[str] = []
     if message.role == "user":
+        # Document attachments are deliberately NOT materialized here. The
+        # summarizer reads text; extracting a PDF on every compaction would
+        # re-parse every attachment, and the durable reference survives in the
+        # marker's ``preserve_data["attachments"]`` manifest instead (contract
+        # amendment 5). Stated so the omission reads as a decision.
         parts.append(f"[User]\n{message.text}")
     elif message.role == "assistant":
         text = message.text

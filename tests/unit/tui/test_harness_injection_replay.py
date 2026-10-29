@@ -434,3 +434,188 @@ async def test_a_held_child_report_replays_as_a_warning_and_a_delivered_one_does
     # The delivered row's own arrival is the answer it bought, which is not in
     # this history — so nothing licenses painting it here.
     assert "rev-r6" not in shown
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_flood_of_binding_notices_folds_to_one_row() -> None:
+    """Stored per-tick account notices paint ONCE; a real switch still paints.
+
+    Builds before the stable-account binding journaled one
+    ``session_credential_binding_notice.v1`` row per sync re-copy — the same
+    sentence dozens of times (the live cloud-node-1 screenshot). The fold drops a
+    sentence equal to the last one painted, so the flood reads as one row, while
+    a DIFFERENT sentence (a genuine switch) still gets its own. Driven through the
+    real app's own boot replay, like the MCP-warning cell above.
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage
+    from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+    same = "[session credential] This session is now using the stub login on node-a."
+    switched = "[session credential] This session is now using the stub login on node-b."
+
+    def _notice(text: str) -> CustomMessage:
+        return CustomMessage(
+            custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+            attribution="system",
+            details={"text": text},
+        )
+
+    session = FakeSession()
+    session._history = [_notice(same) for _ in range(12)] + [_notice(switched)]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
+        await pilot.pause()
+        notices = [
+            block._text
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+    # Round 1 (D2): the folded row states how many rows it stands for, and a
+    # different sentence is still its own row rather than another repetition.
+    assert notices == [f"{same}  \u00d712", switched], notices
+
+
+@pytest.mark.asyncio
+async def test_a_run_spanning_two_accounts_folds_to_one_row_that_names_both() -> None:
+    """One row for a real alternation, and it SAYS the run covered two accounts.
+
+    The live flood's rows alternated two store ids with an identical sentence.
+    Folding per credential id painted the wall back; folding on the sentence
+    alone would hide a genuine second account. The run therefore folds on what a
+    reader sees (sentence + provenance) and carries the SET of ids it covered, so
+    one row replaces the wall and ``· 2 logins`` states what the wall was.
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage
+    from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+    same = "[session credential] This session is now using the anthropic login on my-mac."
+    named = "[session credential] This session is now using b@example.test on my-mac."
+
+    def _notice(text: str, row: int) -> CustomMessage:
+        return CustomMessage(
+            custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": text,
+                "provider": "anthropic",
+                "owner_device": "d_local",
+                "credential_id": row,
+            },
+        )
+
+    session = FakeSession()
+    session._history = [_notice(same, (104, 125)[i % 2]) for i in range(20)] + [_notice(named, 125)]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
+        await pilot.pause()
+        notices = [
+            block._text
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+    # "logins" is the module's own noun for one account on one owner (D3), and the
+    # marker is NBSP-joined after its single ASCII break point (D4): wrap_cells
+    # breaks on the ASCII space only, so at 100 columns the marker may move under
+    # the sentence whole, but never split — which is what the round-3 frames show.
+    assert notices == [f"{same}  \u00d720\u00a0\u00b7\u00a02\u00a0logins", named], notices
+
+
+@pytest.mark.asyncio
+async def test_a_collapsed_run_states_how_many_notices_it_stands_for() -> None:
+    """A fold says how many rows it swallowed — quietly, in this row only.
+
+    Round 1, D2: collapsing a run to one line is right, but a reader could not
+    tell one change from forty. The marker is a bare multiplier, never "3
+    account changes": in the live incident behind #3098 those rows were the SAME
+    account reported repeatedly, so the count is a volume fact about the
+    recording, not a claim that each row was a switch.
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage
+    from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+    sentence = "[session credential] This session is now using the stub login on my-mac."
+
+    def _notice() -> CustomMessage:
+        # The SAME identity three times: one account re-announced, which is what
+        # a fold is allowed to collapse.
+        return CustomMessage(
+            custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": sentence,
+                "provider": "stub",
+                "owner_device": "my-mac",
+                "credential_id": 125,
+            },
+        )
+
+    session = FakeSession()
+    session._history = [_notice(), _notice(), _notice()]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
+        await pilot.pause()
+        notices = [
+            block._text
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+    assert len(notices) == 1, notices
+    # ONE account in the run, so no accounts clause: the bare multiplier.
+    assert notices[0] == f"{sentence}  \u00d73", notices
+    # The count is the ROW's, not a second notice: nothing else was painted.
+    assert "3 account" not in notices[0]
+
+
+@pytest.mark.asyncio
+async def test_identical_genuine_account_switch_sentences_survive_real_turns() -> None:
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage
+    from local_operator.network.credentials.messages import render_binding_change_notice
+    from local_operator.session.credential_binding import CredentialBinding
+    from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+    def binding(row_id: int) -> CredentialBinding:
+        return CredentialBinding(
+            provider="stub", owner_device="d_local", owner_device_name="node", credential_id=row_id
+        )
+
+    notices = []
+    for old, new in ((1, 2), (2, 3)):
+        notices.append(
+            CustomMessage(
+                custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+                attribution="system",
+                details={
+                    "text": render_binding_change_notice(
+                        binding(new), binding(old), self_device="d_local"
+                    ),
+                    "provider": "stub",
+                    "owner_device": "d_local",
+                    "credential_id": new,
+                },
+            )
+        )
+    assert notices[0].details["text"] == notices[1].details["text"]
+    session = FakeSession()
+    session._history = [
+        notices[0],
+        Message.user("Do actual work"),
+        Message.assistant("Done"),
+        notices[1],
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
+        await pilot.pause()
+        shown = [
+            block._text
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+    assert shown == [notice.details["text"] for notice in notices]

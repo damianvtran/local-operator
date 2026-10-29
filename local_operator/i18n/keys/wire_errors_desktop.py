@@ -141,6 +141,10 @@ def effort_not_in_levels(*, model: str, levels: str, effort: str) -> Msg:
     )
 
 
+def fast_mode_unsupported(*, model: str) -> Msg:
+    return Msg("wire.errors.desktop.fast_mode_unsupported", {"model": model})
+
+
 def feed_subscriber_limit() -> Msg:
     return Msg("wire.errors.desktop.feed_subscriber_limit", {})
 
@@ -151,6 +155,18 @@ def feed_subscription_unknown() -> Msg:
 
 def force_requires_confirm_replace() -> Msg:
     return Msg("wire.errors.desktop.force_requires_confirm_replace", {})
+
+
+def librarian_bootstrap_failed() -> Msg:
+    return Msg("wire.errors.desktop.librarian_bootstrap_failed", {})
+
+
+def librarian_disabled(*, op: str) -> Msg:
+    return Msg("wire.errors.desktop.librarian_disabled", {"op": op})
+
+
+def librarian_owner_active() -> Msg:
+    return Msg("wire.errors.desktop.librarian_owner_active", {})
 
 
 def library_asset_not_found() -> Msg:
@@ -319,8 +335,24 @@ def session_not_found(*, session_id: str) -> Msg:
     return Msg("wire.errors.desktop.session_not_found", {"session_id": session_id})
 
 
+def skill_alias_occupied() -> Msg:
+    return Msg("wire.errors.desktop.skill_alias_occupied", {})
+
+
+def skill_local_changes_unpublished() -> Msg:
+    return Msg("wire.errors.desktop.skill_local_changes_unpublished", {})
+
+
+def skill_not_editable() -> Msg:
+    return Msg("wire.errors.desktop.skill_not_editable", {})
+
+
 def skill_not_found() -> Msg:
     return Msg("wire.errors.desktop.skill_not_found", {})
+
+
+def skill_stale() -> Msg:
+    return Msg("wire.errors.desktop.skill_stale", {})
 
 
 def sort_unknown(*, sorts: str) -> Msg:

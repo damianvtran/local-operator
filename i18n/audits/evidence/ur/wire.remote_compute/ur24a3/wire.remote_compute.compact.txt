@@ -1,0 +1,1 @@
+wire.remote_compute.finished_exit_code | exit code: {exit_code} | ایگزٹ کوڈ: {exit_code}

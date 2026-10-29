@@ -83,6 +83,10 @@ async def test_temporary_allow_all_does_not_follow_another_session():
         assert await pending is False
         app._adopt_session(first)
         assert app._interaction is first_source
+        # The temporary A latch lives on the FIRST source's draft and was never
+        # written to a sidecar; returning to it must restore that decision, not
+        # the global default `_adopt_approval_override` would have applied on a
+        # first adoption.
         assert app._approve_all
 
 

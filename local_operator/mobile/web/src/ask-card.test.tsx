@@ -6,7 +6,7 @@
 // read-only lapsed state after a deadline, and the rule that a refusal is rendered in
 // the DAEMON's own words rather than humanised here.
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AskCard } from "./components/ask-card";
 import type { AskQuestion, PendingAsk } from "./types";
 
@@ -53,9 +53,19 @@ function ask(patch: Partial<PendingAsk> = {}): PendingAsk {
 	};
 }
 
-function renderCard(row: PendingAsk, onSettled?: () => void) {
+function renderCard(
+	row: PendingAsk,
+	onSettled?: () => void,
+	onDismissed?: (askId: string, reason: "moot" | "answered_in_chat" | undefined) => void,
+) {
 	return render(
-		<AskCard row={row} sessionId="s1" nowMs={Date.now()} onSettled={onSettled} />,
+		<AskCard
+			row={row}
+			sessionId="s1"
+			nowMs={Date.now()}
+			onSettled={onSettled}
+			onDismissed={onDismissed}
+		/>,
 	);
 }
 
@@ -198,7 +208,12 @@ describe("AskCard", () => {
 		expect(screen.getByRole("button", { name: /send answer/ })).toBeTruthy();
 		expect(screen.getByText("Queued — the agent is continuing; deadline passed")).toBeTruthy();
 		expect(screen.queryByText(/^Timed out —/)).toBeNull();
-		expect(screen.queryByRole("button", { name: /dismiss/ })).toBeNull();
+		/* R5: an OPEN ask has a door of its own — the quiet `close…`, which asks
+		   WHY before anything is sent. What it must NOT offer is the lapsed row's
+		   one-tap dismissal, which says "send no reply" over an ask the agent is
+		   still owed an answer to. */
+		expect(screen.getByRole("button", { name: /^dismiss…$/ })).toBeTruthy();
+		expect(screen.queryByRole("button", { name: /dismiss — send no reply/ })).toBeNull();
 	});
 
 	it("offers no controls on a settled ask, and no error register on an expired one", () => {
@@ -222,11 +237,10 @@ describe("AskCard", () => {
 		);
 		unmount();
 		vi.clearAllMocks();
-		/* DISMISS IS A `timed_out` ACTION (agent review round 1, R1): the queue
-		   accepts no other status, so the control is offered only where it can
-		   land. The open-ask assertion below is the regression guard — the button
-		   used to be rendered on an open ask, where every tap collected a
-		   refusal sentence that was false about the row under it. */
+		/* THE ONE-TAP DISMISS IS THE LAPSED ROW'S (agent review round 1, R1, kept
+		   by R5): the button says "send no reply", which is true only once the
+		   agent has walked past the deadline. An OPEN ask's door is `close…` plus
+		   a reason, exercised in its own cases below. */
 		renderCard(ask({ status: "timed_out" }));
 		expandLapsed();
 		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
@@ -235,13 +249,211 @@ describe("AskCard", () => {
 		);
 	});
 
-	it("offers dismiss only on a timed-out ask", () => {
+	it("offers the one-tap dismissal on a timed-out ask and the reason row on an open one", () => {
 		const { unmount } = renderCard(ask());
-		expect(screen.queryByRole("button", { name: /dismiss/ })).toBeNull();
+		expect(screen.queryByRole("button", { name: /dismiss — send no reply/ })).toBeNull();
+		expect(screen.getByRole("button", { name: /^dismiss…$/ })).toBeTruthy();
 		unmount();
 		renderCard(ask({ status: "timed_out" }));
 		expandLapsed();
 		expect(screen.getByRole("button", { name: /dismiss — send no reply/ })).toBeTruthy();
+		expect(screen.queryByRole("button", { name: /^dismiss…$/ })).toBeNull();
+	});
+
+	it("closes an open ask with a reason, and sends nothing until one is chosen", async () => {
+		/* R5 (design §15's amended D6): an open ask can be put away from the phone.
+		   The tap that REVEALS the reasons is not the dismissal — a reason the
+		   operator did not choose is not one they gave — and the two reasons are
+		   what the agent acts on (`moot` closes the question, `answered_in_chat`
+		   tells it the answer is already in the conversation). */
+		renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
+		expect(sendCommand).not.toHaveBeenCalled();
+		fireEvent.click(screen.getByRole("button", { name: /^No longer needed/ }));
+		await waitFor(() =>
+			expect(sendCommand).toHaveBeenCalledWith("s1", {
+				op: "ask_dismiss",
+				ask_id: "ask-1",
+				reason: "moot",
+			}),
+		);
+	});
+
+	it("sends answered_in_chat when the operator says they replied in chat", async () => {
+		renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^Answered in chat/ }));
+		await waitFor(() =>
+			expect(sendCommand).toHaveBeenCalledWith("s1", {
+				op: "ask_dismiss",
+				ask_id: "ask-1",
+				reason: "answered_in_chat",
+			}),
+		);
+	});
+
+	it("puts the reasons away again on cancel, sending nothing", () => {
+		renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^cancel$/ }));
+		expect(screen.queryByRole("button", { name: /^No longer needed/ })).toBeNull();
+		expect(screen.getByRole("button", { name: /^dismiss…$/ })).toBeTruthy();
+		expect(sendCommand).not.toHaveBeenCalled();
+	});
+
+	it("shows a relay or bridge refusal beside the reasons it answered", async () => {
+		/* A relay's open ask is dismissed at its origin, and the queue says so in
+		   its own sentence. That sentence belongs beside the reason the operator
+		   pressed (D5's rule), and the controls come back so the card is not a
+		   dead end. */
+		(sendCommand as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+			new Error("this ask was asked by a relayed conversation — dismiss it there."),
+		);
+		renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^No longer needed/ }));
+		const sentence = await screen.findByText(/dismiss it there/);
+		const reason = screen.getByRole("button", { name: /^No longer needed/ });
+		expect(
+			reason.compareDocumentPosition(sentence) & Node.DOCUMENT_POSITION_FOLLOWING,
+		).toBeTruthy();
+		/* INERT NOW (UX round 1, U8): the sentence is shown beside the control that
+		   produced it, and the control stops inviting the same refusal again. */
+		expect((reason as HTMLButtonElement).disabled).toBe(true);
+	});
+
+	it("does not promise a ~30 s bring-up for a dismissal on a cold conversation", async () => {
+		/* Agent review round 1, M1: the dismissal takes the no-boot door on every
+		   surface (`dismiss_cold`, §14/fork A), so the cold engage clock belongs to
+		   an ANSWER. The gate used to be `busy !== "" && cold`, and dismissing an
+		   open ask on a cold row printed "bringing the session up — ~30 s" beside
+		   two dead `…` buttons: the card asserted the opposite of the contract. */
+		let release: (value: unknown) => void = () => {};
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementationOnce(
+			() => new Promise((resolve) => { release = resolve; }),
+		);
+		renderCard(ask({ runtime_live: false }));
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^No longer needed/ }));
+		await waitFor(() => expect(sendCommand).toHaveBeenCalled());
+		expect(screen.queryByText(/bringing the session up/)).toBeNull();
+		await act(async () => { release({ ok: true, detail: "dismissed" }); });
+	});
+
+	it("clears a refusal's sentence when the reasons are cancelled", async () => {
+		/* UX round 2, U10 = agent review round 2, m1: the sentence renders outside
+		   the `closing` ternary, so `cancel` left an old refusal sitting under a
+		   fresh-looking `dismiss…` until the next op happened to clear it. */
+		(sendCommand as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+			new Error("you already dismissed this."),
+		);
+		renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^No longer needed/ }));
+		await screen.findByText("you already dismissed this.");
+		fireEvent.click(screen.getByRole("button", { name: /^cancel$/ }));
+		expect(screen.queryByText("you already dismissed this.")).toBeNull();
+		expect(screen.getByRole("button", { name: /^dismiss…$/ })).toBeTruthy();
+	});
+
+	it("names the act, and states what each reason tells the agent", () => {
+		/* Design round 1, D1 = UX round 1, U6: the reveal used to be three controls
+		   on one line with no heading and no explanation, so "Answered in chat"
+		   could be read as "send my answer" while sitting 8.5 px under `decline`.
+		   The heading says "Dismiss", and each row carries its note. */
+		renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
+		expect(screen.getByText("Dismiss this ask")).toBeTruthy();
+		expect(screen.getByRole("button", { name: /^No longer needed/ }).textContent).toContain(
+			"stop waiting on it",
+		);
+		expect(
+			screen.getByRole("button", { name: /^Answered in chat/ }).textContent,
+		).toContain("you already replied in the conversation");
+	});
+
+	it("keeps the pressed reason's label while the dismissal is in flight", async () => {
+		/* UX round 1, U3 (design N3): both buttons used to become `…`, which erased
+		   the only on-screen statement of which reason had been sent. */
+		let release: (value: unknown) => void = () => {};
+		(sendCommand as ReturnType<typeof vi.fn>).mockImplementationOnce(
+			() => new Promise((resolve) => { release = resolve; }),
+		);
+		renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^Answered in chat/ }));
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: /^Answered in chat/ }).textContent).toContain(
+				"Answered in chat",
+			),
+		);
+		expect(
+			screen.getByRole("button", { name: /^Answered in chat/ }).getAttribute("aria-busy"),
+		).toBe("true");
+		await act(async () => { release({ ok: true, detail: "dismissed" }); });
+	});
+
+	it("hands the reason to the sheet on an accepted dismissal", async () => {
+		/* UX round 1, U2: the card leaves the aggregate, so the sheet needs the
+		   operator's own word to show a receipt instead of its empty state. */
+		const dismissed = vi.fn();
+		renderCard(ask(), undefined, dismissed);
+		fireEvent.click(screen.getByRole("button", { name: /^dismiss…$/ }));
+		fireEvent.click(screen.getByRole("button", { name: /^No longer needed/ }));
+		/* THE ASK ID RIDES WITH THE REASON (agent review round 2, M1): the sheet
+		   keys its receipt to the ask it was about, so a later dismissal cannot be
+		   confused with this one. */
+		await waitFor(() => expect(dismissed).toHaveBeenCalledWith("ask-1", "moot"));
+	});
+
+	it("draws the context line under the question it refers to", () => {
+		/* Design round 1, D3: state → context → question made "this" point at a
+		   line the reader had not reached yet; the terminal paints it under. */
+		const at = new Date(2026, 9, 23, 19, 36, 0).getTime();
+		renderCard(ask({ user_messages_since: 3, last_user_message_at: at }));
+		const context = screen.getByTestId("ask-context");
+		const questionText = screen.getByText("ship the fix?");
+		expect(
+			questionText.compareDocumentPosition(context) & Node.DOCUMENT_POSITION_FOLLOWING,
+		).toBeTruthy();
+	});
+
+	it("draws the stale-ask context line from the wire pair, and only when it can", () => {
+		/* SA-D7: "3 messages from you since this was asked (last 19:36)". ABSENCE
+		   IS THE CONTRACT — an older runtime sends no field, and a zero says the ask
+		   is newer than every message — so the card draws NOTHING in either case
+		   rather than a zero the reader would have to disbelieve. */
+		const at = new Date(2026, 9, 23, 19, 36, 0).getTime();
+		const { unmount } = renderCard(
+			ask({ user_messages_since: 3, last_user_message_at: at }),
+		);
+		const line = screen.getByTestId("ask-context");
+		expect(line.textContent).toBe("3 messages from you since this was asked (last 19:36)");
+		unmount();
+
+		renderCard(ask({ user_messages_since: 1, last_user_message_at: at }));
+		expect(screen.getByTestId("ask-context").textContent).toBe(
+			"1 message from you since this was asked (last 19:36)",
+		);
+	});
+
+	it("draws no context line for an absent count, a zero, or a settled ask", () => {
+		const at = new Date(2026, 9, 23, 19, 36, 0).getTime();
+		const cases = [
+			/* an older runtime: neither field */
+			ask(),
+			/* the ask is newer than every message */
+			ask({ user_messages_since: 0, last_user_message_at: at }),
+			/* half a pair: no clock to state */
+			ask({ user_messages_since: 3 }),
+			/* settled: no wait left to be stale */
+			ask({ status: "answered", delivered: true, user_messages_since: 3, last_user_message_at: at }),
+		];
+		for (const row of cases) {
+			const { unmount } = renderCard(row);
+			expect(screen.queryByTestId("ask-context")).toBeNull();
+			unmount();
+		}
 	});
 
 	it("keeps the answer draft across an unmount — collapse and return keeps it", async () => {
@@ -281,6 +493,239 @@ describe("AskCard", () => {
 		).toBe(false);
 	});
 
+	describe("the Other row", () => {
+		/* The answer draft is persisted in localStorage under the ask id and every
+		   case here reuses `ask-1`; without this, one case's open `Other` seeds the
+		   next. */
+		beforeEach(() => localStorage.clear());
+		const otherRow = () => screen.getByRole("button", { name: /^Other/ });
+		const typeOther = (text: string) =>
+			fireEvent.change(screen.getByRole("textbox", { name: "ship the fix?" }), {
+				target: { value: text },
+			});
+		const send = () => screen.getByRole("button", { name: /send answer/ }) as HTMLButtonElement;
+		const sentAnswers = (answers: Record<string, string[]>) =>
+			expect(sendCommand).toHaveBeenCalledWith("s1", {
+				op: "ask_respond",
+				ask_id: "ask-1",
+				answers,
+			});
+
+		it("renders after the options on an option question, with no field until pressed", () => {
+			renderCard(ask());
+			const buttons = screen.getAllByRole("button").map((b) => b.textContent);
+			expect(buttons.indexOf("no")).toBeLessThan(buttons.findIndex((t) => /^Other/.test(t ?? "")));
+			expect(otherRow().getAttribute("aria-pressed")).toBe("false");
+			expect(screen.queryByRole("textbox")).toBeNull();
+		});
+
+		it("sends the typed text, not an index or a label", async () => {
+			renderCard(ask());
+			fireEvent.click(otherRow());
+			expect(otherRow().getAttribute("aria-pressed")).toBe("true");
+			typeOther("  typed answer ");
+			fireEvent.click(send());
+			await waitFor(() => sentAnswers({ q1: ["typed answer"] }));
+		});
+
+		it("takes focus only from the press, and re-focuses on a second press instead of deselecting", () => {
+			renderCard(ask());
+			fireEvent.click(otherRow());
+			const field = screen.getByRole("textbox", { name: "ship the fix?" });
+			expect(document.activeElement).toBe(field);
+			(field as HTMLInputElement).blur();
+			fireEvent.click(otherRow());
+			expect(otherRow().getAttribute("aria-pressed")).toBe("true");
+			expect(document.activeElement).toBe(field);
+		});
+
+		it("caps the field at the wire's 32768 characters", () => {
+			renderCard(ask());
+			fireEvent.click(otherRow());
+			expect(screen.getByRole("textbox", { name: "ship the fix?" }).getAttribute("maxlength")).toBe(
+				"32768",
+			);
+		});
+
+		it("is exclusive with the options in single-select", async () => {
+			renderCard(ask());
+			fireEvent.click(otherRow());
+			typeOther("typed answer");
+			fireEvent.click(screen.getByRole("button", { name: /^yes$/ }));
+			expect(otherRow().getAttribute("aria-pressed")).toBe("false");
+			expect(screen.queryByRole("textbox")).toBeNull();
+			fireEvent.click(send());
+			await waitFor(() => sentAnswers({ q1: ["yes"] }));
+		});
+
+		it("is additive and last in multi-select, and unticks when pressed again", async () => {
+			renderCard(ask({ questions: [question({ multi: true })] }));
+			fireEvent.click(otherRow());
+			typeOther("something else");
+			fireEvent.click(screen.getByRole("button", { name: /^yes$/ }));
+			fireEvent.click(send());
+			await waitFor(() => sentAnswers({ q1: ["yes", "something else"] }));
+
+			cleanup();
+			vi.clearAllMocks();
+			localStorage.clear();
+			renderCard(ask({ questions: [question({ multi: true })] }));
+			fireEvent.click(screen.getByRole("button", { name: /^yes$/ }));
+			fireEvent.click(otherRow());
+			typeOther("something else");
+			fireEvent.click(otherRow());
+			expect(otherRow().getAttribute("aria-pressed")).toBe("false");
+			fireEvent.click(send());
+			await waitFor(() => sentAnswers({ q1: ["yes"] }));
+		});
+
+		it("does not read a label typed into the field as a tick", async () => {
+			/* Typing `no, thanks` passes through `no`, an option's label: the cell then
+			   holds that string, which must not be read back as a tick of the option. */
+			renderCard(ask({ questions: [question({ multi: true })] }));
+			fireEvent.click(otherRow());
+			typeOther("no");
+			typeOther("no, thanks");
+			fireEvent.click(send());
+			await waitFor(() => sentAnswers({ q1: ["no, thanks"] }));
+		});
+
+		it("keeps the question incomplete while Other is open and empty", () => {
+			renderCard(ask());
+			fireEvent.click(otherRow());
+			expect(send().disabled).toBe(true);
+			typeOther("   ");
+			expect(send().disabled).toBe(true);
+			typeOther("now it is an answer");
+			expect(send().disabled).toBe(false);
+		});
+
+		it("does not grey send on a multi-select that already has a tick, and drops the blank marker", async () => {
+			/* Deliberately not the desktop's rule: here a tick IS a complete answer. */
+			renderCard(ask({ questions: [question({ multi: true })] }));
+			fireEvent.click(screen.getByRole("button", { name: /^yes$/ }));
+			fireEvent.click(otherRow());
+			expect(otherRow().getAttribute("aria-pressed")).toBe("true");
+			expect(send().disabled).toBe(false);
+			fireEvent.click(send());
+			await waitFor(() => sentAnswers({ q1: ["yes"] }));
+		});
+
+		it("still holds a multi-select open when the open Other is its only entry", () => {
+			renderCard(ask({ questions: [question({ multi: true })] }));
+			fireEvent.click(otherRow());
+			expect(send().disabled).toBe(true);
+		});
+
+		it("puts the 'choose any' hint above the option rows, not after the Other field", () => {
+			renderCard(ask({ questions: [question({ multi: true })] }));
+			const hint = screen.getByText("choose any that apply");
+			const first = screen.getByRole("button", { name: /^yes$/ });
+			expect(
+				hint.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING,
+			).toBeTruthy();
+		});
+
+		it("dismisses the keyboard on Enter without submitting, and leaves an IME's Enter alone", () => {
+			renderCard(ask());
+			fireEvent.click(otherRow());
+			const field = screen.getByRole("textbox", { name: "ship the fix?" }) as HTMLInputElement;
+			typeOther("half a thought");
+			expect(document.activeElement).toBe(field);
+
+			fireEvent.keyDown(field, { key: "Enter", isComposing: true });
+			expect(document.activeElement).toBe(field);
+
+			/* Safari confirms a composition with `isComposing` already false and the
+			   legacy `keyCode` 229 as the only signal. */
+			fireEvent.keyDown(field, { key: "Enter", keyCode: 229 });
+			expect(document.activeElement).toBe(field);
+
+			fireEvent.keyDown(field, { key: "Enter" });
+			expect(document.activeElement).not.toBe(field);
+			expect(sendCommand).not.toHaveBeenCalled();
+			expect(field.value).toBe("half a thought");
+		});
+
+		it("survives an unmount open and empty, without taking focus, and still sends no blank", async () => {
+			const first = renderCard(ask());
+			fireEvent.click(otherRow());
+			first.unmount();
+
+			renderCard(ask());
+			expect(otherRow().getAttribute("aria-pressed")).toBe("true");
+			expect(document.activeElement).not.toBe(screen.getByRole("textbox"));
+			expect(send().disabled).toBe(true);
+			typeOther("back again");
+			cleanup();
+			renderCard(ask());
+			expect((screen.getByRole("textbox") as HTMLInputElement).value).toBe("back again");
+			fireEvent.click(send());
+			await waitFor(() => sentAnswers({ q1: ["back again"] }));
+		});
+
+		it("never lets a blank or duplicate value reach the wire", async () => {
+			/* A draft written by something else (or an older build): the submit still
+			   trims, drops blanks and keeps the first of a duplicate. */
+			localStorage.setItem(
+				"lo-mobile-draft:ask:ask-1",
+				JSON.stringify({ answers: { q1: ["yes", "  ", "yes", " typed "] }, skipped: [] }),
+			);
+			renderCard(ask({ questions: [question({ multi: true })] }));
+			fireEvent.click(send());
+			await waitFor(() => sentAnswers({ q1: ["yes", "typed"] }));
+			for (const [, body] of vi.mocked(sendCommand).mock.calls) {
+				const answers = (body as { answers: Record<string, string[]> }).answers;
+				expect(Object.values(answers).flat()).not.toContain("");
+			}
+		});
+
+		it("is withheld on a secret question and on a free-text one", () => {
+			renderCard(ask({ questions: [question({ options: [], secret: true })] }));
+			expect(screen.getByPlaceholderText("paste secret").getAttribute("type")).toBe("password");
+			expect(screen.queryByRole("button", { name: /^Other/ })).toBeNull();
+			cleanup();
+			renderCard(ask({ questions: [question({ options: [] })] }));
+			expect(screen.queryByRole("button", { name: /^Other/ })).toBeNull();
+			expect(screen.getByPlaceholderText("your answer")).toBeTruthy();
+		});
+
+		it("is withheld on a secret question that has options", () => {
+			renderCard(ask({ questions: [question({ secret: true })] }));
+			expect(screen.getByRole("button", { name: /^yes$/ })).toBeTruthy();
+			expect(screen.queryByRole("button", { name: /^Other/ })).toBeNull();
+		});
+
+		it("receipts a mixed multi answer with ' · ' between the option and the typed text", () => {
+			renderCard(
+				ask({
+					status: "answered",
+					delivered: true,
+					questions: [
+						question({
+							multi: true,
+							options: [
+								{ label: "yes", description: "ship it" },
+								{ label: "no", description: "" },
+							],
+						}),
+					],
+					answers: { q1: ["yes", "typed, with a comma"] },
+				}),
+			);
+			expect(screen.getByText("yes — ship it · typed, with a comma")).toBeTruthy();
+		});
+
+		it("is disabled while the answer is in flight", async () => {
+			vi.mocked(sendCommand).mockImplementationOnce(() => new Promise(() => {}));
+			renderCard(ask());
+			fireEvent.click(otherRow());
+			typeOther("slow");
+			fireEvent.click(send());
+			await waitFor(() => expect((otherRow() as HTMLButtonElement).disabled).toBe(true));
+		});
+	});
+
 	it("marks the recommended option from the wire's own index", () => {
 		renderCard(ask({ questions: [question({ recommended: 0 })] }));
 		expect(screen.getByText(/· recommended/)).toBeTruthy();
@@ -301,6 +746,25 @@ describe("AskCard", () => {
 		   without the list threw during render, which unmounts the sheet. */
 		renderCard({ ...ask({ status: "answered" }), questions: undefined } as unknown as PendingAsk);
 		expect(screen.getByTestId("ask-card")).toBeTruthy();
+	});
+
+	it("states a dismissed row's questions with no answer slot and no description list", () => {
+		/* UX round 2, U5 on round 1's U3: the reason line is the state, the
+		   question is the receipt, and there is nothing to pair it with — so no
+		   `—` (U3) and no `<dl>` whose `<dt>`s describe nothing (U5). */
+		renderCard(
+			ask({
+				status: "dismissed",
+				delivered: true,
+				dismissed_at: Date.now(),
+				dismissed_reason: "moot",
+			}),
+		);
+		expect(screen.getByText("Dismissed — no longer needed")).toBeTruthy();
+		expect(screen.getByText("ship the fix?")).toBeTruthy();
+		expect(screen.queryByText("—")).toBeNull();
+		expect(document.querySelector("dl")).toBeNull();
+		expect(document.querySelector("dt")).toBeNull();
 	});
 
 	it("shows the queue's own refusal sentence verbatim, and restores the controls", async () => {

@@ -56,6 +56,35 @@ describe("AskRow", () => {
 		expect(screen.getByText("yes — merge it today")).toBeTruthy();
 	});
 
+	it("separates a typed answer from an option's description in a multi answer", () => {
+		/* U3/U7: `label — description` followed by `, typed text` ran the option's
+		   description into the user's own words. The same ` · ` separator as the
+		   card's receipt keeps the two readable. */
+		render(
+			<AskRow
+				entry={entry({
+					details: {
+						ask_id: "ask-1",
+						status: "answered",
+						questions: [
+							{
+								id: "q1",
+								question: "which surfaces?",
+								options: [{ label: "phone", description: "the phone bundle" }],
+								multi: true,
+								secret: false,
+								persist: false,
+							},
+						],
+						answers: { q1: ["phone", "also the terminal"] },
+					},
+				})}
+			/>,
+		);
+		fireEvent.click(screen.getByRole("button"));
+		expect(screen.getByText("phone — the phone bundle · also the terminal")).toBeTruthy();
+	});
+
 	it("renders a late answer as late, in warning ink", () => {
 		render(
 			<AskRow

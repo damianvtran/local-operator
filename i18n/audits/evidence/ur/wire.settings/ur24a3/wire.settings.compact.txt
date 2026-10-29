@@ -1,0 +1,16 @@
+wire.settings.compaction_wire_bytes_trigger.label | Request size trigger (bytes) | درخواست محرک (بائٹس)
+wire.settings.display_rail.help | A rule marks the ANSWER: the message that ends the turn. Mid-turn narration takes no rail. | ایک لکیر ANSWER کو نشان زد کرتی ہے: ٹرن ختم کرنے والا پیغام۔ ٹرن کے دوران کے بیان پر ریل نہیں۔
+wire.settings.network_audit_max_bytes.help | Bytes per generation, after rotation. 8 MiB of gzipped JSONL is roughly 55k records; the five-generation ceiling is therefore ~40 MiB. | گردش کے بعد فی جنیریشن بائٹس۔ 8 MiB gzip شدہ JSONL میں تقریباً 55k ریکارڈز ہوتے ہیں؛ پانچ جنیریشنز کی حد اس لیے ~40 MiB ہے۔
+wire.settings.proactive.description | Bounds for the proactive agent class: how long a hidden patience wait defaults to, how it backs off across re-attempts, and when a cycle must end. Read at the moment a wait is armed or fires. | پیش قدم ایجنٹ قسم کی حدود: پوشیدہ انتظار کی ڈیفالٹ مدت، دوبارہ کوششوں میں بیک آف، اور چکر کب ختم ہو۔ یہ ترتیبات انتظار مقرر یا متحرک ہونے پر پڑھی جاتی ہیں۔
+wire.settings.remote_compute.description | Preview: run agent work on Radient-hosted compute, bound to one of your mesh networks. | تجرباتی: ایجنٹ کا کام Radient کے ہوسٹ کیے کمپیوٹ پر چلائیں، آپ کے ایک میش نیٹ ورک سے منسلک۔
+wire.settings.remote_compute_enabled.help | Preview: sends work to Radient compute, bound to one mesh network. | تجرباتی: کام Radient کمپیوٹ کو بھیجے، ایک میش نیٹ ورک سے منسلک۔
+wire.settings.retry_connectivitybackoffcapms.help | Longest wait between connectivity retries. | کنیکٹیوٹی کی دوبارہ کوششوں کے درمیان سب سے طویل انتظار۔
+wire.settings.session_cleanup_max_total_bytes.help | Needs cleanup on. Trim oldest past this many bytes; 0 = no cap. | صفائی آن ہو۔ اتنے بائٹس سے بڑھنے پر پرانے ہٹائیں؛ 0 = کوئی حد نہیں۔
+wire.settings.subagents_max_running.label | Max background jobs | زیادہ سے زیادہ پس منظر جاب
+wire.settings.subagents_model_choice.help | Who picks a subagent's tier; the operator pins one in its profile. | ذیلی ایجنٹ کا درجہ کون منتخب کرے؛ آپریٹر پروفائل میں مقرر کرتا ہے۔
+wire.settings.supplements_denyprefixes.help | Needs Highlights on. Comma-separated folders whose files are never listed or sent to a decision model; use it on a machine holding customer data. | نمایاں حصے آن ہوں۔ کاما سے الگ فولڈرز جن کی فائلیں کبھی فہرست میں نہیں آتیں اور فیصلہ کرنے والے ماڈل کو نہیں بھیجی جاتیں؛ گاہکوں کے ڈیٹا والی مشین پر استعمال کریں۔
+wire.settings.supplements_maxcostusd.help | Needs graphics on. Soft cap on one job's spend. | گرافکس آن ہوں۔ ایک جاب کے خرچ کی نرم حد۔
+wire.settings.supplements_timeouts.help | Needs Highlights on. Give up on a whole job after this long. | نمایاں حصے آن ہوں۔ اتنی دیر بعد پوری جاب چھوڑ دیں۔
+wire.settings.tui_theme.help | Colour ramp. /theme switches it live with an arrow-key preview. | رنگوں کا تسلسل۔ /theme ایرو کیز کے پیش نظارہ کے ساتھ براہ راست بدلتی ہے۔
+wire.settings.wakes_triggers_project_staleness_enabled.help | Wake to check in on projects whose progress went stale. Settled (done/paused/archived) projects are never watched. | ان پروجیکٹس پر رابطے کے لیے بیدار ہوں جن کی پیش رفت پرانی ہو۔ حتمی حالت والے (done/paused/archived) پروجیکٹس کی نگرانی کبھی نہیں۔
+wire.settings.web_fetch_max_bytes.label | Download ceiling (bytes) | ڈاؤن لوڈ حد (بائٹس)

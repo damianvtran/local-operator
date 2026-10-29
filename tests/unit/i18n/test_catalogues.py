@@ -10,6 +10,13 @@ import pytest
 
 from local_operator.i18n import catalogues, runtime
 
+#: The generated CLDR table the catalogue checker reads; the parity test passes
+#: it to `arguments_match` so the `number -> plural` upgrade is judged by the
+#: same losslessness rule as `check_catalogues`.
+_PLURAL_RULES = json.loads(
+    (Path(runtime.__file__).with_name("data") / "plural_rules.json").read_text(encoding="utf-8")
+)
+
 #: The `wire.*` namespaces still awaiting their extraction slice: stub files
 #: that M0 shipped and no slice has populated yet (RFC §5: later slices
 #: populate them). An extraction slice removes its namespace from this tuple
@@ -36,10 +43,12 @@ def test_shipped_wire_namespaces_exist() -> None:
     # The TUI wave writes `tui.*` files instead —
     # the first (`tui.welcome`, T1) is checked by PRESENCE here and by content
     # in its own slice test, so this list does not churn per TUI slice.
-    # The held Chinese candidate lives on a separate remote ref, not in the
-    # releasable package. Pin the whole set so partial restoration cannot
-    # accidentally admit nine passed groups without its failed slash audit.
-    assert catalogues.locales() == ("en", "es", "fr", "hi", "ru", "vi")
+    # Chinese shipped once the policy owner lifted its security hold on
+    # 2026-10-24: the blocking wire.slash audit was remediated at current bytes
+    # and every carried namespace has a fresh passed ledger row. Pin the whole
+    # set so a partial restoration cannot admit a locale without its complete
+    # audit chain, and so a disposition cannot silently drop a shipped wave.
+    assert catalogues.locales() == ("en", "es", "fr", "hi", "ru", "ur", "vi", "zh-CN")
     assert {name for name in catalogues.namespaces("en") if name.startswith("wire.")} == {
         "wire.errors",
         "wire.errors.agents",
@@ -59,10 +68,18 @@ def test_shipped_wire_namespaces_exist() -> None:
         # an edit to the already-audited wire.settings or translated ledgers.
         "wire.settings.account_policy",
         "wire.slash",
+        # The Library slice's two slash doors (`/library`, `/librarian`)
+        # resolve through this English-only CHILD of `wire.slash`, the
+        # `wire.settings.account_policy` shape: their copy must not move the
+        # already-audited `wire.slash` locale hashes.
+        "wire.slash.library",
         "wire.aida_cadence",
         # The OpenRouter host-speed settings row (English-only, own namespace so
         # the audited wire.settings hash is untouched).
         "wire.host_speed",
+        # Radient Saver's settings row and fail-open notices (own namespace so the
+        # audited wire.settings hash is untouched).
+        "wire.radient_saver",
         # Populated by the console-capacity slice (this PR), the same way the
         # extraction slices added wire.settings/wire.errors.*/wire.exec.
         "wire.console",
@@ -73,6 +90,18 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Per-session voice mode: its route refusals and its settings section
         # (English-only, own namespace so the audited sources stay untouched).
         "wire.voice",
+        # The tier-1 remote-compute CLI copy is its own English-only namespace,
+        # the `wire.host_speed` shape: `lop exec --remote` adds keys to `wire.exec`,
+        # which fr/hi/vi CARRY, and an English edit to a carried namespace
+        # invalidates that locale's ledger row and unships the whole locale.
+        "wire.remote_compute",
+        # The Notifications inbox (docs/design/notifications-inbox.md): the
+        # desktop routes' refusal copy, and the `/notifications` page row's
+        # description as an English-only CHILD of `wire.slash` (the
+        # `wire.slash.library` shape — the audited `wire.slash` bytes and their
+        # locale ledger hashes do not move).
+        "wire.errors.notifications",
+        "wire.slash.notifications_page",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
@@ -84,11 +113,15 @@ def test_shipped_wire_namespaces_exist() -> None:
     # not a stub or an exemption from the exact namespace contract.
     assert catalogues.load_catalogue("en", "wire.errors.sdk_spec") != {}
     assert catalogues.load_catalogue("en", "wire.exec") != {}
+    assert catalogues.load_catalogue("en", "wire.remote_compute") != {}
     # Approved source namespace, not a prefix-wide wildcard. Mutation controls
     # below still reject undeclared additions, removals and emptied namespaces.
     assert catalogues.load_catalogue("en", "wire.settings.hub_defaults") != {}
     assert catalogues.load_catalogue("en", "wire.settings.account_policy") != {}
     assert catalogues.load_catalogue("en", "wire.slash") != {}
+    assert catalogues.load_catalogue("en", "wire.slash.library") != {}
+    assert catalogues.load_catalogue("en", "wire.errors.notifications") != {}
+    assert catalogues.load_catalogue("en", "wire.slash.notifications_page") != {}
     assert catalogues.load_catalogue("en", "wire.settings") != {}
     # The Aida cadence interval row is a small English-only addition carried in
     # its own `wire.*` namespace so already-audited `wire.settings` locale
@@ -142,29 +175,103 @@ def test_exact_wire_namespace_contract_rejects_mutations(
                 test_shipped_wire_namespaces_exist()
 
 
-def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
+def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> None:
     # Pin only the original ten Hindi groups plus each later reviewed slice.
     # Analytics/desktop backfill is explicitly unfinished; mechanical parity is
     # not full-surface coverage. `tui.review` is the LOH-19 slice's audited
     # namespace, added here with its own ledger row; `tui.schedule` is P1's,
     # carried only now that its audit row exists (the carried-namespace gate
     # un-ships a locale for an unaudited file); `tui.projects_edit` is P2's
-    # audited namespace, carried the same way on top of the union.
+    # audited namespace, carried the same way on top of the union. P3a adds
+    # `tui.authoring` only after its independent 40-key audit passed. P3b adds
+    # `tui.team_authoring` after its independent 35-key audit passed. P4a adds
+    # `tui.viewer` after its independent audit and keyboard-hint audit refresh.
+    # The wire.memory slice adds the independently audited `wire.memory`
+    # namespace, whose ledger row is what un-ships it. The LOH-11 relay-web
+    # tag slice adds `relay.session.tags` on the same terms: one audited
+    # namespace with its own fresh ledger row. The remote-compute wave (S3e)
+    # adds `cli.exec_remote_help` and `wire.remote_compute`, each carried only
+    # once its independent audit row passed against the current en bytes.
+    # The R5 stale-ask wave (2026-10-23) adds the two ask-surface namespaces,
+    # `relay.ask` and `tui.asks`, on the same terms: independently audited
+    # (round 1 raised 12 findings, round 2 passed all seven locales), one fresh
+    # ledger row each against the current en bytes. P5 adds `tui.palette` on
+    # the same terms: a 7-key namespace whose fresh, independently audited
+    # ledger row is what lets the locale carry it. The fast-mode fix adds
+    # `tui.notices` and `wire.errors.desktop`: Hindi had no file for either
+    # namespace, so the refusal notices fell back to English; now each carries
+    # a 30-key / 84-key catalogue with its own audited ledger row (see
+    # i18n/ledger.json), which is the same condition every namespace above was
+    # admitted on. The relay.asks slice adds the SPA's ask cards/sheet/dock
+    # namespace `relay.asks` on the same terms — it is a DIFFERENT namespace
+    # from R5's `relay.ask` (the dismiss reasons and stale-ask line), and
+    # `namespaces()` returns the files sorted, so `relay.asks` sorts before
+    # `relay.session.tags` rather than where the slice landed. The approvals
+    # slice adds `relay.approvals` (17 keys, the approval-scope copy main added
+    # as literals) on the same terms: carried only now that its independent
+    # audit row exists against the current en bytes. It sorts before
+    # `relay.ask`. The notifications-inbox wave adds `tui.notifications` (the
+    # inbox page's 72 keys) on exactly the same terms: six locales carry it
+    # only because their independent audit bundles and fresh ledger rows landed
+    # with the files in the same commit, and the seventh (ru) is still absent
+    # for want of its round-2 delta audit. Mechanical parity is asserted below
+    # for every namespace in this tuple, so the new one is checked too.
+    # `relay.ask`. The phone inbox adds `relay.notifications` (77 keys) with
+    # the other seven locales; it sorts after `relay.chrome`. Carrying it
+    # pins key/placeholder parity here, while shipping still waits on its
+    # independent audit row, exactly as each namespace above did.
     locale = "hi"
     namespaces = (
+        "cli.exec_remote_help",
+        # The serve-supervision slice's 14-key namespace, carried in every locale
+        # only with its independently audited ledger row at the current en bytes;
+        # it sorts after cli.exec_remote_help.
+        "cli.services_status",
+        "relay.approvals",
+        "relay.ask",
+        "relay.asks",
+        # Borderless phone chrome carries its own audited namespace; existing
+        # English labels stay untouched while all seven locales join the wave.
+        "relay.chrome",
+        # The session status dot's 9-key namespace (round 2 added the
+        # reconnecting/dropped/quiet/ended copy), carried only with its
+        # doubly audited ledger row; it keeps relay.chrome's English bytes
+        # frozen, and sorts between relay.chrome and relay.session.tags.
+        "relay.health",
+        "relay.notifications",
+        "relay.session.tags",
+        # Audited relay condensation copy adds 19 keys; keep this census exact.
+        "relay.transcript",
+        "tui.asks",
+        "tui.authoring",
+        "tui.notices",
+        "tui.notifications",
+        "tui.palette",
         "tui.projects_edit",
         "tui.review",
         "tui.schedule",
         "tui.status",
+        "tui.tags",
+        "tui.team_authoring",
         "tui.transcript",
+        "tui.viewer",
         "tui.welcome",
         "wire.errors",
+        "wire.errors.desktop",
+        "wire.errors.notifications",
         "wire.errors.settings",
         "wire.exec",
         "wire.incidents",
+        "wire.memory",
         "wire.notices",
+        # Radient Saver LO1 (PR #3078): the 17-key settings and fail-open notice
+        # copy, carried with its independently audited ledger row at the
+        # current en bytes; it sorts before wire.remote_compute.
+        "wire.radient_saver",
+        "wire.remote_compute",
         "wire.settings",
         "wire.slash",
+        "wire.slash.notifications_page",
     )
     assert catalogues.namespaces(locale) == namespaces
     for namespace in namespaces:
@@ -172,8 +279,12 @@ def test_wave3_hindi_carries_its_namespace_snapshot_with_parity() -> None:
         translated = catalogues.load_catalogue(locale, namespace)
         assert translated.keys() == source.keys(), (locale, namespace)
         for key in source:
-            assert runtime.message_arguments(translated[key]) == runtime.message_arguments(
-                source[key]
+            assert i18n_check.arguments_match(
+                runtime.message_arguments(source[key]),
+                runtime.message_arguments(translated[key]),
+                translated_source=translated[key],
+                locale=locale,
+                plural=_PLURAL_RULES,
             ), (locale, namespace, key)
 
 
@@ -250,3 +361,26 @@ def test_context_sidecar_is_not_a_namespace_and_reads_when_present(
     assert catalogues.context("en", "demo") == sidecar
     # Absent sidecar is a valid state ({}), not an error.
     assert catalogues.context("en", "missing") == {}
+
+
+def test_the_bundle_identity_covers_the_eager_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A namespace moving between eager and deferred must change the ETag.
+
+    Reproduces review round 1 MAJOR-1: the hash once digested only
+    ``(namespace, file sha)`` pairs, so making ``wire.settings`` eager took the
+    served message count from 335 to 1139 while the ETag stayed
+    ``a6785c3f…``. A client holding that ETag revalidated to 304, skipped
+    re-registration, and kept the newly eager namespace English indefinitely.
+    """
+    deferred = catalogues.wire_bundle("en")
+    monkeypatch.setattr(catalogues, "DEFERRED_NAMESPACES", {})
+    eager = catalogues.wire_bundle("en")
+
+    assert len(eager["messages"]) > len(deferred["messages"])
+    assert len(eager["messages"]) - len(deferred["messages"]) == len(
+        catalogues.load_catalogue("en", "wire.settings")
+    )
+    # Identical file bytes, different split: the identity must still differ.
+    assert eager["content_sha256"] != deferred["content_sha256"]

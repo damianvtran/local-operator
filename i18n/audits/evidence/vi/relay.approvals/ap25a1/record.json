@@ -1,0 +1,86 @@
+{
+ "schema": 1,
+ "audit_id": "ap25a1",
+ "audit_id_assigned_by": "implementation session, 2026-10-25 — no audit id was issued when the audit ran; the id exists so the bundle path can be cited from the ledger",
+ "audit_kind": "independent_current_byte_namespace_audit",
+ "locale": "vi",
+ "namespace": "relay.approvals",
+ "audit_date": "2026-10-25",
+ "audited_revision": null,
+ "audited_revision_note": "The audit did not record a git revision; the bytes it audited are identified by the hashes in input_hashes. They became tracked in 58102b3ae3cd0062e4f2dfee89f4b150bf330b68. The target catalogue has not changed since that commit.",
+ "attestation_revision": "58102b3ae3cd0062e4f2dfee89f4b150bf330b68",
+ "key_count": {
+  "en": 17,
+  "target": 17
+ },
+ "verdict": "passed",
+ "verdict_reason": "The three approval-gate labels were compared side by side; the session-only vs all-sessions distinction survives on the explicit scope phrase and the (auto) vs (default auto) token, and gate.body_scope restates it. 'Run without asking' keeps its risk wording. No blocker or major finding at the audited bytes.",
+ "auditor": {
+  "agent": "translation-auditor (lopdev team)",
+  "session": "not recorded in the ledger row (the auditing session id was not preserved)",
+  "model": "deepseek/deepseek-flash",
+  "actual_model_source": "the auditing session's own header, as recorded in the ledger row",
+  "date": "2026-10-25",
+  "independence": "Independent agent/context: it formed its own view before reading the first pass's findings. A second pass the same day, with no sight of the first findings, overturned nothing. Both passes ran on the same model, so independence is agent/context, not model diversity — disclosed, not closed."
+ },
+ "translator": {
+  "agent": "i18n-translator",
+  "model": "unrecorded (not disclosed; the catalogue files were untracked working-tree bytes at ab44bbb04a)",
+  "date": "unrecorded"
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/relay.approvals.json",
+   "sha256": "321658288e707b93b94062345bd8bbbdc4301d7fd6865b7378a46efe1d429125",
+   "matches_ledger_source_sha256": true
+  },
+  "en_context_sidecar": {
+   "path": "local_operator/i18n/catalogues/en/relay.approvals.context.json",
+   "sha256": "3f1521e5b63b3916c0f68bdb0f2b0165fe9d437b2e14b18ddad9d19cc2ec6117",
+   "note": "hash of the sidecar at the attestation revision, i.e. over the audited bytes"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/vi/relay.approvals.json",
+   "sha256": "675bf61065a07e2b115060d528272ec001c5af45981fa837286bb1b1c13c1f4c",
+   "matches_current_working_tree": true
+  }
+ },
+ "artifacts": [
+  "report.md",
+  "mechanical-recheck.log",
+  "recheck.py.txt",
+  "receipt.json"
+ ],
+ "audit_log": {
+  "path": null,
+  "state": "absent",
+  "reason": "No command output was captured during the in-session audit; its mechanical figures were reported in prose in the ledger row. This bundle records the absence instead of reconstructing a log that never existed."
+ },
+ "mechanical_recheck": {
+  "path": "mechanical-recheck.log",
+  "run_by": "implementation session (not the auditor; not independent evidence)",
+  "run_at": "2026-10-25",
+  "revision": "58102b3ae3cd0062e4f2dfee89f4b150bf330b68",
+  "note": "A replay of the mechanical checks the ledger row reports, against the same git revision, so the claims can be re-derived from the audited bytes. It does not stand in for the audit's own log."
+ },
+ "findings": [],
+ "noted_outside_scope": [],
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 0,
+  "rejected": 0,
+  "findings_total": 0
+ },
+ "limitations": [
+  "No native-speaker judgement is part of this audit: the auditor was an LLM and the record claims no native review."
+ ],
+ "post_audit_change": {
+  "reason": "After this audit, the en `relay.approvals` catalogue was split for the M5 emphasis remediation: the single `gate.body_scope` key became `gate.body_scope.{before,session_clause,between,default_clause,after}` so the component can wrap the two blast-radius phrases in `<strong>` without markup in the catalogue. That changes the en bytes the row's pass was bound to.",
+  "current_en_sha256": "5efd5d666d1c498de506541c8bbd339204b5919950395934bfcf188476030ce0",
+  "current_context_sha256": "1a595de0049de2b02d27e00fc57c3fa14cb191cdde917bd54045b64a36664e75"
+ }
+}

@@ -1162,3 +1162,68 @@ async def test_a_gate_parked_on_the_owner_reaches_a_bound_remote_viewer(
         if parked is not None and not parked.done():
             parked.cancel()
         await asyncio.to_thread(created.stop)
+
+
+@pytest.mark.asyncio
+async def test_a_remote_viewer_reattaches_after_its_link_drops_and_returns(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Link drop + restore: the viewer recovers with no user action and pilots again.
+
+    THE INCIDENT SHAPE (2026-10-21, cloud-node-1): a mesh link dropped while the
+    desktop held a remote session open. Before the fix the viewer relay ended the
+    link but left the viewer's stream socket open, so the viewer never saw EOF and
+    never redialled — the session sat frozen until reopened. Now the link's close
+    ends its streams, the viewer's own recovery re-opens one over the next link, and
+    a prompt sent afterwards is journalled by the OWNER.
+    """
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer, peer_pair, monkeypatch, name="relink", prompt=""
+    )
+    try:
+        viewer = await _open(created, monkeypatch)
+        try:
+            await viewer.bind_runtime()
+            assert not viewer.is_cold, viewer.cold_reason
+            await viewer.prompt("before the drop")
+            assert await _wait(lambda: any("before the drop" in t for t in _user_texts(created)))
+            await asyncio.to_thread(created.owner.wait_for_turn)
+
+            server_a = created.server_a
+            device_b = created.server_b.identity.device_id
+            with server_a._streams_lock:  # noqa: SLF001
+                riding = [s for s in server_a._streams.values() if s.peer_device_id == device_b]
+            assert riding, "the viewer's stream was not open on the viewer relay"
+            dropped = riding[0].link
+            assert dropped is not None
+            # THE DROP: the link dies under the open stream (the idle-timeout close).
+            await asyncio.to_thread(dropped.close, "timeout")
+
+            # The viewer relay ended the stream that rode it, so the viewer sees EOF.
+            def stream_ended() -> bool:
+                with server_a._streams_lock:  # noqa: SLF001
+                    return all(s.link is not dropped for s in server_a._streams.values())
+
+            assert await _wait(stream_ended, timeout_s=10.0)
+
+            # RESTORE + RE-ATTACH with no user action: the viewer's recovery opens
+            # a fresh stream (over a fresh link) and a prompt reaches the owner.
+            def reattached() -> bool:
+                with server_a._streams_lock:  # noqa: SLF001
+                    return any(
+                        s.peer_device_id == device_b and s.link is not None and s.link.alive
+                        for s in server_a._streams.values()
+                    )
+
+            assert await _wait(reattached, timeout_s=30.0), "the viewer never re-attached"
+            # Stream registration precedes the viewer's canonical sync. Wait for
+            # that real warm state, not an arbitrary sleep (review C4 / QA Q1).
+            assert await _wait(lambda: not viewer.is_cold, timeout_s=30.0), viewer.cold_reason
+            await viewer.prompt("after the restore")
+            assert await _wait(
+                lambda: any("after the restore" in t for t in _user_texts(created))
+            ), _user_texts(created)
+        finally:
+            await viewer.dispose()
+    finally:
+        await asyncio.to_thread(created.stop)

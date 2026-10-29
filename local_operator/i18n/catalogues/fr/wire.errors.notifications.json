@@ -1,0 +1,6 @@
+{
+  "wire.errors.notifications.store_busy": "Le stockage des notifications est occupé pour le moment, donc rien n’a changé. Réessayez dans un instant.",
+  "wire.errors.notifications.store_full": "Cet ordinateur n’a plus d’espace disque, donc rien n’a changé. Libérez de l’espace sur le volume qui contient {where}, puis réessayez.",
+  "wire.errors.notifications.store_unavailable": "Le stockage des notifications n’a pas pu être lu ni écrit. Réessayer n’y changera rien ; vérifiez {where} et le disque qui le contient.",
+  "wire.errors.notifications.unknown_item": "Cette notification ne figure plus dans Notifications."
+}

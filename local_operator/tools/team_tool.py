@@ -18,6 +18,7 @@ full briefs. Mirrors how roles and skills are handled.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable, Iterable, Literal
 
@@ -27,14 +28,15 @@ from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
     AgentToolUpdate,
+    DurableWriteIntent,
     ToolContext,
     ToolResult,
 )
+from local_operator.projects import truncate_row
 from local_operator.teams import (
     MAX_TEAM_INSTRUCTIONS_CHARS,
     TeamEditFields,
     TeamMember,
-    TeamRegistry,
     TeamRegistryLockTimeout,
     TeamRegistryRecoveryError,
     display_form,
@@ -46,6 +48,7 @@ from local_operator.tools.builtin import (
     _guard,
     _text,
     _validation_error,
+    identifier_text,
     spill_truncate,
 )
 
@@ -86,10 +89,11 @@ class TeamOverride(BaseModel):
 class TeamParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["list", "show", "create", "update"] = Field(
+    op: Literal["list", "show", "create", "update", "promote"] = Field(
         description=(
             "list/show: what teams exist and what they say; create/update: "
-            "author or fix a team. Use team_delete for irreversible removal."
+            "author or fix a team; promote: copy THIS conversation's team into "
+            "the user's account. Use team_delete for irreversible removal."
         )
     )
     name: str | None = Field(default=None, description="Team name (all ops but list).")
@@ -147,6 +151,28 @@ class TeamParams(BaseModel):
             "team name or another team's alias."
         ),
     )
+    scope: Literal["global", "session"] | None = Field(
+        default=None,
+        description=(
+            "Default: this conversation if it has a store, else the account. "
+            "'global': the account, needs confirmation."
+        ),
+    )
+    # ``as`` is a Python keyword, so the design's ``[as=Y]`` is ``as_name`` here
+    # too — one spelling on every surface rather than a translation per layer.
+    as_name: str | None = Field(
+        default=None, description="promote: copy it under this name (default: its own)."
+    )
+    # The flag IS the confirmation, exactly as on the agent twin: one answer, one
+    # field, so a caller cannot ask for the overwrite while dropping the part that
+    # made it the user's decision.
+    confirm_replace: bool = Field(
+        default=False,
+        description=(
+            "promote: replace any account row this would collide with (the team or "
+            "a member). This IS the user's confirmation — set it only when they asked."
+        ),
+    )
     overrides: list[TeamOverride] | None = Field(
         default=None,
         description=(
@@ -169,15 +195,19 @@ def _slot_token(member: TeamMember) -> str:
     return f"team:{member.role}" if member.kind == "team" else str(member.role)
 
 
-def _override_lines(team: Any) -> list[str]:
+def _override_lines(team: Any, mark: Callable[[str], str] | None = None) -> list[str]:
     """The lines ``show`` adds for a roster carrying member overrides.
 
     Deliberately NOT in ``roster_lines()``: that feeds the manager's and every
     member's prompt, and a prompt change is a prompt-cache cost for no behaviour
     gain. ``show`` is the surface a model reads when it needs to know, and the
     desktop editor is the surface that writes them.
+
+    ``mark`` wraps the slot name for the redaction pass, like
+    ``Team.roster_lines``; a slot name is a rendered identifier.
     """
 
+    label = mark or (lambda value: value)
     rows: list[str] = []
     for member in team.members:
         if member.is_default():
@@ -187,7 +217,7 @@ def _override_lines(team: Any) -> list[str]:
             parts.append(f"tier {member.tier}")  # i18n: ignore model-facing tool output
         if member.effort:
             parts.append(f"effort {member.effort}")  # i18n: ignore model-facing tool output
-        rows.append(f"- {_slot_token(member)}: {', '.join(parts)}")
+        rows.append(f"- {label(_slot_token(member))}: {', '.join(parts)}")
     if not rows:
         return []
     return ["member overrides (model tier / reasoning effort):", *rows]
@@ -277,17 +307,29 @@ def _overrides_refusal() -> str:
     )
 
 
-def _registry(context: ToolContext | None) -> TeamRegistry | None:
+def _registry(context: ToolContext | None) -> Any | None:
+    """The session's team authority, duck-typed.
+
+    A session holds a COMPOSITE over its scoped store and the global one
+    (LOH-9), so an ``isinstance(TeamRegistry)`` gate would answer "no registry"
+    in every session while the tool was still advertised. The two methods this
+    module calls on it are the contract; anything answering them is a registry.
+    """
     raw = getattr(context, "team_registry", None) if context else None
-    return raw if isinstance(raw, TeamRegistry) else None
+    if raw is None or not hasattr(raw, "list_teams") or not hasattr(raw, "get_team_by_name"):
+        return None
+    return raw
 
 
-def _row(team: Any) -> str:
+def _row(team: Any, *, context: ToolContext | None = None) -> str:
     # ``member_count()`` for the same reason every other listing uses it (D2):
     # `len(members) + 1` assumes the manager is not on the roster, which is
     # false for real teams, and collapses a multi-count slot to one. This row
     # is what the MODEL reads when it lists teams, so a wrong count here is a
     # wrong count in the agent's own reasoning about a roster it may staff.
+
+    # Identifier fields: the display form and the manager are marked spans; a
+    # team may be named or led by a word that looks credential-shaped.
     slots = team.member_count()
     summary = (team.description or "").strip() or "(no description)"
     # "members", matching the number (R6): `member_count()` excludes the
@@ -299,10 +341,10 @@ def _row(team: Any) -> str:
     # keeps the typeable key beside it (``Platform Reliability (ops)``) while
     # a derived default paints whatever the human surfaces paint.
     row = (
-        f"- {display_form(team.name, team.label)} "
-        f"[{slots} {member_word}, led by {team.manager}]: {summary}"
+        f"- {identifier_text(context, display_form(team.name, team.label))} "
+        f"[{slots} {member_word}, led by {identifier_text(context, team.manager)}]: {summary}"
     )
-    return row if len(row) <= _ROW_CAP else row[: _ROW_CAP - 1].rstrip() + "…"
+    return truncate_row(row, cap=_ROW_CAP)
 
 
 async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult:
@@ -320,7 +362,23 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
             "instance owns a product) the project brief. Read guide://teams first."
         )
         return _text(tool_call_id, "team", body)
-    body = "registered teams:\n" + "\n".join(_row(team) for team in teams)
+    # GROUP BY STORE (AC13 / U1): a conversation team and an account team have
+    # different lifetimes, and a model choosing a roster must see which it is.
+    from local_operator.profile_scope import row_scope
+
+    here = [team for team in teams if row_scope(registry, team) == "session"]
+    everywhere = [team for team in teams if row_scope(registry, team) != "session"]
+    body = ""
+    if here:
+        body += "teams in this conversation:\n" + "\n".join(
+            _row(team, context=context) for team in here
+        )
+    if everywhere:
+        if body:
+            body += "\n\n"
+        body += "teams saved everywhere (your account):\n" + "\n".join(
+            _row(team, context=context) for team in everywhere
+        )
     body += "\n\nlaunch with /team <name> <request>, or op='show' name='<name>'."
     text, spill = spill_truncate(body, "team", context)
     return _text(tool_call_id, "team", text, details=spill or None)
@@ -335,20 +393,31 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
         return _error(tool_call_id, "team", str(exc))
     if team is None:
-        return _error(tool_call_id, "team", f"no team named {name!r} (try op='list')")
+        return _error(
+            tool_call_id,
+            "team",
+            f"no team named {identifier_text(context, repr(name))} in this conversation "
+            "or your account (try op='list'). A team can be conversation-local, so one "
+            "created in another conversation is not visible here; a fork of this "
+            "conversation starts with a copy of its teams.",
+        )
+    from local_operator.profile_scope import row_scope, scope_words
+
     header = [
-        f"{display_form(team.name, team.label)}. Led by {team.manager}",
+        f"{identifier_text(context, display_form(team.name, team.label))}. "
+        f"Led by {identifier_text(context, team.manager)}",
+        f"scope: {scope_words(row_scope(registry, team))}",
         f"description: {team.description or '(unstated)'}",
     ]
     if team.aliases:
         # D5: an alias resolves to this team, and the model has no other way
-        # to learn one exists.
+        # to learn one exists. Identifier fields: every alias is a name.
         header.append(
-            f"aliases: {', '.join(team.aliases)}"
+            f"aliases: {', '.join(identifier_text(context, alias) for alias in team.aliases)}"
         )  # i18n: ignore model-facing tool output
     header.append("roster:")  # i18n: ignore model-facing tool output
-    header.extend(team.roster_lines())
-    header.extend(_override_lines(team))
+    header.extend(team.roster_lines(lambda value: identifier_text(context, value)))
+    header.extend(_override_lines(team, lambda value: identifier_text(context, value)))
     body = "\n".join(header)
     if team.instructions.strip():
         body += "\n\ncollaboration:\n" + team.instructions.strip()
@@ -358,7 +427,7 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         body += "\n\nproject:\n" + team.project.strip()
     else:
         body += "\n\nproject: (none)"
-    body += f"\n\nlaunch with /team {team.name} <request>."
+    body += f"\n\nlaunch with /team {identifier_text(context, team.name)} <request>."
     text, spill = spill_truncate(body, "team", context)
     return _text(tool_call_id, "team", text, details=spill or None)
 
@@ -391,6 +460,40 @@ async def _op_write(
         existing = registry.get_team_by_name(name)
     except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
         return _error(tool_call_id, "team", str(exc))
+    from local_operator.profile_scope import (
+        durable_write_decision,
+        durable_write_refusal,
+        needs_durable_consent,
+        row_scope,
+        scope_store,
+        scope_words,
+        shadow_in_other_store,
+        shadow_refusal,
+        tool_write_scope,
+    )
+
+    scope = tool_write_scope(registry, params.scope)
+    # THE COLLISION RUNS BEFORE THE CONSENT ASK (agent review round 1, M1): a
+    # create over an account name must answer "that name exists", not ask for an
+    # account write the model cannot authorize. Case-folded and ALIAS-aware (the
+    # helper), because `/team release` resolves an alias exactly like a name.
+    if creating:
+        collides = shadow_in_other_store(registry, scope, name, kind="team")
+        if collides is not None:
+            return _error(
+                tool_call_id,
+                "team",
+                shadow_refusal(
+                    "team",
+                    name,
+                    existing_scope="global" if scope == "session" else "session",
+                ),
+            )
+    # WHERE THIS WRITE LANDS: a create goes where the caller asked, an update to
+    # the row's owner. The consent question is asked for the ACCOUNT store only,
+    # and only for a tool call — the TUI/desktop hand a plain registry and no
+    # context because the user is the actor there.
+    target = row_scope(registry, existing) if existing is not None else scope
     if creating and existing is not None:
         # Q1: a create whose name collides with an ALIAS must say so in the
         # registry's own words -- "already exists" sends the model looking
@@ -401,15 +504,31 @@ async def _op_write(
             return _error(
                 tool_call_id,
                 "team",
-                f"Team name {name!r} is already an alias of team {existing.name!r}",
+                f"Team name {identifier_text(context, repr(name))} is already an alias "
+                f"of team {identifier_text(context, repr(existing.name))}",
             )
         return _error(
             tool_call_id,
             "team",
-            f"team {name!r} already exists; use op='update' to change it.",
+            f"team {identifier_text(context, repr(name))} already exists; "
+            "use op='update' to change it.",
         )
+    authorized_by: str | None = None
+    if context is not None and target == "global" and needs_durable_consent(registry, params.scope):
+        intent = DurableWriteIntent(
+            kind="team", operation="update" if not creating else "create", name=name
+        )
+        authorized_by, reason = await durable_write_decision(context, intent)
+        if authorized_by is None:
+            return _error(tool_call_id, "team", durable_write_refusal(intent, reason))
     if not creating and existing is None:
-        return _error(tool_call_id, "team", f"no team named {name!r} to update.")
+        return _error(
+            tool_call_id,
+            "team",
+            f"no team named {identifier_text(context, repr(name))} to update in this "
+            "conversation or your account (a team can be conversation-local; try "
+            "op='list').",
+        )
     if params.overrides:
         # The operator gate (design §6): a roster-level pin is the operator's
         # choice unless they have delegated model choice, exactly like a role's
@@ -456,7 +575,7 @@ async def _op_write(
         if creating:
             if not (params.manager or "").strip():
                 fields.manager = "manager"
-            team = registry.create_team(fields)
+            team = scope_store(registry, scope).create_team(fields)
             verb = "created"
         else:
             assert existing is not None  # guarded above
@@ -471,6 +590,8 @@ async def _op_write(
     except Exception as exc:  # noqa: BLE001
         return _error(tool_call_id, "team", f"could not save team: {exc}")
     pinned = sum(1 for member in team.members if not member.is_default())
+    # Identifier fields: the write receipt names the team and its manager; both
+    # are marked spans, never credentials.
     note = ""
     unconfigured = _unconfigured_tiers(team.members)
     if unconfigured:
@@ -485,11 +606,20 @@ async def _op_write(
     return _text(
         tool_call_id,
         "team",
-        f"{verb} team {team.name!r}. {team.manager} leads it; "
+        f"{verb} team {identifier_text(context, repr(team.name))} in {scope_words(target)}. "
+        f"{identifier_text(context, team.manager)} leads it; "
         f"{len(team.members)} member slot(s)."
         + (f" {pinned} carries a model/effort override." if pinned else "")
         + note
-        + f" Launch with /team {team.name} <request>.",
+        + f" Launch with /team {identifier_text(context, team.name)} <request>.",
+        # The team receipt used to carry no details at all, so a transcript audit
+        # could not tell where a team was written. Same fields as the agent
+        # receipt: the store, and the consent origin for an account write.
+        details={
+            "name": team.name,
+            "scope": target,
+            "authorized_by": authorized_by,
+        },
     )
 
 
@@ -518,12 +648,45 @@ async def _op_delete(context: ToolContext | None, tool_call_id: str, name: str) 
     except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
         return _error(tool_call_id, "team_delete", str(exc))
     if team is None:
-        return _error(tool_call_id, "team_delete", f"no team named {name!r} to delete.")
+        return _error(
+            tool_call_id,
+            "team_delete",
+            f"no team named {identifier_text(context, repr(name))} to delete in this "
+            "conversation or your account (a team can be conversation-local; try "
+            "op='list').",
+        )
+    from local_operator.profile_scope import row_scope, scope_words
+
+    # RESOLVED SESSION-FIRST, THEN REFUSED IF IT IS THE ACCOUNT'S. The model may
+    # remove a team it authored for this conversation; deleting one the user
+    # saved for every conversation stays on the user surfaces, which ask their
+    # own confirmation. A plain registry (no scopes) reads as global, so a
+    # headless tool cannot delete one either.
+    target = row_scope(registry, team)
+    # A host with NO conversation store keeps pre-S2 behaviour: its plain
+    # registry IS the account, and team deletion was a working tool there. The
+    # account-row refusal only protects a SCOPED host, where the row the user
+    # saved for every conversation is not the model's to remove.
+    if target != "session" and getattr(registry, "session_registry", None) is not None:
+        return _error(
+            tool_call_id,
+            "team_delete",
+            f"team {identifier_text(context, repr(name))} is saved in the user's account, "
+            "so this tool cannot delete it. Delete it from the desktop Teams editor, the "
+            "TUI /team listing, or `lop teams delete`.",
+        )
     try:
         registry.delete_team(team.id)
     except Exception as exc:  # noqa: BLE001
         return _error(tool_call_id, "team_delete", f"could not delete team: {exc}")
-    return _text(tool_call_id, "team_delete", f"deleted team {name!r}.")
+    # Identifier field: the delete receipt names the team and the store it left.
+    return _text(
+        tool_call_id,
+        "team_delete",
+        f"deleted team {identifier_text(context, repr(name))} from {scope_words(target)}; "
+        "the user's account is unchanged.",
+        details={"name": name, "scope": target, "authorized_by": None},
+    )
 
 
 @_guard("team")
@@ -546,7 +709,93 @@ async def execute_team(
         return await _op_list(context, tool_call_id)
     if params.op == "show":
         return await _op_show(context, tool_call_id, str(params.name))
+    if params.op == "promote":
+        return await _op_promote(context, tool_call_id, params)
     return await _op_write(context, tool_call_id, params, creating=params.op == "create")
+
+
+async def _op_promote(
+    context: ToolContext | None, tool_call_id: str, params: TeamParams
+) -> ToolResult:
+    """Copy a CONVERSATION team (and the members it needs) into the account.
+
+    Same rule as the agent twin (:func:`agent_tool._op_promote`): the copy is the
+    user's decision, so a tool call with no host grant is REFUSED with a remedy
+    naming the surfaces that can ask. The expansion is the composite's job — it
+    resolves the roster through the launch resolver and copies session-scoped
+    members in the same transaction — so this op only names the intent and
+    reports what came back.
+    """
+
+    from local_operator.profile_scope import (
+        PromotionIncomplete,
+        durable_write_decision,
+        durable_write_refusal,
+        promote_missing,
+    )
+
+    registry = _registry(context)
+    agents = getattr(context, "agent_registry", None) if context else None
+    if registry is None or getattr(registry, "session_registry", None) is None:
+        return _error(
+            tool_call_id,
+            "team",
+            "this run has no conversation store, so there is no conversation-scoped team "
+            "to promote. The user can author one on their own surface instead.",
+        )
+    if agents is None:
+        return _error(
+            tool_call_id,
+            "team",
+            "promoting a team needs this conversation's agent registry: its members must "
+            "resolve, and conversation-scoped ones are copied with it.",
+        )
+    name = str(params.name or "").strip()
+    intent = DurableWriteIntent(kind="team", operation="promote", name=name)
+    authorized_by, reason = await durable_write_decision(context, intent)
+    if authorized_by is None:
+        return _error(tool_call_id, "team", durable_write_refusal(intent, reason))
+    try:
+        result = await asyncio.to_thread(
+            lambda: registry.promote(
+                name,
+                as_name=params.as_name,
+                replace=params.confirm_replace,
+                authorized_by=authorized_by,
+                agents=agents,
+            )
+        )
+    except KeyError:
+        return _error(tool_call_id, "team", promote_missing("team", name))
+    except PromotionIncomplete as error:
+        return _error(tool_call_id, "team", str(error))
+    except ValueError as error:
+        return _error(tool_call_id, "team", str(error))
+    target = str(params.as_name or name)
+    expanded = ""
+    if result.expanded:
+        # The receipt NAMES the members: a user who copied "one team" needs to
+        # know which roles came with it, because they are now account-wide too.
+        expanded = f" It also copied what the roster needs: {', '.join(result.expanded)}."
+    replaced = ""
+    if result.replaced:
+        replaced = f" It overwrote the account's existing {', '.join(result.replaced)}."
+    return _text(
+        tool_call_id,
+        "team",
+        f"copied team {identifier_text(context, repr(target))} to your account."
+        f"{expanded}{replaced} Every other conversation can use it and this one keeps "
+        "its own copy.",
+        details={
+            "name": target,
+            "scope": "global",
+            "authorized_by": authorized_by,
+            "created": result.created,
+            "expanded": result.expanded,
+            "replaced": result.replaced,
+            "provenance_ids": result.provenance_ids,
+        },
+    )
 
 
 def build_team_tool(context: ToolContext) -> AgentTool | None:

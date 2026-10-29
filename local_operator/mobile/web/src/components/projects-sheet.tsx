@@ -77,7 +77,7 @@ import { Sheet } from "./ui/sheet";
 /** The one skin the sheet's text, date, number and select controls share — a
     field added to a form must not look like a foreign control. */
 const FIELD_CLASS =
-	"min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim";
+	"min-h-11 rounded-sm bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim";
 
 /** One form field: label, control, and the helper that explains the control.
 
@@ -244,7 +244,7 @@ function sessionState(row: ProjectLinkedSession): { word: string; ink: string } 
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
 	return (
-		<section className="border-t border-hairline px-3 py-2">
+		<section className="px-3 py-2">
 			<h3 className="mb-1 text-meta font-medium text-ink-dim">{title}</h3>
 			{children}
 		</section>
@@ -274,7 +274,7 @@ function ProjectRow({
 		<button
 			type="button"
 			onClick={onOpen}
-			className="flex w-full flex-col gap-0.5 rounded-sm px-2 py-2 text-left active:bg-surface"
+			className="flex w-full flex-col gap-0.5 rounded-sm px-2 py-2 text-start active:bg-surface"
 		>
 			<span className="flex min-w-0 items-baseline gap-2">
 				<span className="min-w-0 flex-1 truncate text-body font-medium text-ink">
@@ -299,7 +299,7 @@ function ProjectRow({
 				>
 					{progress}
 				</span>
-				<span className="ml-auto shrink-0 text-ink-dim">{meta.join(" · ")}</span>
+				<span className="ms-auto shrink-0 text-ink-dim">{meta.join(" · ")}</span>
 			</span>
 		</button>
 	);
@@ -313,7 +313,7 @@ function BackRow({ onClick, label = "projects" }: { onClick: () => void; label?:
 			onClick={onClick}
 			className="flex min-h-11 items-center gap-1 px-3 text-body-sm text-ink-muted active:bg-surface"
 		>
-			<span aria-hidden>‹</span>
+			<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 			{label}
 		</button>
 	);
@@ -325,7 +325,7 @@ function ErrorBlock({ message, onRetry }: { message: string; onRetry: () => void
 			<p role="alert" className="text-body-sm break-words text-danger">
 				{message}
 			</p>
-			<Button variant="quiet" onClick={onRetry}>
+			<Button variant="ghost" onClick={onRetry}>
 				retry
 			</Button>
 		</div>
@@ -838,8 +838,8 @@ export function ProjectsSheet({
 								))}
 							</div>
 							<Button
-								variant="outline"
-								className="ml-auto"
+								variant="tonal"
+								className="ms-auto"
 								onClick={() => {
 									setFormError("");
 									setView({ name: "create" });
@@ -960,7 +960,7 @@ export function ProjectsSheet({
 									    `edit <milestone>` per row, and two controls whose accessible
 									    names differ only by context are ambiguous to walk (D9). */}
 									<Button
-										variant="outline"
+										variant="tonal"
 										className="shrink-0"
 										aria-label="edit project"
 										disabled={busy}
@@ -1038,7 +1038,7 @@ export function ProjectsSheet({
 												disabled={busy}
 												aria-pressed={milestone.completed_at !== null}
 												onClick={() => void toggleMilestone(detail.project, milestone)}
-												className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-sm px-1 text-left active:bg-surface disabled:opacity-50"
+												className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-sm px-1 text-start active:bg-surface disabled:opacity-50"
 											>
 												<span
 													aria-hidden
@@ -1083,7 +1083,7 @@ export function ProjectsSheet({
 											    as two different kinds of thing and misses the app's own
 											    44px floor (design round 6, D3). */}
 											<Button
-												variant="outline"
+												variant="tonal"
 												className="shrink-0"
 												disabled={busy}
 												aria-label={`edit ${milestone.name}`}
@@ -1095,7 +1095,7 @@ export function ProjectsSheet({
 									))
 								)}
 								<Button
-									variant="outline"
+									variant="tonal"
 									className="mt-1"
 									disabled={busy}
 									onClick={() => openMilestone(detail.project.id, null)}
@@ -1130,7 +1130,7 @@ export function ProjectsSheet({
 												    one thing the phone could not do at all, and a
 												    session linked by mistake had no way out. */}
 												<Button
-													variant="outline"
+													variant="tonal"
 													className="shrink-0"
 													disabled={busy}
 													aria-label={`unlink ${row.title || row.session_id}`}
@@ -1145,7 +1145,7 @@ export function ProjectsSheet({
 									})
 								)}
 								<Button
-									variant="outline"
+									variant="tonal"
 									className="mt-1"
 									disabled={busy || atLinkCap}
 									onClick={() => {
@@ -1276,7 +1276,7 @@ export function ProjectsSheet({
 						>
 							{busy ? "creating…" : "create"}
 						</Button>
-						<Button variant="quiet" disabled={busy} onClick={() => setView({ name: "browse" })}>
+						<Button variant="ghost" disabled={busy} onClick={() => setView({ name: "browse" })}>
 							cancel
 						</Button>
 					</div>
@@ -1447,7 +1447,7 @@ export function ProjectsSheet({
 							{busy ? "saving…" : "save"}
 						</Button>
 						<Button
-							variant="quiet"
+							variant="ghost"
 							disabled={busy}
 							onClick={() => setView({ name: "detail", key: view.key })}
 						>
@@ -1524,7 +1524,7 @@ export function ProjectsSheet({
 							{busy ? "saving…" : editingMilestone === null ? "add" : "save"}
 						</Button>
 						<Button
-							variant="quiet"
+							variant="ghost"
 							disabled={busy}
 							onClick={() => setView({ name: "detail", key: view.key })}
 						>
@@ -1543,7 +1543,7 @@ export function ProjectsSheet({
 							   control is an explanation rather than a button that 404s. */
 							<p className="text-meta break-words text-warning">{SLASH_IN_MILESTONE}</p>
 						) : removalArmed ? (
-							<div className="flex flex-col gap-2 rounded-sm border border-danger-border bg-danger-wash p-3">
+							<div className="flex flex-col gap-2 rounded-sm bg-danger-wash p-3">
 								<p className="text-body-sm break-words text-danger">
 									remove “{editingMilestone}” from this project? the milestone is gone;
 									the project's sessions and its history are untouched.
@@ -1557,7 +1557,7 @@ export function ProjectsSheet({
 										remove
 									</Button>
 									<Button
-										variant="quiet"
+										variant="ghost"
 										disabled={busy}
 										onClick={() => setRemovalArmed(false)}
 									>
@@ -1567,7 +1567,7 @@ export function ProjectsSheet({
 							</div>
 						) : (
 							<Button
-								variant="quiet"
+								variant="ghost"
 								className="self-start"
 								disabled={busy}
 								onClick={() => setRemovalArmed(true)}
@@ -1606,7 +1606,7 @@ export function ProjectsSheet({
 									type="button"
 									disabled={busy}
 									onClick={() => void linkSession(view.key, session.session_id)}
-									className="flex min-h-11 w-full flex-col items-start gap-0.5 rounded-sm px-1 py-1 text-left active:bg-surface disabled:opacity-50"
+									className="flex min-h-11 w-full flex-col items-start gap-0.5 rounded-sm px-1 py-1 text-start active:bg-surface disabled:opacity-50"
 								>
 									<span className="flex w-full min-w-0 items-baseline gap-2">
 										<span className="min-w-0 flex-1 truncate text-body-sm text-ink">
@@ -1675,7 +1675,7 @@ export function ProjectsSheet({
 							delete
 						</Button>
 						<Button
-							variant="quiet"
+							variant="ghost"
 							disabled={busy}
 							onClick={() => setView({ name: "detail", key: view.key })}
 						>

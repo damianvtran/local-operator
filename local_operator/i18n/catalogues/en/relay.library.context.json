@@ -1,0 +1,7 @@
+{
+  "relay.library.count": {
+    "role": "Library grid result count",
+    "tone": "lowercase, numeric; the plural is grammatical, not an abbreviation",
+    "note": "Owned relay SPA copy for the phone Library. ICU plural: one asset / N assets. The number is the server's filtered total, not the number of tiles currently painted."
+  }
+}

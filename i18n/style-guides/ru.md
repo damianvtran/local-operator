@@ -56,6 +56,10 @@ translators and the auditor.
   truncation. Never truncate.
 - Budgets: `maxCells` from the en sidecar; pinned: PERSIST_HINT 42/43 cells,
   tip pool 59, `/help` ≈ 55.
+- Recorded width exception: `cli.services_status` in this wave:
+  `serve_linger_required` measures 97 and `restart_supervision_limit` 84 cells
+  with `rich.cells.cell_len` against the 80/78 status budget.
+  `unsupervised_unknown` measures 74 and FITS, so it is not covered here.
 
 ## Punctuation & typography
 
@@ -88,3 +92,12 @@ catalogues before landing here.
   поверхность» — «рабочее» is dropped because the full term cannot fit the
   57/59-cell tip pool alongside the cite; accepted by the wave-2 audit.
   Revisit only with a budget change.
+- Recorded budget exception (notifications inbox, wave 3): `filter_unread`
+  keeps «новые» and `seen_in_chat` keeps «было в чате». «непрочитанные» (13
+  cells) and «видели в чате» (13) each exceed their slot, and no compliant
+  synonym is both accurate and shorter. The two slots are not the same kind of
+  thing: `filter_unread`'s 8 cells are the page header's read-filter segment,
+  while `seen_in_chat`'s 12 are a row chip, which is absorbed by the title
+  column and drops wholesale at 43/44 columns on its own — 48/49 when the
+  priority chip is also painted. So the copy wins in both cases and the budgets
+  are recorded here rather than silently widened.

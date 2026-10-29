@@ -1,0 +1,17 @@
+tui.transcript.ask.key_name | {keys} (key name) | {keys} (کلید کا نام)
+tui.transcript.ask.not_answered | not answered | جواب نہیں دیا گیا
+tui.transcript.ask.not_provided | not provided | فراہم نہیں کیا گیا
+tui.transcript.attach.receipt | ↑ {count, plural, one {# image} other {# images}} attached | ↑ {count, plural, one {# تصویر} other {# تصویریں}} منسلک
+tui.transcript.catchup.headline | catch-up — {label} | بیداری کا خلاصہ — {label}
+tui.transcript.catchup.missed | {count, plural, one {# missed wake} other {# missed wakes}} | {count, plural, one {# چھوٹی ہوئی بیداری} other {# چھوٹی ہوئی بیداریاں}}
+tui.transcript.queued.newest | · queued for the next runtime — esc takes it back | · اگلے رن ٹائم کے لیے قطار میں — esc سے واپس لیں
+tui.transcript.queued.older | · queued for the next runtime | · اگلے رن ٹائم کے لیے قطار میں
+tui.transcript.sender.pid | pid {pid} | pid {pid}
+tui.transcript.sender.unknown | another session | کوئی اور سیشن
+tui.transcript.group.messages | messages · {count} | پیغامات · {count}
+tui.transcript.group.actions | {count, plural, one {{label} action} other {{label} actions}} | {count, plural, one {{label} کارروائی} other {{label} کارروائیاں}}
+tui.transcript.group.reply_requested | {count, plural, one {{label} reply requested} other {{label} reply requested}} | {count, plural, one {{label} جواب کی درخواست} other {{label} جواب کی درخواستیں}}
+tui.transcript.group.steered | {count, plural, one {{label} steered} other {{label} steered}} | {count, plural, one {{label} رخ بدلنے والا پیغام} other {{label} رخ بدلنے والے پیغامات}}
+tui.transcript.hub.reply_requested | Reply requested | جواب کی درخواست
+tui.transcript.hub.steered | Steered | رخ بدلا گیا
+tui.transcript.hub.from | From {identity} | {identity} کی طرف سے

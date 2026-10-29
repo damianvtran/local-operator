@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "record_kind": "round_2_disposition_verification",
+  "audit_id": "UR-R3-AUDIT-001",
+  "old_commit": "d3f5e21b6b01e82ff20faa4dc49f4f9420a5c40a",
+  "new_commit": "5eaddeff1d4cb9bfee9c2a831d1e48938c9cce9f",
+  "disposition_count": 13,
+  "verified_fixed_count": 13,
+  "unresolved_count": 0,
+  "id_note": "IDs are session-qualified because the two round-2 auditors independently reused UR-R2-001 through UR-R2-006.",
+  "rows": [
+    {
+      "id": "5ebbaba9537e:UR-R2-001",
+      "disposition": "verified_fixed",
+      "keys": ["wire.settings.wakes_triggers_project_staleness_enabled.help", "wire.settings.wakes_triggers_project_staleness_enabled.label"],
+      "verification": "Settled now reads حتمی حالت والے (done/paused/archived), covering all three terminal states without implying only completed; the direct trigger label remains coherent."
+    },
+    {
+      "id": "5ebbaba9537e:UR-R2-002",
+      "disposition": "verified_fixed",
+      "keys": ["wire.settings.supplements_denyprefixes.help", "wire.settings.supplements_denyprefixes.label"],
+      "verification": "Coordinated passive negation explicitly says files neither appear in the list nor are sent to the decision model; the direct label remains consistent."
+    },
+    {
+      "id": "5ebbaba9537e:UR-R2-003",
+      "disposition": "verified_fixed",
+      "keys": ["wire.settings.subagents_model_choice.help", "wire.settings.subagents_model_choice.choice.operator.label", "wire.settings.subagents_max_running.label", "wire.settings.supplements_maxcostusd.help", "wire.settings.supplements_timeouts.help"],
+      "verification": "Operator is آپریٹر in help and its visible choice label; all three background-job usages now use the established جاب."
+    },
+    {
+      "id": "5ebbaba9537e:UR-R2-004",
+      "disposition": "verified_fixed",
+      "keys": ["wire.slash.hub"],
+      "verification": "Per-link subscription now uses سبسکرپشن; the changed /help value is separately measured as a 57/~55 approximate fit risk."
+    },
+    {
+      "id": "5ebbaba9537e:UR-R2-005",
+      "disposition": "verified_fixed",
+      "keys": ["wire.settings.remote_compute.description", "wire.settings.remote_compute_enabled.help"],
+      "verification": "Both feature-status Preview values now use تجرباتی rather than visual پیش نظارہ."
+    },
+    {
+      "id": "5ebbaba9537e:UR-R2-006",
+      "disposition": "verified_fixed",
+      "keys": ["wire.remote_compute.finished_exit_code"],
+      "verification": "The process-status label now reads ایگزٹ کوڈ with the placeholder preserved exactly."
+    },
+    {
+      "id": "5ebbaba9537e:UR-R2-007",
+      "disposition": "verified_fixed",
+      "keys": ["wire.settings.display_rail.help", "wire.settings.display_rail.label", "wire.settings.display_turn_answer_rail.help"],
+      "verification": "The factual rail description uses کرتی ہے; the neighboring Draw instruction correctly remains imperative بنائیں rather than being forced into the same verb form."
+    },
+    {
+      "id": "3e0f499dc2ee:UR-R2-001",
+      "disposition": "verified_fixed",
+      "keys": ["wire.errors.settings.inline_credentials", "wire.errors.settings.credential_retrieve_failed"],
+      "verification": "Raw scoped bytes contain zero literal redaction artifacts; the inline instruction reuses the exact established native plural from credential_retrieve_failed and preserves both inline-credential and query-parameter prohibitions."
+    },
+    {
+      "id": "3e0f499dc2ee:UR-R2-002",
+      "disposition": "verified_fixed",
+      "keys": ["wire.settings.compaction_wire_bytes_trigger.label", "wire.settings.network_audit_max_bytes.help", "wire.settings.session_cleanup_max_total_bytes.help", "wire.settings.web_fetch_max_bytes.label", "wire.settings.tui_theme.help"],
+      "verification": "All four bytes residues now use بائٹس and the theme help uses ایرو کیز."
+    },
+    {
+      "id": "3e0f499dc2ee:UR-R2-003",
+      "disposition": "verified_fixed",
+      "keys": ["wire.settings.remote_compute.description", "wire.settings.remote_compute_enabled.help"],
+      "verification": "Both Preview values use the auditor-supported native feature-status تجرباتی, matching the coordinated first-audit fix."
+    },
+    {
+      "id": "3e0f499dc2ee:UR-R2-004",
+      "disposition": "verified_fixed",
+      "keys": ["wire.settings.proactive.description", "wire.settings.proactive.title"],
+      "verification": "یہ ترتیبات is now the subject agreeing with پڑھی جاتی ہیں; the wait is only the event that triggers the read."
+    },
+    {
+      "id": "3e0f499dc2ee:UR-R2-005",
+      "disposition": "verified_fixed",
+      "keys": ["wire.settings.retry_connectivitybackoffcapms.help", "wire.settings.retry_connectivitymaxretries.help"],
+      "verification": "The remediated phrase uses کی and کوششوں; its direct connectivity-retry family neighbor remains coherent."
+    },
+    {
+      "id": "3e0f499dc2ee:UR-R2-006",
+      "disposition": "verified_fixed",
+      "keys": ["wire.settings.subagents_model_choice.help", "wire.settings.subagents_model_choice.choice.operator.label"],
+      "verification": "The help and direct visible choice both use آپریٹر, resolving the drift in the same key as the first auditor's operator finding."
+    }
+  ]
+}

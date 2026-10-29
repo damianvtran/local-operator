@@ -230,6 +230,7 @@ def default_status_fetcher(
     config_dir: Path,
     owner: Any,
     transport: Any = None,
+    auth_store: Any = None,
 ) -> Callable[[], Awaitable[Any]]:
     """The PRODUCTION SDK-status fetcher (R8/Q3).
 
@@ -237,7 +238,10 @@ def default_status_fetcher(
     access — the ordinary SDK/auth path, no parallel transport and no model-
     key cascade. The RAW nested DTO is returned untouched; the caller
     normalizes it strictly and re-verifies the owner after the await.
-    ``transport`` is injected only by proof rigs.
+    ``transport`` is injected only by proof rigs. ``auth_store`` is the
+    connector's own credential store: handing it through means a fetch never
+    opens a private SQLite connection of its own (a per-message leak that
+    exhausted the connector's file descriptors; see ``TeamBridgeClient._auth_store``).
     """
 
     _require_owner_identity(owner)  # fail closed on a missing canonical hub
@@ -251,6 +255,7 @@ def default_status_fetcher(
             base_url=owner.canonical_base_url,
             credential_id=owner.credential_id,
             transport=transport,
+            store=auth_store,
         )
         # R9/Q3-3: the exact intended AuthStore row and canonical hub are
         # compared to the native initiating owner BEFORE the GET — a bearer
@@ -293,16 +298,46 @@ def _require_owner_identity(owner: Any) -> None:
         raise BridgeRefusal("bridge_owner_mismatch", "the enrolled owner has no canonical hub")
 
 
+def _bound_hub(access: Any) -> str:
+    """The hub a credential row is bound to, normalized for comparison.
+
+    A row authorized before the sign-in began stamping ``api_endpoint`` (commit
+    131fc1afd81, 2026-10-23) carries NO hub, and a refresh never adds one. Such
+    a row is read as the default hub, never as "matches whatever the owner
+    enrolled on".
+
+    WHAT MAKES THAT SAFE (and what does not). It does NOT rest on the refresh
+    issuer check: ``refresh_radient_token`` compares the CURRENT process's token
+    URL, not the issuer that minted the row, and before 131fc1afd81 a login
+    honoured ``RADIENT_OAUTH_TOKEN_URL`` and stamped nothing, so an unstamped row
+    is not proof of the default issuer. It rests on three facts that hold
+    regardless:
+
+    * the comparison is against the hub the ROW is bound to (stamped, else the
+      default), never against the hub the client was told to call, so a client
+      pointed at hub B cannot launder a bearer for hub A;
+    * the owner's hub was proven when the enrollment committed this credential
+      against it, and the same pinned bearer already travels to that hub on
+      every poll, so this check admits no new bearer travel;
+    * an owner enrolled on any NON-default hub is still refused for an
+      unstamped row, so the relaxation can only ever admit a default-hub owner.
+    """
+
+    from local_operator.env import DEFAULT_RADIENT_API_BASE_URL
+
+    stamped = (getattr(access, "api_endpoint", None) or "").rstrip("/")
+    return stamped or DEFAULT_RADIENT_API_BASE_URL.rstrip("/")
+
+
 def _require_access_matches_owner(access: Any, owner: Any) -> None:
     """Credential/account/canonical-hub equality; tokens are never touched."""
 
     from local_operator.team_bridge.client import BridgeRefusal
 
-    endpoint = (getattr(access, "api_endpoint", None) or "").rstrip("/")
     if (
         getattr(access, "credential_id", None) != owner.credential_id
         or getattr(access, "account_id", None) != owner.account_id
-        or endpoint != str(owner.canonical_base_url).rstrip("/")
+        or _bound_hub(access) != str(owner.canonical_base_url).rstrip("/")
     ):
         raise BridgeRefusal(
             "bridge_owner_mismatch", "the signed-in credential is not the enrolled owner"
@@ -344,7 +379,7 @@ async def _verify_live_identity(owner: Any, auth_store: Any, config_dir: Any) ->
     if (
         access.credential_id != owner.credential_id
         or access.account_id != owner.account_id
-        or (access.api_endpoint or "").rstrip("/") != str(owner.canonical_base_url).rstrip("/")
+        or _bound_hub(access) != str(owner.canonical_base_url).rstrip("/")
     ):
         raise StoreRefused("policy_stale", "the signed-in identity is not the enrolled owner")
 
@@ -370,6 +405,9 @@ class AcceptedLaw:
     guidance_version: str
     guidance_sha: str
     consent_sha: str
+    # The hub's accepted consent-version set (``consent.accepted_versions``),
+    # empty when the hub does not send one. See ``_consent_receipt_is_current``.
+    consent_accepted_versions: tuple[str, ...] = ()
 
 
 def _stage_text_floor(kind: str, version: Any, text: Any) -> tuple[str, str]:
@@ -398,14 +436,58 @@ def _stage_text_floor(kind: str, version: Any, text: Any) -> tuple[str, str]:
     return version, _hashlib.sha256(encoded).hexdigest()
 
 
+def _consent_accepted_versions(consent: "Mapping[str, Any]") -> tuple[str, ...]:
+    """The hub's accepted consent-version set from ``consent.accepted_versions``.
+
+    Absent or malformed reads as EMPTY, never as "anything goes": with no
+    well-formed set, currency falls back to the exact served-version match
+    this client always enforced. Only non-empty strings survive.
+    """
+
+    raw = consent.get("accepted_versions")
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return ()
+    if not all(isinstance(v, str) and v for v in raw):
+        return ()
+    return tuple(raw)
+
+
+def _consent_receipt_is_current(
+    receipt_version: Any, served_version: str, accepted: "tuple[str, ...]"
+) -> bool:
+    """Is the committed consent receipt still CURRENT under this hub's law?
+
+    WHY A SET (agent-server PR #156): the hub serves ``bridge_consent_v2`` for
+    NEW consents while every ``bridge_consent_v1`` endpoint stays valid — the
+    server never re-consents them. Requiring receipt == served version held
+    every v1 member ``policy_stale`` the moment v2 was served, so the hub now
+    also sends ``consent.accepted_versions``. A receipt is current when it is
+    the served version, or when it is EXACTLY a member of a set that also
+    contains the served version (a set that omits the version it serves is
+    incoherent and grants nothing).
+
+    Exact string membership only — never string or numeric ordering: a
+    version is an identifier, and "v10" > "v9" style comparisons would
+    accept versions the hub never named. Anything not listed fails closed.
+    """
+
+    if not isinstance(receipt_version, str) or not receipt_version:
+        return False
+    if receipt_version == served_version:
+        return True
+    return served_version in accepted and receipt_version in accepted
+
+
 def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: Any) -> AcceptedLaw:
     """Strictly normalize the RAW SDK status DTO against the FROZEN server law.
 
     The frozen Go DTO is ``{api_version:"1", available, tenants:[{tenant_id,
     tenant_name, eligible, endpoint:null|{id,label,state}, counts}],
     guidance:{version,text}, screening:{version,template}, consent:{version,
-    text}}``. The endpoint lives ONLY on the caller's OWN tenant row and must
-    be ``owner.endpoint_id`` with state exactly ``active``; ``available``
+    text, accepted_versions?}}``; ``accepted_versions`` (agent-server #156) is
+    the hub's accepted consent set, read by ``_consent_accepted_versions``.
+    The endpoint lives ONLY on the caller's OWN tenant row and must be
+    ``owner.endpoint_id`` with state exactly ``active``; ``available``
     means SOME organization. Served guidance/consent texts pass the DURABLE
     contentless floors; the screening selector passes the local-template
     comparison; consent CURRENCY checks the committed receipt. Every miss is
@@ -413,8 +495,11 @@ def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: A
     spend.
     """
 
-    from local_operator.team_bridge.client import _api_supported, _screening_is_trusted
-    from local_operator.team_bridge.screening import SCREENING_TEMPLATE_V1_SHA256
+    from local_operator.team_bridge.client import (
+        _api_supported,
+        _screening_is_trusted,
+        screening_template_sha256,
+    )
     from local_operator.team_bridge.store import StoreRefused
 
     if not isinstance(status, Mapping):
@@ -464,18 +549,22 @@ def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: A
     )
     # CONSENT CURRENCY: the served version is the CURRENT server version, NOT
     # proof of acceptance. Acceptance is the COMMITTED native receipt;
-    # currency is that receipt's version matching what the server serves now.
+    # currency is that receipt's version being the served one or in the hub's
+    # accepted set (_consent_receipt_is_current).
+    accepted_versions = _consent_accepted_versions(consent)
     receipt = store.owner_consent_receipt(owner)
     if receipt is None:
         raise StoreRefused("policy_stale", "no committed consent receipt for the owner")
-    if receipt["consent_version"] != consent_version:
+    if not _consent_receipt_is_current(
+        receipt["consent_version"], consent_version, accepted_versions
+    ):
         raise StoreRefused(
             "policy_stale", "committed consent is not current for the served version"
         )
     import hashlib as _hashlib
 
     digest = _hashlib.sha256(str(template).encode("utf-8")).hexdigest()
-    if digest != SCREENING_TEMPLATE_V1_SHA256:
+    if digest != screening_template_sha256(version):
         raise StoreRefused(
             "policy_stale", "screening template bytes do not match the local selector"
         )
@@ -486,6 +575,7 @@ def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: A
         guidance_version=guidance_version,
         guidance_sha=guidance_sha,
         consent_sha=consent_sha,
+        consent_accepted_versions=accepted_versions,
     )
 
 
@@ -517,6 +607,7 @@ class AcceptedCapture:
         "consent_version",
         "consent_ref",
         "consent_served_version",
+        "consent_accepted_versions",
         "guidance_version",
         "guidance_sha",
         "consent_sha",
@@ -542,6 +633,7 @@ class AcceptedCapture:
         guidance_sha: Any = None,
         consent_sha: Any = None,
         source: Any = None,
+        consent_accepted_versions: "tuple[str, ...]" = (),
     ) -> None:
         if token is not _CAPTURE_TOKEN:
             raise ValueError("AcceptedCapture is minted only by the verified status path")
@@ -561,6 +653,7 @@ class AcceptedCapture:
         self.consent_version = consent_version
         self.consent_ref = consent_ref
         self.consent_served_version = consent_served_version
+        self.consent_accepted_versions = consent_accepted_versions
         self.guidance_version = guidance_version
         self.guidance_sha = guidance_sha
         self.consent_sha = consent_sha
@@ -643,6 +736,103 @@ class _CyclePolicy:
     provider: str
 
 
+async def verified_status_capture(
+    *, store: Any, owner: Any, status_fetcher: "Callable[[], Awaitable[Any]] | None"
+) -> "AcceptedCapture":
+    """THE AUTHORITY GATE: a fresh, sealed, verified hub status for this owner.
+
+    Raises ``StoreRefused('policy_stale')`` unless the hub currently serves
+    messaging to this account, the owner's organization is eligible, its
+    endpoint is active, and the committed consent is current for the served
+    version — with the owner generation still live across the read. On
+    success the accepted text floors have advanced and the capture is
+    returned.
+
+    WHY A FUNCTION OF ITS OWN (PR #3063 review M6): this is the part of a
+    screen that is about the HUB's current authority, not the model. The
+    connector hands a message off on a RECORDED read verdict without calling
+    the model again (see ``connector.wake.recorded_read_verdict``), and that
+    handoff must still pass exactly this gate; extracting it lets the cycle
+    and the recorded-verdict path run the same code rather than two copies.
+    """
+
+    from local_operator.team_bridge.store import StoreRefused
+
+    if status_fetcher is None:
+        # None is NOT authority: without a status source there is
+        # nothing to accept, so nothing is published and nothing
+        # dispatches.
+        raise StoreRefused("policy_stale", "no verified status source")
+    fetched = await status_fetcher()
+    if not isinstance(fetched, VerifiedStatus):
+        # R11/2: a public class shape is NOT provenance — an unverified
+        # callback (raw Mapping or a forged wrapper) refuses HERE, before
+        # normalization, floor advance, client creation or spend.
+        raise StoreRefused("policy_stale", "unverified status source")
+    raw = fetched.status
+    if not isinstance(raw, Mapping):
+        raise StoreRefused("policy_stale", "status fetch returned no mapping")
+    law = _normalize_accepted_status(raw, owner, store)
+    if not store.current_generation_is_live(owner):
+        raise StoreRefused("policy_stale", "owner generation lost during the status read")
+    # The FULL law has passed (origin seal, identity, UNIQUE eligible
+    # tenant/endpoint, pinned selector, committed-consent currency):
+    # advance BOTH accepted floors in ONE atomic transaction — a refused
+    # candidate leaves every floor untouched.
+    receipt_pre = store.owner_consent_receipt(owner)
+    if receipt_pre is None:
+        raise StoreRefused("policy_stale", "no committed consent receipt for the owner")
+    if not _consent_receipt_is_current(
+        receipt_pre["consent_version"],
+        law.consent_served_version,
+        law.consent_accepted_versions,
+    ) or not receipt_pre.get("consent_ref"):
+        raise StoreRefused("policy_stale", "consent receipt is not the served version")
+    store.advance_text_floors(
+        owner,
+        [
+            ("guidance", law.guidance_version, law.guidance_sha),
+            ("consent", law.consent_served_version, law.consent_sha),
+        ],
+    )
+    # R12/O1: re-verify the receipt AFTER the floor advance and before
+    # mint/dispatch. A receipt rotated between the law check and the
+    # advance would otherwise mint a capture whose served-vs-current
+    # consent versions disagree — its future reuse would refuse, but
+    # the CURRENT run would already have proceeded on stale consent.
+    receipt = store.owner_consent_receipt(owner)
+    if (
+        receipt is None
+        or receipt_pre["consent_version"] != receipt["consent_version"]
+        or receipt_pre.get("consent_ref") != receipt.get("consent_ref")
+        or not _consent_receipt_is_current(
+            receipt["consent_version"],
+            law.consent_served_version,
+            law.consent_accepted_versions,
+        )
+    ):
+        raise StoreRefused("policy_stale", "consent receipt changed across the floor advance")
+    return AcceptedCapture(
+        _CAPTURE_TOKEN,
+        version=law.version,
+        template_hash=law.template_hash,
+        owner_frame=_full_owner_frame(owner),
+        captured_at=time.time(),
+        credential_id=owner.credential_id,
+        account_id=owner.account_id,
+        hub=owner.canonical_base_url,
+        owner_generation=owner.enrollment_generation,
+        consent_version=receipt["consent_version"],
+        consent_ref=receipt["consent_ref"],
+        consent_served_version=law.consent_served_version,
+        consent_accepted_versions=law.consent_accepted_versions,
+        guidance_version=law.guidance_version,
+        guidance_sha=law.guidance_sha,
+        consent_sha=law.consent_sha,
+        source="sdk-verified",
+    )
+
+
 async def run_screening_cycle(
     *,
     config_dir: "Path",
@@ -688,10 +878,7 @@ async def run_screening_cycle(
     # source, unknown version, mismatched bytes, disabled/ineligible
     # tenant/endpoint, or an unprovenanced cache is a TYPED REFUSAL — never
     # a default, never an arbitrary flat mapping, never a dispatch.
-    from local_operator.team_bridge.screening import (
-        SCREENING_TEMPLATE_V1_SHA256,
-        SCREENING_VERSION_V1,
-    )
+    from local_operator.team_bridge.client import screening_template_sha256
 
     store = Store(config_dir)
     capture = accepted_capture
@@ -719,15 +906,21 @@ async def run_screening_cycle(
             or capture.account_id != owner.account_id
             or capture.hub != owner.canonical_base_url
             or capture.owner_generation != owner.enrollment_generation
-            or capture.version != SCREENING_VERSION_V1
-            or capture.template_hash != SCREENING_TEMPLATE_V1_SHA256
+            or screening_template_sha256(capture.version) is None
+            or capture.template_hash != screening_template_sha256(capture.version)
         )
         if not stale:
             receipt_now = store.owner_consent_receipt(owner)
             floors_ok = True
             for kind, ver, sha in (
                 ("guidance", capture.guidance_version, capture.guidance_sha),
-                ("consent", capture.consent_version, capture.consent_sha),
+                # The consent FLOOR holds the SERVED text's (version, sha) -- the
+                # same pair the mint advanced it to. The receipt version is a
+                # separate fact (currency, checked below), and differs from the
+                # served one on the accepted-set path (v1 receipt, v2 served);
+                # pairing it with the served sha could never match, so every
+                # cycle would re-fetch status.
+                ("consent", capture.consent_served_version, capture.consent_sha),
             ):
                 if not isinstance(ver, str) or not isinstance(sha, str):
                     floors_ok = False
@@ -741,7 +934,11 @@ async def run_screening_cycle(
                     break
             if (
                 receipt_now is None
-                or receipt_now["consent_version"] != capture.consent_served_version
+                or not _consent_receipt_is_current(
+                    receipt_now["consent_version"],
+                    capture.consent_served_version,
+                    capture.consent_accepted_versions,
+                )
                 or receipt_now.get("consent_ref") != capture.consent_ref
                 or not floors_ok
             ):
@@ -751,71 +948,8 @@ async def run_screening_cycle(
         else:
             capture = None
     if capture is None:
-        if status_fetcher is None:
-            # None is NOT authority: without a status source there is
-            # nothing to accept, so nothing is published and nothing
-            # dispatches.
-            raise StoreRefused("policy_stale", "no verified status source")
-        fetched = await status_fetcher()
-        if not isinstance(fetched, VerifiedStatus):
-            # R11/2: a public class shape is NOT provenance — an unverified
-            # callback (raw Mapping or a forged wrapper) refuses HERE, before
-            # normalization, floor advance, client creation or spend.
-            raise StoreRefused("policy_stale", "unverified status source")
-        raw = fetched.status
-        if not isinstance(raw, Mapping):
-            raise StoreRefused("policy_stale", "status fetch returned no mapping")
-        law = _normalize_accepted_status(raw, owner, store)
-        if not store.current_generation_is_live(owner):
-            raise StoreRefused("policy_stale", "owner generation lost during the status read")
-        # The FULL law has passed (origin seal, identity, UNIQUE eligible
-        # tenant/endpoint, pinned selector, committed-consent currency):
-        # advance BOTH accepted floors in ONE atomic transaction — a refused
-        # candidate leaves every floor untouched.
-        receipt_pre = store.owner_consent_receipt(owner)
-        if receipt_pre is None:
-            raise StoreRefused("policy_stale", "no committed consent receipt for the owner")
-        if receipt_pre["consent_version"] != law.consent_served_version or not receipt_pre.get(
-            "consent_ref"
-        ):
-            raise StoreRefused("policy_stale", "consent receipt is not the served version")
-        store.advance_text_floors(
-            owner,
-            [
-                ("guidance", law.guidance_version, law.guidance_sha),
-                ("consent", law.consent_served_version, law.consent_sha),
-            ],
-        )
-        # R12/O1: re-verify the receipt AFTER the floor advance and before
-        # mint/dispatch. A receipt rotated between the law check and the
-        # advance would otherwise mint a capture whose served-vs-current
-        # consent versions disagree — its future reuse would refuse, but
-        # the CURRENT run would already have proceeded on stale consent.
-        receipt = store.owner_consent_receipt(owner)
-        if (
-            receipt is None
-            or receipt_pre["consent_version"] != receipt["consent_version"]
-            or receipt_pre.get("consent_ref") != receipt.get("consent_ref")
-            or receipt["consent_version"] != law.consent_served_version
-        ):
-            raise StoreRefused("policy_stale", "consent receipt changed across the floor advance")
-        capture = AcceptedCapture(
-            _CAPTURE_TOKEN,
-            version=law.version,
-            template_hash=law.template_hash,
-            owner_frame=_full_owner_frame(owner),
-            captured_at=time.time(),
-            credential_id=owner.credential_id,
-            account_id=owner.account_id,
-            hub=owner.canonical_base_url,
-            owner_generation=owner.enrollment_generation,
-            consent_version=receipt["consent_version"],
-            consent_ref=receipt["consent_ref"],
-            consent_served_version=law.consent_served_version,
-            guidance_version=law.guidance_version,
-            guidance_sha=law.guidance_sha,
-            consent_sha=law.consent_sha,
-            source="sdk-verified",
+        capture = await verified_status_capture(
+            store=store, owner=owner, status_fetcher=status_fetcher
         )
     if capture is None:  # both branches above either set it or raised
         raise StoreRefused("policy_stale", "no verified status source")

@@ -233,10 +233,70 @@ _WALK_DEPTH_CAP = 2
 # 782 -> 804 (#2509): the tools/effort/delegate descriptions now say WHICH
 # kind may carry them, so the agent doc's rendered schema grew by those
 # qualifiers (the tier arm below moves with it).
+# 1001 -> 1063 (#2520, ask relay): the ``AskParams.relay`` property and the
+# queued tail's one relay clause are the whole move, and BOTH ledgers were
+# re-measured in the same pass — ``scripts/bench_context_budget.py``'s top arm
+# moves 88,825 -> 89,094 chars (+269 = ~+97 billed) and its ceiling with it,
+# while every other entry here is byte-identical. The field is mode-independent,
+# so the blocking arm's bench number moved by the same +269 chars and still
+# passes under that ceiling.
+# RE-MEASURED (LOH-9 S2): agent 804 -> 1044 and team 779 -> 1018 are the ONLY
+# entries that moved. The agent doc gains the scope ladder (reuse -> ephemeral
+# -> durable), the delete op, and the consent refusal's user surfaces; the team
+# doc gains the same scope rule and its delete semantics. Both were measured
+# through this test's own printed table on the rebased tree, whose upstream
+# baseline is the #2520 ask raise above (ask 1063, unmoved here).
+# RE-MEASURED 2026-10-23 (stale asks, ``feat/ask-stale-guidance``; design
+# ask-nonblocking §16/SA-D1): ``ask`` 1063 -> 1079 and ``ask_withdraw``
+# 314 -> 452 are the ONLY entries that moved, and both moves ARE the change:
+# the ``ask`` queued tail gains one clause (settle it the moment it stops
+# mattering — the tool the clause names is NOT in this doc's schema, so the
+# property list is unchanged), and ``ask_withdraw``'s doc renders the rewritten
+# description plus the widened ``answers`` field copy (the empty-list recipe,
+# the ids rule, the all-empty refusal, and "latest or earlier" beside VERBATIM —
+# the last two taken in review round 1, which is the 418 -> 452 part). Measured
+# through this test's own printed table on the branch; every other entry is
+# byte-identical. BOTH ledgers move together: the same two descriptions are the
+# +663 chars of ``tool_schemas`` in ``scripts/bench_context_budget.py``'s
+# top-arm raise (32,872 -> 33,364), whose child arm carries neither tool and
+# moves only by the shared ``system.md`` paragraph.
 MEASURED_TOKENS: dict[str, int] = {
-    "agent": 804,
-    "ask": 1001,
-    "ask_withdraw": 314,
+    # RE-MEASURED (LOH-9 S3): 1044 -> 1056. The delta is the one-clause
+    # fork exception on the ephemeral bullet ("a fork starts with a copy of
+    # this conversation's roles"), added because the guides and the two
+    # ``show`` messages now carry it. Measured through this test's own
+    # printed table; the ``team`` entry below moves by the same 12 for its
+    # twin sentence, and no other entry moved.
+    # RE-MEASURED (LOH-9 S4): 1056 -> 1119. The delta is promotion: the ``op``
+    # enum gains one word and the payload gains ``as_name`` and
+    # ``confirm_replace`` (the second is the overwrite AND the user's answer, so
+    # its wording is the safety-critical part). Trimmed once already; the same
+    # printed table measured it.
+    # RE-MEASURED (LOH-9 S5): 1119 -> 1365. The delta is the completed guidance:
+    # a ``promote`` row in the authored ops table and the promote step in the
+    # notes, the corrected refusal remedy (the TUI form and the create/install
+    # retry, with update/reset/sync naming no retry), the collision clause and
+    # the host-dependent default. The same printed table measured it; the
+    # 8 KiB soft cap still holds.
+    # RE-MEASURED (F0, #3054): 1365 -> 1364. The ``scope`` field now states the
+    # host-dependent default ("this conversation if it has a store, else the
+    # account") instead of naming 'session' as THE default, which was false in a
+    # configuration run (unscoped registries, so an omitted scope writes the
+    # account). Worded to cost no more than the old text: the child-kind
+    # context budget had 2 billed tokens of headroom. The ``team`` entry moves by
+    # the same -1 for its twin field; the same printed table measured both.
+    "agent": 1364,
+    # RE-MEASURED (ask/notify dedupe, asks/dedupe.py): 1079 -> 1078. The
+    # restraint now says "decide, never for FYI" and "asking notifies: never
+    # also `notify` it"; trims elsewhere in the same paragraph pay for it so
+    # the tail is net negative. Same reading on both ask arms (the doc renders
+    # the shared restraint plus each arm's tail; only the restraint moved).
+    # 1078 -> 1083 (CI remediation, #3094): the rewrite had dropped "decide
+    # yourself", "subagent" and "approved that action", which test_ask_tool.py
+    # pins as the last-resort and irreversible-trigger contract; restoring them
+    # costs +5, measured by this test's print on both LOP_ASK_NONBLOCKING arms.
+    "ask": 1083,
+    "ask_withdraw": 452,
     "bash": 295,
     # NEW (H5d, Team Bridge): the ``bridge`` doc — take-up's hash rule, the
     # claim lifecycle, and why "decide" is not an op. First measured at 572
@@ -251,14 +311,51 @@ MEASURED_TOKENS: dict[str, int] = {
     # and ack clauses tightened) while this entry kept its H5d value. Measured
     # by this test's own printed table (the ``count_text_tokens`` ledger path)
     # and pasted; no other tool's bytes moved, and the 9-token drop is the reword alone.
-    "bridge": 559,
+    # RE-MEASURED (#2665 round 1): 559 -> 729. The channel lane publishes four
+    # op literals, eleven parameters and the nested ``ChannelMemberParams``
+    # model; its prose was trimmed first (761 -> 729 measured: wire description
+    # 376 -> 240 chars, both model docstrings to one line each). 729 is the
+    # structural floor for a capability the model must be able to call. The
+    # paired start-context raise is stated in scripts/bench_context_budget.py.
+    # 729 -> 747 (PR #2828): the closed recipient schema now exposes its allowed
+    # endpoint/account properties in the opt-in reference. Then 747 -> 773 with
+    # #2757: the channel_thread op and the thread_root_id parameter add 26
+    # tokens. Then 773 -> 798 with #2760: the react op plus its emoji parameter
+    # and the reaction reference prose add 25. Each number was measured on the
+    # MERGED tree with the preceding changes present — never carried across.
+    # 798 -> 777 after trimming the tool's prose for the context budget: the
+    # repeated op roster left the description and the thread-reply clause moved
+    # to thread_root_id's own field note. Every op is still discoverable.
+    # Neither the document soft cap nor the start-context budget changes.
+    # 777 -> 1674: the doc now covers the OP SET THE TOOL ACTUALLY HAS. Before this
+    # branch it documented four ops (take_up/ack/send/reply) while main's tool shipped
+    # ten and this branch adds four more; `directory`, `dm`,
+    # `shared_conversations`/`shared_history` and the six
+    # room ops (`channels`, `channel_create`, `channel_post`, `channel_history`,
+    # `channel_thread`, `react`) had no entry at all, so a model reading the reference
+    # had to guess, and the new `dm` blurb forward-references `channel_history` for
+    # reading the reply. Measured by this test's own ledger print ON THIS HEAD (1674),
+    # never carried across. The pair-lane caveat on `send` earns its tokens: without it
+    # an agent answers a DM with `send`, which no Team Bridge UI shows.
+    # Independently, main's #3133 adds the recipient description below; the
+    # converged ledger must include BOTH changes and was measured by this test.
+    # 777 -> 839 (tb-send-recipient-ergonomics): the ``to`` parameter publishes
+    # its own DESCRIPTION now — both accepted object shapes, the bare account id
+    # and where the ids come from — because the schema is the model's first
+    # teacher, and the bare form was refused at validation while teaching
+    # nothing. +62 on this opt-in reference; the paired start-context raise is
+    # stated in scripts/bench_context_budget.py. Measured by this test's printed
+    # table, no other tool's bytes moved.
+    # Converged directory/dm + recipient-description ledger: 1,736 tokens,
+    # measured by this test's canonical renderer on the merged tree.
+    "bridge": 1736,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
     # the field's own description to the doc — the deliberate cost of the value
     # never appearing in the transcript (incident: a literal password in `type`
     # reached a subagent's transcript, where no shape pass could see it).
-    "browser": 1424,
+    "browser": 1655,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
@@ -288,7 +385,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # 918 -> 935 (2026-10-11, round-1 remediation F2): the cost sentence no
     # longer lumps OpenAI with the never-reporting rungs — an OpenAI edit
     # shows an estimated figure when the response carries usage.
-    "generate_image": 931,
+    # 931 -> 975 (media artifact naming): the new ``filename`` stem field's
+    # teaching description renders in the parameter table. The sanitising and
+    # collision rules live in the image guide, so the wire keeps one sentence.
+    "generate_image": 975,
     # NEW (sound-generation wave, 2026-10-17): the ``generate_sound_effect``
     # doc — the two rungs and the no-OpenAI rule, the REQUIRED duration and
     # what it costs, the estimate rules and the honest cancel paragraphs.
@@ -300,7 +400,21 @@ MEASURED_TOKENS: dict[str, int] = {
     # fields and caps names at 100 chars: final render is 494 (+7 from 487).
     # Both measurements use render_tool_doc + count_text_tokens in this test's
     # canonical isolated arm, not a copied or guessed token allowance.
-    "generate_sound_effect": 494,
+    # 494 -> 568 (media artifact naming): the new ``filename`` field for the
+    # single form and the ``name`` field re-described as that item's filename
+    # stem. Load-bearing naming discovery; the guide holds the rules.
+    # 568 -> 570 (round-1 m1/Q-1): the ``sounds`` description now names
+    # ``filename`` in the exclusivity clause, so the inert combination is
+    # refused rather than silently ignored.
+    # 570 -> 739 (sfx-quality, 2026-10-23): the doc now carries the 192/128
+    # MP3 preference and its plan fallback, the duration/price split (per second
+    # on Radient, per generation on a BYOK key), the negative-prompt rule and
+    # the BYOK vendor-logging limit. Measured by this test's own printed table
+    # under the canonical hermetic arm; only the two audio entries moved.
+    # 739 -> 725 (review round 1, M1): the "per generation ~200 credits" claim
+    # was wrong for the request shape this tool always sends; the corrected
+    # sentence (40 credits per second of requested duration) is shorter.
+    "generate_sound_effect": 725,
     # NEW (video phase, 2026-10-10): the ``generate_video`` doc — the async
     # lifecycle (receipt, completion, restart, cancel), the two rungs, the
     # mode/source rules and the family quirks. The wire description carries
@@ -310,14 +424,30 @@ MEASURED_TOKENS: dict[str, int] = {
     # now the contract §2.3 string verbatim (the shipped wording stated the
     # same fact twice); re-measured deliberately, and it is the ONLY entry
     # this remediation moved.
-    "generate_video": 790,
+    # 790 -> 833 (media artifact naming): the ``filename`` stem field's
+    # teaching description; the destination/collision rules live in the guide.
+    "generate_video": 833,
     # NEW (sound-generation wave, 2026-10-17): the ``generate_voiceover`` doc
     # — the three rungs and the failover rule, cost and estimates, the
     # language-on-flash limit (no pronunciation dictionaries), MP3-only and
     # the honest cancel paragraphs.
-    "generate_voiceover": 628,
-    "glob": 87,
-    "grep": 333,
+    # 628 -> 668 (media artifact naming): the ``filename`` stem field's
+    # teaching description renders in the parameter table.
+    # 668 -> 788 (sfx-quality, 2026-10-23): the MP3 sentence now carries the
+    # 192/128 preference and fallback, and the doc states the BYOK
+    # vendor-logging limit. Same measured table, same canonical arm.
+    # 788 -> 812 (review round 1, M1): one sentence names the BYOK voiceover
+    # meter (per character; the estimate is per 1,000 characters).
+    "generate_voiceover": 812,
+    # 87 -> 215 / 333 -> 445 (scout grep/glob fixes, 2026-10-26): the ``glob``
+    # ``path`` parameter and its off-wire note (absolute-pattern split, ``..``
+    # refusal, approval), and ``grep``'s ``max_filesize_mb`` parameter plus the
+    # clipped-line and skipped-file notes. Re-measured through this test's own
+    # printed table; no other entry moved. Round-1 remediation: 215 -> 224 /
+    # 445 -> 472 — the wire descriptions were cut to fit the start-context
+    # ratchet and their detail moved here, to the on-demand doc.
+    "glob": 224,
+    "grep": 472,
     # NEW (LOH-14 agent slice): the ``harness_import`` doc advertises the six
     # actions plus the preview-first/confirm/selection contract. Measured with
     # this test's canonical isolated renderer; no existing entry moved. Round-1
@@ -341,9 +471,19 @@ MEASURED_TOKENS: dict[str, int] = {
     # NEW (Library): the six-op catalog tool's reference — filters, tag and
     # provenance rules, and the read-tier rationale. Measured through this
     # file's own renderer; no other entry moved.
-    "library": 683,
+    # RE-MEASURED (Librarian provenance): 683 -> 713. The `actor` bullet now
+    # states the DERIVATION (the Librarian's own session records `librarian`,
+    # every other session `agent`) and the reservation, replacing a sentence
+    # that was simply wrong — it claimed a `librarian` default no caller ever
+    # used. The `update` bullet gains the clause that a non-empty tag set
+    # organizes too. Re-measured through this file's own printed table; no
+    # other entry moved.
+    "library": 713,
     "lsp": 272,
-    "memory": 116,
+    # 116 -> 127 (memory move, round 1): the description now names
+    # ``edit new_text={"move":"scope"}``, which makes the verb discoverable
+    # without a guide lookup. Re-measured deliberately via this test's print.
+    "memory": 109,
     "monitor": 353,
     "network": 870,
     # NEW (quiet-turn S0a, docs/design/quiet-turns.md §4): the ``no_reply``
@@ -351,23 +491,67 @@ MEASURED_TOKENS: dict[str, int] = {
     # it" notes. Re-measured via this test's own print, and it is the ONLY
     # entry that moved: every other count above is byte-identical.
     "no_reply": 109,
+    # NEW (notifications inbox, docs/design/notifications-inbox.md §3.1): the
+    # ``notify`` doc — its description plus the five-field schema rendered by
+    # this file's own renderer. Re-measured via this test's print; it is the
+    # ONLY entry that moved, every other count is byte-identical.
+    # RE-MEASURED (ask/notify dedupe): 242 -> 241 — "FYI ... never a question
+    # (`ask` notifies)", worded to cost less than the text it replaced.
+    "notify": 241,
     "patience": 330,
-    "project": 1098,
+    # RE-MEASURED 2026-10-20 (evidence-attachment discoverability): ``project``
+    # 1098 -> 1143 is the ONLY entry that moved — the ``attach`` description now
+    # names its occasion (frame/chart/log) and the copy-and-limit contract;
+    # re-measured through this test's own printed table, not pasted.
+    "project": 1143,
     "project_delete": 91,
     "read": 345,
+    # NEW (redaction policy, PR #2796): the sanctioned public-copy reader.
+    # 237 tokens measured through this test's own table; deliberately small —
+    # it exists to avoid a bypass, not to be a second file browser.
+    # RE-MEASURED: 121 -> 162 (#3106, repo_root added) -> 135 (#3106 trim) ->
+    # 133 (merge of #3122, whose `_CONSUMER_CHECKOUTS` registry makes the
+    # `repo_root` description name three checkouts; the same cut still fits the
+    # `--kind child` budget arm, 30,380, which is the tighter ratchet).
+    # Measured through this test's own assertion table after each change, never
+    # carried from CI or guessed:
+    #   .venv/bin/python scripts/run_bounded.py --timeout 300 -- \
+    #     .venv/bin/python -m pytest
+    #     tests/unit/tools/test_tool_docs.py::test_docs_stay_within_the_soft_cap_and_the_token_ledger_is_current
+    # No other entry moved.
+    "read_public_copy": 133,
     "read_variable": 67,
-    "secret": 184,
+    "secret": 186,
     # Advertised surface re-measured: explicit repeat + confirmed-reuse detail
     # costs +86 opt-in tokens; 3182 chars remains below the 8192-char soft cap.
     "send": 779,
     # Spawn's tags field/description deliberately adds 21 reference tokens.
-    "sessions": 819,
+    # RE-MEASURED 2026-10-23 (session self-identity): the description gains one
+    # sentence pointing at the listing's `(this session)` marker, so the doc
+    # moves 819 -> 840. That sentence is the ONLY thing that moved; every other
+    # count above is byte-identical, re-measured through this test's own
+    # printed table rather than pasted.
+    "sessions": 840,
     # NEW (wave 4 slice A, 2026-10-10): the ``setting`` doc — the key
     # vocabulary, the op split and the validation-by-registry contract. 191
     # tokens is the deliberate cost of the reference detail staying off the
     # wire (the description keeps one sentence); re-measured via this test's
     # own print, and it is the ONLY count this change moved.
     "setting": 187,
+    # NEW (V2-4 agent tags, 2026-10-20): the ``tags`` doc — the names-only
+    # assignment rule, the caps, the remote refusal and the receipt contract.
+    # Deliberate cost of that reference being one read away; the same tool's
+    # schema is the whole of ``scripts/bench_context_budget.py``'s raise
+    # (measurement recorded there), so the two ledgers move together.
+    # 528 -> 531 in review round 2: the receipt claim is qualified to
+    # ``assign``, because ``create``/``list``/``rename`` name categories only.
+    "tags": 531,
+    # NEW (claude.ai artifact data store, 2026-10-21): the ``artifact_data``
+    # doc — the per-action field table, the path/`me` rules and the
+    # ``if_version`` contract. The tool is DEFERRED, so this doc is what the
+    # first ``tool://`` read or call teaches; its schema adds nothing to the
+    # start context (``scripts/bench_context_budget.py`` unchanged).
+    "artifact_data": 836,
     "task": 616,
     # 485 -> 779 (#2521, team-member model tier / reasoning effort): the whole
     # delta is the new ``overrides`` parameter, and it is SCHEMA rather than
@@ -376,8 +560,20 @@ MEASURED_TOKENS: dict[str, int] = {
     # list-of-objects shape and its three field descriptions, not added
     # sentences. It is the ONLY entry that moved. Re-measured deliberately
     # through this test's own printed table; the tier arm below is unmoved
-    # because this doc does not read config.
-    "team": 779,
+    # because this doc does not read config. RE-MEASURED (LOH-9 S2): 779 ->
+    # 1018, the scope rule and delete semantics; measured with the same printed
+    # table, and the tier arm below still does not read config.
+    # RE-MEASURED (LOH-9 S3): 1018 -> 1030, the fork-copy clause; only this
+    # and the ``agent`` entry moved.
+    # RE-MEASURED (LOH-9 S4): 1030 -> 1109, the same promotion delta; the team
+    # doc also states that a replace may cover a member, which the agent twin
+    # does not need.
+    # RE-MEASURED (LOH-9 S5): 1109 -> 1400 — the promote row, the promote and
+    # member-copy step, the corrected refusal copy and the collision clause;
+    # the same printed table.
+    # RE-MEASURED (F0, #3054): 1400 -> 1399 -- the ``scope`` default wording,
+    # the same -1 as the agent twin.
+    "team": 1399,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -385,9 +581,14 @@ MEASURED_TOKENS: dict[str, int] = {
     "video_status": 202,
     "wait": 268,
     "wake": 308,
-    "web_fetch": 348,
+    # RE-MEASURED (web-research-speed): 348 -> 363 — the new optional
+    # ``query`` parameter (passage previews for oversized pages) in the
+    # rendered schema, net of the description trimmed to pay for it.
+    "web_fetch": 363,
     "web_read": 221,
-    "web_search": 189,
+    # RE-MEASURED (web-research-speed): 189 -> 193 — "with `query`" steers the
+    # follow-up fetch of a result toward a passage preview.
+    "web_search": 193,
     "write": 137,
 }
 
@@ -405,7 +606,17 @@ MEASURED_TOKENS: dict[str, int] = {
 #: the model_choice note is gone again (revert of the nested tier-choice gate).
 #: 811 -> 833 (#2509): the same +22 the canonical table above takes, because
 #: the qualified tools/effort/delegate descriptions render on both arms.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 833, "task": 764}
+#: 833 -> 1073 (LOH-9 S2): the same scope ladder the canonical arm takes; the
+#: tier arm renders it identically, so `task` stays 764.
+#: 1073 -> 1085 (LOH-9 S3): the one-clause fork exception, the same +12 as
+#: the canonical arm; `task` stays 764.
+#: RE-MEASURED (LOH-9 S4): agent 1085 -> 1148; ``task`` is unmoved because the
+#: promotion fields are on ``agent``/``team``, not on the launch tool.
+#: RE-MEASURED (LOH-9 S5): agent 1148 -> 1394, the same +246 the canonical arm
+#: takes because both arms render the completed notes; ``task`` stays 764.
+#: RE-MEASURED (F0, #3054): agent 1394 -> 1393, the same -1 ``scope``-default
+#: wording as the canonical arm; ``task`` stays 764.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1393, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
@@ -811,6 +1022,21 @@ def test_cut_wire_prose_moved_into_the_tool_doc(
             f"{name}: phrase still on the always-loaded wire — the move saved "
             f"nothing, so either cut it or drop it from MOVED_WIRE_DETAIL: {phrase!r}"
         )
+
+
+@pytest.mark.parametrize("name", ["agent", "team"])
+def test_the_promote_op_and_step_are_reachable_in_the_rendered_doc(
+    default_surface: list[AgentTool], name: str
+) -> None:
+    """The ledger pins SIZE, not content: a same-length edit could drop the row.
+
+    The design's guidance-reachability metric is an assertion, not eyeballing, so
+    both halves the model reads are pinned by phrase: the authored Ops-table row
+    and the narrative PROMOTE step.
+    """
+    doc = render_tool_doc(next(tool for tool in default_surface if tool.name == name))
+    assert "\n- promote: " in doc, f"tool://{name} lost its promote row"
+    assert "\n- PROMOTE: " in doc, f"tool://{name} lost the promote step in its notes"
 
 
 def test_authored_notes_and_renderers_name_real_tools(

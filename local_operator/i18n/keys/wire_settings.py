@@ -1186,6 +1186,86 @@ def language_label() -> Msg:
     return Msg("wire.settings.language.label", {})
 
 
+def librarian_description() -> Msg:
+    return Msg("wire.settings.librarian.description", {})
+
+
+def librarian_title() -> Msg:
+    return Msg("wire.settings.librarian.title", {})
+
+
+def librarian_cadence_at_help() -> Msg:
+    return Msg("wire.settings.librarian_cadence_at.help", {})
+
+
+def librarian_cadence_at_label() -> Msg:
+    return Msg("wire.settings.librarian_cadence_at.label", {})
+
+
+def librarian_cadence_at_placeholder() -> Msg:
+    return Msg("wire.settings.librarian_cadence_at.placeholder", {})
+
+
+def librarian_cadence_max_extra_per_day_help() -> Msg:
+    return Msg("wire.settings.librarian_cadence_max_extra_per_day.help", {})
+
+
+def librarian_cadence_max_extra_per_day_label() -> Msg:
+    return Msg("wire.settings.librarian_cadence_max_extra_per_day.label", {})
+
+
+def librarian_cadence_min_gap_minutes_help() -> Msg:
+    return Msg("wire.settings.librarian_cadence_min_gap_minutes.help", {})
+
+
+def librarian_cadence_min_gap_minutes_label() -> Msg:
+    return Msg("wire.settings.librarian_cadence_min_gap_minutes.label", {})
+
+
+def librarian_cadence_paused_choice_false_description() -> Msg:
+    return Msg("wire.settings.librarian_cadence_paused.choice.false.description", {})
+
+
+def librarian_cadence_paused_choice_true_description() -> Msg:
+    return Msg("wire.settings.librarian_cadence_paused.choice.true.description", {})
+
+
+def librarian_cadence_paused_help() -> Msg:
+    return Msg("wire.settings.librarian_cadence_paused.help", {})
+
+
+def librarian_cadence_paused_label() -> Msg:
+    return Msg("wire.settings.librarian_cadence_paused.label", {})
+
+
+def librarian_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.librarian_enabled.choice.false.description", {})
+
+
+def librarian_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.librarian_enabled.choice.true.description", {})
+
+
+def librarian_enabled_help() -> Msg:
+    return Msg("wire.settings.librarian_enabled.help", {})
+
+
+def librarian_enabled_label() -> Msg:
+    return Msg("wire.settings.librarian_enabled.label", {})
+
+
+def librarian_name_help() -> Msg:
+    return Msg("wire.settings.librarian_name.help", {})
+
+
+def librarian_name_label() -> Msg:
+    return Msg("wire.settings.librarian_name.label", {})
+
+
+def librarian_name_placeholder() -> Msg:
+    return Msg("wire.settings.librarian_name.placeholder", {})
+
+
 def local_providers_base_url_help() -> Msg:
     return Msg("wire.settings.local_providers.base_url.help", {})
 
@@ -1606,6 +1686,20 @@ def providers_anthropic_cache_ttl_1h_min_context_tokens_label() -> Msg:
     return Msg("wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label", {})
 
 
+def providers_anthropic_subagent_cache_ttl_1h_min_context_tokens_help() -> Msg:
+    return Msg(
+        "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.help",
+        {},
+    )
+
+
+def providers_anthropic_subagent_cache_ttl_1h_min_context_tokens_label() -> Msg:
+    return Msg(
+        "wire.settings.providers_anthropic_subagent_cache_ttl_1h_min_context_tokens.label",
+        {},
+    )
+
+
 def providers_openai_api_choice_chat_completions_description() -> Msg:
     return Msg("wire.settings.providers_openai_api.choice.chat_completions.description", {})
 
@@ -1908,6 +2002,30 @@ def query_budget_title() -> Msg:
     return Msg("wire.settings.query_budget.title", {})
 
 
+def remote_compute_description() -> Msg:
+    return Msg("wire.settings.remote_compute.description", {})
+
+
+def remote_compute_title() -> Msg:
+    return Msg("wire.settings.remote_compute.title", {})
+
+
+def remote_compute_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.remote_compute_enabled.choice.false.description", {})
+
+
+def remote_compute_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.remote_compute_enabled.choice.true.description", {})
+
+
+def remote_compute_enabled_help() -> Msg:
+    return Msg("wire.settings.remote_compute_enabled.help", {})
+
+
+def remote_compute_enabled_label() -> Msg:
+    return Msg("wire.settings.remote_compute_enabled.label", {})
+
+
 def retired_description() -> Msg:
     return Msg("wire.settings.retired.description", {})
 
@@ -2204,12 +2322,60 @@ def session_cleanup_remove_empty_label() -> Msg:
     return Msg("wire.settings.session_cleanup_remove_empty.label", {})
 
 
+def session_compression_description() -> Msg:
+    return Msg("wire.settings.session_compression.description", {})
+
+
+def session_compression_title() -> Msg:
+    return Msg("wire.settings.session_compression.title", {})
+
+
+def session_compression_after_days_help() -> Msg:
+    return Msg("wire.settings.session_compression_after_days.help", {})
+
+
+def session_compression_after_days_label() -> Msg:
+    return Msg("wire.settings.session_compression_after_days.label", {})
+
+
+def session_compression_enabled_choice_false_description() -> Msg:
+    return Msg("wire.settings.session_compression_enabled.choice.false.description", {})
+
+
+def session_compression_enabled_choice_true_description() -> Msg:
+    return Msg("wire.settings.session_compression_enabled.choice.true.description", {})
+
+
+def session_compression_enabled_help() -> Msg:
+    return Msg("wire.settings.session_compression_enabled.help", {})
+
+
+def session_compression_enabled_label() -> Msg:
+    return Msg("wire.settings.session_compression_enabled.label", {})
+
+
 def session_delegated_description() -> Msg:
     return Msg("wire.settings.session_delegated.description", {})
 
 
 def session_delegated_title() -> Msg:
     return Msg("wire.settings.session_delegated.title", {})
+
+
+def session_scratchpad_description() -> Msg:
+    return Msg("wire.settings.session_scratchpad.description", {})
+
+
+def session_scratchpad_title() -> Msg:
+    return Msg("wire.settings.session_scratchpad.title", {})
+
+
+def session_scratchpad_max_bytes_help() -> Msg:
+    return Msg("wire.settings.session_scratchpad_max_bytes.help", {})
+
+
+def session_scratchpad_max_bytes_label() -> Msg:
+    return Msg("wire.settings.session_scratchpad_max_bytes.label", {})
 
 
 def shell_environment_description() -> Msg:

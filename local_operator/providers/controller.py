@@ -266,6 +266,12 @@ class ControllerAuthStore(Protocol):
         self, provider: str, credential: dict[str, Any]
     ) -> "StoredCredential": ...  # pragma: no cover
 
+    def complete_radient_login(
+        self, result: dict[str, Any]
+    ) -> "StoredCredential": ...  # pragma: no cover
+
+    def retained_radient_login_ids(self) -> tuple[int, ...]: ...  # pragma: no cover
+
     def delete_credentials_for_provider(
         self, provider: str, disabled_cause: str = ...
     ) -> int: ...  # pragma: no cover
@@ -278,6 +284,10 @@ class ControllerAuthStore(Protocol):
 
     async def get_oauth_access(
         self, provider: str, *, read_only: bool = False
+    ) -> "OAuthAccess | None": ...  # pragma: no cover
+
+    async def get_catalogue_access(
+        self, provider: str
     ) -> "OAuthAccess | None": ...  # pragma: no cover
 
     async def list_oauth_accesses(
@@ -449,6 +459,11 @@ class ProviderViewRow:
     #: The ``credential_type`` of each stored row, in store order -- what a
     #: ``/logout`` row's detail column says it will remove.
     credential_types: tuple[str, ...]
+    #: Optional surface copy for a distinction the machine ``state`` cannot make.
+    #: Kimi's two sign-ins share ONE account; the sibling that did not issue the
+    #: recorded grant says ``shared Kimi login`` instead of looking like a second
+    #: connected account. The wire's state enum remains unchanged.
+    state_detail: str | None = None
 
 
 class ReadOnlyUsageMetadataStore(Protocol):
@@ -477,11 +492,13 @@ class ReadOnlyUsageSnapshot:
       credits.
     - ``reports``: the cached reports for the persisted account(s), identity
       stripped. ``[]`` with ``unavailable=False`` is a genuine "nothing cached".
-    - ``may_be_stale`` / ``cached_at``: freshness. The seam opens
-      ``immutable=1`` to guarantee it never WRITES, which means it cannot see an
-      uncheckpointed WAL — so a non-empty ``-wal`` beside the database is the
-      signal that ``reports`` may be behind, possibly still naming an account a
-      committed DELETE removed. Staleness is DISCLOSED, not withheld: the
+    - ``may_be_stale`` / ``cached_at``: freshness. Where the seam cannot read
+      a WAL without creating a file it opens ``immutable=1``, which cannot see
+      uncheckpointed frames — so a non-empty ``-wal`` beside such a snapshot is
+      the signal that ``reports`` may be behind, possibly still naming an
+      account a committed DELETE removed. (The auth store reads a live
+      writer's WAL directly and is then current; see
+      ``AuthStore._connect_read_only``.) Staleness is DISCLOSED, not withheld: the
       reports are still returned (a blank phone /usage on a busy desktop would
       be the worse failure), flagged so the surface renders "cached, as of T
       (may be out of date)" and can exclude a removed account. ``cached_at``
@@ -522,7 +539,10 @@ class ProviderController:
         # lop session on this machine: several terminals run at once, and one
         # process's refresh is every process's answer.
         self._usage_cache = usage_cache
-        self._meta_catalogue_scope: str | None = None
+        #: Selected account scopes captured by live catalogue reads. The
+        #: first-frame path uses these plus nonsecret store metadata, never
+        #: bearer decryption, token rotation or inference quota evidence.
+        self._catalogue_scopes: dict[str, str] = {}
 
     def set_login_callbacks(self, factory: "LoginCallbackFactory | None") -> None:
         """Install host-specific login callbacks after construction.
@@ -617,6 +637,26 @@ class ProviderController:
                 state = "env_key"
             else:
                 state = "needs_login"
+            state_detail = None
+            if definition.id in {"kimi", "kimi-wechat"} and count > 0:
+                # Only a shared OAuth grant records an issuer. A pasted Kimi key
+                # (and every other provider) keeps its ordinary state; choosing
+                # by raw provider id here would hide this distinction behind a
+                # presentation special case rather than the stored credential.
+                from local_operator.providers.oauth.kimi import (
+                    AUTH_HOST_KEY,
+                    DEFAULT_AUTH_HOST,
+                )
+
+                oauth_rows = [row for row in mine if row.credential_type == "oauth"]
+                if len(oauth_rows) == 1:
+                    auth_host = str(oauth_rows[0].data.get(AUTH_HOST_KEY) or "").rstrip("/")
+                    # Match only a complete host, never an arbitrary suffix or
+                    # path. Missing/tampered hosts take the legacy .com default;
+                    # they do not become an excuse to claim a second login.
+                    active_id = "kimi" if auth_host == DEFAULT_AUTH_HOST else "kimi-wechat"
+                    if definition.id != active_id:
+                        state_detail = "shared Kimi login"
             rows.append(
                 ProviderViewRow(
                     definition=definition,
@@ -633,6 +673,7 @@ class ProviderController:
                     has_credential=count > 0 or env_key,
                     usable=usable,
                     credential_types=tuple(row.credential_type for row in mine),
+                    state_detail=state_detail,
                 )
             )
         return rows
@@ -968,19 +1009,20 @@ class ProviderController:
         result (``reports == []``, ``unavailable=False``), and freshness
         (``may_be_stale``/``cached_at``).
 
-        Freshness is load-bearing, not decorative: ``immutable=1`` guarantees the
-        no-write property but cannot see an uncheckpointed WAL, so a non-empty
-        ``-wal`` means the numbers may be behind — and an INVENTORY built from
-        them could name an account a committed DELETE removed. Staleness is
-        therefore DISCLOSED, not withheld: the snapshot is RETURNED with
-        ``may_be_stale=True`` (and ``cached_at``), both for the inventory and for
-        an explicit provider, so a busy desktop never blanks the phone's
-        ``/usage`` exactly when the user wants to see credits. A flagged,
-        clearly-labelled snapshot is never PRESENTED as current — the surface
-        renders "cached, as of T (may be out of date)" and may exclude a removed
-        account — which satisfies the safety rule without hiding usable data. The
-        one state that stays UNAVAILABLE is an unreadable/foreign schema, where
-        nothing trustworthy exists to return at all.
+        Freshness is load-bearing, not decorative: an ``immutable=1`` snapshot
+        (taken where a WAL read would create a file) cannot see an uncheckpointed
+        WAL, so a non-empty ``-wal`` beside it means the numbers may be behind —
+        and an INVENTORY built from them could name an account a committed
+        DELETE removed. Staleness is therefore DISCLOSED, not withheld: the
+        snapshot is RETURNED with ``may_be_stale=True`` (and ``cached_at``),
+        both for the inventory and for an explicit provider, so a busy desktop
+        never blanks the phone's ``/usage`` exactly when the user wants to see
+        credits. A flagged, clearly-labelled snapshot is never PRESENTED as
+        current — the surface renders "cached, as of T (may be out of date)" and
+        may exclude a removed account — which satisfies the safety rule without
+        hiding usable data. The one state that stays UNAVAILABLE is an
+        unreadable/foreign schema, where nothing trustworthy exists to return at
+        all.
 
         The returned reports carry NO account identity: identity and vendor notes
         are stripped here rather than trusted to the renderer.
@@ -1317,7 +1359,19 @@ class ProviderController:
             return f"Login for '{storage}' produced no key; nothing stored."
 
         result.setdefault("authorized_at", int(time.time() * 1000))
-        self.auth_store.upsert_credential(storage, result)
+        completed_radient = None
+        if storage == "radient":
+            # The flow has awaited /me verification; the cancellation guard
+            # above and the receipt's own final recheck both precede writes.
+            completed_radient = self.auth_store.complete_radient_login(result)
+        else:
+            self.auth_store.upsert_credential(storage, result)
+        if completed_radient is not None and completed_radient.disabled_cause is not None:
+            from local_operator.providers.oauth.radient import RadientLoginDisabled
+
+            # A closed typed outcome lets desktop distinguish preserved local
+            # disablement without forwarding arbitrary provider exception text.
+            raise RadientLoginDisabled()
         # The new credential may list DIFFERENT models than the one it replaced
         # -- a different account, a different plan, or a catalogue listed
         # anonymously before there was a credential at all. No TTL can observe
@@ -1346,6 +1400,12 @@ class ProviderController:
         identity = result.get("email") or result.get("account_id") or result.get("org_name") or ""
         suffix = f" ({identity})" if identity else ""
         msg = f"Logged in to '{storage}'{suffix}."
+        if storage == "radient":
+            from local_operator.providers.auth_cli import format_retained_radient_logins
+
+            retained = format_retained_radient_logins(self.auth_store.retained_radient_login_ids())
+            if retained:
+                msg += "\n" + "\n".join(retained)
         if result.get("grant_note"):
             msg += f" Note: {result['grant_note']}"
         return msg
@@ -2560,44 +2620,45 @@ class ProviderController:
                 from local_operator.providers.local import config_values
 
                 values = config_values()
-            meta_scope = None
-            if definition.id == "meta-muse":
-                # A first frame cannot decrypt/rotate credentials or scan every
-                # account document. Use explicit metadata identity only when it
-                # is unambiguous; the live pass records its actual selected scope.
-                meta_scope = getattr(self, "_meta_catalogue_scope", None)
-                store = getattr(self, "auth_store", None)
-                if store is not None:
-                    try:
-                        rows = store.list_credentials("meta-muse")
-                    except (sqlite3.Error, OSError):
-                        # An unreadable store cannot establish a unique account,
-                        # and this method runs on the keystroke that opens a
-                        # picker: painting every row unfiltered is the honest
-                        # "cannot tell" (``usable_providers``' own ``None`` means
-                        # the same one level up), and the live pass records the
-                        # scope it actually selected.
-                        rows = []
-                    scopes = {
-                        str(
-                            row.data.get("account_id")
-                            or row.data.get("org_id")
-                            or row.data.get("email")
-                            or ""
-                        )
-                        for row in rows
-                        if row.credential_type == "oauth" and row.disabled_cause is None
-                    }
-                    scopes.discard("")
-                    if len(scopes) == 1:
-                        meta_scope = next(iter(scopes))
-                    elif meta_scope not in scopes:
-                        meta_scope = None
+            account_scope = None
+            override_keys = getattr(self.auth_store, "override_keys", None)
+            has_api_key_override = bool(override_keys is not None and override_keys(definition.id))
+            if definition.id in {"openai", "meta-muse"} and not has_api_key_override:
+                # No-network reads must use the SAME account-scoped document as
+                # the live pass. Use explicit metadata identity only when it is
+                # unambiguous; never sweep another account's documents. Quota
+                # exhaustion does not revoke catalogue authorization and must not
+                # remove the row from this lookup.
+                account_scope = self._catalogue_scopes.get(definition.id)
+                try:
+                    credential_rows = self.auth_store.list_credentials(definition.id)
+                except (sqlite3.Error, OSError):
+                    credential_rows = []
+                scopes = {
+                    str(
+                        row.data.get("account_id")
+                        or row.data.get("org_id")
+                        or (row.data.get("email") if definition.id == "meta-muse" else None)
+                        or ""
+                    )
+                    for row in credential_rows
+                    if row.credential_type == "oauth" and row.disabled_cause is None
+                }
+                scopes.discard("")
+                if len(scopes) == 1:
+                    account_scope = next(iter(scopes))
+                elif account_scope not in scopes:
+                    account_scope = None
+            elif has_api_key_override:
+                # Live cascade tier 1/2 (CLI/config key) outranks OAuth. Never
+                # let a remembered account scope select that other identity's
+                # document on the no-network frame.
+                self._catalogue_scopes.pop(definition.id, None)
             models, _status = cached_available_models(
                 definition.id,
                 cache_dir=cache_dir,
                 values=values,
-                **({"account_id": meta_scope} if definition.id == "meta-muse" else {}),
+                **({"account_id": account_scope} if account_scope is not None else {}),
             )
             listed.append((definition, models))
         priced = _price_listing_only_rows(listed, cache_dir=cache_dir)
@@ -3006,14 +3067,15 @@ class ProviderController:
             # also called from the CLI and the server), and fetching on the loop
             # would freeze a TUI's repaint. Providers run concurrently.
             models, status = await asyncio.to_thread(available_models, definition.id, **kwargs)
-            if definition.id == "meta-muse":
-                import hashlib
+            if definition.id in {"openai", "meta-muse"}:
+                if definition.id == "meta-muse" and is_oauth and api_key and not account_id:
+                    import hashlib
 
-                self._meta_catalogue_scope = (
-                    account_id or "credential:" + hashlib.sha256(api_key.encode()).hexdigest()
-                    if is_oauth and api_key
-                    else None
-                )
+                    account_id = "credential:" + hashlib.sha256(api_key.encode()).hexdigest()
+                if account_id:
+                    self._catalogue_scopes[definition.id] = account_id
+                else:
+                    self._catalogue_scopes.pop(definition.id, None)
             if definition.id == "openai" and is_oauth:
                 # Price enrichment may know the API model, but not this route's
                 # limits. Preserve even an unknown OAuth window through it.
@@ -3026,6 +3088,14 @@ class ProviderController:
             return definition, connected, models, status
 
         results = await asyncio.gather(*[_fetch_provider(defn) for defn in registry])
+        # A successful provider refresh can change limits and capabilities as
+        # well as picker membership. Drop derived model-info/ladder memos before
+        # publishing the new rows so a long-lived process does not keep quoting
+        # yesterday's metadata. Failures leave the previous answer intact.
+        if any(result[3] == "ok" for result in results):
+            from local_operator.model.configure import invalidate_model_info_cache
+
+            invalidate_model_info_cache()
         listed: list[tuple[ProviderDefinition, bool, list[DiscoveredModel]]] = []
         for definition, connected, models, status in results:
             statuses[definition.id] = status
@@ -3119,7 +3189,15 @@ class ProviderController:
         # Do not introduce a new keyword on old hosts unless the caller needs
         # the read-only contract; the real AuthStore supports both shapes.
         kwargs = {"read_only": True} if read_only else {}
-        access = await self.auth_store.get_oauth_access(credential_id, **kwargs)
+        # Inference account selection excludes exhausted/blocked credentials;
+        # listing their catalogue is a different authorization question. Keep a
+        # compatibility fallback for embedded stores that predate this seam.
+        catalogue_access = getattr(self.auth_store, "get_catalogue_access", None)
+        access = (
+            await catalogue_access(credential_id)
+            if catalogue_access is not None
+            else await self.auth_store.get_oauth_access(credential_id, **kwargs)
+        )
         if access is not None and access.kind == "oauth" and access.access_token:
             return (
                 access.access_token,

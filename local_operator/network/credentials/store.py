@@ -37,7 +37,10 @@ why a brokered failure is reported to the owner rather than repaired here, and w
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
+import time
+import weakref
 from pathlib import Path
 from typing import Any, Callable, Collection, Protocol
 
@@ -108,6 +111,24 @@ class CredentialSource(Protocol):
     def close(self) -> None: ...
 
 
+@dataclasses.dataclass(frozen=True)
+class _LentRow:
+    """The owner row behind one borrow, in the OWNER's id space. Never persisted."""
+
+    owner_device: str
+    credential_id: int
+    account_created_at: int
+    access_token: str
+    org_id: str | None = None
+
+
+#: The stand-in ``org_id`` a restarted borrower gives the row behind a
+#: ``codex:responses`` receipt that this process did not borrow (``_anchor``).
+#: Resolvers test only its presence (``OpenAICompatClient._codex_responses_mode``);
+#: it is never sent, and the owner's real org id is never persisted here.
+_RECEIPT_ORG = "receipt:codex"
+
+
 def build_auth_store(config_dir: Path | None = None, *, db_path: str | Path | None = None) -> Any:
     """The session's local-first resolver, hot-capable when placement arrives.
 
@@ -176,6 +197,24 @@ class MeshAwareAuthStore:
         #: session factory (see :meth:`set_binding_reader`). ``None`` — every
         #: other construction site — reads as "no row", the pre-slice behaviour.
         self._binding_reader: Callable[[str], Any] | None = None
+        #: The OWNER row last lent per ``(key, session_id)``: ``_LentRow``. The
+        #: borrowed access carries only a synthetic id, so this names the
+        #: owner's real row for the session's latest borrow. Memory only, like
+        #: the grants it describes — so nothing that must survive a restart (the
+        #: anchor) may depend on it, and a request's own outcome is attributed
+        #: through ``_lent_access`` below, never through this latest pointer.
+        self._lent: dict[tuple[str, str], _LentRow] = {}
+        # Completion can race another resolve in the SAME conversation. Bind the
+        # owner's immutable identity to the actual access object, not the latest
+        # session pointer, and release it when that in-flight access is released.
+        self._lent_access: weakref.WeakKeyDictionary[Any, _LentRow] = weakref.WeakKeyDictionary()
+        #: Owner rows this device saw fail SERVER-SIDE (5xx/529), per ``(key,
+        #: owner_device)``, ``{row id: until_ms}``. The borrower's half of
+        #: ``AuthStore.deprioritize_credential``: process-wide and expiring after
+        #: the same ``DEPRIORITIZE_TTL_MS``, sent as ``demote_credential_ids`` so
+        #: the owner's selector sorts them last for this device's lends only.
+        self._lend_demotions: dict[tuple[str, str], dict[int, int]] = {}
+        self._receipts: Any = None
 
     @property
     def _mesh(self) -> CredentialSource | None:
@@ -270,8 +309,12 @@ class MeshAwareAuthStore:
         """This device's id as the placement document spells it (``""`` if unknown)."""
         return str(getattr(self._mesh, "self_device", "") or "")
 
-    def _note_borrow_serve(self, provider: str, grant: Grant) -> None:
+    def _note_borrow_serve(self, provider: str, grant: Grant, session_id: str | None) -> None:
         """Report a borrow's serve to the sink, from the ref itself (no added work).
+
+        ``session_id`` is the resolve's own parameter and rides the report for
+        the reason :meth:`_note_local_serve` spells out: the sink belongs to ONE
+        session while the store is shared by its in-process children.
 
         Guarded: a bookkeeping sink must never fail a serve.
         """
@@ -282,6 +325,7 @@ class MeshAwareAuthStore:
         try:
             sink(
                 provider=provider,
+                session_id=session_id or "",
                 owner_device=ref.owner_device,
                 owner_device_name=ref.owner_device_name,
                 credential_id=ref.credential_id,
@@ -296,6 +340,17 @@ class MeshAwareAuthStore:
         ``session_id`` is the resolve's own parameter: the sticky was written
         by the same resolve, so a resolve without one has no row to name and
         reports nothing.
+
+        THE REPORT NAMES ITS SESSION because the sink does not belong to the
+        store. A subagent's stream is ``SessionStreamFn.fork(child_id)``, which
+        reuses the parent's store, while ``attach_credential_binding`` fills
+        this one slot with the PARENT's ``recorder.observe_serve``. Without the
+        id every child resolve wrote the child's sticky into the parent's
+        binding, and the parent's next resolve wrote its own back: a live
+        parent that never left its account journaled 3,876 alternating rows and
+        an account-change notice per flip. The recorder drops a report for any
+        other session; routing children to recorders of their own is a
+        separate decision, not this seam's.
         """
         sink = self._serve_sink
         if sink is None:
@@ -304,7 +359,12 @@ class MeshAwareAuthStore:
         if credential_id is None:
             return
         try:
-            sink(provider=provider, owner_device="", credential_id=credential_id)
+            sink(
+                provider=provider,
+                session_id=session_id or "",
+                owner_device="",
+                credential_id=credential_id,
+            )
         except Exception:  # noqa: BLE001 — a bookkeeping sink must not fail a serve
             logger.debug("credential serve sink failed", exc_info=True)
 
@@ -363,7 +423,7 @@ class MeshAwareAuthStore:
         )
         if not isinstance(grant, Grant):
             return None
-        self._note_borrow_serve(provider, grant)
+        self._note_borrow_serve(provider, grant, session_id)
         return grant.access_token
 
     async def get_oauth_access(
@@ -406,7 +466,7 @@ class MeshAwareAuthStore:
         )
         if not isinstance(grant, Grant):
             return None
-        self._note_borrow_serve(provider, grant)
+        self._note_borrow_serve(provider, grant, session_id)
         return self._access_from_grant(grant)
 
     # -- the broker rung ----------------------------------------------------
@@ -452,18 +512,41 @@ class MeshAwareAuthStore:
         slot: asyncio.Future[Any] = loop.create_future()
         self._grants[slot_pair] = slot
         try:
+            # The two selection inputs a local turn's selector reads from its own
+            # store, sent for the owner's selector (``owner.grant`` step 2e). Only
+            # passed when present, so a ``CredentialSource`` written before them
+            # (and an older owner) sees exactly the call it always saw.
+            selection: dict[str, Any] = {}
+            anchor = self._anchor(key, session_id, model_id)
+            if anchor is not None:
+                selection["affinity"] = anchor
+            demoted = self._demoted(key)
+            if demoted:
+                selection["demote_credential_ids"] = demoted
             grant = await mesh.grant_async(
                 key,
                 session_id=session_id,
                 model_id=model_id,
                 force_refresh=force_refresh,
                 provider=provider,
+                **selection,
             )
         except BaseException as exc:
             slot.set_exception(exc)
             raise
         if isinstance(grant, Grant):
             self._brokered[pair] = self._credential_id(key, grant)
+            ref = grant.credential_ref
+            if ref.credential_id > 0:
+                self._lent[pair] = _LentRow(
+                    owner_device=ref.owner_device,
+                    credential_id=ref.credential_id,
+                    account_created_at=ref.account_created_at,
+                    access_token=grant.access_token,
+                    org_id=grant.identity.get("org_id"),
+                )
+            else:
+                self._lent.pop(pair, None)
             self._refusals.pop(key, None)
         elif isinstance(grant, BrokerError):
             self._refusals[key] = grant
@@ -488,7 +571,7 @@ class MeshAwareAuthStore:
         from local_operator.providers.auth_store import OAuthAccess
 
         credential_kind = "api_key" if grant.credential_ref.kind == "api_key" else "oauth"
-        return OAuthAccess(
+        access = OAuthAccess(
             access_token=grant.access_token,
             credential_id=self._credential_id(
                 key_for(provider=grant.credential_ref.provider), grant
@@ -499,6 +582,15 @@ class MeshAwareAuthStore:
             kind=credential_kind,
             raw=None,
         )
+        ref = grant.credential_ref
+        self._lent_access[access] = _LentRow(
+            ref.owner_device,
+            ref.credential_id,
+            ref.account_created_at,
+            grant.access_token,
+            grant.identity.get("org_id"),
+        )
+        return access
 
     def _synthetic_for_provider(self, provider: str) -> int | None:
         if self._mesh is None:
@@ -570,8 +662,242 @@ class MeshAwareAuthStore:
                     provider, session_id, error, api_key, block_ms, model_id=model_id
                 )
             )
+        self._note_lent_failure(pair, error, api_key)
         self._report_failure(pair[0], error=error, session_id=session_id or "", model_id=model_id)
+        # Still ``False``: there is no LOCAL sibling. The driver's rotation leg
+        # re-resolves regardless, and the demotion noted above is what moves that
+        # re-ask to another of the owner's rows on a server-side fault.
         return False
+
+    # -- lend selection parity: receipts, anchors, demotions -----------------
+    #
+    # A local session keeps its warm account through a success RECEIPT, and a
+    # 5xx moves it to a sibling through a DEMOTION; both live in the store that
+    # owns the rows. For a borrowed row that store is the owner's, which must
+    # never be written on a peer's word (F3). So the borrower keeps both for its
+    # own sessions, keyed by the OWNER's real row id, and sends them with each
+    # ask; the owner's selector applies them to that one resolve.
+
+    def _receipt_store(self) -> Any:
+        """The ``AccountAffinityStore`` this device's sessions already write.
+
+        THE LOCAL STORE'S OWN INSTANCE when it has one: receipts are one JSON file
+        per session holding every provider's lease, and two in-memory writers of the
+        same file would each save their own view and erase the other's. A borrower
+        with no local ``AuthStore`` (tests' stand-ins) roots one beside its config.
+        """
+        factory = getattr(self._local, "_account_affinity_store", None)
+        if callable(factory):
+            return factory()
+        if self._receipts is None and self.config_dir is not None:
+            from local_operator.providers.account_affinity import AccountAffinityStore
+
+            self._receipts = AccountAffinityStore(Path(self.config_dir) / "auth.db")
+        return self._receipts
+
+    @staticmethod
+    def _receipt_key(key: str, owner_device: str) -> str:
+        # ``<key>@<owner>``, never the bare provider: an owner row id must not be
+        # readable as one of this device's own rows, and a placement move to another
+        # owner must not carry an anchor into a different id space.
+        return f"{key}@{owner_device}"
+
+    def _lent_for(self, provider: str, session_id: str | None, access: Any) -> _LentRow | None:
+        """The owner row behind a borrowed ``access``, or ``None``.
+
+        Bound to the immutable ACCESS: a later borrow for the same session may
+        already have replaced its latest-row pointer while this request runs.
+        """
+        if access is None or not is_synthetic_credential_id(int(access.credential_id or 0)):
+            return None
+        return self._lent_access.get(access)
+
+    def _anchor(self, key: str, session_id: str, model_id: str) -> tuple[int, int] | None:
+        """This session's warm owner row, from its own receipt, for the next ask.
+
+        The receipt is read exactly as ``AuthStore._affinity_credential_id`` reads a
+        local one — same store, same lifetime/model/prefix check through ``get``,
+        same endpoint rule — inside the failover driver's ``selection_context``.
+        Outside one (no compatibility signature) there is no anchor, as locally.
+        """
+        from local_operator.providers.account_affinity import (
+            current_selection_endpoint,
+            current_selection_signature,
+            receipt_endpoint_matches,
+        )
+        from local_operator.providers.auth_store import OAuthAccess
+
+        mesh = self._mesh
+        signature = current_selection_signature()
+        if mesh is None or not session_id or signature is None:
+            return None
+        receipts = self._receipt_store()
+        if receipts is None:
+            return None
+        receipt = receipts.get(
+            session_id, self._receipt_key(key, mesh.owner_of(key)), model_id, signature
+        )
+        if receipt is None:
+            return None
+        # The endpoint rule needs the row's credential metadata, and the only
+        # field a resolver reads from an OAuth lend is ``org_id`` (Codex mode is
+        # credential-derived). ``_lent`` holds it for THIS process's borrows
+        # only, so after a restart it is rebuilt from what was persisted: the
+        # receipt names the immutable owner row (id + ``created_at``), and
+        # ``org_id`` is that row's identity key, never rewritten by a refresh —
+        # an org change re-creates the row — so a ``codex:responses`` receipt
+        # can only have been recorded on an org-carrying row. The CURRENT
+        # client still judges the endpoint, and the owner still refuses a
+        # re-created, excluded, blocked or depleted row on its side.
+        lent = self._lent.get((key, session_id))
+        if (
+            lent is not None
+            and lent.credential_id == receipt.account_id
+            and lent.account_created_at == receipt.account_created_at
+        ):
+            org_id = lent.org_id
+        else:
+            org_id = _RECEIPT_ORG if receipt.endpoint_mode == "codex:responses" else None
+        identity = OAuthAccess(
+            access_token="",
+            credential_id=receipt.account_id,
+            kind="oauth",
+            org_id=org_id,
+        )
+        if not receipt_endpoint_matches(receipt, identity, current_selection_endpoint()):
+            return None
+        return (receipt.account_id, receipt.account_created_at)
+
+    def _demoted(self, key: str) -> list[int]:
+        """Owner rows still demoted for ``key``'s current owner; expired marks dropped."""
+        mesh = self._mesh
+        if mesh is None:
+            return []
+        marks = self._lend_demotions.get((key, mesh.owner_of(key)))
+        if not marks:
+            return []
+        now = int(time.time() * 1000)
+        for row_id in [row_id for row_id, until in marks.items() if until <= now]:
+            marks.pop(row_id, None)
+        return sorted(marks)
+
+    def _note_lent_failure(
+        self, pair: tuple[str, str], error: BaseException, api_key: str | None
+    ) -> None:
+        """The borrower's half of ``AuthStore.rotate_sibling`` for an owner row.
+
+        Own failure ends the session's lease on that row (local: the receipt is
+        invalidated), and a server-side fault demotes the row for
+        ``DEPRIORITIZE_TTL_MS`` without blocking it — the provider failed, not the
+        account. A usage limit is rested by ``report_sync``'s cooldown instead.
+        """
+        from local_operator.providers.auth_store import DEPRIORITIZE_TTL_MS
+        from local_operator.providers.failover import is_server_side_failure
+
+        lent = self._lent.get(pair)
+        if api_key and (lent is None or lent.access_token != api_key):
+            # The FAILING bearer names the row; the session's record may already
+            # describe a newer borrow (a late 529 for A after this session
+            # resolved B). The failed request's access is still held by the
+            # failover driver, so ``_lent_access`` maps that bearer to the row it
+            # was actually lent from — no latest-session pointer involved, so
+            # overlapping requests cannot attribute each other's failure. Its
+            # synthetic id pins the match to this key's owner. No match means
+            # nothing to attribute.
+            lent = next(
+                (
+                    row
+                    for access, row in list(self._lent_access.items())
+                    if row.access_token == api_key
+                    and access.credential_id == synthetic_credential_id(pair[0], row.owner_device)
+                ),
+                None,
+            ) or next(
+                (
+                    row
+                    for (key, _sid), row in self._lent.items()
+                    if key == pair[0] and row.access_token == api_key
+                ),
+                None,
+            )
+        if lent is None:
+            return
+        try:
+            receipts = self._receipt_store()
+            if receipts is not None and pair[1]:
+                receipts.invalidate(
+                    pair[1],
+                    self._receipt_key(pair[0], lent.owner_device),
+                    account_id=lent.credential_id,
+                )
+        except Exception:  # noqa: BLE001 — bookkeeping must not mask the provider error
+            logger.debug("could not invalidate a borrowed row's receipt", exc_info=True)
+        if is_server_side_failure(error):
+            marks = self._lend_demotions.setdefault((pair[0], lent.owner_device), {})
+            marks[lent.credential_id] = int(time.time() * 1000) + DEPRIORITIZE_TTL_MS
+
+    def record_account_success(
+        self,
+        provider: str,
+        session_id: str | None,
+        access: Any,
+        request: Any,
+        hint: Any,
+        sent_at_ms: int,
+        sent_monotonic: float,
+    ) -> None:
+        """A success receipt, for a local row as before or for the OWNER's lent row.
+
+        A borrowed access carries a synthetic id and no ``account_created_at``, so
+        the local store refuses it and no remote session could ever anchor. The
+        receipt is written with the owner's real row id and creation stamp, in the
+        same store and with the same validation a local receipt gets, under the
+        ``<key>@<owner>`` provider key.
+        """
+        lent = self._lent_for(provider, session_id, access)
+        if lent is None:
+            local = getattr(self._local, "record_account_success", None)
+            if callable(local):
+                local(provider, session_id, access, request, hint, sent_at_ms, sent_monotonic)
+            return
+        receipts = self._receipt_store()
+        if not session_id or receipts is None or lent.account_created_at <= 0:
+            # An owner that predates ``account_created_at`` lends rows this device
+            # cannot identify immutably, so it anchors nothing: today's lend.
+            return
+        receipts.record(
+            session_id,
+            self._receipt_key(key_for(provider=provider), lent.owner_device),
+            lent.credential_id,
+            lent.account_created_at,
+            request.model.model_id,
+            hint,
+            sent_at_ms=sent_at_ms,
+            sent_monotonic=sent_monotonic,
+        )
+        # It served: whatever fault demoted it has passed (``_clear_demotion``'s
+        # rule for a local row).
+        self._lend_demotions.get((key_for(provider=provider), lent.owner_device), {}).pop(
+            lent.credential_id, None
+        )
+
+    def record_account_failure(
+        self, provider: str, session_id: str | None, access: Any, sent_at_ms: int
+    ) -> None:
+        lent = self._lent_for(provider, session_id, access)
+        if lent is None:
+            local = getattr(self._local, "record_account_failure", None)
+            if callable(local):
+                local(provider, session_id, access, sent_at_ms)
+            return
+        receipts = self._receipt_store()
+        if session_id and receipts is not None:
+            receipts.invalidate(
+                session_id,
+                self._receipt_key(key_for(provider=provider), lent.owner_device),
+                account_id=lent.credential_id,
+                sent_at_ms=sent_at_ms,
+            )
 
     def block_credential(
         self,

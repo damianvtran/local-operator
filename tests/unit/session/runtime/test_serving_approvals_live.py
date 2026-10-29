@@ -17,8 +17,11 @@ already PARKED is never auto-answered or auto-denied, and an explicit
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -26,7 +29,11 @@ import pytest
 from local_operator import settings_io
 from local_operator.config import ConfigManager
 from local_operator.config_watch import ConfigWatcher, _reset_for_tests, process_watcher
-from local_operator.harness.approval import LOOSENING_REFUSED_NOTICE
+from local_operator.harness.approval import (
+    LOOSENING_REFUSED_NOTICE,
+    REARM_KEPT_BY_AUTO_NOTICE,
+)
+from local_operator.session.approval_policy import OVERRIDE_FILENAME
 from local_operator.session.runtime.serving import ServingSessionHandle
 from tests.unit.session.runtime.test_serving import FakeSession
 
@@ -70,14 +77,22 @@ def _write_here(config_dir, key: str, value: Any) -> None:
 
 
 def _handle(
-    tmp_path, *, auto_approve: bool, pinned: bool = False
+    tmp_path,
+    *,
+    auto_approve: bool,
+    pinned: bool = False,
+    session_dir: Path | None = None,
 ) -> tuple[ServingSessionHandle, FakeSession, ConfigWatcher, list[Any]]:
     config_dir = tmp_path / "config"
-    config_dir.mkdir()
+    config_dir.mkdir(exist_ok=True)
     ConfigManager(config_dir).set_config_value(
         "tool_approval_mode", "auto" if auto_approve else "ask"
     )
     session = FakeSession()
+    if session_dir is not None:
+        # The handle reads the sidecar through ``_session_directory()``, which
+        # is the two-hop ``transcript.directory`` read a real session answers.
+        session.transcript = SimpleNamespace(directory=session_dir)
     emitted: list[Any] = []
 
     async def _emit(event: object) -> None:
@@ -201,8 +216,9 @@ async def test_a_disk_write_tightens_the_gate_and_the_next_decision_parks(tmp_pa
     assert handle._auto_approve is False
     pending = asyncio.ensure_future(handle._approval_gate("write", "a file"))
     await asyncio.sleep(0)
-    assert handle._fold.projection.pending is not None, "the tightened gate did not park a card"
-    request_id = handle._fold.projection.pending.request_id
+    parked_card = handle._fold.projection.pending
+    assert parked_card is not None, "the tightened gate did not park a card"
+    request_id = parked_card.request_id
     await handle.approval_answer(request_id, False, False)
     assert await pending is False
     await asyncio.sleep(0)
@@ -223,12 +239,18 @@ async def test_a_loosening_does_not_revoke_an_explicit_per_session_ask(tmp_path)
     (``Session._explicit_model_choice`` and its ``keeping …`` notice) on the
     more dangerous of the two keys.
     """
-    handle, session, watcher, emitted = _handle(tmp_path, auto_approve=False)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    handle, session, watcher, emitted = _handle(
+        tmp_path, auto_approve=False, session_dir=session_dir
+    )
 
     from local_operator.session.frontend_state import SlashResult
 
     handle._approvals_slash(session, "ask", SlashResult)
     assert handle._auto_approve is False
+    # The choice was written BESIDE the conversation, so a resume can find it.
+    assert json.loads((session_dir / OVERRIDE_FILENAME).read_text())["override"] == "ask"
     emitted.clear()
 
     _write_elsewhere(watcher.config_dir, "tool_approval_mode", "auto")
@@ -254,67 +276,49 @@ async def test_a_loosening_does_not_revoke_an_explicit_per_session_ask(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_a_tightening_follows_the_file_even_over_an_explicit_choice(tmp_path) -> None:
-    """THE ASYMMETRIC RULE, tightening half. Safety propagates without
-    exception: a session that explicitly chose ``auto`` still follows the file
-    to ``ask``, because a user who ends up safer than they asked is never the
-    wrong surprise. This is the direction the rule does NOT make conditional."""
-    # File AND gate start at `auto`, so the disk write below is a real
-    # transition; the session's own `/approvals auto` is what records the
-    # explicit choice the tightening then has to override.
-    handle, session, watcher, emitted = _handle(tmp_path, auto_approve=True)
+async def test_a_global_tightening_does_not_rearm_an_explicit_auto(tmp_path) -> None:
+    """A GLOBAL CHANGE DOES NOT MOVE A SESSION THAT CHOSE — either direction.
+
+    This replaces the previous rule, which let a tightening through "because
+    safety propagates without exception". It does not propagate through a
+    conversation's own decision: a session its human deliberately set to
+    ``auto`` (a long unattended run, a CI-shaped task) was re-armed by a
+    default about OTHER sessions, mid-turn and silently. Since 2026-10-23 the
+    recorded choice outranks the file both ways, the notice says so, and it
+    names the command that follows the file.
+
+    The asymmetry that remains is the FILE's, not the choice's: a session that
+    never chose still follows a tightening unconditionally (the test below).
+    """
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    handle, session, watcher, emitted = _handle(
+        tmp_path, auto_approve=True, session_dir=session_dir
+    )
 
     from local_operator.session.frontend_state import SlashResult
 
     handle._approvals_slash(session, "auto", SlashResult)
     assert handle._auto_approve is True
     assert handle._explicit_approvals_mode == "auto"
+    # The human's choice is durable, not just in memory.
+    assert json.loads((session_dir / OVERRIDE_FILENAME).read_text())["override"] == "auto"
     emitted.clear()
 
     _write_elsewhere(watcher.config_dir, "tool_approval_mode", "ask")
     watcher.poll_now()
     await asyncio.sleep(0)
-    assert handle._auto_approve is False, "a tightening was refused; safety must always propagate"
-    texts = [getattr(e, "text", "") for e in emitted]
-    assert any("tool approvals: ask" in t and "config.yml changed" in t for t in texts), texts
 
-    # ...AND THE SESSION CAN STILL FOLLOW THE FILE BACK (review round 2, R6).
-    # The runtime half of the same regression: the only mode this human ever
-    # typed is `auto`, so there is no hardening for the explicit-`ask` keep
-    # branch to protect, and a guard that read merely "this session chose
-    # something" pinned it to `ask` permanently. The FILE owns the value once it
-    # moves the gate, which is why the recorded mode is cleared — that is also
-    # what keeps the keep notice's "set with /approvals in this session" a true
-    # statement rather than a claim about a value the file chose.
-    assert (
-        handle._explicit_approvals_mode is None
-    ), "a file write left the session claiming the human had typed the mode"
-    # Since #1282 the way back is the ATTRIBUTED write, not any file write: an
-    # unattributed loosening is refused, and refused for the ATTRIBUTION reason
-    # rather than by blaming a choice this human never made.
-    emitted.clear()
-    _write_elsewhere(watcher.config_dir, "tool_approval_mode", "auto")
-    watcher.poll_now()
-    await asyncio.sleep(0)
-    assert handle._auto_approve is False, "an unattributed loosening moved this gate"
+    assert handle._auto_approve is True, "a global default re-armed a conversation that chose auto"
+    assert handle._explicit_approvals_mode == "auto"
     texts = [getattr(e, "text", "") for e in emitted]
-    assert any("keeping tool approvals" in t for t in texts), texts
-    assert not any(
-        "set with /approvals in this session" in t for t in texts
-    ), "the refusal blamed a choice this human never made (R6)"
-    _write_here(watcher.config_dir, "tool_approval_mode", "auto")
-    await asyncio.sleep(0)
-    assert handle._auto_approve is False, (
-        "the file already said auto when the loosening was refused, so re-writing the "
-        "same value is not even a delivery -- there is no value change to announce"
-    )
-    # ...AND THE SESSION IS NOT PINNED: the human's own command still loosens it,
-    # which is the property R6 protected. Under #1282 this is the ONLY route from
-    # the divergence the refusal leaves behind, and `/approvals` says as much.
-    from local_operator.session.frontend_state import SlashResult
-
-    handle._approvals_slash(session, "auto", SlashResult)
-    assert handle._auto_approve is True
+    assert REARM_KEPT_BY_AUTO_NOTICE in texts, texts
+    # The gate really is still loose: the next decision answers inline, and no
+    # card is parked for a human who is not there.
+    assert await handle._approval_gate("bash", "rm -rf build/") is True
+    assert handle._fold.projection.pending is None
+    # ...and the file's direction did not rewrite the conversation's record.
+    assert json.loads((session_dir / OVERRIDE_FILENAME).read_text())["override"] == "auto"
     await handle.dispose()
 
 
@@ -426,58 +430,11 @@ async def test_a_bare_approvals_reports_a_divergence_against_the_file(
     assert "retire and reopen" not in follower_text, follower_text
     assert "the window that opens a runtime owns its gate" not in follower_text, follower_text
 
-    # `/approvals default …` is the other report that offered a refused command:
-    # the persist half is machine-locality (refused from ANY control connection)
-    # and the second clause promised `auto` "now" on a connection that is refused
-    # it (design round 2, D10 = UX round 2, U7).
-    from local_operator.session.frontend_state import SlashResult as _SlashResult
-
-    capable = getattr(
-        handle._approvals_slash(session, "default auto", _SlashResult, may_loosen=True), "text", ""
-    )
-    assert "/approvals ask|auto switches this session now" in capable, capable
-    refused = getattr(
-        handle._approvals_slash(session, "default auto", _SlashResult, may_loosen=False), "text", ""
-    )
-    assert "/approvals ask switches this session now" in refused, refused
-    # THE SPAWNER REMEDY IS DELETED, and this is the pin that says so (revision 2
-    # §5 / stage F). The old clause named "the window that started it", which for a
-    # background-started runtime is a window that does not exist — the remedy the
-    # redesign exists to remove. What replaces it is the three levers that work
-    # from anywhere, in the order a reader can act on them.
-    assert "needs the operator's own consent" in refused, refused
-    assert "has to come from the window" not in refused, refused
-    assert "retire" not in refused, refused
-    # The unactionable half of the old sentence is gone: this is a FILE (or the
-    # desktop app's settings), not something to go and type in a terminal — the
-    # surface the operator was already sitting at (UX round 2, U7).
-    assert "run it on a terminal" not in refused, refused
-    # ...and it names the machine the SESSION runs on, because the reader can be
-    # a phone for which "this machine" means the phone (design round 3, D16). The
-    # two hosts build this from ONE function, so they cannot drift apart again.
-    assert "the machine this session runs on" in refused, refused
-    from local_operator.harness.approval import approvals_default_notice
-
-    # THE HOST STATE IS PART OF THE SENTENCE NOW, so the expected value is built the
-    # way production builds it (UX round 6, U1/U2): a host with no usable anchor is
-    # told the two levers cannot run yet and which command fixes that. Passing the
-    # same predicate the handle passes is what keeps this cell honest both on a
-    # developer machine that HAS an anchor and on CI, which does not.
-    from local_operator.operator import operator_authority_unusable
-
-    uninstalled = operator_authority_unusable()
-    assert refused == approvals_default_notice(
-        may_loosen=False, anchor_unusable=uninstalled
-    ), refused
-    assert capable == approvals_default_notice(may_loosen=True), capable
-    # ...and the OTHER host's sentence is pinned here rather than left to whichever
-    # machine runs the suite: the SETUP ACTION is named instead of the two levers
-    # being offered as if they worked (copy rule §2.9: a remedy names a product
-    # action, never a terminal command).
-    both = approvals_default_notice(may_loosen=False, anchor_unusable=True)
-    assert "one approval and one admin password prompt" in both, both
-    assert "authority is not installed here" in both, both
-    assert len(both) <= 400, len(both)
+    # `/approvals default <mode>` USED TO BE REFUSED here and is now HONOURED:
+    # the persistence path is exercised in
+    # ``test_the_runtime_default_saves_the_file_and_reaches_an_inheriting_handle``
+    # below, which is the one place the receipt, the file and the sibling
+    # handle are asserted together.
     await handle.dispose()
 
 
@@ -554,8 +511,9 @@ async def test_a_parked_prompt_is_left_for_the_human(tmp_path) -> None:
     await asyncio.sleep(0)
     assert handle._auto_approve is True
     assert not parked.done(), "a loosening auto-answered a card the human was looking at"
-    assert handle._fold.projection.pending is not None
-    assert handle._fold.projection.pending.request_id == pending.request_id
+    front = handle._fold.projection.pending
+    assert front is not None
+    assert front.request_id == pending.request_id
 
     # The human decides, and only then does the future settle.
     await handle.approval_answer(pending.request_id, False, False)
@@ -663,4 +621,441 @@ async def test_a_repeat_with_a_different_decision_is_still_refused(tmp_path) -> 
         await handle.approval_answer(pending.request_id, False, False)
 
     assert await parked is True
+    await handle.dispose()
+
+
+# ---------------------------------------------------------------------------
+# The conversation's own recorded choice, and the machine-default sink
+# ---------------------------------------------------------------------------
+#
+# Two live bugs this section pins, both from the operator's report: a session
+# started in `ask` kept prompting after the global default was set to `auto`
+# (the runtime refused to persist a default from a control connection, and its
+# in-memory choice was not written down), and an explicit `/approvals` pick
+# vanished on resume. The rule now: the choice is PERSISTED with the
+# conversation and outranks the file in BOTH directions; every session that
+# never chose still follows the file, with a loosening still needing authority.
+
+
+def test_the_file_name_used_by_the_tests_is_the_module_constant() -> None:
+    """One spelling: the sidecar name is imported, never copied into a test."""
+    assert OVERRIDE_FILENAME == "approvals.json"
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_conversation_starts_in_its_recorded_mode(tmp_path) -> None:
+    """RESUME reads the choice back from the session directory.
+
+    The machine default says ``ask`` and the handle is CONSTRUCTED with that
+    value — exactly what ``exec_control``/``spawn_owned_session`` do — so the
+    only way the gate can start loose is by adopting the record. Before this
+    the handle went back to asking and the user's `/approvals auto` was gone.
+    """
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    original, original_session, _watcher, _emitted = _handle(
+        tmp_path, auto_approve=False, session_dir=session_dir
+    )
+    from local_operator.session.frontend_state import SlashResult
+
+    original._approvals_slash(original_session, "auto", SlashResult)
+    await original.dispose()
+
+    resumed, _session, _watcher, _emitted = _handle(
+        tmp_path, auto_approve=False, session_dir=session_dir
+    )
+    assert resumed._explicit_approvals_mode == "auto"
+    assert resumed._auto_approve is True
+    # The FIRST decision is already loose: no card is parked and then answered.
+    assert await resumed._approval_gate("bash", "make test") is True
+    assert resumed._fold.projection.pending is None
+    await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_record_warns_and_starts_in_ask(tmp_path) -> None:
+    """FAIL CLOSED: a corrupt record is `ask`, and the user is told.
+
+    The unsafe reading is "no choice" → inherit the config's ``auto``, which
+    would silently un-gate a conversation whose human had hardened it.
+    """
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    (session_dir / OVERRIDE_FILENAME).write_text('{"schema_version": 1, "overr', encoding="utf-8")
+    handle, _session, _watcher, emitted = _handle(
+        tmp_path, auto_approve=True, session_dir=session_dir
+    )
+    await asyncio.sleep(0)
+    assert handle._explicit_approvals_mode is None
+    assert handle._auto_approve is False, "a corrupt record inherited the config's auto"
+    texts = [getattr(e, "text", "") for e in emitted]
+    assert any("could not be read" in t for t in texts), texts
+    await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_persist_failure_is_disclosed_and_the_session_still_switches(tmp_path) -> None:
+    """The live switch happens; the receipt says the resume will not keep it.
+
+    Not raising is deliberate: refusing the switch after the human typed it
+    would leave the gate disagreeing with the answer just given. The clause
+    names the error CLASS, never a stack — this text lands in a transcript.
+    """
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    handle, session, _watcher, _emitted = _handle(
+        tmp_path, auto_approve=False, session_dir=session_dir
+    )
+
+    def _refuse(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch_target = "local_operator.session.runtime.serving._write_approval_override"
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(monkeypatch_target, _refuse)
+        from local_operator.session.frontend_state import SlashResult
+
+        receipt = handle._approvals_slash(session, "auto", SlashResult)
+
+    assert handle._auto_approve is True, "the live switch must still apply"
+    text = getattr(receipt, "text", "")
+    assert "applied for this session but NOT saved for resume (OSError)" in text, text
+    assert not (session_dir / OVERRIDE_FILENAME).exists()
+    await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_global_tightening_leaves_a_parked_prompt_for_the_human(tmp_path) -> None:
+    """A card on screen is never auto-denied by a tightening at the next tick.
+
+    The gate reads the flag when a DECISION is made, so an in-flight card keeps
+    waiting; only the decision after it sees the new mode. The card has to be
+    opened while the gate is ARMED (an auto gate never parks one), and the
+    loosening follows so the tightening is a real transition on this handle.
+    """
+    handle, _session, watcher, _emitted = _handle(tmp_path, auto_approve=False)
+    parked = asyncio.ensure_future(handle._approval_gate("bash", "touch /tmp/x"))
+    await asyncio.sleep(0)
+    pending = handle._fold.projection.pending
+    assert pending is not None
+
+    # Attributed, so it actually moves this gate (an unattributed write cannot).
+    _write_here(watcher.config_dir, "tool_approval_mode", "auto")
+    await asyncio.sleep(0)
+    assert handle._auto_approve is True
+    assert not parked.done()
+    front = handle._fold.projection.pending
+    assert front is not None
+    assert front.request_id == pending.request_id
+
+    _write_elsewhere(watcher.config_dir, "tool_approval_mode", "ask")
+    watcher.poll_now()
+    await asyncio.sleep(0)
+    assert handle._auto_approve is False
+    assert not parked.done(), "a tightening auto-denied a card the human was looking at"
+    assert handle._fold.projection.pending is not None
+
+    # The human's own yes still settles the parked card, and the NEXT decision
+    # is made under the tightened mode.
+    await handle.approval_answer(pending.request_id, True, False)
+    assert await parked is True
+    next_card = asyncio.ensure_future(handle._approval_gate("write", "later"))
+    await asyncio.sleep(0)
+    assert handle._fold.projection.pending is not None, "the next decision ignored the file"
+    await handle.approval_answer(handle._fold.projection.pending.request_id, False, False)
+    assert await next_card is False
+    await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_choice_leaves_a_parked_prompt_alone(tmp_path) -> None:
+    """A parked card is untouched by a global change even when the gate is kept.
+
+    Both rules meet here: the conversation's choice means the file does not
+    move its gate, and the card was already open, so nothing about this tick
+    may answer it. The card is opened under the recorded `ask` (an auto gate
+    never parks one); the global loosening is then kept, and the human answers.
+    """
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    handle, session, watcher, emitted = _handle(
+        tmp_path, auto_approve=False, session_dir=session_dir
+    )
+    from local_operator.session.frontend_state import SlashResult
+
+    handle._approvals_slash(session, "ask", SlashResult)
+    parked = asyncio.ensure_future(handle._approval_gate("bash", "touch /tmp/x"))
+    await asyncio.sleep(0)
+    pending = handle._fold.projection.pending
+    assert pending is not None
+    emitted.clear()
+
+    _write_elsewhere(watcher.config_dir, "tool_approval_mode", "auto")
+    watcher.poll_now()
+    await asyncio.sleep(0)
+    assert handle._auto_approve is False
+    assert not parked.done()
+    front = handle._fold.projection.pending
+    assert front is not None
+    assert front.request_id == pending.request_id
+    assert any(
+        "keeping tool approvals: ask" in t for t in [getattr(e, "text", "") for e in emitted]
+    )
+    await handle.approval_answer(pending.request_id, True, False)
+    assert await parked is True
+    # The next decision still parks, because the conversation's choice holds.
+    next_card = asyncio.ensure_future(handle._approval_gate("bash", "next"))
+    await asyncio.sleep(0)
+    assert handle._fold.projection.pending is not None
+    await handle.approval_answer(handle._fold.projection.pending.request_id, True, False)
+    assert await next_card is True
+    await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_default_saves_the_file_and_reaches_an_inheriting_handle(
+    tmp_path, monkeypatch
+) -> None:
+    """`/approvals default auto` from a control connection now PERSISTS (#sink).
+
+    It writes ``tool_approval_mode`` through this process's settings facade, so
+    the file changes AND every inheriting handle in this process follows within
+    the same delivery — the sibling below is the operator's second session,
+    which used to keep prompting. The receipt names the file, the key and what
+    applied, because "saved" alone does not say where.
+    """
+    maker, maker_session, watcher, _emitted = _handle(tmp_path, auto_approve=False)
+    sibling, _sibling_session, _same_watcher, _sibling_emitted = _handle(
+        tmp_path, auto_approve=False
+    )
+    assert sibling._auto_approve is False
+
+    # The facade resolves the config dir through ``paths.config_dir()``, so the
+    # env has to name this scratch dir — the same wiring the divergence report
+    # test uses. Without it the write would land in the isolated HOME's config
+    # and the watcher below would (correctly) see nothing.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(watcher.config_dir))
+
+    from local_operator.session.frontend_state import SlashResult
+
+    receipt = maker._approvals_slash(maker_session, "default auto", SlashResult)
+
+    assert ConfigManager(watcher.config_dir).get_config_value("tool_approval_mode") == "auto"
+    text = getattr(receipt, "text", "")
+    assert str(ConfigManager(watcher.config_dir).config_file) in text, text
+    assert "tool_approval_mode" in text, text
+    assert "this conversation now follows it" in text, text
+    assert "other conversations with their own choice keep it" in text, text
+    # The sibling followed through the watcher — no direct flag write needed.
+    assert sibling._auto_approve is True
+    assert await sibling._approval_gate("bash", "make test") is True
+    assert sibling._fold.projection.pending is None
+    # ...and the issuing handle follows the command it just issued.
+    assert maker._auto_approve is True
+    assert maker._explicit_approvals_mode is None
+
+    # The tightening direction of the same op is honoured too.
+    back = maker._approvals_slash(maker_session, "default ask", SlashResult)
+    assert ConfigManager(watcher.config_dir).get_config_value("tool_approval_mode") == "ask"
+    assert "this conversation now follows it" in getattr(back, "text", ""), getattr(
+        back, "text", ""
+    )
+    assert sibling._auto_approve is False
+    assert maker._auto_approve is False
+    await maker.dispose()
+    await sibling.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_default_clears_only_the_issuing_conversations_choice(
+    tmp_path, monkeypatch
+) -> None:
+    """The issuing conversation adopts the global; NOBODY else's record moves.
+
+    This is the design round's refinement on top of the sink: the command has
+    always meant "this session and every new one", so the issuing conversation
+    must stop keeping a choice that now contradicts the default it just set.
+    Every OTHER conversation keeps its own record — a global preference is a
+    default, not a forced rewrite, and revoking a hardening elsewhere is the
+    consent expansion this whole change refuses.
+    """
+    maker_dir = tmp_path / "maker-session"
+    maker_dir.mkdir()
+    maker, maker_session, watcher, _emitted = _handle(
+        tmp_path, auto_approve=True, session_dir=maker_dir
+    )
+    inheriting, _inheriting_session, _same_watcher, _inherited = _handle(
+        tmp_path, auto_approve=True
+    )
+    keeper_dir = tmp_path / "keeper-session"
+    keeper_dir.mkdir()
+    keeper, keeper_session, _keeper_watcher, _keeper_emitted = _handle(
+        tmp_path, auto_approve=True, session_dir=keeper_dir
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(watcher.config_dir))
+    from local_operator.session.frontend_state import SlashResult
+
+    maker._approvals_slash(maker_session, "ask", SlashResult)  # the issuer chose ask
+    keeper._approvals_slash(keeper_session, "auto", SlashResult)  # someone else chose auto
+    assert maker._auto_approve is False
+    assert keeper._auto_approve is True
+
+    receipt = maker._approvals_slash(maker_session, "default ask", SlashResult)
+
+    assert ConfigManager(watcher.config_dir).get_config_value("tool_approval_mode") == "ask"
+    # The issuer follows the default it set, and its stale record is cleared.
+    assert maker._auto_approve is False
+    assert maker._explicit_approvals_mode is None
+    # The persisted record was cleared too, not merely forgotten in memory.
+    assert json.loads((maker_dir / OVERRIDE_FILENAME).read_text())["override"] is None
+    assert "this conversation now follows it" in getattr(receipt, "text", ""), getattr(
+        receipt, "text", ""
+    )
+    # An inheriting session follows through the watcher...
+    assert inheriting._auto_approve is False
+    # ...and a session with its own recorded choice is untouched.
+    assert keeper._auto_approve is True, "a global default revoked another conversation's choice"
+    assert keeper._explicit_approvals_mode == "auto"
+    assert json.loads((keeper_dir / OVERRIDE_FILENAME).read_text())["override"] == "auto"
+    await maker.dispose()
+    await inheriting.dispose()
+    await keeper.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_default_write_failure_says_nothing_was_saved(
+    tmp_path, monkeypatch
+) -> None:
+    """A failed write is reported as a failure — never as a propagation.
+
+    The old receipt claimed ``auto`` "now"; the new one claims exactly what the
+    facade did. If the write raises (a read-only config directory, a full
+    disk), the receipt names the error class and says no other session changed.
+    """
+    handle, session, watcher, _emitted = _handle(tmp_path, auto_approve=False)
+
+    def _refuse(*_args, **_kwargs):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr("local_operator.settings_io.write_setting", _refuse)
+    from local_operator.session.frontend_state import SlashResult
+
+    receipt = handle._approvals_slash(session, "default auto", SlashResult)
+    text = getattr(receipt, "text", "")
+    assert "NOT saved (PermissionError)" in text, text
+    assert "no other session was told" in text, text
+    assert "every session" not in text, text
+    assert ConfigManager(watcher.config_dir).get_config_value("tool_approval_mode") == "ask"
+    assert handle._auto_approve is False
+    await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_published_gate_carries_the_policy_and_its_provenance(tmp_path) -> None:
+    """The phone/desktop contract must say WHO set the rule, not just the mode.
+
+    A viewer cannot derive the effective policy: the conversation's own record
+    outranks config.yml, so "Ask — session override; global Auto" is only
+    possible if the publisher stamps both halves. This drives the real
+    publication seam with a stub store and checks the payload a viewer folds.
+    """
+    handle, session, _watcher, _emitted = _handle(tmp_path, auto_approve=False)
+
+    class _Store:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def mutate(self, **changes: Any) -> None:
+            self.calls.append(changes)
+
+    store = _Store()
+    session._frontend_state_store = store  # type: ignore[attr-defined]
+    parked = asyncio.ensure_future(handle._approval_gate("bash", "probe"))
+    await asyncio.sleep(0)
+    handle._publish_pending_gate()
+
+    payload = store.calls[-1]["pending_gate"]
+    assert payload["approval_mode"] == "ask", payload
+    assert payload["approval_provenance"] == "global", payload
+    assert payload["approval_global_mode"] == "ask", payload
+
+    # GLOBAL ASK + SESSION ASK: the two words agree, and the payload must still
+    # carry the global half instead of letting a viewer derive the complement
+    # (the U4 defect said "global Auto" here).
+    handle._explicit_approvals_mode = "ask"
+    handle._publish_pending_gate()
+    payload = store.calls[-1]["pending_gate"]
+    assert payload["approval_mode"] == "ask", payload
+    assert payload["approval_provenance"] == "session", payload
+    assert payload["approval_global_mode"] == "ask", payload
+
+    # Session AUTO over a global ASK: the interesting cross direction.
+    handle._explicit_approvals_mode = "auto"
+    handle._publish_pending_gate()
+    payload = store.calls[-1]["pending_gate"]
+    assert payload["approval_mode"] == "auto", payload
+    assert payload["approval_provenance"] == "session", payload
+    assert payload["approval_global_mode"] == "ask", payload
+
+    pending = handle._fold.projection.pending
+    assert pending is not None
+    await handle.approval_answer(pending.request_id, False, False)
+    assert await parked is False
+    await handle.dispose()
+
+    # GLOBAL AUTO + SESSION AUTO, the mirror. A gate can be PARKED under auto
+    # only because it was raised before the mode moved (that is the saved-state
+    # card), so drive the real writes in that order rather than hand-setting the
+    # fields: default auto first, then this conversation's own auto.
+    from local_operator.session.frontend_state import SlashResult
+
+    (tmp_path / "mirror").mkdir()
+    auto_handle, auto_session, _auto_watcher, _auto_emitted = _handle(
+        tmp_path / "mirror", auto_approve=False
+    )
+    auto_store = _Store()
+    auto_session._frontend_state_store = auto_store  # type: ignore[attr-defined]
+    auto_parked = asyncio.ensure_future(auto_handle._approval_gate("bash", "probe"))
+    await asyncio.sleep(0)
+    auto_handle._approvals_default_slash("default auto", SlashResult)
+    auto_handle._approvals_slash(auto_handle._session, "auto", SlashResult)
+    auto_handle._publish_pending_gate()
+    auto_payload = auto_store.calls[-1]["pending_gate"]
+    assert auto_payload["approval_mode"] == "auto", auto_payload
+    assert auto_payload["approval_provenance"] == "session", auto_payload
+    assert auto_payload["approval_global_mode"] == "auto", auto_payload
+    auto_pending = auto_handle._fold.projection.pending
+    assert auto_pending is not None
+    await auto_handle.approval_answer(auto_pending.request_id, False, False)
+    assert await auto_parked is False
+    await auto_handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_phone_reads_a_successful_loosening_as_success(tmp_path) -> None:
+    """A successful loosening is tinted ``warning`` but is not a refusal.
+
+    ``_slash_receipt`` used to classify on the tint, so the phone showed every
+    successful ``auto`` / ``default auto`` as refused and kept the draft. The
+    structured ``data.ok`` is the verdict; the tint rule survives only for an
+    older runtime that sends none (agent review round 1, B1).
+    """
+    from local_operator.mobile.daemon import _slash_receipt
+    from local_operator.session.frontend_state import SlashResult
+
+    handle, _session, _watcher, _emitted = _handle(tmp_path, auto_approve=False)
+
+    live = handle._approvals_slash(handle._session, "auto", SlashResult)
+    detail, _tone, refused = _slash_receipt(live.model_dump(mode="json"), "approvals")
+    assert live.data["ok"] is True
+    assert refused is False, detail
+
+    default = handle._approvals_default_slash("default auto", SlashResult)
+    detail, _tone, refused = _slash_receipt(default.model_dump(mode="json"), "approvals")
+    assert default.data["ok"] is True
+    assert refused is False, detail
+
+    # Legacy owner with no verdict keeps the old rule: a warning-shaped outcome
+    # with no structured success is a refusal.
+    assert _slash_receipt({"text": "x", "style": "warning"}, "approvals")[2] is True
     await handle.dispose()

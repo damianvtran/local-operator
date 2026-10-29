@@ -15,13 +15,42 @@ OperatorApp via run_test.
 from __future__ import annotations
 
 import asyncio
+import gc
+import json
+import sys
+import threading
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from local_operator.harness.types import Usage
+from tests.loop_callback_spans import CallbackSpans
+
+
+@pytest.fixture(autouse=True)
+def _s2_static_worker_identity(request):
+    """Arm metadata BEFORE App boot, not when the recorder starts later.
+
+    Scope only the unchanged S2 function. Unsupported worker shapes/custom task
+    factories invalidate attribution quality, never change liveness thresholds.
+    """
+    if request.node.name != "test_s2_send_to_agent_end_keeps_the_loop_under_the_bar":
+        yield
+        return
+    from textual.worker import Worker
+
+    from tests.worker_code_identity import WorkerCodeIdentity, source_allowlist
+
+    registry = WorkerCodeIdentity(source_allowlist(Path(__file__).resolve().parents[2]))
+    try:
+        registry.install(Worker)
+        yield
+    finally:
+        registry.close()
 
 
 @pytest.fixture
@@ -57,6 +86,226 @@ NOISE_K = 3.0
 NOISE_CPU_CAP_MS = 1500.0
 NOISE_WALL_CAP_MS = 4000.0
 
+#: The S2 cell's fixed CPU ceiling, applied in two places: to the DELTA the
+#: turn adds over its control legs, and to the one-time empty -> conversation
+#: composition leg, which the delta cannot cover because it happens before
+#: both compared legs (review R1). It is the calibrated loaded ceiling itself,
+#: not a new constant: the control legs cancel the layout work that forced the
+#: 500 ms calibration (413 ms of legitimate layout CPU on CI), and a runner's
+#: wake noise shows up mostly in wall time. CPU samples are interval sums over
+#: the probe's wall window (see the S2 docstring and review R3), so they can
+#: carry some wall-driven inflation; that is recorded and deliberately NOT
+#: rescaled, because a single turn-leg interval above this fixed bar is the
+#: remaining red path. The noise-scaled formula is kept for the WALL backstop
+#: and for callers that still assert an absolute CPU bound via
+#: ``assert_no_stall_loaded``.
+S2_FIXED_CPU_CEILING_MS = 500.0
+
+
+#: The generations ``gc.get_count()`` reports and this attribution keeps apart.
+#: Gen 0 is the young-object sweep; gen 2 is the full-heap pass, whose cost
+#: scales with everything the process is still holding.
+GC_GENERATIONS = (0, 1, 2)
+
+
+@dataclass(frozen=True)
+class GcLeg:
+    """Cyclic-GC work the loop thread did inside one measurement leg.
+
+    WHY this exists: the quantity the S2 cell asserts — ``time.thread_time``
+    on the loop thread — is exactly what a cyclic collection spends when it
+    runs there. A collection's cost scales with the process's accumulated
+    HEAP, not with the code under test, and an xdist worker carries every
+    object the tests before it leaked. So the one number the cell asserts
+    cannot, on its own, tell the collector from the product: this record is
+    what separates them, per leg, by generation.
+
+    It is RECORDED, never deducted. Deducting would hand the cell a reading
+    that can no longer fail the way the 648.8 / 653 / 667.7 ms readings
+    failed, before anyone can say what consumed the CPU; any change to the
+    bound is a separate, argued change that cites these numbers.
+
+    ``count_at_open``/``count_at_close`` are ``gc.get_count()`` at the leg
+    boundaries — pending allocations per generation, the cheap leading
+    indicator of a collection. The object graph itself is deliberately NOT
+    walked: that costs more than the leg it would be measuring.
+    """
+
+    label: str
+    #: Collections per generation, counted only where they ran on the leg's thread.
+    collections: dict[int, int]
+    #: ``time.thread_time`` milliseconds spent inside those collections.
+    cpu_ms: dict[int, float]
+    count_at_open: tuple[int, int, int]
+    count_at_close: tuple[int, int, int]
+
+    @property
+    def total_ms(self) -> float:
+        return sum(self.cpu_ms.values())
+
+    def percentages(self) -> dict[int, float]:
+        """Each generation's share of this leg's GC time, 0.0 when nothing ran."""
+        total = self.total_ms
+        return {
+            generation: (100.0 * self.cpu_ms.get(generation, 0.0) / total) if total else 0.0
+            for generation in GC_GENERATIONS
+        }
+
+    def describe(self) -> str:
+        """One line a failure message can carry: totals, generations, shares."""
+        shares = self.percentages()
+        per_generation = ", ".join(
+            f"gen{generation} {self.cpu_ms.get(generation, 0.0):.1f} ms "
+            f"{shares[generation]:.1f}% ({self._count_text(generation)})"
+            for generation in GC_GENERATIONS
+        )
+        return (
+            f"{self.label or 'unnamed leg'}: {self.total_ms:.1f} ms of loop-thread GC over "
+            f"{self._count_text(None)} [{per_generation}]; "
+            f"gc.get_count() {self.count_at_open} -> {self.count_at_close}"
+        )
+
+    def _count_text(self, generation: int | None) -> str:
+        count = (
+            sum(self.collections.values())
+            if generation is None
+            else self.collections.get(generation, 0)
+        )
+        return f"{count} collection{'' if count == 1 else 's'}"
+
+    def as_summary(self) -> dict[str, object]:
+        """JSON-safe form for the JUnit property."""
+        shares = self.percentages()
+        return {
+            "label": self.label,
+            "gc_ms": {f"gen{g}": round(self.cpu_ms.get(g, 0.0), 3) for g in GC_GENERATIONS},
+            "gc_pct": {f"gen{g}": round(shares[g], 1) for g in GC_GENERATIONS},
+            "collections": {f"gen{g}": self.collections.get(g, 0) for g in GC_GENERATIONS},
+            "gc_ms_total": round(self.total_ms, 3),
+            "get_count_at_open": list(self.count_at_open),
+            "get_count_at_close": list(self.count_at_close),
+        }
+
+
+class GcAttribution:
+    """Per-leg cyclic-GC bookkeeping, fed by ``gc.callbacks``.
+
+    Registered for the recorder's lifetime rather than only around a leg's own
+    body, because a collection lands wherever the allocation count crosses a
+    threshold — a Textual timer's allocation, a test's own setup between probe
+    wakes — and every one of those is the same loop-thread pause the leg
+    measures. Cheap: with no leg open the callback is one boolean test, and a
+    collection costs two ``thread_time`` reads per phase plus a dict update.
+    Nothing is allocated on the no-collection path.
+
+    Same-thread only: ``gc.callbacks`` is PROCESS-global while the clock it is
+    compared against is per-thread, so a worker thread collecting while the
+    loop sits idle must not be charged to the loop — the loop thread lost no
+    CPU to it. (Same rule ``CallbackSpans`` and ``LoopCpuProbe`` state.)
+
+    Nesting: CPython sets ``gc.collecting`` while a collection runs, so one
+    cannot start inside another. One open slot is exact, not a simplification.
+    The two clock reads this callback makes land inside the interval it
+    measures; they are microseconds and are not deducted, because deducting
+    the instrument from its own measurement is how a dead instrument reads
+    clean.
+    """
+
+    def __init__(self, thread_id: int | None = None) -> None:
+        # Built on the thread whose ``thread_time`` the legs are measured on
+        # (the recorder's owner); asyncio offers no other way to name it.
+        self.thread_id = threading.get_ident() if thread_id is None else thread_id
+        self._attached = False
+        self._leg_open = False
+        self._label = ""
+        self._started_at: float | None = None
+        self._generation = -1
+        self._collections: dict[int, int] = {}
+        self._cpu_ms: dict[int, float] = {}
+        self._count_at_open: tuple[int, int, int] = (0, 0, 0)
+
+    def attach(self) -> None:
+        """Register the callback; idempotent so a leg can attach on its own."""
+        if not self._attached:
+            gc.callbacks.append(self._on_gc)
+            self._attached = True
+
+    def detach(self) -> None:
+        """Remove the callback. Safe to call when it was never attached."""
+        if not self._attached:
+            return
+        try:
+            gc.callbacks.remove(self._on_gc)
+        except ValueError:  # already gone; the invariant below still holds
+            pass
+        self._attached = False
+
+    def open(self, label: str = "") -> None:
+        """Start a leg: subsequent collections on this thread are charged to it."""
+        self._label = label
+        self._collections = {}
+        self._cpu_ms = {}
+        self._started_at = None
+        self._count_at_open = gc.get_count()
+        self._leg_open = True
+
+    def close(self) -> GcLeg:
+        """End the leg and return what it collected.
+
+        A collection cannot still be open here: collections are synchronous
+        and every leg boundary is crossed from the owning thread between two
+        task steps, never from inside a collector phase.
+        """
+        self._leg_open = False
+        leg = GcLeg(
+            label=self._label,
+            collections=dict(self._collections),
+            cpu_ms={generation: ms for generation, ms in self._cpu_ms.items()},
+            count_at_open=self._count_at_open,
+            count_at_close=gc.get_count(),
+        )
+        self._label = ""
+        self._collections = {}
+        self._cpu_ms = {}
+        return leg
+
+    def _on_gc(self, phase: str, info: dict[str, int]) -> None:
+        if not self._leg_open or threading.get_ident() != self.thread_id:
+            return
+        # ``generation`` is only on the start phase; the stop phase carries the
+        # counts, so the generation is captured where it exists.
+        if phase == "start":
+            self._started_at = time.thread_time()
+            self._generation = int(info.get("generation", -1))
+        elif self._started_at is not None:
+            generation = self._generation
+            self._cpu_ms[generation] = (
+                self._cpu_ms.get(generation, 0.0) + (time.thread_time() - self._started_at) * 1000.0
+            )
+            self._collections[generation] = self._collections.get(generation, 0) + 1
+            self._started_at = None
+
+
+@dataclass(frozen=True)
+class LegPeak:
+    """Worst probe interval recorded inside one measurement leg.
+
+    Both clocks are kept because they answer different questions: ``cpu_ms``
+    is loop-thread work that could block a frame, while ``wall_ms`` also
+    includes the process being descheduled. Legs are opened with
+    :meth:`StallRecorder.begin_leg` and closed with
+    :meth:`StallRecorder.end_leg`. The interval that straddles a boundary is
+    attributed to the leg that was open when the probe sampled it, so a leg
+    carries at most one ``TICK_S`` of boundary slop.
+
+    ``gc`` is the leg's cyclic-GC record (:class:`GcLeg`): it explains a
+    ``cpu_ms`` reading, it never changes it.
+    """
+
+    cpu_ms: float
+    wall_ms: float
+    gc: GcLeg | None = None
+
 
 class StallRecorder:
     """Records loop-thread CPU bursts AND wall-clock gaps while it runs.
@@ -65,9 +314,11 @@ class StallRecorder:
 
     * ``time.thread_time`` (CPU) is per-thread and excludes time asleep or
       waiting on the GIL, so a sample is large only when the loop thread
-      genuinely ran without yielding — never merely because the machine was
-      busy. This is the same statistic ``tests/unit/tools/
-      test_loop_liveness.py`` adopted for ``LoopCpuProbe``. It is the clock
+      genuinely ran BETWEEN probe wakes — never merely because the machine
+      was busy. Multiple callbacks/task steps can run in that interval; the
+      sample does not prove one uninterrupted callback. This is the same
+      statistic ``tests/unit/tools/test_loop_liveness.py`` adopted for
+      ``LoopCpuProbe``. It is the clock
       that sees the reconnect regression (a synchronous 60 MB transcript
       parse, ~90-130 ms of CPU on the loop) and is blind to OS scheduler
       starvation (the flake that produced 525 ms and 668 ms wall gaps on
@@ -110,32 +361,56 @@ class StallRecorder:
     below the canonical 5 s freeze.
     """
 
-    def __init__(self, stall_ms: float = STALL_MS) -> None:
+    def __init__(
+        self, stall_ms: float = STALL_MS, *, callbacks: CallbackSpans | None = None
+    ) -> None:
         self.stall_ms = stall_ms
+        self._callbacks = callbacks
         self.cpu_stalls: list[float] = []
         self.wall_stalls: list[float] = []
         self._task: asyncio.Task[None] | None = None
         #: Worst wake stretch seen inside the noise window, or None if no
         #: window was measured; see :meth:`begin_noise_window`.
         self.noise_floor_ms: float | None = None
-        #: Loop-thread CPU calibration ratio from :meth:`calibrate_cpu`;
+        #: Wall/CPU descheduling ratio from :meth:`calibrate_cpu`;
         #: 1.0 until measured, so uncalibrated callers keep fixed ceilings.
         self.cpu_calibration_ratio: float = 1.0
         self._noise_open = False
+        #: Running maxima of the leg opened by :meth:`begin_leg`, including
+        #: intervals below ``stall_ms``; see :class:`LegPeak`.
+        self._leg_cpu_ms = 0.0
+        self._leg_wall_ms = 0.0
+        self._leg_open = False
+        #: Loop-thread cyclic-GC attribution for the legs, by generation.
+        #: Attached for the recorder's lifetime, and the only thing that can
+        #: answer "GC or product?" about a leg's CPU number; see
+        #: :class:`GcAttribution`.
+        self.gc_attribution = GcAttribution()
+        #: Closed legs' GC records, in the order they closed.
+        self.gc_legs: list[GcLeg] = []
 
     async def _probe(self) -> None:
         last_cpu = time.thread_time()
         last_wall = time.perf_counter()
+        if self._callbacks is not None:
+            self._callbacks.take_window()
         while True:
             await asyncio.sleep(TICK_S)
             now_cpu = time.thread_time()
             now_wall = time.perf_counter()
             cpu_gap_ms = (now_cpu - last_cpu) * 1000.0
             wall_gap_ms = (now_wall - last_wall) * 1000.0
+            if self._callbacks is not None:
+                self._callbacks.observe_window(cpu_gap_ms, wall_gap_ms)
             if self._noise_open and (
                 self.noise_floor_ms is None or wall_gap_ms > self.noise_floor_ms
             ):
                 self.noise_floor_ms = wall_gap_ms
+            if self._leg_open:
+                if cpu_gap_ms > self._leg_cpu_ms:
+                    self._leg_cpu_ms = cpu_gap_ms
+                if wall_gap_ms > self._leg_wall_ms:
+                    self._leg_wall_ms = wall_gap_ms
             if cpu_gap_ms >= self.stall_ms:
                 self.cpu_stalls.append(cpu_gap_ms)
             if wall_gap_ms >= self.stall_ms:
@@ -144,6 +419,7 @@ class StallRecorder:
             last_wall = now_wall
 
     async def start(self) -> None:
+        self.gc_attribution.attach()
         self._task = asyncio.create_task(self._probe())
         # Let the probe take a tick BEFORE the work under test runs, so its
         # baseline is initialised; otherwise the first post-stall tick sets
@@ -158,21 +434,147 @@ class StallRecorder:
         except asyncio.CancelledError:
             pass
         self._task = None
+        self.gc_attribution.detach()
+
+    def begin_leg(self, label: str = "") -> None:
+        """Open a measurement leg; its peaks cover every probe interval until closed.
+
+        WHY legs exist here: the S2 cell times two comparable stretches of
+        layout churn in one run — a turn-free control and the turn itself —
+        and an absolute worst interval includes the app's own rendering cost
+        in both. The honest quantity is the difference between the legs; this
+        is the bookkeeping that keeps them apart. Intervals are recorded on
+        BOTH clocks even below ``stall_ms``, so a leg's peak is not quantised
+        by the stall-recording threshold.
+
+        ``label`` names the leg in the GC record and in a failure message
+        ("turn", "composition", "control-0"); it changes no measurement.
+        The GC attribution attaches here too, so a caller driving legs without
+        a probe task still gets its record.
+        """
+        self._leg_cpu_ms = 0.0
+        self._leg_wall_ms = 0.0
+        self._leg_open = True
+        self.gc_attribution.attach()
+        self.gc_attribution.open(label)
+
+    def end_leg(self) -> LegPeak:
+        """Close the open leg and return its worst intervals and its GC record."""
+        self._leg_open = False
+        leg_gc = self.gc_attribution.close()
+        self.gc_legs.append(leg_gc)
+        return LegPeak(cpu_ms=self._leg_cpu_ms, wall_ms=self._leg_wall_ms, gc=leg_gc)
+
+    @property
+    def leg_open(self) -> bool:
+        """Whether a leg is open, so a failing test can close it in ``finally``."""
+        return self._leg_open
+
+    def measurement_summary(self) -> dict[str, object]:
+        """Persist bounded evidence on passing CI cells too, without re-profiling."""
+        return {
+            "worst_cpu_ms": max(self.cpu_stalls, default=0.0),
+            "worst_wall_ms": max(self.wall_stalls, default=0.0),
+            "noise_floor_ms": self.noise_floor_ms,
+            "wall_cpu_descheduling_ratio": self.cpu_calibration_ratio,
+            "callbacks": self._callbacks.summary() if self._callbacks is not None else None,
+            "gc_attribution": self.gc_summary(),
+        }
+
+    def gc_summary(self) -> dict[str, object]:
+        """Per-leg and cell-total cyclic-GC record, for passes AND failures.
+
+        Passes carry it because the next failure needs a baseline: a cell whose
+        passing runs show ~0 ms of GC and 2-5 ms of delta has a different
+        problem from one whose passes already carry a 10 ms gen-2 step. Nothing
+        here is deducted from a bound.
+        """
+        totals = {generation: 0.0 for generation in GC_GENERATIONS}
+        collections = {generation: 0 for generation in GC_GENERATIONS}
+        for leg in self.gc_legs:
+            for generation in GC_GENERATIONS:
+                totals[generation] += leg.cpu_ms.get(generation, 0.0)
+                collections[generation] += leg.collections.get(generation, 0)
+        total_ms = sum(totals.values())
+        return {
+            "note": "loop-thread cyclic GC inside the measurement legs; recorded, NOT deducted",
+            "legs": [leg.as_summary() for leg in self.gc_legs],
+            "gc_ms": {f"gen{g}": round(totals[g], 3) for g in GC_GENERATIONS},
+            "gc_pct": {
+                f"gen{g}": (round(100.0 * totals[g] / total_ms, 1) if total_ms else 0.0)
+                for g in GC_GENERATIONS
+            },
+            "collections": {f"gen{g}": collections[g] for g in GC_GENERATIONS},
+            "gc_ms_total": round(total_ms, 3),
+        }
+
+    def gc_failure_note(self, *peaks: LegPeak, delta_ms: float | None = None) -> str:
+        """The GC half of a failure message: was this GC, or the product?
+
+        A failure has to answer that WITHOUT a rerun, because the reading is
+        gone as soon as the process exits. So the message carries each leg's
+        per-generation GC record, the ``gc.get_count()`` boundaries that show
+        what was queued, and a verdict line.
+
+        The verdict's arithmetic is deliberately one-sided. The GC figure is a
+        LEG TOTAL (every collection the leg recorded) while the measured
+        quantity is a PEAK INTERVAL, and a total is at least what any one
+        interval held — so the message states "at most N ms of the leg's GC,
+        at least M ms not GC". Writing the GC half as exact would be the
+        over-read this instrument exists to prevent, because a reader acts on
+        that line when the flake recurs. ``delta_ms`` is the compared quantity
+        when the failed assertion was a delta (the control leg's own GC cancels
+        there, exactly as layout does); without it the leg's absolute peak is
+        used.
+        """
+        lines = [
+            "",
+            "gc attribution (same run, loop thread; RECORDED, never subtracted from a bound):",
+        ]
+        for peak in peaks:
+            lines.append(
+                f"  {peak.gc.describe()}"
+                if peak.gc is not None
+                else "  gc: unmeasured for this leg"
+            )
+        measured = [peak for peak in peaks if peak.gc is not None]
+        if not measured:
+            return "\n".join(lines)
+        subject = measured[-1]
+        subject_gc = subject.gc.total_ms if subject.gc is not None else 0.0
+        if delta_ms is not None and len(measured) >= 2:
+            baseline_gc = measured[-2].gc.total_ms if measured[-2].gc is not None else 0.0
+            gc_delta = subject_gc - baseline_gc
+            share = 100.0 * gc_delta / delta_ms if delta_ms > 0 else 0.0
+            lines.append(
+                f"  verdict: the {delta_ms:.1f} ms delta can attribute at most {gc_delta:.1f} ms "
+                f"({share:.1f}%) to loop-thread GC — leg TOTALS against peak intervals, so that "
+                f"is an upper bound; at least {delta_ms - gc_delta:.1f} ms was not GC."
+            )
+        else:
+            share = 100.0 * subject_gc / subject.cpu_ms if subject.cpu_ms > 0 else 0.0
+            lines.append(
+                f"  verdict: this leg's {subject.cpu_ms:.1f} ms CPU peak can attribute at most "
+                f"{subject_gc:.1f} ms ({share:.1f}%) to loop-thread GC — a leg total against a "
+                f"single peak interval, so an upper bound; at least "
+                f"{subject.cpu_ms - subject_gc:.1f} ms was not GC."
+            )
+        return "\n".join(lines)
 
     def calibrate_cpu(self, burn_ms: float = 50.0) -> float:
-        """Measure this loop thread's CPU throughput before the turn.
+        """Measure this thread's wall/CPU descheduling ratio before the turn.
 
-        WHY a second estimator beside the wake-stretch floor: the floor is
-        measured while the loop is IDLE (pumping pauses), so it names how
-        late a wake can land, not how fast the loop thread executes CPU
-        work while a turn is running — descheduling and slow silicon
-        stretch a CPU sum without any single idle wake being late, which
-        is how a healthy 539 ms reading crossed the 500 ms ceiling the
-        floor had kept at 500. This leg burns a FIXED amount of loop-thread
-        CPU (timed with ``thread_time``, the LoopCpuProbe clock in
-        ``tests/unit/tools/test_loop_liveness.py``) and returns wall/CPU:
+        The idle wake floor and this ratio were introduced after an S2
+        reading of 539 ms crossed the 500 ms ceiling. Neither measurement
+        establishes which production callback consumed that CPU. This leg
+        burns a FIXED amount of loop-thread CPU (timed with ``thread_time``,
+        the LoopCpuProbe clock in ``tests/unit/tools/test_loop_liveness.py``)
+        and returns wall/CPU:
         ~1.0 on an uncontended runner, >1.0 exactly when this thread is
-        not getting the CPU its clock says it used. The burn is a tight
+        not getting the CPU its clock says it used. This is NOT a throughput
+        calibration: it fixes elapsed CPU, not completed work, so slower silicon
+        can still return ~1.0. The existing formula is retained; diagnostic
+        attribution must not silently widen the liveness contract. The burn is a tight
         allocation-free arithmetic loop, so no GC pause of its own lands
         in the interval (that probe deducts GC because it samples OTHER
         work; here there is nothing to deduct). Call BEFORE :meth:`start`
@@ -233,14 +635,18 @@ class StallRecorder:
         suffix = f" [{context}]" if context else ""
         worst_cpu = max(self.cpu_stalls) if self.cpu_stalls else 0.0
         worst_wall = max(self.wall_stalls) if self.wall_stalls else 0.0
+        if self._callbacks is not None and (
+            worst_cpu >= cpu_ceiling_ms or worst_wall >= wall_ceiling_ms
+        ):
+            suffix += "\ncallback attribution: " + json.dumps(self._callbacks.summary())
         assert worst_cpu < cpu_ceiling_ms, (
-            f"event loop consumed {worst_cpu:.0f} ms of CPU without yielding "
+            f"event loop consumed {worst_cpu:.0f} ms of CPU between probe ticks "
             f"(ceiling {cpu_ceiling_ms:.0f} ms); "
             f"all CPU stalls: {[round(s, 1) for s in self.cpu_stalls]}"
             f"{suffix}"
         )
         assert worst_wall < wall_ceiling_ms, (
-            f"event loop blocked for {worst_wall:.0f} ms of wall time "
+            f"event loop probe wake gap was {worst_wall:.0f} ms of wall time "
             f"(ceiling {wall_ceiling_ms:.0f} ms); "
             f"all wall stalls: {[round(s, 1) for s in self.wall_stalls]}"
             f"{suffix}"
@@ -283,27 +689,178 @@ class StallRecorder:
         starved off it; the 4000 ms cap keeps the canonical 5 s freeze
         tripping every bound.
         """
+        bound_cpu, bound_wall, context = self.loaded_bounds(
+            cpu_ceiling_ms=cpu_ceiling_ms,
+            wall_ceiling_ms=wall_ceiling_ms,
+            noise_floor_ms=noise_floor_ms,
+        )
+        self.assert_no_stall(cpu_ceiling_ms=bound_cpu, wall_ceiling_ms=bound_wall, context=context)
+
+    def loaded_bounds(
+        self,
+        cpu_ceiling_ms: float = 500.0,
+        wall_ceiling_ms: float = 2000.0,
+        noise_floor_ms: float | None = None,
+    ) -> tuple[float, float, str]:
+        """The loaded CPU/wall bounds, and the context naming their arithmetic.
+
+        Extracted so the S2 delta assertion and its JUnit summary report the
+        exact numbers :meth:`assert_no_stall_loaded` would have used: one
+        formula, several readers. With no measured floor the fixed ceilings
+        pass through unchanged, so uncalibrated callers keep today's bar.
+        """
         bound_cpu = cpu_ceiling_ms
         bound_wall = wall_ceiling_ms
         context = ""
         if noise_floor_ms is not None:
-            # The calibrated ceiling scales the fixed bar by the loop
-            # thread's own measured throughput (see :meth:`calibrate_cpu`)
-            # instead of raising the constant: the file's history above is
-            # the warning that the next slower runner beats any new fixed
-            # number. The NOISE_CPU_CAP_MS cap is unchanged, so a genuinely
-            # long CPU burst still reds on every runner.
+            # Preserve the existing bound formula while adding diagnostics.
+            # This wall/CPU ratio measures descheduling, not fixed-work CPU
+            # throughput; attribution must not masquerade as a new calibration.
+            # The CPU/wall caps still reject the canonical hostile controls.
             calibrated_cpu = cpu_ceiling_ms * self.cpu_calibration_ratio
             bound_cpu = min(max(NOISE_K * noise_floor_ms, calibrated_cpu), NOISE_CPU_CAP_MS)
             bound_wall = min(max(NOISE_K * noise_floor_ms, wall_ceiling_ms), NOISE_WALL_CAP_MS)
             context = (
-                f"noise floor {noise_floor_ms:.0f} ms, CPU calibration "
+                f"noise floor {noise_floor_ms:.0f} ms, wall/CPU descheduling ratio "
                 f"x{self.cpu_calibration_ratio:.2f} -> CPU bound {bound_cpu:.0f} ms, "
                 f"wall bound {bound_wall:.0f} ms "
                 f"(K={NOISE_K:g}, caps {NOISE_CPU_CAP_MS:.0f}/{NOISE_WALL_CAP_MS:.0f}, "
                 f"fixed {cpu_ceiling_ms:.0f}/{wall_ceiling_ms:.0f})"
             )
-        self.assert_no_stall(cpu_ceiling_ms=bound_cpu, wall_ceiling_ms=bound_wall, context=context)
+        return bound_cpu, bound_wall, context
+
+    def assert_leg_ceiling(
+        self,
+        peak: LegPeak,
+        *,
+        label: str,
+        cpu_ceiling_ms: float = S2_FIXED_CPU_CEILING_MS,
+        wall_ceiling_ms: float = 2000.0,
+        noise_floor_ms: float | None = None,
+    ) -> None:
+        """Bound ONE measured leg by the fixed CPU ceiling and the wall backstop.
+
+        The S2 cell uses this for the one-time empty -> conversation
+        composition: that transition happens before the compared control/turn
+        legs, so the delta cannot cover it, and leaving it unmeasured let a
+        first-send regression of 600-1900 ms pass the delta shape (review R1).
+        It is boot-adjacent layout work, not send-path work, so it is bounded
+        as an absolute window rather than by a difference. The CPU bar is the
+        fixed calibrated 500 ms; the wall side uses the same noise-scaled bound
+        as :meth:`assert_no_stall_loaded`, because a blocking sleep must still
+        red.
+        """
+        _, bound_wall, _ = self.loaded_bounds(
+            cpu_ceiling_ms=cpu_ceiling_ms,
+            wall_ceiling_ms=wall_ceiling_ms,
+            noise_floor_ms=noise_floor_ms,
+        )
+        suffix = ""
+        if self._callbacks is not None and (
+            peak.cpu_ms >= cpu_ceiling_ms or peak.wall_ms >= bound_wall
+        ):
+            suffix = "\ncallback attribution: " + json.dumps(self._callbacks.summary())
+        assert peak.cpu_ms < cpu_ceiling_ms, (
+            f"{label} consumed {peak.cpu_ms:.1f} ms of loop-thread CPU "
+            f"(fixed ceiling {cpu_ceiling_ms:.0f} ms); "
+            f"all CPU stalls: {[round(s, 1) for s in self.cpu_stalls]}"
+            f"{suffix}{self.gc_failure_note(peak)}"
+        )
+        assert peak.wall_ms < bound_wall, (
+            f"{label} probe wake gap was {peak.wall_ms:.0f} ms of wall time "
+            f"(ceiling {bound_wall:.0f} ms); "
+            f"all wall stalls: {[round(s, 1) for s in self.wall_stalls]}"
+            f"{suffix}{self.gc_failure_note(peak)}"
+        )
+
+    def assert_turn_delta_loaded(
+        self,
+        control: LegPeak,
+        turn: LegPeak,
+        cpu_ceiling_ms: float = S2_FIXED_CPU_CEILING_MS,
+        wall_ceiling_ms: float = 2000.0,
+        noise_floor_ms: float | None = None,
+    ) -> None:
+        """Loaded bar applied to the DELTA the turn adds over a control leg.
+
+        WHY the delta and not the turn's absolute worst interval: this path's
+        largest legitimate loop-CPU cost is Textual layout — 413 ms measured
+        on CI against the fixed 500 ms ceiling, with a second legitimate
+        sample at 557.8 ms (run 38165502284, 2026-10-11). The absolute reading
+        therefore mostly measures the app's rendering and the runner hosting
+        it, not the send path the cell claims to pin. The control leg mounts
+        the same widgets through the same append path and pumps the same
+        cadence WITHOUT the agent-turn transition events, so layout cost
+        cancels in ``turn.cpu_ms - control.cpu_ms``; what remains is the
+        synchronous work the turn itself adds, which is the quantity a freeze
+        regression moves. ``control`` is the LOW-WATERMARK of repeated control
+        legs measured before the turn in the same run with the same
+        :class:`StallRecorder` and the same app (the S2 cell takes the minimum
+        of two warm samples): a single control leg inflated by host noise
+        would make the delta more negative and silently mask a turn
+        regression, so one sample is not a safe baseline.
+
+        The CPU bar keeps the calibrated 500 ms constant and does NOT ride
+        the run's wake-stretch floor or descheduling ratio: those estimators
+        exist to absorb the absolute layout and wake cost, and a difference
+        of two same-run legs already cancels both (``thread_time`` counts CPU
+        actually executed either way). Re-scaling the delta by them would
+        hand a loaded runner a multi-second CPU allowance in exactly the
+        quantity where the noise they model has cancelled — and would let a
+        deliberate 650 ms synchronous block pass. The wall side stays an
+        ABSOLUTE backstop over the collected stall list, using the existing
+        noise-scaled formula: a blocking sleep on the loop is invisible to
+        ``thread_time``, so it cannot show up in a CPU delta and must still
+        red as a wall gap.
+
+        Known residual, recorded rather than rescaled (review R3): CPU samples
+        are interval sums over the probe's wall window — ``thread_time`` deltas
+        include whatever loop-thread work ran between two wakes, and on a
+        loaded runner a delayed wake can attribute CPU from work around the
+        interval (the review measured 100.6 ms of CPU inside a 123.8 ms wall
+        window). A leg peak is therefore an upper bound on one uninterrupted
+        callback, not a per-callback measurement. A single turn-leg interval
+        above the fixed 500 ms remains the red path, and the failure message
+        carries callback attribution AND the per-generation GC record
+        (``gc_attribution``) to explain it: the second instrument exists
+        because cyclic GC runs on whichever thread triggers it, so a gen-2
+        pass over this worker's accumulated heap is real loop-thread CPU that
+        no callback attribution can charge to a callback.
+        """
+        bound_cpu = cpu_ceiling_ms
+        _, bound_wall, _ = self.loaded_bounds(
+            cpu_ceiling_ms=cpu_ceiling_ms,
+            wall_ceiling_ms=wall_ceiling_ms,
+            noise_floor_ms=noise_floor_ms,
+        )
+        delta_cpu = turn.cpu_ms - control.cpu_ms
+        worst_wall = max(self.wall_stalls, default=0.0)
+        floor_text = f"{noise_floor_ms:.0f} ms" if noise_floor_ms is not None else "unmeasured"
+        suffix = (
+            f" [CPU bound {bound_cpu:.0f} ms fixed (layout cancels in the delta, "
+            f"so the run's wake floor and descheduling ratio are not applied), "
+            f"wall bound {bound_wall:.0f} ms, noise floor {floor_text}, "
+            f"wall/CPU descheduling ratio x{self.cpu_calibration_ratio:.2f}]"
+        )
+        suffix += (
+            f"\ncontrol: {control.cpu_ms:.1f} ms CPU / {control.wall_ms:.1f} ms wall; "
+            f"turn: {turn.cpu_ms:.1f} ms CPU / {turn.wall_ms:.1f} ms wall"
+        )
+        if self._callbacks is not None and (delta_cpu >= bound_cpu or worst_wall >= bound_wall):
+            suffix += "\ncallback attribution: " + json.dumps(self._callbacks.summary())
+        assert delta_cpu < bound_cpu, (
+            f"the agent-turn path added {delta_cpu:.1f} ms of loop-thread CPU over "
+            f"the comparable control leg (turn {turn.cpu_ms:.1f} ms - control "
+            f"{control.cpu_ms:.1f} ms, bound {bound_cpu:.1f} ms); "
+            f"all CPU stalls: {[round(s, 1) for s in self.cpu_stalls]}"
+            f"{suffix}{self.gc_failure_note(control, turn, delta_ms=delta_cpu)}"
+        )
+        assert worst_wall < bound_wall, (
+            f"event loop probe wake gap was {worst_wall:.0f} ms of wall time "
+            f"(ceiling {bound_wall:.0f} ms); "
+            f"all wall stalls: {[round(s, 1) for s in self.wall_stalls]}"
+            f"{suffix}{self.gc_failure_note(control, turn, delta_ms=delta_cpu)}"
+        )
 
 
 # --- A2: the title backfill answers a no-title directory once ----------------
@@ -1226,18 +1783,66 @@ async def test_s1_boot_paints_and_stays_responsive_over_the_first_seconds() -> N
 
 
 @pytest.mark.asyncio
-async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar() -> None:
+async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar(
+    record_property: Callable[[str, object], None],
+) -> None:
     """S2: a streamed reply with tool batches, from submit to ``agent_end``,
-    leaves no loop stall above the bar — the reported 'sending a message
-    freezes the UI until processed'. The pricing leg is made hostile the same
-    way the unit test makes it: discovery stubbed slow, memo cold. The bar
-    scales with the run's own measured noise floor (the idle leg below; the
-    constants and the CI dataset behind them sit beside NOISE_K): on a quiet
-    machine it is the calibrated 500 ms, on a loaded runner the bound rides
-    the runner's own wake noise and its measured loop-thread CPU throughput
-    (the calibration leg below — the idle floor alone cannot see a slow or
-    descheduled loop thread, which is the estimator flaw behind the healthy
-    539 ms reading that crossed the unscaled 500 ms ceiling)."""
+    adds no loop stall above the bar over a same-run control baseline — the
+    reported 'sending a message freezes the UI until processed'. The pricing
+    leg is made hostile the same way the unit test makes it: discovery stubbed
+    slow, memo cold.
+
+    WHAT IS MEASURED, and why it is a delta: this path's dominant legitimate
+    loop-CPU cost is Textual layout, not the send plumbing — 413 ms of layout
+    CPU was recorded on CI against the fixed 500 ms ceiling, with a second
+    legitimate sample at 557.8 ms (run 38165502284). An absolute bar therefore
+    mostly measures the app's rendering and the runner hosting it, and a
+    machine-noise sample can cross it while the send path is healthy. The cell
+    measures three windows on the same app and ``StallRecorder``:
+
+    * The one-time empty → conversation COMPOSITION, which retires the splash
+      and composes the first conversation. It happens before either compared
+      leg, so it cannot be differenced; it is bounded on its own by the fixed
+      calibrated 500 ms CPU bar and the noise-scaled absolute wall backstop.
+      Without this leg a first-send regression of 600-1900 ms passed the delta
+      shape (review R1).
+    * Two measured CONTROL legs plus one discarded warm-up leg of the same
+      widget pair: the same assistant block and tool card mounted through the
+      same append path, the same band update and the same pump cadence, with
+      NONE of the agent-turn transition events
+      (``AgentStartEvent``/``Message*``/``ToolExecution*``/``AgentEndEvent``).
+      The warm-up leg runs the same mount/settle path first, so neither control
+      nor turn is the first to touch Textual's style/layout caches; the control
+      baseline is the MINIMUM of the two measured samples, because one control
+      leg inflated by host noise would make the delta more negative and mask a
+      regression. Each later leg mounts into a tree at least as large as the
+      one before, so the turn cannot benefit from a smaller tree than its
+      baseline (review R2/R2b).
+    * The TURN leg itself.
+
+    Layout cost then cancels in ``turn - control`` and the remainder is the
+    synchronous work the turn adds — the quantity a freeze regression moves.
+    A deliberate 650 ms block injected into a turn-only handler fails this
+    assertion, including when the first control leg is artificially inflated,
+    because the baseline is the low-watermark of two samples.
+
+    The CPU bar is the calibrated 500 ms applied to the DELTA, not to the raw
+    interval: the control legs cancel the layout cost, so the absolute CPU
+    reading's need for runner-noise scaling goes with it. CPU samples are
+    interval sums over the probe's wall window, so they can carry some
+    wall-driven inflation (100.6 ms CPU inside a 123.8 ms wall window was
+    measured in review); that residual is recorded, not rescaled, and a single
+    turn-leg interval above the fixed 500 ms remains the red path (review R3).
+    The wall side stays an ABSOLUTE backstop over the collected stall list,
+    still scaled by the run's measured wake floor, because a blocking sleep is
+    invisible to ``thread_time`` and cannot appear in a CPU delta. Callback
+    diagnostics and the JUnit measurement summary ride along, now with every
+    leg's numbers and explicit nulls when a leg was not measured (review R4).
+
+    KNOWN LIMIT: a synchronous regression in code shared by both the control
+    and the turn (the widget/layout path) cancels in the delta; that class is
+    covered only by the absolute wall backstop and the S1/S3 cells.
+    """
     from local_operator.harness.types import (
         AgentEndEvent,
         AgentStartEvent,
@@ -1253,6 +1858,9 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar() -> None:
     from local_operator.model import configure, discovery
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.events import ContextUsageReported
+    from local_operator.tui.widgets.assistant import AssistantBlock
+    from local_operator.tui.widgets.tool_card import ToolCard
+    from local_operator.tui.widgets.transcript import NoticeBlock
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
     slow = _SlowListing(5.0)
@@ -1261,65 +1869,630 @@ async def test_s2_send_to_agent_end_keeps_the_loop_under_the_bar() -> None:
     configure.invalidate_model_info_cache()
     session = FakeSession()
     app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        recorder = StallRecorder()
-        # CPU calibration BEFORE start(): the probe must not record its own
-        # burn, and the ratio must describe this thread before the turn.
-        recorder.calibrate_cpu()
-        await recorder.start()
-        # The run's own noise floor, measured before the turn: pump the idle
-        # app for a spell — timers, paints, the same pump the turn will use —
-        # with none of the turn's legs on it. The worst wake stretch observed
-        # here is what the turn's CPU-sum reading is allowed to ride on; the
-        # constants and the CI dataset behind them are beside NOISE_K.
-        recorder.begin_noise_window()
-        for _ in range(12):
-            await pilot.pause(0.05)
-        recorder.end_noise_window()
-        # A turn with message text, a tool batch, per-call usage reports, and
-        # an unpriceable model on the components — the exact surface the
-        # freeze was reported on.
-        session.emit(AgentStartEvent())
-        message = Message.assistant("streaming answer")
-        session.emit(MessageStartEvent(message=message))
-        session.emit(MessageUpdateEvent(message=message, delta="streaming answer"))
-        session.emit(MessageEndEvent(message=message))
-        usage = Usage(input_tokens=10_000, output_tokens=2_000, context_tokens=10_200)
-        app.post_message(ContextUsageReported(10_200, usage))
-        session.emit(
-            ToolExecutionStartEvent(tool_call_id="t1", tool_name="bash", args={"command": "ls"})
-        )
-        session.emit(
-            ToolExecutionEndEvent(
-                tool_call_id="t1",
-                tool_name="bash",
-                result=ToolResult(tool_call_id="t1", tool_name="bash"),
-            )
-        )
-        session.emit(AgentEndEvent())
-        for _ in range(20):
-            await pilot.pause(0.05)
-        await recorder.stop()
-        # Drain the background refresh BEFORE detaching the stub: the thread
-        # is mid-sleep inside it, and restoring the real discovery + clearing
-        # the memo while it runs leaves either a poisoned memo entry or a
-        # thread fetching against a swapped module for the next test.
+    composition_peak: LegPeak | None = None
+    control_peaks: list[LegPeak] = []
+    turn_peak: LegPeak | None = None
+
+    def _peak_ms(peak: LegPeak | None, *, wall: bool = False) -> float | None:
+        """Round one leg field, or ``None`` when that leg never ran (review R4)."""
+        if peak is None:
+            return None
+        return round(peak.wall_ms if wall else peak.cpu_ms, 1)
+
+    try:
+        with CallbackSpans(asyncio.get_running_loop()) as callbacks:
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                recorder = StallRecorder(callbacks=callbacks)
+                # CPU calibration BEFORE start(): the probe must not record its own
+                # burn, and the ratio must describe this thread before the turn.
+                recorder.calibrate_cpu()
+
+                async def _drive_layout_leg(
+                    *, label: str, measure: bool, retire: bool
+                ) -> LegPeak | None:
+                    """Drive one leg of the layout work the turn's handlers reach.
+
+                    The warm-up leg runs this path first so neither measured
+                    control nor the turn is the first to touch Textual's
+                    style/layout caches (review R2). ``retire`` removes the
+                    warm-up pair again so the first measured leg starts from
+                    the same tree the warm-up did. Measured control pairs stay
+                    mounted, so every later leg lays out a tree at least as
+                    large as the previous one — the direction cannot favour the
+                    turn, and the baseline is the later minimum of two samples
+                    (review R2b).
+                    """
+                    if measure:
+                        recorder.begin_leg(label=label)
+                    block = AssistantBlock()
+                    block.update_text("streaming answer")
+                    app._append_block(block)
+                    app._refresh_working_activity()
+                    block.update_text(f"streaming answer, {label} flush")
+                    card = ToolCard(f"{label}-t1", "bash", {"command": "ls"})
+                    app._append_block(card)
+                    app._refresh_working_activity()
+                    block.finalize_text()
+                    card.mark_done("", None)
+                    status = app._status
+                    assert status is not None, "the status band exists once the app is booted"
+                    status.update(context_tokens=10_200, context_is_estimate=False)
+                    for _ in range(20):
+                        await pilot.pause(0.05)
+                    peak = recorder.end_leg() if measure else None
+                    if retire:
+                        app._transcript_view().remove_block(block)
+                        app._transcript_view().remove_block(card)
+                        for _ in range(2):
+                            await pilot.pause(0.05)
+                    return peak
+
+                try:
+                    await recorder.start()
+                    # The run's own noise floor, measured before any work leg: pump the
+                    # idle app for a spell — timers, paints, the same pump the turn will
+                    # use — with none of the turn's legs on it. The worst wake stretch
+                    # observed here scales the WALL backstop only; the CPU bars are the
+                    # fixed calibrated ceiling because noise of this kind is wall time,
+                    # not loop-thread CPU. The constants and the CI dataset behind them
+                    # sit beside NOISE_K.
+                    recorder.begin_noise_window()
+                    for _ in range(12):
+                        await pilot.pause(0.05)
+                    recorder.end_noise_window()
+                    # --- Composition leg (R1): the one-time empty → conversation draw ---
+                    # It retires the splash and composes the first conversation, and it
+                    # happens before either compared leg, so the delta cannot bound it.
+                    # It is boot-adjacent layout, not send-path work, so it gets the
+                    # fixed absolute CPU bar: measurably cheaper than the 600-1900 ms
+                    # first-send regression this leg exists to catch.
+                    recorder.begin_leg(label="composition")
+                    app._append_block(NoticeBlock("composition probe"))
+                    for _ in range(10):
+                        await pilot.pause(0.05)
+                    composition_peak = recorder.end_leg()
+                    recorder.assert_leg_ceiling(
+                        composition_peak,
+                        label="empty -> conversation composition",
+                        noise_floor_ms=recorder.noise_floor_ms,
+                    )
+                    # --- Discarded warm-up leg (R2): the same widget pair, unmeasured ---
+                    await _drive_layout_leg(label="warmup", measure=False, retire=True)
+                    # --- Two measured control legs; baseline is the low-watermark (R2b) ---
+                    # A single control sample inflated by host noise would make the
+                    # delta more negative and silently mask a turn regression; the
+                    # minimum of two same-shaped warm samples keeps that headroom.
+                    for index in range(2):
+                        control = await _drive_layout_leg(
+                            label=f"control-{index}", measure=True, retire=False
+                        )
+                        assert control is not None, "a control leg was not measured"
+                        control_peaks.append(control)
+                    # --- Turn leg: the same churn plus the transition events ---
+                    recorder.begin_leg(label="turn")
+                    # A turn with message text, a tool batch, per-call usage reports, and
+                    # an unpriceable model on the components — the exact surface the
+                    # freeze was reported on.
+                    session.emit(AgentStartEvent())
+                    message = Message.assistant("streaming answer")
+                    session.emit(MessageStartEvent(message=message))
+                    session.emit(MessageUpdateEvent(message=message, delta="streaming answer"))
+                    session.emit(MessageEndEvent(message=message))
+                    usage = Usage(input_tokens=10_000, output_tokens=2_000, context_tokens=10_200)
+                    app.post_message(ContextUsageReported(10_200, usage))
+                    session.emit(
+                        ToolExecutionStartEvent(
+                            tool_call_id="t1", tool_name="bash", args={"command": "ls"}
+                        )
+                    )
+                    session.emit(
+                        ToolExecutionEndEvent(
+                            tool_call_id="t1",
+                            tool_name="bash",
+                            result=ToolResult(tool_call_id="t1", tool_name="bash"),
+                        )
+                    )
+                    session.emit(AgentEndEvent())
+                    for _ in range(20):
+                        await pilot.pause(0.05)
+                    turn_peak = recorder.end_leg()
+                finally:
+                    if recorder.leg_open:
+                        recorder.end_leg()
+                    await recorder.stop()
+                    # JUnit retains this on PASS and FAIL; future CI evidence
+                    # must not require another profiling run to read the clocks.
+                    # Every measured leg and both bounds are recorded, with
+                    # explicit nulls when a leg did not run (review R4), so a
+                    # failing run cannot be misread as a zero-cost measurement.
+                    _, bound_wall, _ = recorder.loaded_bounds(
+                        noise_floor_ms=recorder.noise_floor_ms
+                    )
+                    control_low = (
+                        min(control_peaks, key=lambda peak: peak.cpu_ms) if control_peaks else None
+                    )
+                    record_property(
+                        "s2_loop_liveness",
+                        json.dumps(
+                            {
+                                **recorder.measurement_summary(),
+                                "legs_measured": {
+                                    "composition": composition_peak is not None,
+                                    "control_samples": len(control_peaks),
+                                    "turn": turn_peak is not None,
+                                },
+                                "composition_worst_cpu_ms": _peak_ms(composition_peak),
+                                "composition_worst_wall_ms": _peak_ms(composition_peak, wall=True),
+                                "control_samples_worst_cpu_ms": [
+                                    round(peak.cpu_ms, 1) for peak in control_peaks
+                                ],
+                                "control_samples_worst_wall_ms": [
+                                    round(peak.wall_ms, 1) for peak in control_peaks
+                                ],
+                                "control_worst_cpu_ms": _peak_ms(control_low),
+                                "control_worst_wall_ms": _peak_ms(control_low, wall=True),
+                                "turn_worst_cpu_ms": _peak_ms(turn_peak),
+                                "turn_worst_wall_ms": _peak_ms(turn_peak, wall=True),
+                                "turn_delta_cpu_ms": (
+                                    None
+                                    if control_low is None or turn_peak is None
+                                    else round(turn_peak.cpu_ms - control_low.cpu_ms, 1)
+                                ),
+                                "delta_cpu_bound_ms": S2_FIXED_CPU_CEILING_MS,
+                                "composition_cpu_bound_ms": S2_FIXED_CPU_CEILING_MS,
+                                "wall_bound_ms": round(bound_wall, 1),
+                            }
+                        ),
+                    )
+                # The composition leg is already bounded above; the turn's DELTA
+                # over the low-watermark control and the absolute wall backstop are
+                # the remaining assertions. See the docstring and
+                # assert_turn_delta_loaded for why the delta is the honest quantity.
+                assert control_peaks, "no control leg was measured"
+                assert turn_peak is not None, "the turn leg was not measured"
+                control_peak = min(control_peaks, key=lambda peak: peak.cpu_ms)
+                recorder.assert_turn_delta_loaded(
+                    control=control_peak,
+                    turn=turn_peak,
+                    noise_floor_ms=recorder.noise_floor_ms,
+                )
+
+    finally:
+        # Keep the stub installed until its background reader has drained, even
+        # when the turn/assertion raises. Never poison another test's cold memo.
         slow.latency_s = 0.0
-        for _ in range(200):
-            if slow.in_flight == 0:
-                break
-            await asyncio.sleep(0.02)
-        discovery.available_models = original  # type: ignore[assignment]
-        configure.invalidate_model_info_cache()
-        # Loaded bar (500 ms CPU / 2 s wall): this path has legitimate loop
-        # CPU from Textual layout (413 ms recorded on CI), and the
-        # reconnect/connect tests are the ones that assert the strict 50 ms
-        # CPU bar against the parse regression. Bench numbers were recorded in
-        # bench/before.json vs after.json — out of the tree now, one `git show`
-        # away at ba225070 (AGENTS.md, "Evidence goes on the PR, never into the
-        # repository").
-        recorder.assert_no_stall_loaded(noise_floor_ms=recorder.noise_floor_ms)
+        try:
+            for _ in range(200):
+                if slow.in_flight == 0:
+                    break
+                await asyncio.sleep(0.02)
+        finally:
+            discovery.available_models = original  # type: ignore[assignment]
+            configure.invalidate_model_info_cache()
+
+
+# --- S2's GC instrument: what consumed the CPU, and the control that proves it --
+#
+# The S2 cell asserts loop-thread CPU against a fixed 500 ms ceiling, and the
+# flake pattern is bimodal: most legs near zero, the failing leg carrying one
+# step (648.8 / 653 / 667.7 ms across three shard runs). A single spike with no
+# attribution is indistinguishable from a genuinely slow product path, so these
+# tests pin an instrument that names the collector, and a causal control that
+# separates a collection on the loop thread from real work. Nothing here
+# changes the ceiling, skips the cell, or retries it.
+
+
+def _cyclic_heap(nodes: int) -> list[dict[str, object]]:
+    """A tracked, self-referential heap that only the CYCLIC collector can free.
+
+    Every node points at itself, so refcounting can never reclaim the graph:
+    it survives until a gen-2 pass reaches it, which is the shape whose
+    collection cost scales with the heap instead of with the code under test —
+    the same shape a long-lived xdist worker accumulates from the tests before
+    it. Measured here (CPython 3.12, this host): 25k nodes ~1.0 ms per gen-2
+    pass, 120k ~4.6 ms, 200k ~13.7 ms. The assertions below use ratios and low
+    floors rather than those absolute numbers, so slower silicon changes
+    nothing.
+    """
+    heap: list[dict[str, object]] = []
+    for index in range(nodes):
+        node: dict[str, object] = {"index": index}
+        node["self"] = node
+        heap.append(node)
+    return heap
+
+
+def test_s2_gc_attribution_is_zero_on_a_leg_that_collects_nothing() -> None:
+    """The instrument's zero: no allocation, no collection, no GC time.
+
+    Without this the non-zero reading in the real cell could be the
+    instrument's own bookkeeping. ``gc.collect()`` first settles every
+    counter, so a sweep already queued by the set-up cannot land in the leg
+    and be counted as the leg's.
+    """
+    gc.collect()
+    recorder = StallRecorder()
+    try:
+        recorder.begin_leg(label="quiet")
+        leg = recorder.end_leg()
+    finally:
+        recorder.gc_attribution.detach()
+    assert leg.gc is not None
+    assert leg.gc.label == "quiet"
+    assert leg.gc.collections == {}
+    assert leg.gc.total_ms == 0.0
+    assert leg.gc.percentages() == {0: 0.0, 1: 0.0, 2: 0.0}
+    # get_count() is recorded at both boundaries: the pending per-generation
+    # allocation counts are the cheap leading indicator of a collection.
+    assert len(leg.gc.count_at_open) == 3
+    assert len(leg.gc.count_at_close) == 3
+    assert leg.gc.describe().startswith("quiet: 0.0 ms of loop-thread GC over 0 collections")
+
+
+@pytest.mark.asyncio
+async def test_s2_gc_attribution_shows_a_step_for_a_collection_inside_a_leg() -> None:
+    """The causal arm: a collection landing in the leg must move ``gc_ms``.
+
+    This is what a correlation cannot do. The leg's raw CPU reading and its
+    GC record are produced by two different instruments over the same
+    interval, so the test asserts BOTH that the record names the generation
+    AND that the probe's own peak contains the time the record charges — if
+    those two disagreed, the attribution would be measuring something else.
+    """
+    recorder = StallRecorder()
+    heap: list[dict[str, object]] = []
+    try:
+        await recorder.start()
+        recorder.begin_leg(label="quiet")
+        await asyncio.sleep(TICK_S * 10)
+        quiet = recorder.end_leg()
+        heap = _cyclic_heap(120_000)
+        recorder.begin_leg(label="heavy")
+        gc.collect(2)  # a full pass, fired on this thread, INSIDE the leg
+        await asyncio.sleep(TICK_S * 10)
+        heavy = recorder.end_leg()
+    finally:
+        await recorder.stop()
+        heap.clear()
+        del heap
+        gc.collect()
+    assert quiet.gc is not None and heavy.gc is not None
+    # A gen-0 sweep can fire from the probe's own allocation inside this leg and
+    # costs microseconds; what a 500 ms ceiling could ever blame is a gen-1 or
+    # gen-2 step, so those are what "quiet" pins in this async leg. The
+    # deterministic all-generation zero is the synchronous leg test above.
+    assert quiet.gc.collections.get(1, 0) == 0
+    assert quiet.gc.collections.get(2, 0) == 0
+    assert quiet.gc.total_ms < 1.0
+    assert heavy.gc.collections.get(2) == 1
+    assert heavy.gc.cpu_ms.get(2, 0.0) > 0.5
+    assert heavy.gc.percentages()[2] > 90.0
+    # The probe's peak for the leg contains the collection the record charges:
+    # two independent instruments, one interval. A peak below the GC time would
+    # mean the attribution was not measuring the CPU the assertion bounds.
+    assert heavy.cpu_ms >= heavy.gc.total_ms
+    assert heavy.cpu_ms > quiet.cpu_ms
+
+
+@pytest.mark.asyncio
+async def test_s2_gc_attribution_step_scales_with_the_surviving_heap() -> None:
+    """The causal property: the step is the HEAP's, not the leg's own code.
+
+    Every leg below runs the identical body — same window, same forced full
+    pass, same probe — so a step that tracks the surviving graph is GC, and a
+    step that ignored it would be the leg itself.
+
+    ``gc.freeze()`` is what makes the comparison sharp here: the interpreter
+    already tracks pytest's own heap, and a gen-2 pass over it costs ~37 ms on
+    this host whatever this test does. Freezing parks those objects outside
+    future collections, so the measured cost is this leg's heap, and the
+    reverse arm (``drained``: graph dropped before the leg opens) has an
+    honest near-zero floor instead of a 37 ms one. Restored with
+    ``gc.unfreeze()`` in ``finally`` — a stuck freeze would hide collections
+    from the rest of the shard, the same hazard as a stuck ``gc.disable()``.
+    """
+    recorder = StallRecorder()
+    small: list[dict[str, object]] = []
+    big: list[dict[str, object]] = []
+    frozen = False
+    try:
+        gc.collect()
+        gc.freeze()
+        frozen = True
+        await recorder.start()
+        recorder.begin_leg(label="baseline-frozen")
+        gc.collect(2)
+        await asyncio.sleep(TICK_S * 8)
+        baseline = recorder.end_leg()
+        small = _cyclic_heap(25_000)
+        recorder.begin_leg(label="heap-25k")
+        gc.collect(2)
+        await asyncio.sleep(TICK_S * 8)
+        small_peak = recorder.end_leg()
+        big = _cyclic_heap(120_000)
+        recorder.begin_leg(label="heap-120k")
+        gc.collect(2)
+        await asyncio.sleep(TICK_S * 8)
+        big_peak = recorder.end_leg()
+        small.clear()
+        big.clear()
+        del small, big
+        gc.collect()  # the graph is gone BEFORE the reverse leg opens
+        recorder.begin_leg(label="drained")
+        gc.collect(2)
+        await asyncio.sleep(TICK_S * 8)
+        drained = recorder.end_leg()
+    finally:
+        await recorder.stop()
+        if frozen:
+            gc.unfreeze()
+        gc.collect()
+    peaks = (baseline, small_peak, big_peak, drained)
+    assert all(peak.gc is not None for peak in peaks)
+    assert all(peak.gc.collections.get(2) == 1 for peak in peaks)  # type: ignore[union-attr]
+    baseline_ms = baseline.gc.cpu_ms.get(2, 0.0)  # type: ignore[union-attr]
+    small_ms = small_peak.gc.cpu_ms.get(2, 0.0)  # type: ignore[union-attr]
+    big_ms = big_peak.gc.cpu_ms.get(2, 0.0)  # type: ignore[union-attr]
+    drained_ms = drained.gc.cpu_ms.get(2, 0.0)  # type: ignore[union-attr]
+    # Frozen baseline: nothing of this test's is tracked, so the pass is cheap.
+    assert baseline_ms < 2.0, (baseline_ms, small_ms, big_ms, drained_ms)
+    # The step appears with the graph and scales with it.
+    assert small_ms > 0.2, (baseline_ms, small_ms, big_ms, drained_ms)
+    assert big_ms > small_ms * 2, (baseline_ms, small_ms, big_ms, drained_ms)
+    # The reverse arm: same leg body, graph already reclaimed, step gone.
+    assert drained_ms < big_ms * 0.5, (baseline_ms, small_ms, big_ms, drained_ms)
+    # The only relation this instrument asserts between the two readings is
+    # CONTAINMENT, one-directional: a collection is synchronous, so it lies
+    # inside one probe interval and that leg's peak cannot be smaller than the
+    # time the record charges. That is a consistency check — a mismatch would
+    # mean the record and the peak describe different intervals — and NOT
+    # corroboration of scaling: the drained leg below shows a large probe peak
+    # over 0.03 ms of GC, because the peak carries everything else the loop did
+    # in that window too.
+    assert big_peak.cpu_ms >= big_ms, (big_peak.cpu_ms, big_ms)
+
+
+def test_s2_gc_attribution_shows_no_step_with_gc_held_off_and_restores_it() -> None:
+    """The other reverse arm: automatic GC held off for the leg records nothing.
+
+    ``gc.disable()`` stops the AUTOMATIC collection the allocation thresholds
+    trigger (an explicit ``gc.collect()`` still runs and still fires the
+    callbacks — verified on this interpreter, 1.6 ms and a gen-2 pair), so the
+    leg below allocates cyclically without collecting. Both `isenabled()` and
+    the thresholds are restored in ``finally``: a stuck ``gc.disable()`` would
+    poison every test after this one in the shard.
+
+    The leg opens AND closes inside the disabled window. Closing it after the
+    restore would leave the leg recording whatever allocation the restore path
+    itself does — CI's `test (3.12, 1)` read `{0: 1}` exactly that way, one
+    gen-0 sweep landing between `gc.enable()` and ``end_leg()``.
+    """
+    recorder = StallRecorder()
+    enabled_before = gc.isenabled()
+    thresholds_before = gc.get_threshold()
+    churn: list[dict[str, object]] = []
+    gc.disable()
+    try:
+        assert not gc.isenabled()
+        recorder.begin_leg(label="gc-held-off")
+        for index in range(5_000):
+            node: dict[str, object] = {"index": index}
+            node["self"] = node
+            churn.append(node)
+        leg = recorder.end_leg()
+    finally:
+        try:
+            gc.set_threshold(*thresholds_before)
+            if enabled_before:
+                gc.enable()
+            else:
+                gc.disable()
+        finally:
+            recorder.gc_attribution.detach()
+            churn.clear()
+            del churn
+            gc.collect()
+    assert leg.gc is not None
+    assert leg.gc.collections == {}
+    assert leg.gc.total_ms == 0.0
+    assert gc.isenabled() is enabled_before
+    assert gc.get_threshold() == thresholds_before
+
+
+def test_s2_gc_attribution_is_reported_on_failure_and_in_the_pass_summary() -> None:
+    """A reader must answer "was this GC or the product?" from one run's output.
+
+    The failure path is the one that matters: when the ceiling trips, the
+    reading is gone when the process exits, so the message has to carry the
+    per-generation record and the GC share of the asserted quantity. The pass
+    path carries the same record in the JUnit property, because the next
+    failure needs a green baseline to compare against.
+    """
+    recorder = StallRecorder()
+    heap = _cyclic_heap(120_000)
+    try:
+        recorder.begin_leg(label="turn")
+        gc.collect(2)
+        turn = recorder.end_leg()
+    finally:
+        recorder.gc_attribution.detach()
+        heap.clear()
+        del heap
+        gc.collect()
+    assert turn.gc is not None
+    summary = recorder.gc_summary()
+    note = summary["note"]
+    assert isinstance(note, str) and note.startswith("loop-thread cyclic GC")
+    assert summary["gc_ms_total"] == pytest.approx(turn.gc.total_ms, abs=1e-2)
+    per_generation = summary["gc_ms"]
+    shares_by_generation = summary["gc_pct"]
+    collections_by_generation = summary["collections"]
+    assert isinstance(per_generation, dict) and isinstance(shares_by_generation, dict)
+    assert isinstance(collections_by_generation, dict)
+    assert per_generation["gen2"] == pytest.approx(turn.gc.cpu_ms[2], abs=1e-2)
+    assert shares_by_generation["gen2"] == pytest.approx(100.0, abs=1e-2)
+    assert collections_by_generation["gen2"] == 1
+    legs = summary["legs"]
+    assert isinstance(legs, list) and legs[0]["label"] == "turn"
+    assert legs[0]["get_count_at_open"] and len(legs[0]["get_count_at_open"]) == 3
+    # The pass summary is also what S2 attaches to its JUnit property.
+    assert "gc_attribution" in recorder.measurement_summary()
+    control = LegPeak(
+        cpu_ms=5.0,
+        wall_ms=5.0,
+        gc=GcLeg(
+            label="control",
+            collections={},
+            cpu_ms={},
+            count_at_open=(0, 0, 0),
+            count_at_close=(0, 0, 0),
+        ),
+    )
+    with pytest.raises(AssertionError) as failure:
+        # Delta far above the bound, as the failing shard runs were.
+        recorder.assert_turn_delta_loaded(
+            control=control, turn=LegPeak(cpu_ms=650.0, wall_ms=5.0, gc=turn.gc)
+        )
+    message = str(failure.value)
+    assert "loop-thread GC" in message
+    assert "gen2" in message
+    assert "never subtracted from a bound" in message
+    # The verdict must state its own arithmetic: a leg total against a peak
+    # interval can only bound the GC share from above, and the rest from below.
+    assert "at most" in message
+    assert "at least" in message
+    assert "upper bound" in message
+    assert "648" not in message  # the message reports THIS run, not history
+
+
+def test_s2_gc_attribution_costs_nothing_measurable_when_nothing_collects() -> None:
+    """1000 empty legs: the instrument must not become the cost it measures.
+
+    Budget is 2 ms per leg — roughly three orders of magnitude above the
+    measured cost here (single-digit microseconds), deliberately loose: this
+    asserts an instrument that is not accidentally doing work per leg (walking
+    ``gc.get_objects()``, formatting strings), not a performance target. It is
+    therefore not too tight on a loaded host, where a 2 ms/leg budget is still
+    far above clock noise.
+    """
+    recorder = StallRecorder()
+    try:
+        gc.collect()
+        recorder.begin_leg(label="warm")
+        recorder.end_leg()
+        started = time.perf_counter()
+        for index in range(1000):
+            recorder.begin_leg(label="empty")
+            recorder.end_leg()
+        per_leg_ms = (time.perf_counter() - started) * 1000.0 / 1000.0
+    finally:
+        recorder.gc_attribution.detach()
+    assert per_leg_ms < 2.0, per_leg_ms
+    # Gen-0 sweeps from the loop's own allocation are microseconds and can land
+    # in any of the 1000 legs; a gen-1/gen-2 pass inside one is what would mean
+    # the instrument had started doing real work, and the total bounds the
+    # young-generation noise as well.
+    older = sum(leg.collections.get(1, 0) + leg.collections.get(2, 0) for leg in recorder.gc_legs)
+    assert older == 0
+    assert sum(leg.total_ms for leg in recorder.gc_legs) < 5.0
+
+
+class _HeldDiscovery:
+    """Gated discovery stand-in for the S3 off-loop proof.
+
+    A sleeping stub cannot say WHICH thread is blocked, and ``Event.wait`` on
+    the loop would block the very dispatch it awaits. This helper:
+
+    * refuses the loop thread BEFORE any wait — an inline dependency fails
+      immediately instead of freezing the loop for the gate timeout;
+    * is armed by construction, so a refresh dispatched while the app boots is
+      captured rather than sliding into a plain sleep no later gate can reach;
+    * counts only the invocations CURRENTLY parked, so a stale entry flag can
+      never qualify a worker that expired and finished;
+    * records expiry explicitly: a timed-out gate can never be a held witness.
+    """
+
+    TICK_S = 0.01
+
+    def __init__(self, *, latency_s: float = 5.0, expire_s: float = 5.0) -> None:
+        self.latency_s = latency_s
+        self._gate = threading.Event()
+        self._expire_s = expire_s
+        self._loop_thread = threading.get_ident()
+        self._lock = threading.Lock()
+        self.entered = 0
+        self.parked = 0
+        self.expired = 0
+        #: Identity of the invocation currently parked; bumps on every entry so
+        #: a witness cannot borrow ticks from an earlier invocation.
+        self._generation = 0
+        self._active_generation = 0
+        self.inline_violations = 0
+        self.worker_thread: int | None = None
+
+    def __call__(self, provider: str, **_kwargs: Any) -> tuple[list[Any], str]:
+        if threading.get_ident() == self._loop_thread:
+            with self._lock:
+                self.inline_violations += 1
+            raise AssertionError("metadata dependency ran on the loop thread")
+        with self._lock:
+            self.entered += 1
+            self._generation += 1
+            self._active_generation = self._generation
+            self.parked += 1
+            self.worker_thread = threading.get_ident()
+        try:
+            if not self._gate.wait(timeout=self._expire_s):
+                with self._lock:
+                    self.expired += 1
+        finally:
+            with self._lock:
+                self.parked -= 1
+        return [], "ok"
+
+    def release(self) -> None:
+        self._gate.set()
+
+    async def await_held(self, *, minimum_ticks: int = 3, timeout_s: float = 2.0) -> dict[str, int]:
+        """N consecutive intervals held across BOTH ends by the SAME invocation.
+
+        Each interval is sampled before and after its sleep: a tick only counts
+        when the same parked generation is present on both sides, the gate is
+        unreleased and nothing has expired. The first held tick cannot claim
+        ticks that elapsed before entry, and a released-but-waking worker
+        (parked still 1) is a failure, not a sample.
+        """
+        started = time.perf_counter()
+        consecutive = 0
+        generation = 0
+        while True:
+            with self._lock:
+                before = (self.parked, self._active_generation, self.expired, self._gate.is_set())
+            await asyncio.sleep(self.TICK_S)
+            with self._lock:
+                after = (self.parked, self._active_generation, self.expired, self._gate.is_set())
+            if after[2] or before[2]:
+                raise AssertionError("the held dependency gate expired before the witness")
+            if after[3] or before[3]:
+                raise AssertionError("the gate was released before the witness completed")
+            held = before[0] >= 1 and after[0] >= 1 and before[1] == after[1] and after[1] != 0
+            if held and after[1] == generation:
+                consecutive += 1
+            elif held and generation == 0:
+                generation = after[1]
+                consecutive = 1
+            else:
+                consecutive = 0
+                generation = after[1] if held else 0
+            if consecutive >= minimum_ticks:
+                return {
+                    "ticks": consecutive,
+                    "parked": after[0],
+                    "generation": generation,
+                }
+            if time.perf_counter() - started > timeout_s:
+                raise AssertionError("no invocation stayed parked for the witness")
 
 
 @pytest.mark.asyncio
@@ -1334,39 +2507,148 @@ async def test_s3_harvest_with_unlisted_model_and_cold_memo_keeps_the_loop_free(
     from local_operator.tui.app import OperatorApp
     from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
-    slow = _SlowListing(5.0)
+    # ARMED BEFORE install and before the app boots: a refresh dispatched
+    # during startup must be captured, not slide into a plain sleep no later
+    # gate can intercept. The install itself happens INSIDE the protected try
+    # below, so a failure after it still restores discovery.
+    slow = _HeldDiscovery()
     original = discovery.available_models
-    discovery.available_models = slow  # type: ignore[assignment]
-    configure.invalidate_model_info_cache()
+    # PREEXISTING PENDING BASELINE, captured BEFORE the first global mutation:
+    # a foreign key must fail closed rather than be cleared into looking empty.
+    preexisting_refreshes = set(configure._paint_refreshing)
+    # NARROW OBSERVER over the real entry: record the args BEFORE delegating
+    # unchanged, so a refresh that completes before cleanup still leaves proof
+    # that we owned a submission. The real executor/_refresh/dependency path is
+    # untouched — no stub worker, no new product seam.
+    original_refresh_entry = configure.refresh_model_info_background
+    submitted_refreshes: list[tuple[str, str]] = []
+    target_refresh = ("kimi", "never-heard-of-it")
 
-    session = FakeSession()
-    # A child job on a model nothing knows: the harvest's worst case.
-    child = SimpleNamespace(
-        id="j1",
-        usage=Usage(input_tokens=48_000, output_tokens=9_000),
-        model_label="kimi/never-heard-of-it",
-    )
-    session.jobs = SimpleNamespace(list=lambda: [child])  # type: ignore[assignment]
-    app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        recorder = StallRecorder()
-        await recorder.start()
-        started = time.perf_counter()
-        for _ in range(3):  # three harvest ticks' worth of work, inline
-            app._harvest_subagent_costs()
-            await pilot.pause(0.02)
-        elapsed_ms = (time.perf_counter() - started) * 1000.0
-        await recorder.stop()
-        slow.latency_s = 0.0
-        for _ in range(200):
-            if slow.in_flight == 0:
-                break
-            await asyncio.sleep(0.02)
-        discovery.available_models = original  # type: ignore[assignment]
+    def _observe_refresh(provider: str, model_id: str) -> None:
+        submitted_refreshes.append((provider, model_id))
+        return original_refresh_entry(provider, model_id)
+
+    installed = False
+    recorder: StallRecorder | None = None
+    harvest_cpu_ms = 0.0
+    # OWNED CLEANUP FROM THE FIRST GLOBAL REPLACEMENT: an app-start, harvest,
+    # witness or recorder failure must still restore discovery and settle the
+    # worker, or the next test in this worker inherits both.
+    try:
+        # Refuse foreign work BEFORE clearing caches or replacing either global.
+        # A joiner/app response is not ownership of an already queued resolver.
+        assert (
+            not preexisting_refreshes
+        ), f"pre-existing refresh keys before install: {preexisting_refreshes!r}"
+        installed = True
+        configure.refresh_model_info_background = _observe_refresh  # type: ignore[assignment]
+        discovery.available_models = slow  # type: ignore[assignment]
         configure.invalidate_model_info_cache()
-        assert elapsed_ms < 500.0, f"harvest blocked for {elapsed_ms:.0f} ms"
-        recorder.assert_no_stall_loaded()
+        session = FakeSession()
+        child = SimpleNamespace(
+            id="j1",
+            usage=Usage(input_tokens=48_000, output_tokens=9_000),
+            model_label="kimi/never-heard-of-it",
+        )
+        session.jobs = SimpleNamespace(list=lambda: [child])  # type: ignore[assignment]
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            recorder = StallRecorder()
+            await recorder.start()
+            # CALL-ONLY CPU: the old span wrapped the three calls AND their
+            # pilot.pause(0.02) settles, so it read the runner's wake-up as
+            # harvest work (an injected 600 ms async pause produced a 696 ms
+            # window while the calls cost 0.015 ms of loop CPU; run
+            # 39968922316, split case). The 500 ms budget is unchanged; only
+            # its subject is now the loop thread's own time inside the calls.
+            for _ in range(3):  # three harvest ticks' worth of work, inline
+                call_cpu = time.thread_time()
+                app._harvest_subagent_costs()
+                harvest_cpu_ms += (time.thread_time() - call_cpu) * 1000.0
+                await pilot.pause(0.02)
+            # CAUSAL OFF-LOOP PROOF. Low CPU alone also passes a harvest that
+            # waits on the loop, so require real loop ticks WHILE the refresh
+            # worker is parked at the dependency, unexpired and unreleased.
+            witness = await slow.await_held()
+            # The held worker must belong to THIS model's real refresh request,
+            # not unrelated discovery work that happens to park at the same stub.
+            assert target_refresh in submitted_refreshes, "target refresh was never submitted"
+            assert slow.inline_violations == 0, "the metadata dependency ran on the loop thread"
+            assert slow.worker_thread != threading.get_ident()
+            slow.release()
+            assert (
+                harvest_cpu_ms < 500.0
+            ), f"harvest consumed {harvest_cpu_ms:.1f} ms of loop CPU across 3 calls"
+            recorder.assert_no_stall_loaded()
+            assert witness["parked"] >= 1 and witness["ticks"] >= 3
+    finally:
+        # Every stage runs even when an earlier one faults; discovery is
+        # restored LAST but unconditionally, so a queued refresh cannot read it
+        # while the owned worker is still awake, and a failure inside cleanup
+        # cannot skip the other stages or silently pass.
+        cleanup_error: BaseException | None = None
+        try:
+            slow.release()  # cleanup release never authorizes the witness
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            cleanup_error = exc
+        try:
+            if recorder is not None:
+                await recorder.stop()
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            cleanup_error = cleanup_error or exc
+        try:
+            # SETTLEMENT = the owned refresh key disappearing from the module's
+            # pending set, observed BEFORE any invalidation: invalidation clears
+            # that set, so checking afterwards would fabricate completion.
+            # `slow.parked == 0` alone is NOT completion — it is also true
+            # before a queued job reaches the dependency and after the
+            # dependency returns but before `_refresh`'s finally runs.
+            # A KNOWN owned submission that already completed is settled: never
+            # wait for its key to reappear. EVERY observed submission after our
+            # empty baseline is test-owned, even if it is not the target model.
+            owned = set(submitted_refreshes)
+            if owned:
+                settled = not owned.intersection(configure._paint_refreshing)
+                deadline = time.perf_counter() + 4.0
+                while not settled and time.perf_counter() < deadline:
+                    await asyncio.sleep(0.02)
+                    settled = not owned.intersection(configure._paint_refreshing)
+                if not settled:
+                    raise AssertionError("an owned refresh is still pending at restore")
+            else:
+                # No owned submission was observed (e.g. the body failed before
+                # the harvest ran): do not invent expected work.
+                settled = True
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            cleanup_error = cleanup_error or exc
+        try:
+            configure.refresh_model_info_background = (  # type: ignore[assignment]
+                original_refresh_entry
+            )
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            cleanup_error = cleanup_error or exc
+        try:
+            discovery.available_models = original  # type: ignore[assignment]
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            cleanup_error = cleanup_error or exc
+        try:
+            # No installed globals means no owned cache: preserve foreign pending
+            # markers when the first guard refused the test before mutation.
+            if installed:
+                configure.invalidate_model_info_cache()
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            cleanup_error = cleanup_error or exc
+        # BODY + CLEANUP ARE BOTH PRESERVED: a red body does not waive the
+        # visibility of a leaked or unsettled producer.
+        body_error = sys.exc_info()[1]
+        if cleanup_error is not None:
+            if body_error is not None and body_error is not cleanup_error:
+                raise BaseExceptionGroup(
+                    "S3 body and cleanup both failed",
+                    [body_error, cleanup_error],
+                ) from None
+            raise cleanup_error
 
 
 @pytest.mark.asyncio

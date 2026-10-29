@@ -1,0 +1,172 @@
+wire.remote_compute.alone
+EN "--remote-status and --remote-cancel are commands of their own: run one on its own, without --remote or other run options."
+ZH "--remote-status和--remote-cancel是独立命令：单独运行其中一个，不要与--remote或其他运行选项一起使用。"
+CX {"note": "No placeholders. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.api_override
+EN "Remote compute is sending your Radient login and requests to {host} instead of the default Radient API, because LOP_REMOTE_COMPUTE_API_URL is set. Unset it unless you control that host."
+ZH "由于设置了LOP_REMOTE_COMPUTE_API_URL，远程计算正将你的Radient登录信息和请求发送到{host}，而不是默认的Radient API。除非你控制该主机，否则取消该设置。"
+CX {"note": "{host} is the exact host and port the bearer is being sent to, WITHOUT any credential and without a path — it is the whole point of the line and must be preserved exactly once. Printed once per invocation, to stderr, before the first request, so stdout stays the run id alone, and on --remote-status and --remote-cancel as well. The second sentence is the operative fact: the Radient LOGIN leaves for that host, and the variable should be unset unless the reader controls it. A login going to a staging server must never look like one going to production, and the reader must be able to act on the sentence without knowing what a bearer is.", "role": "CLI warning printed to STDERR when the remote-compute API base is overridden", "tone": "plain, two sentences; the variable name and the host stay verbatim; it states the consequence rather than only the fact"}
+wire.remote_compute.api_override_invalid
+EN "LOP_REMOTE_COMPUTE_API_URL must be an https:// URL, or http:// on 127.0.0.1, ::1 or localhost, with no userinfo, query or fragment, no whitespace, control or non-ASCII characters and no percent-encoding; remote compute did not start."
+ZH "LOP_REMOTE_COMPUTE_API_URL必须是https:// URL，或仅限127.0.0.1、::1或localhost上的http://；不得包含用户信息、查询或片段，不得含空白、控制字符或非ASCII字符，也不得使用百分号编码；远程计算未启动。"
+CX {"note": "No placeholders. The value itself is never echoed. It states the whole rule (https, or http only on 127.0.0.1, ::1 or localhost; no userinfo, query or fragment; no whitespace, control or non-ASCII characters; no percent-encoding) because the command exits rather than falling back to production; the last clause says that the remote-compute command did not start. The character rules are one of them refused by the parser before it splits the value, so they belong in the same sentence rather than a second one.", "role": "CLI refusal for an unusable LOP_REMOTE_COMPUTE_API_URL", "tone": "plain, ONE sentence; the variable, the schemes and the literal loopback hosts stay verbatim"}
+wire.remote_compute.bad_repo
+EN "Because this run clones the repository from the far end, --repo must be an https:// or ssh:// URL, or a git@host:path address; a local path cannot be used."
+ZH "由于本次运行从远端克隆仓库，--repo必须是https://或ssh:// URL，或git@host:path形式的地址；不能使用本地路径。"
+CX {"note": "Refusal naming the three accepted URL shapes (https://, ssh://, git@host:path); the shell-looking examples are syntax and stay verbatim. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.bad_sha
+EN "The --sha value must be a full 40-character commit SHA: a branch name or an abbreviated hash could resolve to a different commit than the one this run was submitted for."
+ZH "--sha值必须是完整的40字符提交SHA：分支名或缩写哈希可能解析为与本次运行提交时不同的提交。"
+CX {"note": "Refusal for anything but a full 40-hex commit SHA; no placeholders. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.cancelled
+EN "Remote run {run_id} is cancelled."
+ZH "远程运行{run_id}已取消。"
+CX {"note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.conflict
+EN "That idempotency key was already used with a different request body. Pass a new one with --idempotency-key."
+ZH "该幂等键已用于不同的请求体。用--idempotency-key传入新键。"
+CX {"note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.detached
+EN "Remote run {run_id} submitted.\nnetwork (confirmed by Radient): {network_id}\nIdempotency key: {idempotency_key}\nFollow it: lop exec --remote-status {run_id}\nCancel it: lop exec --remote-cancel {run_id}"
+ZH "已提交远程运行{run_id}。\n网络（Radient已确认）：{network_id}\n幂等键：{idempotency_key}\n查看进度：lop exec --remote-status {run_id}\n取消运行：lop exec --remote-cancel {run_id}"
+CX {"note": "Multi-line receipt printed to STDERR under --detach: the run id alone goes to stdout so a script can capture it. {network_id} is what the server returned, confirmed against the submitted request, never the client's expectation. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.disabled
+EN "Remote compute is off. Turn it on with `lop config edit remote_compute.enabled true`, then run this again."
+ZH "远程计算已关闭。用`lop config edit remote_compute.enabled true`开启，然后重新运行此命令。"
+CX {"note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.failed
+EN "remote compute failed: {error}"
+ZH "远程计算失败：{error}"
+CX {"note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.finished_cancelled
+EN "Remote run {run_id} finished: cancelled."
+ZH "远程运行{run_id}已结束：已取消。"
+CX {"note": "The watch's closing line for a run a user cancelled (outcome `cancelled`, which is not a status word). {run_id} must be preserved. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.finished_charged
+EN "charged: {amount}"
+ZH "已计费：{amount}"
+CX {"note": "{amount} is the charged figure EXACTLY as the server reported it (for example 0.42, or a JSON cost breakdown). Never reformat, convert or recompute it: this client does not know the price. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.finished_exit_code
+EN "exit code: {exit_code}"
+ZH "退出码：{exit_code}"
+CX {"note": "{exit_code} is the server's integer exit code, printed as text; it is a number and is never translated or localised. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.finished_expired
+EN "Remote run {run_id} finished: expired, so it reached its deadline before it was done."
+ZH "远程运行{run_id}已结束：已过期，即在完成前到达了截止时间。"
+CX {"note": "The watch's closing line for a run that hit its deadline. 'expired' means the server's maximum run time ended the run, not that a credential expired. {run_id} must be preserved. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.finished_failed
+EN "Remote run {run_id} finished: failed."
+ZH "远程运行{run_id}已结束：失败。"
+CX {"note": "The watch's closing line for a run whose task failed. One key per OUTCOME, so the locale owns its own verb phrase. {run_id} must be preserved. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.finished_succeeded
+EN "Remote run {run_id} finished: succeeded."
+ZH "远程运行{run_id}已结束：成功。"
+CX {"note": "The watch's closing line. One key per OUTCOME rather than a shared sentence with a substituted word, so each locale owns the grammar of its own verb. {run_id} must be preserved. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.finished_unknown
+EN "Remote run {run_id} is no longer running, but Radient reported no outcome this build can read."
+ZH "远程运行{run_id}已不再运行，但Radient未报告此版本能够识别的结果。"
+CX {"note": "The watch's closing line when the run stopped but the server named no outcome this build can read (absent, or outside the four known ones). It must not claim success or failure. {run_id} must be preserved. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.interrupted
+EN "Stopped watching run {run_id}; it is still running remotely. Cancel it with: lop exec --remote-cancel {run_id}"
+ZH "已停止监视运行{run_id}；它仍在远程运行。取消命令：lop exec --remote-cancel {run_id}"
+CX {"note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.invalid_request
+EN "Radient rejected the request as invalid. That is a bug in this client, not something to retype."
+ZH "Radient以无效为由拒绝了该请求。这是本客户端的缺陷，不是重输一遍就能解决的问题。"
+CX {"note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.key_empty
+EN "An empty --idempotency-key is refused rather than replaced with a fresh key: leave the flag out to mint one, or pass the key of the run you are retrying."
+ZH "空的--idempotency-key会被拒绝，而不会替换为新键：省略该选项以生成新键，或传入你正在重试的那次运行的键。"
+CX {"note": "Refusal for an explicitly empty --idempotency-key, which is never replaced by a fresh key. No placeholders. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.key_not_printable
+EN "The idempotency key must be printable ASCII: letters, digits and punctuation only, with no accents, tabs or newlines."
+ZH "幂等键必须是可打印ASCII：仅限字母、数字和标点，不能含重音字符、制表符或换行符。"
+CX {"note": "Refusal for a key outside 0x20-0x7e; no placeholders. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.key_too_long
+EN "The idempotency key is longer than {max_bytes} bytes, which the server refuses: pass a key of at most {max_bytes} bytes."
+ZH "幂等键超过{max_bytes}字节，服务器会拒绝：传入不超过{max_bytes}字节的键。"
+CX {"note": "{max_bytes} is a bare integer (128) and appears twice; it must stay identical in both places. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.local_only
+EN "{flag} only makes sense for a local run, so it cannot be combined with --remote."
+ZH "{flag}仅适用于本地运行，因此不能与--remote一起使用。"
+CX {"note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.needs_prompt
+EN "--remote needs a prompt: pass the task as the one positional argument."
+ZH "--remote需要提示词：将任务作为唯一的定位参数传入。"
+CX {"note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.needs_repo
+EN "--remote needs --repo <url> and --sha <commit>: this run never uploads local files, so name the repository and commit to check out."
+ZH "--remote需要--repo <url>和--sha <commit>：此运行从不上传本地文件，因此需指定要检出的仓库和提交。"
+CX {"note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.network_mismatch
+EN "Radient answered with a run from another network, or without a network id, so it cannot be reported as a run of this network."
+ZH "Radient返回的运行来自另一个网络，或未带网络ID，因此无法将其报告为本网络的运行。"
+CX {"note": "Refusal raised when the run the server returned belongs to another network, or carries no network id at all (both are mismatches: the field is in the contract). No placeholders: never echo either network id. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.no_capacity
+EN "Radient has no remote-compute capacity right now; try again later."
+ZH "Radient当前没有远程计算容量；稍后重试。"
+CX {"note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.no_credit
+EN "Radient has no compute credit for this account, so the run was not admitted."
+ZH "此账户在Radient没有计算额度，因此该运行未被接纳。"
+CX {"note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.only_with
+EN "{flag} only applies with --remote."
+ZH "{flag}仅在配合--remote时适用。"
+CX {"note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.preview_not_enabled
+EN "Remote compute is not enabled for this Radient account yet (preview)."
+ZH "此Radient账户尚未启用远程计算（预览）。"
+CX {"note": "No placeholders. 403 means the server-side preview allowlist does not carry this Radient account yet, so the remedy is to wait for the preview rather than to retry or re-login. `preview` stays in parentheses as the feature's own label.", "role": "CLI error for HTTP 403 from the remote-compute API", "tone": "plain, one sentence; not a bug report"}
+wire.remote_compute.replayed
+EN "The idempotency key matched an earlier submission, so this is remote run {run_id} and no new run was created."
+ZH "该幂等键匹配到较早的一次提交，因此这是远程运行{run_id}，未创建新运行。"
+CX {"note": "Printed to STDERR when a submit answered 200 rather than 201, i.e. the --idempotency-key matched an earlier submission and Radient returned THAT run instead of creating one. It must say both that no new run was created and which run this is; {run_id} is the run the server returned. Stdout is unaffected (the run id alone under --detach), and the watch or detach continues normally afterwards.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.retrying
+EN "Radient reported an error for this run and retries it, so this watch continues."
+ZH "Radient报告此运行出错并正在重试，因此继续监视。"
+CX {"note": "Printed once when the run's status is `error`. The server retries an errored run, so the sentence must read as 'still going', never as a failure or as the end of the watch. No placeholders. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.run_identity_mismatch
+EN "Radient answered for remote run {answered}, not the run {asked_for} that was asked for, so this response cannot be reported as that run's state."
+ZH "Radient返回的是远程运行{answered}，而不是所请求的运行{asked_for}，因此无法将此响应报告为该运行的状态。"
+CX {"note": "Both placeholders are run ids: {asked_for} is the id this command sent in the path, {answered} is the id in the body Radient returned. Both must be preserved and kept distinguishable, because the point of the sentence is that they differ. It reports a response this client refuses to attribute (a cached page, a proxy, or a server bug); nothing was retried or cancelled by it.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.status_line
+EN "status: {status}"
+ZH "状态：{status}"
+CX {"note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.status_network_matched
+EN "network checked: this run is in {network_id}, this device's network."
+ZH "已核对网络：此运行位于{network_id}，即本设备的网络。"
+CX {"note": "{network_id} is the run's network as the server returned it, and this device resolved the same one, so the sentence may state a match. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.status_network_mismatch
+EN "network checked: this run is in {network_id}, which is not this device's network."
+ZH "已核对网络：此运行位于{network_id}，这不是本设备的网络。"
+CX {"note": "{network_id} is the run's network as the server returned it and it is NOT this device's, so the sentence must be a warning, not a refusal. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.status_network_unconfirmed
+EN "network unconfirmed: this device cannot tell which network this run belongs to."
+ZH "网络未确认：本设备无法判断此运行属于哪个网络。"
+CX {"note": "No placeholder. The device could not resolve a network to compare, or the run named none; say the network is unconfirmed rather than implying either match or mismatch. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.status_unknown
+EN "status: {status} (not a status this build knows; still watching)"
+ZH "状态：{status}（此版本不认识的状态；仍在监视）"
+CX {"note": "Printed once for a status outside this build's vocabulary, which stays NON-terminal; {status} is the server's raw word and is not translated. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.still_running
+EN "Run {run_id} is still running past the {max_hours}-hour limit Radient reported for it, so this command stopped watching. Check it with: lop exec --remote-status {run_id}"
+ZH "运行{run_id}已超过Radient为其报告的{max_hours}小时上限，但仍在运行，因此本命令已停止监视。查看命令：lop exec --remote-status {run_id}"
+CX {"note": "{max_hours} is the limit the SERVER admitted the run with (it may cap what was asked for), so the sentence describes the server's bound. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.submitted
+EN "Remote run {run_id} submitted.\nnetwork (confirmed by Radient): {network_id}"
+ZH "已提交远程运行{run_id}。\n网络（Radient已确认）：{network_id}"
+CX {"note": "Two-line receipt printed before a watch starts. {network_id} is what the server returned and this client confirmed, so the line states evidence rather than intent. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.unknown_run
+EN "Radient has no such remote run for the selected login."
+ZH "所选登录名下，Radient没有这样的远程运行。"
+CX {"note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.unreachable
+EN "Radient could not be reached; check the network and try again."
+ZH "无法连接到Radient；检查网络后重试。"
+CX {"note": "Placeholders are runtime values (run ids, network ids, status words, HTTP context) and must be preserved exactly. The es, fr, hi, ru and vi catalogues carry this namespace; an independent audit records the ledger rows, and English fallback still must not change locale eligibility.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim"}
+wire.remote_compute.unreadable_envelope
+EN "Radient's response format has changed, and this lop build cannot read it. Update lop with `lop-update` and try again."
+ZH "Radient的响应格式已更改，此lop构建无法读取。用`lop-update`更新lop后重试。"
+CX {"note": "No placeholders. The response body looked like Radient's envelope but carried keys outside the msg/result/error set, so this build cannot parse it: the format changed after this build was cut. It says so and names `lop-update` as the remedy; a retry cannot help.", "role": "CLI runtime message for lop exec --remote", "tone": "plain, one sentence; commands and flags stay verbatim; never alarmist"}

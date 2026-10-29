@@ -59,7 +59,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.session.runtime import control, registry
+from local_operator.session.runtime import control, journal, registry
 from local_operator.session.runtime.process import SIGNAL_DRAIN_S
 from tests.e2e.harness import NO_NOTIFY_ENV
 from tests.e2e.test_cut_off_turns_e2e import (
@@ -378,6 +378,13 @@ async def test_stop_all_stops_the_idle_and_the_busy_session_promptly(
             await _wait_record(config, "drainidle1")
             await rig.park("drainbusy1")
             await _wait_record(config, "drainbusy1", busy=True)
+            # THE BOOT HALF OF THE PAIR (review round 2, MINOR-3): both live
+            # runtimes wrote ``sessions/<id>/runtime-run.json`` at construction,
+            # which is the key ``info.collect._stored_lines`` fences a stored row
+            # on. Observed while they are live, so a missing boot write cannot
+            # hide behind the clean exit that removes the marker below.
+            for session_id in ("drainidle1", "drainbusy1"):
+                assert journal.read_run_record(rig.directories[session_id]) is not None, session_id
             log_before = len(_runtime_log(config))
 
             started = time.monotonic()
@@ -402,6 +409,18 @@ async def test_stop_all_stops_the_idle_and_the_busy_session_promptly(
             assert causes == [], causes
             assert TURN_COMPLETED not in _transcript(rig.directories["drainbusy1"])
             assert idle_directory.exists()
+            # AND THE amain HALF (review round 2, MINOR-3): the socket rung is
+            # handled in the trigger loop, not in ``_clean_exit``, so the only
+            # path that can prove the caller's ``requested=True`` and the marker
+            # clear is a real ``lop stop``. Both sessions must carry an exit
+            # record naming the socket stop as the user's own act, with no run
+            # marker left beside it — the exact pair a listing reads.
+            for session_id in ("drainidle1", "drainbusy1"):
+                record = journal.read_exit_record(rig.directories[session_id])
+                assert record is not None, session_id
+                assert record.reason == "socket-stop", (session_id, record.reason)
+                assert record.requested is True, (session_id, record)
+                assert journal.read_run_record(rig.directories[session_id]) is None, session_id
     finally:
         await rig.aclose()
 

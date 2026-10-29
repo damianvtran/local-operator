@@ -1,0 +1,27 @@
+# tui.usage — sampled en/zh pairs for attestation zhca1
+# 6/21 keys; all >120 chars and all plurals included
+
+## tui.usage.paid.continue  [42 chars]
+EN: included quota used; credits will continue
+ZH: 包含的配额已用尽；将继续使用积分
+
+## tui.usage.reported_balance  [81 chars, PLURAL]
+EN: {count, plural, one {{shown} reported balance} other {{shown} reported balances}}
+ZH: {count, plural, other {{shown}项已报告余额}}
+
+## tui.usage.showing_prefix  [8 chars]
+EN: showing 
+ZH: 显示 
+
+## tui.usage.sign_in_expired  [23 chars]
+EN: {value} sign-in expired
+ZH: {value}项登录已过期
+
+## tui.usage.title  [5 chars]
+EN: Usage
+ZH: 用量
+
+## tui.usage.windows_count  [61 chars, PLURAL]
+EN: {count, plural, one {{shown} window} other {{shown} windows}}
+ZH: {count, plural, other {{shown}个窗口}}
+

@@ -4447,3 +4447,38 @@ print("PEER-REAUTH-OK")
         finally:
             await manager.disconnect_all()
             store.close()
+
+
+class TestAUsableLocalGrant:
+    """QA: a ROW is not a credential; an emptied or dead one must not win."""
+
+    URL = "https://usable.example/mcp"
+
+    def _storage(self, store) -> "McpTokenStorage":
+        return McpTokenStorage(self.URL, store)
+
+    def test_a_fresh_grant_is_a_local_grant(self) -> None:
+        store = FakeAuthStore()
+        self._storage(store)._write(
+            {"tokens": {"access_token": "access", "refresh_token": "refresh"}}
+        )
+        assert auth_mod.server_has_stored_grant(self.URL, store) is True
+
+    def test_an_emptied_row_is_not_a_local_grant(self) -> None:
+        store = FakeAuthStore()
+        self._storage(store)._write({"tokens": {"access_token": "", "refresh_token": ""}})
+        assert auth_mod.server_has_stored_grant(self.URL, store) is False
+
+    def test_a_tombstoned_row_is_not_a_local_grant(self) -> None:
+        """The dead marker outranks the token fields: only a NEW grant clears it."""
+        store = FakeAuthStore()
+        self._storage(store)._write(
+            {"tokens": {"access_token": "access", "refresh_token": "refresh"}}
+        )
+        self._storage(store).mark_grant_dead(rejected_refresh_token="refresh")
+        assert auth_mod.server_has_stored_grant(self.URL, store) is False
+
+    def test_a_registration_only_row_is_not_a_local_grant(self) -> None:
+        store = FakeAuthStore()
+        self._storage(store).seed_client_info("client-1")
+        assert auth_mod.server_has_stored_grant(self.URL, store) is False

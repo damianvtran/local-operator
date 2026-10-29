@@ -1,0 +1,42 @@
+{
+  "form_raw_string_cell_widths": {},
+  "settings_nonchoice_labels_over29": [],
+  "settings_english_nonchoice_labels_over29": [
+    [
+      "aida_onboarding_nudge_days.label",
+      33
+    ],
+    [
+      "providers_anthropic_cache_ttl_1h_min_context_tokens.label",
+      33
+    ],
+    [
+      "runtime_keep_alive_seconds.label",
+      34
+    ],
+    [
+      "runtime_unattended_gate_timeout.label",
+      31
+    ],
+    [
+      "tools_defer.label",
+      39
+    ],
+    [
+      "tools_search_interception_rg_excludes.label",
+      33
+    ]
+  ],
+  "prior_claims_rederived": {
+    "wire.settings scratchpad cap label cells (lost claim es/fr/ru/vi 28/27/24/26; hi/en 19/27)": {
+      "es": 28,
+      "fr": 27,
+      "ru": 24,
+      "vi": 26,
+      "hi": 19,
+      "en": 27
+    }
+  },
+  "numeric_token_differences": [],
+  "qualification": "Scalar measurements, not rendered layout evidence. Lengths of strings containing placeholders include placeholder spelling, not all runtime value lengths."
+}

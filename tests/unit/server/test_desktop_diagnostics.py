@@ -642,6 +642,11 @@ async def test_session_report_route_encodes_tuple_keyed_groups_as_arrays(desktop
         ("anthropic", "other"),
     }
     assert all(isinstance(row["aggregate"]["calls"], int) for row in data["by_model"])
+    assert {row["billing_basis"] for row in data["by_model_basis"]} == {"not_tracked"}
+    assert len(data["descendants_by_basis"]) == 1
+    assert data["descendants_by_basis"][0]["billing_basis"] == "not_tracked"
+    assert data["descendants_by_basis"][0]["aggregate"]["calls"] == 1
+
     assert data["by_purpose_outcome"] == [
         {"purpose": "turn", "outcome": "stop", "calls": 2}
     ]  # OWN scope: the child's call is not folded in, and the edges that let a
@@ -690,6 +695,7 @@ async def test_every_group_by_is_an_array_of_keyed_objects(desktop, tmp_path):
 
     shapes = {
         "by_model": ({"provider", "model_id", "aggregate"}, 2),
+        "by_model_basis": ({"provider", "model_id", "billing_basis", "aggregate"}, 2),
         "by_purpose": ({"purpose", "aggregate"}, 2),
         "by_purpose_outcome": ({"purpose", "outcome", "calls"}, 2),
     }
@@ -908,7 +914,7 @@ def test_info_registry_row_carries_the_panel_destination():
     assert row["aliases"] == []
     # Parity with the registry: the catalogue is exactly the rows that carry a
     # destination, in registry order, which is what the transport's own record
-    # claims and what `/mobile` and `/notifications` are excluded from — both
+    # claims and what `/mobile` and `/unread` are excluded from — both
     # withhold a destination on purpose, because neither has a renderer adapter
     # (the phone is provisioned from a shell, the pile is cleared by the
     # sidebar's own control).

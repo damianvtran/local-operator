@@ -26,6 +26,7 @@ from local_operator.harness.types import (
     SteeringDeliveredEvent,
 )
 from local_operator.providers.model_access import REHOME_BUSY_REPLY
+from local_operator.session import auto_tag, naming, session_tags
 from local_operator.session.frontend_state import SlashResult as _SlashResult
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.naming import (
@@ -35,7 +36,11 @@ from local_operator.session.naming import (
 )
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime import serving as serving_mod
-from local_operator.session.runtime.serving import ServingSessionHandle
+from local_operator.session.runtime.serving import (
+    AskUnavailableError,
+    ServingSessionHandle,
+)
+from tests.unit.legacy_skill_payload import legacy_skill_payload
 
 
 class FakeSession:
@@ -56,6 +61,10 @@ class FakeSession:
     #: fake stands in for without creating it.
     _name_state: ConversationName
     conversation_name_state: ConversationName
+    #: Some cases attach a transcript directory so the handle's two-hop sidecar
+    #: read has something real to resolve; declared here so the facade tests can
+    #: set it without an attr-defined complaint.
+    transcript: Any
 
     def __init__(self) -> None:
         self.session_id = "sess-1"
@@ -65,6 +74,9 @@ class FakeSession:
         #: stated because the pair-only-switch regression assigns a real spec
         #: here to stand in for a session the user is already on (#2471).
         self.model: ModelSpec | None = None
+        #: The CONVERSATION's chosen level, as the real session reports it (the
+        #: carry reads it). Declared so the tests can set it on the double.
+        self.chosen_effort: str | None = None
         self.conversation_name = ""
         self.is_streaming = False
         self._handlers: list[Any] = []
@@ -279,7 +291,9 @@ class FakeSession:
         )
 
 
-def make_handle(auto_approve: bool = False) -> tuple[ServingSessionHandle, FakeSession]:
+def make_handle(
+    auto_approve: bool = False, directory: Path | None = None
+) -> tuple[ServingSessionHandle, FakeSession]:
     # The handle records whichever loop it is built on; inside an async test
     # that is the running loop, and the sync construction test never awaits so
     # a fresh loop is fine. get_event_loop_policy().get_event_loop() avoids the
@@ -289,33 +303,23 @@ def make_handle(auto_approve: bool = False) -> tuple[ServingSessionHandle, FakeS
     except RuntimeError:
         loop = asyncio.new_event_loop()
     session = FakeSession()
+    if directory is not None:
+        # A session with somewhere to write, which is what the steer door now
+        # needs: an accepted steer is spooled for a successor before it is
+        # acknowledged (``ServingSessionHandle.steer``), and a double with no
+        # transcript directory can only take the refusal.
+        session.transcript = SimpleNamespace(directory=directory)
     handle = ServingSessionHandle(session, loop, cwd="/tmp", auto_approve=auto_approve)
     return handle, session
 
 
 def _skill_payload(typed: str) -> str:
-    """The persisted form of a ``$skill`` invocation: what a CLIENT sent.
+    """A ``$skill`` invocation in the LEGACY persisted form.
 
-    Built from the REAL ``Skill`` and the REAL renderer, the way the fold-parity
-    test does it: a hand-spelled tag would pin a payload shape the product never
-    produces, and it is the payload's own ``invocation`` attribute that the fix
-    reads back. Expansion is the client's duty (a desktop renders it in
-    ``local-operator-ui``'s ``skill-invocation.ts``), which is why the harness is
-    handed this and never the typed line.
+    Old transcripts never migrate, so the reader stays and this pins its input;
+    ``legacy_skill_payload`` reproduces the deleted writer's escaping.
     """
-    from local_operator.skills.discovery import Skill
-    from local_operator.skills.invoke import parse_invocation, render_invocation
-
-    skill = Skill(
-        name="research",
-        description="research things",
-        file_path=Path("/skills/research/SKILL.md"),
-        base_dir=Path("/skills/research"),
-        source="user",
-    )
-    invocation = parse_invocation(typed, {"research": skill})
-    assert invocation is not None
-    return render_invocation(invocation, "# Research\n\nSKILL_BODY_MARKER\n")
+    return legacy_skill_payload(typed)
 
 
 def test_default_conversation_name_is_empty_not_a_placeholder() -> None:
@@ -394,8 +398,8 @@ async def test_ask_mode_parks_a_card_then_resolves() -> None:
 
 
 @pytest.mark.asyncio
-async def test_same_id_concurrent_steers_are_admitted_once() -> None:
-    handle, session = make_handle()
+async def test_same_id_concurrent_steers_are_admitted_once(tmp_path: Path) -> None:
+    handle, session = make_handle(directory=tmp_path / "sess")
     command_id = "same-steer"
 
     receipts = await asyncio.gather(
@@ -409,8 +413,8 @@ async def test_same_id_concurrent_steers_are_admitted_once() -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_steer_rejection_releases_owned_slot_and_same_id() -> None:
-    handle, session = make_handle()
+async def test_async_steer_rejection_releases_owned_slot_and_same_id(tmp_path: Path) -> None:
+    handle, session = make_handle(directory=tmp_path / "sess")
     notified = 0
 
     def notify() -> None:
@@ -436,8 +440,8 @@ async def test_async_steer_rejection_releases_owned_slot_and_same_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_steer_ack_loss_retry_remains_admitted() -> None:
-    handle, session = make_handle()
+async def test_steer_ack_loss_retry_remains_admitted(tmp_path: Path) -> None:
+    handle, session = make_handle(directory=tmp_path / "sess")
 
     assert await handle.steer("once", command_id="lost-ack") == "steering queued"
     assert await handle.steer("once", command_id="lost-ack") == "already admitted"
@@ -445,8 +449,10 @@ async def test_steer_ack_loss_retry_remains_admitted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stalled_owned_steers_apply_backpressure_and_drain_frees_capacity() -> None:
-    handle, session = make_handle()
+async def test_stalled_owned_steers_apply_backpressure_and_drain_frees_capacity(
+    tmp_path: Path,
+) -> None:
+    handle, session = make_handle(directory=tmp_path / "sess")
 
     for index in range(32):
         assert await handle.steer(f"steer {index}", command_id=f"id-{index}") == "steering queued"
@@ -462,8 +468,8 @@ async def test_stalled_owned_steers_apply_backpressure_and_drain_frees_capacity(
 
 
 @pytest.mark.asyncio
-async def test_terminal_steer_rejection_releases_identity() -> None:
-    handle, session = make_handle()
+async def test_terminal_steer_rejection_releases_identity(tmp_path: Path) -> None:
+    handle, session = make_handle(directory=tmp_path / "sess")
     original = session.steer
     attempts = 0
 
@@ -482,8 +488,8 @@ async def test_terminal_steer_rejection_releases_identity() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prompt_streaming_rejection_transfers_identity_to_steer() -> None:
-    handle, session = make_handle()
+async def test_prompt_streaming_rejection_transfers_identity_to_steer(tmp_path: Path) -> None:
+    handle, session = make_handle(directory=tmp_path / "sess")
 
     async def reject_prompt(  # noqa: ANN202
         text, images=None, *, message_id=None, admitted=None  # noqa: ANN001
@@ -536,8 +542,8 @@ async def test_a_refused_prompt_retried_as_a_prompt_is_really_admitted() -> None
 
 
 @pytest.mark.asyncio
-async def test_distinct_concurrent_steers_keep_fifo_order() -> None:
-    handle, session = make_handle()
+async def test_distinct_concurrent_steers_keep_fifo_order(tmp_path: Path) -> None:
+    handle, session = make_handle(directory=tmp_path / "sess")
 
     receipts = await asyncio.gather(
         *(
@@ -654,8 +660,53 @@ async def test_concurrent_gate_answers_have_one_authoritative_winner() -> None:
 
 
 @pytest.mark.asyncio
-async def test_concurrent_explicit_steers_preserve_dispatch_order() -> None:
-    handle, session = make_handle()
+async def test_a_signal_exit_refuses_parked_and_later_gates() -> None:
+    """M1 on #3028: once a signal commits the exit, no gate parks on a person.
+
+    A parked approval is denied (``False``, the stop/timeout answer) and the
+    count says so; a gate opened afterwards answers at once instead of parking
+    a fresh card that would hold the drain open again; an ask answers ``None``.
+    """
+    handle, _ = make_handle(auto_approve=False)
+    parked = asyncio.ensure_future(handle._approval_gate("bash", "Allow?"))
+    await asyncio.sleep(0)
+    assert handle.is_busy() is True
+
+    assert handle.refuse_gates_for_exit() == 1
+    assert await asyncio.wait_for(parked, timeout=2) is False
+    assert handle.is_busy() is False
+
+    assert await asyncio.wait_for(handle._approval_gate("bash", "again"), timeout=1) is False
+    assert handle._pending_futures == {}
+    question = SimpleNamespace(id="q1", question="Proceed?", options=[], secret=False)
+    assert await asyncio.wait_for(handle._ask_gate([question]), timeout=1) is None
+
+
+@pytest.mark.asyncio
+async def test_a_signal_between_two_questions_does_not_park_the_second() -> None:
+    """m1 (agent review round 2 on #3028): the exit flag is re-read per question.
+
+    q1 is answered in the same tick the exit is committed; the refusal finds
+    nothing parked (q1's future is already settled), so a single entry check
+    let q2 park after the refusal. The loop now stops and returns what it has.
+    """
+    handle, _ = make_handle(auto_approve=False)
+    q1 = SimpleNamespace(id="q1", question="First?", options=[], secret=False)
+    q2 = SimpleNamespace(id="q2", question="Second?", options=[], secret=False)
+    asked = asyncio.ensure_future(handle._ask_gate([q1, q2]))
+    await asyncio.sleep(0)
+    (future,) = list(handle._pending_futures.values())
+    future.set_result({"q1": ["yes"]})
+    assert handle.refuse_gates_for_exit() == 0
+    answer = await asyncio.wait_for(asked, timeout=1)
+    assert answer == {"q1": ["yes"]}, answer
+    assert handle._pending_futures == {}
+    assert handle.is_busy() is False
+
+
+@pytest.mark.asyncio
+async def test_concurrent_explicit_steers_preserve_dispatch_order(tmp_path: Path) -> None:
+    handle, session = make_handle(directory=tmp_path / "sess")
     receipts = await asyncio.gather(
         handle.steer("mobile steer"),
         handle.steer("attach steer one"),
@@ -676,6 +727,89 @@ async def test_pending_gate_is_busy_until_ordinary_timeout(monkeypatch) -> None:
     assert await waiting is False
     assert handle.is_busy() is False
     assert serving_mod.PENDING_REQUEST_TIMEOUT_S == 0.05
+
+
+class _PhoneAttachesMidWait:
+    """A registrant with nothing attached until the test attaches a phone.
+
+    Answers by KIND (``attached_surfaces``/``watching_surfaces``), the shape the
+    current RuntimeServer publishes, so flipping ``surfaces`` is the same change
+    the relay's attach makes to what ``_gate_timeout_s`` reads.
+    """
+
+    def __init__(self) -> None:
+        self.surfaces: frozenset[str] = frozenset()
+
+    def attached_surfaces(self) -> frozenset[str]:
+        return self.surfaces
+
+    def watching_surfaces(self) -> frozenset[str]:
+        return self.surfaces
+
+    def set_record_pending(self, pending: str | None) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gate_kind", ["approval", "ask"])
+async def test_a_gate_that_expired_unattended_records_the_wait_it_actually_had(
+    monkeypatch, gate_kind: str
+) -> None:
+    """The row says how long the gate WAITED, not what the policy says now.
+
+    PR #3030 QA finding X1: a gate opened with nothing attached and
+    notifications off waits the short cap; a phone attaching mid-wait flips the
+    policy to the 24 h park, and the recorder re-read the policy when it wrote
+    the row — so a 30-second expiry was recorded (and replayed to the model and
+    the phone) as ``waited_s: 86400``. Driven through the REAL gates so the
+    value asserted is the one the gate hands the recorder, not one this test
+    supplied.
+    """
+    monkeypatch.setattr(serving_mod, "PENDING_REQUEST_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(
+        ServingSessionHandle, "_unattended_gate_hours", lambda self: 24, raising=False
+    )
+    # Notifications OFF and nothing attached: the one case the short cap is for.
+    monkeypatch.setattr(
+        "local_operator.tui.notify.notifications_enabled", lambda: False, raising=False
+    )
+    handle, session = make_handle(auto_approve=False)
+    registrant = _PhoneAttachesMidWait()
+    handle._registrant = registrant  # type: ignore[assignment]
+    appended: list[Any] = []
+
+    class _Transcript:
+        async def append_message(self, message):  # noqa: ANN001
+            appended.append(message)
+
+    setattr(session, "transcript", _Transcript())
+    assert handle._gate_timeout_s() == 0.05, "precondition: the gate opens on the short cap"
+
+    async def _open_gate() -> Any:
+        if gate_kind == "approval":
+            return await handle._approval_gate("bash", "rm -rf build/")
+        question = AskQuestion(
+            id="go",
+            question="Deploy?",
+            options=[AskOption(label="Yes"), AskOption(label="No")],
+        )
+        return await handle._ask_gate([question])
+
+    waiting = asyncio.ensure_future(_open_gate())
+    # Two ticks: one to enter the wrapper, one for the gate to park its future.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert handle._pending_futures, "precondition: the gate is parked before the attach"
+    # The phone attaches while the gate is parked on the short wait.
+    registrant.surfaces = frozenset({"daemon"})
+    assert handle._gate_timeout_s() == 24 * 3600.0, "precondition: attach switches the policy"
+
+    settled = await asyncio.wait_for(waiting, 5)
+
+    assert settled in (False, None), "the short wait must still expire"
+    assert appended, "the expiry was not recorded at all"
+    waited = appended[0].details["waited_s"]
+    assert waited == 0.05, f"recorded waited_s={waited!r}; the gate waited the 0.05 s short cap"
 
 
 @pytest.mark.asyncio
@@ -968,6 +1102,70 @@ async def test_ask_gate_asks_multiple_questions_one_at_a_time() -> None:
     await handle.ask_answer(second.request_id, "yes")
     assert await asyncio.wait_for(asked, 1) == {"env": ["prod"], "confirm": ["yes"]}
     assert handle._fold.projection.pending is None
+
+
+@pytest.mark.asyncio
+async def test_the_ask_surface_can_be_installed_without_the_approval_gates() -> None:
+    """#2803: a resumed, unsupervised run gets the ASK half and nothing else.
+
+    The ask half is what makes the queue exist at all (``Session.ask_queue``
+    answers ``None`` without a hook), so a resume worker without it never builds
+    a queue, never advertises ``ask``/``ask_withdraw``, and cannot deliver a row
+    its conversation's ask log owes.
+    """
+    loop = asyncio.get_running_loop()
+    session = FakeSession()
+    handle = ServingSessionHandle(
+        session, loop, cwd="/tmp", install_gates=False, install_ask_surface=True
+    )
+
+    assert handle._gates_installed is False
+    # NOTHING about approvals moved: that half is why `--control` is withheld
+    # from a resume worker in the first place.
+    assert getattr(session, "_approval_handler", None) is None
+    assert getattr(handle, "_approval_gate", None) is None
+    assert session._ask_handler is handle._ask_gate
+
+
+@pytest.mark.asyncio
+async def test_a_run_with_neither_flag_installs_no_ask_surface() -> None:
+    """A fresh unsupervised ``lop exec`` still has no ``ask`` (SA-D2)."""
+    loop = asyncio.get_running_loop()
+    session = FakeSession()
+    ServingSessionHandle(session, loop, cwd="/tmp", install_gates=False)
+
+    assert getattr(session, "_ask_handler", None) is None
+
+
+@pytest.mark.asyncio
+async def test_the_queued_only_ask_surface_refuses_in_words_when_awaited() -> None:
+    """The kill-switch arm must not report a user who was never shown a card.
+
+    Under the queued engine the handler is only a capability flag —
+    ``execute_ask`` awaits it on the BLOCKING arm alone. With the engine off
+    (``LOP_ASK_NONBLOCKING=0``) there is nobody to present the question, and
+    returning ``None`` would render as "the user closed the question", so the
+    arm raises a sentence instead.
+    """
+    loop = asyncio.get_running_loop()
+    session = FakeSession()
+    handle = ServingSessionHandle(
+        session, loop, cwd="/tmp", install_gates=False, install_ask_surface=True
+    )
+    with pytest.raises(AskUnavailableError) as raised:
+        await session._ask_handler(
+            [
+                AskQuestion(
+                    id="q0",
+                    question="which?",
+                    options=[AskOption(label="yes"), AskOption(label="no")],
+                )
+            ]
+        )
+
+    assert "No one can be asked on this run" in str(raised.value)
+    assert "the queued-ask engine is off" in str(raised.value)
+    assert handle._ask_gate is session._ask_handler
 
 
 @pytest.mark.asyncio
@@ -1433,6 +1631,22 @@ async def test_attach_seeds_streaming_from_flag_for_mid_turn_subscriber() -> Non
     session.is_streaming = True
     handle.subscribe(lambda: None)
     assert handle._fold.projection.streaming is True
+
+
+def test_a_committed_departure_ignores_the_warm_window() -> None:
+    """#3028 node control (c): an idle signalled runtime must leave, not wait 120 s.
+
+    Residency keeps a runtime warm for an imminent wake; a signal drain is not
+    residency. The warm-window term therefore stops holding once ``_draining``
+    is latched, so the turn boundary ends the runtime and its successor owns
+    the next occurrence.
+    """
+    handle, _ = make_handle()
+    handle.next_wake_due_at = lambda: 0  # type: ignore[method-assign]
+    handle._draining = False
+    assert handle.may_refresh() == "wake due within the warm window"
+    handle._draining = True
+    assert handle.may_refresh() == ""
 
 
 # --- next_wake_due_at: the reaper's warmth signal ----------------------------
@@ -2059,10 +2273,10 @@ async def test_a_chosen_effort_is_applied_with_the_model_on_this_owner(
     monkeypatch.setattr(
         session,
         "set_model",
-        lambda spec, explicit=False: applied.append((spec, explicit)),
+        lambda spec, explicit=False, **kw: applied.append((spec, explicit)),
         raising=False,
     )
-    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
 
     await handle.set_model_effort("deepseek", "deepseek-flash", "max")
     await handle.set_model("deepseek", "deepseek-flash")
@@ -2103,9 +2317,9 @@ async def test_a_pair_only_switch_keeps_the_level_the_user_chose(
     handle, session = make_handle()
     applied: list[Any] = []
     monkeypatch.setattr(
-        session, "set_model", lambda spec, explicit=False: applied.append(spec), raising=False
+        session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
     )
-    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
 
     chosen = build_model_spec("deepseek", "deepseek-flash").model_copy(
         update={"reasoning_effort": "max"}
@@ -2139,6 +2353,81 @@ async def test_a_pair_only_switch_keeps_the_level_the_user_chose(
         applied[-1].reasoning_effort
         == build_model_spec("deepseek", "deepseek-flash").reasoning_effort
     )
+
+
+@pytest.mark.asyncio
+async def test_a_pair_only_switch_keeps_the_fast_dial(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A re-pick of the row in force must not erase the speed the user set.
+
+    ``build_model_spec`` never seeds ``fast_mode`` (it is the one dial billed at a
+    premium, so it cannot arrive on by inference), and ``Session.set_model``
+    assigns the rebuilt spec BEFORE its same-pair early return. So the birth
+    override RPC — the one ``AttachedSession._consume_model_override`` sends on
+    the first send of a draft created with fast on (ui#1265) — rebuilt the spec
+    and reseated the conversation on standard speed at the exact moment the user
+    expected the tier they had just chosen.
+
+    Same rule as the level beside it (#2471): a pair re-pick is not a request to
+    forget a knob. A GENUINE switch does not carry the dial — it is a per-model
+    premium, and re-arming it on a different model is how a switch costs money
+    the user never agreed to.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    handle, session = make_handle()
+    applied: list[Any] = []
+    monkeypatch.setattr(
+        session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
+    )
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
+
+    fast = build_model_spec("anthropic", "claude-opus-5").model_copy(update={"fast_mode": True})
+    assert fast.supports_fast_mode, "the registry must sell this tier"
+    session.model = fast
+
+    await handle.set_model_effort("anthropic", "claude-opus-5", None)
+    assert applied[-1].fast_mode is True, "the dial the owner was born on must survive the RPC"
+
+    await handle.set_model_effort("deepseek", "deepseek-flash", None)
+    assert applied[-1].fast_mode is False, "a switch to another model is not a fast re-arm"
+
+
+@pytest.mark.asyncio
+async def test_a_level_less_switch_carries_the_choice_not_the_clamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CLAMP on the spec must not displace the choice on the way back.
+
+    `max` -> `openai/gpt-5` clamps to `xhigh` (its ladder stops there), which is
+    correctly the level IN FORCE. The reverse hop must carry `max` — the level
+    the conversation chose — not `xhigh`, the clamp the previous hop left on the
+    spec. Preferring the spec level here was the second half of review M1a: the
+    clamp was no longer RECORDED as the choice, but it was still being carried.
+    """
+    from local_operator.model.configure import build_model_spec
+
+    handle, session = make_handle()
+    applied: list[Any] = []
+
+    def _apply(spec: Any, explicit: bool = False, **kw: Any) -> None:
+        # Assign like the real Session does, or the second hop would read the
+        # FIRST spec and the assertion could pass for the wrong reason.
+        applied.append(spec)
+        session.model = spec
+
+    monkeypatch.setattr(session, "set_model", _apply, raising=False)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
+
+    session.model = build_model_spec("anthropic", "claude-opus-5").model_copy(
+        update={"reasoning_effort": "max"}
+    )
+    session.chosen_effort = "max"
+
+    await handle.set_model_effort("openai", "gpt-5", None)
+    assert applied[-1].reasoning_effort == "xhigh"  # in force, clamped
+
+    await handle.set_model_effort("anthropic", "claude-opus-5", None)
+    assert applied[-1].reasoning_effort == "max", "the clamp was carried instead of the choice"
 
 
 @pytest.mark.asyncio
@@ -2220,9 +2509,9 @@ async def test_a_level_this_model_cannot_express_is_clamped_not_refused(
     handle, session = make_handle()
     applied: list[Any] = []
     monkeypatch.setattr(
-        session, "set_model", lambda spec, explicit=False: applied.append(spec), raising=False
+        session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
     )
-    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
 
     await handle.set_model_effort("deepseek", "deepseek-flash", "xhigh")
 
@@ -2951,9 +3240,9 @@ async def test_the_wire_op_refuses_a_decision_only_provider(
     handle, session = make_handle()
     applied: list[Any] = []
     monkeypatch.setattr(
-        session, "set_model", lambda spec, explicit=False: applied.append(spec), raising=False
+        session, "set_model", lambda spec, explicit=False, **kw: applied.append(spec), raising=False
     )
-    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+    monkeypatch.setattr(handle, "_refresh_state", lambda **_: None)
 
     with pytest.raises(ValueError) as refused:
         # MIXED CASE, deliberately: the wire takes the frame's strings verbatim, so the
@@ -3609,7 +3898,7 @@ class _AccessSession(FakeSession):
         self.model_label = label
         self.effective_model_label = label
 
-    def set_model(self, spec: Any, *, explicit: bool = False) -> None:
+    def set_model(self, spec: Any, *, explicit: bool = False, effort_choice: object = None) -> None:
         self.model = spec
         self.model_label = f"{spec.provider}/{spec.model_id}"
         self.effective_model_label = self.model_label
@@ -3649,6 +3938,10 @@ async def test_the_serve_side_publishes_the_access_claim_at_open_and_on_switch(
     assert (opened.state, opened.provider, opened.label) == ("signed_out", "radient", "Radient")
 
     await handle.set_model_effort("deepseek", "deepseek-flash", None)
+    # The reply does not wait for the claim (PR #3053 R1-1): it follows in the
+    # background publish the switch scheduled.
+    assert handle._model_access_publish is not None
+    await handle._model_access_publish
     switched = session._frontend_state_store.state.model_access
     assert switched is not None
     assert (switched.state, switched.provider, switched.label) == (
@@ -4131,3 +4424,175 @@ async def test_rehome_reports_a_switch_that_did_not_take(monkeypatch: pytest.Mon
 
     assert detail == "kept: the switch did not take (still radient/auto)"
     assert session.model_label == "radient/auto"
+
+
+# -- V2-3: fork auto-tagging in the naming worker ---------------------------
+
+
+def _auto_tag_handle(tmp_path: Path) -> tuple[ServingSessionHandle, FakeSession]:
+    """A handle whose own config root IS ``tmp_path`` — the sidecar's store."""
+    loop = asyncio.get_running_loop()
+    session = FakeSession()
+    # The store validates 12-hex session ids; the module default is a label.
+    session.session_id = "abcdef123456"
+    (tmp_path / "sessions" / session.session_id).mkdir(parents=True)
+    handle = ServingSessionHandle(session, loop, cwd=str(tmp_path), config_dir=tmp_path)
+    return handle, session
+
+
+def _seed_categories(root: Path, *names: str) -> list[str]:
+    return [
+        item["id"] for item in session_tags.write_categories(root, [(None, name) for name in names])
+    ]
+
+
+async def _settle(handle: ServingSessionHandle) -> None:
+    """Wait for the detached naming worker, including its ``to_thread`` store work.
+
+    A few bare ``sleep(0)`` turns are not enough once the worker parks on a
+    thread for the tag write: the task must be awaited to its own completion,
+    or the assertions race the write's ``finally``.
+    """
+    await asyncio.sleep(0)
+    pending = list(handle._background_tasks)
+    if pending:
+        await asyncio.gather(*pending)
+
+
+@pytest.mark.asyncio
+async def test_the_fork_intent_rides_the_naming_call_and_assigns_once(tmp_path: Path) -> None:
+    handle, session = _auto_tag_handle(tmp_path)
+    review, project = _seed_categories(tmp_path, "Review", "Project")
+    assert auto_tag.record_fork(tmp_path, session.session_id)
+    reply = f"<title>Billing importer rewrite</title>" f"<tags>{review},{project}</tags>"
+    # Two samples: no fit seam means the clean first sample is HEDGED, and the
+    # second (verified) sample is the accepted one — so it must carry the tags
+    # this test expects to be written.
+    session.title_replies = [reply, reply]
+
+    handle._maybe_name_conversation("rewrite the billing importer")
+    await _settle(handle)
+
+    assert session.conversation_name == "Billing importer rewrite"
+    system, prompt = session._complete_calls[0]
+    assert "<available-tags" in system
+    assert review not in prompt  # the tag list is prefix, not the excerpt
+    state = session_tags.read_entity_tags(tmp_path, "session", session.session_id)
+    assert state["tags"] == [review, project]
+    assert state["primary"] == review
+    assert auto_tag.read(tmp_path, session.session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_a_manual_add_then_clear_before_the_first_turn_wins(tmp_path: Path) -> None:
+    handle, session = _auto_tag_handle(tmp_path)
+    review, _ = _seed_categories(tmp_path, "Review", "Project")
+    assert auto_tag.record_fork(tmp_path, session.session_id)
+    # The human tags the fork and clears it again before the first turn. The
+    # VALUE is empty; the revision moved, and the sidecar's snapshot is stale.
+    session_tags.set_entity_tags(tmp_path, "session", session.session_id, [review], review)
+    session_tags.set_entity_tags(tmp_path, "session", session.session_id, [], None)
+    reply = f"<title>Billing importer rewrite</title><tags>{review}</tags>"
+    session.title_replies = [reply, reply]
+
+    handle._maybe_name_conversation("rewrite the billing importer")
+    await _settle(handle)
+
+    assert session.conversation_name == "Billing importer rewrite"
+    assert session_tags.read_entity_tags(tmp_path, "session", session.session_id)["tags"] == []
+    assert auto_tag.read(tmp_path, session.session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_a_category_deleted_during_the_call_is_dropped_at_write(
+    tmp_path: Path,
+) -> None:
+    handle, session = _auto_tag_handle(tmp_path)
+    review, project = _seed_categories(tmp_path, "Review", "Project")
+    assert auto_tag.record_fork(tmp_path, session.session_id)
+
+    async def complete(system: str, prompt: str) -> str:
+        # The provider call is long enough for the registry to move.
+        session_tags.write_categories(tmp_path, [(project, "Project")])
+        return f"<title>Billing importer rewrite</title><tags>{review}</tags>"
+
+    session.complete_once = complete  # type: ignore[method-assign]
+    handle._maybe_name_conversation("rewrite the billing importer")
+    await _settle(handle)
+
+    assert session.conversation_name == "Billing importer rewrite"
+    assert session_tags.read_entity_tags(tmp_path, "session", session.session_id)["tags"] == []
+    assert [item["id"] for item in session_tags.read_categories(tmp_path)] == [project]
+
+
+@pytest.mark.asyncio
+async def test_without_an_intent_the_prompt_is_byte_identical(tmp_path: Path) -> None:
+    handle, session = _auto_tag_handle(tmp_path)
+    _seed_categories(tmp_path, "Review")
+    session.title_replies = [
+        "<title>Billing importer rewrite</title>",
+        "<title>Billing importer rewrite</title>",
+    ]
+
+    handle._maybe_name_conversation("rewrite the billing importer")
+    await _settle(handle)
+
+    assert session._complete_calls[0][0] == naming.TITLE_SYSTEM_PROMPT
+    assert session_tags.read_entity_tags(tmp_path, "session", session.session_id)["tags"] == []
+
+
+@pytest.mark.asyncio
+async def test_an_empty_registry_spends_the_intent_without_a_block_or_write(
+    tmp_path: Path,
+) -> None:
+    handle, session = _auto_tag_handle(tmp_path)
+    assert auto_tag.record_fork(tmp_path, session.session_id)
+    session.title_replies = [
+        "<title>Billing importer rewrite</title><tags>whatever</tags>",
+        "<title>Billing importer rewrite</title>",
+    ]
+
+    handle._maybe_name_conversation("rewrite the billing importer")
+    await _settle(handle)
+
+    assert session._complete_calls[0][0] == naming.TITLE_SYSTEM_PROMPT
+    assert session_tags.read_entity_tags(tmp_path, "session", session.session_id)["tags"] == []
+    assert auto_tag.read(tmp_path, session.session_id) is None
+
+
+@pytest.mark.asyncio
+async def test_no_accepted_title_writes_nothing_and_keeps_the_intent(
+    tmp_path: Path,
+) -> None:
+    """A failed/declined call is not the naming answer the intent is spent on."""
+    handle, session = _auto_tag_handle(tmp_path)
+    _seed_categories(tmp_path, "Review")
+    assert auto_tag.record_fork(tmp_path, session.session_id)
+    session.title_replies = ["<title/>"]
+
+    handle._maybe_name_conversation("rewrite the billing importer")
+    await _settle(handle)
+
+    assert session.conversation_name == ""
+    assert session_tags.read_entity_tags(tmp_path, "session", session.session_id)["tags"] == []
+    # The latch allows one retry while unnamed; the intent rides it rather than
+    # being spent on an answer that never accepted a title.
+    assert auto_tag.read(tmp_path, session.session_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_the_heal_never_reads_the_fork_intent(tmp_path: Path) -> None:
+    handle, session = _auto_tag_handle(tmp_path)
+    review = _seed_categories(tmp_path, "Review")[0]
+    assert auto_tag.record_fork(tmp_path, session.session_id)
+    session.title_replies = [
+        f"<title>Billing importer rewrite</title><tags>{review}</tags>",
+        f"<title>Billing importer rewrite</title><tags>{review}</tags>",
+    ]
+
+    await handle._name_conversation_worker("rewrite the billing importer", heal=True)
+
+    assert session.conversation_name == "Billing importer rewrite"
+    assert session._complete_calls[0][0] == naming.TITLE_SYSTEM_PROMPT
+    assert session_tags.read_entity_tags(tmp_path, "session", session.session_id)["tags"] == []
+    assert auto_tag.read(tmp_path, session.session_id) is not None

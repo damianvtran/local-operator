@@ -1,0 +1,7 @@
+{
+  "cli.model_help.model": "切换另一个运行中的lop会话的模型（相当于在该会话中使用/model）",
+  "cli.model_help.target": "conversation-name / session-id / cwd子串（不区分大小写）。用--pid/--session指定目标时省略。",
+  "cli.model_help.selector": "要切换至的模型，如deepseek/deepseek-flash",
+  "cli.model_help.pid": "按确切pid指定目标",
+  "cli.model_help.session": "按确切会话ID指定目标"
+}

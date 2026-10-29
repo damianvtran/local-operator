@@ -18,6 +18,7 @@ time (AGENTS.md "Timing, flakes").
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -29,7 +30,13 @@ from typing import Any
 import boto3
 import pytest
 from botocore.stub import ANY, Stubber
-from lop_osworld_v2_adapter import cleanup, provisioning, scoring, taskfile
+from lop_osworld_v2_adapter import (
+    cleanup,
+    guest_xcursor,
+    provisioning,
+    scoring,
+    taskfile,
+)
 from lop_osworld_v2_adapter.observation import SCREENSHOT_CAUSE_KEY
 from lop_osworld_v2_adapter.providers import aws as aws_mod
 from lop_osworld_v2_adapter.providers.aws import (
@@ -941,13 +948,15 @@ async def test_readiness_timeout_raises_after_deadline(
 
 
 @pytest.mark.asyncio
-async def test_probe_asks_the_readiness_endpoint_and_200_is_reachable(
+async def test_probe_asks_the_liveness_endpoint_and_200_is_reachable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The ambiguous-delivery probe is the allocation readiness GET, again.
+    """The ambiguous-delivery probe is the mid-episode liveness GET.
 
-    Same endpoint, same meaning: whatever answered 200 at admission answers
-    this, and the answer is the boolean the session's gate acts on. The
+    ``/platform``, not the allocation check's ``/terminal``: mid-episode the
+    desktop may hold a terminal, and upstream's ``/terminal`` then walks the
+    whole AT-SPI tree -- seconds -- so a live server would read as down. The
+    answer is the boolean the session's gate acts on. The
     caller's ``timeout`` reaches the transport unchanged -- the bound is the
     caller's, so the short probe deadline stays the harness's decision.
     """
@@ -956,7 +965,7 @@ async def test_probe_asks_the_readiness_endpoint_and_200_is_reachable(
         provider = _provider(stubs, monkeypatch)
         provider._public_ip = "203.0.113.5"
         assert await provider.probe_control_server(5.0) is True
-    assert stubs.http_calls == ["http://203.0.113.5:5000/terminal"]
+    assert stubs.http_calls == ["http://203.0.113.5:5000/platform"]
     assert stubs.http_timeouts == [5.0]
 
 
@@ -976,7 +985,7 @@ async def test_probe_collapses_every_not_answering_mode_to_false(
         provider = _provider(stubs, monkeypatch)
         provider._public_ip = "203.0.113.5"
         assert await provider.probe_control_server(5.0) is False
-    assert stubs.http_calls == ["http://203.0.113.5:5000/terminal"]
+    assert stubs.http_calls == ["http://203.0.113.5:5000/platform"]
 
     def refused(url: str, timeout: float) -> int:
         del url, timeout
@@ -2512,6 +2521,7 @@ async def test_real_aws_answer_never_publishes_coerced_values(
                 *,
                 timeout: float,
                 execution_overhead_seconds_per_action: float = 0.0,
+                timeout_context: str | None = None,
             ) -> Any:
                 if method == "ask_user_exchange":
                     self.calls.append(method)
@@ -2522,6 +2532,7 @@ async def test_real_aws_answer_never_publishes_coerced_values(
                     result_type,
                     timeout=timeout,
                     execution_overhead_seconds_per_action=(execution_overhead_seconds_per_action),
+                    timeout_context=timeout_context,
                 )
 
         async def rescue(descriptor: Any, **kwargs: Any) -> Any:
@@ -3032,3 +3043,86 @@ async def test_a_build_without_the_accessor_refuses_rather_than_guessing(
             await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
 
     assert "_task_get" in str(excinfo.value)
+
+
+# ----------------------------------------------------------------------
+# Guest X-display leak fix (see ``guest_xcursor``)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_allocate_always_records_the_xcursor_patch_outcome(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FAIL-OPEN, NEVER SILENT: the stubbed guest is not the stock image, so
+    the patch does not apply -- and the episode still allocates AND the record
+    says ``applied: false`` with the reason. A silent no-op is the failure."""
+
+    with _Stubs() as stubs:
+        root = await _allocate_with_guest(stubs, monkeypatch, tmp_path)
+
+    record = json.loads((root / guest_xcursor.EVIDENCE_FILENAME).read_bytes())
+    assert record["applied"] is False
+    assert record["status"] in ("unrecognised", "failed", "unreachable")
+    assert record["reason"]
+    assert record["upstream"]["merge_sha"] == guest_xcursor.UPSTREAM_MERGE_SHA
+
+
+@pytest.mark.asyncio
+async def test_allocate_patches_a_stock_guest_before_upstream_resets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The patch lands BEFORE upstream's reset, so the first frame is leak-free."""
+
+    state = {"sha": guest_xcursor.STOCK_SHA256, "pids": [101, 102]}
+
+    def inspect_reply() -> dict[str, Any]:
+        return {
+            "returncode": 0,
+            "output": json.dumps({"sha256": state["sha"], "server_pids": state["pids"]}),
+            "error": "",
+        }
+
+    _ResetRecordingEnv.posts_at_reset = None
+    with _Stubs() as stubs:
+        _ResetRecordingEnv.stubs = stubs
+        original = stubs.clients.http_post_json
+
+        def post(url: str, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+            argv = payload.get("command", [])
+            if argv[:2] == ["python3", "-c"] and argv[2] == guest_xcursor._INSPECT_SOURCE:
+                stubs.guest_posts.append(payload)
+                return inspect_reply()
+            if argv[:2] == ["python3", "-c"] and argv[2] == guest_xcursor._WRITE_SOURCE:
+                stubs.guest_posts.append(payload)
+                assert (
+                    hashlib.sha256(base64.b64decode(argv[5])).hexdigest()
+                    == guest_xcursor.PATCHED_SHA256
+                )
+                state["sha"] = guest_xcursor.PATCHED_SHA256
+                state["pids"] = [101, 103]  # werkzeug re-execs the serving child
+                return {"returncode": 0, "output": json.dumps({"written": True}), "error": ""}
+            return original(url, payload, timeout)
+
+        stubs.clients.http_post_json = post
+        _expect_describe_images(stubs)
+        _expect_run_instances(stubs)
+        _expect_create_schedule(stubs)
+        _expect_running(stubs)
+        provider = _provider(
+            stubs,
+            monkeypatch,
+            desktop_env_factory=_ResetRecordingEnv,
+            task_factory=lambda t: {"id": t.task_id, "instruction": "do it"},
+        )
+        root = _cache_root(tmp_path)
+        await provider.allocate(_plan(), _task(), cache_root=root)
+
+    record = json.loads((root / guest_xcursor.EVIDENCE_FILENAME).read_bytes())
+    assert record["applied"] is True and record["status"] == "applied"
+    assert provider.guest_xcursor_patch is not None and provider.guest_xcursor_patch.applied
+    write_index = next(
+        i for i, p in enumerate(stubs.guest_posts) if p["command"][2] == guest_xcursor._WRITE_SOURCE
+    )
+    assert _ResetRecordingEnv.posts_at_reset is not None
+    assert write_index < _ResetRecordingEnv.posts_at_reset

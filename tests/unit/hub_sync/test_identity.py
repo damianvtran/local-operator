@@ -70,6 +70,30 @@ def test_source_refusals_do_not_echo_credentials(source: str) -> None:
     assert "secret" not in str(refusal.value) and "password" not in str(refusal.value)
 
 
+@pytest.mark.parametrize(
+    "source,approved",
+    [
+        ("http://[::1", ("https://hub.example/api/v1",)),
+        ("  https://hub.example/api  ", ("https://hub.example/api",)),
+    ],
+)
+def test_malformed_or_padded_sources_keep_the_link_refusal(
+    source: str, approved: tuple[str, ...]
+) -> None:
+    """Completion must not convert a parser failure into a raw ValueError.
+
+    ``urlsplit`` raises on a bracketed host, and ``normalize_radient_api_base_url``
+    strips whitespace; validating the RAW value first keeps both refusals in the
+    route's own vocabulary instead of a 409 carrying the parser's message or a
+    silently accepted padded value.
+    """
+
+    with pytest.raises(LinkError) as refusal:
+        approve_source(source, approved)
+    assert refusal.value.code == "origin-conflict"
+    assert "Invalid IPv6 URL" not in str(refusal.value)
+
+
 def test_source_syntax_does_not_authorize_credential_egress() -> None:
     assert (
         approve_source("https://HUB.example/api/", ("https://hub.example/api",))
@@ -77,6 +101,35 @@ def test_source_syntax_does_not_authorize_credential_egress() -> None:
     )
     with pytest.raises(LinkError):
         approve_source("https://attacker.example/api", ("https://hub.example/api",))
+
+
+def test_approve_source_completes_only_the_version_segment() -> None:
+    """The renderer's unversioned server base names the same configured origin.
+
+    Completion may only append ``/v1`` to a root with no path: a different host,
+    scheme or version is still refused, and a custom gateway path is untouched.
+    """
+
+    assert (
+        approve_source("https://api.radienthq.com", ("https://api.radienthq.com/v1",))
+        == "https://api.radienthq.com/v1"
+    )
+    assert (
+        approve_source("http://127.0.0.1:8127", ("http://127.0.0.1:8127/v1",))
+        == "http://127.0.0.1:8127/v1"
+    )
+    assert (
+        approve_source("https://gw.example/hub", ("https://gw.example/hub",))
+        == "https://gw.example/hub"
+    )
+    for refused in (
+        "http://api.radienthq.com",
+        "https://api.radienthq.com/v2",
+        "https://attacker.example",
+    ):
+        with pytest.raises(LinkError) as refusal:
+            approve_source(refused, ("https://api.radienthq.com/v1",))
+        assert refusal.value.code == "origin-conflict"
 
 
 @pytest.mark.parametrize(

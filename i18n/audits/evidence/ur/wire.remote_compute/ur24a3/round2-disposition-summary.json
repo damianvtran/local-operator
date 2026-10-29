@@ -1,0 +1,85 @@
+{
+  "finding_groups": [
+    {
+      "finding_id": "UR-R2-001",
+      "severity": "major",
+      "status": "resolved",
+      "affected_keys": 1,
+      "changed_keys": 1,
+      "exact_proposed_matches": 1,
+      "resolution": "remediated with proposed wording"
+    },
+    {
+      "finding_id": "UR-R2-002",
+      "severity": "major",
+      "status": "resolved",
+      "affected_keys": 1,
+      "changed_keys": 1,
+      "exact_proposed_matches": 1,
+      "resolution": "remediated with proposed wording"
+    },
+    {
+      "finding_id": "UR-R2-003",
+      "severity": "minor",
+      "status": "resolved",
+      "affected_keys": 4,
+      "changed_keys": 4,
+      "exact_proposed_matches": 4,
+      "resolution": "remediated with proposed wording"
+    },
+    {
+      "finding_id": "UR-R2-004",
+      "severity": "minor",
+      "status": "resolved",
+      "affected_keys": 1,
+      "changed_keys": 1,
+      "exact_proposed_matches": 1,
+      "resolution": "remediated with proposed wording"
+    },
+    {
+      "finding_id": "UR-R2-005",
+      "severity": "minor",
+      "status": "resolved",
+      "affected_keys": 2,
+      "changed_keys": 2,
+      "exact_proposed_matches": 0,
+      "resolution": "accepted idiomatic alternate تجرباتی for feature Preview"
+    },
+    {
+      "finding_id": "UR-R2-006",
+      "severity": "minor",
+      "status": "resolved",
+      "affected_keys": 1,
+      "changed_keys": 1,
+      "exact_proposed_matches": 1,
+      "resolution": "remediated with proposed wording"
+    },
+    {
+      "finding_id": "UR-R2-007",
+      "severity": "minor",
+      "status": "resolved",
+      "affected_keys": 1,
+      "changed_keys": 1,
+      "exact_proposed_matches": 1,
+      "resolution": "remediated with proposed wording"
+    }
+  ],
+  "allowed_identifier_dispositions": [
+    {
+      "key": "wire.settings.speech_transcription_cleanup.help",
+      "status": "accepted_unchanged_allowed_choice_identifier",
+      "byte_stable": true,
+      "current": "املاء سے فلر الفاظ اور غیر گفتار اشارے کیسے نکلیں۔ auto جہاں ممکن ہو پرووائیڈر کی مقامی صفائی، ورنہ محتاط کلائنٹ قواعد استعمال کرتا ہے؛ provider اور client میں سے ہر ایک صرف ایک میکانیزم استعمال کرتا ہے؛ آف حرف بہ حرف ٹرانسکرپٹ رکھتا ہے۔ فی درخواست `cleanup` فیلڈ بھی اول ہے۔"
+    },
+    {
+      "key": "wire.settings.supplements_model.help",
+      "status": "accepted_unchanged_allowed_choice_identifier",
+      "byte_stable": true,
+      "current": "گرافکس آن ہوں۔ auto سستا تیز ماڈل چنتا ہے؛ session موجودہ سیشن کا ماڈل استعمال کرتا ہے۔"
+    }
+  ],
+  "total_dispositions": 13,
+  "resolved_dispositions": 13,
+  "changed_remediations": 11,
+  "allowed_unchanged": 2
+}

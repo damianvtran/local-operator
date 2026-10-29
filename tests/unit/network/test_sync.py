@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from local_operator.network import sync
+from local_operator.session import compression
 
 
 def _ask(root: Path) -> Any:
@@ -79,6 +80,7 @@ def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
     )
     from local_operator.session.retention import DESKTOP_MARKER_NAME
     from local_operator.session.runtime.inbox import INBOX_NAME
+    from local_operator.session.runtime.journal import EXIT_RECORD_NAME
     from local_operator.session.runtime.registry import (
         SIGNAL_RECEIPT_NAME,
         STOP_MARKER_NAME,
@@ -105,6 +107,27 @@ def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
     # arrives, so the fixture has to hold one.
     (directory / SIGNAL_RECEIPT_NAME).write_text(
         json.dumps({"v": 1, "kind": "runtime", "signals": [{"name": "SIGTERM"}]}),
+        encoding="utf-8",
+    )
+    # The runtime's exit record travels for the reason the receipt beside it
+    # does, and the round trip below asserts EVERY ``COPY_SET_NAMES`` member
+    # arrives, so the fixture holds one.
+    (directory / EXIT_RECORD_NAME).write_text(
+        json.dumps(
+            {
+                "v": 1,
+                "kind": "runtime-exit",
+                "session_id": session_id,
+                "pid": 4242,
+                "started_at": 1_700_000_000.0,
+                "at": 1_700_000_100.0,
+                "reason": "idle-exit",
+                "detail": "",
+                "requested": False,
+                "build": "",
+                "pressure": {"free_disk_bytes": None, "load_1m": None},
+            }
+        ),
         encoding="utf-8",
     )
     (directory / INBOX_NAME).write_text(json.dumps({"id": "m1"}) + "\n", encoding="utf-8")
@@ -259,9 +282,11 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         TITLE_SIDECAR_NAME,
     )
     from local_operator.session.channel_spend import PENDING_SIDECAR_NAME
+    from local_operator.session.compression import ARCHIVE_FILENAMES
     from local_operator.session.creation import CREATED_AT_NAME
     from local_operator.session.retention import DESKTOP_MARKER_NAME
     from local_operator.session.runtime.inbox import INBOX_NAME
+    from local_operator.session.runtime.journal import EXIT_RECORD_NAME
     from local_operator.session.runtime.registry import (
         SIGNAL_RECEIPT_NAME,
         STOP_MARKER_NAME,
@@ -271,6 +296,13 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
 
     assert set(sync.COPY_SET_NAMES) == {
         "transcript.jsonl",
+        # THE TRANSCRIPT'S OTHER SPELLINGS: a compressed session's body is one of
+        # these names INSTEAD OF ``transcript.jsonl``, and both have to be accounted
+        # for because ``assert_complete`` asks before anything restores it (M-1/Q-3:
+        # unlisted, the archive refused the move of every session past
+        # ``after_days``). They never travel under these names — the prepare
+        # restores the plain journal first — so this pin is about accounting.
+        *ARCHIVE_FILENAMES,
         TITLE_SIDECAR_NAME,
         ATTACHMENT_SIDECAR_NAME,
         ORIGIN_NAME,
@@ -280,6 +312,11 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         # termination signal it received. Evidence ABOUT a run, keyed to that run's
         # pid, so it travels with the session exactly as the marker does.
         SIGNAL_RECEIPT_NAME,
+        # The runtime's durable exit record: when and why the last run left. A
+        # move that dropped it would leave the destination reading "no record
+        # attests to a stop" — the SIGKILL shape — silently rewriting the
+        # session's history (review round 1).
+        EXIT_RECORD_NAME,
         INBOX_NAME,
         ASKS_LOG_NAME,
         FORK_BOUNDARY_NAME,
@@ -348,7 +385,9 @@ def test_a_copy_transfers_the_whole_set_byte_for_byte_and_verifies_it(tmp_path: 
     transcript = (directory / "transcript.jsonl").read_bytes()
     assert (dest / "transcript.jsonl").read_bytes() == transcript
     for name in sync.COPY_SET_NAMES:
-        if name == "transcript.jsonl":
+        # The transcript travels under ONE of its names: this fixture is plain, so the
+        # archive forms are the spellings it does not have.
+        if name == "transcript.jsonl" or name in compression.ARCHIVE_FILENAMES:
             continue
         assert (dest / name).is_file(), name
     # THE SCRATCHPAD TREE TRAVELS, per file, byte for byte — including a nested

@@ -35,6 +35,128 @@ presses. The receiving application may normalize them, remove a trailing
 newline, or submit on a newline; transport equality is not a guarantee of
 application storage semantics.
 
+## Key names
+
+`key` (and the `paste_text` chord) take an array of key names pressed
+together. A name is either a single printable ASCII character, which is the
+key itself and keeps its case in the parsed representation (`"A"` is not
+`"a"`), or one of the named keys
+`protocol.NAMED_KEYS` defines: `alt`, `backspace`, `capslock`, `ctrl`,
+`delete`, `down`, `end`, `enter`, `esc`, `home`, `insert`, `left`, `meta`
+(the Super/logo key), `pagedown`, `pageup`, `right`, `shift`, `space`, `tab`,
+`up`, `f1`–`f24`. Named keys are matched case-insensitively. A chord may not
+name the same key twice. Representation is not a promise of uppercase input:
+the OSWorld compiler lowercases single-character key names, so both `"A"`
+and `"a"` compile to the same physical key. Use `["shift", "a"]` when an
+uppercase key press is intended (or `type` for literal text).
+
+The validator also accepts a small set of standard spellings and rewrites each
+one to the single key it names (`protocol.KEY_ALIASES`):
+
+| Accepted spelling (any case) | Becomes |
+| --- | --- |
+| `Return` | `enter` |
+| `Escape` | `esc` |
+| `Page_Down`, `pgdn` | `pagedown` |
+| `Page_Up`, `pgup` | `pageup` |
+| `Caps_Lock` | `capslock` |
+| `del` | `delete` |
+| `super`, `Super_L`, `win` | `meta` |
+| `Control_L` / `Shift_L` / `Alt_L` | `ctrl` / `shift` / `alt` |
+| `minus` / `plus` / `equal` | `-` / `+` / `=` |
+
+X11 keysyms that already match a named key once case is ignored (`BackSpace`,
+`Tab`, `Delete`, `Home`, `End`, `Insert`, arrow names) need no alias.
+"Case-insensitive" was never what refused `Escape`: it folds to `ESCAPE`, and
+the named key is `ESC`.
+
+The rewrite happens while the action is parsed, before the batch is bound to
+an observation. Parsed actions, bound-batch artifacts, their digests and compiled
+guest commands therefore contain canonical key names and match what the
+canonical spelling produces. Existing canonical batches replay unchanged.
+Raw model-response evidence is not rewritten and can still contain aliases.
+The surface schema and its `tool_schema_digest` are unchanged too, because
+`named_keys` still lists exactly the same set.
+
+An alias is admitted only when it is a standard X11 keysym or
+pyautogui/xdotool name **and** it presses exactly the key its target presses.
+pyautogui's X11 table is the check: the OSWorld compiler emits `ctrl`, and
+pyautogui sends `Control_L`. Two kinds of name stay refused:
+
+- Names that could mean different keys: `cmd`/`command` mean Ctrl in a Linux
+  shortcut but Super if read literally; `option` could mean Alt or AltGr.
+- Names that would press a different key: `Control_R`, `Shift_R`, `Alt_R` and
+  `Super_R` would press the left key, and `Next`/`Prior` read as commands.
+
+The refusal for `cmd` names both meanings and leaves the choice to the model.
+
+A literal `" "` names the space bar (it is the one printable character outside
+`string.punctuation`). Several refusals now carry a corrected example built
+from the model's own input. None of them is applied automatically. A refusal
+of one action's field, including an unknown key, names that action's index
+(`(action index 6)`):
+
+- A chord that spells text is refused only when pressing it would NOT type
+  that text. That happens when it has no modifier, every key is a single
+  printable character or `space`, and at least one of these holds:
+  - it contains an upper-case letter (a chord applies no shift, and the
+    compiler presses single characters lower-cased);
+  - it contains a repeated key;
+  - it contains a literal `" "` (refused on the old parser anyway).
+
+  The refusal shows the `type` action, e.g. `{"kind": "type", "text": "echo A"}`.
+  A lower-case, duplicate-free spelling such as `["t", "e", "r", "m"]` ran as
+  typed under the old contract and stays accepted. So do `["shift", "A"]`,
+  `["ctrl", "alt", "t"]` and `["up", "left"]`.
+- A multi-character name close to no key (`"cat"`, `"comp.scm"`) gets "if you
+  meant to type this text" and the `type` action. A near-miss still gets
+  "use … instead".
+- A `+`-joined chord (`"ctrl+t"`, `"ctrl++"`) gets `"keys": ["ctrl", "t"]` or
+  `["ctrl", "+"]`. A `+` where a part should start is the `+` key. The
+  suggestion is made only when the whole chord would be accepted, so `"A+B"`
+  gets no split.
+- A key repeated in one chord (`["Page_Up", "Page_Up"]`) gets one
+  `{"kind": "key", "keys": ["pageup"]}` action per press.
+- A batch over 64 actions is told the bound.
+
+Two more refusals stay, and their sentences now give the repair. An all-zero
+`scroll` states the sign convention: deltas are wheel clicks, and
+`delta_y > 0` scrolls UP. A `finish` or `ask_user` sharing a batch, including
+`[wait, finish]`, is told to send the finish alone. Leading waits are not
+dropped, because both measured `[wait, finish]` batches were an episode's first
+call with `reason: "placeholder"`, and both models then did the task.
+
+`type.text` is non-empty but may be whitespace: `"\n"` presses Return and `" "`
+presses space. Whitespace-only text may contain only space, tab, CR and LF.
+`"\x0b"` and `"\x0c"` have no key, so they are refused rather than typed as
+nothing. Removing the `\S` pattern from the `TypeAction` schema moved three
+sealed digests:
+
+| Digest | Before | After |
+| --- | --- | --- |
+| `runner-tool-schema-v1`, default surface | `347cc002ddaf…` | `bceb4942bc72…` |
+| `runner-tool-schema-v1`, OSWorld adapter surface | `59c2d8b8df9c…` | `5d3c05c86762…` |
+| `runner-model-reply-v1`, legacy binding | `07010b62a012…` | `12b9d16a7317…` |
+| `runner-model-reply-v1`, compact binding | `f0c5f14fa4de…` | `7bedde234538…` |
+
+Nothing in the repository re-parses stored action artifacts, so existing bundles
+still verify. An offline replay of old accepted batches through the new
+validator would refuse one shape: a chord carrying an upper-case letter, a
+repeat or a literal space. In the 2026-10-28 evidence that was 4 of 714
+batches, and each is lossy on the old compiler.
+
+Unknown fields stay refused rather than dropped. Only a field that belongs to
+another action kind is dropped (`public_reply.drop_sibling_action_fields`),
+because the model's `kind` tag already says what it meant. Dropping a pause
+field such as `wait` or `wait_ms` on a `key` would lose the pause. Turning it
+into a `wait` would add an action to an ordered batch. Either way the action
+would not be the one the model asked for. Instead, the refusal shows the
+corrected two-action form,
+`[{"kind": "key", "keys": ["enter"]}, {"kind": "wait", "duration_ms": 1000}]`.
+A near-miss of the kind's own field gets a "Did you mean" suggestion
+(`"key"` → `"keys"`). A rule broken inside a field (duplicate keys in a chord)
+is quoted in that field's refusal.
+
 ## X11 execution and ownership
 
 The generic stdlib host helper `local_operator.computer_input` generates guest

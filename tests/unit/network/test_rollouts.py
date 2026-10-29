@@ -19,11 +19,13 @@ is S1's and is exercised against real relays in ``test_mesh_update.py``.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import threading
 import time
 from argparse import Namespace
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -1350,3 +1352,596 @@ def test_a_real_update_exit_opens_the_roll_and_the_pass_moves_a_real_member(
     assert member["version"] == "0.99.0", member
     assert calls == ["0.99.0"], calls
     assert after["state"] == "done", after["state"]
+
+
+class _DriverThatIgnoresTheStop:
+    """A driver whose join returns at the deadline while it keeps running."""
+
+    def __init__(self) -> None:
+        self.stop_called = False
+        self.join_timeout: float | None = None
+        #: Flipped by a test to model the survivor finally dying.
+        self.alive = True
+
+    def stop(self) -> None:
+        self.stop_called = True
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_timeout = timeout
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+
+class _DriverThatStops:
+    """The clean arm: the join returns and the thread is already gone."""
+
+    def __init__(self) -> None:
+        self.stop_called = False
+        self.join_timeout: float | None = None
+
+    def stop(self) -> None:
+        self.stop_called = True
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_timeout = timeout
+
+    def is_alive(self) -> bool:
+        return False
+
+
+def _rollout_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.name == rollouts.logger.name and record.levelno == logging.WARNING
+    ]
+
+
+def test_stop_driver_reports_a_thread_that_will_not_stop_and_keeps_it_registered(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A timed-out join must not erase the only path to the surviving scan.
+
+    ``stop_driver`` popped the registry entry BEFORE the join, and
+    ``Thread.join(timeout)`` returns nothing either way, so a driver that
+    ignored its stop became unreachable — and ``ensure_driver`` could start a
+    second scan beside it. The entry stays until the thread is known stopped;
+    the warning is what names the survivor.
+    """
+    server = _Server(tmp_path / "cfg")
+    driver = _DriverThatIgnoresTheStop()
+    rollouts._DRIVERS[id(server)] = cast(Any, driver)
+    try:
+        with caplog.at_level(logging.WARNING, logger=rollouts.logger.name):
+            rollouts.stop_driver(cast(Any, server), timeout=1.5)
+        assert driver.stop_called, "the stop request must still go out first"
+        assert driver.join_timeout == 1.5, "stop_driver must wait for its timeout"
+        assert rollouts._DRIVERS[id(server)] is driver, "the survivor must stay reachable"
+        warnings = _rollout_warnings(caplog)
+        assert len(warnings) == 1, caplog.text
+        message = warnings[0].getMessage()
+        assert "1.5s" in message, message
+        assert "still running" in message, message
+        assert str(server.root) in message, "the warning must name the relay's root (R1-5)"
+    finally:
+        rollouts._DRIVERS.pop(id(server), None)
+        rollouts._DRIVER_SURVIVOR_WARNED.pop(id(server), None)
+
+
+def test_stop_driver_removes_the_entry_and_stays_silent_when_the_thread_stopped(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The normal path: the driver stopped, the entry goes, no warning."""
+    server = _Server(tmp_path / "cfg")
+    driver = _DriverThatStops()
+    rollouts._DRIVERS[id(server)] = cast(Any, driver)
+    try:
+        with caplog.at_level(logging.WARNING, logger=rollouts.logger.name):
+            rollouts.stop_driver(cast(Any, server), timeout=1.5)
+        assert driver.stop_called
+        assert driver.join_timeout == 1.5
+        assert id(server) not in rollouts._DRIVERS
+        assert _rollout_warnings(caplog) == [], caplog.text
+    finally:
+        rollouts._DRIVERS.pop(id(server), None)
+        rollouts._DRIVER_SURVIVOR_WARNED.pop(id(server), None)
+
+
+class _DriverThatStopsAndInstallsAReplacement(_DriverThatStops):
+    """A dying driver whose join slots a successor into the registry.
+
+    Used to exercise the identity guard: the loop that ends must not delete the
+    entry it no longer owns.
+    """
+
+    def __init__(self, install: "Callable[[], None]") -> None:
+        super().__init__()
+        self._install = install
+
+    def join(self, timeout: float | None = None) -> None:
+        super().join(timeout)
+        self._install()
+
+
+def test_stop_driver_keeps_a_replacement_registered_during_the_join(
+    tmp_path: Path,
+) -> None:
+    """The identity check is load-bearing: a successor must survive the reap (R1-3)."""
+    server = _Server(tmp_path / "cfg")
+    replacement = _DriverThatStops()
+
+    def install() -> None:
+        rollouts._DRIVERS[id(server)] = cast(Any, replacement)
+
+    driver = _DriverThatStopsAndInstallsAReplacement(install)
+    rollouts._DRIVERS[id(server)] = cast(Any, driver)
+    try:
+        rollouts.stop_driver(cast(Any, server), timeout=1.5)
+        assert (
+            rollouts._DRIVERS[id(server)] is replacement
+        ), "stop_driver removed the thread that replaced the one it joined"
+    finally:
+        rollouts._DRIVERS.pop(id(server), None)
+        rollouts._DRIVER_SURVIVOR_WARNED.pop(id(server), None)
+
+
+def test_stop_driver_warns_once_per_survivor_episode(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Repeated stops re-check but do not re-warn, and a new survivor can (R1-1).
+
+    The third stop is the only thing that observes the survivor's death and
+    clears the entry, which is why re-entry must not become an early return.
+    """
+    server = _Server(tmp_path / "cfg")
+    driver = _DriverThatIgnoresTheStop()
+    rollouts._DRIVERS[id(server)] = cast(Any, driver)
+    try:
+        with caplog.at_level(logging.WARNING, logger=rollouts.logger.name):
+            rollouts.stop_driver(cast(Any, server), timeout=1.5)
+            rollouts.stop_driver(cast(Any, server), timeout=1.5)
+            assert rollouts._DRIVERS[id(server)] is driver
+            assert len(_rollout_warnings(caplog)) == 1, caplog.text
+
+            driver.alive = False
+            rollouts.stop_driver(cast(Any, server), timeout=1.5)
+            assert id(server) not in rollouts._DRIVERS
+            assert len(_rollout_warnings(caplog)) == 1, caplog.text
+
+            replacement = _DriverThatIgnoresTheStop()
+            rollouts._DRIVERS[id(server)] = cast(Any, replacement)
+            rollouts.stop_driver(cast(Any, server), timeout=1.5)
+        assert rollouts._DRIVERS[id(server)] is replacement
+        warnings = _rollout_warnings(caplog)
+        assert len(warnings) == 2, caplog.text
+        assert "still running" in warnings[-1].getMessage()
+    finally:
+        rollouts._DRIVERS.pop(id(server), None)
+        rollouts._DRIVER_SURVIVOR_WARNED.pop(id(server), None)
+
+
+# ---------------------------------------------------------------------------
+# A target the member's channel does not serve YET is a wait, not a refusal
+# ---------------------------------------------------------------------------
+
+
+def _not_published(version: str = "0.99.0") -> dict[str, Any]:
+    """The member's real answer shape: a normal ack, ``state: refused`` + the code."""
+    return _answer(
+        "refused",
+        code="target_not_published",
+        reason=(
+            f"the target {version} is not resolvable on this device's channel "
+            "(the member's channel does not serve this version); nothing was installed"
+        ),
+    )
+
+
+def test_a_not_yet_published_target_is_retried_on_the_ladder_then_installs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0.90.17's shape: PyPI lagged the tag by ~22 min; the member must catch up unaided."""
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+    asked = _scripted(monkeypatch, [_not_published(), _not_published()])
+
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    live = _live(record["id"], root)
+    member = _member(live, "d_a")
+    assert live["state"] == "active", live
+    assert (member["state"], member["code"]) == ("deferred", "target_not_published"), member
+    assert member["waits"] == 1 and member["fails"] == 0, member
+    first_floor = 1000.0 + rollouts.NOT_PUBLISHED_BACKOFF_S[0]
+    assert member["next_ask_at"] == first_floor, member
+    assert "waiting for 0.99.0 on PyPI" in rollouts.summary(live), rollouts.summary(live)
+
+    rollouts.step_record(cast(Any, server), record["id"], now=first_floor - 1.0)
+    assert asked == ["d_a"], "a waiting member must not be asked inside its floor"
+
+    rollouts.step_record(cast(Any, server), record["id"], now=first_floor + 1.0)
+    member = _member(_live(record["id"], root), "d_a")
+    assert member["waits"] == 2, member
+    assert member["next_ask_at"] == first_floor + 1.0 + rollouts.NOT_PUBLISHED_BACKOFF_S[1], member
+
+    _scripted(monkeypatch, [_answer("done", version="0.99.0")])
+    rollouts.step_record(cast(Any, server), record["id"], now=member["next_ask_at"] + 1.0)
+    closed = _live(record["id"], root)
+    assert closed["state"] == "done", closed
+    assert _member(closed, "d_a")["state"] == "done", closed
+    rows = [r for r in server.audit.rows if r.event == rollouts.MEMBER_STATE]
+    # One row for entering the wait (the second identical answer adds none),
+    # one for done — never a row per poll.
+    assert [r.detail["state"] for r in rows] == ["deferred", "done"], rows
+    done_rows = [r for r in server.audit.rows if r.event == rollouts.ROLLOUT_DONE]
+    assert done_rows and done_rows[-1].outcome == "ok", done_rows
+
+
+def test_the_wait_rung_survives_an_interleaved_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m3 (agent review round 1): a busy ask between two 404s keeps the wait's rung.
+
+    The busy answer says nothing about PyPI, so the ladder must not restart at
+    its first rung; the next 404 climbs to the second rung, not the first.
+    """
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+    _scripted(monkeypatch, [_not_published(), _answer("busy"), _not_published()])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    member = _member(_live(record["id"], root), "d_a")
+    rollouts.step_record(cast(Any, server), record["id"], now=member["next_ask_at"] + 1.0)
+    member = _member(_live(record["id"], root), "d_a")
+    assert member["code"] == "busy" and member["waits"] == 1, member
+    at = member["next_ask_at"] + 1.0
+    rollouts.step_record(cast(Any, server), record["id"], now=at)
+    member = _member(_live(record["id"], root), "d_a")
+    assert member["waits"] == 2, member
+    assert member["next_ask_at"] == at + rollouts.NOT_PUBLISHED_BACKOFF_S[1], member
+
+
+def test_a_done_member_keeps_the_sessions_it_left_behind_in_record_and_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q2 (QA round 1): ``left_busy`` reaches the rollout record and the audit row.
+
+    The member's sentence is capped at DETAIL_CAP in the record, so with two or
+    three named sessions the names could be lost; the ids ride as data.
+    """
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+    done = _answer("done", version="0.99.0", reason="this device moved from 0.0.1 to 0.99.0")
+    done["left_busy"] = [{"session_id": "p4rk-r-0001", "name": "Librarian", "pending": "approval"}]
+    _scripted(monkeypatch, [done])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    closed = _live(record["id"], root)
+    assert _member(closed, "d_a")["left_busy"] == ["p4rk-r-0001"], closed
+    rows = [r for r in server.audit.rows if r.event == rollouts.MEMBER_STATE]
+    assert rows and rows[-1].detail.get("left_busy") == ["p4rk-r-0001"], rows
+
+
+def test_left_busy_survives_the_real_audit_logs_detail_filter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q8 (QA round 2 on #3028): the REAL ``AuditLog`` keeps only allow-listed keys.
+
+    The fake sink above records whatever it is handed, so it passed while the
+    real log dropped ``left_busy`` (``DETAIL_KEYS["update_member_state"]`` did
+    not list it). This cell writes through a real ``AuditLog`` and reads the
+    row back from disk, with a list longer than the cap.
+    """
+    from local_operator.network.audit import AuditLog
+
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    log = AuditLog(root)
+    server.audit = cast(Any, log)
+    record = _open(root, devices=["d_a"])
+    done = _answer("done", version="0.99.0", reason="this device moved from 0.0.1 to 0.99.0")
+    done["left_busy"] = [{"session_id": f"p4rk-{i:04d}"} for i in range(rollouts.LEFT_BUSY_CAP + 5)]
+    _scripted(monkeypatch, [done])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    log.close()
+    rows = [r for r in AuditLog(root).tail(200) if r.get("event") == rollouts.MEMBER_STATE]
+    assert rows, rows
+    kept = rows[-1].get("detail", {}).get("left_busy")
+    assert isinstance(kept, list) and kept[:2] == ["p4rk-0000", "p4rk-0001"], rows[-1]
+    assert len(kept) <= rollouts.LEFT_BUSY_CAP, len(kept)
+
+
+def test_left_busy_is_bounded_by_count() -> None:
+    """n1 (review round 2): a peer's list is capped before it reaches durable storage."""
+    many = [{"session_id": f"s{i:04d}"} for i in range(rollouts.LEFT_BUSY_CAP + 30)]
+    update = rollouts.classify_answer(
+        {"ok": True, "state": "done", "left_busy": many}, fails=0, now=0.0
+    )
+    assert len(update["left_busy"]) == rollouts.LEFT_BUSY_CAP
+
+
+def test_a_target_that_never_appears_stops_at_the_window_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+    _scripted(monkeypatch, [_not_published()])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    assert _live(record["id"], root)["state"] == "active"
+
+    asked = _scripted(monkeypatch, [])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0 + rollouts.WINDOW_S + 1.0)
+    closed = _live(record["id"], root)
+    assert closed["state"] == "done" and asked == [], (closed, asked)
+    line = rollouts.summary(closed)
+    assert "0.99.0 never appeared on PyPI" in line, line
+    assert "may not have been published at all" in line, line
+    assert "not updated, 0.99.0 is not on PyPI" in line, line
+    assert "no longer active" not in line, "the generic nudge must not sit beside the remedy"
+    rows = [r for r in server.audit.rows if r.event == rollouts.ROLLOUT_DONE]
+    assert rows and rows[-1].outcome == "partial", rows
+    assert "0.99.0 is not on PyPI" in rows[-1].detail["counts"], rows[-1].detail
+
+
+#: The publish wait's promised ceiling (seconds), spelled as a literal rather
+#: than read from the module: the cells below must FAIL against a build that
+#: still parks the wait on the failure ladder, not merely error on a name.
+PUBLISH_WAIT_CAP_S = 900.0
+
+
+def _drive(
+    server: _Server,
+    record_id: str,
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: Callable[[], dict[str, Any]],
+    *,
+    asks: int,
+    start: float = 1000.0,
+) -> list[float]:
+    """Ask the one member ``asks`` times, each just past its floor; return the floors' gaps."""
+    gaps: list[float] = []
+    at = start
+    for _ in range(asks):
+        _scripted(monkeypatch, [answer()])
+        rollouts.step_record(cast(Any, server), record_id, now=at)
+        member = _member(_live(record_id, root), "d_a")
+        gaps.append(float(member["next_ask_at"]) - at)
+        at = float(member["next_ask_at"]) + 1.0
+    return gaps
+
+
+def test_a_publish_wait_re_asks_soon_and_never_backs_off_past_its_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-10-28: an hour of PyPI lag put the next ask 2 h out on the failure ladder.
+
+    The node sat 98 min behind an already-published 0.91.1. However long the
+    404s go on, a waiting member is re-asked within the cap, and the ladder
+    opens short (publish lag is minutes, an ask is one small frame).
+    """
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+    gaps = _drive(server, record["id"], root, monkeypatch, _not_published, asks=12)
+    member = _member(_live(record["id"], root), "d_a")
+    assert (member["state"], member["code"]) == ("deferred", "target_not_published"), member
+    assert member["waits"] == 12 and member["fails"] == 0, member
+    assert max(gaps) <= PUBLISH_WAIT_CAP_S, gaps
+    assert gaps[0] < rollouts.FAIL_BACKOFF_S[0], gaps
+    assert gaps == sorted(gaps), f"the wait backs off monotonically: {gaps}"
+    assert gaps[-1] == PUBLISH_WAIT_CAP_S, f"the ladder settles on its cap: {gaps}"
+
+
+def test_a_real_failure_still_climbs_the_failure_ladder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The short ladder is the publish wait's alone: a broken install still backs off to 2 h."""
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+    ladder = rollouts.FAIL_BACKOFF_S
+    gaps = _drive(
+        server,
+        record["id"],
+        root,
+        monkeypatch,
+        lambda: _answer("failed", reason="the install broke"),
+        asks=len(ladder) + 2,
+    )
+    assert gaps == [*ladder, ladder[-1], ladder[-1]], gaps
+    assert ladder == (300.0, 600.0, 1200.0, 2400.0, 7200.0), "the failure ladder is unchanged"
+    member = _member(_live(record["id"], root), "d_a")
+    assert member["fails"] == len(ladder) + 2 and member["waits"] == 0, member
+
+
+def test_the_window_still_ends_a_publish_wait_that_never_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cap shortens the gaps, never the bound: no ask lands after the window closes."""
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"], now=1000.0)
+    window_end = 1000.0 + rollouts.WINDOW_S
+    asked_at: list[float] = []
+
+    def _fake(server_: Any, device: str, *, rollout: str = "") -> dict[str, Any]:
+        asked_at.append(moment)
+        return _not_published()
+
+    monkeypatch.setattr(meshupdate, "update_peer", _fake)
+    moment = 1000.0
+    steps = 0
+    while _live(record["id"], root)["state"] == "active":
+        steps += 1
+        assert steps <= 1000, "the window never closed"
+        rollouts.step_record(cast(Any, server), record["id"], now=moment)
+        member = _member(_live(record["id"], root), "d_a")
+        moment = max(float(member["next_ask_at"]), moment) + 1.0
+    closed = _live(record["id"], root)
+    assert closed["state"] == "done", closed
+    assert asked_at and max(asked_at) <= window_end, (max(asked_at), window_end)
+    # A day at the cap is ~96 asks — bounded, and the receipts coalesce them.
+    assert len(asked_at) <= rollouts.WINDOW_S / PUBLISH_WAIT_CAP_S + 8, len(asked_at)
+    assert "0.99.0 never appeared on PyPI" in rollouts.summary(closed), rollouts.summary(closed)
+    assert len(_member(closed, "d_a").get("receipts") or []) <= rollouts.RECEIPT_CAP, closed
+
+
+def test_a_newer_rollout_replaces_a_record_still_waiting_for_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"], now=1000.0)
+    _scripted(monkeypatch, [_not_published()])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    assert _member(_live(record["id"], root), "d_a")["state"] == "deferred"
+
+    newer = _open(root, devices=["d_a"], now=2000.0)
+    assert _live(record["id"], root)["state"] == "superseded"
+    asked = _scripted(monkeypatch, [_answer("done", version="0.99.0")])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0 + 7200.0)
+    assert asked == [], "a superseded waiting record must never ask again"
+    rollouts.step_record(cast(Any, server), newer["id"], now=2001.0)
+    assert asked == ["d_a"] and _live(newer["id"], root)["state"] == "done"
+
+
+def test_an_editable_install_refusal_stays_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+    asked = _scripted(
+        monkeypatch,
+        [_answer("refused", code="editable_install", reason="dev tree")] * 3,
+    )
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    closed = _live(record["id"], root)
+    member = _member(closed, "d_a")
+    assert (member["state"], member["code"]) == ("refused", "editable_install"), member
+    assert rollouts.member_terminal(member) and closed["state"] == "done", closed
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0 + 7200.0)
+    assert asked == ["d_a"], asked
+
+
+def test_the_origins_own_unparseable_stamp_is_still_a_terminal_refusal() -> None:
+    """``update_peer``'s pre-frame refusal carries no member state: no wait can fix it."""
+    update = rollouts.classify_answer(
+        {"ok": False, "code": "target_not_published", "message": "not a version"},
+        fails=0,
+        now=1000.0,
+    )
+    assert (update["state"], update["code"]) == ("refused", "target_not_published"), update
+    assert rollouts.member_terminal(update)
+
+
+def test_a_done_member_puts_its_serve_fact_on_the_record_and_audit_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-10-28: a member whose `lop serve` stayed STALE says so on the origin.
+
+    The record carries the bounded fact and the REAL audit log keeps the flat
+    keys (``serve``/``serve_stale``/``serve_remedy`` are allow-listed for
+    ``update_member_state``) — the same filter that once dropped ``left_busy``.
+    """
+    from local_operator.network.audit import AuditLog
+
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    log = AuditLog(root)
+    server.audit = cast(Any, log)
+    record = _open(root, devices=["d_a"])
+    done = _answer("done", version="0.99.0", reason="this device moved from 0.91.1 to 0.99.0")
+    done["serve"] = {
+        "state": "stale",
+        "moved": [],
+        "stale": [{"pid": 537864, "version": "0.91.1"}],
+        "remedy": "lop services restart",
+    }
+    _scripted(monkeypatch, [done])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    log.close()
+    member = _member(_live(record["id"], root), "d_a")
+    assert member["serve"] == {
+        "state": "stale",
+        "stale": [{"pid": 537864, "version": "0.91.1"}],
+        "moved": [],
+        "remedy": "lop services restart",
+    }, member
+    rows = [r for r in AuditLog(root).tail(200) if r.get("event") == rollouts.MEMBER_STATE]
+    detail = rows[-1].get("detail", {})
+    assert detail.get("serve") == "stale", rows[-1]
+    assert detail.get("serve_stale") == ["537864@0.91.1"], rows[-1]
+    assert detail.get("serve_remedy") == "lop services restart", rows[-1]
+
+
+def test_an_answer_without_a_serve_fact_records_none() -> None:
+    """An older member sends no ``serve``; the record must not invent one."""
+    update = rollouts.classify_answer({"ok": True, "state": "done"}, fails=0, now=0.0)
+    assert update["serve"] == {}, update
+    junk = rollouts.classify_answer(
+        {"ok": True, "state": "done", "serve": {"state": "teleported"}}, fails=0, now=0.0
+    )
+    assert junk["serve"] == {}, junk
+
+
+def test_a_later_answer_without_a_serve_fact_clears_the_earlier_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review m4 on #3093: ``serve`` is replaced on key presence, like ``left_busy``.
+
+    A member record carrying an earlier STALE fact, answered by an older
+    member (no ``serve``), must not keep the stale verdict beside the newer
+    receipt.
+    """
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+
+    def _seed(rec: dict[str, Any]) -> bool:
+        member = rollouts.member_of(rec, "d_a")
+        assert member is not None
+        member["serve"] = {"state": "stale", "stale": [{"pid": 1, "version": "0.91.0"}]}
+        return True
+
+    rollouts.mutate_record(record["id"], root, _seed)
+    _scripted(monkeypatch, [_answer("done", version="0.99.0", reason="moved")])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    assert _member(_live(record["id"], root), "d_a")["serve"] == {}
+
+
+def test_a_capped_receipt_keeps_the_serve_remedy_whole() -> None:
+    """QA round 1 on #3093, Q4: the remedy survives the origin's DETAIL_CAP.
+
+    The member's reason used to append the serve clause AFTER named busy
+    sessions, and a plain slice cut it as `... on this d`. The clause now rides
+    first and the cap breaks on a word with an ellipsis.
+    """
+    from local_operator.network import meshupdate
+
+    fact = {
+        "state": "stale",
+        "stale": [{"pid": 1203893, "version": "0.91.92"}],
+        "remedy": "lop services restart",
+    }
+    reason = (
+        "this device moved from 0.91.92 to 0.91.93"
+        + meshupdate.serve_clause(fact)
+        + "; 1 session(s) retired for the new build, 2 kept; 2 busy session(s) stay on "
+        "0.91.92 until they settle: Librarian (approval), Quarterly planning (tool)"
+    )
+    assert len(reason) > rollouts.DETAIL_CAP, len(reason)
+    update = rollouts.classify_answer(
+        {"ok": True, "state": "done", "message": reason}, fails=0, now=0.0
+    )
+    detail = update["detail"]
+    assert len(detail) <= rollouts.DETAIL_CAP, detail
+    assert "run `lop services restart`" in detail, detail
+    assert detail.endswith("…"), detail
+    kept = detail[:-1]
+    assert reason.startswith(kept), detail
+    # Whole words: what follows the kept text is a separator, never a letter.
+    assert reason[len(kept)] in " ,.;:", (detail, reason[len(kept) :][:10])

@@ -1,0 +1,208 @@
+=== audit es tui.notifications — id ntt2 (round 2, delta) ===
+auditor: translation-auditor, session 288dd1136395, actual model radient/auto (fallback chain disclosed in record.json)
+run-utc: 2026-10-26T00:37:47Z
+repo tip: 8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a branch feat/notifications-tui
+
+----- 1. delta diff (es ntt1->ntt2; context committed->on-disk) -----
+COMMAND: delta diff — es messages ntt1 -> ntt2; context committed(8976104b83b) -> on-disk
+
+[1] es message strings
+  keys: 72 -> 72 | same key set: True
+  changed: 1 | byte-identical: 71/72
+    tui.notifications.hint_unread
+      old 'no leída'
+      new 'sin leer'
+  removed: none | added: none
+
+[2] context sidecar field-level diff
+  keys: 72 -> 72 | same key set: True
+  field-level changes: 4
+    tui.notifications.hint_answer :: maxCells 8 -> 9
+    tui.notifications.hint_answer :: note note CHANGED (len 36 -> 334)
+    tui.notifications.hint_dismiss_all :: maxCells 12 -> 14
+    tui.notifications.hint_dismiss_all :: note note CHANGED (len 34 -> 390)
+  lacking note/role/tone: [] / [] / none
+  keys with maxCells: 53 (committed 53)
+
+[3] en message strings
+  committed tip 8976104b83b en sha256 == round-1 pin b415bc70...70b68: True (no message string changed)
+
+----- 2. mechanical harness on round-2 bytes (budgets from on-disk sidecar) -----
+COMMAND: /Users/damian/workspace/repos/lo-notifications-l1/.venv/bin/python /Users/damian/.local-operator/sessions/288dd1136395/scratchpad/tui-audit/es/audit_notifications_es_rt2.py  (PYTHONDONTWRITEBYTECODE=1)
+Namespace: tui.notifications
+Audited target copy: /Users/damian/.local-operator/sessions/288dd1136395/scratchpad/tui-audit/es/tui.notifications/ntt2/target.json
+Budgets read from: /Users/damian/.local-operator/sessions/288dd1136395/scratchpad/tui-audit/es/tui.notifications/ntt2/context.disk.json (on-disk working tree, NOT the committed sidecar)
+
+PASS target_sha256=c4c2c502cd3805687bdaeb505b579c629a259bdbee3c453ba72539cca4588ac4 (matches pin)
+PASS source_sha256=b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68 (matches pin)
+PASS context_sha256=9d10eb5db735fc9cbfb5152f9106a296f39bc85a722ff67b38ee5233c4d645b6 (matches pin)
+
+keys en=72 es=72 context=72
+PASS key sets identical
+PASS context sidecar describes only real keys
+
+CLDR es categories: ['many', 'one', 'other']
+ICU parse+argument parity: 72/72 keys PASS
+plural-bearing messages: 7 -> ['tui.notifications.asks_stay', 'tui.notifications.banner_digest_title', 'tui.notifications.confirm_dismiss_session', 'tui.notifications.dismissed', 'tui.notifications.header_counts', 'tui.notifications.stale_skipped', 'tui.notifications.updates_since']
+PASS tui.notifications.asks_stay: plural 'count' has ['many', 'one', 'other']
+PASS tui.notifications.banner_digest_title: plural 'count' has ['many', 'one', 'other']
+PASS tui.notifications.confirm_dismiss_session: plural 'count' has ['many', 'one', 'other']
+PASS tui.notifications.dismissed: plural 'count' has ['many', 'one', 'other']
+PASS tui.notifications.header_counts: plural 'unread' has ['many', 'one', 'other']
+PASS tui.notifications.header_counts: plural 'waiting' has ['many', 'one', 'other']
+PASS tui.notifications.stale_skipped: plural 'count' has ['many', 'one', 'other']
+PASS tui.notifications.updates_since: plural 'count' has ['many', 'one', 'other']
+
+CLDR render sweep (0/1/2/5/1000000):
+  tui.notifications.asks_stay @      0: '0 consultas permanecen hasta que las respondas.'  [47 cells]
+  tui.notifications.asks_stay @      1: '1 consulta permanece hasta que la respondas.'  [44 cells]
+  tui.notifications.asks_stay @      2: '2 consultas permanecen hasta que las respondas.'  [47 cells]
+  tui.notifications.asks_stay @      5: '5 consultas permanecen hasta que las respondas.'  [47 cells]
+  tui.notifications.asks_stay @1000000: '1.000.000 de consultas permanecen hasta que las respondas.'  [58 cells]
+  tui.notifications.banner_digest_title @      0: '0 notificaciones más de prioridad alta'  [38 cells]
+  tui.notifications.banner_digest_title @      1: '1 notificación más de prioridad alta'  [36 cells]
+  tui.notifications.banner_digest_title @      2: '2 notificaciones más de prioridad alta'  [38 cells]
+  tui.notifications.banner_digest_title @      5: '5 notificaciones más de prioridad alta'  [38 cells]
+  tui.notifications.banner_digest_title @1000000: '1.000.000 de notificaciones más de prioridad alta'  [49 cells]
+  tui.notifications.confirm_dismiss_session @      0: '¿Descartar 0 actualizaciones de Revisión de datos? y/n'  [54 cells]
+  tui.notifications.confirm_dismiss_session @      1: '¿Descartar 1 actualización de Revisión de datos? y/n'  [52 cells]
+  tui.notifications.confirm_dismiss_session @      2: '¿Descartar 2 actualizaciones de Revisión de datos? y/n'  [54 cells]
+  tui.notifications.confirm_dismiss_session @      5: '¿Descartar 5 actualizaciones de Revisión de datos? y/n'  [54 cells]
+  tui.notifications.confirm_dismiss_session @1000000: '¿Descartar 1.000.000 de actualizaciones de Revisión de datos? y/n'  [65 cells]
+  tui.notifications.dismissed @      0: '0 actualizaciones descartadas.'  [30 cells]
+  tui.notifications.dismissed @      1: '1 actualización descartada.'  [27 cells]
+  tui.notifications.dismissed @      2: '2 actualizaciones descartadas.'  [30 cells]
+  tui.notifications.dismissed @      5: '5 actualizaciones descartadas.'  [30 cells]
+  tui.notifications.dismissed @1000000: '1.000.000 de actualizaciones descartadas.'  [41 cells]
+  tui.notifications.header_counts @      0: '0 sin leer · 3 por responder'  [28 cells]
+  tui.notifications.header_counts @      1: '1 sin leer · 3 por responder'  [28 cells]
+  tui.notifications.header_counts @      2: '2 sin leer · 3 por responder'  [28 cells]
+  tui.notifications.header_counts @      5: '5 sin leer · 3 por responder'  [28 cells]
+  tui.notifications.header_counts @1000000: '1.000.000 sin leer · 3 por responder'  [36 cells]
+  tui.notifications.stale_skipped @      0: '0 cambiaron desde que los viste y no se tocaron.'  [48 cells]
+  tui.notifications.stale_skipped @      1: '1 cambió desde que lo viste y no se tocó.'  [41 cells]
+  tui.notifications.stale_skipped @      2: '2 cambiaron desde que los viste y no se tocaron.'  [48 cells]
+  tui.notifications.stale_skipped @      5: '5 cambiaron desde que los viste y no se tocaron.'  [48 cells]
+  tui.notifications.stale_skipped @1000000: '1.000.000 cambiaron desde que los viste y no se tocaron.'  [56 cells]
+  tui.notifications.updates_since @      0: '0 actualizaciones desde 14:30'  [29 cells]
+  tui.notifications.updates_since @      1: '1 actualización desde 14:30'  [27 cells]
+  tui.notifications.updates_since @      2: '2 actualizaciones desde 14:30'  [29 cells]
+  tui.notifications.updates_since @      5: '5 actualizaciones desde 14:30'  [29 cells]
+  tui.notifications.updates_since @1000000: '1.000.000 de actualizaciones desde 14:30'  [40 cells]
+
+maxCells check at realistic worst values:
+  ago                      es=  8 en=  7 budget= 12 delta= +1
+  arg_read                 es= 38 en= 35 budget= 44 delta= +3
+  ask_expires              es= 15 en= 16 budget= 18 delta= -1
+  ask_kind                 es=  8 en=  3 budget=  8 delta= +5
+  back                     es= 16 en= 15 budget= 24 delta= +1
+  banner_digest_body       es= 35 en= 32 budget= 60 delta= +3
+  banner_digest_title      es= 39 en= 35 budget= 60 delta= +4
+  chip_high                es=  4 en=  4 budget=  6 delta= +0
+  empty_caught_up_title    es= 12 en= 13 budget= 30 delta= -1
+  empty_filtered_title     es= 31 en= 29 budget= 40 delta= +2
+  empty_none_title         es= 25 en= 20 budget= 30 delta= +5
+  filter_all               es=  5 en=  3 budget=  8 delta= +2
+  filter_unread            es=  8 en=  6 budget=  8 delta= +2
+  group_conversation       es= 12 en= 12 budget= 12 delta= +0
+  group_older              es= 10 en=  5 budget= 30 delta= +5
+  group_time               es=  5 en=  4 budget= 12 delta= +1
+  group_today              es=  3 en=  5 budget= 30 delta= -2
+  group_waiting            es= 22 en= 14 budget= 30 delta= +8
+  group_week               es= 11 en= 17 budget= 30 delta= -6
+  group_yesterday          es=  4 en=  9 budget= 30 delta= -5
+  header_counts            es= 29 en= 28 budget= 40 delta= +1
+  header_partial           es= 11 en=  8 budget= 12 delta= +3
+  hint_answer              es=  9 en=  6 budget=  9 delta= +3
+  hint_back                es=  6 en=  4 budget=  8 delta= +2
+  hint_clear               es=  6 en=  5 budget=  8 delta= +1
+  hint_conversation        es= 12 en= 12 budget= 14 delta= +0
+  hint_dismiss             es=  9 en=  7 budget= 10 delta= +2
+  hint_dismiss_all         es= 14 en= 11 budget= 14 delta= +3
+  hint_filter              es=  7 en=  6 budget=  8 delta= +1
+  hint_open                es=  5 en=  4 budget= 10 delta= +1
+  hint_read                es=  4 en=  4 budget=  8 delta= +0
+  hint_select              es=  6 en=  6 budget=  8 delta= +0
+  hint_undo                es=  8 en=  4 budget=  8 delta= +4
+  hint_unread              es=  8 en=  6 budget=  8 delta= +2
+  just_now                 es= 11 en=  8 budget= 12 delta= +3
+  kind_asks                es=  8 en=  4 budget=  8 delta= +4
+  kind_updates             es=  7 en=  7 budget=  8 delta= +0
+  no_body                  es= 26 en= 25 budget= 40 delta= +1
+  position                 es=  7 en=  7 budget= 12 delta= +0
+  priority_high            es=  4 en=  4 budget=  8 delta= +0
+  priority_normal_up       es=  7 en=  7 budget=  8 delta= +0
+  row_now                  es=  5 en=  3 budget=  5 delta= +2
+  section_history          es= 26 en= 15 budget= 30 delta=+11
+  section_links            es=  7 en=  5 budget= 20 delta= +2
+  section_projects         es= 22 en= 16 budget= 30 delta= +6
+  section_waiting_here     es= 34 en= 35 budget= 40 delta= -1
+  seen_in_chat             es= 13 en= 12 budget= 12 delta= +1  <-- OVER by 1
+  seen_live                es= 13 en=  9 budget= 12 delta= +4  <-- OVER by 1
+  selected                 es= 13 en= 11 budget= 16 delta= +2
+  sidebar_note             es= 17 en= 16 budget= 18 delta= +1
+  title                    es= 14 en= 13 budget= 20 delta= +1
+  update_kind              es=  7 en=  6 budget=  8 delta= +1
+  updates_since            es= 30 en= 22 budget= 30 delta= +8
+over-budget keys at these values: ['tui.notifications.seen_in_chat', 'tui.notifications.seen_live']
+
+updates_since width by count (budget 30):
+  count=      1  [ 27 cells] '1 actualización desde 14:30'
+  count=      9  [ 29 cells] '9 actualizaciones desde 14:30'
+  count=     12  [ 30 cells] '12 actualizaciones desde 14:30'
+  count=     99  [ 30 cells] '99 actualizaciones desde 14:30'
+  count=   1234  [ 33 cells] '1.234 actualizaciones desde 14:30'
+  count=1000000  [ 40 cells] '1.000.000 de actualizaciones desde 14:30'
+detail meta line is appended to Text() (no_wrap=False) -> soft-wraps, never crops
+en keys already over their own maxCells: []
+
+literal token integrity:
+PASS tui.notifications.back: '←' present
+PASS tui.notifications.pointer_unread: '/unread' present
+PASS tui.notifications.unread_mark_all: '/unread read' present
+PASS tui.notifications.unread_mark_these: '/unread read' present
+PASS tui.notifications.banner_digest_body: '/notifications' present
+PASS tui.notifications.refused_argument: '/notifications' present
+PASS tui.notifications.refused_argument: 'read' present
+PASS tui.notifications.confirm_dismiss_session: 'y/n' present
+PASS tui.notifications.confirm_mark_all: 'y/n' present
+PASS tui.notifications.priority_normal_up: 'normal+' present
+PASS tui.notifications.header_counts: '·' present
+PASS tui.notifications.ask_answer_hint: ' a ' present
+PASS tui.notifications.empty_caught_up_body: ' f ' present
+
+typography, NFC, bidi:
+NFC violations: none
+manual bidi controls: none
+space-before-punctuation (es forbids): none
+PASS NFC clean, no bidi controls, no space before :;?!
+
+negative controls (same functions, deliberately broken copies):
+  control CTL1 dropped {time} placeholder: tui.notifications.updates_since: en has 2 argument(s), translation has 1
+  control CTL2 renamed {count}->{total}: tui.notifications.marked_read: argument 1 is 'total', en's is 'count' (renamed or reordered)
+  control CTL3 es plural missing `many`: tui.notifications.dismissed: plural 'count' missing ['many']
+  control CTL4 literal /unread read anglicised: tui.notifications.unread_mark_all: '/unread read' missing
+  control CTL5 decomposed accent (NFD): non-NFC: ['tui.notifications.group_today']
+  control CTL6 budget shrunk under a clean key: over budget: ['tui.notifications.hint_back', 'tui.notifications.seen_in_chat', 'tui.notifications.seen_live']
+
+repo check_catalogues() (whole tree, read-only):
+  total problems reported for the whole tree: 0
+  problems mentioning tui.notifications: none
+  problems in locale es: 0
+
+FAILURES=[]
+SUMMARY keys_read=72 over_budget_keys=2 failures=0
+
+----- 3. render geometry on round-2 bytes -----
+COMMAND: round-2 geometry from target.json + pinned renderer @8976104b83b
+hint_unread now: 'sin leer' cells: 8 (budget 8)
+all-hints-fit threshold: en 92 cols | es 104 cols
+  width=92: en 8 hints, es 7  <- E missing in es
+  width=100: en 8 hints, es 7  <- E missing in es
+  width=103: en 8 hints, es 7  <- E missing in es
+  width=104: en 8 hints, es 8
+  width=120: en 8 hints, es 8
+
+chip arithmetic unchanged by the metadata edit (row_line constants):
+  seen_live: es 13 cells -> chip cost 14; title cells at 80 = 39 (en 43); dropped wholesale below width 45 (en 41)
+  seen_in_chat: es 13 cells -> chip cost 14; title cells at 80 = 39 (en 40); dropped wholesale below width 45 (en 44)

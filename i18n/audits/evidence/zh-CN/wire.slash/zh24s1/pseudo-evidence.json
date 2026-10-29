@@ -1,0 +1,132 @@
+{
+  "method": "zh-CN fit probe: Chinese renders in 2-cell CJK glyphs and is normally shorter than English, so no RTL-style synthetic stretch is meaningful. measured_cells is the authoritative cell count (East Asian Wide/Fullwidth = 2, combining marks = 0). A +25% growth scenario models a future longer phrasing for the same key; it is reported but not treated as a failure. This is a synthetic fit probe, not a rendered TUI screenshot.",
+  "argument_parity_errors": [],
+  "plural_render_count": 0,
+  "plural_render_errors": [],
+  "width_rows": [
+    {
+      "key": "wire.slash.agent",
+      "mode": "command_description_line",
+      "approx_help_budget_cells": 55,
+      "measured_cells": 50,
+      "en_cells": 69,
+      "growth_25pct_cells": 62,
+      "fits": true,
+      "growth_fits": false
+    },
+    {
+      "key": "wire.slash.fork",
+      "mode": "command_description_line",
+      "approx_help_budget_cells": 55,
+      "measured_cells": 59,
+      "en_cells": 74,
+      "growth_25pct_cells": 74,
+      "fits": false,
+      "growth_fits": false
+    },
+    {
+      "key": "wire.slash.goal",
+      "mode": "command_description_line",
+      "approx_help_budget_cells": 55,
+      "measured_cells": 41,
+      "en_cells": 52,
+      "growth_25pct_cells": 51,
+      "fits": true,
+      "growth_fits": true
+    },
+    {
+      "key": "wire.slash.hub",
+      "mode": "command_description_line",
+      "approx_help_budget_cells": 55,
+      "measured_cells": 49,
+      "en_cells": 56,
+      "growth_25pct_cells": 61,
+      "fits": true,
+      "growth_fits": false
+    },
+    {
+      "key": "wire.slash.loop",
+      "mode": "command_description_line",
+      "approx_help_budget_cells": 55,
+      "measured_cells": 41,
+      "en_cells": 53,
+      "growth_25pct_cells": 51,
+      "fits": true,
+      "growth_fits": true
+    },
+    {
+      "key": "wire.slash.mcp",
+      "mode": "command_description_line",
+      "approx_help_budget_cells": 55,
+      "measured_cells": 48,
+      "en_cells": 58,
+      "growth_25pct_cells": 60,
+      "fits": true,
+      "growth_fits": false
+    },
+    {
+      "key": "wire.slash.mobile",
+      "mode": "command_description_line",
+      "approx_help_budget_cells": 55,
+      "measured_cells": 46,
+      "en_cells": 51,
+      "growth_25pct_cells": 58,
+      "fits": true,
+      "growth_fits": false
+    },
+    {
+      "key": "wire.slash.model",
+      "mode": "command_description_line",
+      "approx_help_budget_cells": 55,
+      "measured_cells": 46,
+      "en_cells": 54,
+      "growth_25pct_cells": 58,
+      "fits": true,
+      "growth_fits": false
+    },
+    {
+      "key": "wire.slash.project",
+      "mode": "command_description_line",
+      "approx_help_budget_cells": 55,
+      "measured_cells": 49,
+      "en_cells": 56,
+      "growth_25pct_cells": 61,
+      "fits": true,
+      "growth_fits": false
+    },
+    {
+      "key": "wire.slash.stop",
+      "mode": "command_description_line",
+      "approx_help_budget_cells": 55,
+      "measured_cells": 58,
+      "en_cells": 66,
+      "growth_25pct_cells": 72,
+      "fits": false,
+      "growth_fits": false
+    },
+    {
+      "key": "wire.slash.team",
+      "mode": "command_description_line",
+      "approx_help_budget_cells": 55,
+      "measured_cells": 46,
+      "en_cells": 69,
+      "growth_25pct_cells": 58,
+      "fits": true,
+      "growth_fits": false
+    }
+  ],
+  "over_approx_help_budget": [
+    {
+      "key": "wire.slash.fork",
+      "measured_cells": 59,
+      "en_cells": 74,
+      "note": "Exceeds the approximate 55-cell /help pin but is shorter than the English source; this is inherited English fit risk, not a Chinese expansion."
+    },
+    {
+      "key": "wire.slash.stop",
+      "measured_cells": 58,
+      "en_cells": 66,
+      "note": "Exceeds the approximate 55-cell /help pin but is shorter than the English source; this is inherited English fit risk, not a Chinese expansion."
+    }
+  ]
+}

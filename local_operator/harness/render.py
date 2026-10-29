@@ -30,9 +30,13 @@ import here cannot put the leak back unnoticed.
 
 from __future__ import annotations
 
-from typing import TypeGuard
+from collections.abc import Mapping
+from typing import Any, TypeGuard
 
-from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+from local_operator.compaction.cutpoint import (
+    OPERATOR_ANSWER_KEY,
+    RENDERED_INJECTION_KEY,
+)
 
 # Imported under the name the renderer body used at its old home, so the move
 # stays byte-identical rather than renaming a call while relocating it.
@@ -47,6 +51,9 @@ from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
 # for a runner and the fourth (``harness.comms``) drags the session package in
 # behind them, which is precisely what made this module unreachable from an
 # episode (see the module docstring). Import nothing heavy into that module.
+from local_operator.harness.message_types import (
+    ASK_RELAY_MESSAGE_TYPE as ASK_RELAY_CUSTOM_TYPE,
+)
 from local_operator.harness.message_types import (
     ASK_RESPONSE_MESSAGE_TYPE as ASK_RESPONSE_CUSTOM_TYPE,
 )
@@ -111,6 +118,48 @@ def _injected_user_message(
         message = Message(role="user", content=[TextContent(text=text)], id=entry_id)
     message.provider_payload = {RENDERED_INJECTION_KEY: True}
     return message
+
+
+def _operator_answer_values(details: Mapping[str, Any]) -> list[str]:
+    """The operator-TYPED answer values of an ``ask_response`` row, or ``[]``.
+
+    Compaction's carry miner keeps these as operator asks (``OPERATOR_ANSWER_KEY``),
+    so only words the operator actually supplied qualify:
+
+    - only an ``answered`` or ``late`` row (a late answer is still the operator's
+      answer); a decline, timeout or dismissal carries none;
+    - never a SECRET question: its cell holds a key name and, for ``persist``,
+      the harness's promotion sentence — never the operator's words;
+    - never a BRIDGE request (any question with a ``question_id``): its picks are
+      the sender's, which ``_ask_report`` deliberately does not frame as the human's;
+    - never a placeholder (``<not provided>``) or an empty value.
+
+    A picked option is included: choosing it IS the operator's answer. A
+    multi-line typed answer is kept whole (the serializer emits it as written).
+    """
+    if str(details.get("status") or "") not in ("answered", "late"):
+        return []
+    # Lazy: ``tools.builtin`` costs ~1 s to import and this module sits on every
+    # render; ``asks.queue`` reads the same constant the same way.
+    from local_operator.tools.builtin import ASK_SECRET_NOT_PROVIDED
+
+    questions = [q for q in (details.get("questions") or []) if isinstance(q, Mapping)]
+    if any(str(q.get("question_id") or "") for q in questions):
+        return []
+    secret = {str(q.get("id") or "") for q in questions if q.get("secret")}
+    answers = details.get("answers")
+    if not isinstance(answers, Mapping):
+        return []
+    values: list[str] = []
+    for question in questions:
+        question_id = str(question.get("id") or "")
+        if question_id in secret:
+            continue
+        for value in answers.get(question_id) or []:
+            text = str(value).strip()
+            if text and text != ASK_SECRET_NOT_PROVIDED:
+                values.append(text)
+    return values
 
 
 def _ask_response_images(message: CustomMessage) -> list[ImageContent]:
@@ -291,13 +340,23 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # ride the row as a top-level ``content`` list -- the one place the
             # transcript externalises media -- and become the image blocks of the
             # same user turn here, after the text that points at them.
-            out.append(
-                _injected_user_message(
-                    message.details.get("text", ""),
-                    message.id,
-                    _ask_response_images(message),
-                )
+            answer = _injected_user_message(
+                message.details.get("text", ""),
+                message.id,
+                _ask_response_images(message),
             )
+            # Still injected (the envelope is harness text). The operator's own
+            # typed VALUES ride beside the stamp, taken from the row's structured
+            # ``answers`` rather than re-parsed from the rendered report: that text
+            # also carries the model's question prompts and harness sentences, and
+            # a line-scan restated those as operator words (review round 3, M1).
+            values = _operator_answer_values(message.details)
+            if values:
+                answer.provider_payload = {
+                    **(answer.provider_payload or {}),
+                    OPERATOR_ANSWER_KEY: values,
+                }
+            out.append(answer)
         elif message.custom_type == GATE_TIMEOUT_CUSTOM_TYPE:
             # An unattended gate that expired is NOT a user decision, and the
             # difference is the whole reason the row exists: without it the
@@ -364,6 +423,11 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             PEER_MESSAGE_MESSAGE_TYPE,
             TEAM_BRIDGE_MESSAGE_TYPE,
             MONITOR_PROMPT_MESSAGE_TYPE,
+            # A RELAY'S SETTLE NOTE (#2520) rides the same "the sender formatted
+            # ``details['text']``" shape: the watcher's model must learn in one
+            # line how the ask it pointed at ended, and an unlisted type is
+            # dropped as bookkeeping — the exact trap this tuple documents.
+            ASK_RELAY_CUSTOM_TYPE,
         ):
             # A monitor delivery (a delta, or a lifecycle notice — disabled,
             # stalled, restored) is the same shape: ``Session._deliver_monitor``

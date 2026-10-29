@@ -35,12 +35,14 @@ WHAT THIS MODULE GUARANTEES, and the mechanism for each:
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Collection
 
+from local_operator.network.credentials import mcp_state
 from local_operator.network.credentials.messages import render_broker_error
 from local_operator.network.credentials.placement import (
     PlacementDocument,
@@ -52,14 +54,18 @@ from local_operator.network.credentials.placement import (
 from local_operator.network.credentials.state import PlacementState
 from local_operator.network.credentials.types import (
     BROKER_ERROR_TTL_MS,
+    MAX_PEER_RETRY_AFTER_MS,
     NO_RETRY,
     PEER_BROKER_OP,
+    QUOTA_REASON_POOL_DEPLETED,
     BrokerError,
     CredentialPlacementEntry,
     Grant,
     credential_key_for_mcp,
     credential_key_for_provider,
 )
+
+logger = logging.getLogger("local_operator.network.credentials.client")
 
 #: The borrower's whole budget for one borrow, in seconds. Below the local secret
 #: broker's 10 s (see this module's docstring) and far below the owner-side
@@ -155,6 +161,17 @@ class GrantCache:
                 return pair
         return None
 
+    def keys(self) -> list[str]:
+        """Every key this process is holding a grant for, sorted and de-duplicated.
+
+        The reconcile pass needs the SET OF KEYS to re-check against placement; it
+        never needs the grants themselves, so no accessor returns one. Reading the
+        keys is not serving a bearer — ``get``/``peek`` remain the only readers of
+        a grant, and neither is called here.
+        """
+        with self._lock:
+            return sorted({key for key, _session in self._grants})
+
     def clear(self) -> None:
         with self._lock:
             self._grants.clear()
@@ -192,12 +209,20 @@ class MeshCredentialClient:
         self.deadline_s = deadline_s
         self.grants = GrantCache()
         self._state_lock = threading.Lock()
+        #: The sync engine used by the CLI's direct fallback. Built lazily; the
+        #: runtime never reaches it (it asks its own relay, leg 1).
+        self._engine: Any = None
 
     # -- construction -------------------------------------------------------
 
     @classmethod
     def for_this_device(
-        cls, root: Path | None = None, network_id: str = "", *, include_bridged: bool = False
+        cls,
+        root: Path | None = None,
+        network_id: str = "",
+        *,
+        include_bridged: bool = False,
+        relay: Any = None,
     ) -> MeshCredentialClient | None:
         """A runtime-side client, or ``None`` when this device may borrow nothing.
 
@@ -228,6 +253,10 @@ class MeshCredentialClient:
             network_id=network_id or found_network,
             placement=document,
             state=PlacementState.load(network_id or found_network, root),
+            # The CLI's direct fallback passes a relay it built for ONE dial (see
+            # ``pull_copy_sync``); every runtime caller keeps the default ``None``,
+            # where leg 1 goes through the control socket instead.
+            relay=relay,
         )
 
     @classmethod
@@ -410,6 +439,7 @@ class MeshCredentialClient:
         ttl = BROKER_ERROR_TTL_MS.get(status, 0)
         if ttl == NO_RETRY:
             ttl = UNSUPPORTED_OBSERVATION_MS
+        floor = False
         row = self.state.observation(key, now=now)
         if row is None:
             return None
@@ -430,6 +460,9 @@ class MeshCredentialClient:
             # that nobody stated. No stated remainder ⇒ 0 ⇒ the sentence keeps
             # "for now", exactly as the fresh one does.
             owner_ms = int(row.get("owner_retry_after_ms") or 0)
+            # A remembered clamped value is still a floor while it counts down: the
+            # owner's reset lies beyond it, so "at least" stays true (#3108 r2 m1).
+            floor = owner_ms >= MAX_PEER_RETRY_AFTER_MS
             if owner_ms:
                 stamp = float(row.get("observed_at") or 0.0)
                 current = time.time() if now is None else now
@@ -441,6 +474,14 @@ class MeshCredentialClient:
             owner_device=str(row.get("owner_device") or self.owner_of(key)),
             owner_device_name=self.owner_label(key),
             retry_after_ms=ttl,
+            retry_after_is_floor=floor,
+            # A CACHED ``quota_blocked`` IS ALWAYS THE OWNER'S OWN STATE (#3108 review
+            # r2-m1): the holder-exclusion answer is never remembered (``_from_reply``
+            # / ``_detail_from_owner`` return it uncached), so whatever reached the
+            # cache was the owner's pool. Rebuilt without the marker, a 0-remainder
+            # cached refusal read as the holder's exclusion again and a concurrent
+            # ask rendered the borrower's own cooldowns for it.
+            reason=QUOTA_REASON_POOL_DEPLETED if status == "quota_blocked" else "",
         )
 
     def _remember(self, key: str, error: BrokerError) -> None:
@@ -462,6 +503,7 @@ class MeshCredentialClient:
         from local_operator.network.credentials.effective import note_resolution
 
         note_resolution(self.root, key, error)
+        self._remember_evidence(key, error)
         self._save_state()
 
     def _bounded(self, grant: Grant) -> Grant:
@@ -486,7 +528,59 @@ class MeshCredentialClient:
 
         note_resolution(self.root, key, grant)
         self.state.note_grant(key, grant.grant_id, owner_device=grant.credential_ref.owner_device)
+        # THE DURABLE HALF OF A SUCCESSFUL BORROW. The grant itself lives only in
+        # memory (``GrantCache``), so without this row a restarted session has no
+        # way to say "this server works because <owner> signed in" — it would read
+        # as a server nobody has ever signed in to. Writing ``synced`` also
+        # REPLACES an older ``expired``/``unauthorized``, which is the "clear the
+        # entry on success" half: the failure it described is no longer true.
+        mcp_state.record(
+            self.network_id,
+            key,
+            state="synced",
+            owner_device=grant.credential_ref.owner_device,
+            owner_name=grant.credential_ref.owner_device_name,
+            root=self.root,
+        )
         self._save_state()
+
+    def _remember_evidence(self, key: str, error: BrokerError) -> None:
+        """Record WHY a refusal happened, in the durable, value-free vocabulary.
+
+        A broker code this build does not classify records NOTHING: it overwrote a
+        precise older answer with a vague new one otherwise, and the status surface
+        treats absent evidence as "ask the stores", which is honest.
+        """
+        state = mcp_state.state_for_code(error.code)
+        if not state:
+            return
+        if state == "revoked" and not self._has_prior_claim(key):
+            # A COLD "not a holder" IS NOT A REVOCATION (requirement-6 inversion).
+            # A server that was just mirrored, or one whose share has not arrived,
+            # answers ``not_a_holder`` before any dial because ``should_borrow`` is
+            # false. Recording ``revoked`` there made the status say access had
+            # been withdrawn for a server nobody ever shared — the exact opposite
+            # of ``not_yet_synced`` / ``needs_operator_login``. Only a device that
+            # HAD a claim (a cached grant or an existing evidence row) can lose it.
+            return
+        mcp_state.record(
+            self.network_id,
+            key,
+            state=state,
+            code=error.code,
+            owner_device=error.owner_device or self.owner_of(key),
+            owner_name=error.owner_device_name or self.owner_label(key),
+            root=self.root,
+        )
+
+    def _has_prior_claim(self, key: str) -> bool:
+        """Whether this device ever held a claim on ``key``: a grant or evidence."""
+        if self.grants.peek(key, "") is not None:
+            return True
+        try:
+            return bool(mcp_state.load(self.network_id, self.root).get(key))
+        except Exception:  # noqa: BLE001 — unknown is not a claim
+            return False
 
     def _save_state(self) -> None:
         try:
@@ -511,8 +605,15 @@ class MeshCredentialClient:
         model_id: str = "",
         force_refresh: bool = False,
         provider: str = "",
+        affinity: tuple[int, int] | None = None,
+        demote_credential_ids: Collection[int] = (),
     ) -> Grant | BrokerError:
         """Borrow a bearer for ``key``. Blocking; call from a thread.
+
+        ``affinity`` is this session's warm-account anchor ``(owner row id, row
+        created_at)`` and ``demote_credential_ids`` the owner rows this session just
+        saw fail server-side; both come from ``MeshAwareAuthStore`` and only steer
+        the owner's choice (``owner.grant`` step 2e).
 
         THE ORDER IS THE CONTRACT: a live grant, then a cached refusal, then the
         dial. Checking the cache before the grant would serve a stale "no" over a
@@ -550,6 +651,12 @@ class MeshCredentialClient:
             refusal = self.cached_refusal(key)
             if refusal is not None and refusal.code == "quota_blocked":
                 return self._render(refusal, key, label)
+        # THE ROWS THIS DEVICE SAW ANSWER A USAGE LIMIT, hidden from this ask only
+        # (see ``PlacementState.cool_down``). An explicit refresh still carries
+        # them: a forced refresh is a repair of the bearer, not a request to be
+        # served by a row the provider said is spent.
+        resting = self.state.cooldowns(key, model_id, owner_device=self.owner_of(key))
+        excluded = sorted({int(row["credential_id"]) for row in resting})
         try:
             from local_operator.network import store
             from local_operator.network.relay import control_request
@@ -557,6 +664,13 @@ class MeshCredentialClient:
             record = store.find_own_relay(self.root)
             if record is None:
                 return self._offline(key, label)
+            extra: dict[str, Any] = {}
+            if excluded:
+                # Only when there is something to hide, so the frame an older relay
+                # or owner reads is byte-identical to the one it always read.
+                extra["exclude_credential_ids"] = excluded
+            # The same only-when-present rule for the selection inputs.
+            extra.update(_selection_fields(affinity, demote_credential_ids))
             reply = control_request(
                 record,
                 "credential_grant",
@@ -570,6 +684,7 @@ class MeshCredentialClient:
                 session_id=session_id,
                 model_id=model_id,
                 force_refresh=bool(force_refresh),
+                **extra,
             )
         except Exception as exc:  # noqa: BLE001 — a broker bug must not fail a turn
             return BrokerError(
@@ -579,7 +694,36 @@ class MeshCredentialClient:
                 owner_device_name=self.owner_label(key),
                 message=exc.__class__.__name__,
             )
-        return self._from_reply(reply, key, label, session_id)
+        return self._from_reply(reply, key, label, session_id, resting=resting)
+
+    def _resting_refusal(self, key: str, label: str, resting: list[dict[str, Any]]) -> BrokerError:
+        """``quota_blocked`` built from this device's own cooldowns. Not cached.
+
+        Not cached in the refusal file on purpose: the cooldowns already ARE the
+        record, and a cached refusal would outlive a cooldown the operator clears
+        (or one that ends) by its own TTL rather than by the fact.
+        """
+        now = time.time()
+        remaining_ms = max(0, int((min(float(r["until"]) for r in resting) - now) * 1000))
+        accounts = tuple(
+            dict.fromkeys(str(r.get("label") or "") for r in resting if r.get("label"))
+        )
+        error = BrokerError(
+            code="quota_blocked",
+            key=key,
+            owner_device=self.owner_of(key),
+            owner_device_name=self.owner_label(key),
+            retry_after_ms=remaining_ms,
+        )
+        error.message = render_broker_error(
+            error,
+            key=key,
+            provider=label,
+            owner_name=self.owner_label(key),
+            last_seen_s=self.owner_last_seen_s(error.owner_device),
+            accounts=accounts,
+        )
+        return error
 
     # -- leg 2: the relay asks the owner ------------------------------------
 
@@ -591,6 +735,9 @@ class MeshCredentialClient:
         session_id: str = "",
         model_id: str = "",
         force_refresh: bool = False,
+        exclude_credential_ids: list[int] | None = None,
+        affinity: tuple[int, int] | None = None,
+        demote_credential_ids: Collection[int] = (),
     ) -> dict[str, Any]:
         """Answer a leg-1 ``credential_grant``. Returns a ``detail`` object.
 
@@ -633,9 +780,18 @@ class MeshCredentialClient:
             "model_id": model_id,
             "force_refresh": bool(force_refresh),
         }
+        if exclude_credential_ids:
+            # The borrower's resting rows (``PlacementState.cool_down``). Present only
+            # when non-empty, so the frame an older owner reads is unchanged — and an
+            # older owner simply ignores it, which costs one more 429, never a wrong
+            # account (it is a narrowing, never a widening).
+            frame["exclude_credential_ids"] = list(exclude_credential_ids)
+        frame.update(_selection_fields(affinity, demote_credential_ids))
         direct = self._ask_owner_directly(owner, frame)
         if direct is not None:
-            return self._detail_from_owner(direct, key, label)
+            return self._detail_from_owner(
+                direct, key, label, excluded=bool(exclude_credential_ids)
+            )
         return self._detail_error(self._render(self._offline(key, label, owner=owner), key, label))
 
     def _ask_owner_directly(self, owner: str, frame: dict[str, Any]) -> dict[str, Any] | None:
@@ -731,6 +887,15 @@ class MeshCredentialClient:
         if not self.should_borrow(key):
             return
         credential_id = self._reported_credential_id(key, session_id)
+        if kind == "quota":
+            self._cool_lent_row(
+                key,
+                session_id=session_id,
+                credential_id=credential_id,
+                model_id=model_id,
+                retry_after_ms=retry_after_ms,
+                block_scope=block_scope,
+            )
         self.grants.drop(key)
         try:
             from local_operator.network import store
@@ -753,6 +918,56 @@ class MeshCredentialClient:
             )
         except Exception:  # noqa: BLE001 — a failed report must not raise into a turn
             return
+
+    def _cool_lent_row(
+        self,
+        key: str,
+        *,
+        session_id: str,
+        credential_id: int,
+        model_id: str,
+        retry_after_ms: int,
+        block_scope: str,
+    ) -> None:
+        """Rest the LENT row for the window a local row would rest. Best effort.
+
+        The borrower-side half of the local rule (``AuthStore.rotate_sibling``):
+        same window, same family scoping, read from
+        ``auth_store.failure_block_window``. Read BEFORE the grant cache is dropped,
+        like the report's ``credential_id``, because the lent row's id and label
+        are only known from that grant. Without an id there is nothing to hide —
+        the owner's own first-row pick then stands, exactly as before.
+        """
+        if credential_id <= 0:
+            return
+        from local_operator.providers.auth_store import failure_block_window
+        from local_operator.session.credential_binding import identity_label_for
+
+        scope, window_ms = failure_block_window(
+            retry_after_ms, usage_limited=True, model_id=model_id
+        )
+        if block_scope:
+            # The scope the caller actually observed (``configure``'s Fable-only
+            # cap) wins over the one derived from the model, as on the owner.
+            scope = block_scope
+        label = ""
+        for sid in dict.fromkeys((session_id, "")):
+            grant = self.grants.peek(key, sid)
+            if isinstance(grant, Grant):
+                label = identity_label_for(grant.identity)
+                break
+        try:
+            self.state.cool_down(
+                key,
+                owner_device=self.owner_of(key),
+                credential_id=credential_id,
+                block_scope=scope,
+                until=time.time() + window_ms / 1000.0,
+                label=label,
+            )
+            self._save_state()
+        except Exception:  # noqa: BLE001 — a bookkeeping failure must not raise into a turn
+            logger.debug("could not record a borrowed row's cooldown", exc_info=True)
 
     def _reported_credential_id(self, key: str, session_id: str) -> int:
         """The owner's row id from the grant this device was last lent for ``key``.
@@ -796,8 +1011,13 @@ class MeshCredentialClient:
             return {"kind": "error", "code": "owner_offline", "key": key}
         return detail
 
-    def pull_placement(self) -> dict[str, Any]:
+    def pull_placement(self, only_device: str = "") -> dict[str, Any]:
         """Ask every other active member for its placement document, and merge.
+
+        ``only_device`` narrows the fan-out to ONE member, for the cadence path:
+        a member that holds keys owned by one peer needs that peer's document to
+        converge, and asking every member on every tick would put a per-member
+        round trip on a 15 s floor. The full sweep stays the explicit verb.
 
         WHY EVERY MEMBER RATHER THAN THE KNOWN OWNERS: a share done for a key this
         device has never heard of leaves no entry here to name the owner, so
@@ -819,17 +1039,57 @@ class MeshCredentialClient:
         been wired into any session that was running while it landed.
         """
         if self.placement is None or not self.network_id:
-            return {"kind": "ack", "key": "", "changed": [], "owners": 0, "newly_borrowable": []}
+            # A MISSING DOCUMENT IS ITSELF A LOSS (design §4: access ends at
+            # reconcile, not at token expiry). The device may have been removed from
+            # the network while this process was running; the grants in memory must
+            # not outlive that, so the same reconcile runs here before answering.
+            revoked = self.revoke_local_grants()
+            missing: dict[str, Any] = {
+                "kind": "ack",
+                "key": "",
+                "changed": [],
+                "owners": 0,
+                "newly_borrowable": [],
+            }
+            if revoked:
+                missing["revoked"] = revoked
+            return missing
         from local_operator.network.types import MeshRefusal
 
         before_borrowable = set(self._borrowable_now())
+        # THE KEYS THAT COULD LOSE ACCESS ON THIS PULL, captured BEFORE the merge:
+        # reading the placement property after a change CLEARS every cached grant
+        # (the withdrawal rule), and a cleared cache can no longer name what was
+        # withdrawn. These names are what the evidence document records.
+        held_before = self.grants.keys()
         changed: list[str] = []
         #: ``{device, reason}`` for every member whose document was NOT merged, so a
         #: skipped member is named in the reply rather than silently missing.
         skipped: list[dict[str, str]] = []
         asked = 0
-        for device in self._other_active_members():
+        members = self._other_active_members()
+        if only_device:
+            members = [device for device in members if device == only_device]
+        from local_operator.network import wire
+
+        for device in members:
             asked += 1
+            # A PEER THAT DOES NOT ADVERTISE THE PUSH CAPABILITY MUST NOT BE SENT
+            # A PLACEMENT REQUEST EITHER (lifecycle-only peer test): the handshake
+            # already says it cannot handle one, so asking would put a frame on
+            # the wire that a previous-release peer has no handler for. The link
+            # is established first only to READ its capabilities; a failed dial
+            # falls through to ``_ask_owner_directly``'s own offline handling.
+            ensure = getattr(self._relay, "_ensure_link_with_reason", None)
+            if ensure is not None:
+                try:
+                    link, _why = ensure(device)
+                except Exception:  # noqa: BLE001 — an unreachable peer is reported below
+                    link = None
+                caps = tuple(getattr(link, "capabilities", ()) or ()) if link is not None else ()
+                if link is not None and wire.CREDENTIAL_PLACEMENT_PUSH_V1 not in caps:
+                    skipped.append({"device": device, "reason": "peer_lacks_placement_push"})
+                    continue
             reply = self._ask_owner_directly(
                 device,
                 {
@@ -880,11 +1140,13 @@ class MeshCredentialClient:
                     # under the lock and only after parsing, so nothing was written.
                     skipped.append({"device": device, "reason": "malformed_document"})
                     continue
+        revoked = self.revoke_local_grants(held_before)
         after_borrowable = self._borrowable_now()
         result: dict[str, Any] = {
             "kind": "ack",
             "key": "",
             "changed": sorted(set(changed)),
+            "revoked": revoked,
             "owners": asked,
             "newly_borrowable": sorted(
                 key
@@ -911,6 +1173,192 @@ class MeshCredentialClient:
             for key, entry in document.entries.items()
             if entry.owner_device != self.self_device and entry.is_holder(self.self_device)
         }
+
+    def _auth_store(self) -> Any:
+        """This root's credential database, explicitly — see :meth:`_sync_engine`."""
+        from local_operator.providers.auth_store import AuthStore
+
+        if self.root is None:
+            # Only reachable if a caller builds the factory without a root; the
+            # engine passes it conditionally, but the type is ``Path | None``.
+            raise RuntimeError("no config root for the credential store")
+        return AuthStore(db_path=self.root / "auth.db", config_dir=self.root)
+
+    def _sync_engine(self) -> Any:
+        """The engine the direct fallback applies through. Built once, lazily."""
+        if self._engine is None:
+            from local_operator.network.credentials import sync as sync_mod
+
+            # THE STORE IS ROOTED EXPLICITLY. ``SyncEngine``'s default store derives
+            # its database from the AMBIENT config dir (``AuthStore`` defaults
+            # ``db_path`` to ``default_db_path()``), so a CLI working under an
+            # injected root would apply the copy into the operator's own store — or,
+            # in a test, into whichever store happens to exist outside the root.
+            self._engine = sync_mod.SyncEngine(
+                self._relay,
+                root=self.root,
+                self_device=self.self_device,
+                self_device_name=self._self_label(),
+                auth_store_factory=self._auth_store if self.root is not None else None,
+            )
+        return self._engine
+
+    def pull_copy_sync(self, key: str) -> dict[str, Any]:
+        """Pull ONE copy from its owner over ``net_broker kind=copy``, directly.
+
+        THE CLI'S FALLBACK PATH, and why it exists: a branch CLI talking to an
+        older relay (or any relay without the local ``credential_sync_pull`` op)
+        must still repair a member. The client built for this call holds a relay
+        object for ONE dial (``for_this_device(..., relay=...)``), asks the owner
+        itself, and applies the reply through the SAME ``SyncEngine.apply_copy_reply``
+        the tick uses — same digest check, same monotonicity rule, same evidence.
+
+        NO DIAL when it cannot help: not a holder, a key this device owns, or a
+        broker-only key all answer locally. The receipt is ``{ok, state, code}``,
+        the same three fields ``pull_now`` answers, and no value crosses it.
+        """
+        from local_operator.network.credentials import mcp_state
+        from local_operator.network.credentials import sync as sync_mod
+
+        placement = self.placement
+        if placement is None:
+            # No document is a placement fact, not a question for the owner.
+            return {
+                "ok": False,
+                "state": "revoked" if self._has_prior_claim(key) else "unknown",
+                "code": "not_a_holder",
+            }
+        entry = placement.entry(key)
+        if entry is None or not entry.is_holder(self.self_device):
+            # A placement fact, not something to ask the owner about. The state is
+            # ``revoked`` only for a device that had a claim; a cold device gets
+            # ``unknown`` and the status surface reads placement for itself.
+            return {
+                "ok": False,
+                "state": "revoked" if self._has_prior_claim(key) else "unknown",
+                "code": "not_a_holder",
+            }
+        owner = str(entry.owner_device)
+        if not owner or owner == self.self_device:
+            return {"ok": False, "state": "synced", "code": "local_owner"}
+        if not sync_mod.copies_by_class(str(entry.kind)):
+            return {"ok": False, "state": "unavailable", "code": "not_copyable"}
+        state = sync_mod.SyncState.load(placement.network_id, root=self.root)
+        held = state.applied_for(key) or {}
+        held_gen = int(held.get("gen") or 0)
+        reply = self._ask_owner_directly(
+            owner,
+            {
+                "op": PEER_BROKER_OP,
+                "kind": "copy",
+                "network_id": placement.network_id,
+                "from_device": self.self_device,
+                "from_device_name": self._self_label(),
+                "key": key,
+                "gen": 0,
+                "held": held_gen,
+            },
+        )
+        if reply is None:
+            mcp_state.record(
+                placement.network_id,
+                key,
+                state="unavailable",
+                code="owner_offline",
+                owner_device=owner,
+                owner_name=str(entry.owner_device_name or ""),
+                root=self.root,
+            )
+            return {"ok": False, "state": "unavailable", "code": "owner_offline"}
+        detail = reply.get("detail") if isinstance(reply, dict) else None
+        outcome = self._sync_engine().apply_copy_reply(key, detail, owner=owner, held_gen=held_gen)
+        if outcome in ("applied", "in_sync"):
+            return {"ok": True, "state": "synced", "code": ""}
+        if outcome.startswith("refused:"):
+            code = outcome.split(":", 1)[1]
+            mapped = mcp_state.state_for_code(code) or "unavailable"
+            if mapped == "revoked" and not self._has_prior_claim(key):
+                return {"ok": False, "state": "unknown", "code": code}
+            mcp_state.record(
+                placement.network_id,
+                key,
+                state=mapped,
+                code=code,
+                owner_device=owner,
+                owner_name=str(entry.owner_device_name or ""),
+                root=self.root,
+            )
+            return {"ok": False, "state": mapped, "code": code}
+        return {"ok": False, "state": "unknown", "code": "no_answer"}
+
+    def revoke_local_grants(self, keys: list[str] | None = None) -> list[str]:
+        """Drop every cached grant this device may no longer hold. Returns the keys.
+
+        TWO REASONS A GRANT DIES HERE, and both are reconcile facts rather than
+        token facts (design §4):
+
+        * **This device is no longer a holder** for the key — the owner revoked the
+          share, the entry moved to another owner, or the placement document is
+          gone. ``should_borrow`` is the same predicate every request checks, so
+          this cannot disagree with what a fresh borrow would answer.
+        * **This device is no longer a live member** of the network — removed, or
+          the record itself is gone. The handshake would refuse on the next
+          contact anyway; dropping now ends access at reconcile instead of leaving
+          the bearer usable until its TTL.
+
+        THE EVIDENCE IS THE OTHER HALF. A dropped grant with no record reads to
+        ``/mcp`` as "never signed in", which sends the operator looking for a
+        sign-in that used to work. ``revoked`` says what happened and asks for a
+        new share, which is the only remedy that can work.
+
+        ``keys`` is the caller's pre-merge snapshot: reading ``self.placement`` after
+        a changed document clears the cache as a side effect, so the names to
+        reconcile must be captured before that read. ``None`` means "whatever the
+        cache holds now".
+        """
+        candidates = list(self.grants.keys()) if keys is None else list(dict.fromkeys(keys))
+        if not candidates:
+            return []
+        membership_gone = not self._self_membership_active()
+        dropped: list[str] = []
+        for key in candidates:
+            if not membership_gone and self.should_borrow(key):
+                continue
+            owner = self.owner_of(key)
+            owner_name = self.owner_label(key)
+            self.grants.drop(key)
+            mcp_state.record(
+                self.network_id,
+                key,
+                state="revoked",
+                code="member_not_active" if membership_gone else "not_a_holder",
+                owner_device=owner,
+                owner_name=owner_name,
+                root=self.root,
+            )
+            dropped.append(key)
+        return dropped
+
+    def _self_membership_active(self) -> bool:
+        """Whether this device is still a live member of its network.
+
+        No record, an unreadable store, a missing self row or an inactive one all
+        answer ``False``: the question is permission to keep using a bearer, and
+        every failure mode of the proof must fail closed.
+        """
+        if not self.network_id:
+            return True
+        try:
+            from local_operator.network import store
+
+            for record in store.list_networks(self.root):
+                if record.network_id != self.network_id:
+                    continue
+                member = record.self_member()
+                return bool(member is not None and member.active)
+            return False
+        except Exception:  # noqa: BLE001 — a store we cannot read proves nothing
+            return False
 
     def _other_active_members(self) -> list[str]:
         try:
@@ -988,8 +1436,28 @@ class MeshCredentialClient:
         )
         return error
 
-    def _from_reply(self, reply: Any, key: str, label: str, session_id: str) -> Grant | BrokerError:
-        """Turn a leg-1 control reply into a grant or a refusal."""
+    def _from_reply(
+        self,
+        reply: Any,
+        key: str,
+        label: str,
+        session_id: str,
+        *,
+        resting: list[dict[str, Any]] | None = None,
+    ) -> Grant | BrokerError:
+        """Turn a leg-1 control reply into a grant or a refusal.
+
+        ``resting`` is the cooldown set this ask excluded. When the owner answers
+        that the exclusion left nothing (the owner's ``peer_excluded`` arm, marked
+        ``reason: holder_excluded``; an older owner's unmarked ``quota_blocked`` with
+        no remainder, see :attr:`BrokerError.is_holder_exclusion`), the answer is this
+        device's own rest, rendered from its cooldowns and NOT remembered (review
+        round 1, m1): caching it would record a refusal (or a ``withdrawn`` receipt)
+        that outlives the cooldowns it describes, and the cooldowns already are the
+        record. An owner-measured ``quota_blocked`` (its own block, or a pool spent by
+        usage, marked ``pool_depleted`` whether or not its reopening is known) is the
+        owner's state and is cached as before.
+        """
         if not isinstance(reply, dict):
             return self._render(self._offline(key, label), key, label)
         detail = reply.get("detail")
@@ -1013,11 +1481,16 @@ class MeshCredentialClient:
             self.grants.put(key, session_id, grant)
             self._remember_grant(key, grant)
             return grant
-        error = self._render(BrokerError.from_detail(detail), key, label)
+        refused = BrokerError.from_detail(detail)
+        if resting and refused.is_holder_exclusion:
+            return self._resting_refusal(key, label, resting)
+        error = self._render(refused, key, label)
         self._remember(key, error)
         return error
 
-    def _detail_from_owner(self, reply: dict[str, Any], key: str, label: str) -> dict[str, Any]:
+    def _detail_from_owner(
+        self, reply: dict[str, Any], key: str, label: str, *, excluded: bool = False
+    ) -> dict[str, Any]:
         """A leg-2 reply as a detail object, with the cache updated.
 
         The transport's own refusal (``{"op": "error", ...}``) carries no code, only
@@ -1047,6 +1520,12 @@ class MeshCredentialClient:
             self._remember_grant(key, grant)
             return detail
         error = self._render(BrokerError.from_detail(detail), key, label)
+        if excluded and error.is_holder_exclusion:
+            # The answer to the HOLDER'S exclusion, not an owner-side state (review
+            # round 1, m1): the holder's cooldowns are the record, and caching this
+            # here — the relay shares the session's observation file — would make
+            # the next ask short-circuit on a refusal that outlives them.
+            return self._detail_error(error)
         self._remember(key, error)
         return self._detail_error(error)
 
@@ -1063,6 +1542,8 @@ class MeshCredentialClient:
         model_id: str = "",
         force_refresh: bool = False,
         provider: str = "",
+        affinity: tuple[int, int] | None = None,
+        demote_credential_ids: Collection[int] = (),
     ) -> Grant | BrokerError:
         """``request_grant_sync`` off the event loop.
 
@@ -1078,7 +1559,29 @@ class MeshCredentialClient:
             model_id=model_id,
             force_refresh=force_refresh,
             provider=provider,
+            affinity=affinity,
+            demote_credential_ids=tuple(demote_credential_ids),
         )
+
+
+def _selection_fields(
+    affinity: tuple[int, int] | None, demote_credential_ids: Collection[int]
+) -> dict[str, Any]:
+    """The optional lend-selection fields, present ONLY when they carry something.
+
+    The ``exclude_credential_ids`` rule (#3066): a frame with nothing to say is
+    byte-identical to the one an older relay or owner always read, and an older
+    owner that receives them ignores them, which is today's lend.
+    """
+    fields: dict[str, Any] = {}
+    if affinity is not None:
+        fields["affinity"] = {
+            "account_id": int(affinity[0]),
+            "account_created_at": int(affinity[1]),
+        }
+    if demote_credential_ids:
+        fields["demote_credential_ids"] = sorted({int(i) for i in demote_credential_ids})
+    return fields
 
 
 def key_for(*, provider: str = "", mcp_url: str = "") -> str:

@@ -1,0 +1,5 @@
+INPUT /Users/damian/workspace/repos/lo-notifications-l1/local_operator/i18n/catalogues/en/wire.slash.notifications_page.json 9440f547bbf4e982c949202fd5ddb78a784a3d6da0f7e88694eb9ffdc3bc6594
+INPUT /Users/damian/workspace/repos/lo-notifications-l1/local_operator/i18n/catalogues/ru/wire.slash.notifications_page.json d1f0996ee378123fce3ffe0a42ba30818020c2f8e8bbd30db48486b9bfa64076
+INPUT /Users/damian/workspace/repos/lo-notifications-l1/local_operator/i18n/catalogues/en/wire.slash.notifications_page.context.json 2974cbbc68f15d61f45c8a79d99185ddb8b13afeb2f1920d592f752accdf45e0
+MAXCELLS wire.slash.notifications_page.help 47 budget=50
+RESULT {"namespace":"wire.slash.notifications_page","enKeys":1,"targetKeys":1,"parsedMessages":2,"ruPluralNodes":0,"mechanicalFailures":0,"contextKeys":1}

@@ -29,10 +29,13 @@
 #   an empty `source`, which is what bypasses the already-engaged gate. Issue
 #   triage stays immediate on `issues [opened]` for any non-bot author:
 #   issues do not wait.
-# * The sweep job is the ONLY place `actions: write` exists, and it is safe
-#   there BY CONSTRUCTION: it runs no model code, mints no app token, checks
-#   out only the default branch, and its one write is `gh workflow run
-#   helpdesk.yml` with fixed inputs. The model never holds that token.
+# * The sweep job's `actions: write` is safe BY CONSTRUCTION: it runs no model
+#   code, mints no app token, checks out only the default branch, and its one
+#   write is `gh workflow run helpdesk.yml` with fixed inputs. The model never
+#   holds that token. (This used to say it was the only place the scope
+#   existed; `reap-superseded.yml` now also holds it, for the one write of
+#   cancelling a queued run whose work nothing will read. Neither job runs
+#   model code, and neither can write repository contents.)
 # * There is no `pull_request`/`pull_request_target` trigger: a fork PR never
 #   gets repository secrets on its own events, and fork PRs are excluded on
 #   EVERY path — the sweep skips them (head owner/name mismatch), and

@@ -28,6 +28,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .connector.wake import parse_event_ref
+from .types import (
+    CONVERSATION_FEED_KIND,
+    ConversationFeedRef,
+    parse_conversation_ref_value,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +57,14 @@ class FeedRefPlan:
     refresh: bool
     refresh_types: tuple[str, ...]
     skipped: tuple[str, ...]
+    conversation_deliveries: tuple[ConversationFeedRef, ...] = ()
 
 
 def plan_feed_refs(refs: Sequence[str]) -> FeedRefPlan:
     """Classify a drained batch. Pure; no network, no store, no wake."""
 
     deliveries: list[str] = []
+    conversation_deliveries: list[ConversationFeedRef] = []
     refresh_types: list[str] = []
     skipped: list[str] = []
     for ref in refs:
@@ -66,6 +73,16 @@ def plan_feed_refs(refs: Sequence[str]) -> FeedRefPlan:
             skipped.append(ref)
             continue
         event_type, kind, value = parsed
+        if event_type == DELIVERY_TYPE and kind == CONVERSATION_FEED_KIND:
+            # A conversation delivery is NEVER a pair delivery: it goes to the
+            # conversation card path, which owns the history/read, admission
+            # and mention-aware framing.
+            conversation_ref = parse_conversation_ref_value(value)
+            if conversation_ref is None:
+                skipped.append(ref)
+            else:
+                conversation_deliveries.append(conversation_ref)
+            continue
         if event_type == DELIVERY_TYPE and kind == "message_id":
             deliveries.append(value)
             continue
@@ -86,6 +103,7 @@ def plan_feed_refs(refs: Sequence[str]) -> FeedRefPlan:
         refresh=bool(refresh_types),
         refresh_types=tuple(refresh_types),
         skipped=tuple(skipped),
+        conversation_deliveries=tuple(conversation_deliveries),
     )
 
 

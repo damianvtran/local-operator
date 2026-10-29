@@ -2273,6 +2273,8 @@ class PoisonedThenFine:
     #: what this class covers is the session actually recovering, which is the
     #: part that was broken.
     refusal = "Could not process image"
+    #: Overridable for the same reason: OpenRouter's modality refusal is a 404.
+    status = 400
 
     def __init__(self) -> None:
         self.requests: list[ChatRequest] = []
@@ -2283,10 +2285,11 @@ class PoisonedThenFine:
         self.calls += 1
         first = self.calls == 1
         refusal = self.refusal
+        status = self.status
 
         async def gen():
             if first:
-                raise ProviderError(400, refusal)
+                raise ProviderError(status, refusal)
             yield StreamTextDelta(delta="ok")
             yield StreamEndEvent(stop_reason="endTurn")
 
@@ -2387,6 +2390,113 @@ async def test_the_many_image_dimension_refusal_also_unbricks_the_session(tmp_pa
     await session.prompt("try again")
     assert stream.calls == 2
     assert _image_blocks(stream.requests[1]) == 0, "the session is still sending the bad image"
+    await session.dispose()
+
+
+_MODALITY_REFUSALS = [
+    pytest.param(404, "No endpoints found that support image input", id="openrouter-404"),
+    pytest.param(
+        422,
+        "Failed to deserialize the JSON body into the target type: messages[0]: "
+        "unknown variant `image_url`, expected `text`",
+        id="deepseek-422",
+    ),
+    pytest.param(
+        400,
+        "Invalid content type. image_url is only supported by certain models.",
+        id="openai-compat-400",
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status, refusal", _MODALITY_REFUSALS)
+async def test_a_text_only_model_refusing_images_unbricks_the_session(tmp_path, status, refusal):
+    """PR #3071 M1/Q1: a model nothing described is now sent images, so a
+    text-only endpoint behind one answers with a MODALITY refusal. The session
+    must recognise it the way it recognises a bad block: the discovering turn
+    fails (as the block-refusal path does — no in-turn retry), the sticky strip
+    engages, the user is told once, and every later turn succeeds without the
+    image. Before the markers, every turn failed and re-sent the image."""
+
+    class Refusing(PoisonedThenFine):
+        pass
+
+    Refusing.status = status
+    Refusing.refusal = refusal
+    stream = Refusing()
+    session = make_session(tmp_path, stream)
+    events: list[AgentEvent] = []
+    session.subscribe(events.append)
+    await session.seed_history(
+        [
+            Message(
+                role="user", content=[TextContent(text="look at this"), ImageContent(data="Zm9v")]
+            )
+        ]
+    )
+
+    await session.prompt("one")
+    assert _image_blocks(stream.requests[0]) == 1
+    assert session._images_rejected, "the modality refusal was not recognised"
+
+    await session.prompt("two")
+    await session.prompt("three")
+    assert stream.calls == 3, "a later turn failed again"
+    assert [_image_blocks(request) for request in stream.requests[1:]] == [0, 0]
+    rejected = [
+        event
+        for event in events
+        if isinstance(event, NoticeEvent) and event.code == "tui.notices.image_rejected_history"
+    ]
+    assert len(rejected) == 1, "the strip must be announced exactly once"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_modality_strip_lifts_on_a_switch_to_another_model(tmp_path):
+    """The refusal is about the MODEL, not the block, so its strip is scoped
+    like the count strip: a switch onto a vision model sees the images again
+    instead of staying blind for the rest of the session."""
+
+    class Refusing(PoisonedThenFine):
+        status = 404
+        refusal = "No endpoints found that support image input"
+
+    stream = Refusing()
+    session = make_session(tmp_path, stream)
+    await session.seed_history(
+        [
+            Message(
+                role="user", content=[TextContent(text="look at this"), ImageContent(data="Zm9v")]
+            )
+        ]
+    )
+    await session.prompt("one")
+    assert session._images_rejected
+
+    session.set_model(ModelSpec(provider="test", model_id="vision", context_window=100_000))
+    await session.prompt("two")
+    assert _image_blocks(stream.requests[-1]) == 1, "the switch did not lift the model-scoped strip"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_block_refusal_strip_survives_a_switch(tmp_path):
+    """Control for the test above: a POISONED block stays stripped on any model."""
+    stream = PoisonedThenFine()
+    session = make_session(tmp_path, stream)
+    await session.seed_history(
+        [
+            Message(
+                role="user", content=[TextContent(text="look at this"), ImageContent(data="Zm9v")]
+            )
+        ]
+    )
+    await session.prompt("one")
+    session.set_model(ModelSpec(provider="test", model_id="vision", context_window=100_000))
+    await session.prompt("two")
+    assert _image_blocks(stream.requests[-1]) == 0
     await session.dispose()
 
 
@@ -3145,9 +3255,10 @@ async def test_consumed_and_foreign_jobs_do_not_auto_deliver(tmp_path):
     job.consumed = True
     await session._on_job_completed(consumed_id, "done", job)
 
-    # A streaming session stays quiet too: the in-turn model owns the floor.
-    # The runner must still be RUNNING when the flag flips, or the manager's
-    # own settle-delivery wins the race and delivers while idle.
+    # Setting the flag WITHOUT a live loop leaves no safe boundary to drain
+    # the result, so this synthetic busy session stays quiet. The runner must
+    # still be RUNNING when the flag flips, or the manager's own settle-
+    # delivery wins the race and delivers while idle.
     async def slow_runner(job_id, signal, report_progress):
         await asyncio.sleep(0.3)
         return "done"
@@ -5083,9 +5194,10 @@ async def test_a_settled_result_is_readable_as_it_lands_not_at_turn_end(tmp_path
     morning at 09:06:52. The operator read that as an aggregation of
     job-completed notices bunched at the end of the conversation.
 
-    The fix keeps the model's batched hand-over exactly as it was and makes
-    only the ROW early: durable at settle, and the batch reuses that message,
-    so the conversation holds one row.
+    The ROW is durable at settle, and both safe-boundary delivery and the
+    fallback below reuse that message, so the conversation holds one row.
+    This cell exercises the fallback explicitly; the real-loop safe-boundary
+    cells live in ``test_job_result_safe_boundary.py``.
     """
     stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
     session = make_session(tmp_path, stream)
@@ -5104,7 +5216,7 @@ async def test_a_settled_result_is_readable_as_it_lands_not_at_turn_end(tmp_path
         "j1"
     ], "the row must be durable as the job settles, not at the turn's end"
     early_id = rows[0].id
-    assert session._deferred_job_results, "precondition: the model's hand-over is still deferred"
+    assert session._deferred_job_results, "precondition: the model's hand-over is still pending"
     assert prompts == [], "the human's copy must not buy a turn while the turn is streaming"
 
     session._is_streaming = False
@@ -7093,3 +7205,213 @@ async def test_the_after_settled_success_snapshot_reads_complete_only(
     release.set()
     await asyncio.wait_for(dispose_task, timeout=10)
     await asyncio.wait_for(asyncio.shield(task), timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_a_dismissal_receipt_does_not_clear_a_stop_but_a_decline_does(tmp_path):
+    """D2 (design docs/design/ask-nonblocking.md §15): tidying an ask is not a new
+    instruction. A ``dismissed`` ask_response is stopped-work residue; a decline
+    hands the decision back and stays fresh intent."""
+    from local_operator.harness.message_types import ASK_RESPONSE_MESSAGE_TYPE
+    from local_operator.session.session import Session
+
+    def row(status: str) -> CustomMessage:
+        return CustomMessage(
+            custom_type=ASK_RESPONSE_MESSAGE_TYPE,
+            attribution="user",
+            id=f"ask-response-{status}",
+            details={"ask_id": "a-1", "status": status},
+        )
+
+    assert Session._is_stopped_work_residue([row("dismissed")]) is True
+    assert Session._is_stopped_work_residue([row("declined")]) is False
+    assert Session._is_stopped_work_residue([row("answered")]) is False
+
+
+def test_the_dismissal_batch_predicate_is_shared_by_both_rules():
+    """SA-D4: the idle delivery arm and the residue rule ask ONE question.
+
+    A batch that mixes a dismissal with anything else is not a dismissal batch:
+    the rest of it is fresh intent, and both callers must see that.
+    """
+    from local_operator.harness.message_types import ASK_RESPONSE_MESSAGE_TYPE
+    from local_operator.session.session import Session
+
+    def row(status: str, kind: str = ASK_RESPONSE_MESSAGE_TYPE) -> CustomMessage:
+        return CustomMessage(
+            custom_type=kind,
+            attribution="user",
+            id=f"ask-response-{status}",
+            details={"ask_id": "a-1", "status": status},
+        )
+
+    assert Session._is_dismissal_batch([row("dismissed")]) is True
+    assert Session._is_dismissal_batch([row("dismissed"), row("dismissed")]) is True
+    assert Session._is_dismissal_batch([]) is False
+    assert Session._is_dismissal_batch([row("dismissed"), row("declined")]) is False
+    mixed = [row("dismissed"), row("x", kind=JOB_RESULT_MESSAGE_TYPE)]
+    assert Session._is_dismissal_batch(mixed) is False
+    # The residue rule agrees on the same rows, which is the point of sharing.
+    assert Session._is_stopped_work_residue([row("dismissed"), row("declined")]) is False
+
+
+@pytest.mark.asyncio
+async def test_an_idle_dismissal_is_held_without_a_turn(tmp_path):
+    """SA-D4: an idle live runtime takes the receipt durably and buys NO turn.
+
+    The dismissal is a tidy-up; spending a paid turn so the agent can say "noted"
+    is work nobody asked for. The row still reaches the model — the next real turn
+    reads it out of the live context — which the e2e covers end to end; this cell
+    pins the cost (zero provider calls) and the durability.
+    """
+    from local_operator.harness.message_types import ASK_RESPONSE_MESSAGE_TYPE
+    from local_operator.session.session import Session
+
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(2)])
+    session = make_session(tmp_path, stream)
+    try:
+        receipt = CustomMessage(
+            custom_type=ASK_RESPONSE_MESSAGE_TYPE,
+            attribution="user",
+            id="ask-response-a-1",
+            details={"ask_id": "a-1", "status": "dismissed", "reason": "moot"},
+        )
+        await session.deliver_ask_messages([receipt])
+        # Held, not run: no provider call, no turn lock, no agent start.
+        await asyncio.sleep(0.1)
+        assert stream.requests == [], "a dismissal must not spend a turn"
+        assert not session._turn_lock.locked()
+        assert session.transcript.has_entry("ask-response-a-1")
+        assert Session._is_dismissal_batch([receipt]) is True
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_idle_answer_still_opens_its_turn(tmp_path):
+    """The idle arm is DISMISSAL-ONLY. An answer is fresh intent and keeps the
+    turn that delivers it (the pre-SA-D4 behaviour, unchanged)."""
+    from local_operator.harness.message_types import ASK_RESPONSE_MESSAGE_TYPE
+
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(2)])
+    session = make_session(tmp_path, stream)
+    try:
+        await session.deliver_ask_messages(
+            [
+                CustomMessage(
+                    custom_type=ASK_RESPONSE_MESSAGE_TYPE,
+                    attribution="user",
+                    id="ask-response-a-2",
+                    details={"ask_id": "a-2", "status": "answered", "answers": {"q0": ["yes"]}},
+                )
+            ]
+        )
+        for _ in range(200):
+            if stream.requests:
+                break
+            await asyncio.sleep(0.02)
+        assert stream.requests, "an answer must still open the turn that delivers it"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_user_message_stamp_counts_only_the_operators_own_words(tmp_path):
+    """SA-D7: the ask card's count is over ADMITTED operator messages.
+
+    Typed prompts and steers count; harness chrome (a goal continuation, an
+    injected loop prompt) does not, and one row admitted twice counts once.
+    """
+    from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    try:
+        asked_at = int(time.time() * 1000)
+        assert session.ask_context_line(asked_at) is None, "no messages yet -> no line"
+
+        await session.prompt("first")
+        await session.prompt("second")
+        pair = session.ask_context_line(asked_at)
+        assert pair is not None
+        since, latest = pair
+        assert since == 2, pair
+        assert latest == session.latest_user_message_at()
+        assert latest is not None and latest >= asked_at
+
+        # A message stamped as harness-injected is not the operator writing.
+        injected = Message.user("spooled owner prompt")
+        injected.provider_payload = {RENDERED_INJECTION_KEY: True}
+        session._note_admitted_user_message(injected)
+        assert session.ask_context_line(asked_at)[0] == 2  # type: ignore[index]
+
+        # The same row admitted twice counts once (two admission sites).
+        steer = Message.user("third")
+        session._note_admitted_user_message(steer)
+        session._note_admitted_user_message(steer)
+        assert session.ask_context_line(asked_at)[0] == 3  # type: ignore[index]
+
+        # An ask OLDER than every admission counts them all, exactly — the ring
+        # has dropped nothing, so the answer is a fact rather than "unknown".
+        newest = session.latest_user_message_at() or 0
+        assert session.ask_context_line(asked_at - 10_000_000) == (3, newest)
+        # And an ask NEWER than every message is exactly zero (the ask is the
+        # newest thing in the conversation).
+        assert session.ask_context_line(newest + 1) == (0, newest)
+        # Once the ring has dropped an entry, an ask older than what it retains is
+        # no longer countable and says so rather than undercounting.
+        session._user_message_stamp_truncated = True
+        assert session.ask_context_line(asked_at - 10_000_000) is None
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_user_message_stamp_is_identical_across_a_restart(tmp_path):
+    """R1-3: the live stamp and the replay seed are the SAME NUMBER per row.
+
+    The count is compared with ``>`` against an ask's ``created_at``, so a
+    millisecond of drift across a restart could flip a message that arrived in the
+    ask's own millisecond — QA measured a 1 ms gap when the live path read the
+    wall clock and the seed read ``entry.ts``. Both now read ``entry.ts`` through
+    one conversion (:meth:`Session._operator_message_stamp_ms`), so a restart over
+    the same directory reproduces the pairs exactly.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(2)])
+    session = make_session(tmp_path, stream)
+    try:
+        await session.prompt("first")
+        await session.prompt("second")
+        live = list(session._user_messages)
+        assert len(live) == 2
+    finally:
+        await session.dispose()
+
+    revived = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    try:
+        assert list(revived._user_messages) == live, "the seed moved a stamp across the restart"
+        assert revived.latest_user_message_at() == live[-1][1]
+    finally:
+        await revived.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ask_agent_running_is_false_only_for_a_stopped_idle_session(tmp_path):
+    """D6 predicate: pending abort AND no turn in flight. Idle-without-abort and
+    mid-turn are both "running"."""
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(3)])
+    session = make_session(tmp_path, stream)
+    assert session.ask_agent_running() is True  # idle, never stopped
+    session.abort("interrupted")
+    assert session.ask_agent_running() is False  # stop pending, nothing running
+    session._is_streaming = True
+    assert session.ask_agent_running() is True  # the turn is still unwinding
+    session._is_streaming = False
+    await session._turn_lock.acquire()
+    try:
+        assert session.ask_agent_running() is True
+    finally:
+        session._turn_lock.release()
+    await session.prompt("hello")  # a fresh prompt clears the stop
+    assert session.ask_agent_running() is True
+    await session.dispose()

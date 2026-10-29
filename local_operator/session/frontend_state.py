@@ -73,7 +73,7 @@ from local_operator.harness.types import (
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
 from local_operator.model.costs import (
     carry_floor,
-    cost_summary,
+    cost_summary_by_basis,
     job_subtree_cost,
     turn_cost,
 )
@@ -716,8 +716,8 @@ def _folded_components(components: Sequence[Any]) -> list[Any]:
         _usage_field,
     )
 
-    folded: dict[tuple[str, str, str], Any] = {}
-    order: list[tuple[str, str, str]] = []
+    folded: dict[tuple[str, str, str, str | None], Any] = {}
+    order: list[tuple[str, str, str, str | None]] = []
     passthrough: list[Any] = []
     for raw_component in components:
         provider = str(getattr(raw_component, "provider", "") or "")
@@ -768,7 +768,9 @@ def _folded_components(components: Sequence[Any]) -> list[Any]:
             if accepted is not None
             else "estimated" if estimated is not None else "unknown"
         )
-        key = (provider, model_id, mode)
+        # A retained job row must not relabel API-key cash as plan money (or
+        # vice versa) merely because both calls used the same serving model.
+        key = (provider, model_id, mode, getattr(component, "billing_basis", None))
         existing = folded.get(key)
         if existing is None:
             folded[key] = component.model_copy(deep=True)
@@ -915,6 +917,134 @@ def closing_state_overrides(live: Any, durable: Any) -> dict[str, Any]:
     return overrides
 
 
+def _restored_model_field(value: Any) -> Any:
+    """One live spec, in the restored field's own type.
+
+    ``model_copy`` does not validate, so the ``ModelSpec``-to-wire validator on
+    ``selected_model``/``effective_model`` does not run on this path — the same
+    reason the receipt fixup beside the call site has to hand over a validated
+    object rather than a dump. The dump is therefore re-validated into
+    ``FrontendModelSpec`` HERE, which is the shape ``refresh_from_session``'s
+    constructor call lands on the live path, so both stores hold the same type
+    and not merely the same values.
+    """
+    if isinstance(value, ModelSpec):
+        return FrontendModelSpec.model_validate(value.model_dump(mode="json"))
+    return value
+
+
+def _reading_pair(
+    configured: FrontendModelSpec | None, stored: FrontendModelSpec | None
+) -> tuple[FrontendModelSpec, FrontendModelSpec] | None:
+    """The two specs a restored context reading is only meaningful between, or ``None``.
+
+    A token count is interpretable only against the window it was measured
+    against, so a reading may cross a restore only while BOTH sides name the
+    same model: the stored ``context_tokens`` were measured on the stored
+    spec's model, and the window about to divide them is the configured
+    spec's. Two different models have no honest conversion between them — the
+    user switched models since the checkpoint was written — so the reading is
+    DROPPED rather than recomputed.
+
+    ONE RULE, TWO CONSUMERS, IN TWO MODULES. ``attached.AttachedSession._restored_pair``
+    asks it for the COLD viewer (may this process adopt the checkpoint's
+    numerator and denominator?), and ``_live_model_updates`` asks it for the
+    first frame a restarted OWNER publishes (may it carry the checkpoint's
+    reading under a spec that names another model?). Those were two spellings
+    of the same comparison, and they drifted in exactly the way a duplicated
+    rule does: the viewer refused a cross-model reading while the owner's first
+    frame kept one (review round 1, M1 = QA round 1, Q2). A third consumer must
+    call this rather than restate the comparison.
+    """
+    if configured is None or stored is None:
+        return None
+    if configured.provider != stored.provider or configured.model_id != stored.model_id:
+        return None
+    return configured, stored
+
+
+def _live_model_updates(
+    session: Any, checkpoint_model: FrontendModelSpec | None = None
+) -> dict[str, Any]:
+    """The model pair a restored checkpoint must NOT be allowed to keep.
+
+    ``checkpoint_model`` is the spec the ROW's reading was measured on, which is
+    the row's ``effective_model`` — its SELECTED slot names the model the user
+    chose, and in a fallback session the two differ while only one of them
+    served the requests the tokens came from. Callers pass
+    ``effective_model or selected_model``, the same slot pair
+    ``refresh_from_session`` resolves (QA round 2, Q3).
+
+    A checkpoint is written at a turn end, so its ``selected_model`` /
+    ``effective_model`` describe the runtime that WROTE it. They were the one
+    live field ``_restored_state`` left standing, so a headless owner's FIRST
+    frame named the level the PREVIOUS runtime ran while ``session.model`` — the
+    level its requests, every later frame and the effort picker's entity list
+    read — named the one it had actually restored: the desktop chip painted
+    "High" over a session running "medium" until some unrelated refresh
+    happened to republish the pair (Defect B, session ddd673e63db8).
+
+    The checkpoint's spec is stale for exactly the reason its ``cwd`` is (see
+    the call site): a successor's own spec is authoritative for what it runs.
+    The projection is ``refresh_from_session``'s — ``session.model``, and
+    ``effective_model or selected`` — so the first frame a restarted owner
+    publishes and every frame after it cannot disagree about the running level.
+
+    An empty dict for a host that exposes no model at all: a reduced facade and
+    a test double have none, and there the checkpoint's spec is still the only
+    answer available (the fallback the ``cwd`` fixup documents).
+
+    THE CONTEXT READING IS THE MODEL'S TOO, and the pair above is what decides
+    it: ``context_tokens`` was measured on the model the row's ``effective_model``
+    NAMES — the one that served those calls — so when the restore lands on a
+    different ``(provider, model_id)`` that numerator and its window describe a
+    model that is not about to run. Left in place they made
+    the first frame name one model and divide another model's reading by its
+    window — the ``attached.py`` cold pair refused exactly this pairing while
+    this path published it (review round 1, M1 = QA round 1, Q2). The reading is
+    therefore DROPPED, not converted: no token count is known on the new model,
+    so ``context_tokens`` and its estimate flag go unset (the same honest
+    degradation the band already renders as ``—`` / the mobile meter as
+    ``no-reading``), and the window is the LIVE spec's own — the field
+    ``refresh_from_session`` publishes, so the first frame and every frame after
+    it divide by the same number. A SAME-model restore keeps the checkpoint's
+    pair exactly as it did, because that is the reading the conversation was
+    actually measured at; identity, not a window mismatch, is the gate.
+
+    THE PAIR'S OWN DERIVED FIELD MOVES WITH IT. ``effort_displacement`` (#2658)
+    is a fact ABOUT ``selected``/``effective`` — computed from them and the
+    conversation's ``chosen_effort`` — so re-stamping the pair without it
+    published a frame that contradicted itself: the pair named the level the
+    successor runs while the note still narrated the checkpoint's. Reproduced by
+    review round 4 (m1): a checkpoint written while ``minimal`` was clamped to
+    ``low``, a later ``/effort high``, and the successor's FIRST frame carried
+    ``high/high`` beside ``Effort: low on anthropic/claude-opus-5; you chose
+    minimal.`` until some unrelated refresh recomputed it. Same call and same
+    arguments as ``refresh_from_session``'s, deliberately: a second spelling of
+    the rule is how a derived field and its input drift apart.
+    """
+    selected = getattr(session, "model", None)
+    if selected is None:
+        return {}
+    effective = getattr(session, "effective_model", None) or selected
+    updates: dict[str, Any] = {
+        "selected_model": _restored_model_field(selected),
+        "effective_model": _restored_model_field(effective),
+        "effort_displacement": effort_displacement(
+            selected, effective, getattr(session, "chosen_effort", None)
+        ),
+    }
+    if _reading_pair(effective, checkpoint_model) is None:
+        updates.update(
+            {
+                "context_tokens": None,
+                "context_is_estimate": None,
+                "context_window": getattr(effective, "context_window", None),
+            }
+        )
+    return updates
+
+
 def _inherited_identity_fixups(state: Any, session_id: str) -> dict[str, Any]:
     """Fields a restored checkpoint must NOT be allowed to carry across a fork.
 
@@ -976,6 +1106,9 @@ _FRONTEND_LOCAL_SLASHES = {
     # on a screen nobody is looking at and copy onto a host nobody is at, which
     # is the same argument `/theme` and `/settings` make about config.yml.
     "copy",
+    # Preview reads the invoking machine's filesystem and paints this TUI.
+    # It must not bind or route to an authoritative runtime on another host.
+    "view",
     # The same three facts as `/copy` above, one step further out: the transcript
     # it reads is painted by this frontend, the picker is painted by this
     # frontend, and the BROWSER is on the machine the user is sitting at. Routed
@@ -1029,6 +1162,17 @@ _FRONTEND_LOCAL_SLASHES = {
     # attached. The machine-wide wake index (the desktop's schedules page) is a
     # different subject and is deliberately not what this page reads.
     "schedule",
+    # The Library page reads THIS machine's derived asset catalog and writes
+    # THIS machine's metadata database, both under the config root the page
+    # opens. Routed to an authoritative runtime it would paint the runtime
+    # host's catalog while the user is looking at this screen — `/import`'s
+    # wrong-machine answer, with user-edited names and tags attached.
+    "library",
+    # The Librarian's pause/resume/run hooks read and write THIS machine's
+    # state, and `open` switches THIS terminal onto the pinned conversation
+    # (`/resume`'s local half). A follower routed here would pause or organize
+    # the host's library and then try to attach a session nobody is at.
+    "librarian",
     "provider",
     "search",
     "accounts",
@@ -1067,6 +1211,7 @@ _FRONTEND_LOCAL_SLASHES = {
     # FAILS `tests/unit/session/runtime/test_capability_surface.py` unless the
     # runtime dispatches it.
     "notifications",
+    "unread",  # Same host-local completion receipt store under its renamed command.
     # FRONTEND-LOCAL because the command hosts a MASKED PASTE, and the user is
     # sitting at this terminal — routing the whole command would raise the
     # paste prompt on the runtime host's screen, which nobody is looking at. This is
@@ -1166,6 +1311,16 @@ _FRONTEND_LOCAL_SLASHES = {
     # write. v2 is single-machine; serving the owner's project view over the
     # control protocol is a follow-up.
     "project",
+    # The tag store is THIS machine's: `config_dir()/tags` holds the registry and
+    # the per-session assignment files the sidebar's bucket map reads, exactly
+    # the argument `/archive` makes about `archived-sessions.json`. Routed to the
+    # runtime, a `/tag` write would land on the runtime host's config root while
+    # the picker and the sidebar beside it paint this one — and `/tags on|off`
+    # would persist a presentation mode governing a list this terminal draws.
+    # Both commands are frontend-local for the store they share, which is also
+    # what keeps them out of `serving.py::_slash_result`.
+    "tag",
+    "tags",
     # Memory inspection is this frontend's synced store, like /project. A
     # follower without registry identity can inspect only session/global; it
     # never guesses the remote owner's agent/team identity from a role name.
@@ -1271,12 +1426,15 @@ class FrontendSpendChildren(BaseModel):
     #: say must not grow every frame by a key, the same shape ``asks_truncated``
     #: uses on the state model above.
     reason: str | None = None
+    by_basis: dict[str, int] | None = None
 
     @model_serializer(mode="wrap")
     def _serialize_reason(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         payload = handler(self)
         if self.reason is None:
             payload.pop("reason", None)
+        if self.by_basis is None:
+            payload.pop("by_basis", None)
         return payload
 
 
@@ -1564,6 +1722,16 @@ class PendingGateState(BaseModel):
     #: gaining a ``notification`` frame of their own — a second channel for a
     #: card the app already receives is how one question becomes two banners.
     session_name: str = ""
+    #: The approval rule in force and its provenance, for a viewer that shows
+    #: the policy beside the pending question. Defaulted for the same skew
+    #: reason as ``session_name``: an old payload has neither key and must read
+    #: as "not stated", never as a mode the runtime did not stamp. See
+    #: ``mobile.types.PendingRequest`` for the vocabulary.
+    approval_mode: str = ""
+    approval_provenance: str = ""
+    #: The machine default the mode outranks; ``""`` when not stated. See
+    #: ``mobile.types.PendingRequest`` for why it is not derivable.
+    approval_global_mode: str = ""
 
 
 class PendingAskState(BaseModel):
@@ -1609,6 +1777,33 @@ class PendingAskState(BaseModel):
     #: to a reader built before the field: the UI row type is open-ended and an
     #: unknown key is ignored (``extra="allow"``).
     attachments: dict[str, list[dict[str, Any]]] | None = None
+    #: THE ASK CARD'S CONTEXT LINE (SA-D7, design §15): how many operator messages
+    #: were admitted after this ask was raised, and when the latest one was (ms).
+    #: The pair the card renders as "3 messages from you since this was asked (last
+    #: 19:36)", carried on the ROW because the desktop reads rows, not sessions.
+    #:
+    #: ``None`` means the writing runtime COULD NOT COUNT IT — an older runtime, an
+    #: ask older than its retained window, or a session that has admitted no
+    #: operator message — and every surface renders no line at all for it. That is
+    #: why these are nullable rather than defaulted to zero: a zero is a fact (the
+    #: ask is newer than every message), and absence must not be spelled as one.
+    #: The same added-key trade-off as ``attachments`` above: this model serialises
+    #: its ``None`` fields, so a snapshot carries ``null`` here where
+    #: ``pending_row`` and the phone's ``PendingAskWire`` simply omit the key.
+    user_messages_since: int | None = None
+    last_user_message_at: int | None = None
+    #: THE DISMISSAL'S OWN PAIR (SA-D8, design §17): when the ask was put away and
+    #: the operator's reason for it. ``None`` for every status but ``dismissed``,
+    #: and for a dismissal written by a build before the keys existed — which is
+    #: also the row the surfaces hide, so absence never reads as a reason.
+    #:
+    #: DOCUMENTATION PLUS TYPING rather than validation (``extra="allow"`` above),
+    #: but not optional bookkeeping: the phone's projection filters a row against
+    #: its own field list before the client ever sees it, and the two models are
+    #: the same frozen shape, so a key missing heading here is a key the phone
+    #: would have to grow a second vocabulary for.
+    dismissed_at: int | None = None
+    dismissed_reason: str | None = None
 
 
 class _FrozenSequence(tuple[Any, ...]):
@@ -2406,6 +2601,66 @@ def _released_row(job: Any) -> "JobState":
     values["direct_cost"] = row_cost
     values["direct_cost_knowledge"] = _cost_knowledge(row_cost, unknown)
     return _freeze_job(JobState.model_validate(values))
+
+
+class _LiveRows:
+    """Immutable base rows keyed by an owner's explicit source revision.
+
+    Lineage and derived pricing are deliberately outside this memo: comms,
+    todos and paint-safe pricing have independent writers/clocks. Sources
+    without a revision remain on the rebuilding path.
+    A source mutation invalidates before its observers run; elapsed time never
+    participates, so there is no interval in which stale accounting is allowed.
+    """
+
+    def __init__(self, epoch: str) -> None:
+        self._epoch = epoch
+        self._rows: dict[str, tuple[Any, int, Any, JobState]] = {}
+
+    def rebind(self, epoch: str) -> None:
+        if epoch != self._epoch:
+            self._epoch = epoch
+            self.clear()
+
+    def clear(self) -> None:
+        self._rows.clear()
+
+    def retain(self, ids: set[str]) -> None:
+        for key in self._rows.keys() - ids:
+            del self._rows[key]
+
+    def row(self, job: Any, window: _FrozenSequence | None) -> "JobState":
+        revision = getattr(job, "projection_revision", None)
+        job_id = str(getattr(job, "id", "") or "")
+        previous = self._rows.get(job_id)
+        if (
+            type(revision) is int
+            and previous is not None
+            and previous[0] is job
+            and previous[1] == revision
+            and previous[2] is window
+        ):
+            frozen = previous[3]
+            # Pricing has an independent clock: a cold paint memo can warm, or
+            # an unstamped aggregate can cross a pricing window without a job
+            # mutation. Cache immutable structure, never that derived money.
+            cost, unknown = job_subtree_cost(
+                job, default_model_label=str(getattr(job, "model_label", None) or "")
+            )
+            knowledge = _cost_knowledge(cost, unknown)
+            if cost != frozen.direct_cost or knowledge != frozen.direct_cost_knowledge:
+                frozen = frozen.model_copy(
+                    update={"direct_cost": cost, "direct_cost_knowledge": knowledge}
+                )
+                _mark_frozen_job(frozen)
+                self._rows[job_id] = (job, revision, window, frozen)
+            return frozen
+        frozen = _freeze_job(JobState.from_job(job, window=window))
+        if type(revision) is int:
+            self._rows[job_id] = (job, revision, window, frozen)
+        else:
+            self._rows.pop(job_id, None)
+        return frozen
 
 
 class _ReleasedRows:
@@ -3251,6 +3506,8 @@ def _thaw_model(value: BaseModel) -> BaseModel:
 
 
 def _freeze_usage(value: Usage) -> _FrozenUsage:
+    if isinstance(value, _FrozenUsage):
+        return value
     frozen = _FrozenUsage.model_validate(value.model_dump(mode="python"))
     updates = {name: _freeze_value(item) for name, item in frozen.__dict__.items()}
     for name, item in (frozen.model_extra or {}).items():
@@ -3259,6 +3516,8 @@ def _freeze_usage(value: Usage) -> _FrozenUsage:
 
 
 def _freeze_frontend_usage(value: FrontendUsage) -> _FrozenFrontendUsage:
+    if isinstance(value, _FrozenFrontendUsage):
+        return value
     frozen = _FrozenFrontendUsage.model_validate(value.model_dump(mode="python"))
     updates = {name: _freeze_value(item) for name, item in frozen.__dict__.items()}
     for name, item in (frozen.model_extra or {}).items():
@@ -3302,6 +3561,101 @@ def effective_identity_for(
     if in_force:
         return {"speaker": manager or team, "team": team, "role_of_speaker": "manager"}
     return {"speaker": active_agent, "team": "", "role_of_speaker": ""}
+
+
+def effort_displacement(selected: Any, effective: Any, chosen: str | None = None) -> dict[str, str]:
+    """The chosen reasoning level that is NOT in force on the serving model.
+
+    A fallback may serve at a level other than the one the conversation chose,
+    for two different reasons that read identically on a status band and must
+    not be silent either way: the chain entry pins a level of its own (the
+    operator's config says the rescue route runs at ``high``), or the target's
+    ladder cannot express the choice and ``spec_for_target`` clamps it. In both
+    cases the band's effort segment correctly names the level IN FORCE — that
+    is its job — so the divergence has to be stated somewhere else or the user
+    watches ``max`` become ``high`` with no explanation.
+
+    ``chosen`` is the CONVERSATION's choice (``Session.chosen_effort``), passed
+    separately because the selected spec may be a route that cannot express it
+    and then carries ``None``/a clamp itself. ``None`` means "read it off the
+    selected spec", which is the honest answer for an ownerless frame (a cold
+    catalogue row) that has no session to ask.
+
+    Returns ``{}`` when there is nothing to report: no level was chosen (a
+    model's seed is not a choice), or the serving spec is on exactly the chosen
+    level. Otherwise a five-key statement, all short strings:
+
+    * ``chosen`` — the level the conversation owns;
+    * ``effective`` — the level in force on the serving spec, ``""`` when that
+      spec exposes no level (the provider's own default, or no effort knob);
+    * ``selected`` / ``serving`` — ``provider/model_id`` labels for the two;
+    * ``note`` — the sentence a surface renders, composed HERE so the TUI, the
+      desktop strip and any other client cannot word one fact three ways.
+
+    The sentence names the level in force first and then the level that comes
+    back, which is the pair a user needs to decide whether to wait or re-pick:
+    ``Effort: high on anthropic/claude-sonnet-5-5; max resumes on
+    deepseek/deepseek-flash.`` Design review round 1 (D1) preferred this to the
+    first wording's ``returns with``, whose missing subject left the reader to
+    infer that the MODEL returns rather than the effort. A same-model route
+    (the quota walk can pin one model at a lower level) reads ``Effort: medium
+    on openai/gpt-6.1-sol; you chose high.``
+    """
+
+    def _level(spec: Any) -> str:
+        return str(getattr(spec, "reasoning_effort", "") or "").strip().lower()
+
+    def _label(spec: Any) -> str:
+        provider = str(getattr(spec, "provider", "") or "")
+        model_id = str(getattr(spec, "model_id", "") or "")
+        return f"{provider}/{model_id}" if provider and model_id else model_id
+
+    # ``in_force`` is the LEVEL; the ``effective`` SPEC stays the parameter —
+    # shadowing it with its own level was a real bug here (the first draft
+    # reassigned it before ``_label`` read the spec and composed an empty
+    # serving label, so every displacement answered "nothing to report").
+    in_force = _level(effective)
+    if chosen is None:
+        chosen_level = _level(selected)
+        # A SEED IS NOT A CHOICE. ``build_model_spec`` sets both fields to the
+        # same value and they diverge only when a level is picked (the
+        # documented contract ``_carried_effort`` reads as "a choice"). Without
+        # this guard a fallback would report the boot model's own seed as a
+        # preference the user never expressed — inventing a level and then
+        # mourning it.
+        chosen_default = (
+            str(getattr(selected, "reasoning_default_effort", "") or "").strip().lower()
+        )
+        if not chosen_level or chosen_level == chosen_default:
+            return {}
+    else:
+        # Callers that hold the session's own choice (the journal-backed
+        # ``Session.chosen_effort``) have already done that discrimination; an
+        # explicit empty value is "nothing chosen", never "read the spec".
+        chosen_level = str(chosen).strip().lower()
+        if not chosen_level:
+            return {}
+    if chosen_level == in_force:
+        return {}
+    selected_label = _label(selected)
+    serving_label = _label(effective)
+    if not serving_label:
+        return {}
+    level_in_force = in_force or "the model's own default"
+    if serving_label != selected_label:
+        note = (
+            f"Effort: {level_in_force} on {serving_label}; "
+            f"{chosen_level} resumes on {selected_label}."
+        )
+    else:
+        note = f"Effort: {level_in_force} on {serving_label}; you chose {chosen_level}."
+    return {
+        "chosen": chosen_level,
+        "effective": in_force,
+        "selected": selected_label,
+        "serving": serving_label,
+        "note": note,
+    }
 
 
 class FrontendSessionState(BaseModel):
@@ -3377,6 +3731,19 @@ class FrontendSessionState(BaseModel):
     effective_identity: dict[str, str] = Field(default_factory=dict)
     selected_model: FrontendModelSpec | None = None
     effective_model: FrontendModelSpec | None = None
+    #: The chosen reasoning level a fallback is NOT honouring, or ``{}``.
+    #:
+    #: ADDITIVE, and the sibling of ``selected_model``/``effective_model``
+    #: rather than a fourth way to read them: the two specs already carry the
+    #: two levels, and this field exists because the DIFFERENCE is the fact a
+    #: user needs and no client could state it honestly without re-deriving
+    #: which of the two is a choice (see :func:`effort_displacement`). The
+    #: sentence is composed server-side so every surface says one thing.
+    #:
+    #: Bounded by its shape: five short strings, replaced (never appended) on
+    #: every refresh — the same classification ``effective_identity`` carries.
+    #: ``{}`` is the ordinary value and also what an older backend omits.
+    effort_displacement: dict[str, str] = Field(default_factory=dict)
     #: "Can the model this session is on actually run here" — see
     #: :class:`FrontendModelAccess`. ``None`` = no claim (a host that does not
     #: publish it, or one whose store could not be read); old clients ignore
@@ -3393,6 +3760,8 @@ class FrontendSessionState(BaseModel):
     # Whole manager ledger, not a sum of visible rows: live descendants, folded
     # attempts and retained-away jobs all belong here exactly once. Optional
     # knowledge distinguishes legacy checkpoints from an explicitly empty ledger.
+    # Same ledger walk as subagent_cost; retain across parent-only refreshes.
+    subagent_basis_micro: dict[str, int] | None = None
     subagent_cost: float | None = None
     subagent_cost_knowledge: CostKnowledge | None = None
     cost_knowledge: CostKnowledge = CostKnowledge.UNKNOWN
@@ -3554,6 +3923,8 @@ class FrontendSessionState(BaseModel):
     def _serialize_frozen_jobs(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         mutable = self.model_copy(update={"jobs": list(self.jobs)})
         payload = handler(mutable)
+        if mutable.subagent_basis_micro is None:
+            payload.pop("subagent_basis_micro", None)
         # N2: the ask fields are present on the frame ONLY while the feature is
         # live in this process. Popped here rather than left to the writer,
         # because every consumer of this state — the install snapshot, every
@@ -3897,6 +4268,17 @@ class FrontendUpdate(BaseModel):
     no ``degraded`` flag to ask about. That is silent drift from a different
     cause, which is a strictly worse failure than the loud one it replaces.
 
+    THE ROSTER HAS ITS OWN DELTA FORM: ``job_deltas``. ``changes["jobs"]`` is a
+    REPLACEMENT — the whole roster — and that is what a snapshot and an attach
+    seed carry, so an old follower that has never heard of ``job_deltas`` keeps
+    working against a new runtime. A live roster tick is a MERGE instead:
+    ``job_deltas.upserted`` carries only rows that changed or appeared, and
+    ``job_deltas.removed`` the ids that left, because a 185-row roster made a
+    383,608-byte delta on every 50 ms tick while one row had moved. An old
+    reader ignores the additive key and keeps its last snapshot, which is safe:
+    the next ``frontend_sync`` is authoritative. A new reader merges (see
+    ``FrontendStateStore.apply_update``).
+
     Refusing a malformed frame is NOT the same as tearing down the socket over
     a degraded one. The degrade path now labels its own frame, so the frame this
     validator rejects is one claiming to be a complete delta while carrying no
@@ -3913,8 +4295,27 @@ class FrontendUpdate(BaseModel):
     #: The runtime shed this delta's body to keep the line under the socket limit.
     #: Sequencing is still authoritative; the FIELDS are not, so a receiver must
     #: re-snapshot rather than treat the empty body as "nothing changed".
+    #:
+    #: A degraded frame also carries ``paused`` (additive), and the relay's notice
+    #: event adds ``action: "reload"``. ``paused`` says the stream is no longer
+    #: describing canonical state; it CLEARS on the next complete frame — a
+    #: ``frontend_sync`` (which carries the whole snapshot) or the next
+    #: non-degraded ``frontend_update`` — so no new frame op is needed for the
+    #: clear. A client that ignores both keys still behaves as it always did: it
+    #: re-syncs through the gap/degrade path.
     degraded: bool = False
     degraded_reason: str = ""
+    #: The per-ROW form of ``changes["jobs"]``: ``{"upserted": [row, ...],
+    #: "removed": [job_id, ...], "order": [job_id, ...], "roster_size": N}``.
+    #: Additive and optional; a frame may carry either form but not both
+    #: (``changes["jobs"]`` wins if it does, because a full roster is always the
+    #: more complete statement). ``order`` is present only when the id-keyed
+    #: merge cannot derive the roster order; ``roster_size`` is the divisor the
+    #: rows were bounded against, so a re-bounding consumer does not have to
+    #: rebuild the snapshot to count rows. Rows are the same bounded summaries a
+    #: snapshot row is, so all the roster bounds (text share, usage fold, launch
+    #: ids, elided facts) apply to every changed row here too.
+    job_deltas: dict[str, Any] = Field(default_factory=dict)
     job_trajectory_appends: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     # Jobs whose appended events are a REPLACEMENT, not a suffix. The runtime's
     # ``AsyncJob.trajectory`` evicts oldest past ``subagent.TRAJECTORY_CAP``, so
@@ -3923,6 +4324,46 @@ class FrontendUpdate(BaseModel):
     # while duplicating rows in its click-through view.
     job_trajectory_replacements: list[str] = Field(default_factory=list)
     job_todo_updates: dict[str, list[dict[str, Any]] | None] = Field(default_factory=dict)
+
+    @field_validator("job_deltas", mode="before")
+    @classmethod
+    def _job_deltas_wire(cls, value: Any) -> Any:
+        """Reject a malformed delta before it can be mistaken for an empty one.
+
+        Same reason the degradation flag is explicit: an empty delta means
+        "nothing moved" and is safe to apply, so a malformed one that coerced to
+        ``{}`` — or whose ``upserted``/``removed`` arms were the wrong SHAPE and
+        got filtered to nothing downstream — would consume a sequence and leave
+        the follower stale forever with a gap check that stays happy. Raising
+        here refuses the frame instead, and the receiver's gap path re-syncs —
+        the recovery the transport already has.
+
+        The check is structural, not semantic: each arm is validated for its
+        WIRE shape (a list of rows; lists of job-id strings; an integer) and
+        left otherwise opaque. A row's own fields are the reducer's business,
+        and every reader already treats an unknown extra key as ignorable.
+        """
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError("job_deltas must be an object with 'upserted'/'removed'")
+        upserted = value.get("upserted")
+        if upserted is not None and not isinstance(upserted, list):
+            raise ValueError("job_deltas.upserted must be a list of roster rows")
+        for arm in ("removed", "order"):
+            ids = value.get(arm)
+            if ids is None:
+                continue
+            if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
+                raise ValueError(f"job_deltas.{arm} must be a list of job ids")
+        roster_size = value.get("roster_size")
+        # ``bool`` is an ``int`` subclass, and a delta whose divisor is ``True``
+        # is a producer bug rather than a one-row roster.
+        if roster_size is not None and (
+            not isinstance(roster_size, int) or isinstance(roster_size, bool)
+        ):
+            raise ValueError("job_deltas.roster_size must be an integer")
+        return value
 
     @model_validator(mode="before")
     @classmethod
@@ -4472,6 +4913,22 @@ def bound_ask_rows(
     return kept, dropped
 
 
+def bound_ask_snapshot_in_place(snapshot: dict[str, Any]) -> None:
+    """The wire's ask bound, for a caller that replaces the rows AFTER serialization.
+
+    The desktop's COLD override (``server/utils/desktop_sessions._cold_ask_rows``)
+    serves a facade's ask rows from the durable index, and it does so on the
+    already-serialized snapshot — i.e. after :func:`sync_wire_payload` bounded the
+    facade's OWN list. Re-binding here is what keeps one policy for both: a frame
+    must not carry rows past ``ASK_WIRE_TEXT_BUDGET_CHARS`` just because they came
+    from the index, and ``asks_truncated`` must describe the rows it ships beside.
+    A second spelling of this policy at the call site is the leak this module
+    records twice for jobs ("a bound placed only at the snapshot boundary holds
+    for the first frame and leaks on every one after it").
+    """
+    _bound_asks_in_place(snapshot)
+
+
 def _bound_asks_in_place(snapshot: dict[str, Any]) -> None:
     """Clip the queued-ask list to its wire bound on the SNAPSHOT route.
 
@@ -4878,6 +5335,47 @@ def _fold_job_usage_in_place(job: dict[str, Any]) -> None:
         except Exception:  # noqa: BLE001 — odd accounting must not refuse an attach
             continue
         container[key] = [item.model_dump(mode="json") for item in folded]
+
+
+def bound_delta_rows_in_place(rows: list[Any], *, roster_size: int) -> None:
+    """Apply the roster bounds to the rows of a PER-ROW job delta.
+
+    ONE definition, because two routes build these rows: ``mutate`` (the
+    runtime's own live tick, which then relays them over the socket) and the
+    desktop bridge's ``_frontend`` (which republishes them to a renderer).
+
+    ``roster_size`` scopes the TEXT share, and ONLY that: ``text_share`` is
+    computed exactly as the attach snapshot computes it, off the same budget and
+    floor, so a child's live preview is the one its seed would show. On a
+    one-row delta that is a STRICTER share than dividing by one, never a looser
+    one.
+
+    The launch-prompt and launch-id budgets are PER-FRAME, deliberately: they
+    are frame budgets (``JOB_LAUNCH_PROMPTS_FRAME_BUDGET_CHARS`` and the launch
+    id twin), and a changed-row delta is a much smaller frame than the seed — so
+    a row the snapshot starves may keep its launch text on a live tick. That is
+    safe rather than inconsistent: both functions keep every KEY and replace
+    only TEXT (or a derivable id) with a documented placeholder, so
+    reconciliation and identity are untouched, and the seed remains the bounded
+    floor a reconnect lands on.
+
+    Order matters and is the snapshot's: collapsed-attempt prompts first (they
+    free budget without changing any row's shape), then the per-job receipt fold,
+    then free text, launch ids, and derivable facts.
+    """
+    if not rows:
+        return
+    _bound_launch_prompts_across_jobs(rows)
+    for summary in rows:
+        _fold_job_usage_in_place(summary)
+    text_share = max(JOB_TEXT_FLOOR_CHARS, JOB_TEXT_FRAME_BUDGET_CHARS // max(1, roster_size))
+    for summary in rows:
+        _bound_job_text_in_place(summary, share=text_share)
+    for summary in rows:
+        _elide_derivable_launch_id_in_place(summary)
+    _bound_launch_ids_across_jobs(rows)
+    for summary in rows:
+        _elide_row_facts_in_place(summary)
 
 
 def largest_frame_fields(frame: dict[str, Any], *, limit: int = 3) -> str:
@@ -6079,6 +6577,7 @@ class FrontendStateStore:
         #: because it answers the other half of one question: what a roster tick
         #: must rebuild.
         self._released_rows = _ReleasedRows(self._state.epoch)
+        self._live_rows = _LiveRows(self._state.epoch)
         #: The FOLLOWER's last wire body per job, as received (before the reducer
         #: rewrites ``trajectory``/``todos`` on it), so a ``jobs`` delta can keep
         #: the canonical row of every child whose body did not move -- see
@@ -6469,6 +6968,7 @@ class FrontendStateStore:
         # here rather than in two conditioned branches.
         self._trajectory_windows.clear()
         self._released_rows.clear()
+        self._live_rows.clear()
         self._follower_windows.reset(state.epoch)
         # Same lineage argument as the window memo: a re-seated state's rows are
         # freshly parsed objects, so no body recorded against the old ones may
@@ -6570,11 +7070,66 @@ class FrontendStateStore:
         #: The windows of the rows that go through validation, aligned with it.
         rebuilt_windows: list[_FrozenSequence] = []
         bodies: dict[str, dict[str, Any]] = {}
-        if "jobs" in update.changes:
+        # A per-ROW roster delta, as opposed to a full-roster replacement in
+        # ``changes["jobs"]``. ``changes["jobs"]`` still WINS when both arrive:
+        # a replacement is the more complete statement, and that is also the
+        # form every older runtime sends, so the legacy path stays byte-for-byte
+        # what it was.
+        job_delta = bool(update.job_deltas) and "jobs" not in update.changes
+        if "jobs" in update.changes or job_delta:
             previous = {job.id: job for job in self._state.jobs}
             replacements = set(update.job_trajectory_replacements)
             rebuilt = []
-            for received in update.changes["jobs"]:
+            if job_delta:
+                upserts = [
+                    row
+                    for row in (update.job_deltas.get("upserted") or [])
+                    if isinstance(row, Mapping)
+                ]
+                removed = {str(item) for item in (update.job_deltas.get("removed") or [])}
+                by_id = {str(row.get("id", "")): row for row in upserts}
+                sources: list[Any] = []
+                for job in self._state.jobs:
+                    if job.id in removed:
+                        continue
+                    row = by_id.pop(job.id, None)
+                    if row is None and (
+                        job.id in update.job_trajectory_appends
+                        or job.id in replacements
+                        or job.id in update.job_todo_updates
+                    ):
+                        # The reducer merges these three from OUTSIDE the row
+                        # body, so a carried row would silently drop them. Give
+                        # such a row its own last sent body and let the rebuild
+                        # path apply them, rather than inventing a fourth path.
+                        row = _job_summary(job)
+                    sources.append(job if row is None else row)
+                # New ids append in delta order, unless the sender had to say
+                # otherwise: see ``mutate``'s order arm. A receiver that gets
+                # ``order`` re-sequences below instead of guessing.
+                sources.extend(by_id.values())
+                order = update.job_deltas.get("order")
+                if isinstance(order, list) and order:
+                    indexed: dict[str, Any] = {}
+                    for source in sources:
+                        key = (
+                            source.id if isinstance(source, JobState) else str(source.get("id", ""))
+                        )
+                        indexed[key] = source
+                    sources = [
+                        indexed.pop(str(job_id)) for job_id in order if str(job_id) in indexed
+                    ] + list(indexed.values())
+            else:
+                sources = list(update.changes["jobs"])
+            for received in sources:
+                if isinstance(received, JobState):
+                    # CARRIED BY IDENTITY, and that is the delta path's win: no
+                    # deep copy, no pydantic pass, no window rebuild for a row
+                    # the runtime did not mention. ``windows`` still gets this
+                    # row's window because it is aligned with the ROSTER.
+                    plan.append(received)
+                    windows.append(cast(_FrozenSequence, received.trajectory))
+                    continue
                 job_id = str(received.get("id", "")) if isinstance(received, Mapping) else ""
                 prior = previous.get(job_id)
                 kept = self._reusable_job(job_id, prior, received, update)
@@ -6638,6 +7193,10 @@ class FrontendStateStore:
                 rebuilt_windows.append(window)
                 plan.append(len(rebuilt))
                 rebuilt.append(raw)
+            # The VALIDATION input for both forms: the legacy path installs it
+            # as the whole roster, the delta path validates these rows and then
+            # overrides ``normalized["jobs"]`` with the merged plan below. It is
+            # never installed as a replacement on the delta path.
             changes["jobs"] = rebuilt
             retained = {
                 job.id if isinstance(job, JobState) else str(rebuilt[job]["id"]) for job in plan
@@ -6670,8 +7229,7 @@ class FrontendStateStore:
             if name in FrontendSessionState.model_fields
         }
         normalized.update(patch.model_extra or {})
-        if windows:
-            # Install the frozen windows the loop above produced, by IDENTITY:
+        if windows or job_delta:
             # ``model_copy`` does not re-coerce (so the retained rows survive as
             # the objects they already were) and ``_freeze_value`` returns an
             # already-frozen window unchanged, which is what keeps the memo's
@@ -6706,11 +7264,19 @@ class FrontendStateStore:
         if windows:
             for job, window in zip(self._state.jobs, windows, strict=True):
                 self._follower_windows.remember(job.id, window)
-        if "jobs" in update.changes:
+        if "jobs" in update.changes or job_delta:
             # Same place and same reason as the window memo: only a body whose
             # row canonical state now HOLDS is recorded, paired with that row.
+            # A delta records the rows it rebuilt and KEEPS the record of every
+            # row it carried, but only while that record still points at the
+            # very object canonical state holds — an original row object that a
+            # later full-roster frame replaces must not linger here and be
+            # handed back as "unchanged" for a row that moved.
+            recorded = self._follower_job_bodies
             self._follower_job_bodies = {
-                job.id: (bodies[job.id], job) for job in self._state.jobs if job.id in bodies
+                job.id: ((bodies[job.id], job) if job.id in bodies else recorded[job.id])
+                for job in self._state.jobs
+                if job.id in bodies or (job.id in recorded and recorded[job.id][1] is job)
             }
         self._todo_sequences = todo_sequences
         for subscriber in subscribers:
@@ -6835,6 +7401,7 @@ class FrontendStateStore:
         trajectory_appends: dict[str, list[dict[str, Any]]] = {}
         trajectory_replacements: list[str] = []
         todo_updates: dict[str, list[dict[str, Any]] | None] = {}
+        job_deltas: dict[str, Any] = {}
         for key, value in changes.items():
             if key == "jobs":
                 # JobState equality walks the bounded trajectories without first
@@ -6860,11 +7427,27 @@ class FrontendStateStore:
                 wire_changes[key] = candidate
         if "jobs" in wire_changes:
             previous = {job.id: job for job in self._state.jobs}
+            # The ROSTER size, not the number of changed rows: ``text_share`` is
+            # the same value the attach snapshot divides by, and keeping the
+            # divisor identical is what makes a child's live preview byte-for-byte
+            # the one its seed showed. A delta whose rows are FEWER than the
+            # roster therefore spends at most what the snapshot spends.
+            roster_size = len(wire_changes["jobs"])
             summaries = []
+            seen: set[str] = set()
             for job in wire_changes["jobs"]:
                 job_id = job.id
+                seen.add(job_id)
                 trajectory = job.trajectory
                 prior = previous.get(job_id)
+                if prior is not None and (prior is job or prior == job):
+                    # NOTHING ABOUT THIS ROW MOVED. Skipping it is the whole
+                    # point of ``job_deltas``: a 185-row roster that ships every
+                    # row on every 50 ms tick measured 383,608 bytes for a
+                    # one-row change. The expensive per-row work below (the
+                    # trajectory prefix test, the deepcopy of appended rows, the
+                    # summary serialisation) is paid for changed rows only.
+                    continue
                 if prior is None or prior.todos != job.todos:
                     todo_updates[job_id] = job_todos_wire_value(job.todos)
                 old = prior.trajectory if prior is not None else []
@@ -6895,46 +7478,45 @@ class FrontendStateStore:
                     # fetch. Thaw at this wire boundary, just as snapshots do.
                     trajectory_appends[job_id] = [_wire_value(event) for event in appended]
                 summaries.append(_job_summary(job))
-            # Same roster-shared budget the attach snapshot applies, and applied
-            # here too because a delta re-serializes job rows by its own route:
-            # a bound placed only at the snapshot boundary holds for the first
-            # frame and leaks on every one after it.
-            _bound_launch_prompts_across_jobs(summaries)
-            # ...and the per-job RECEIPT fold, which lived only in
-            # ``sync_wire_payload`` and the durable checkpoint for exactly the
-            # reason above: a delta re-serializes job rows by its own route, so
-            # the fold has to run on this route too. Measured on the operator's
-            # machine (2026-09-26, session d81d04d3): 98 child sessions' ~18.5k
-            # provider calls ride each row's ``usage.cost_components``, and with
-            # a 224-row roster the UNFOLDED delta serialized ``changes.jobs`` at
-            # 4.3 MB -- every frame over the socket line, so the runtime
-            # degraded each one and the viewer re-synced from the snapshot in a
-            # loop, holding no live state at all. Folding is lossless for cost
-            # (see ``_folded_components``): receipts merge by serving identity,
-            # so the price and the token sums survive byte for byte.
-            for summary in summaries:
-                _fold_job_usage_in_place(summary)
-            # ...and the same is true of the per-ROW text bound, which lived only
-            # in ``sync_wire_payload``: a child whose ``result_text`` (or prompt,
-            # or error) was a whole transcript page rode out unbounded on every
-            # live delta while the reconnecting snapshot clipped it. Free text is
-            # the field that can be arbitrarily large on a row that is otherwise
-            # kilobytes, so it is the one that can put a delta over the socket
-            # line on its own. ``share`` is computed exactly as the snapshot
-            # computes it, off the same budget and floor, so a viewer cannot see
-            # two different previews of one child depending on whether it
-            # arrived live or in the seed.
-            text_share = max(
-                JOB_TEXT_FLOOR_CHARS, JOB_TEXT_FRAME_BUDGET_CHARS // max(1, len(summaries))
-            )
-            for summary in summaries:
-                _bound_job_text_in_place(summary, share=text_share)
-            for summary in summaries:
-                _elide_derivable_launch_id_in_place(summary)
-            _bound_launch_ids_across_jobs(summaries)
-            for summary in summaries:
-                _elide_row_facts_in_place(summary)
-            wire_changes["jobs"] = summaries
+            # Every roster bound (launch prompts, receipt fold, free text,
+            # launch ids, derivable facts) runs on these rows only — a delta
+            # re-serializes job rows by its own route, and a bound placed only at
+            # the snapshot boundary holds for the first frame and leaks on every
+            # one after it. The measurements that made each one load-bearing are
+            # on ``bound_delta_rows_in_place`` and the functions it calls.
+            bound_delta_rows_in_place(summaries, roster_size=roster_size)
+            # PER-ROW, not a replacement. ``changes["jobs"]`` stays reserved for
+            # the snapshot/seed path, where a replacement is exactly right and an
+            # old follower only understands that form. The roster ORDER is
+            # derived by the receiver's id-keyed merge whenever it can be, and
+            # spelled out only on the ticks where it cannot (see below).
+            candidate_order = [job.id for job in wire_changes["jobs"]]
+            del wire_changes["jobs"]
+            job_deltas["upserted"] = summaries
+            # The ROSTER SIZE the rows were bounded against, as a scalar. A
+            # consumer that re-bounds the rows (the desktop bridge does, for a
+            # renderer that may be several versions behind) needs the same
+            # divisor the producer used — and deriving it by rebuilding the
+            # whole snapshot per tick is the very cost this delta exists to
+            # remove. One int, so it is not worth a second frame shape.
+            job_deltas["roster_size"] = roster_size
+            removed = [job_id for job_id in previous if job_id not in seen]
+            if removed:
+                job_deltas["removed"] = removed
+            # ORDER IS SENT ONLY WHEN THE MERGE CANNOT DERIVE IT. A delta's
+            # natural merge order is "rows I already hold, unchanged, then new
+            # ids in arrival order", which is the roster order for every tick
+            # except one that re-adds a job in a position other than the end —
+            # a returning child, a moved row. Sending the id list on every tick
+            # would cost ~7 bytes per roster row (1.3 KB at 185 rows) for a fact
+            # the receiver can usually derive; sending it only on divergence
+            # keeps the common frame at changed-rows cost and still makes the
+            # follower's order exact when it cannot.
+            expected_order = [job_id for job_id in previous if job_id in seen] + [
+                job_id for job_id in candidate_order if job_id not in previous
+            ]
+            if candidate_order != expected_order:
+                job_deltas["order"] = candidate_order
         if "peer_cycle_display" in wire_changes:
             # A live delta bypasses the attach serializer. Bound its independent
             # wire copy too; normalized store/archive proof stays complete.
@@ -6988,6 +7570,7 @@ class FrontendStateStore:
             epoch=frozen.epoch,
             sequence=frozen.sequence,
             changes=wire_changes,
+            job_deltas=job_deltas,
             job_trajectory_appends=trajectory_appends,
             job_trajectory_replacements=trajectory_replacements,
             job_todo_updates=todo_updates,
@@ -7103,6 +7686,7 @@ class FrontendStateStore:
         ledger = {
             "subagent_cost": state.subagent_cost,
             "subagent_cost_knowledge": state.subagent_cost_knowledge,
+            "subagent_basis_micro": state.subagent_basis_micro,
         }
         payload = _spend_channels_payload(
             session, ledger, state.child_costs, getattr(session, "spend", None)
@@ -7220,6 +7804,16 @@ class FrontendStateStore:
                     else state.loop
                 ),
                 **_inherited_identity_fixups(state, session_id),
+                # WHAT THIS RUNTIME RUNS IS NOT THE CHECKPOINT'S TO DECIDE
+                # either, and this pair is the field the rule above was still
+                # missing: the row names the model the previous runtime ran, and
+                # the owner's own spec is the one its requests use. The
+                # comparison slot is the row's EFFECTIVE model, not its
+                # selected one: that is the model the row's ``context_tokens``
+                # were measured on, so gating on ``selected_model`` dropped a
+                # still-serving model's reading whenever a fallback had been in
+                # force when the row was written (QA round 2, Q3).
+                **_live_model_updates(session, state.effective_model or state.selected_model),
             }
         )
 
@@ -7232,6 +7826,7 @@ class FrontendStateStore:
             # or the payload it installs could be built from a reused window.
             self._trajectory_windows.clear()
             self._released_rows.clear()
+            self._live_rows.clear()
         selected = getattr(session, "model", None)
         effective = getattr(session, "effective_model", None) or selected
         last_usage = None
@@ -7241,7 +7836,9 @@ class FrontendStateStore:
                 last_usage = restore()
             except Exception:
                 last_usage = None
-        jobs = self._jobs(session, self._retained_windows(), self._released_memo())
+        jobs = self._jobs(
+            session, self._retained_windows(), self._released_memo(), self._live_memo()
+        )
         child_costs: dict[str, float] = dict(current.child_costs)
         for job in jobs:
             _carry_child_cost(child_costs, job, default_model_label=_label(selected))
@@ -7375,6 +7972,16 @@ class FrontendStateStore:
             ),
             effective_model=(
                 effective.model_dump(mode="json") if isinstance(effective, ModelSpec) else effective
+            ),
+            # The DIFFERENCE between those two, stated once and in words.
+            # Both specs are already on the state, so this is not a second
+            # source of truth: it is the answer to "is the level the user
+            # chose the level now serving", which a client could only derive
+            # by knowing that ``reasoning_effort != reasoning_default_effort``
+            # is this codebase's test for a CHOICE (see ``_carried_effort``).
+            # That knowledge belongs here, not in three renderers.
+            effort_displacement=effort_displacement(
+                selected, effective, getattr(session, "chosen_effort", None)
             ),
             # A fallback delta must not carry the former primary's accusation.
             # The owner access publisher will replace it with the serving claim.
@@ -7750,6 +8357,7 @@ class FrontendStateStore:
             ledger = {
                 "subagent_cost": state.subagent_cost,
                 "subagent_cost_knowledge": state.subagent_cost_knowledge,
+                "subagent_basis_micro": state.subagent_basis_micro,
             }
         if child_costs is None:
             child_costs = state.child_costs
@@ -7779,6 +8387,7 @@ class FrontendStateStore:
                 else {
                     "subagent_cost": state.subagent_cost,
                     "subagent_cost_knowledge": state.subagent_cost_knowledge,
+                    "subagent_basis_micro": state.subagent_basis_micro,
                 }
             ),
             state.child_costs,
@@ -7836,7 +8445,9 @@ class FrontendStateStore:
         cadence the page that needs it already refreshes on, at a fraction of
         the cost.
         """
-        jobs = self._jobs(session, self._retained_windows(), self._released_memo())
+        jobs = self._jobs(
+            session, self._retained_windows(), self._released_memo(), self._live_memo()
+        )
         child_costs = dict(self._state.child_costs)
         selected = getattr(session, "model", None)
         for job in jobs:
@@ -7856,6 +8467,51 @@ class FrontendStateStore:
         self._trajectory_windows.adopt_from(self._state.jobs)
         self._released_rows.adopt_from(self._state.jobs)
         return update
+
+    def refresh_model_selection(self, session: Any) -> FrontendUpdate | None:
+        """Publish ONLY the fields a model or effort switch moves.
+
+        WHY NOT ``refresh_from_session``. A switch changes the selected spec,
+        the serving spec, the chosen level and the window, and nothing else.
+        The full refresh rebuilds every job row, re-reads todos, wakes,
+        monitors, asks and the spend ledger as well, which on a long manager
+        costs time proportional to its roster: measured with
+        ``scripts/bench_model_switch.py`` (a 1,000-child roster),
+        ``refresh_from_session`` took 19 ms p50 / 133 ms max per call on the
+        session loop, and a genuine switch paid it twice (once directly, once
+        through the tier-tool rebuild). This one reads a constant number of
+        session fields; the ``mutate`` still fans its diff out to every
+        subscriber, which is O(fields changed), not O(roster).
+
+        The fields and their derivations are exactly the ones
+        :meth:`refresh_from_session` writes for them, so the two cannot
+        disagree; keep them in step if one changes.
+        """
+        current = self._state
+        selected = getattr(session, "model", None)
+        effective = getattr(session, "effective_model", None) or selected
+        return self.mutate(
+            selected_model=(
+                selected.model_dump(mode="json") if isinstance(selected, ModelSpec) else selected
+            ),
+            effective_model=(
+                effective.model_dump(mode="json") if isinstance(effective, ModelSpec) else effective
+            ),
+            effort_displacement=effort_displacement(
+                selected, effective, getattr(session, "chosen_effort", None)
+            ),
+            # Same guard as the full refresh: a claim about a provider that is
+            # no longer serving is withdrawn until the owner republishes it.
+            model_access=(
+                current.model_access
+                if current.model_access is None
+                or current.model_access.provider == getattr(effective, "provider", None)
+                else None
+            ),
+            context_window=(
+                getattr(effective, "context_window", None) if effective is not None else None
+            ),
+        )
 
     def refresh_model_access(self, access: "FrontendModelAccess | None") -> FrontendUpdate | None:
         """Publish whether the session's selected model can run on this host.
@@ -8211,10 +8867,18 @@ class FrontendStateStore:
         # published a duplicate frame for every child boundary and made remote
         # followers pay a second wire update for the same activity string.
         kind = str(getattr(event, "type", ""))
+        if kind == "model_change":
+            # A model edge (a deliberate switch, a fallback, a recovery) moves
+            # the selection fields and nothing else, so it publishes them alone.
+            # The full rescan here was the roster-sized pass every ``/model``
+            # still paid whenever a viewer was subscribed (PR #3053 review
+            # round 1, R1-1): the switch had already published its selection,
+            # and the event re-ran ``refresh_from_session`` on the loop anyway.
+            selection = self.refresh_model_selection(session)
+            return selection if update is None else update
         if isinstance(event, (AgentEndEvent, MessageEndEvent)) or kind in {
             "tool_execution_end",
             "subagent_end",
-            "model_change",
         }:
             before = self._state.sequence
             self.refresh_from_session(session)
@@ -8532,11 +9196,16 @@ class FrontendStateStore:
         self._released_rows.rebind(self._state.epoch)
         return self._released_rows
 
+    def _live_memo(self) -> _LiveRows:
+        self._live_rows.rebind(self._state.epoch)
+        return self._live_rows
+
     @staticmethod
     def _jobs(
         session: Any,
         windows: _TrajectoryWindows | None = None,
         released: "_ReleasedRows | None" = None,
+        live: "_LiveRows | None" = None,
     ) -> list[JobState]:
         """One roster row per job, reusing frozen retained windows when given a memo.
 
@@ -8634,13 +9303,15 @@ class FrontendStateStore:
                         )
                     )
                     continue
-                value = JobState.from_job(
-                    job,
-                    window=(
-                        None
-                        if windows is None
-                        else windows.window(job_id, getattr(job, "trajectory", None))
-                    ),
+                window = (
+                    None
+                    if windows is None
+                    else windows.window(job_id, getattr(job, "trajectory", None))
+                )
+                value = (
+                    live.row(job, window)
+                    if live is not None
+                    else JobState.from_job(job, window=window)
                 )
                 # Marked SEEN only once the row is built: a job whose row raises is
                 # skipped from ``values``, so keeping it in ``seen`` would keep its
@@ -8653,6 +9324,8 @@ class FrontendStateStore:
                 continue
         if windows is not None:
             windows.retain(seen)
+        if live is not None:
+            live.retain(seen - released_seen)
         if released is not None:
             # Only the RELEASED ids: a row that went back to being rebuilt in
             # full (or left the roster) must not keep a memo entry pinning it.
@@ -8970,9 +9643,10 @@ def _ledger_cost(session: Any) -> dict[str, Any]:
     if not callable(accounting):
         return {}
     components = accounting()
-    cost, unknown = cost_summary(components)
+    cost, unknown, bases = cost_summary_by_basis(components)
     return {
         "subagent_cost": cost,
+        "subagent_basis_micro": bases,
         # An empty ledger has no missing bills; an unknown-only nonempty ledger
         # does. PARTIAL keeps that distinction when parent spend is known.
         "subagent_cost_knowledge": (CostKnowledge.PARTIAL if unknown else CostKnowledge.EXACT),
@@ -9008,6 +9682,7 @@ def _children_snapshot(
         snapshot = ChildrenSnapshot(
             total_micro=_usd_to_micro(cost),
             knowledge=str(knowledge),
+            by_basis=ledger.get("subagent_basis_micro"),
         )
     elif child_costs:
         snapshot = ChildrenSnapshot(
@@ -9019,6 +9694,7 @@ def _children_snapshot(
     if predates_process and snapshot.knowledge in ("exact", "unknown"):
         return ChildrenSnapshot(
             total_micro=snapshot.total_micro,
+            by_basis=snapshot.by_basis,
             knowledge="partial",
             reason="subagent spend from earlier processes is not re-readable here",
         )
@@ -9051,8 +9727,12 @@ def _usage_billing_basis(usage: Any, effective_model: Any = None) -> str | None:
     recorded basis.
     """
     try:
+        from local_operator.session.channel_spend import BASIS_VALUES
         from local_operator.session.spend import inference_billing_labels
 
+        basis = getattr(usage, "billing_basis", None)
+        if basis in BASIS_VALUES:
+            return basis
         provider = str(getattr(usage, "provider", "") or "")
         if not provider:
             provider = str(getattr(effective_model, "provider", "") or "")
@@ -9443,6 +10123,12 @@ def _aggregate_usage(usages: list[Usage]) -> Usage:
         reasoning_tokens=sum(u.reasoning_tokens for u in usages),
         context_tokens=last_context,
         cost_components=components,
+        billing_basis=(
+            components[0].billing_basis
+            if components
+            and all(c.billing_basis == components[0].billing_basis for c in components)
+            else None
+        ),
     )
 
 

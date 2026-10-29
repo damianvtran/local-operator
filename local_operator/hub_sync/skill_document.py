@@ -19,9 +19,12 @@ import unicodedata
 from collections.abc import Hashable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 import yaml
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; the runtime import is lazy below
+    from local_operator.hub_sync.skill_bundle import SkillBundleManifest
 
 MAX_FILES = 64
 MAX_FILE_BYTES = 200 * 1024
@@ -29,6 +32,19 @@ MAX_CONTENT_BYTES = 1024 * 1024
 MAX_WIRE_BYTES = 2 * 1024 * 1024
 MAX_PATH_BYTES = 240
 MAX_PATH_SEGMENTS = 5
+#: What the HUB accepts per published skill, by visibility: ``(bytes per file,
+#: bytes summed over every file)``. These are NOT the local limits above (200 KiB
+#: / 1 MiB): the local ones bound what this machine will store, these bound what
+#: a push can succeed with, so an editor must warn against these before a push is
+#: refused. Mirrored by hand from the agent-server, the source of truth:
+#: ``internal/requests/skills.go`` -- ``SkillFileMaxBytes`` /
+#: ``SkillFilesSumMaxBytes`` (public, 20 KiB each) and ``SkillFileMaxBytesOrg`` /
+#: ``SkillFilesSumMaxBytesOrg`` (organisation, 256 KiB each). Re-read that file
+#: when the hub changes its caps; nothing in core can detect the drift.
+HUB_PUBLISH_BUDGETS: Mapping[str, tuple[int, int]] = {
+    "public": (20 * 1024, 20 * 1024),
+    "org": (256 * 1024, 256 * 1024),
+}
 MAX_NAME_CHARS = 64
 MAX_DESCRIPTION_CHARS = 1024
 _NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -465,3 +481,36 @@ class SkillDocument:
             raise _invalid("skill source requires SKILL.md")
         meta = parse_frontmatter(skill.content)
         return cls(meta["name"], meta["description"], tuple(files))
+
+
+# -- form dispatch ----------------------------------------------------------------
+#
+# A hub skill row is published in exactly ONE of two forms: a text DOCUMENT
+# (this module) or a BUNDLE (``skill_bundle``). Both validate through their own
+# strict manifest; callers that only care that "this is a canonical skill
+# manifest" use these two functions so the dispatch key lives exactly once.
+# ``bundle`` is the discriminator because the two key sets are disjoint by
+# construction (a document manifest refuses ``bundle``; a bundle manifest
+# refuses ``files``).
+
+
+def skill_manifest_from_json(value: Any) -> "SkillDocument | SkillBundleManifest":
+    """Build whichever manifest FORM these canonical client fields describe."""
+
+    # Lazy import: ``skill_bundle`` imports THIS module for the frontmatter
+    # parser, so a module-level import here would be a cycle.
+    if isinstance(value, Mapping) and "bundle" in value:
+        from local_operator.hub_sync.skill_bundle import SkillBundleManifest
+
+        return SkillBundleManifest.from_json(value)
+    return SkillDocument.from_json(value)
+
+
+def skill_manifest_from_remote(value: Any) -> "SkillDocument | SkillBundleManifest":
+    """As above for a hub DETAIL payload (tolerant envelope, strict manifest)."""
+
+    if isinstance(value, Mapping) and "bundle" in value:
+        from local_operator.hub_sync.skill_bundle import SkillBundleManifest
+
+        return SkillBundleManifest.from_remote(value)
+    return SkillDocument.from_remote(value)

@@ -1,0 +1,55 @@
+# tui.schedule — sampled en/zh pairs for attestation zhca1
+# 13/61 keys; all >120 chars and all plurals included
+
+## tui.schedule.detail_next  [4 chars]
+EN: Next
+ZH: 下次
+
+## tui.schedule.empty_header  [18 chars]
+EN: No scheduled wakes
+ZH: 暂无定时唤醒
+
+## tui.schedule.ends_left  [44 chars, PLURAL]
+EN: {count, plural, one {# left} other {# left}}
+ZH: {count, plural, other {剩余#次}}
+
+## tui.schedule.ends_until_left  [15 chars]
+EN: {duration} left
+ZH: 剩余{duration}
+
+## tui.schedule.fired  [46 chars, PLURAL]
+EN: {count, plural, one {# fired} other {# fired}}
+ZH: {count, plural, other {已触发#次}}
+
+## tui.schedule.fired_detail_of  [18 chars]
+EN: {count} of {limit}
+ZH: {count}/{limit}
+
+## tui.schedule.fired_of  [68 chars, PLURAL]
+EN: {count, plural, one {# of {limit} fired} other {# of {limit} fired}}
+ZH: {count, plural, other {已触发#/{limit}次}}
+
+## tui.schedule.form_notify_hint  [37 chars]
+EN: tell me when the wake's turn finishes
+ZH: 唤醒开启的这轮对话结束时通知我
+
+## tui.schedule.form_when_label  [4 chars]
+EN: when
+ZH: 时间
+
+## tui.schedule.notice_supervisor  [83 chars]
+EN: Nothing supervises these wakes — they fire only while this conversation is running.
+ZH: 没有进程监管这些唤醒——仅在本次会话运行期间触发。
+
+## tui.schedule.status_overdue  [13 chars]
+EN: overdue {age}
+ZH: 已逾期{age}
+
+## tui.schedule.subtitle  [87 chars, PLURAL]
+EN: {count, plural, one {# wake in this conversation} other {# wakes in this conversation}}
+ZH: {count, plural, other {本次会话有#个唤醒}}
+
+## tui.schedule.title  [15 chars]
+EN: Scheduled wakes
+ZH: 定时唤醒
+

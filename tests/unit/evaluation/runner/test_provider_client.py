@@ -3073,7 +3073,7 @@ def _defective_reply(case: str, current: Observation) -> str:
         return json.dumps(
             {
                 "actions": [
-                    {"kind": "key", "observation_id": observation_id, "keys": ["ctrl", "Return"]}
+                    {"kind": "key", "observation_id": observation_id, "keys": ["control", "k"]}
                 ]
             }
         )
@@ -3112,6 +3112,36 @@ def _defective_reply(case: str, current: Observation) -> str:
     if case == "field-invalid":
         return json.dumps(
             {"actions": [{"kind": "type", "observation_id": observation_id, "text": ""}]}
+        )
+    # The 2026-10-28 session-arm refusals, sent through the REPLY arm: the same
+    # payload must earn the same repair on both channels (one hint builder).
+    if case == "chord-spells-text":
+        return json.dumps(
+            {
+                "actions": [
+                    {
+                        "kind": "key",
+                        "observation_id": observation_id,
+                        "keys": ["e", "c", "h", "o", "space", "A"],
+                    }
+                ]
+            }
+        )
+    if case == "word-as-a-key":
+        return json.dumps(
+            {"actions": [{"kind": "key", "observation_id": observation_id, "keys": ["cat"]}]}
+        )
+    if case == "plus-joined-chord":
+        return json.dumps(
+            {"actions": [{"kind": "key", "observation_id": observation_id, "keys": ["ctrl+t"]}]}
+        )
+    if case == "key-pressed-twice":
+        return json.dumps(
+            {
+                "actions": [
+                    {"kind": "key", "observation_id": observation_id, "keys": ["Page_Up"] * 2}
+                ]
+            }
         )
     if case == "marker-in-a-field":
         # The ONLY difference from ``field-invalid`` is the bytes the model wrote
@@ -3196,12 +3226,20 @@ _REJECTION_HINT_CASES = [
         "envelope-shape",
         ["action_batch requires exactly", '{"actions": [...]}'],
     ),
-    ("unknown-key", "unknown-key", ["not an accepted key name", '"enter"', "array of key names"]),
+    ("unknown-key", "unknown-key", ["not an accepted key name", '"ctrl"', "array of key names"]),
     ("keys-not-array", "keys-not-array", ['["ctrl", "alt", "t"]', "not an object"]),
     ("unknown-action-kind", "unknown-action-kind", ['"right_click"', 'Did you mean "click"?']),
     ("coordinate", "out-of-frame-coordinate", ['"x" 0..1279', '"y" 0..719']),
     ("unknown-frame-id", "unknown-frame-id", ["unknown frame_id '1'", "only accepted frame ids"]),
     ("field-invalid", "field-invalid", ['"text" in a "type" action', "non-empty string"]),
+    (
+        "chord-spells-text",
+        "field-invalid",
+        ["pressed together as one chord", '{"kind": "type", "text": "echo A"}'],
+    ),
+    ("word-as-a-key", "unknown-key", ['{"kind": "type", "text": "cat"}']),
+    ("plus-joined-chord", "unknown-key", ['send "keys": ["ctrl", "t"]']),
+    ("key-pressed-twice", "field-invalid", ['each {"kind": "key", "keys": ["pageup"]}']),
     # The envelope path's own attack: a marker phrase in the field that failed.
     # Both rows are the round-2 review's reproductions, and both are hygiene rows
     # as well -- the first used to bucket as ``second-batch``, a PRESERVED class,

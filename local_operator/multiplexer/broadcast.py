@@ -207,10 +207,13 @@ def is_resumable_session(session_id: str) -> bool:
     crash, when the user has already lost the work.
     """
     from local_operator.paths import config_dir
-    from local_operator.resume import TRANSCRIPT_NAME
+    from local_operator.session import compression
 
     try:
-        return (config_dir() / "sessions" / session_id / TRANSCRIPT_NAME).is_file()
+        # ANY physical form: a compressed session is resumable — its runtime
+        # restores the plain file before reading — so binding it is correct and
+        # withholding the binding would strand the pane for a session that exists.
+        return compression.has_transcript(config_dir() / "sessions" / session_id)
     except OSError:
         logger.debug("session transcript check failed", exc_info=True)
         return False

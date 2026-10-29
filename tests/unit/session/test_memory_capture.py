@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -14,14 +15,40 @@ import pytest
 from local_operator.harness.types import Message, TextContent
 from local_operator.memory import MemoryError, MemoryIdentity, MemoryStore, guard
 from local_operator.memory_capture import (
+    ATTRIBUTION_STARTED_KEY,
+    LOCATORS_DEFAULT_ENABLED,
     capture_detail,
     extract,
     finish,
     hint,
     persist,
+    policy,
     snapshot,
     watermark,
 )
+
+
+async def _await_capture_row(memory: MemoryStore, marker: str, *, timeout: float = 10.0) -> Any:
+    """The marker's capture row, waiting for a worker that has not landed yet.
+
+    THE FAILURE THIS REPLACES was a bare ``assert all(watermark(...))``: a False
+    with no marker, no status and no reason (run 39383034418, job 118496365150,
+    ``[context-full]`` at :1162). A capture row is written by
+    ``complete_memory_capture`` after it awaits the scan task, so the honest wait
+    is for the ROW, not for a snapshot of ``_background_tasks`` — a completion
+    task that is spawned or rescheduled after the snapshot is invisible to it.
+
+    Returns ``capture_detail`` (``status``/``n``/``reason``/``refused``/
+    ``skipped``) or ``None``. The caller asserts on the value, so a timeout is a
+    named reading rather than a lost assertion.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        detail = capture_detail(memory, marker)
+        if detail is not None or time.monotonic() >= deadline:
+            return detail
+        await asyncio.sleep(0.05)
+
 
 NOISY_LOCATORS = (
     "Ratio 9/1, see guide://credentials and skill://software-development. "
@@ -37,6 +64,411 @@ USEFUL_BODIES = {
     "https://example.invalid/task/25",
     "branch: fix/memory-capture",
 }
+
+#: The one knowledge fact the locator-grammar fixtures hang their context on.
+CONTEXT_FACT = "The evidence is recorded."
+
+
+def _decision_section(body: str) -> str:
+    """A decision heading with one fact and `body` as fenced DATA beneath it."""
+    return f"## Key Decisions\n- {CONTEXT_FACT}\n{body}\n"
+
+
+# --- Knowledge-first admission --------------------------------------------
+#
+# Measured on the operator's store (18,571 session facts): 13,175 (70.9%) were
+# locator debris — URLs, paths, hex ids and bare numbers — because the scan
+# minted every locator it found as its own fact. Only 8 lessons and 3 decisions
+# existed. These tests pin the inversion: headings/decisions are the primary
+# source, and a locator is admitted only as context of a real memory, never on
+# its own. The default is OFF and the setting can restore the context arm
+# without a code change.
+
+
+def test_a_transcript_that_is_only_locators_yields_no_facts():
+    transcript = " ".join(
+        (
+            USEFUL_LOCATORS,
+            "/src/task.py",
+            "https://example.invalid/task/25",
+            "thread: 1700000000.123456",
+            "~/.aws/credentials",
+            "guide://memory/docs/example",
+        )
+    )
+    assert extract(transcript) == []
+    # Even with the context arm enabled, adjacency is the admission rule: a
+    # locator with no real memory beside it is still refused.
+    assert extract(transcript, locators=True) == []
+
+
+def test_a_decision_heading_keeps_a_path_only_as_its_context():
+    with_path_in_the_decision = extract(
+        "## Key Decisions\n- Store evidence at ~/tools/widget/docs/proof.md\n"
+    )
+    assert [row["tags"] for row in with_path_in_the_decision] == [["decision"]]
+    assert "~/tools/widget/docs/proof.md" in with_path_in_the_decision[0]["body"]
+    # Never a second, standalone locator fact beside the decision.
+    assert len(with_path_in_the_decision) == 1
+
+
+def test_a_locator_on_its_own_line_is_context_of_the_section_fact():
+    text = (
+        "## Key Decisions\n"
+        "- Store evidence in the widget vault.\n"
+        "~/tools/widget/docs/proof.md\n"
+    )
+    assert [row["body"] for row in extract(text)] == ["Store evidence in the widget vault."]
+    contextual = extract(text, locators=True)
+    assert len(contextual) == 1 and contextual[0]["tags"] == ["decision"]
+    assert contextual[0]["body"].startswith("Store evidence in the widget vault.")
+    assert "~/tools/widget/docs/proof.md" in contextual[0]["body"]
+
+
+def test_the_locator_setting_defaults_off_and_reads_the_config(tmp_path):
+    assert LOCATORS_DEFAULT_ENABLED is False
+    assert policy(tmp_path)["locators"] is False
+    (tmp_path / "config.yml").write_text(
+        "values:\n  memory:\n    capture_locators: true\n", encoding="utf-8"
+    )
+    assert policy(tmp_path)["locators"] is True
+
+
+def test_the_compaction_prompt_template_is_never_captured():
+    """The prompt's own headings and descriptions are scaffolding, not memories.
+
+    Measured on session 439818272d84: parsing the logged compaction prompt
+    produced four template "facts" ("What the user wants...", "Decisions made
+    during...", "Anything that does not fit above...") plus a `{{#if
+    previous_summary}}` row. The template repeats the knowledge headings, so it
+    is exactly the shape the parser must not trust as conversation.
+    """
+    prompt = (
+        "You are summarizing the conversation so far so the agent can continue.\n\n"
+        "## Goal\n\nWhat the user wants, in one or two sentences, in the user's terms.\n\n"
+        "## Key Decisions\n\nDecisions made during the conversation and why each "
+        "was chosen, especially where alternatives were rejected.\n\n"
+        "## Critical Context\n\nAnything that does not fit above.\n\n"
+        "{{#if previous_summary}}\n{{/if}}\n"
+    )
+    assert extract(prompt) == []
+    messages = [Message(role="user", content=[TextContent(text=prompt)])]
+    assert snapshot(messages).strip() == ""
+
+
+def test_a_candidate_whose_fact_dump_is_refused_is_skipped_not_crashed(store):
+    """ADMISSION matches ``validate_op``'s re-dump, not only the body guard.
+
+    A real carry line containing the literal ``secret: <value>`` passed
+    ``guard(body)`` and ``validate_fact``, then raised from ``validate_op`` when
+    the fact's full JSON was re-dumped — taking the whole pass down with zero
+    rows. The candidate is skipped and counted instead.
+    """
+    body = (
+        "- The mask is **label-dependent**. `key: <value>`, `token: <value>`, "
+        "`secret: <value>` and `key=<value>` are masked; `name: <value>`, "
+        "`id: <value>` and the bare value print unchanged."
+    )
+    rows = extract("## Key Decisions\n- " + body)
+    assert list(rows) == [] and rows.skipped == 1
+    assert persist(store, "dump-shape", rows, "ok") == ("declined", "admission-skip")
+
+
+def test_a_carry_line_whose_fact_dump_is_refused_does_not_take_the_pass(store):
+    from local_operator.memory_capture import carry_rows
+
+    carry = (
+        "- Asks: The mask is **label-dependent**. `key: <value>`, `token: <value>`, "
+        "`secret: <value>` and `key=<value>` are masked; `name: <value>`, "
+        "`id: <value>` and the bare value print unchanged.\n"
+        "- Asks: keep the launch plan on the staged rollout schedule\n"
+    )
+    rows = carry_rows(carry)
+    assert [row["body"] for row in rows] == ["keep the launch plan on the staged rollout schedule"]
+
+
+def test_carry_identifiers_are_context_only_and_never_standalone():
+    from local_operator.memory_capture import carry_rows
+
+    assert carry_rows("- Identifiers: /src/only.py\n", locators=True) == []
+    assert carry_rows("- Identifiers: /src/only.py\n") == []
+    with_memory = (
+        "- Asks: keep the plan for the staged rollout in place\n- Identifiers: /src/detail.py\n"
+    )
+    assert [row["body"] for row in carry_rows(with_memory)] == [
+        "keep the plan for the staged rollout in place"
+    ]
+    rows = carry_rows(with_memory, locators=True)
+    assert len(rows) == 1 and rows[0]["tags"] == ["ask"]
+    assert rows[0]["body"].startswith("keep the plan for the staged rollout in place")
+    assert "/src/detail.py" in rows[0]["body"]
+
+
+@pytest.mark.parametrize(
+    "heading,body,tag",
+    [
+        ("Key Decisions", "采用标题解析，而不是定位符扫描。", "decision"),
+        ("Progress", "已经运行了定向测试。", "progress"),
+        ("Key Decisions", "Используем заголовки вместо сканирования локаторов.", "decision"),
+        ("Progress", "Проверка завершена успешно.", "progress"),
+        ("Key Decisions", "Deploy в staging через the new parser.", "decision"),
+        ("Progress", "好", "progress"),
+    ],
+)
+def test_knowledge_in_any_script_is_captured(heading, body, tag):
+    """Q8: non-Latin knowledge must not be a silent English-only `ok`/0."""
+    rows = extract(f"## {heading}\n- {body}")
+    assert [row["body"] for row in rows] == [body]
+    assert rows[0]["tags"] == [tag]
+
+
+def test_a_section_with_no_judgeable_prose_is_counted_not_silent_ok_zero(store):
+    """A locator-only section is DECLINED at admission, never a clean `ok`/0."""
+    rows = extract("## Progress\n- https://example.invalid/only-a-locator")
+    assert list(rows) == [] and rows.skipped == 1
+    assert persist(store, "locator-only-section", rows, "ok") == (
+        "declined",
+        "admission-skip",
+    )
+
+
+#: The residue table. The verdict is what remains after every locator token is
+#: removed, so the same table covers M1/MS2 and the round-2/3 cases; that is the
+#: point of the design (QA round 4).
+RESIDUE_DEBRIS = [
+    # M1: trailing separators, spaced and unspaced
+    "C:\\Program Files\\app\\",
+    "C:\\Users\\First Last\\",
+    "C:\\repo\\My App\\",
+    "\\\\server\\Long Folder\\",
+    "C:/Program Files/app/",
+    # spaced final segment with no separator of its own
+    "C:\\Program Files",
+    "C:\\repo\\My App",
+    "\\\\server\\Long Folder",
+    # round 2/3 path-only shapes
+    "C:\\Program Files\\Common Files\\proof.txt",
+    "C:\\Users\\First Last\\file.txt",
+    "C:\\Users\\damian\\file.txt",
+    "\\\\server\\share\\file.txt",
+    "C:\\Program Files (x86)\\app",
+    "C:\\Program Files (x86)\\Common Files\\proof.txt",
+    "C:\\Program Files (x86)\\Steam\\steamapps\\common",
+    "C:\\Microsoft VS Code\\app",
+    "C:\\My Documents\\app",
+    "C:\\My Documents Old\\app",
+    "C:\\My Documents Old Files\\app",
+    "/srv/app",
+    "/Users/First Last/app",
+    "www.example.com",
+    "www.example.com/path",
+    "C:\\repo\\app example.com/docs",
+    "mailto:ops@example.com",
+    "MAILTO:ops@example.com",
+    "https://example.invalid/a",
+    # other locator-only tokens
+    "#2652",
+    "44fa24a65c",
+    "branch fix/memory-capture-knowledge-first",
+    "branch: fix/memory-capture,",
+    "(branch fix/memory-capture)",
+    "thread: fix/x;",
+    "44fa24a65c.",
+    "secret QA_SAMPLE_KEY",
+    "tests/a.py tests/b.py",
+    "A",
+]
+RESIDUE_KNOWLEDGE = [
+    # M2: prose after a path, including a later separator that used to absorb it
+    "C:\\repo\\app is the build root at C:\\repo\\out",
+    "/srv/app needs read/write",
+    "/opt/app handles input/output",
+    # leading path plus prose
+    "C:\\repo\\app is the build root",
+    "C:\\Users\\First Last\\repo\\app is where we deploy from",
+    "\\\\server\\share is the evidence root",
+    "C:\\Program Files\\app is installed for all users",
+    "\\\\server\\share\\dir is where evidence lives",
+    "/srv/app is the build root",
+    "/Users/First Last/repo/app is where we deploy from",
+    "C:\\repo\\My App is the build root",
+    # trailing and middle paths
+    "The build root is C:\\repo\\app",
+    "Store evidence at C:\\Program Files\\app for later",
+    "C:\\repo\\app done",
+    "/srv/app read-only",
+    "C:\\repo\\app OK",
+    "C:\\repo\\app Minerva",
+    "TCP/IP",
+    "and/or",
+    "read/write",
+    "rotate the dashboard key each quarter",
+    "tests/a.py moved to tests/b.py",
+    "scripts/a.mjs moved to scripts/b.mjs",
+    "src/foo.py now imports src/bar.py",
+    "lib/foo.py calls lib/bar.py",
+    "C:\\repo\\app docs at example.com/docs",
+    "C:\\repo\\app see www.example.com/path for details",
+    # prose-first controls
+    "We deploy at example.com/docs every Friday.",
+    "We deploy from C:\\Program Files\\app every Friday.",
+    "Use the docs at https://example.invalid/runbook when shipping.",
+]
+
+
+@pytest.mark.parametrize("body", RESIDUE_DEBRIS)
+def test_residue_is_empty_for_a_locator_only_body(body):
+    """B1/round 4: no prose left after locator removal means debris, not a fact."""
+    rows = extract("## Progress\n- " + body)
+    assert list(rows) == [] and rows.skipped == 1
+
+
+@pytest.mark.parametrize("body", RESIDUE_KNOWLEDGE)
+def test_residue_is_prose_for_a_body_that_contains_a_locator(body):
+    """B1/round 4: prose on either side of a path keeps the fact."""
+    rows = extract("## Key Decisions\n- " + body)
+    assert [row["body"] for row in rows] == [body]
+    assert rows[0]["tags"] == ["decision"]
+    assert rows.skipped == 0
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        r"C:\Users\damian\file.txt",
+        r"C:\Program Files\Common Files\proof.txt",
+        r"C:\Users\First Last\file.txt",
+        r"\\server\share\file.txt",
+        "www.example.com",
+        "www.example.com/path",
+        "mailto:ops@example.com",
+        "MAILTO:ops@example.com",
+        "/srv/app",
+        "/Users/First Last/app",
+    ],
+)
+def test_adjacent_locator_shapes_are_context_not_facts(body):
+    """MINOR 1: a candidate that IS a locator shape is context, not a fact."""
+    rows = extract("## Progress\n- " + body)
+    assert list(rows) == [] and rows.skipped == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        r"C:\repo\app is the build root",
+        r"C:\Users\First Last\repo\app is where we deploy from",
+        r"\\server\share is the evidence root",
+        r"C:\Program Files\app is installed for all users",
+        r"\\server\share\dir is where evidence lives",
+        "/srv/app is the build root",
+        "/Users/First Last/repo/app is where we deploy from",
+    ],
+)
+def test_a_leading_locator_plus_prose_is_knowledge(body):
+    """B1: a path that starts the body must not swallow the prose after it."""
+    rows = extract("## Key Decisions\n- " + body)
+    assert [row["body"] for row in rows] == [body]
+    assert rows[0]["tags"] == ["decision"]
+    assert rows.skipped == 0
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "We deploy at example.com/docs every Friday.",
+        r"We deploy from C:\Program Files\app every Friday.",
+        "Use the docs at https://example.invalid/runbook when shipping.",
+    ],
+)
+def test_a_decision_that_mentions_a_locator_is_still_knowledge(body):
+    """The control for MINOR 1: the fix must not delete knowledge that names a path."""
+    rows = extract("## Key Decisions\n- " + body)
+    assert [row["body"] for row in rows] == [body]
+    assert rows[0]["tags"] == ["decision"]
+    assert rows.skipped == 0
+
+
+def test_all_six_prompt_sections_are_recognised():
+    """m2: the capture scheme must agree with what the prompt mandates."""
+    summary = (
+        "# Goal\n- Ship the memory fix.\n"
+        "# Constraints\n- Do not touch the write path.\n"
+        "# Progress\n- Wrote the parser and ran the suite.\n"
+        "# Key Decisions\n- Keep locators as context only.\n"
+        "# Next Steps\n- Open the PR and run QA.\n"
+        "# Critical Context\n- The live store is 54 MB.\n"
+    )
+    rows = extract("", summary)
+    assert len(rows) == 6
+    assert {row["tags"][0] for row in rows} == {
+        "goal",
+        "constraint",
+        "progress",
+        "decision",
+        "next-step",
+        "context",
+    }
+    assert "Do not touch the write path." in {row["body"] for row in rows}
+    assert "Open the PR and run QA." in {row["body"] for row in rows}
+
+
+def test_the_prompt_exclusion_and_heading_vocabulary_are_pinned_to_the_template():
+    """m3/MINOR 2: the pin is EQUALITY, so a new prompt section cannot pass unseen."""
+    from local_operator.compaction.api import _load_instruction_template
+    from local_operator.memory_capture import _HEADING_TAGS, _PROMPT_SIGNATURE
+
+    template = _load_instruction_template()
+    assert template.splitlines()[0].startswith(_PROMPT_SIGNATURE)
+    mandated = {
+        line[3:].strip().lower() for line in template.splitlines() if line.startswith("## ")
+    }
+    # The two headings that are prompt machinery, not summary sections the model
+    # is asked to fill. Kept explicit so a new scaffolding heading is a red test.
+    scaffolding = {
+        "previous summary (fold into the sections above, then drop this section)",
+        "conversation to summarize",
+    }
+    assert mandated - scaffolding == set(_HEADING_TAGS), sorted(
+        (mandated - scaffolding) ^ set(_HEADING_TAGS)
+    )
+    assert mandated - set(_HEADING_TAGS) == scaffolding, sorted(
+        (mandated - set(_HEADING_TAGS)) - scaffolding
+    )
+
+
+def test_carry_rows_never_overshoots_the_context_body_cap():
+    """n1: the candidate and its separator must count toward the 600-char cap."""
+    from local_operator.memory_capture import carry_rows
+
+    segment = "/src/" + "/".join(["dir"] * 65) + "/proof"
+    carry = (
+        "- Asks: "
+        # Prose, not one 280-char token: the carry arm's debris floor counts words.
+        + ("keep the rollout plan " * 13)[:280]
+        + "\n"
+        + "".join(f"- Identifiers: {segment}{n}.md\n" for n in range(3))
+    )
+    rows = carry_rows(carry, locators=True)
+    assert len(rows) == 1
+    # The first identifier fits; the second would overshoot once its own
+    # characters and separator are counted. Before the fix the second was
+    # admitted and the body reached 855.
+    assert 280 < len(rows[0]["body"]) <= 600
+
+
+def test_line_heavy_input_stops_inside_the_heading_walk(monkeypatch):
+    """n2: the first budget check must happen inside the lazy line walk."""
+    import local_operator.memory_capture as capture
+
+    ticks = count(0)
+    monkeypatch.setattr(
+        capture,
+        "time",
+        types.SimpleNamespace(monotonic=lambda: next(ticks) * 0.5, time=time.time),
+    )
+    with pytest.raises(TimeoutError):
+        extract("plain prose\n" * 200_000)
 
 
 @pytest.mark.parametrize(
@@ -71,33 +503,46 @@ def test_capture_ignores_prose_ratios_and_internal_uri_fragments(text):
         ("secret GITHUB_TOKEN #LOH-25 abc123def", {"secret GITHUB_TOKEN", "#LOH-25", "abc123def"}),
     ],
 )
-def test_capture_keeps_complete_useful_locators_without_checking_existence(text, expected):
-    rows = extract(text)
-    assert {row["body"] for row in rows} == expected
-    assert all(set(row) == {"title", "body", "tags"} and row["tags"] == ["locator"] for row in rows)
+def test_capture_keeps_complete_useful_locators_as_context(text, expected):
+    """The grammar is unchanged; only the ADMISSION destination is.
+
+    A locator used to be a fact of its own. It now rides as `— context: …` on
+    the section's decision, and the fenced block keeps the fixture's prose from
+    becoming a separate paragraph fact. A locator-only section still yields
+    zero facts, which the next test pins.
+    """
+    rows = extract(_decision_section(f"```\n{text}\n```"), locators=True)
+    assert len(rows) == 1 and rows[0]["tags"] == ["decision"]
+    assert rows[0]["body"].startswith(CONTEXT_FACT)
+    for locator in expected:
+        assert locator in rows[0]["body"], (locator, rows[0]["body"])
+    assert all(row["body"] != locator for row in rows for locator in expected)
 
 
 @pytest.mark.parametrize("kind,part", [("branch", "feature/"), ("thread", "topic/")])
 def test_oversized_reference_never_persists_or_recalls_a_prefix(store, kind, part):
     text = f"{kind}: " + part * 24 + "trailing"
-    rows = extract(text)
+    rows = extract(_decision_section(f"```\n{text}\n```"), locators=True)
     persist(store, "oversized-reference", rows, "ok")
-    # Exercise retention before asserting: the old parser really wrote and
+    # Exercise retention before asserting: an earlier parser really wrote and
     # recalled an invented prefix, not just a different intermediate list.
     assert store.search("trailing " + part.rstrip("/")) == []
-    assert watermark(store, "oversized-reference") == ("ok", 0)
-    assert store.inventory("session")["items"] == []
-    assert rows == []
+    assert watermark(store, "oversized-reference") == ("ok", 1)
+    assert [row["body"] for row in rows] == [CONTEXT_FACT]
 
 
 def test_reference_at_the_identifier_limit_stays_complete():
     text = "branch: " + "r" * 128
-    assert [row["body"] for row in extract(text)] == [text]
+    rows = extract(_decision_section(f"```\n{text}\n```"), locators=True)
+    assert [row["body"] for row in rows] == [f"{CONTEXT_FACT} — context: {text}"]
 
 
 def test_capture_noise_does_not_displace_useful_locators():
     noise = " ".join(f"guide://example/item-{n} ratio 9/{n}" for n in range(100))
-    assert {row["body"] for row in extract(USEFUL_LOCATORS + " " + noise)} == USEFUL_BODIES
+    rows = extract(_decision_section(f"```\n{USEFUL_LOCATORS} {noise}\n```"), locators=True)
+    assert len(rows) == 1
+    for body in USEFUL_BODIES:
+        assert body in rows[0]["body"], (body, rows[0]["body"])
 
 
 def test_capture_never_turns_a_long_token_or_scan_cut_into_a_path():
@@ -106,9 +551,13 @@ def test_capture_never_turns_a_long_token_or_scan_cut_into_a_path():
     # Put a slash at a forced window boundary, then genuine source after the
     # oversized token. The continuation is data, not a fresh absolute path.
     long_uri = "guide://" + "x" * (SCAN_WINDOW - len("guide://")) + "/invented/proof.md"
-    assert {row["body"] for row in extract(long_uri + " docs/real.md")} == {"docs/real.md"}
-    assert extract("https://example.invalid/" + "x" * 500) == []
-    assert extract("/repo/" + "x" * 500) == []
+    rows = extract(_decision_section(f"```\n{long_uri} docs/real.md\n```"), locators=True)
+    assert len(rows) == 1
+    assert "docs/real.md" in rows[0]["body"]
+    assert "invented" not in rows[0]["body"]
+    for oversized in ("https://example.invalid/" + "x" * 500, "/repo/" + "x" * 500):
+        rows = extract(_decision_section(f"```\n{oversized}\n```"), locators=True)
+        assert [row["body"] for row in rows] == [CONTEXT_FACT]
 
 
 # Value-free stage witness for the restart-recovery diagnostic below. It only
@@ -229,14 +678,18 @@ def store(tmp_path):
 
 def test_extractor_returns_data_only_and_refuses_sensitive_locators(tmp_path):
     rows = extract(
-        "See https://example.invalid/thread/123 and /src/task.py and ~/.ssh/id_rsa; "
-        "secret PASSPORT_NO"
+        _decision_section(
+            "```\nSee https://example.invalid/thread/123 and /src/task.py and "
+            "~/.ssh/id_rsa; secret PASSPORT_NO\n```"
+        ),
+        locators=True,
     )
-    assert any("https://example.invalid" in row["body"] for row in rows)
-    assert any("PASSPORT_NO" in row["body"] for row in rows)
-    assert not any("id_rsa" in row["body"] for row in rows)
+    assert len(rows) == 1
+    assert "https://example.invalid/thread/123" in rows[0]["body"]
+    assert "PASSPORT_NO" in rows[0]["body"]
+    assert "id_rsa" not in rows[0]["body"]
     assert list(tmp_path.iterdir()) == []
-    assert len(extract(" ".join("/src/item%d.py" % n for n in range(100)))) <= 40
+    assert extract(" ".join("/src/item%d.py" % n for n in range(100))) == []
 
 
 def test_bounded_snapshot_ignores_images():
@@ -267,7 +720,7 @@ def test_explicit_store_associations_keep_whole_uris_and_relative_paths(store):
 
 
 def test_capture_idempotence_watermark_and_semantic_reuse(store):
-    rows = extract("https://example.invalid/file") + extract(
+    rows = extract(
         "",
         "# Goal\n- Complete release\n# Key Decisions\n- Keep stable prefix\n"
         "# Other\n- not semantic",
@@ -276,11 +729,27 @@ def test_capture_idempotence_watermark_and_semantic_reuse(store):
     count = store.inventory()["ops"]
     persist(store, "marker-1", rows, "ok")
     assert store.inventory()["ops"] == count
-    assert watermark(store, "marker-1") == ("ok", 3)
+    assert watermark(store, "marker-1") == ("ok", 2)
     assert watermark(store, "uncommitted") is None
     assert hint(store, "uncommitted") == ""
-    assert "3 candidates" in hint(store, "marker-1")
+    assert "2 candidates" in hint(store, "marker-1")
     assert store.search("stable prefix")[0]["status"] == "candidate"
+    assert {row["tags"][0] for row in rows} == {"goal", "decision"}
+
+
+@pytest.mark.asyncio
+async def test_curated_summary_facts_survive_a_full_transcript_scan(store):
+    """SUMMARY FIRST: the 52-row cap truncates from the end, not the knowledge."""
+
+    async def scan():
+        return _scan_rows(40)
+
+    summary = "## Key Decisions\n" + "\n".join(f"- Keep curated fact number {n}" for n in range(40))
+    terminal = await finish(store, "summary-first", asyncio.create_task(scan()), summary)
+    assert terminal == "ok"
+    assert watermark(store, "summary-first") == ("ok", 52)
+    assert store.search("curated fact number 39"), "the scan must not truncate the summary"
+    assert store.search("curated fact number 0")
 
 
 @pytest.mark.asyncio
@@ -289,7 +758,7 @@ async def test_capture_late_completion_never_blocks_commit_or_wakes(store):
 
     async def capture():
         await gate.wait()
-        return extract("/src/late.py")
+        return extract("## Progress\n- Wrote /src/late.py and verified it")
 
     task = asyncio.create_task(capture())
     writer = asyncio.create_task(finish(store, "committed-marker", task, ""))
@@ -314,6 +783,73 @@ async def test_failure_is_terminal_not_false_capture_success(store):
 
 
 @pytest.mark.asyncio
+async def test_failure_logs_exception_class_and_never_its_message(store, caplog):
+    # A failed capture used to land as status='failed'/n=0 with the coarse
+    # ``store-error`` reason and no way to tell a code bug from a store fault.
+    # The class name is the diagnostic; the message is untrusted conversation
+    # content and must never reach the log.
+    secret = "untrusted content: /Users/example/private.md"
+
+    async def broken():
+        raise TypeError(secret)
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.memory_capture"):
+        terminal = await finish(store, "raise-marker", asyncio.create_task(broken()), "")
+
+    assert terminal == "failed"
+    assert capture_detail(store, "raise-marker") == ("failed", 0, "store-error", 0, 0)
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("TypeError" in message and "raise-marker" in message for message in messages)
+    assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_timeout_is_attributed_as_timeout_not_a_store_error(store, caplog, monkeypatch):
+    import local_operator.memory_capture as capture
+
+    # Shrink the module's real bound instead of sleeping the shipped 2.5s: the
+    # path under test is ``wait_for`` expiring, and the bound is not the subject.
+    monkeypatch.setattr(capture, "SCAN_BUDGET", 0.05)
+    monkeypatch.setattr(capture, "_SCAN_GRACE", 0.0)
+    inner = asyncio.create_task(asyncio.sleep(5))
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.memory_capture"):
+        terminal = await finish(store, "timeout-marker", inner, "")
+
+    inner.cancel()
+    assert terminal == "failed"
+    assert capture_detail(store, "timeout-marker") == ("failed", 0, "timeout", 0, 0)
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("TimeoutError" in message and "timeout-marker" in message for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_cancellation_propagates_and_is_never_recorded_as_a_failure(store, caplog):
+    # A cancelled pass (shutdown, a superseded compaction) is not a defect and
+    # must never be counted beside real failures in ``captures``.
+    inner = asyncio.create_task(asyncio.sleep(30))
+    writer = asyncio.create_task(finish(store, "cancelled-marker", inner, ""))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert not writer.done()
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.memory_capture"):
+        writer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await writer
+
+    inner.cancel()
+    try:
+        await inner
+    except asyncio.CancelledError:
+        pass
+    assert capture_detail(store, "cancelled-marker") is None
+    assert [
+        record for record in caplog.records if record.name == "local_operator.memory_capture"
+    ] == []
+
+
+@pytest.mark.asyncio
 async def test_real_committed_compaction_finishes_capture_while_idle_without_waking(
     tmp_path, monkeypatch
 ):
@@ -334,10 +870,10 @@ async def test_real_committed_compaction_finishes_capture_while_idle_without_wak
     entered = threading.Event()
     original = capture.extract_messages
 
-    def gated(messages):
+    def gated(messages, **kwargs):
         entered.set()
         assert gate.wait(5), "capture setup gate was never released"
-        return original(messages)
+        return original(messages, **kwargs)
 
     monkeypatch.setattr(capture, "extract_messages", gated)
     requests = []
@@ -346,7 +882,7 @@ async def test_real_committed_compaction_finishes_capture_while_idle_without_wak
         requests.append(request)
 
         async def events():
-            yield StreamTextDelta(delta="Recorded reply")
+            yield StreamTextDelta(delta="## Progress\n- Captured docs/idle.md")
             yield StreamEndEvent(stop_reason="stop")
 
         return events()
@@ -415,7 +951,7 @@ async def test_restart_recovers_committed_marker_without_waking(tmp_path, monkey
     )
     transcript = Transcript(root / "sessions" / "restart-session")
     await transcript.append_message(
-        Message.user("Old source docs/recovered.md " + NOISY_LOCATORS + " " + USEFUL_LOCATORS)
+        Message.user("## Key Decisions\n- Keep evidence at ~/tools/widget/docs/proof.md")
     )
     kept = await transcript.append_message(Message.user("Kept turn"))
     marker = await transcript.append_compaction("# Goal\n- Recover committed goal", kept.id, 100)
@@ -446,12 +982,10 @@ async def test_restart_recovers_committed_marker_without_waking(tmp_path, monkey
     assert (state := watermark(memory, marker.id)) is not None, witness.report()
     assert state[0] == "ok", witness.report()
     assert memory.search("recovered")
-    assert state == ("ok", 6)  # recovered path + four locators + reused semantic goal
-    assert {item["body"] for item in memory.search("proof")} == {"~/tools/widget/docs/proof.md"}
+    assert state == ("ok", 2)  # recovered decision + reused semantic goal
+    assert any("~/tools/widget/docs/proof.md" in item["body"] for item in memory.search("proof"))
     assert not memory.search("software-development")
-    # Recall is OR-based: the valid branch may match "branch", but the prose
-    # fragment must not have become its own persisted fact.
-    assert {item["body"] for item in memory.search("branch that")} == {"branch: fix/memory-capture"}
+    assert not memory.search("branch that")
     assert not memory.search("/1")
     assert requests == []
     assert "memory_hint" in await capture.session_tail(reopened)
@@ -659,8 +1193,10 @@ async def test_three_chained_real_compactions_capture_store_restart_retrieve(
 ):
     """store -> compact x3 -> restart -> retrieve over a REAL Session, both strategies.
 
-    snapcompact returns no model text, so only locators may be captured there; the
-    explicit store must survive either way, and no chained pass may wake the owner.
+    context-full's summary is model-written; snapcompact keeps no model summary, so
+    its knowledge comes from the carry and from heading sections in the transcript
+    itself. The explicit store must survive either way, and no chained pass may wake
+    the owner.
     """
     from local_operator.compaction.api import CompactionSettings
     from local_operator.harness.types import ModelSpec, StreamEndEvent, StreamTextDelta
@@ -701,10 +1237,13 @@ async def test_three_chained_real_compactions_capture_store_restart_retrieve(
     memory = MemoryStore(root, MemoryIdentity(f"chain-{strategy}", "", "main"), directory)
     explicit = memory.put("session", {"title": "Release decision", "body": "Decision: ship Friday"})
     markers = []
+    readings: list[tuple[str, Any]] = []
     try:
         for n in range(3):
             for m in range(3):
-                await session.prompt(f"Round {n}.{m} see docs/chain{n}.md " + "detail " * 35)
+                await session.prompt(
+                    f"Round {n}.{m}\n## Progress\n- Reviewed docs/chain{n}.md " + "detail " * 35
+                )
             outcome = await session.compact_now()
             assert outcome.ran, (strategy, n)
             entry = transcript.latest_entry("compaction")
@@ -716,15 +1255,35 @@ async def test_three_chained_real_compactions_capture_store_restart_retrieve(
             assert archived == (strategy == "snapcompact"), entry.payload.get("summary", "")[:80]
             for task in list(session._background_tasks):
                 await asyncio.wait_for(task, 5)
+            # WAIT FOR THE ROW, and carry its fields into the failure. A chained
+            # pass's completion can be scheduled around the snapshot above; the
+            # postcondition is the persisted row, which is what the rest of this
+            # cell (and a resumed session) actually reads.
+            readings.append((entry.id, await _await_capture_row(memory, entry.id)))
         assert len(set(markers)) == 3
-        assert all(watermark(memory, marker) for marker in markers)
+        missing = [marker for marker, detail in readings if detail is None]
+        assert not missing, (
+            "a chained compaction left no capture row: "
+            + "; ".join(
+                f"{marker}: status={detail.status if detail else None} "
+                f"n={detail.n if detail else None} reason={detail.reason if detail else None} "
+                f"refused={detail.refused if detail else None} "
+                f"skipped={detail.skipped if detail else None}"
+                for marker, detail in readings
+            )
+            + f"; pending_background={len(session._background_tasks)} "
+            f"last_terminal={getattr(session, '_memory_terminal', None)!r}"
+        )
         before = len(requests)
     finally:
         await session.dispose()
     # Restart: a fresh store handle over the same disk state still retrieves.
     reopened = MemoryStore(root, MemoryIdentity(f"chain-{strategy}", "", "main"), directory)
     assert reopened.show("session", explicit["id"])["fact"]["body"] == "Decision: ship Friday"
-    assert reopened.search("chain0")
+    # The CURRENT progress line is what survives: `Progress` is a state tag, one head
+    # per session revised in place (memory round B2 rule 3), so pass 0's
+    # `chain0` line is superseded by pass 2's rather than kept beside it.
+    assert reopened.search("chain2")
     assert before >= 9
     print("CHAIN", strategy, "markers", len(markers), "captured", len(reopened.search("docs")))
 
@@ -838,9 +1397,10 @@ def test_every_candidate_extract_returns_passes_the_guard_the_write_applies(text
 
     This is the invariant that was violated, asserted with the exact call
     ``validate_fact`` makes on title and body, over ordinary locators AND the long
-    hex/base64 shapes only the opaque rule refuses.
+    hex/base64 shapes only the opaque rule refuses. The corpus rides in a
+    knowledge bullet because a bare locator is no longer a candidate at all.
     """
-    rows = extract(text)
+    rows = extract("## Key Decisions\n- Record " + text)
     for row in rows:
         guard(row["body"], opaque=True)
         guard(row["title"], opaque=True)
@@ -861,10 +1421,10 @@ def test_every_candidate_extract_returns_passes_the_guard_the_write_applies(text
 )
 def test_a_candidate_the_write_would_refuse_is_skipped_not_admitted(text, offending):
     """A refused shape is skipped at admission; the pass keeps the rest of its rows."""
-    rows = extract(text + " and ~/docs/proof.md")
+    rows = extract("## Key Decisions\n" + f"- Review {text}\n" + "- Keep ~/docs/proof.md")
     bodies = {row["body"] for row in rows}
     assert not any(offending in body for body in bodies)
-    assert "~/docs/proof.md" in bodies, "the benign neighbour in the same text still lands"
+    assert "Keep ~/docs/proof.md" in bodies, "the benign neighbour in the same section still lands"
 
 
 def _capture_row(store, marker_id):
@@ -906,8 +1466,9 @@ def _refused_row():
 
 
 def test_a_clean_pass_records_no_reason(store):
-    persist(store, "clean-marker", extract(USEFUL_LOCATORS), "ok")
-    assert watermark(store, "clean-marker") == ("ok", len(USEFUL_BODIES))
+    rows = extract("", "# Goal\n- Ship release\n# Key Decisions\n- Keep prefix")
+    persist(store, "clean-marker", rows, "ok")
+    assert watermark(store, "clean-marker") == ("ok", 2)
     assert _capture_row(store, "clean-marker") is None
     assert _detail(store, "clean-marker").reason is None
 
@@ -917,7 +1478,7 @@ def test_the_write_skips_a_row_it_refuses_and_counts_it(store):
     persist(store, "belt-marker", _scan_rows(39) + [_refused_row()], "ok")
     assert watermark(store, "belt-marker") == ("ok", 39)
     assert _capture_row(store, "belt-marker") == {
-        "reason": "refused-row",
+        "reason": "write-refused",
         "refused": 1,
         "skipped": 0,
     }
@@ -933,15 +1494,15 @@ async def test_one_unwritable_row_cannot_zero_the_whole_capture(store):
 
     terminal = await finish(store, "one-bad-row", asyncio.create_task(scan()), "")
     assert (terminal, watermark(store, "one-bad-row")) == ("ok", ("ok", 39))
-    assert _reason(store, "one-bad-row") == "refused-row"
+    assert _reason(store, "one-bad-row") == "write-refused"
 
 
 def _fake_scan_clock(monkeypatch, step):
     """Advance the scan clock one ``step`` per reading; keep ``time.time`` real.
 
-    ``extract`` reads ``time.monotonic`` once before the loop and once per window, so a
-    per-reading fake clock provokes a budget stop without a multi-second test.
-    ``persist`` stamps rows with ``time.time``, which stays the real function.
+    ``extract`` reads ``time.monotonic`` before the scan and on every 64th section
+    line, so a per-reading fake clock provokes a budget stop without a multi-second
+    test. ``persist`` stamps rows with ``time.time``, which stays the real function.
     """
     import local_operator.memory_capture as capture
 
@@ -951,11 +1512,13 @@ def _fake_scan_clock(monkeypatch, step):
         "time",
         types.SimpleNamespace(monotonic=lambda: next(ticks) * step, time=time.time),
     )
-    return " ".join(f"/src/item{n}.py" for n in range(3000))
+    return "## Key Decisions\n" + "\n".join(
+        f"- chose item{n} at /src/item{n}.py" for n in range(3000)
+    )
 
 
 def test_a_scan_that_runs_out_of_budget_hands_back_the_rows_it_found(monkeypatch):
-    text = _fake_scan_clock(monkeypatch, 1.1)
+    text = _fake_scan_clock(monkeypatch, 0.5)
     with pytest.raises(TimeoutError) as stopped:
         extract(text)
     assert getattr(
@@ -966,7 +1529,7 @@ def test_a_scan_that_runs_out_of_budget_hands_back_the_rows_it_found(monkeypatch
 @pytest.mark.asyncio
 async def test_budget_exhaustion_lands_a_partial_result_instead_of_failure(store, monkeypatch):
     """PARTIAL BUDGET: the rows found before the stop land, attributed ``timeout``."""
-    text = _fake_scan_clock(monkeypatch, 1.1)
+    text = _fake_scan_clock(monkeypatch, 0.5)
     task = asyncio.create_task(asyncio.to_thread(extract, text))
     terminal = await finish(store, "budget-marker", task, "")
     assert (terminal, watermark(store, "budget-marker")) == ("ok", ("ok", 40))
@@ -977,7 +1540,7 @@ async def test_budget_exhaustion_lands_a_partial_result_instead_of_failure(store
 @pytest.mark.asyncio
 async def test_a_budget_stop_with_no_rows_is_a_failure(store, monkeypatch):
     """TOTAL LOSS: a budget stop that found nothing must not read as a completed pass."""
-    _fake_scan_clock(monkeypatch, 1.1)
+    _fake_scan_clock(monkeypatch, 0.5)
     # No locator in any window: the scan stops having found nothing at all.
     task = asyncio.create_task(asyncio.to_thread(extract, "plain prose " * 1200))
     terminal = await finish(store, "budget-empty", task, "")
@@ -990,14 +1553,14 @@ async def test_a_budget_stop_with_no_rows_is_a_failure(store, monkeypatch):
 @pytest.mark.asyncio
 async def test_carry_rows_survive_a_budget_stop(store, monkeypatch):
     """MINOR 1: the marquee retention is not the arm that ran out of budget."""
-    _fake_scan_clock(monkeypatch, 1.1)
+    _fake_scan_clock(monkeypatch, 0.5)
     task = asyncio.create_task(asyncio.to_thread(extract, "plain prose " * 1200))
     terminal = await finish(
         store,
         "budget-carry",
         task,
         "",
-        carry="- Asks: keep the launch plan",
+        carry="- Asks: keep the launch plan on the staged rollout schedule",
     )
     assert (terminal, watermark(store, "budget-carry")) == ("ok", ("ok", 1))
     assert _detail(store, "budget-carry").reason == "timeout"
@@ -1056,7 +1619,7 @@ def test_a_previous_release_store_round_trips_without_a_schema_change(tmp_path):
     with store.connection() as db:
         assert [row[1] for row in db.execute("PRAGMA table_info(captures)")] == CAPTURES_SHAPE
     assert watermark(store, "old-marker") == ("failed", 0)
-    persist(store, "new-marker", extract("/src/after-rollout.py"), "ok")
+    persist(store, "new-marker", extract("## Progress\n- Landed /src/after-rollout.py"), "ok")
     assert watermark(store, "new-marker") == ("ok", 1)
     assert _detail(store, "new-marker").reason is None
 
@@ -1072,36 +1635,200 @@ async def test_a_pass_whose_every_candidate_is_refused_is_a_failure(store):
     assert terminal == "failed"
     assert watermark(store, "all-refused") == ("failed", 0)
     assert _detail(store, "all-refused").refused == 1
+    assert _detail(store, "all-refused").reason == "write-refused"
     assert "did not complete" in hint(store, "all-refused")
 
 
 def test_admission_skips_are_counted_distinctly_from_write_refusals(store):
     """MINOR 2: a stricter admission rule leaves a count, not a silent gap."""
-    rows = extract(f"/docs/{HEX} ~/docs/proof.md")
+    rows = extract("## Key Decisions\n" f"- Review the credential {HEX}\n" "- Keep ~/docs/proof.md")
     assert rows.skipped == 1
-    assert [row["body"] for row in rows] == ["~/docs/proof.md"]
-    assert persist(store, "admission-marker", rows, "ok") == ("ok", "refused-row")
+    assert [row["body"] for row in rows] == ["Keep ~/docs/proof.md"]
+    assert persist(store, "admission-marker", rows, "ok") == ("ok", "admission-skip")
     assert watermark(store, "admission-marker") == ("ok", 1)
     assert _capture_row(store, "admission-marker") == {
-        "reason": "refused-row",
+        "reason": "admission-skip",
         "refused": 0,
         "skipped": 1,
     }
-    assert "withheld" in hint(store, "admission-marker")
+    assert "declined by the admission guard" in hint(store, "admission-marker")
 
 
-def test_a_pass_whose_every_candidate_is_refused_at_admission_is_a_failure(store):
-    """An admission-only total loss is still a total loss."""
-    rows = extract(f"/docs/{HEX}")
+def test_a_pass_whose_every_candidate_is_declined_at_admission_is_not_a_failure(store):
+    """An admission-only total loss is a benign DECLINE, distinct from a stage fault.
+
+    Nothing the store should have taken was lost: every candidate was noise the
+    admission guard refused before the store saw it. Recording ``failed`` here made a
+    quiet pass indistinguishable from a timeout or a store error at the status column.
+    """
+    rows = extract(f"## Key Decisions\n- Review the credential {HEX}")
     assert list(rows) == [] and rows.skipped == 1
-    assert persist(store, "admission-empty", rows, "ok") == ("failed", "refused-row")
-    assert watermark(store, "admission-empty") == ("failed", 0)
+    assert persist(store, "admission-empty", rows, "ok") == ("declined", "admission-skip")
+    assert watermark(store, "admission-empty") == ("declined", 0)
+    assert "declined" in hint(store, "admission-empty")
+    assert "did not complete" not in hint(store, "admission-empty")
 
 
 def test_a_non_mapping_row_costs_one_candidate_not_the_pass(store):
     """NIT 1: the belt's contract holds for a malformed row, not just ``MemoryError``."""
     malformed: Any = ["not-a-mapping"]  # the shape a future producer bug would emit
     terminal = persist(store, "malformed-row", malformed, "ok")
-    assert terminal == ("failed", "refused-row")
+    assert terminal == ("failed", "write-refused")
     assert watermark(store, "malformed-row") == ("failed", 0)
     assert _detail(store, "malformed-row").refused == 1
+
+
+def test_both_guards_are_counted_and_the_write_belt_is_named(store):
+    """BOTH GUARDS: the literal names the write belt; ``meta`` keeps both counts.
+
+    The write belt is the later, stricter guard, and its refusal is the one an
+    operator investigating a lost candidate needs named; the admission count stays
+    visible beside it rather than being folded into the literal.
+    """
+    rows = extract("## Key Decisions\n" f"- Review the credential {HEX}\n" "- Keep ~/docs/proof.md")
+    assert rows.skipped == 1
+    terminal = persist(
+        store, "both-guards", list(rows) + [_refused_row()], "ok", skipped=rows.skipped
+    )
+    assert terminal == ("ok", "write-refused")
+    assert _capture_row(store, "both-guards") == {
+        "reason": "write-refused",
+        "refused": 1,
+        "skipped": 1,
+    }
+
+
+def _meta_value(store, key):
+    with store.connection() as db:
+        row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row[0] if row else None
+
+
+def test_the_cohort_marker_starts_at_the_first_attributed_capture(store):
+    """The split is dated in ``meta`` so reporting can age rows honestly.
+
+    Rows written before this stamp carry the verdict-shaped literal (or none at all)
+    and cannot be reclassified by guard; the stamp is the boundary between the two
+    cohorts, written once and never moved.
+    """
+    assert _meta_value(store, ATTRIBUTION_STARTED_KEY) is None
+    persist(store, "cohort-one", extract("## Progress\n- Landed /src/cohort.py"), "ok")
+    first = _meta_value(store, ATTRIBUTION_STARTED_KEY)
+    assert first is not None
+    assert isinstance(json.loads(first)["at"], float)
+    persist(store, "cohort-two", extract("## Progress\n- Landed /src/cohort2.py"), "ok")
+    assert _meta_value(store, ATTRIBUTION_STARTED_KEY) == first, "first write wins"
+
+
+def test_a_legacy_verdict_literal_is_unclassifiable_and_never_rewritten(store):
+    """NO BACKFILL: a pre-split record keeps its bytes and yields no guard cause.
+
+    ``refused-row`` named no guard, so reading it as either new literal would invent
+    a cause the writer never recorded. The raw record is left exactly as written.
+    """
+    legacy = json.dumps({"reason": "refused-row", "refused": 0, "skipped": 18})
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO meta VALUES (?,?)",
+            (f"capture.{store.identity.session_id}.legacy-marker", legacy),
+        )
+        db.execute(
+            "INSERT INTO captures(session,compaction,status,n) VALUES (?,?,?,?)",
+            (store.identity.session_id, "legacy-marker", "failed", 0),
+        )
+        db.commit()
+    detail = _detail(store, "legacy-marker")
+    assert detail.reason is None
+    assert (detail.status, detail.n, detail.refused, detail.skipped) == ("failed", 0, 0, 18)
+    assert _capture_row(store, "legacy-marker") == {
+        "reason": "refused-row",
+        "refused": 0,
+        "skipped": 18,
+    }
+
+
+def test_a_legacy_partial_pass_still_reports_withheld_candidates(store):
+    """MINOR 1: an unclassifiable record must not render as a clean success.
+
+    ``capture_detail`` refuses the pre-split verdict literal, so the reason reads
+    ``None``; the stored counts are the only surviving evidence that the pass was
+    partial. The hint reports them without naming a guard — the one thing it must not
+    do is invent a cause or claim a clean pass on the records this change cannot
+    reclassify.
+    """
+    meta = json.dumps({"reason": "refused-row", "refused": 0, "skipped": 18})
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO meta VALUES (?,?)",
+            (f"capture.{store.identity.session_id}.legacy-partial", meta),
+        )
+        db.execute(
+            "INSERT INTO captures(session,compaction,status,n) VALUES (?,?,?,?)",
+            (store.identity.session_id, "legacy-partial", "ok", 5),
+        )
+        db.commit()
+    message = hint(store, "legacy-partial")
+    assert "18 candidates were withheld (cause not recorded)" in message
+    assert "declined by the admission guard" not in message
+    assert "withheld by the memory guard at the write" not in message
+    # A genuinely clean pass keeps the unqualified wording.
+    persist(store, "legacy-clean", _scan_rows(2), "ok")
+    assert "withheld" not in hint(store, "legacy-clean")
+
+
+def test_a_duplicate_persist_reports_the_terminal_pair_the_store_holds(store):
+    """MINOR 2: a replayed marker reports the recorded status, not the requested one.
+
+    ``declined`` is derived inside ``persist`` from what the pass wrote, so the
+    duplicate early-return must read the row back. Echoing the caller's ``ok`` would
+    contradict the row a resumed caller reads next and the docstring that promises
+    the terminal pair actually recorded.
+    """
+    rows = extract(f"## Key Decisions\n- Review the credential {HEX}")
+    assert persist(store, "duplicate-marker", rows, "ok") == ("declined", "admission-skip")
+    assert persist(store, "duplicate-marker", rows, "ok") == ("declined", "admission-skip")
+    assert watermark(store, "duplicate-marker") == ("declined", 0)
+    assert persist(store, "duplicate-clean", _scan_rows(2), "ok") == ("ok", None)
+    assert persist(store, "duplicate-clean", _scan_rows(2), "ok") == ("ok", None)
+
+
+#: The four shapes whose reason/status mapping is contractual. ``admission-skip`` and
+#: ``write-refused`` are different guards; only the latter is a total loss when every
+#: candidate lands there. ``quota`` and ``timeout`` are stage faults and stay ``failed``
+#: when nothing was captured. The write refusal is the shape no live record produced
+#: (``refused`` summed to zero across all 48), so it is proven here, not assumed.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "shape,reason,status",
+    [
+        ("admission-skip", "admission-skip", "declined"),
+        ("write-refused", "write-refused", "failed"),
+        ("quota", "quota", "failed"),
+        ("timeout", "timeout", "failed"),
+    ],
+)
+async def test_the_four_attribution_shapes_map_to_exact_literal_and_status(
+    store, monkeypatch, shape, reason, status
+):
+    if shape == "admission-skip":
+        terminal = persist(
+            store, shape, extract(f"## Key Decisions\n- Review the credential {HEX}"), "ok"
+        )
+    elif shape == "write-refused":
+        terminal = persist(store, shape, [_refused_row()], "ok")
+    elif shape == "quota":
+
+        def refuse(db, scope, owner, *, relief=False):
+            raise MemoryError("Memory quota reached (synthetic).")
+
+        monkeypatch.setattr(store, "_quota", refuse)
+
+        async def scan():
+            return _scan_rows(1)
+
+        terminal = (await finish(store, shape, asyncio.create_task(scan()), ""), "quota")
+    else:
+        terminal = persist(store, shape, [], "ok", None, "timeout")
+    assert terminal == (status, reason)
+    detail = _detail(store, shape)
+    assert (detail.status, detail.reason) == (status, reason)

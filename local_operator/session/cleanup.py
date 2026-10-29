@@ -84,16 +84,17 @@ import logging
 import os
 import shutil
 import stat
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
+from local_operator.session import compression
 from local_operator.session.retention import (
     _SIDECAR_NAMES,
     LIVE_MARKER_NAME,
     SESSIONS_DIRNAME,
-    TRANSCRIPT_FILENAME,
     _is_claimed,
     _process_alive,
     session_activity,
@@ -198,6 +199,19 @@ def deletable_origins() -> frozenset[str]:
 #: still matters. Gated BY the record switch, in addition to its own (the
 #: content phase is part of the same delegated class).
 DEFAULT_DELEGATED_SCRATCHPAD_ENABLED = True
+
+#: The content layer's FOURTH arm — plain non-git directory copies — is OFF by
+#: default, unlike the two above. WHY: the other two arms match a shape the
+#: WRITE policy itself refuses (a write could not have put a ``node_modules``
+#: or a ``.pytest_cache`` there) or a tree git can PROVE is merged; a non-git
+#: directory has neither property, so this arm earns its trust per file
+#: (path+blob proof against a merged tree, see ``delegated_retention``). That
+#: proof needs a reference repository, which fresh installs do not have — and
+#: an arm whose proof depends on machine-local configuration must not be armed
+#: by a default. An operator previews it with
+#: ``lop sessions cleanup --dry-run --report-non-git-copies`` before turning it on;
+#: the ``reference_repos`` key below names the trees it proves against.
+DEFAULT_DELEGATED_NON_GIT_COPIES_ENABLED = False
 #: Hours since the session's last activity (``retention.session_activity``)
 #: before a delegated session is reapable. 48 h outlives a weekend-length pause
 #: of a parent that is still going to ask its children for a result.
@@ -227,6 +241,75 @@ STORE_MARKER_NAME = ".local-operator-store"
 #: ``enabled``) or ``"cli"`` (``lop sessions cleanup``), which is the first
 #: question after "why": who did it.
 CLEANUP_LOG_NAME = ".cleanup-log.jsonl"
+
+#: Env var that lets a TEST PROCESS delete from the operator's own store.
+#:
+#: WHY A VARIABLE AND NOT A CONFIG KEY: the run this guard refuses is not a
+#: user asking for something, it is a test rig that reached the wrong store.
+#: The exception therefore has to be visible in the command that grants it
+#: (``env LOCAL_OPERATOR_ALLOW_TEST_STORE_DELETIONS=1 pytest …``) rather than
+#: buried in a settings file the operator cannot see. Values accepted are
+#: :data:`_TRUTHY` and nothing else — ``"0"``, ``"false"`` and the empty
+#: string are NOT an opt-in, because the guard reads this variable only to
+#: find an ENABLED override, never to find a disabled one.
+ALLOW_TEST_STORE_DELETIONS_ENV = "LOCAL_OPERATOR_ALLOW_TEST_STORE_DELETIONS"
+
+#: The only spellings that opt a test process in (case-insensitive).
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+#: Modules whose PRESENCE means this interpreter is a test run. ``PYTEST_
+#: CURRENT_TEST`` covers the per-test phase and is the primary signal; these
+#: two cover collection, session fixtures and teardown, where that variable is
+#: already unset but the process is still pytest.
+_TEST_RUN_MODULES = ("pytest", "_pytest")
+
+#: The ``policy`` of the row :func:`_annotate_failed_removal` appends when a
+#: receipt was written and the removal then failed. It is deliberately NOT the
+#: policy of the receipt it corrects: the census reads a row naming a session
+#: as PROOF the directory left, so a failure row carrying the original policy
+#: would have explained away a later, genuinely unrecorded disappearance.
+#: ``census._NON_REMOVAL_POLICIES`` carries this value for that reason.
+REMOVAL_FAILED_POLICY = "removal-failed"
+
+#: Where a committed mesh handoff parks the source directory until it is deleted
+#: (``<config>/network/handed-away/``), and how long an entry may sit there before
+#: :func:`sweep_handed_away` removes it.
+#:
+#: OUTSIDE ``sessions/`` ON PURPOSE: the rename out of the store is the commit point
+#: of a move (``docs/design/mesh-move-outcome.md`` clause 1), so the tree it leaves
+#: behind must be invisible to every scanner, listing and resume — while still being
+#: recoverable by hand for a day if the deletion itself failed.
+HANDED_AWAY_DIRNAME = "handed-away"
+HANDED_AWAY_MAX_AGE_S = 24 * 3600.0
+
+#: The operator's VALUE HOLDS, beside the log: ``{"schema": 1, "holds": {id:
+#: {"reason", "by", "at", "kind"}}}``. A hold is the one statement a removal
+#: cannot argue with — not an age, not a size, not a policy switch — so it is
+#: read by every remover (``remove_session_dir``, ``_guard`` and the content
+#: pass's ``_content_guard``) and cleared only by :func:`release_hold`, which
+#: writes its own ``hold-release`` row. Deliberately a separate FILE from the
+#: cleanup log: the log is append-only history, this is current intent, and a
+#: reader that has to fold history to answer "is this held?" can be wrong at
+#: exactly the wrong moment. Read FAIL CLOSED: an unreadable or corrupt file
+#: keeps every candidate (see :class:`HoldsUnreadable`).
+HOLDS_NAME = ".session-holds.json"
+HOLDS_SCHEMA = 1
+HOLD_KINDS = ("evidence", "source-of-truth", "operator")
+
+#: The directory inside a session that the content pass may reclaim from.
+#: Spelled once: ``_scratchpad_refusal`` and the contents measurement must
+#: agree on which subtree is "the pad", or a receipt describes one tree and
+#: the removal targets another.
+PAD_DIRNAME = "scratchpad"
+
+#: How many directory entries :func:`measure_session_dir` will stat before it
+#: stops and marks the measurement incomplete. The bound is the point: this
+#: runs on the removal path (one session) and on the census's store walk
+#: (thousands), so an unbounded rglob over a clone tree is not an option. A
+#: capped measurement is still a LOWER BOUND and still an honest receipt —
+#: ``contents_complete`` says so rather than letting a reader assume the walk
+#: finished.
+CONTENTS_MAX_ENTRIES = 20_000
 
 #: The LAST startup removal, as one JSON object beside the log: ``{"at",
 #: "actor", "pid", "removed": N, "scanned": N, "policies": {name: count},
@@ -270,6 +353,24 @@ class CleanupPolicy:
     #: :attr:`delegated_enabled` so the record pass and the content phase can
     #: be turned off independently.
     delegated_scratchpad_enabled: bool = DEFAULT_DELEGATED_SCRATCHPAD_ENABLED
+    #: The content layer's FOURTH arm, the plain non-git copy collector (see
+    #: :data:`DEFAULT_DELEGATED_NON_GIT_COPIES_ENABLED`). Off by default: its
+    #: per-file proof needs a reference repository the operator names.
+    delegated_non_git_copies_enabled: bool = DEFAULT_DELEGATED_NON_GIT_COPIES_ENABLED
+    #: Where the copy arm looks for the MERGED trees its per-file proof checks
+    #: against, besides the repositories it finds inside the same pad. Absolute
+    #: paths, ``user`` already expanded here; empty means "none configured".
+    delegated_non_git_copy_references: tuple[str, ...] = ()
+    #: Session ids the operator has RESERVED from this arm — "this one is
+    #: mine". A held session's copy candidates are refused even when the proof
+    #: passes; it is the only per-session hold the harness has, and it exists
+    #: because a hold stated in conversation does not bind an automated pass.
+    delegated_non_git_copy_holds: tuple[str, ...] = ()
+    #: The hold list was PRESENT but unreadable (a number, a dict, a raising
+    #: read). The arm must then not run at all: an empty parsed list is
+    #: indistinguishable from "nothing held", and guessing that direction would
+    #: delete the very session the operator reserved.
+    delegated_non_git_copy_holds_unreadable: bool = False
 
     @property
     def has_any_limit(self) -> bool:
@@ -422,9 +523,16 @@ def policy_from_config(config_manager: Any) -> CleanupPolicy:
         except Exception:  # noqa: BLE001 — a broken config is not a reason to run
             return default
 
+    # ``None`` means PRESENT-but-unreadable, not empty: the arm is skipped so a
+    # broken list can never be read as "nothing is held".
+    copy_holds = _delegated_copy_holds(getter)
     return CleanupPolicy(
         delegated_enabled=_delegated_enabled(getter),
         delegated_scratchpad_enabled=_delegated_scratchpad_enabled(getter),
+        delegated_non_git_copies_enabled=_delegated_non_git_copies_enabled(getter),
+        delegated_non_git_copy_references=_delegated_copy_references(getter),
+        delegated_non_git_copy_holds=copy_holds or (),
+        delegated_non_git_copy_holds_unreadable=copy_holds is None,
         delegated_max_age_hours=clamp_delegated_hours(
             _delegated_leaf(getter, "max_age_hours", DEFAULT_DELEGATED_MAX_AGE_HOURS)
         ),
@@ -460,15 +568,105 @@ def _delegated_scratchpad_enabled(getter: Callable[..., Any]) -> bool:
     return _delegated_switch(getter, DEFAULT_DELEGATED_SCRATCHPAD_ENABLED, "scratchpad", "enabled")
 
 
-def _delegated_switch(getter: Callable[..., Any], default: bool, *names: str) -> bool:
-    """One delegated-class switch, FAIL-CLOSED where the default is ON.
+def _delegated_non_git_copies_enabled(getter: Callable[..., Any]) -> bool:
+    """The content layer's COPY arm (see ``DEFAULT_..._NON_GIT_COPIES_...``).
 
-    Absent reads as ``default`` — both delegated switches default to ON. A
-    value that is present but is not a switch (``"banana"``) or a read that
-    raises reads as OFF: the parent switch can afford to read garbage as its
-    default because its default is off, these cannot — the cost of a kept
-    delegated session (record) or of kept pad content is bytes, the cost of a
-    reaped one is the incident.
+    Deliberately read through the same fail-closed switch helper even though
+    its default is OFF: absent reads ``False`` (the helper's ``default``), a
+    real switch reads as written, and garbage reads ``False`` — the same
+    direction as the two ON-by-default switches, for a different reason: this
+    arm's proof is machine-local, so an unreadable value must not arm it.
+    """
+    return _delegated_switch(
+        getter, DEFAULT_DELEGATED_NON_GIT_COPIES_ENABLED, "non_git_copies", "enabled"
+    )
+
+
+def _delegated_copy_references(getter: Callable[..., Any]) -> tuple[str, ...]:
+    """The copy arm's configured reference repositories, ``~`` expanded.
+
+    Reads ``session.cleanup.delegated.non_git_copies.reference_repos``. A
+    STRING is a path list split on ``os.pathsep`` (so an operator can write
+    one env-style line); a list/tuple of strings is taken as-is. Blank parts
+    are dropped, each path is ``expanduser``-ed, and ANYTHING ELSE — a number,
+    a dict, a read that raises — yields ``()``: this feeds a proof, and a
+    malformed value must read as "nothing configured", never as a guess.
+    """
+    try:
+        raw = getter(DELEGATED_PATH + ("non_git_copies", "reference_repos"), "")
+    except Exception:  # noqa: BLE001 — a broken config is not a reason to guess
+        return ()
+    if isinstance(raw, str):
+        parts: list[Any] = raw.split(os.pathsep)
+    elif isinstance(raw, (list, tuple)):
+        parts = list(raw)
+    else:
+        return ()
+    references: list[str] = []
+    for part in parts:
+        if not isinstance(part, str):
+            continue
+        stripped = part.strip()
+        if not stripped:
+            continue
+        try:
+            references.append(os.path.expanduser(stripped))
+        except Exception:  # noqa: BLE001 — expanduser is pure, but never raise here
+            continue
+    return tuple(references)
+
+
+_HOLDS_ABSENT = object()
+
+
+def _delegated_copy_holds(getter: Callable[..., Any]) -> tuple[str, ...] | None:
+    """The copy arm's operator HOLDS, or ``None`` when the list is unreadable.
+
+    Reads ``session.cleanup.delegated.non_git_copies.hold_sessions``. A string
+    is split on ``os.pathsep`` and commas (an operator can write one line); a
+    list/tuple of strings is taken as-is. Blank parts are dropped.
+
+    THE THREE-WAY ANSWER IS THE SAFETY PROPERTY. Absent is legitimately ``()``.
+    A valid value is parsed. A PRESENT but malformed value — a number, a dict,
+    a list with a non-string, or a read that raises — is ``None``, and every
+    caller turns that into "the arm does not run". Reading it as ``()`` would
+    be the one wrong direction: "I cannot tell what is held" would become
+    "nothing is held", and the held session would be exactly the one reaped.
+    """
+    try:
+        raw = getter(DELEGATED_PATH + ("non_git_copies", "hold_sessions"), _HOLDS_ABSENT)
+    except Exception:  # noqa: BLE001 — an unreadable hold list is not "no holds"
+        return None
+    if raw is _HOLDS_ABSENT:
+        return ()
+    if isinstance(raw, str):
+        parts: list[Any] = raw.replace(os.pathsep, ",").split(",")
+    elif isinstance(raw, (list, tuple)):
+        parts = list(raw)
+    else:
+        return None
+    holds: list[str] = []
+    for part in parts:
+        if not isinstance(part, str):
+            return None  # a list of numbers/dicts is not a hold list
+        stripped = part.strip()
+        if stripped:
+            holds.append(stripped)
+    return tuple(holds)
+
+
+def _delegated_switch(getter: Callable[..., Any], default: bool, *names: str) -> bool:
+    """One delegated-class switch: absent reads ``default``, garbage reads OFF.
+
+    The record and scratchpad switches default to ON; the non-git-copy arm
+    defaults to OFF. A value that is present but is not a switch
+    (``"banana"``) or a read that raises reads as OFF: the parent switch can
+    afford to read garbage as its default because its default is off, the
+    ON-defaulting switches cannot — the cost of a kept delegated session
+    (record) or of kept pad content is bytes, the cost of a reaped one is the
+    incident. The OFF-defaulting copy arm reads garbage as OFF for the
+    symmetric reason: its proof is machine-local and a broken value must not
+    arm it.
     """
     try:
         raw = getter(DELEGATED_PATH + names, _ABSENT)
@@ -488,6 +686,202 @@ def _delegated_switch(getter: Callable[..., Any], default: bool, *names: str) ->
 # ---------------------------------------------------------------------------
 # The store marker
 # ---------------------------------------------------------------------------
+
+
+class HoldsUnreadable(Exception):
+    """The holds file exists but cannot be trusted; every caller FAILS CLOSED.
+
+    Raised for an unreadable file, invalid JSON, an unknown schema or a
+    malformed entry. Absence is NOT an error — the common store has no holds
+    file — but a file that is there and cannot be read must keep every
+    candidate rather than let a removal proceed as if nothing were held.
+    """
+
+
+def holds_path(sessions_dir: Path) -> Path:
+    return sessions_dir / HOLDS_NAME
+
+
+def read_holds(sessions_dir: Path) -> dict[str, dict[str, Any]]:
+    """The store's holds by session id; ``{}`` when no file exists.
+
+    Raises :class:`HoldsUnreadable` for anything that is not a clean schema-1
+    document. Deliberately strict on entries too: a holds file a newer build
+    wrote with a shape this one does not understand must refuse removals, not
+    be silently filtered down to the entries this one happens to parse.
+    """
+    path = holds_path(sessions_dir)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise HoldsUnreadable(f"cannot read {path}: {exc}") from exc
+    try:
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise HoldsUnreadable(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict) or payload.get("schema") != HOLDS_SCHEMA:
+        raise HoldsUnreadable(f"{path} has no schema-{HOLDS_SCHEMA} document")
+    holds = payload.get("holds")
+    if not isinstance(holds, dict):
+        raise HoldsUnreadable(f"{path} carries no holds object")
+    clean: dict[str, dict[str, Any]] = {}
+    for session_id, entry in holds.items():
+        if not isinstance(session_id, str) or not isinstance(entry, dict):
+            raise HoldsUnreadable(f"{path} carries a malformed hold entry")
+        clean[session_id] = entry
+    return clean
+
+
+def _write_holds(sessions_dir: Path, holds: dict[str, dict[str, Any]]) -> bool:
+    """Publish the holds map atomically; False (and ERROR) on any failure."""
+    path = holds_path(sessions_dir)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        with tmp.open("w", encoding="utf-8") as handle:
+            json.dump({"schema": HOLDS_SCHEMA, "holds": holds}, handle, indent=1, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.error("session cleanup: cannot write %s: %s", path, exc)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def hold_for(sessions_dir: Path, session_id: str) -> dict[str, Any] | None:
+    """This session's hold, or ``None``; raises :class:`HoldsUnreadable`."""
+    return read_holds(sessions_dir).get(session_id)
+
+
+def set_hold(
+    sessions_dir: Path,
+    session_id: str,
+    *,
+    reason: str,
+    by: str,
+    kind: str = "operator",
+) -> bool:
+    """Record a hold on ``session_id``: True only when it is durably written.
+
+    A hold without a reason is refused: the file is read by a person deciding
+    whether a preserved session still matters, and "held" with no why is a
+    tombstone nobody can release responsibly. ``kind`` is one of
+    :data:`HOLD_KINDS`; it exists so a reader can tell evidence a case depends
+    on from a session that is itself the source of truth.
+    """
+    if kind not in HOLD_KINDS:
+        logger.error("session cleanup: unknown hold kind %r", kind)
+        return False
+    if not reason.strip():
+        logger.error("session cleanup: refusing a hold with no reason (%s)", session_id)
+        return False
+    try:
+        holds = read_holds(sessions_dir)
+    except HoldsUnreadable as exc:
+        logger.error("session cleanup: cannot hold %s: %s", session_id, exc)
+        return False
+    holds[session_id] = {
+        "reason": reason.strip(),
+        "by": by,
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "kind": kind,
+    }
+    return _write_holds(sessions_dir, holds)
+
+
+def release_hold(sessions_dir: Path, session_id: str, *, reason: str, actor: str) -> bool:
+    """Clear a hold, recording the decision as a ``hold-release`` log row.
+
+    True only when a recorded hold was cleared. THE RECEIPT IS WRITTEN FIRST:
+    if the log append fails nothing is cleared, so the failure mode is a hold
+    that stays in force (removals keep refusing) rather than a hold that
+    vanished without the operator's stated decision in the log. If the log
+    append succeeds and the holds rewrite then fails, the session remains held
+    and the row records the intent — retry the release; removals stay closed
+    until the file says otherwise, which is the safe side either way.
+
+    Releasing an id that is not held is a no-op returning False: the CLI says
+    "no hold was recorded" rather than pretending to have cleared one.
+    """
+    # THE DECISION NEEDS A WHY, SYMMETRIC WITH set_hold (UX round 1, U1). A
+    # blank release reason is not a decision a later reader can evaluate, and a
+    # hold is the operator's safety statement: releasing one is itself a
+    # consequential act (retention may now reap the conversation), so an empty
+    # string is refused here as well as at the CLI. The API check matters most
+    # for non-CLI callers, which have no argparse layer to lean on.
+    if not reason.strip():
+        logger.error("session cleanup: refusing to release a hold with no reason (%s)", session_id)
+        return False
+    try:
+        holds = read_holds(sessions_dir)
+    except HoldsUnreadable as exc:
+        logger.error("session cleanup: cannot release %s: %s", session_id, exc)
+        return False
+    previous = holds.get(session_id)
+    if previous is None:
+        return False
+    record = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "session": session_id,
+        "policy": "hold-release",
+        "reason": reason,
+        "actor": actor,
+        "pid": os.getpid(),
+        "previous": previous,
+    }
+    if not _append_cleanup_log(sessions_dir, record):
+        return False
+    del holds[session_id]
+    return _write_holds(sessions_dir, holds)
+
+
+def resolve_session_reference(sessions_dir: Path, requested: str) -> tuple[str | None, list[str]]:
+    """Map a typed session reference to one store id; ``(id, candidates)``.
+
+    Same contract as the CLI's other session references: the EXACT id wins,
+    and a prefix resolves only when exactly one stored directory starts with
+    it. Ambiguity returns NO id and the matching ids (sorted), never a guess —
+    a hold is a safety statement about one conversation, so picking one of two
+    matches silently is the failure mode that matters here.
+
+    The reference must be one path component (no separators, no ``..``), or it
+    could name a directory outside this store. That check is local rather than
+    imported from ``resume.is_session_id_shape``: ``resume`` is heavy (it pulls
+    the transcript reader and the picker machinery), and this function is
+    called on the CLI path only, but the policy module is imported by the
+    daemon at boot and must stay light.
+    """
+    if not requested or requested in (".", "..") or Path(requested).name != requested:
+        return None, []
+    try:
+        if (sessions_dir / requested).is_dir():
+            return requested, []
+    except OSError:
+        return None, []
+    matches: list[str] = []
+    try:
+        with os.scandir(sessions_dir) as scanned:
+            for entry in scanned:
+                if entry.name.startswith(".") or not entry.name.startswith(requested):
+                    continue
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        matches.append(entry.name)
+                except OSError:
+                    continue
+    except OSError:
+        return None, []
+    matches.sort()
+    if len(matches) == 1:
+        return matches[0], []
+    return None, matches
 
 
 def store_marker_path(sessions_dir: Path) -> Path:
@@ -515,6 +909,156 @@ def mark_store(sessions_dir: Path) -> None:
             )
     except OSError as exc:
         logger.debug("session cleanup: cannot mark store %s: %s", sessions_dir, exc)
+
+
+def _truthy_opt_in(value: str | None) -> bool:
+    """Whether ``value`` is an explicit opt-in (:data:`_TRUTHY`), not merely set."""
+    return value is not None and value.strip().lower() in _TRUTHY
+
+
+def _real_home() -> Path | None:
+    """The operator's home directory taken from PASSWD, not from ``$HOME``.
+
+    The isolation recipe every rig on this machine uses is ``env -i HOME=<tmp>``,
+    so ``$HOME`` is precisely the thing a redirected run has already pointed
+    somewhere else — trusting it here would make the guard agree with the run it
+    is meant to refuse. The passwd entry names the home the OPERATOR's store is
+    actually under. ``None`` on a platform without ``pwd`` (Windows), where
+    :func:`_live_session_stores` falls back to the expanduser form.
+    """
+    try:
+        import pwd
+
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    except (ImportError, KeyError, OSError, AttributeError):
+        return None
+    return Path(home) if home else None
+
+
+def _live_session_stores() -> tuple[Path, ...]:
+    """Every resolved ``sessions/`` path that IS the operator's real store.
+
+    ONE SOURCE ON PURPOSE, and it is the passwd home rather than ``$HOME``.
+    Every rig on this machine isolates by pointing ``HOME`` at a scratch
+    directory (``env -i HOME=<tmp>``), and under that recipe ``$HOME`` names a
+    TEMPORARY store that the guard must clear — folding ``Path.home()`` in here
+    would refuse exactly the runs the isolation exists to make safe, which is how
+    a guard gets switched off instead of trusted. The passwd entry is the home
+    the operator's real store lives under whatever this process was told. Where
+    ``pwd`` does not exist (Windows) the expanduser form is the only answer
+    available, and it is used only there.
+
+    Resolved, and tolerant: a home that cannot be resolved is dropped rather than
+    raising, since a guard that crashes on a missing path refuses nothing at all.
+
+    WHY ``local_operator.paths`` IS IMPORTED HERE AND NOT AT MODULE SCOPE. This
+    module is on ``delegated_retention``'s import path, and that pass runs on the
+    store-maintenance thread of EVERY runtime process, so
+    ``tests/unit/test_import_graph.py::test_delegated_retention_import_is_light``
+    pins the exact ``local_operator.*`` set importing it may load. A
+    module-scope ``from local_operator.paths import DEFAULT_CONFIG_DIRNAME`` —
+    the obvious spelling of the two lines below, and the first thing this guard
+    had — landed ``local_operator.paths`` in that set and broke the guarantee on
+    a path the guard does not run on (measured: the pinned test fails with that
+    import, passes with this one). DO NOT HOIST IT: the name belongs to
+    :mod:`local_operator.paths` on purpose (one definition of the config-dir
+    name), but this module may only read it at CALL time, which costs one
+    ``sys.modules`` lookup on a removal and nothing at import.
+    """
+    from local_operator.paths import DEFAULT_CONFIG_DIRNAME
+
+    home = _real_home()
+    if home is None:
+        home = Path(os.path.expanduser("~"))
+    try:
+        return ((home / DEFAULT_CONFIG_DIRNAME / SESSIONS_DIRNAME).resolve(),)
+    except OSError:
+        return ()
+
+
+def _test_run_reason() -> str | None:
+    """Why THIS process is a test run; ``None`` when it is not one.
+
+    Three independent signals, each cheap, because the two directions cost very
+    different things: a false positive refuses a deletion that a one-word
+    environment variable lets through, while a false negative lets a test suite
+    delete from the operator's live store — which is exactly what happened on
+    2026-08-24 (a rig's suite ran against the real ``$HOME`` and a real session
+    directory was gone afterwards, with no record of which process removed it).
+
+    ``PYTEST_CURRENT_TEST`` is set by pytest for the duration of each test and is
+    the documented signal; the module check covers the phases around it (import
+    time, session fixtures, teardown) where a test process is still a test
+    process but that variable is unset; the argv check catches ``python -m
+    pytest`` launched before any import has happened.
+    """
+    current = os.environ.get("PYTEST_CURRENT_TEST")
+    if current:
+        return f"pytest is running a test (PYTEST_CURRENT_TEST={current.split(' ')[0]})"
+    for name in _TEST_RUN_MODULES:
+        if name in sys.modules:
+            return f"the pytest module is imported in this interpreter ({name})"
+    entry = os.path.basename(sys.argv[0] or "")
+    if entry.startswith(("pytest", "py.test")):
+        return f"the entry point is {entry}"
+    return None
+
+
+def _live_store_refusal(store: Path) -> str | None:
+    """Why a TEST RUN must not remove anything from ``store``; ``None`` if it may.
+
+    THE GAP THIS CLOSES (measured 2026-08-24, then again on 2026-10-29). Every
+    other guard in this module asks whether the TARGET is a legitimate store:
+    marked, directly under ``sessions/``, inside the config dir the process was
+    given. A test process handed the operator's own config dir passes all four,
+    because on paper it is doing something legal — the question nobody asked was
+    "should THIS PROCESS be touching the live store at all". A lane's pytest run
+    executed against the real ``$HOME`` that night and a real session directory
+    was gone afterwards; a receipt names the removal now (``remove_session_dir``
+    writes one before it deletes), but nothing had refused the process, so the
+    receipt recorded the loss instead of preventing it.
+
+    ``store`` is the ALREADY-RESOLVED ``sessions/`` directory: :func:`_refusal`
+    has resolved it before calling, so a symlink into the real store cannot
+    launder itself past this comparison either.
+
+    FAIL CLOSED, and the refusal names the escape hatch: an unmarked path that
+    merely LOOKS live is not this guard's problem (the marker check precedes it),
+    but a marked live store under a test run is refused with the variable that
+    grants the exception spelled out, because a refusal an operator cannot act on
+    is how a guard gets deleted instead of understood.
+    """
+    if _truthy_opt_in(os.environ.get(ALLOW_TEST_STORE_DELETIONS_ENV)):
+        return None
+    test_run = _test_run_reason()
+    if test_run is None:
+        return None
+    if store in _live_session_stores():
+        return (
+            f"this is the operator's LIVE store {store} and this process is a test run "
+            f"({test_run}); point the run at a temporary store, or set "
+            f"{ALLOW_TEST_STORE_DELETIONS_ENV}=1 to allow this one deliberately"
+        )
+    return None
+
+
+def _live_config_refusal(config_dir: Path | str) -> str | None:
+    """The live-store refusal for a remover whose target is NOT under ``sessions/``.
+
+    :func:`_live_store_refusal` compares a resolved ``sessions/`` directory with
+    the operator's own. :func:`sweep_handed_away` deletes quarantine trees under
+    ``<config>/network/handed-away/`` — store data, but OUTSIDE ``sessions/`` —
+    so it has to ask that question about the CONFIG DIR. Building the store path
+    from the config dir and reusing the one comparison keeps a single definition
+    of "the live store" and a single refusal sentence. (A pad's content is inside
+    ``sessions/`` and calls :func:`_live_store_refusal` with the resolved store
+    directly.)
+    """
+    try:
+        store = (Path(config_dir) / SESSIONS_DIRNAME).resolve()
+    except OSError:
+        return None
+    return _live_store_refusal(store)
 
 
 def _refusal(target: Path, config_dir: Path | None) -> str | None:
@@ -547,6 +1091,13 @@ def _refusal(target: Path, config_dir: Path | None) -> str | None:
         return f"not directly under a '{SESSIONS_DIRNAME}/' directory"
     if not store_marker_path(parent).is_file():
         return f"store carries no {STORE_MARKER_NAME} marker"
+    # BEFORE the config-dir comparison, deliberately: a test process handed the
+    # operator's real config dir passes that comparison, and "this is the live
+    # store and you are a test run" is the more actionable sentence of the two
+    # once both are true.
+    live_test_run = _live_store_refusal(parent)
+    if live_test_run is not None:
+        return live_test_run
     if config_dir is not None:
         try:
             expected = (config_dir / SESSIONS_DIRNAME).resolve()
@@ -598,6 +1149,29 @@ def remove_session_dir(
             reason,
         )
         return False
+    try:
+        held = hold_for(target.resolve().parent, target.name)
+    except HoldsUnreadable as exc:
+        # Fail closed: a holds file that cannot be read is not proof that
+        # nothing is held. Refusing here is the whole point of the file.
+        logger.error(
+            "session cleanup: REFUSED to remove %s (operator holds unreadable: %s); "
+            "policy=%s reason=%s",
+            target,
+            exc,
+            policy,
+            reason,
+        )
+        return False
+    if held is not None:
+        logger.warning(
+            "session cleanup: REFUSED to remove %s (held by the operator: %s); policy=%s reason=%s",
+            target,
+            held.get("reason") or "no reason recorded",
+            policy,
+            reason,
+        )
+        return False
     if dry_run:
         logger.debug(
             "session cleanup (dry run): would remove %s; policy=%s reason=%s",
@@ -606,6 +1180,15 @@ def remove_session_dir(
             reason,
         )
         return True
+    # MEASURE BEFORE THE RECORD AND BEFORE THE REMOVAL: the receipt has to say
+    # what was lost, and once `_bounded_rmtree` returns there is nothing left to
+    # measure. A measurement failure is recorded rather than raised — an
+    # unreadable corner must not turn a policy removal into a crash — but it is
+    # named in the row so a reader knows the figures are missing, not zero.
+    try:
+        contents: dict[str, Any] = measure_session_dir(target)
+    except Exception as exc:  # noqa: BLE001 — the removal decision is the guards'
+        contents = {"contents_error": f"{type(exc).__name__}: {exc}"}
     record = {
         "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "session": target.name,
@@ -614,22 +1197,69 @@ def remove_session_dir(
         "reason": reason,
         "actor": actor,
         "pid": os.getpid(),
+        "path": os.fspath(target.absolute()),
+        # WHICH guards cleared it, named rather than implied. Before this the row
+        # recorded the DECISION (policy/reason/actor) but not the gate that
+        # allowed it, so a reader could not tell an ordinary removal from one
+        # that had also passed the operator-hold check or survived the store
+        # identity proof. Both gates run on every removal here, so both are
+        # named; a future gate must add itself to this list.
+        "guards": ["refusal", "holds"],
+        **contents,
     }
-    _append_cleanup_log(target.parent, record)
+    if not _append_cleanup_log(target.parent, record):
+        # A directory whose receipt cannot be written SURVIVES. The WARNING
+        # below is a process log line, not a durable record, and a removal
+        # nobody can describe afterwards is the incident shape this module
+        # exists to prevent.
+        logger.error(
+            "session cleanup: REFUSED to remove %s: its receipt could not be written to %s",
+            target,
+            target.parent / CLEANUP_LOG_NAME,
+        )
+        return False
     logger.warning(
-        "session cleanup: removing %s%s; policy=%s reason=%s actor=%s (record: %s)",
+        "session cleanup: removing %s%s; policy=%s reason=%s actor=%s "
+        "bytes=%s entries=%s transcript_bytes=%s pad_bytes=%s pad_entries=%s (record: %s)",
         target.name,
         f" ({title})" if title else "",
         policy,
         reason,
         actor,
+        contents.get("bytes", "?"),
+        contents.get("entries", "?"),
+        contents.get("transcript_bytes", "?"),
+        contents.get("pad_bytes", "?"),
+        contents.get("pad_entries", "?"),
         target.parent / CLEANUP_LOG_NAME,
     )
     # The bounded widen-and-retry removal — the ``onexc`` hook, the pre-widen
     # fallback walk and the module's single ``rmtree`` call site — lives in
     # ``_bounded_rmtree``, shared with the scratchpad-content pass.
-    _bounded_rmtree(target)
+    try:
+        _bounded_rmtree(target)
+    except BaseException as exc:
+        # THE RECEIPT ABOVE ALREADY EXISTS, and a removal that did not happen must
+        # not be described by it as one that did. The log is append-only, so the
+        # correction is a FOLLOWING row rather than a withdrawal — rewriting the
+        # previous line would lose it if this process died mid-rewrite, which is
+        # the same reason the receipt is written first. ``BaseException`` on
+        # purpose: a KeyboardInterrupt inside the walk leaves the directory on
+        # disk, and a receipt claiming otherwise is wrong whichever signal caused
+        # it. The row is re-raised through unchanged so callers still see the
+        # failure they always did.
+        _annotate_failed_removal(target.parent, record, exc)
+        raise
     if config_dir is not None:
+        # The two DERIVED sidecars keyed by this session id live OUTSIDE the
+        # directory (they are written outside it on purpose — see
+        # ``session_files/ledger.py`` on reordering the recency-ranked list), so
+        # nothing under ``target`` ever contained them and no removal ever took
+        # them. Measured on the reference host 2026-10-29: 6,767
+        # ``cache/session_files/*.json`` against 3,442 session directories, and
+        # 4,261 ``wakes/spooled/.*.lock`` files with ZERO spooled rows — pure
+        # accumulation of files keyed to conversations that are gone.
+        _drop_session_sidecars(config_dir, target.name)
         # The ask INDEX lives OUTSIDE the session directory (see
         # ``asks/store.py`` on why the cross-session view cannot be a scan of
         # 4,000 session dirs), so the guards above — and this removal — are the
@@ -637,12 +1267,482 @@ def remove_session_dir(
         # session directory is gone, so this is belt-and-braces; doing it at the
         # one place a directory is destroyed is what keeps the aggregate view
         # from briefly listing a conversation nobody can open.
+        # (One ``config_dir`` guard around all three: they are the same closure
+        # over the store's outside indexes, and two adjacent identical guards
+        # invited a later edit that dropped one of them — review N-1.)
         try:
             from local_operator.asks import store as ask_store
 
             ask_store.remove_entry(config_dir, target.name)
         except Exception:  # noqa: BLE001 — the sweep is the backstop
             logger.debug("session cleanup: could not drop the ask index entry", exc_info=True)
+        # The inbox's items for this conversation go with it
+        # (docs/design/notifications-inbox.md §1.4): an item whose conversation
+        # cannot be opened is a link to nowhere. Same site and same reason as
+        # the ask index above — this is the one place a directory is destroyed.
+        # Best-effort: an absent store is a no-op, and a contended one leaves
+        # rows the retention pass ages out.
+        try:
+            from local_operator.notifications.store import NotificationStore
+
+            NotificationStore(config_dir).delete_session(target.name)
+        except Exception:  # noqa: BLE001 — retention is the backstop
+            logger.debug("session cleanup: could not drop the inbox items", exc_info=True)
+    return True
+
+
+def _annotate_failed_removal(
+    sessions_dir: Path, record: dict[str, Any], exc: BaseException
+) -> None:
+    """Append the row that says the receipt above it did NOT happen. Never raises.
+
+    WHY A SECOND ROW AND NOT A REWRITE: the log is append-only because the first
+    write has to survive the process that made it. Editing the receipt in place
+    would lose the whole line if this process died during the edit — the failure
+    mode the ordering exists to prevent — so the correction is a following row
+    that points back at the receipt it corrects (``receipt_at``) and names the
+    policy and reason that receipt carried (``failed_policy``/``failed_reason``).
+
+    THE POLICY IS :data:`REMOVAL_FAILED_POLICY`, not the original: the census
+    reads any row naming a session as proof the directory left, so a failure row
+    that kept the original policy would silently explain away a LATER, genuinely
+    unrecorded disappearance. ``census._NON_REMOVAL_POLICIES`` excludes it.
+
+    Swallowing here is deliberate and narrow: this runs on the failure path, and
+    its own failure must not replace the exception the caller is about to see.
+    """
+    try:
+        _append_cleanup_log(
+            sessions_dir,
+            {
+                "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "session": record.get("session", ""),
+                "policy": REMOVAL_FAILED_POLICY,
+                "reason": f"removal failed after its receipt ({type(exc).__name__})",
+                "actor": record.get("actor", ""),
+                "pid": os.getpid(),
+                "path": record.get("path", ""),
+                "failed_policy": record.get("policy", ""),
+                "failed_reason": record.get("reason", ""),
+                "receipt_at": record.get("at", ""),
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        )
+    except Exception:  # noqa: BLE001 — see the docstring: never replace the raise
+        logger.debug("session cleanup: could not annotate a failed removal", exc_info=True)
+
+
+def _drop_session_sidecars(config_dir: Path, session_id: str) -> None:
+    """Remove the per-session sidecars that live OUTSIDE the session directory.
+
+    Called once the directory is GONE, by both removers that take an established
+    session out of the store: :func:`remove_session_dir` and the source half of a
+    committed mesh move (:func:`hand_off_session_dir`). Three files, each keyed by
+    session id and each recreated from scratch if a session with that id is ever
+    built again:
+
+    * ``<config>/cache/session_files/<id>.json`` — a cache of what the directory's
+      transcript contained; past the directory it caches a scan of nothing;
+    * ``<config>/wakes/spooled/<id>.json`` — an obligation to deliver a spooled
+      turn to a conversation nobody can open any more;
+    * ``<config>/wakes/spooled/.<id>.lock`` — the mutex around writing that row.
+
+    NONE OF THEM WAS EVER INSIDE THE DIRECTORY, which is why no removal ever took
+    them: ``session_files/ledger.py`` writes the cache outside it on purpose (a
+    sidecar inside would move the directory's mtime and reorder the
+    recency-ranked list), and ``wakes/spooled.py`` keeps the spool beside the
+    store rather than in the conversation. Measured on the reference host
+    2026-10-29: 6,767 cache entries against 3,442 session directories and 4,261
+    spool locks with ZERO spooled rows.
+
+    THE LOCK IS THE ONE FILE THAT NEEDS CARE. ``wakes/lock.py`` states the rule —
+    a lock file is never unlinked by anyone while it may be contended, because a
+    waiter holding the old inode and a new writer creating a fresh one are two
+    holders of "the" lock. So it is unlinked only while THIS call holds it, and a
+    busy or unopenable one is left where it is: the same file's own argument is
+    that a writer cannot target a session directory that is not there, so a
+    leftover lock on a dead session is inert, and one that is contended right now
+    belongs to a process still finishing a write. Never raises: this runs after the
+    bytes are gone, and a leftover sidecar is bytes, not a loss.
+    """
+    try:
+        from local_operator.session_files import ledger as session_files_ledger
+
+        session_files_ledger.cache_path(config_dir, session_id).unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:  # noqa: BLE001 — best effort, see the docstring
+        logger.debug("session cleanup: could not drop the file-scan cache entry", exc_info=True)
+    try:
+        from local_operator.wakes import spooled as spooled_store
+        from local_operator.wakes.lock import (
+            WakeLockBusy,
+            WakeLockUnavailable,
+            WakeWriteLock,
+        )
+
+        if spooled_store.spooled_path(config_dir, session_id).exists():
+            spooled_store.clear_spooled_turn(config_dir, session_id)
+        spooled_directory = spooled_store.spooled_dir(config_dir)
+        lock_file = spooled_directory / spooled_store.lock_name(session_id)
+        if lock_file.exists():
+            holder = WakeWriteLock(
+                spooled_directory,
+                name=spooled_store.lock_name(session_id),
+                timeout_s=0.0,
+            )
+            try:
+                with holder:
+                    lock_file.unlink()
+            except (WakeLockBusy, WakeLockUnavailable):
+                logger.debug(
+                    "session cleanup: left the spool lock for %s in place (busy or unopenable)",
+                    session_id,
+                )
+    except FileNotFoundError:
+        pass
+    except Exception:  # noqa: BLE001 — best effort, see the docstring
+        logger.debug("session cleanup: could not drop the spooled-wake sidecars", exc_info=True)
+
+
+class HandOffOutcome(NamedTuple):
+    """What :func:`hand_off_session_dir` did, and WHY when it did not.
+
+    ``handed`` is the bool the callers used to get back wholesale. ``reason`` is a
+    short human cause, never a code: it is what the refusal sentence shows the
+    person reading it ("this device could not hand <id> away (<reason>), so
+    nothing was moved"), and a caller that only logged a bare ``False`` left them
+    with a refusal that named the step and not the cause (QA round 1, Q-4). It is
+    also logged here, so this device's relay log carries the same words.
+    """
+
+    handed: bool
+    reason: str
+
+
+def hand_off_session_dir(
+    target: Path,
+    *,
+    config_dir: Path,
+    reason: str,
+    actor: str,
+    title: str = "",
+) -> HandOffOutcome:
+    """Atomically take a session directory OUT of the store, then delete it.
+
+    THE COMMIT POINT OF A MESH MOVE (``docs/design/mesh-move-outcome.md`` clause 1).
+    ``_source_commit`` used to write the tombstone first and delete afterwards, and a
+    delete that the guards refused still answered ``committed`` — so the destination
+    adopted a second copy of an id the source still listed, which is exactly the
+    state INV-1 exists to prevent (measured on a real two-device run). The rename
+    below is what makes "exactly one copy" atomic: from it on, no scanner, listing,
+    picker or resume on this device can see a live conversation for the id, and it
+    happens BEFORE the tombstone tells the destination anything.
+
+    ORDER, and each step's failure has its own meaning:
+
+    1. ``handed=True`` when ``target`` is already absent. That IS the desired
+       post-state — a retry after a crash between the rename and the tombstone must
+       not be read as a failure to hand the directory away.
+    2. The same :func:`_refusal` guard :func:`remove_session_dir` uses. A directory
+       this module may not touch is left exactly where it is and the caller rolls
+       the move back.
+    3. The cleanup-log record, BEFORE the rename (as the removal path does), so a
+       process that dies mid-handoff still leaves a receipt naming the policy and
+       the reason. A record that cannot be written refuses: a handoff nobody can
+       describe afterwards is the incident shape this module exists to prevent.
+    4. The rename into ``<config>/network/handed-away/`` on the same filesystem, so
+       it is atomic. A failure HERE means the caller's move has not committed and
+       must roll back; it is reported as ``handed=False`` with the ``OSError`` in
+       the reason, never raised, so every caller has ONE shape to handle. Everything
+       after is cleanup.
+    5. Best-effort deletion of the quarantined tree by the one bounded removal. A
+       failure logs and leaves the tree for :func:`sweep_handed_away` — it must not
+       fail a move whose commit has already landed.
+
+    ``mark_store`` is called here for the reason ``_remove_handed_away`` documents:
+    a device that ADOPTED a session over the mesh may never have created one, so its
+    store carries no marker and every guard below would refuse. This is the product
+    path that decided the conversation lives here, which is the same authority
+    ``session_factory`` and ``_promote`` exercise when they mark a store.
+    """
+    target = Path(target)
+    if not target.exists():
+        return HandOffOutcome(True, "the directory was already gone")
+    mark_store(target.parent)
+    refusal = _refusal(target, Path(config_dir))
+    if refusal:
+        logger.warning(
+            "session cleanup: REFUSED to hand %s away: %s (policy=%s reason=%s actor=%s)",
+            target,
+            refusal,
+            MESH_MOVE_POLICY,
+            reason,
+            actor,
+        )
+        return HandOffOutcome(False, f"the store guard refused: {refusal}")
+    try:
+        contents: dict[str, Any] = measure_session_dir(target)
+    except Exception as exc:  # noqa: BLE001 — the decision is the guards'
+        contents = {"contents_error": f"{type(exc).__name__}: {exc}"}
+    record = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "session": target.name,
+        "title": title,
+        "policy": MESH_MOVE_POLICY,
+        "reason": reason,
+        "actor": actor,
+        "pid": os.getpid(),
+        "path": os.fspath(target.absolute()),
+        **contents,
+    }
+    if not _append_cleanup_log(target.parent, record):
+        logger.error(
+            "session cleanup: REFUSED to hand %s away: its receipt could not be written to %s",
+            target,
+            target.parent / CLEANUP_LOG_NAME,
+        )
+        return HandOffOutcome(False, "its receipt could not be written")
+    quarantine_root = Path(config_dir) / "network" / HANDED_AWAY_DIRNAME
+    quarantine = quarantine_root / f"{target.name}.{time.time_ns()}.{os.urandom(4).hex()}"
+    try:
+        quarantine_root.mkdir(parents=True, exist_ok=True)
+        # 0700: the tree it holds is a whole conversation on its way out — same user
+        # only, and the name it is filed under carries a pid-independent token so two
+        # handoffs in one nanosecond tick cannot collide.
+        os.chmod(quarantine_root, 0o700)
+        # THE COMMIT. Nothing has been told to anybody yet, so a failure here is a
+        # refusal the caller rolls back from — never a raise, so both callers (the
+        # live commit and the crash recovery) word it the same way.
+        os.replace(target, quarantine)
+    except OSError as exc:
+        logger.warning(
+            "session cleanup: REFUSED to hand %s away: the directory could not be renamed: %s",
+            target,
+            exc,
+        )
+        return HandOffOutcome(False, f"the directory could not be renamed: {exc}")
+    logger.warning(
+        "session cleanup: handed %s away to %s; policy=%s reason=%s actor=%s "
+        "bytes=%s entries=%s transcript_bytes=%s (record: %s)",
+        target.name,
+        quarantine,
+        MESH_MOVE_POLICY,
+        reason,
+        actor,
+        contents.get("bytes", "?"),
+        contents.get("entries", "?"),
+        contents.get("transcript_bytes", "?"),
+        target.parent / CLEANUP_LOG_NAME,
+    )
+    try:
+        _bounded_rmtree(quarantine)
+    except OSError:
+        logger.warning(
+            "session cleanup: %s was quarantined but could not be deleted; "
+            "sweep_handed_away will remove it once it ages out",
+            quarantine,
+            exc_info=True,
+        )
+    else:
+        # The session has LEFT this store, so its outside sidecars would be exactly
+        # as orphaned here as after a plain removal (see
+        # :func:`_drop_session_sidecars`). Only on success: a quarantined tree that
+        # could not be deleted is still this device's copy, and its cache entry is
+        # still the right answer for a recovery by hand.
+        _drop_session_sidecars(Path(config_dir), target.name)
+    return HandOffOutcome(True, "")
+
+
+def sweep_handed_away(config_dir: Path, *, max_age_s: float = HANDED_AWAY_MAX_AGE_S) -> list[str]:
+    """Delete quarantined handoffs older than ``max_age_s``. Never raises.
+
+    The BACKSTOP for :func:`hand_off_session_dir`'s best-effort deletion: a tree
+    that could not be removed at commit time sits outside ``sessions/`` where no
+    reader can mistake it for a live conversation, so leaving it is safe and
+    removing it later is housekeeping. Age, not presence, decides: the window has
+    to be long enough that an operator recovering a bad move can still find the
+    bytes by hand (a day), and short enough that a stuck deletion cannot grow
+    without bound.
+
+    Called from the relay's start-up recovery and from ``reconcile``'s entry. Both
+    are best-effort by contract, so a failure here is logged at debug and the entry
+    stays for the next hour's attempt.
+    """
+    root = Path(config_dir) / "network" / HANDED_AWAY_DIRNAME
+    swept: list[str] = []
+    # The quarantine lives OUTSIDE sessions/ but INSIDE the store's config dir, so
+    # the gate is asked about the config dir (review round 1, m-1). A test process
+    # may not sweep the operator's real handoff quarantine: those trees are whole
+    # conversations on their way out, and the 24 h age bound is not a substitute
+    # for "this process has no business here".
+    live_test_run = _live_config_refusal(config_dir)
+    if live_test_run is not None:
+        logger.warning(
+            "session cleanup: REFUSED to sweep %s (%s); nothing was removed",
+            root,
+            live_test_run,
+        )
+        return swept
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return swept
+    cutoff = time.time() - max_age_s
+    for child in children:
+        try:
+            if child.stat().st_mtime >= cutoff:
+                continue
+        except OSError:
+            continue
+        try:
+            _bounded_rmtree(child)
+        except OSError:
+            logger.debug("session cleanup: could not sweep %s", child, exc_info=True)
+            continue
+        swept.append(child.name)
+    return swept
+
+
+def remove_fresh_session_dir(
+    target: Path,
+    *,
+    config_dir: Path,
+    policy: str,
+    reason: str,
+    actor: str,
+    title: str = "",
+) -> bool:
+    """Remove a session directory THIS PROCESS just minted, receipt included.
+
+    The two create paths that can fail after ``mkdir`` (a desktop wake whose arm
+    fails, Aida's and the Librarian's failed first build) used a literal
+    ``shutil.rmtree`` and left no trace at all. This is their audited shape.
+
+    WHY NOT :func:`remove_session_dir`: that remover refuses a store without
+    :data:`STORE_MARKER_NAME`, and ``mark_store``'s contract forbids cleanup
+    from marking its own target — so the store a fresh draft lives in (one that
+    has never had a session built in it) carries no marker, exactly where this
+    call is needed. This function keeps every other refusal and adds the one
+    identity proof the call sites relied on, checked HERE so a future caller
+    cannot skip it: there is NO TRANSCRIPT. That window is between ``mkdir``
+    and the first transcript append; a real conversation can never be inside it.
+
+    The receipt is the same content receipt :func:`remove_session_dir` writes,
+    with the caller's policy (``wake-rollback`` / ``failed-create``), and it is
+    written BEFORE the removal: a directory whose receipt cannot be written is
+    left alone, so the failure mode is a stray empty directory, never an
+    unlogged loss.
+    """
+    try:
+        if target.is_symlink():
+            logger.warning("session cleanup: REFUSED to remove fresh %s (symlink)", target)
+            return False
+        resolved = target.resolve(strict=True)
+    except OSError:
+        return False
+    sessions_dir = resolved.parent
+    try:
+        expected = (Path(config_dir) / SESSIONS_DIRNAME).resolve(strict=True)
+    except OSError:
+        logger.warning(
+            "session cleanup: REFUSED to remove fresh %s (config store cannot be resolved)",
+            target,
+        )
+        return False
+    if sessions_dir != expected:
+        logger.warning(
+            "session cleanup: REFUSED to remove fresh %s (not this config dir's store)", target
+        )
+        return False
+    # Same test-run gate as :func:`remove_session_dir` (review round 1, m-1): a
+    # just-minted directory is still a store directory, and the incident class
+    # this guard exists for does not care whether the session had a transcript yet.
+    live_test_run = _live_store_refusal(sessions_dir)
+    if live_test_run is not None:
+        logger.warning(
+            "session cleanup: REFUSED to remove fresh %s (%s); policy=%s reason=%s",
+            target,
+            live_test_run,
+            policy,
+            reason,
+        )
+        return False
+    if not resolved.is_dir():
+        return False
+    # THE IDENTITY PROOF: nothing durable has been written yet. A transcript,
+    # even a zero-byte one another writer created, means the directory is no
+    # longer the one this request left empty.
+    try:
+        # ``transcript_state``, not a stat of the plain name: an archived
+        # transcript is still a transcript, AND an unreadable directory is not
+        # proof of absence — this is the identity proof the whole removal rests
+        # on, and either misreading lets a real conversation be deleted.
+        state = compression.transcript_state(resolved)
+        if state == compression.TRANSCRIPT_UNREADABLE:
+            logger.warning(
+                "session cleanup: REFUSED to remove fresh %s (its contents cannot be read)",
+                resolved.name,
+            )
+            return False
+        if state == compression.TRANSCRIPT_PRESENT:
+            logger.warning(
+                "session cleanup: REFUSED to remove fresh %s (a transcript exists)",
+                resolved.name,
+            )
+            return False
+    except OSError:
+        return False
+    try:
+        held = hold_for(sessions_dir, resolved.name)
+    except HoldsUnreadable as exc:
+        logger.error(
+            "session cleanup: REFUSED to remove fresh %s (operator holds unreadable: %s)",
+            resolved.name,
+            exc,
+        )
+        return False
+    if held is not None:
+        logger.warning(
+            "session cleanup: REFUSED to remove fresh %s (held by the operator: %s)",
+            resolved.name,
+            held.get("reason") or "no reason recorded",
+        )
+        return False
+    try:
+        contents: dict[str, Any] = measure_session_dir(resolved)
+    except Exception as exc:  # noqa: BLE001 — see remove_session_dir
+        contents = {"contents_error": f"{type(exc).__name__}: {exc}"}
+    record = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "session": resolved.name,
+        "title": title,
+        "policy": policy,
+        "reason": reason,
+        "actor": actor,
+        "pid": os.getpid(),
+        "path": os.fspath(resolved),
+        **contents,
+    }
+    if not _append_cleanup_log(sessions_dir, record):
+        logger.error(
+            "session cleanup: REFUSED to remove fresh %s: its receipt could not be written to %s",
+            resolved.name,
+            sessions_dir / CLEANUP_LOG_NAME,
+        )
+        return False
+    logger.warning(
+        "session cleanup: removing fresh %s; policy=%s reason=%s actor=%s bytes=%s entries=%s "
+        "(record: %s)",
+        resolved.name,
+        policy,
+        reason,
+        actor,
+        contents.get("bytes", "?"),
+        contents.get("entries", "?"),
+        sessions_dir / CLEANUP_LOG_NAME,
+    )
+    _bounded_rmtree(resolved)
     return True
 
 
@@ -869,10 +1969,18 @@ def _scratchpad_refusal(target: Path, *, config_dir: Path | None, sessions_dir: 
     except ValueError:
         return f"target {resolved} is not inside the store {store}"
     parts = relative.parts
-    if len(parts) < 3 or parts[1] != "scratchpad":
+    if len(parts) < 3 or parts[1] != PAD_DIRNAME:
         return "not a path inside a session's scratchpad/ directory"
     if not store_marker_path(store).is_file():
         return f"store carries no {STORE_MARKER_NAME} marker"
+    # The same test-run gate :func:`_refusal` applies, at the same point in the
+    # order (before the config-dir comparison, so the more actionable sentence
+    # wins when both are true). A pad's content is store data: a test process
+    # pointed at the live config dir must not strip a live session's scratchpad
+    # any more than it may delete the directory itself.
+    live_test_run = _live_store_refusal(store)
+    if live_test_run is not None:
+        return live_test_run
     if config_dir is not None:
         try:
             expected = (config_dir / SESSIONS_DIRNAME).resolve()
@@ -1009,6 +2117,24 @@ _GUARD_REFUSALS: dict[str, str] = {
         "cancel the monitor, or delete its {monitor_file} entry, before "
         "deleting it."
     ),
+    # A HOLD IS NOT AN UNKNOWN (review round 1, M6): the fallback says "could
+    # not be checked", which is false — it was checked and the operator's own
+    # record is the answer. The remedy is the one command that clears it,
+    # resolved to this session id so the door is addressable.
+    "held by the operator": (
+        "That conversation is held as a value you asked to keep. Release the hold "
+        "with `lop sessions unhold {session_id} --reason ...` before deleting it."
+    ),
+    # The index itself is the thing to repair; deleting it would silently drop
+    # every hold, and nothing removes a session while it cannot be read. The
+    # sentence names the CONVERSATION first, like every other refusal in this
+    # table (the table is read by a user looking at one conversation), and
+    # names the file store-relative — never a host path.
+    "operator holds unreadable": (
+        "That conversation's value-hold index could not be read, so nothing was "
+        "deleted. Repair or restore the store's .session-holds.json file, then "
+        "try again."
+    ),
 }
 
 #: Used for a guard reason with no sentence of its own, INCLUDING a guard that
@@ -1111,7 +2237,7 @@ def _subagent_child_count(directory: Path) -> int:
     """How many subagent runs ``directory`` launched, best-effort, or 0.
 
     Read from the runtime's own roster sidecar through the same reader the
-    desktop's child routes use (``session.session._read_roster_sidecar``) rather
+    desktop's child routes use (``session.roster_sidecar.read_roster_sidecar``) rather
     than re-parsing the file, so "how many children does this conversation
     have" has one answer per conversation.
 
@@ -1122,12 +2248,12 @@ def _subagent_child_count(directory: Path) -> int:
     less informative.
     """
     try:
-        from local_operator.session.session import (
+        from local_operator.session.roster_sidecar import (
             SUBAGENT_ROSTER_SIDECAR,
-            _read_roster_sidecar,
+            read_roster_sidecar,
         )
 
-        payload = _read_roster_sidecar(directory / SUBAGENT_ROSTER_SIDECAR)
+        payload = read_roster_sidecar(directory / SUBAGENT_ROSTER_SIDECAR)
     except Exception:  # noqa: BLE001 — bookkeeping for a receipt, never a decision
         return 0
     if not payload:
@@ -1291,6 +2417,7 @@ def delete_session(
         # reason.
         _forget_wake_entry(config_dir, session_id)
         _forget_monitor_entry(config_dir, session_id)
+        _forget_session_captures(config_dir, session_id)
     return DeleteOutcome(
         session_id=session_id,
         found=True,
@@ -1301,15 +2428,66 @@ def delete_session(
     )
 
 
-def _append_cleanup_log(sessions_dir: Path, record: dict[str, Any]) -> None:
+def _forget_session_captures(config_dir: Path, session_id: str) -> None:
+    """Forget an explicitly deleted conversation's CAPTURED memory (decision D2).
+
+    WHY: session memory used to outlive its session forever — 1,911 facts /
+    334k tokens belonged to 65 deleted sessions on the operator's store, all of
+    them unreviewed captures nobody could reach any more. Only captures go:
+    deliberate facts (stated by an agent or the operator, or a promoted
+    candidate) are KEPT, listable with ``lop memory list --session ID`` and
+    movable, because someone chose to write them.
+
+    Only the EXPLICIT delete calls this. The automatic retention sweeps do not:
+    their contract is reclaiming disk, a sweep can reap hundreds of sessions in
+    one run (each forget re-exports and checkpoints the store), and their
+    captures still expire on their own 14-day deadline — the maintenance pass
+    expires a capture this host WROTE even after its directory is gone
+    (``memory_maintenance._expirable``; PR #3057 review round 3, M1-r3).
+
+    Best-effort like the wake/monitor pruning beside it — the directory is
+    already gone, so a store error must not turn a completed delete into a
+    reported failure; the captures then expire on schedule.
+    """
     try:
-        with (sessions_dir / CLEANUP_LOG_NAME).open("a", encoding="utf-8") as handle:
+        from local_operator.memory_maintenance import forget_session_captures
+
+        forgotten = forget_session_captures(config_dir, session_id)
+        if forgotten:
+            logger.info("forgot %d captured memories of deleted session %s", forgotten, session_id)
+    except Exception:  # noqa: BLE001 — the delete already happened; see docstring
+        logger.warning(
+            "could not forget deleted session %s's captured memory", session_id, exc_info=True
+        )
+
+
+def _append_cleanup_log(sessions_dir: Path, record: dict[str, Any]) -> bool:
+    """Append one row to the store's cleanup log; True only if it is DURABLE.
+
+    Returns False on any write failure and says so at ERROR. THE RETURN VALUE
+    IS THE REMOVAL GATE (2026-10-20): every content removal and every session
+    removal writes its receipt BEFORE it removes anything, and a caller that
+    gets False must not remove. A directory whose receipt cannot be written
+    survives — the log is the durable record the operator is told to read, and
+    the per-removal WARNING is not a substitute for it (it lives in a rotating
+    process log, not the store).
+
+    ``fsync`` before returning, deliberately: an append that reached the page
+    cache and died with the host is the same lost receipt as an append that
+    never happened, and this is the one write whose whole job is to outlive
+    the process. The cost is one fsync per removed item, which is bounded by
+    the same removals-per-pass bounds as the removals themselves.
+    """
+    path = sessions_dir / CLEANUP_LOG_NAME
+    try:
+        with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
     except OSError as exc:
-        # The removal still proceeds — the WARNING log line above carries the
-        # same facts — but say so, because the jsonl is the record the user
-        # is told to look at.
-        logger.warning("session cleanup: cannot append to %s: %s", CLEANUP_LOG_NAME, exc)
+        logger.error("session cleanup: cannot append to %s: %s", path, exc)
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1601,11 +2779,40 @@ def _has_open_asks(directory: Path) -> bool:
 
     FAIL-CLOSED on anything unreadable, like every probe in this module: the
     fold may raise on a hand-edited line, and an ask file that cannot be read is
-    an ask that might be open.
+    an ask that might be open. The explicit readability probe is load-bearing:
+    ``asks.store.read_events`` deliberately swallows an unreadable log into
+    ``[]`` (it runs beside live writers), which without this probe would read as
+    "no asks" and let both cleanup passes delete an answerable question
+    (QA Q-1, reproduced with ``chmod 000``).
+
+    RELAYS ARE READ FROM THE WATCHER'S OWN LOG, NEVER THE ORIGIN'S (#2673,
+    R1-3). A relay's status is normally DERIVED from the origin by the live
+    queue, and that derivation is unreachable here BY DESIGN: this probe runs on
+    a directory whose runtime is gone, and the queue is the only reader allowed
+    to open another session's log. So a relay whose origin was answered while
+    the watcher was stopped still folds ``open`` and holds its directory — the
+    conservative answer, since a pointer is cheap to keep and destroying a
+    session that still shows a card is not recoverable. What this probe CAN see
+    is folded: a locally withdrawn or dismissed relay reads settled
+    (``store._relay_record``), so the ordinary way to retire one works.
     """
     try:
         from local_operator.asks import store as ask_store
 
+        path = ask_store.asks_log_path(directory)
+        try:
+            path.stat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        try:
+            # Open it: ``read_events`` turns a permission error into ``[]``, so
+            # the one place that can tell "absent" from "unreadable" is here.
+            with path.open("rb"):
+                pass
+        except OSError:
+            return True
         records = ask_store.fold(ask_store.read_events(directory), ask_store.now_ms())
         return any(
             record.get("status")
@@ -1616,11 +2823,19 @@ def _has_open_asks(directory: Path) -> bool:
         return True
 
 
-def _guard(
+def _transcript_write_guard(
     directory: Path, config_dir: Path, now: float, *, live_owner_gone: bool = False
 ) -> str | None:
-    """The hard guards, in one place. Returns the guard's name when the
-    directory must be kept, ``None`` when the policy may consider it.
+    """The hazards that make REWRITING this session's transcript unsafe.
+    Returns the hazard's name, ``None`` when a writer may proceed.
+
+    This is the narrower half of :func:`_guard`, split out by CONCERN rather
+    than for reuse's sake. Compression rewrites the transcript and can be undone
+    (a verified restore happens on open), so the hazards that matter to it are
+    the ones a rewrite could race or contradict: an operator hold, a live claim
+    or lease on the directory, an armed wake or monitor that will fire against
+    it. The two CONTENT probes stay out of here and live in :func:`_guard`
+    because they answer a different question — see the asymmetry note there.
 
     Closed on every path: each probe already answers "keep" to its own
     failures, and the outer ``except`` makes an exception NONE of them
@@ -1632,10 +2847,28 @@ def _guard(
     call answers *after* its preempt wait, i.e. "with the resident this policy is
     holding removed, what is left to refuse?" — every other guard is still
     consulted, so a rehearsal cannot promise a deletion a wake or spooled mail
-    will refuse. The real path never passes it: there the lease is genuinely
-    gone, and the guards are read as they stand.
+    will refuse. Only :func:`_guard` forwards it, because only the deletion path
+    rehearses; the content probes it skips past are still read by ``_guard``
+    itself. The real path never passes it: there the lease is genuinely gone,
+    and the guards are read as they stand.
     """
     try:
+        try:
+            held = hold_for(Path(config_dir) / SESSIONS_DIRNAME, directory.name)
+        except HoldsUnreadable as exc:
+            # Fail closed with a diagnosable reason: an unreadable file is not
+            # evidence that nothing is held, it is absence of evidence.
+            logger.error(
+                "session cleanup: holds unreadable for %s (%s); keeping it",
+                directory.name,
+                exc,
+            )
+            return "operator holds unreadable"
+        if held is not None:
+            # The operator's explicit statement outranks every policy question
+            # below; nothing removes a held session but `release_hold`, which is
+            # itself a logged decision.
+            return "held by the operator"
         if not live_owner_gone:
             if _claimed(directory, now):
                 return "claimed by a live process"
@@ -1645,6 +2878,41 @@ def _guard(
             return "has an armed wake"
         if _has_armed_monitor(config_dir, directory.name):
             return "has an armed monitor"
+    except Exception as exc:  # noqa: BLE001 — a guard that cannot answer keeps
+        logger.warning("session cleanup: guard failed for %s (%r); keeping it", directory.name, exc)
+        return f"guard failed: {type(exc).__name__}"
+    return None
+
+
+def _guard(
+    directory: Path, config_dir: Path, now: float, *, live_owner_gone: bool = False
+) -> str | None:
+    """The hard guards for DELETION, in one place. Returns the guard's name
+    when the directory must be kept, ``None`` when the policy may consider it.
+
+    THE ASYMMETRY, which is why this is two layers and not one: deletion
+    destroys what it removes. An unread spooled message or an ask that can still
+    be answered is unrecoverable once the directory is gone — the user loses a
+    message they were never shown, or a question they can still see on their
+    phone. Compression does not: it rewrites the transcript and restores it on
+    open, and the mail and asks live in ``inbox.jsonl``/``asks.jsonl``, which no
+    compression path touches. So the two CONTENT probes must hold a deletion
+    and must not narrow a rewrite; ``compression._keep_reason`` therefore calls
+    :func:`_transcript_write_guard` and never this function. Narrowing _guard
+    instead would make the reversible pass refuse the operator's real old
+    transcripts (all 15 of a cloned store's sessions older than 30 days skipped
+    on "has unread spooled mail"), and widening the rewrite guard to match this
+    one would delete mail-protected sessions on a pass that has no business
+    asking.
+
+    Everything above the content probes is :func:`_transcript_write_guard`; the
+    composition keeps one definition per probe and keeps ``live_owner_gone``
+    meaning the same thing to both callers.
+    """
+    reason = _transcript_write_guard(directory, config_dir, now, live_owner_gone=live_owner_gone)
+    if reason is not None:
+        return reason
+    try:
         if _has_spooled_mail(directory):
             return "has unread spooled mail"
         if _has_open_asks(directory):
@@ -1675,8 +2943,10 @@ def _guard_refusal(reason: str, session_id: str) -> str:
     template = _GUARD_REFUSALS.get(reason)
     if template is None:
         return _GUARD_REFUSAL_FALLBACK
-    return template.replace("{wake_file}", f"wakes/{session_id}.json").replace(
-        "{monitor_file}", f"monitors/{session_id}.json"
+    return (
+        template.replace("{wake_file}", f"wakes/{session_id}.json")
+        .replace("{monitor_file}", f"monitors/{session_id}.json")
+        .replace("{session_id}", session_id)
     )
 
 
@@ -1713,10 +2983,246 @@ def _is_deletable_dir(directory: Path) -> bool:
 
 
 def _has_transcript(directory: Path) -> bool:
+    """Whether the session holds a NON-EMPTY transcript, in any physical form.
+
+    The physical source's size, so a compressed session still answers "yes, and
+    it has content": the archive is the conversation, and stat-ing the absent
+    plain name would report an empty session in the census.
+    """
+    source, _codec = compression.transcript_source(directory)
     try:
-        return (directory / TRANSCRIPT_FILENAME).stat().st_size > 0
+        return source.stat().st_size > 0
     except OSError:
         return False
+
+
+def measure_session_dir(
+    directory: Path, *, max_entries: int = CONTENTS_MAX_ENTRIES
+) -> dict[str, Any]:
+    """What a session directory HOLDS, bounded, for a removal receipt.
+
+    ``transcript_bytes`` (the conversation itself), ``pad_bytes``/
+    ``pad_entries`` (the scratchpad subtree, measured during the SAME walk that
+    produces the total — a second walk of the pad would double the cost of the
+    largest part of a session for no extra fact), ``bytes``/``entries`` (the
+    whole directory), ``origin`` (origin.json's value), ``last_activity_at``
+    (retention's ONE clock, rendered UTC ISO 8601), ``contents_complete`` (False
+    when the walk was CAPPED at ``max_entries`` **or** any entry could not be
+    read — both make every size a lower bound) and ``skipped_entries``.
+
+    NEVER RAISES for a filesystem problem, and an unreadable subtree is NOT
+    zero bytes: an ``OSError`` on a directory or an entry is counted in
+    ``skipped_entries`` and clears ``contents_complete``. The census relies on
+    that flag to refuse a size comparison — a 0000 pad read as "0 bytes" made
+    it report a 2 MB content loss that was still on disk (review round 1, M1) —
+    and a removal receipt that cannot see a subtree says so rather than
+    understating the loss.
+    """
+    pad_root = os.path.join(os.fspath(directory), PAD_DIRNAME)
+    contents: dict[str, Any] = {
+        "transcript_bytes": 0,
+        "pad_bytes": 0,
+        "pad_entries": 0,
+        "bytes": 0,
+        "entries": 0,
+        "origin": "",
+        "last_activity_at": None,
+        "contents_complete": True,
+        "skipped_entries": 0,
+    }
+    transcript_file, _codec = compression.transcript_source(directory)
+    try:
+        # The PHYSICAL bytes the conversation occupies now (the journal, or the
+        # archive that replaced it). A removal receipt states what is on disk, and
+        # the census compares like with like across passes; a compressed session
+        # reporting 0 would read as a 300 MB content loss.
+        contents["transcript_bytes"] = transcript_file.stat().st_size
+    except OSError:
+        pass
+    total = 0
+    entries = 0
+    pad_bytes = 0
+    pad_entries = 0
+    seen = 0
+    complete = True
+    skipped = 0
+    stack: list[tuple[str, bool]] = [(os.fspath(directory), False)]
+    while stack:
+        current, in_pad = stack.pop()
+        try:
+            with os.scandir(current) as scanned:
+                for entry in scanned:
+                    seen += 1
+                    if seen > max_entries:
+                        complete = False
+                        stack.clear()
+                        break
+                    entries += 1
+                    if in_pad:
+                        pad_entries += 1
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            child_in_pad = in_pad or entry.path == pad_root
+                            stack.append((entry.path, child_in_pad))
+                        elif entry.is_file(follow_symlinks=False):
+                            size = entry.stat(follow_symlinks=False).st_size
+                            total += size
+                            if in_pad:
+                                pad_bytes += size
+                    except OSError:
+                        # The entry exists (scandir listed it) but cannot be
+                        # read: its bytes are unknown, not absent.
+                        skipped += 1
+                        continue
+        except OSError:
+            # The DIRECTORY itself could not be scanned. Count it so the
+            # measurement cannot pass a partial walk off as complete.
+            skipped += 1
+            continue
+    contents["bytes"] = total
+    contents["entries"] = entries
+    contents["pad_bytes"] = pad_bytes
+    contents["pad_entries"] = pad_entries
+    contents["skipped_entries"] = skipped
+    contents["contents_complete"] = complete and skipped == 0
+    try:
+        from local_operator.resume import session_origin
+
+        contents["origin"] = session_origin(directory) or ""
+    except Exception:  # noqa: BLE001 — a label, never a reason to fail a receipt
+        contents["origin"] = ""
+    activity = session_activity(directory)
+    if activity is not None:
+        contents["last_activity_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(activity))
+    return contents
+
+
+class DirScanIncomplete(Exception):
+    """Part of a tree could not be inspected, and the caller asked to know.
+
+    Raised by :func:`bounded_dir_scan` in ``strict`` mode only. It carries the
+    offending path and the reason so the caller can name them to the operator:
+    "cannot be inspected" and "cannot be read" are different repair actions, and
+    a bare exception type tells nobody which happened where.
+    """
+
+    def __init__(self, path: str, reason: str) -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(f"{path}: {reason}")
+
+
+def bounded_dir_scan(
+    directory: Path,
+    max_entries: int = CONTENTS_MAX_ENTRIES,
+    *,
+    recency_max_entries: int | None = None,
+    fresh_since_ns: int | None = None,
+    strict: bool = False,
+) -> tuple[int, int, int, bool]:
+    """``(bytes, entries, newest_mtime_ns, truncated)`` under ``directory``.
+
+    BYTES AND ENTRIES ARE BOUNDED AT ``max_entries`` and are LOWER BOUNDS once
+    capped. One walk serves the size estimate a notice records, the entry count
+    a cleanup-log row carries, and the newest mtime a caller may use as a safety
+    signal, so the three can never disagree about what was measured.
+    Deliberately not :func:`_dir_bytes` (an unbounded ``rglob`` that also
+    follows into ``node_modules``): this runs per removed item.
+
+    THE MTIME IS THE REASON THIS RETURNS FOUR VALUES. A caller about to delete a
+    directory it takes whole (the content layer's shape arm) has no other cheap
+    sight of a file written inside it. Its two questions have different costs
+    and different stakes, so they carry different bounds: ``regency`` —
+    ``recency_max_entries`` (default ``max_entries``) — may look further than
+    the byte figure, because a size is only ever quoted in a notice while a
+    recency answer decides whether work is destroyed. Every enumerated entry is
+    statted, directories included: their own mtime changes when a file is added
+    or removed beside them.
+
+    ``truncated`` IS A FAIL-CLOSED SIGNAL: true means the walk stopped at the
+    recency bound without finishing, so "no recent entry" is NOT established and
+    the caller must keep what it was about to delete. ``fresh_since_ns`` lets a
+    caller stop the moment a recent entry is seen (nothing later can make the
+    subtree safer), which truncates the byte figure — safe only because that
+    caller then keeps the whole item; ignore ``bytes`` in that case.
+
+    ``strict`` IS FOR CALLERS THAT WILL DELETE ON THE ANSWER, AND ONLY FOR THEM.
+    Non-strict mode swallows every ``OSError`` (an unstattable entry, a
+    classification that fails, a subtree that cannot be scanned) and simply
+    does not observe it — so ``newest_mtime_ns`` can come back blind to a fresh
+    file it could not stat, and a caller that deletes on "no recent entry" would
+    destroy exactly the work this walk exists to protect. Strict mode raises
+    :class:`DirScanIncomplete` instead, carrying the path and the reason; the
+    content layer turns that into a whole-pad abort. Non-strict is therefore
+    only for callers that will NOT delete on the answer — the removal receipt
+    and any size notice — which need a lower bound, not a verdict.
+
+    Shared with ``delegated_retention`` — it lives HERE because the receipt
+    writer needs the same walk and cannot import that module, not the other way
+    round.
+    """
+    recency_cap = max_entries if recency_max_entries is None else recency_max_entries
+    total = 0
+    seen = 0
+    newest = 0
+    stack = [os.fspath(directory)]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if seen >= recency_cap:
+                        return total, min(seen, max_entries), newest, True
+                    seen += 1
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError as exc:
+                        if strict:
+                            raise DirScanIncomplete(
+                                entry.path, f"cannot be inspected ({exc.strerror or exc})"
+                            ) from exc
+                        continue
+                    newest = max(newest, info.st_mtime_ns)
+                    if fresh_since_ns is not None and info.st_mtime_ns >= fresh_since_ns:
+                        # Recent activity found: the caller keeps the whole item,
+                        # so its byte figure is never shown and the walk can stop.
+                        return total, min(seen, max_entries), newest, False
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False) and seen <= max_entries:
+                            total += info.st_size
+                    except OSError as exc:
+                        if strict:
+                            raise DirScanIncomplete(
+                                entry.path, f"cannot be classified ({exc.strerror or exc})"
+                            ) from exc
+                        continue
+        except OSError as exc:
+            if strict:
+                raise DirScanIncomplete(current, f"cannot be read ({exc.strerror or exc})") from exc
+            continue
+    return total, seen, newest, False
+
+
+def _bounded_dir_stats(directory: Path, max_entries: int = CONTENTS_MAX_ENTRIES) -> tuple[int, int]:
+    """``(bytes, entries)``: :func:`bounded_dir_scan` without the mtime figure.
+
+    Kept as the name every existing caller uses, so adding the mtime observation
+    could not silently change their shape.
+    """
+    total, seen, _newest, _truncated = bounded_dir_scan(directory, max_entries)
+    return total, seen
+
+
+def bounded_dir_bytes(directory: Path, max_entries: int = CONTENTS_MAX_ENTRIES) -> int:
+    """Bytes under ``directory`` counting at most ``max_entries`` entries.
+
+    A lower bound once capped. Deliberately not :func:`_dir_bytes` (an
+    unbounded ``rglob`` that also follows into ``node_modules``): this runs only
+    for the items about to be removed, so its cost is bounded per removal.
+    """
+    return _bounded_dir_stats(directory, max_entries)[0]
 
 
 def _dir_bytes(directory: Path) -> int:
@@ -1739,6 +3245,28 @@ class _Entry:
     activity: float | None
     has_transcript: bool
     size: int
+
+
+#: The reason a pinned session is kept, by the parent class and the delegated pass.
+PINNED_REASON = "pinned by the operator"
+
+
+def pinned_session_ids(config_dir: Path) -> frozenset[str]:
+    """Session ids the operator pinned in the sidebar; raises :class:`GuardUnavailable`.
+
+    The standing rule is "never remove a pinned session", and no cleanup path
+    consulted pins before. Uses the strict reader (``load_pin_ids``), not
+    ``read_pins``: the latter turns an unreadable file into ``[]``, which here
+    would mean "remove everything the operator pinned". An ABSENT file is "nothing
+    pinned". Read once per pass by each caller. Lazy import: ``local_operator.tui``
+    is heavy and this module must stay light for the runtime child.
+    """
+    from local_operator.tui.sidebar_pins import load_pin_ids
+
+    try:
+        return frozenset(load_pin_ids(config_dir))
+    except (OSError, ValueError) as exc:
+        raise GuardUnavailable(f"sidebar-pins.json: {exc}") from exc
 
 
 class GuardUnavailable(Exception):
@@ -1834,6 +3362,16 @@ def _session_title(directory: Path) -> str:
         return ""
 
 
+def _observe(callback: Callable[..., None] | None, *args: Any) -> None:
+    """Call a display observer; its failure never changes a cleanup decision."""
+    if callback is None:
+        return
+    try:
+        callback(*args)
+    except Exception:  # noqa: BLE001 — display only
+        logger.debug("session cleanup: observer callback failed", exc_info=True)
+
+
 def run_cleanup(
     config_dir: Path,
     policy: CleanupPolicy,
@@ -1843,8 +3381,18 @@ def run_cleanup(
     dry_run: bool = False,
     force: bool = False,
     actor: str = "startup",
+    on_plan: Callable[[Candidate], None] | None = None,
+    on_kept: Callable[[str, str], None] | None = None,
 ) -> CleanupResult:
     """Apply ``policy`` to ``config_dir/sessions``.
+
+    ``on_plan(row)`` / ``on_kept(name, guard)`` are display observers for the
+    CLI's preview: called as each candidate is DECIDED (chosen by the first limit
+    that takes it, or kept by a guard), with the values ``result.chosen`` /
+    ``result.protected`` end up holding, so a streamed listing never differs from
+    the final one. They fire while the PLAN is decided (a real run applies it
+    later, in :func:`apply_cleanup`, which they do not observe) and a failing
+    observer never changes a decision.
 
     THE MASTER SWITCH GOVERNS EVERY CALLER. Round 1 let the CLI run with
     ``enabled: false`` on the theory that typing the command was consent;
@@ -1917,7 +3465,16 @@ def run_cleanup(
 
     entries: list[_Entry] = []
     try:
-        children = [child for child in sessions_dir.iterdir() if child.is_dir()]
+        # A hidden directory is a SIDECAR, not a conversation (review M1):
+        # ``sessions/.cleanup-manifests/`` holds the content pass's path-level
+        # reclaim records, and ``sessions/.cleanup-log.jsonl`` lives beside them.
+        # Counting a sidecar as a transcriptless user session let `remove_empty`
+        # delete the whole audit trail and log a phantom row.
+        children = [
+            child
+            for child in sessions_dir.iterdir()
+            if child.is_dir() and not child.name.startswith(".")
+        ]
     except OSError as exc:
         logger.warning("session cleanup: cannot scan %s: %s", sessions_dir, exc)
         result.errors += 1
@@ -1945,6 +3502,7 @@ def run_cleanup(
             result.scanned += 1
             if live_resolved is not None and child.resolve() == live_resolved:
                 result.protected.append((child.name, "the current session"))
+                _observe(on_kept, child.name, "the current session")
                 continue
             entries.append(
                 _Entry(child, session_activity(child), _has_transcript(child), _dir_bytes(child))
@@ -1985,6 +3543,16 @@ def run_cleanup(
         return result
     recent = set(picker[:RECENT_KEEP])
     visible = set(picker)
+    try:
+        # Pins only ever ADD protection and apply with --force too: a pinned
+        # conversation is never listed removable. An unreadable pin file refuses
+        # the run, like an unavailable picker, rather than reading as "none".
+        pinned = pinned_session_ids(config_dir)
+    except GuardUnavailable as exc:
+        logger.warning("session cleanup: REFUSING to run, %s", exc)
+        result.skipped = f"guard unavailable: {exc}"
+        result.errors += 1
+        return result
     chosen: dict[str, Candidate] = {}
 
     # A directory several limits would take is reported once, under the first
@@ -1996,11 +3564,15 @@ def run_cleanup(
         if name not in protected_seen:
             protected_seen.add(name)
             result.protected.append((name, guard))
+            _observe(on_kept, name, guard)
 
     def consider(entry: _Entry, policy_name: str, reason: str) -> bool:
         name = entry.path.name
         if name in chosen:
             return True
+        if name in pinned:
+            protect(name, PINNED_REASON)
+            return False
         if name in recent:
             protect(name, f"one of the {RECENT_KEEP} most recent")
             return False
@@ -2019,6 +3591,7 @@ def run_cleanup(
             origin=_origin_label(entry.path),
             active=entry.activity is not None,
         )
+        _observe(on_plan, chosen[name])
         return True
 
     if policy.remove_empty:
@@ -2111,9 +3684,21 @@ def apply_cleanup(
     result = CleanupResult(scanned=plan.scanned, protected=list(plan.protected))
     result.chosen = list(plan.chosen)
     result.skipped = plan.skipped
+    try:
+        # Re-read at APPLY time: a pin placed between the preview and the
+        # confirmation is exactly the operator changing their mind about a row.
+        pinned = pinned_session_ids(config_dir)
+    except GuardUnavailable as exc:
+        logger.warning("session cleanup: REFUSING to apply, %s", exc)
+        result.skipped = f"guard unavailable: {exc}"
+        result.errors += 1
+        return result
     for candidate in plan.chosen:
         target = sessions_dir / candidate.session
         if not target.is_dir():
+            continue
+        if candidate.session in pinned:
+            result.protected.append((candidate.session, f"{PINNED_REASON} (since the preview)"))
             continue
         guard = _guard(target, config_dir, moment)
         if guard is not None:

@@ -1,0 +1,140 @@
+tui.projects_edit.form_title
+EN " · edit project"
+UR " · پروجیکٹ میں ترمیم"
+CX {"role": "page title suffix", "tone": "plain", "note": "Detail-page edit form identity; appended after the bold 'projects', same shape as tui.projects.new_project. Keep the leading middot and space."}
+tui.projects_edit.binding_edit
+EN "Edit project"
+UR "پروجیکٹ میں ترمیم کریں"
+CX {"role": "key binding description", "tone": "plain", "note": "Binding for `e` on the project detail page; opens the prefilled edit form. Not painted in the hint row (hints use the shorter hint_ keys)."}
+tui.projects_edit.binding_add_milestone
+EN "Add milestone"
+UR "سنگ میل شامل کریں"
+CX {"role": "key binding description", "tone": "plain", "note": "Binding for `a` on the detail page; opens the add-milestone prompt."}
+tui.projects_edit.binding_remove_milestone
+EN "Remove milestone"
+UR "سنگ میل ہٹائیں"
+CX {"role": "key binding description", "tone": "plain", "note": "Binding for `x` on the detail page; asks the inline y/n confirm before removing the selected milestone."}
+tui.projects_edit.binding_next_field
+EN "Next field"
+UR "اگلا خانہ"
+CX {"role": "key binding description", "tone": "plain", "note": "Tab inside the add-milestone prompt; moves between its two fields."}
+tui.projects_edit.binding_add
+EN "Add"
+UR "شامل کریں"
+CX {"role": "key binding description", "tone": "plain", "note": "Enter inside the add-milestone prompt; submits it."}
+tui.projects_edit.binding_cancel
+EN "Cancel"
+UR "منسوخ کریں"
+CX {"role": "key binding description", "tone": "plain", "note": "Escape inside the add-milestone prompt; closes it without writing."}
+tui.projects_edit.hint_edit
+EN "edit"
+UR "ترمیم"
+CX {"role": "hint label", "tone": "plain", "note": "Detail footer hint after the `e` key. Lowercase; the painter supplies the leading space and the key glyph."}
+tui.projects_edit.hint_add_milestone
+EN "add milestone"
+UR "سنگ میل شامل"
+CX {"role": "hint label", "tone": "plain", "note": "Detail footer hint after the `a` key. Lowercase."}
+tui.projects_edit.hint_remove_milestone
+EN "remove"
+UR "ہٹائیں"
+CX {"role": "hint label", "tone": "plain", "note": "Detail footer hint after the `x` key; armed only while a milestone row is selected. Lowercase."}
+tui.projects_edit.hint_next_field
+EN "next field"
+UR "اگلا خانہ"
+CX {"role": "hint label", "tone": "plain", "note": "Add-milestone prompt footer hint after `tab`. Lowercase."}
+tui.projects_edit.hint_add
+EN "add"
+UR "شامل"
+CX {"role": "hint label", "tone": "plain", "note": "Add-milestone prompt footer hint after `enter`. Lowercase."}
+tui.projects_edit.hint_cancel
+EN "cancel"
+UR "منسوخ"
+CX {"role": "hint label", "tone": "plain", "note": "Escape label in the add-milestone prompt footer. Lowercase."}
+tui.projects_edit.key_hint_edit
+EN "the reference handle — changing it renames the key"
+UR "حوالے کا ہینڈل — اسے بدلنے سے کلید کا نام بدلے گا"
+CX {"role": "field hint", "tone": "quiet", "note": "Under the key field in EDIT mode only. Create mode keeps tui.projects' follows-the-title hint. Single line; may clip at narrow widths."}
+tui.projects_edit.refusal_estimate_clear
+EN "an estimate cannot be cleared — enter a number or restore the old one"
+UR "تخمینہ صاف نہیں کیا جا سکتا — عدد درج کریں یا پرانا بحال کریں"
+CX {"role": "field refusal", "tone": "plain", "note": "Under the estimate field when the reader clears it: the store has no clear state for an estimate (ProjectEdit.estimate None means untouched). Must name the two ways forward."}
+tui.projects_edit.refusal_estimate_number
+EN "estimate must be a number"
+UR "تخمینہ عدد ہونا چاہیے"
+CX {"role": "field refusal", "tone": "plain", "note": "Under the estimate field when the text is not a number; matches the store's own sentence for the same case."}
+tui.projects_edit.refusal_estimate_range
+EN "estimate must be greater than 0 and at most {maximum}"
+UR "تخمینہ 0 سے بڑا اور زیادہ سے زیادہ {maximum} ہو"
+CX {"role": "field refusal", "tone": "plain", "note": "Under the estimate field when the number is outside the store's bound. {maximum} is the cap the store enforces (1000)."}
+tui.projects_edit.refusal_date_order
+EN "the target date is before the start date"
+UR "ہدف کی تاریخ آغاز کی تاریخ سے پہلے کی ہے"
+CX {"role": "field refusal", "tone": "plain", "note": "Under the target date when it precedes the start date. Mirrors the create form's rule in this namespace so the edit form does not reach into a pinned namespace."}
+tui.projects_edit.refusal_name_required
+EN "the key is required — it is the reference handle"
+UR "کلید ضروری ہے — یہی حوالے کا ہینڈل ہے"
+CX {"role": "field refusal", "tone": "plain", "note": "Under the key field when it is emptied. Same meaning as the create form's sentence; the edit form has no auto-slug, so there is no example to give."}
+tui.projects_edit.refusal_project_gone_edit
+EN "''{name}'' is no longer in the store — the edit was not saved"
+UR "اسٹور میں ''{name}'' اب موجود نہیں — ترمیم محفوظ نہیں ہوئی"
+CX {"role": "page notice", "tone": "plain", "note": "Footer notice when the project vanished between opening the edit form and saving. {name} is the project's display name."}
+tui.projects_edit.refusal_project_gone_milestone
+EN "''{name}'' is no longer in the store — the milestone was not changed"
+UR "اسٹور میں ''{name}'' اب موجود نہیں — سنگ میل نہیں بدلا"
+CX {"role": "page notice", "tone": "plain", "note": "Footer notice when the project vanished during an add/remove milestone write. {name} is the project's display name."}
+tui.projects_edit.no_changes
+EN "no changes to save"
+UR "محفوظ کرنے کے لیے کوئی تبدیلی نہیں"
+CX {"role": "receipt", "tone": "plain", "note": "Form footer after ctrl+s with nothing changed: no write happened. Short — the footer is one row."}
+tui.projects_edit.saved
+EN "saved"
+UR "محفوظ ہوا"
+CX {"role": "receipt", "tone": "plain", "note": "Detail footer after an edit landed. Short; the page recomposes from the store around it."}
+tui.projects_edit.confirm_remove
+EN "remove milestone ''{name}''? · y remove · n keep"
+UR "سنگ میل ''{name}'' ہٹائیں؟ · y ہٹائیں · n رکھیں"
+CX {"role": "inline confirm", "tone": "plain", "note": "Pinned one-line question before removing a milestone. Keep `y` and `n` literal: they are the keys. {name} is the milestone name."}
+tui.projects_edit.remove_needs_row
+EN "put the cursor on a milestone row to remove"
+UR "ہٹانے کے لیے کرسر سنگ میل کی قطار پر رکھیں"
+CX {"role": "page notice", "tone": "plain", "note": "Footer notice when `x` is pressed with a non-milestone row selected; names the arrow keys."}
+tui.projects_edit.removed
+EN "milestone ''{name}'' removed"
+UR "سنگ میل ''{name}'' ہٹا دیا گیا"
+CX {"role": "receipt", "tone": "plain", "note": "Detail footer after a milestone was removed. {name} is the milestone name."}
+tui.projects_edit.milestone_added
+EN "milestone ''{name}'' added"
+UR "سنگ میل ''{name}'' شامل ہوا"
+CX {"role": "receipt", "tone": "plain", "note": "Detail footer after a NEW milestone was added. {name} is the milestone name."}
+tui.projects_edit.milestone_updated
+EN "milestone ''{name}'' updated"
+UR "سنگ میل ''{name}'' اپ ڈیٹ ہوا"
+CX {"role": "receipt", "tone": "plain", "note": "Detail footer when `a` named a milestone that already existed: the store's add-or-update op updated it instead. {name} is the milestone name."}
+tui.projects_edit.milestone_unchanged
+EN "milestone ''{name}'' was already exactly that"
+UR "سنگ میل ''{name}'' پہلے سے بالکل ایسا ہی تھا"
+CX {"role": "receipt", "tone": "plain", "note": "Detail footer when `a` echoed an existing milestone exactly: the store reports a truthful no-change. {name} is the milestone name."}
+tui.projects_edit.prompt_title
+EN " · add milestone"
+UR " · سنگ میل شامل کریں"
+CX {"role": "page title suffix", "tone": "plain", "note": "Appended to the detail title while the add-milestone prompt is up. Keep the leading middot and space, like tui.projects.new_project."}
+tui.projects_edit.prompt_name_label
+EN "milestone"
+UR "سنگ میل"
+CX {"role": "field label", "tone": "plain", "note": "Label over the prompt's name input. Lowercase, one line."}
+tui.projects_edit.prompt_name_hint
+EN "a name that exists updates it"
+UR "موجودہ نام سے وہی سنگ میل اپ ڈیٹ ہوگا"
+CX {"role": "field hint", "tone": "quiet", "note": "States the store's add-or-update rule so a duplicate name does not surprise. One line."}
+tui.projects_edit.prompt_name_required
+EN "a milestone needs a name"
+UR "سنگ میل کا نام ضروری ہے"
+CX {"role": "field refusal", "tone": "plain", "note": "Under the name input when it is empty. One line."}
+tui.projects_edit.prompt_date_label
+EN "target date"
+UR "ہدف کی تاریخ"
+CX {"role": "field label", "tone": "plain", "note": "Label over the prompt's optional target-date input. Lowercase."}
+tui.projects_edit.prompt_date_hint
+EN "optional — YYYY-MM-DD"
+UR "اختیاری — YYYY-MM-DD"
+CX {"role": "field hint", "tone": "quiet", "note": "Names the optional format. Keep YYYY-MM-DD literal: it is the accepted spelling."}

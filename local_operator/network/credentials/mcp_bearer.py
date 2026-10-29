@@ -120,6 +120,23 @@ class BrokeredBearerAuth(httpx2.Auth):
         # id, and dropping first erased that read. ``report_sync`` drops the cache
         # itself before dialling, so nothing can re-serve the failed bearer.
         await asyncio.to_thread(self._client.report_sync, self.key, kind="unauthorized")
+        # THE DURABLE HALF OF THE 401. Without it the only place this failure
+        # exists is a bare ``auth-required`` on the remote: the broker refusal that
+        # caused the empty bearer (``interactive_required``, ``refresh_failed``,
+        # ``not_a_holder``) was swallowed by ``_blocking_bearer`` and nothing said
+        # why. ``unauthorized`` is the one state only this layer can observe, so it
+        # records it here; a later successful borrow overwrites it with ``synced``.
+        from local_operator.network.credentials import mcp_state
+
+        mcp_state.record(
+            getattr(self._client, "network_id", ""),
+            self.key,
+            state="unauthorized",
+            code="http_401",
+            owner_device=self._client.owner_of(self.key),
+            owner_name=self._client.owner_label(self.key),
+            root=getattr(self._client, "root", None),
+        )
         self._client.grants.drop(self.key)
         bearer = await asyncio.to_thread(self._blocking_bearer)
         if not bearer:

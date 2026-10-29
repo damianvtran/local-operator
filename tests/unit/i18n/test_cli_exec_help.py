@@ -177,12 +177,18 @@ def test_bootstrap_kill_switch_and_eligibility(tmp_path, monkeypatch):
     helper = _bootstrap()
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("LOP_LANG", "zh-CN")
-    assert helper.help_locale() == "en"
+    # Chinese ships since the security disposition, so the eligible tag wins.
+    assert helper.help_locale() == "zh-CN"
     (tmp_path / "config.yml").write_text("values:\n  language: fr\n")
     monkeypatch.setenv("LOP_I18N", "0")
     assert helper.help_locale() == "en"
 
 
+# Help follows the ELIGIBLE (shipped) set, never the prompt preference. Every
+# shipped locale now renders help - `ur` on its relay.asks wave and `zh-CN` on
+# its 2026-10-24 security disposition - so the `unknown` case is what keeps the
+# two sets apart here: a tag that is recognisable but unshipped falls back to
+# `en` rather than to itself.
 @pytest.mark.parametrize(
     "tag, expected",
     [
@@ -191,8 +197,8 @@ def test_bootstrap_kill_switch_and_eligibility(tmp_path, monkeypatch):
         ("ru", "ru"),
         ("vi", "vi"),
         ("hi", "hi"),
-        ("ur", "en"),
-        ("zh-CN", "en"),
+        ("ur", "ur"),
+        ("zh-CN", "zh-CN"),
         ("unknown", "en"),
     ],
 )
@@ -228,7 +234,9 @@ def test_twenty_generated_zero_argument_messages_and_english_fallback():
 
     source = catalogues.load_catalogue("en", "cli.exec_help")
     french = catalogues.load_catalogue("fr", "cli.exec_help")
-    assert set(french) == set(source)
+    chinese = catalogues.load_catalogue("zh-CN", "cli.exec_help")
+    spanish = catalogues.load_catalogue("es", "cli.exec_help")
+    assert set(french) == set(source) == set(chinese) == set(spanish)
     functions = [f for _, f in inspect.getmembers(keys, inspect.isfunction)]
     assert len(source) == len(functions) == 20
     for function in functions:
@@ -241,8 +249,18 @@ def test_twenty_generated_zero_argument_messages_and_english_fallback():
         # not the English source.
         assert fr == render_message(french[msg.code], msg.params, "fr")
         assert fr != en
-        # A locale without the namespace still falls back to the English source.
-        for locale in ("es", "ru", "vi", "hi", "zh-CN", "unknown"):
+        zh = messages.render(msg.code, msg.params, locale="zh-CN")
+        # zh-CN carries this namespace after its disposition: the rendered
+        # bytes are its catalogue value, not the English source.
+        assert zh == render_message(chinese[msg.code], msg.params, "zh-CN")
+        assert zh != en
+        # Spanish carries this namespace after the es W2 wave: its rendered
+        # bytes are its catalogue value, not the English source.
+        es = messages.render(msg.code, msg.params, locale="es")
+        assert es == render_message(spanish[msg.code], msg.params, "es")
+        assert es != en
+        # A locale that does not carry the namespace still falls back to English.
+        for locale in ("ru", "vi", "hi", "unknown"):
             assert messages.render(msg.code, msg.params, locale=locale) == en
     assert "{'required_sections': [...]}" in keys.output_schema().envelope(locale="en")["text"]
 

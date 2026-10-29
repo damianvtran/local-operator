@@ -11,6 +11,7 @@
  */
 import { useState, type ReactNode } from "react";
 import { cn } from "../../lib/cn";
+import { messageRuntime } from "../../store";
 
 /**
  * The dim that says "held shut, not broken" — applied per PART, never to the
@@ -35,7 +36,7 @@ export function Chevron({ open, className }: { open: boolean; className?: string
 	return (
 		<span
 			aria-hidden
-			className={cn("inline-block w-4 text-center text-ink-dim select-none", className)}
+			className={cn("lo-directional w-4 text-center text-ink-dim select-none", className)}
 		>
 			{open ? "▾" : "▸"}
 		</span>
@@ -50,6 +51,7 @@ export function Disclosure({
 	className,
 	headerClassName,
 	hintClassName,
+	bodyOnly = false,
 }: {
 	/** The header's content: a static node, or a FUNCTION of the open state for
 	    a header whose WORDS toggle with it — the supplement disclosures swap
@@ -74,9 +76,12 @@ export function Disclosure({
 	/** Extra classes for the held-shut hint — see its own note below; the
 	    subagents roster passes a stand-down width, nothing else does. */
 	hintClassName?: string;
+	/** The same body inside an already labelled modal needs no second disclosure. */
+	bodyOnly?: boolean;
 }) {
 	const [open, setOpen] = useState(defaultOpen);
 	const shown = open && !forceClosed;
+	if (bodyOnly) return <>{children}</>;
 	return (
 		<div className={className}>
 			<button
@@ -90,14 +95,14 @@ export function Disclosure({
 				   a long-press on a disabled control surfaces nothing. */
 				title={
 					forceClosed
-						? "Held shut while a question is waiting — answer it to reopen this panel."
+						? messageRuntime.t("relay.asks.disclosure.held_shut")
 						: undefined
 				}
 				onClick={() => setOpen(!shown)}
 				className={cn(
 					/* The compact label stays unchanged while the hit box matches the
 					   navigation controls users alternate with on a phone. */
-					"flex min-h-11 w-full items-center gap-1 text-left select-none",
+					"flex min-h-11 w-full items-center gap-1 text-start select-none",
 					headerClassName,
 				)}
 			>
@@ -119,7 +124,7 @@ export function Disclosure({
 					   and the label come first (D4: a failed fan-out is the least
 					   expendable token in this row). */
 					<span className={cn("shrink-0 text-meta text-ink-dim", hintClassName)}>
-						· answer first
+						{messageRuntime.t("relay.asks.disclosure.answer_first")}
 					</span>
 				) : null}
 			</button>

@@ -71,7 +71,7 @@ from local_operator.session.runtime.types import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from local_operator.harness.types import AudioContent, ImageContent
+    from local_operator.harness.types import AudioContent, DocumentContent, ImageContent
 
 from local_operator.harness.approval import (
     AUTHORITY_OPS,
@@ -94,7 +94,7 @@ from local_operator.operator.trust import (
     AnchorLoad,
     OperatorAnchor,
     anchor_path,
-    device_is_revoked,
+    device_is_admitted,
 )
 from local_operator.paths import config_dir
 from local_operator.session.attachments import AttachmentStore
@@ -109,9 +109,11 @@ from local_operator.session.runtime.registry import RecordPublisher
 from local_operator.session.runtime.types import (
     ASK_ATTACHMENTS_CAPABILITY,
     ASK_ATTACHMENTS_UNSUPPORTED,
+    ATTACH_ACTIVITY_CAPABILITY,
     ATTACH_MAX_CLIENTS,
     DESKTOP_WATCH_CAPABILITY,
     DESKTOP_WATCH_LEASE_S,
+    DOCUMENT_ATTACHMENTS_CAPABILITY,
     ENGAGED_ENV,
     EVENT_MUTE_CAPABILITY,
     EVENT_MUTE_DROP_TYPES,
@@ -208,6 +210,10 @@ def image_blocks(images: list[dict[str, str]] | None) -> list["ImageContent"]:
             ImageContent(
                 data=base64.b64encode(payload).decode("ascii"),
                 mime_type=wire_mime,
+                # The origin path is NOT trusted for any read: it is stored so
+                # history can say where the picture came from. The bytes are
+                # the bounded ones, so the path is provenance only.
+                path=str(item.get("origin_path") or "") or None,
             )
         )
     return out
@@ -289,10 +295,91 @@ def audio_blocks(audio: list[dict[str, str]] | None) -> list["AudioContent"]:
     return out
 
 
+def document_blocks(
+    files: list[dict[str, Any]] | None, model: Any = None
+) -> list["DocumentContent"]:
+    """Resolve the wire's file REFERENCES into DocumentContent blocks.
+
+    The ONE deliberate difference from :func:`image_blocks` is the failure
+    contract, and it is the whole point of the ticket that added this: an
+    image entry that cannot be decoded is dropped because a paste that
+    half-decoded should cost that one picture, but a FILE the composer showed
+    as a chip must never vanish — the model would then answer a question
+    about a document it never received. An unresolvable digest, an empty
+    store blob or an unreadable sidecar therefore raises
+    :class:`~local_operator.session.errors.AttachmentMissing` naming the file,
+    and the send is refused (409) before any paid work.
+
+    The MIME is the STORE's (decided from the bytes at upload), never the
+    ref's declared value; ``name``/``path`` are the SEND's provenance and ride
+    the block, because the store sidecar keeps MIME and size only (contract
+    amendment 7).
+
+    ``injection`` is stamped here from the session's CURRENT model as
+    historical metadata (amendment 6): it says how this turn was expected to
+    reach the model. The serializer re-decides from the wire it actually
+    speaks, so a ``/model`` switch after this row is written does not inherit
+    the label.
+    """
+    if not files:
+        return []
+    from local_operator.harness.types import DocumentContent
+    from local_operator.providers.documents import (
+        admission_wire,
+        document_form,
+        document_injection,
+    )
+    from local_operator.session.errors import AttachmentMissing
+
+    if len(files) > 8:
+        # The HTTP door refuses a ninth file at the schema (422); the socket
+        # exists for clients that do not share that model, so the bound is
+        # enforced here too rather than letting a buggy frame put arbitrarily
+        # many 32 MB references through the synchronous admission prelude
+        # (agent review round 1, n2).
+        raise ValueError("at most 8 document attachments are allowed per message")
+    provider = str(getattr(model, "provider", "") or "")
+    supports_responses = bool(getattr(model, "supports_responses_api", False))
+    supports_images = bool(getattr(model, "supports_images", True))
+    form = document_form(
+        provider,
+        admission_wire(provider, supports_responses_api=supports_responses),
+        supports_images=supports_images,
+        context_window=getattr(model, "context_window", None),
+    )
+    store = AttachmentStore()
+    out: list[DocumentContent] = []
+    for item in files:
+        if not isinstance(item, dict):
+            # A malformed frame is REFUSED, not skipped: this is the reference
+            # path for a file the composer showed, and dropping the entry would
+            # send the text of a message whose chip the user watched leave.
+            raise ValueError("a document reference must be an object")
+        digest = str(item.get("digest") or "")
+        filename = str(item.get("name") or "") or (digest or "the attached file")
+        resolved = store.get_bytes(digest) if digest else None
+        if resolved is None:
+            raise AttachmentMissing(filename=filename)
+        raw, mime_type = resolved
+        block = DocumentContent(
+            data=base64.b64encode(raw).decode("ascii"),
+            mime_type=mime_type,
+            filename=filename,
+            path=str(item.get("path") or "") or None,
+            # The retained copy's absolute path, for the history card's
+            # moved/deleted state (the UI must offer a path that exists).
+            stored_path=str(store.path_for(digest)),
+            bytes=len(raw),
+            digest=digest,
+        )
+        block.injection = document_injection(block, form)
+        out.append(block)
+    return out
+
+
 #: A prompt payload past 1 MB is a bug, not a prompt — the line limit the
 #: control socket reader enforces.
 _MAX_LINE_BYTES = 1 << 20
-
 #: How long the per-connection sync task waits for the ON-LOOP frontend bind
 #: before falling back to the off-loop one (``_serve_frontend_sync``).
 #:
@@ -782,6 +869,18 @@ def relay_frame_or_degraded(frame: dict[str, Any], cap_bytes: int) -> dict[str, 
       through and only the oversized BODY is shed. The viewer sees a
       well-sequenced delta whose payload says it was degraded.
 
+    NEVER DROP WITHOUT SAYING WHAT TO DO. Both stand-ins are also PAUSED
+    state: the owner has stopped being able to describe canonical state on
+    this stream, so a client that keeps painting the last delta is showing
+    a view that no longer follows the session. ``paused`` says so, and
+    ``action: "reload"`` (the notice only) names the one recovery that
+    exists — re-sync through ``frontend_sync`` and durable history. The
+    flag CLEARS CLIENT-SIDE on the next complete frame: a ``frontend_sync``
+    carries the whole snapshot, and the next ``frontend_update`` that is not
+    ``degraded`` carries a body this stream can apply again. No new frame op
+    is needed for the clear, which is why this stays an additive key on the
+    frames old readers already accept.
+
     Cost on the hot path: one ``json.dumps`` per frame, measured at ~48µs on a
     20 KB frame (about 41% of the send's own serialization). That is an
     ADDITIONAL serialization, not a reused one — the send does its own — and it
@@ -827,11 +926,25 @@ def relay_frame_or_degraded(frame: dict[str, Any], cap_bytes: int) -> dict[str, 
                 "sequence": data.get("sequence"),
                 "degraded": True,
                 "degraded_reason": text,
+                # The rendering half of the same fact: a viewer that only
+                # paints what it can apply needs to know it is paused, not
+                # merely that one delta was dropped. Additive, so an older
+                # reader ignores it exactly as it ignores any extra key.
+                "paused": True,
             },
         }
     return {
         "op": op,
-        "data": {"type": "notice", "text": text, "kind": "warning"},
+        "data": {
+            "type": "notice",
+            "text": text,
+            "kind": "warning",
+            # A notice is passive; these two keys are what make it
+            # ACTIONABLE, and they are the event-frame half of the pair
+            # documented on ``FrontendUpdate.degraded``.
+            "paused": True,
+            "action": "reload",
+        },
     }
 
 
@@ -1030,6 +1143,80 @@ _SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "abort", "steer", "cancel"})
 #: :meth:`RuntimeServer._dispatch_frame`.
 _UNCHAINED_OPS = frozenset({"ping", "abort"})
 
+#: Ops that change the model or reasoning effort, and so ride their OWN lane of
+#: the connection's op chain instead of queuing behind whatever was admitted
+#: before them.
+#:
+#: WHY. A switch takes effect at the next provider call, and the user reaches
+#: for it mid-turn because the running model is doing badly (see
+#: ``Session.set_model``). The desktop's attach connection is shared with its
+#: sends, and a ``prompt`` sent while a turn runs PARKS inside the handle until
+#: the turn lock frees (``wait_for_turn``). Chained behind it, the switch waited
+#: for the whole remaining turn. Measured on a real runtime
+#: (``scripts/bench_model_switch.py --condition parked``: 12 lanes, a 240-child
+#: roster, a 40 MB transcript, one prompt parked on the same connection): the
+#: dispatcher first SAW a ``set_model`` 31.3 s after it was sent and the client
+#: gave up at its 15 s ack bound; ``set_effort`` the same (16.9 s). That is the
+#: operator's "/model did not run: the app waits up to 20 seconds".
+#:
+#: WHAT ORDERING SURVIVES. Two guarantees, and the lane is shaped to keep both:
+#:
+#: * switches stay in order AMONG THEMSELVES — each waits for the previous
+#:   switch on this connection (``_ClientConn.switch_chain``), so a quick
+#:   A-then-B cannot land as B-then-A;
+#: * anything admitted AFTER a switch still waits for it — the chain head
+#:   becomes a join of the previous head and the switch, so a ``prompt`` sent
+#:   after a ``/model`` runs on the model the user just picked (the draft's
+#:   ``_consume_model_override`` awaits the switch before it sends, and a
+#:   client that does not await is still ordered by this join).
+#:
+#: The one thing given up is that a switch no longer waits for an op admitted
+#: BEFORE it that is still parked — which is the point: a parked prompt whose
+#: turn has not begun will now run on the newly picked model, exactly what the
+#: switch would have done to the turn in flight anyway.
+#:
+#: ``slash``/``slash_result`` belong here only for the commands that ARE
+#: switches, or dials a switch resets (:data:`_SWITCH_SLASH_COMMANDS`): the desktop's model picker
+#: dispatches its choice as ``slash_result`` ``/model`` (see
+#: ``AttachedSession.route_shared_slash``), and every other slash keeps its
+#: place in the main chain. See :func:`_is_switch_frame`.
+_SWITCH_OPS = frozenset({"set_model", "set_effort"})
+
+#: The routed slash commands that ride the switch lane, by registry PRIMARY name.
+#:
+#: ``/fast`` is here for ORDER, not speed (PR #3053 QA round 1, Q1-2). It is a
+#: dial on the model's spec, and a genuine ``/model`` switch drops it. Left on
+#: the main chain while ``/model`` overtook, a ``/fast on`` sent BEFORE a
+#: ``/model B`` behind a parked prompt landed AFTER the switch, so the session
+#: ended on B with the premium tier on, where the send order (and the base
+#: behaviour) ends on B with it off. On the same lane the two keep send order
+#: among themselves, which is the lane's first guarantee.
+_SWITCH_SLASH_COMMANDS = frozenset({"model", "effort", "fast"})
+
+
+def _is_switch_frame(frame: Any) -> bool:
+    """Whether ``frame`` is a model/effort switch that rides the switch lane.
+
+    The slash command is resolved through the registry's alias table
+    (``primary_slash_name``) because the owner's dispatcher resolves it the same
+    way before it runs (``run_slash_authoritative``): a client sending the
+    advertised alias ``/models`` reaches the same ``/model`` branch, and must
+    reach it through the same lane (review round 1, R1-3).
+    """
+    if not isinstance(frame, dict):
+        return False
+    op = frame.get("op")
+    if op in _SWITCH_OPS:
+        return True
+    if op not in ("slash", "slash_result"):
+        return False
+    command = frame.get("command")
+    if not isinstance(command, str):
+        return False
+    from local_operator.slash_commands import primary_slash_name
+
+    return primary_slash_name(command.strip().lower()) in _SWITCH_SLASH_COMMANDS
+
 
 #: Connection-LOCAL ops admitted alongside the priority set above. Not a widening
 #: of it: each mutates only this connection's own relay state and never touches
@@ -1089,6 +1276,7 @@ _SYNC_LOCAL_OPS = frozenset(
         "desktop_watch",
         "desktop_withdraw",
         "viewer_watch",
+        "activity",
         "event_mute",
         "event_unmute",
     }
@@ -1223,6 +1411,13 @@ _ANCHOR_REFRESH_S = ANCHOR_REFRESH_S
 #: How long a verified device certificate is remembered. The certificate is
 #: checked lazily and per certificate string; a TTL rather than a permanent cache
 #: because the anchor's revocation list can change under a long-running session.
+#:
+#: IT DOES NOT BOUND A REFUSAL. Everything the anchor decides in the ADMITTING
+#: direction — a phone the human has just confirmed — has to become visible inside
+#: ``ANCHOR_REFRESH_S``, so a cached ``point=None`` expires with that window rather
+#: than with this one (``_device_cert_point``); otherwise the confirmation copy tells
+#: a human to do something the runtime then ignores for five minutes (agent review
+#: round 1, m2).
 _DEVICE_CERT_TTL_S = 300.0
 
 #: Bound on the device-certificate cache. Keyed by an attacker-chosen string, so
@@ -1332,6 +1527,27 @@ async def _answer_attachment_kwargs(
             )
         attachments[question_id] = list(blocks)
     return {"attachments": attachments}
+
+
+def _takes_document_files(handle: Any) -> bool:
+    """Whether ``handle``'s ``prompt`` AND ``steer`` take the ``files`` keyword.
+
+    Same literal-parameter rule as :func:`_takes_input_mode` and for the same
+    reason: ``**kwargs`` would count as accepting while the dispatch only
+    passes a keyword the literal name is present for, so advertising on it
+    would promise carriage the dispatch drops.
+    """
+    for name in ("prompt", "steer"):
+        method = getattr(handle, name, None)
+        if method is None:
+            return False
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            return False
+        if "files" not in parameters:
+            return False
+    return True
 
 
 def _takes_input_mode(handle: Any) -> bool:
@@ -1629,6 +1845,15 @@ class _ClientConn:
     #: explicitly declares it switched away is discounted, so the change can
     #: never invent a silent session out of an older viewer.
     terminal_displaying: bool = True
+    #: EPOCH MILLISECONDS of the newest REAL key/mouse edge the attached
+    #: terminal reported through the ``activity`` op, or 0 for "never reported".
+    #:
+    #: A TIMESTAMP, NEVER THE EVENT. The inbox needs to know whether the
+    #: operator is at the keyboard (docs/notifications/contract §6.3) — whether a
+    #: banner would be raised over a card they are already reading. What was
+    #: typed is none of the runtime's business, so the message carries one
+    #: integer and nothing else; a keystroke's content never leaves the UI.
+    tui_input_at_ms: int = 0
     #: Which action-carrying slash receipts this client renders itself (see
     #: ``SLASH_ACTION_RECEIPTS``). ``None`` means the auth frame omitted the
     #: field, i.e. a client built before it existed — the runtime then
@@ -1788,6 +2013,11 @@ class _ClientConn:
     #: flight. See ``RuntimeServer._dispatch_frame`` for the measured failure
     #: the shape fixes (a parked ``steer`` made the whole connection mute).
     op_chain: asyncio.Task[None] | None = None
+    #: The last model/effort switch admitted on this connection. Switches wait
+    #: on THIS rather than on ``op_chain`` so a parked op ahead of them cannot
+    #: hold them, while still running in order among themselves — see
+    #: :data:`_SWITCH_OPS`.
+    switch_chain: asyncio.Task[None] | None = None
     #: Strong references to those tasks. A bare ``create_task`` can be collected
     #: mid-await, which would leave an op half-run and its reply never written —
     #: the same reason ``RuntimeServer._event_sends`` exists.
@@ -2029,9 +2259,13 @@ class RuntimeServer:
         )
         #: Verified device certificates, by certificate string, with a TTL — see
         #: ``_device_cert_point`` for why this is lazy, bounded and short-lived.
-        #: ``(point, deadline, device_id)``: the id is kept so REVOCATION can be
-        #: re-checked on a cache hit — see the method, and R6-1.
-        self._device_certs: dict[str, tuple[bytes | None, float, str]] = {}
+        #: ``(point, deadline, device_id, device_key)``: the id AND the key the
+        #: certificate carries are kept so ADMISSION — which is revocation plus the
+        #: id-is-the-key binding plus the anchor's list — can be re-checked on a
+        #: cache hit. What is cached is the expensive half (the signature and the
+        #: expiry, which cannot change); whether the anchor still admits the device
+        #: can, because it is the operator's own action.
+        self._device_certs: dict[str, tuple[bytes | None, float, str, bytes]] = {}
         #: Every unspent operator challenge in this runtime, by challenge string,
         #: with its deadline — the AGGREGATE bound the per-connection maximum
         #: cannot be (see ``_MAX_LIVE_CHALLENGES``). Pruned on mint and on
@@ -2069,6 +2303,8 @@ class RuntimeServer:
         #: makes a runtime whose handle cannot report indistinguishable from
         #: one that predates the fields — both are honestly "unreported", and
         #: neither is a measured zero.
+        self._waiting_on = 0
+        self._jobs_running: int | None = None
         self._subagents_running: int | None = None
         self._subagents_queued: int | None = None
         #: True until a terminal attaches. A freshly spawned runtime genuinely
@@ -2204,6 +2440,11 @@ class RuntimeServer:
                 # mute is a property of the RELAY this server always runs, not
                 # of anything the handle implements.
                 + [EVENT_MUTE_CAPABILITY]
+                # Unconditional for the identical reason: the input stamp is a
+                # property of THIS server's attach records, not of the handle —
+                # and the viewer must see the string before it sends the op,
+                # because an unknown op costs it the whole stream.
+                + [ATTACH_ACTIVITY_CAPABILITY]
                 + ([FRONTEND_CAPABILITY] if hasattr(handle, "subscribe_frontend") else [])
                 + (["completion-ack-v1"] if hasattr(handle, "acknowledge_attention") else [])
                 + (["display-history-window-v1"] if hasattr(handle, "history_page") else [])
@@ -2276,6 +2517,12 @@ class RuntimeServer:
                 # asks both methods — see ``_takes_input_mode``, which mirrors
                 # the dispatch's own check exactly.
                 + ([INPUT_MODE_CAPABILITY] if _takes_input_mode(handle) else [])
+                # DOCUMENTS, on the same gated-on-the-handle rule: the string
+                # is the sender's licence to send ``Prompt.files``, and an
+                # owner whose dispatch would drop the key must not advertise
+                # it — the send is then REFUSED (contract amendment 1), never
+                # forwarded without its files.
+                + ([DOCUMENT_ATTACHMENTS_CAPABILITY] if _takes_document_files(handle) else [])
                 # IMAGES ON A QUEUED-ASK ANSWER, gated on the handle that would
                 # KEEP them for the reason above, and read by senders that
                 # REFUSE (rather than strip) when it is absent: an image is
@@ -3733,6 +3980,19 @@ class RuntimeServer:
                 # merely bounding staleness. A handle that does not implement
                 # the probe leaves the counts at ``None`` — unreported, which
                 # is the honest answer and not a zero.
+                waiting = getattr(self._handle, "waiting_on", None)
+                if callable(waiting):
+                    reported_wait = waiting()
+                    if isinstance(reported_wait, int) and not isinstance(reported_wait, bool):
+                        self.set_waiting(reported_wait)
+                jobs = getattr(self._handle, "job_counts", None)
+                if callable(jobs):
+                    reported_jobs = jobs()
+                    self.set_jobs(
+                        reported_jobs
+                        if isinstance(reported_jobs, int) and not isinstance(reported_jobs, bool)
+                        else None
+                    )
                 counts = getattr(self._handle, "subagent_counts", None)
                 if callable(counts):
                     # Shape-checked rather than unpacked blind: the probe is
@@ -3763,6 +4023,8 @@ class RuntimeServer:
                         # silently dropping the bit and making a working
                         # session broadcast-invisible.
                         started=self._started,
+                        waiting_on=self._waiting_on,
+                        jobs_running=self._jobs_running,
                         beat_lag_s=lag_s,
                         cpu_since_beat_s=cpu_since_beat_s,
                     )
@@ -4657,7 +4919,13 @@ class RuntimeServer:
         # crashing gate in front of it: a non-dict frame is chained like any
         # other and left to the dispatch to reject.
         chained = not (isinstance(frame, dict) and frame.get("op") in _UNCHAINED_OPS)
-        previous = conn.op_chain if chained else None
+        # A switch waits only on the switch before it, never on the main chain:
+        # see :data:`_SWITCH_OPS` for the measured stall and what ordering is kept.
+        switch = chained and _is_switch_frame(frame)
+        if switch:
+            previous = conn.switch_chain
+        else:
+            previous = conn.op_chain if chained else None
 
         async def run() -> None:
             if previous is not None:
@@ -4673,7 +4941,25 @@ class RuntimeServer:
                 self._release_request()
 
         task = asyncio.create_task(run())
-        if chained:
+        if switch:
+            conn.switch_chain = task
+            # The head becomes the JOIN of everything admitted so far, so an op
+            # admitted after this switch still waits for it AND for whatever
+            # the switch overtook — the chain stays transitive.
+            head = conn.op_chain
+            if head is None or head.done():
+                conn.op_chain = task
+            else:
+                joined = {head, task}
+
+                async def join() -> None:
+                    await asyncio.wait(joined)
+
+                join_task = asyncio.create_task(join())
+                conn.op_chain = join_task
+                conn.op_tasks.add(join_task)
+                join_task.add_done_callback(conn.op_tasks.discard)
+        elif chained:
             conn.op_chain = task
         conn.op_tasks.add(task)
         task.add_done_callback(lambda completed: self._op_settled(conn, completed))
@@ -5030,6 +5316,36 @@ class RuntimeServer:
         except Exception:  # noqa: BLE001 — a failure notice never breaks the runtime
             logger.warning("could not journal the failed update", exc_info=True)
 
+    def _bridge_card_may_engage(self, frame: Mapping[str, Any]) -> bool:
+        """The ONE exception to the unengaged peer gate: a Team Bridge card to
+        the member's designated chief of staff, when their ACCEPTED consent
+        discloses that a message may engage it (live E2E F8).
+
+        Only a frame stamped ``custom_type=team_bridge_message`` is considered;
+        the type is validated against the allowlist further down this op, so a
+        forged value is still refused there. The decision itself is
+        ``team_bridge.engagement.designated_session_may_be_engaged``, read from
+        this runtime's own config root: enabled, a live enrollment naming THIS
+        session, and an accepted consent version in the explicit engaging set.
+        Anything else keeps the ordinary refusal. Imported in-function, inside
+        the refusal branch, so the happy path pays nothing.
+        """
+
+        if frame.get("custom_type") != "team_bridge_message":
+            return False
+        try:
+            from local_operator.team_bridge.engagement import (
+                designated_session_may_be_engaged,
+            )
+
+            root = getattr(self, "_config_root", None) or config_dir()
+            return designated_session_may_be_engaged(
+                str(self._record.session_id or ""), config_dir=root
+            )
+        except Exception:  # noqa: BLE001 — a gate that cannot answer refuses
+            logger.warning("bridge engagement check failed; refusing", exc_info=True)
+            return False
+
     def set_record_started(self, started: bool) -> None:
         """Record that this session has run at least one real turn.
 
@@ -5064,6 +5380,21 @@ class RuntimeServer:
         """
         self._started = started
         self._record.started = started
+        self._republish()
+
+    def set_waiting(self, count: int) -> None:
+        """Publish a changed wait count only; heartbeat polls must be cheap."""
+        count = max(0, int(count))
+        if self._waiting_on == count:
+            return
+        self._waiting_on = count
+        self._republish()
+
+    def set_jobs(self, count: int | None) -> None:
+        """Preserve unknown versus measured zero for non-subagent jobs."""
+        if self._jobs_running == count:
+            return
+        self._jobs_running = count
         self._republish()
 
     def set_subagents(self, running: int | None, queued: int | None) -> None:
@@ -5117,6 +5448,8 @@ class RuntimeServer:
                 # same read as ``detached`` because the two answers come from one
                 # snapshot of ``_clients`` (see ``_visible_attach_surfaces``).
                 watching=bool(self.attach_clients()),
+                waiting_on=self._waiting_on,
+                jobs_running=self._jobs_running,
                 subagents_running=self._subagents_running,
                 subagents_queued=self._subagents_queued,
             )
@@ -5518,6 +5851,41 @@ class RuntimeServer:
         except RuntimeError:
             logger.debug("no running loop to nudge the session from", exc_info=True)
 
+    def tui_input_age_s(self) -> float | None:
+        """Seconds since the newest REAL input edge a DISPLAYING terminal reported.
+
+        THE READER BEHIND THE RUNG-4 STAND-DOWN (R6-1). ``serving.
+        _tui_viewer_active`` reads this name; before it existed the probe always
+        answered ``None`` and the runtime kept bannering the conversation the
+        operator was reading, so the ladder's rung 3 and rung 4 disagreed.
+
+        ``None`` is the honest answer for every case this cannot prove, and every
+        caller treats it as "raise the banner" (contract §6.3):
+        ``None`` when no attach connection ever reported an edge, when the only
+        reporters have declared they are showing something else
+        (``terminal_displaying`` False), or when the clock cannot be read.
+
+        ONLY THE AGE. The connection keeps one epoch millisecond per the
+        ``activity`` op; nothing about what was typed is stored or returned.
+        """
+        stale: float | None = None
+        try:
+            now = time.time()
+            for conn in list(self._clients.values()):
+                if getattr(conn, "kind", "") != "attach":
+                    continue
+                if not getattr(conn, "terminal_displaying", True):
+                    continue
+                stamp = int(getattr(conn, "tui_input_at_ms", 0) or 0)
+                if stamp <= 0:
+                    continue
+                age = max(0.0, now - stamp / 1000.0)
+                stale = age if stale is None else min(stale, age)
+        except Exception:  # noqa: BLE001 — an unreadable table is "cannot tell"
+            logger.debug("could not read the TUI input age", exc_info=True)
+            return None
+        return stale
+
     def watching_surfaces(self) -> frozenset[str]:
         """Which KINDS of surface have a HUMAN watching this session right now.
 
@@ -5698,6 +6066,18 @@ class RuntimeServer:
         lifetime of a session that can run for days. The cache is keyed by the
         certificate string, so a different certificate is always verified rather
         than matched against a stale answer.
+
+        TWO WINDOWS, ONE ENTRY. What the anchor decides survives the entry for
+        ``ANCHOR_REFRESH_S`` at most: an ADMITTED point is re-checked against the
+        anchor on every use (so a revocation or a de-listing made after that entry was
+        filled takes effect within one anchor window, not only on a restart — the
+        anchor it is checked against is the caller's snapshot, refreshed every
+        ``ANCHOR_REFRESH_S``), and a REFUSAL expires after the same window rather than after
+        ``_DEVICE_CERT_TTL_S``, because listing is the transition a HUMAN causes and
+        the phone has to be admitted within the time the confirming copy promises
+        (agent review round 1, m2). Only the expensive half — the operator signature
+        and the expiry, which cannot change — is reused for the full certificate
+        TTL.
         """
         if not isinstance(certificate, str) or not certificate:
             return None
@@ -5706,32 +6086,51 @@ class RuntimeServer:
         cached = self._device_certs.get(certificate)
         now = time.monotonic()
         if cached is not None and cached[1] > now:
-            # REVOCATION IS RE-CHECKED ON EVERY USE, even on a cache hit (agent
+            # ADMISSION IS RE-CHECKED ON EVERY USE, even on a cache hit (agent
             # review round 6, R6-1 — the second half of it, and the half the
             # certificate TTL alone does not cover). What is cached is the
             # EXPENSIVE half: the signature and expiry verification, which cannot
-            # change. Whether the certificate's device is REVOKED can, and it is
-            # the operator's own action — so it is read from the anchor every time
+            # change. Whether the anchor ADMITS the certificate's device can, and it
+            # is the operator's own action — so it is read from the anchor every time
             # rather than frozen for `_DEVICE_CERT_TTL_S`. Without this, a device
-            # revoked while a runtime was running kept acting for up to five
-            # minutes after the anchor re-read that was meant to stop it.
-            point, _deadline, device_id = cached
+            # revoked (or de-listed) while a runtime was running kept acting for up
+            # to five minutes after the anchor re-read that was meant to stop it.
+            point, _deadline, device_id, device_key = cached
             if point is None:
                 return None
-            return None if device_is_revoked(anchor, device_id) else point
+            return None if not device_is_admitted(anchor, device_id, device_key) else point
         parsed = operator_verify.read_device_cert(certificate)
         point = operator_verify.verify_device_cert(
             certificate, operator_spki=anchor.spki, now=int(time.time()), parsed=parsed
         )
         device_id = parsed.device_id if parsed is not None else ""
+        device_key = parsed.spki if parsed is not None else b""
         if point is not None:
-            # A certificate that names a REVOKED device is refused here, at the
-            # point its identity is known: ``verify_device_cert`` deliberately
-            # knows nothing about revocation (it checks a signature and an
-            # expiry), and the revocation list is a property of the anchor.
-            if device_is_revoked(anchor, device_id):
+            # A certificate that does not ADMIT its device is refused here, at the
+            # point its identity is known: ``verify_device_cert`` deliberately knows
+            # nothing about admission (it checks a signature and an expiry), and
+            # whether the anchor lists — or has revoked — this device is a property
+            # of the anchor, while whether the declared id is the KEY's id is a
+            # property of the statement the signature just covered.
+            if not device_is_admitted(anchor, device_id, device_key):
                 point = None
-        self._device_certs[certificate] = (point, now + _DEVICE_CERT_TTL_S, device_id)
+        deadline = now + (
+            _DEVICE_CERT_TTL_S
+            if point is not None
+            # A REFUSAL IS CACHED FOR THE ANCHOR WINDOW, NOT THE CERTIFICATE TTL
+            # (agent review round 1, m2). What was cached as "this certificate is
+            # refused" was safe while the only anchor-driven transition was
+            # admit -> revoked; listing introduced the REVERSE, and the human's own
+            # gesture is what causes it. Frozen for five minutes, a phone the person
+            # had just confirmed kept being refused with the very copy telling them
+            # to confirm it — against the split's "accepted within 30 s" cell
+            # (``ANCHOR_REFRESH_S``). The two directions now cost their own
+            # window: a refusal expires with the anchor re-read it depends on, a
+            # verified point keeps the certificate TTL, because re-verifying it on
+            # every frame would buy nothing (a signature does not become valid).
+            else min(_DEVICE_CERT_TTL_S, _ANCHOR_REFRESH_S)
+        )
+        self._device_certs[certificate] = (point, deadline, device_id, device_key)
         if len(self._device_certs) > _MAX_CACHED_DEVICE_CERTS:
             # Bounded: a client can present a new certificate string on every
             # frame, and an unbounded cache keyed by attacker-chosen strings is a
@@ -6113,6 +6512,29 @@ class RuntimeServer:
                 self._desktop_attach_seen = 0.0
                 self._republish_detached()
                 detail = "desktop lease withdrawn"
+            elif op == "activity":
+                # THE INPUT HALF OF "IS THE OPERATOR HERE?" (contract §6.1/§6.3).
+                # ``viewer_watch`` says WHICH conversation a terminal is showing;
+                # this says whether anyone is still at the keyboard. Together
+                # they are the watched-AND-active predicate the item ladder's
+                # rung 4 stands down for — without it the runtime bannered a
+                # conversation the operator was demonstrably reading (R6-1).
+                #
+                # Throttled at the SENDER (one per 10 s) because this is a
+                # freshness claim, not an event stream; an out-of-order beat is
+                # harmless since only the maximum is read.
+                #
+                # ONLY A TIMESTAMP. No keycodes, no text, no counts: the age of
+                # the newest edge is the entire information the ladder needs, and
+                # anything more would put keystroke content on a socket for a
+                # routing decision that never needs it.
+                if conn.kind != "attach" or id(conn.writer) not in self._clients:
+                    raise ValueError("activity requires a live attach connection")
+                stamp = frame.get("input_at_ms")
+                if type(stamp) is not int or stamp <= 0:
+                    raise ValueError("activity input_at_ms must be a positive integer")
+                conn.tui_input_at_ms = max(conn.tui_input_at_ms, stamp)
+                detail = "activity noted"
             elif op == "viewer_watch":
                 # A MULTIPLEXING TERMINAL SAYS WHETHER IT IS STILL SHOWING US.
                 #
@@ -6536,8 +6958,10 @@ class RuntimeServer:
             from local_operator.session.errors import (
                 AsideAdoptRefused,
                 AsideUnanswered,
+                AttachmentMissing,
                 AttachmentUnavailable,
                 AudioInputUnsupported,
+                DocumentCarriageUnsupported,
                 ForkRefused,
                 OperatorAuthorityRequired,
                 ProfileRegistryUnavailable,
@@ -6550,8 +6974,10 @@ class RuntimeServer:
                 (
                     AsideAdoptRefused,
                     AsideUnanswered,
+                    AttachmentMissing,
                     AttachmentUnavailable,
                     AudioInputUnsupported,
+                    DocumentCarriageUnsupported,
                     ForkRefused,
                     OperatorAuthorityRequired,
                     ProfileRegistryUnavailable,
@@ -6561,6 +6987,13 @@ class RuntimeServer:
                 # Category, not arbitrary prose, certifies this as a repairable
                 # admission rejection to older/newer attach clients alike.
                 frame["error_code"] = exc.code
+                if isinstance(exc, AttachmentMissing) and exc.filename:
+                    # The refused file's NAME, as its own bounded field: the
+                    # composer showed a chip, and a refusal that says "an
+                    # attached file" makes the user hunt for which one. The far
+                    # side sanitises and caps it again and rebuilds the
+                    # sentence, so no prose crosses.
+                    frame["error_name"] = str(exc.filename)[:200]
                 if isinstance(exc, OperatorAuthorityRequired) and exc.trigger:
                     # A token from a closed set, never text: the far side picks
                     # the sentence that matches the frame it refused (a refused
@@ -7280,6 +7713,19 @@ class RuntimeServer:
             # ``input_mode``/``input_path``, one contract revision later.
             if "audio" in parameters:
                 fields["audio"] = frame.get("audio")
+            requested_files = frame.get("files")
+            if requested_files:
+                # DOCUMENTS ARE A REFUSAL, NEVER A DROP (contract amendment 1).
+                # A handle from before this carriage cannot resolve the
+                # references, so forwarding the text without them would answer
+                # a question the user believes was about the attached file.
+                if "files" not in parameters:
+                    from local_operator.session.errors import (
+                        DocumentCarriageUnsupported,
+                    )
+
+                    raise DocumentCarriageUnsupported()
+                fields["files"] = requested_files
             return await h.prompt(frame["text"], **fields)
         if op == "steer":
             fields = {"images": frame.get("images")}
@@ -7298,6 +7744,18 @@ class RuntimeServer:
             # dropping them at a handle that cannot take the keyword.
             if "audio" in parameters:
                 fields["audio"] = frame.get("audio")
+            requested_files = frame.get("files")
+            if requested_files:
+                # Same refusal contract as the prompt op above: a steer that
+                # names documents on a handle that cannot carry them refuses
+                # the correction rather than applying it without the file.
+                if "files" not in parameters:
+                    from local_operator.session.errors import (
+                        DocumentCarriageUnsupported,
+                    )
+
+                    raise DocumentCarriageUnsupported()
+                fields["files"] = requested_files
             return await h.steer(frame["text"], **fields)
         if op == "abort":
             return await h.abort()
@@ -7540,6 +7998,14 @@ class RuntimeServer:
                     by=str(frame.get("by", "")),
                     **ask_kwargs,
                 )
+            elif op == "ask_dismiss" and frame.get("reason"):
+                # Forwarded only when sent, so an older owner handle whose
+                # ``ask_dismiss`` predates ``reason`` is still called as before.
+                outcome = method(
+                    str(frame.get("ask_id", "")),
+                    by=str(frame.get("by", "")),
+                    reason=str(frame["reason"]),
+                )
             else:
                 outcome = method(str(frame.get("ask_id", "")), by=str(frame.get("by", "")))
             # ``method`` came from a getattr probe, so what it returns is not
@@ -7611,7 +8077,7 @@ class RuntimeServer:
             # typed (or what ``lop sessions`` showed it), not the session id it
             # never named; both come from ``unengaged_label`` so all four
             # refusal sites share one grammar.
-            if not self._started:
+            if not self._started and not self._bridge_card_may_engage(frame):
                 from local_operator.mobile.peer_send import (
                     unengaged_label,
                     unengaged_refusal,

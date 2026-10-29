@@ -16,14 +16,16 @@ from rich.style import Style
 from rich.text import Text
 from textual import events
 from textual.binding import Binding
-from textual.geometry import Region
+from textual.geometry import Region, Size
 from textual.message import Message
 from textual.reactive import Reactive
 from textual.strip import Strip
 from textual.timer import Timer
 from textual.widget import Widget
 
+from local_operator.i18n.keys import tui_notifications as _inbox_keys
 from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.keys import tui_tags as _tag_keys
 from local_operator.i18n.text import tr
 from local_operator.resume import (
     UNNAMED_DEVICE,
@@ -32,9 +34,11 @@ from local_operator.resume import (
     peer_reason_words,
 )
 from local_operator.session.preview import AGENT_OPENED_MARK, opener_role
+from local_operator.tui import notifications_model as model
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
 from local_operator.tui.composer_focus import composer_may_take_focus, focus_is_claimed
+from local_operator.tui.i18n_status import display_tr
 from local_operator.tui.session_catalog import CatalogEntry, rank_entries
 from local_operator.tui.terminal_title import SPINNER_FRAMES
 from local_operator.tui.widgets.ask_queue import ASK_MARKER
@@ -47,6 +51,14 @@ from local_operator.tui.widgets.session_picker import (
 from local_operator.tui.widgets.tool_card import truncate_cells
 
 _t = tr("tui.small")
+_inbox_t = display_tr(
+    "tui.notifications",
+    # The literal /commands ride as islands (see model.SHELL_COMMANDS):
+    # per-string isolation alone reorders them in Urdu.
+    technical_literals=model.SHELL_COMMANDS,
+    technical_commands=model.SHELL_COMMAND_TEMPLATES,
+)
+_t_tags = tr("tui.tags")
 
 if TYPE_CHECKING:
     # Type-only: the app's concrete class imports THIS module (it assembles
@@ -652,6 +664,18 @@ class SessionSidebar(Widget, can_focus=True):
         #: Startup default from `tui.sidebar_show_subagents`; flipped by
         #: `ctrl+a` for THIS session only, never written back to config.
         self.show_subagents: bool = False
+        #: The ranked list BEFORE tag grouping is applied, kept so `set_tag_groups`
+        #: can rebuild either presentation without re-reading the catalogue and
+        #: `off` can restore the exact pre-grouping order.
+        self._ranked_entries: tuple[CatalogEntry, ...] = ()
+        #: `/tags on` state, persisted by the app. Off is the shipped list.
+        self._tag_grouping: bool = False
+        #: ``(id, name)`` in registry order — the bucket order inside a section.
+        self._tag_categories: tuple[tuple[str, str], ...] = ()
+        #: Session id -> the primary tag id that may group it. Already passed
+        #: through `effective_primary`, so only a registered, assigned primary
+        #: is here; everything else is Untagged.
+        self._tag_primaries: dict[str, str] = {}
         #: ``(session_id, outstanding_ask_count)`` for the session whose asks this
         #: sidebar can actually count — the one the app is attached to. Empty
         #: string means "no mark". COUNTED OVER THE OUTSTANDING SET (open asks;
@@ -672,6 +696,12 @@ class SessionSidebar(Widget, can_focus=True):
         #: footer ladder (like the chip and the ask note), never a new lane, so
         #: the sidebar's hit-test geometry is untouched.
         self._hub_total: int = 0
+        #: The inbox badge figure (notifications design §11): unread updates
+        #: plus unread live asks. Painted as a footer FACT beside the ask note,
+        #: only while > 0, and never a door of its own — the page is reached by
+        #: `/notifications`, and a second pressable span here would be a third
+        #: control on a line the hit tests already resolve twice.
+        self._notifications_total: int = 0
         #: Hidden-population size for the footer chip, from `subagent_population`.
         self._subagent_total: int = 0
         #: Whether the pointer rests on that chip. The chip is a CONTROL (issue
@@ -699,6 +729,18 @@ class SessionSidebar(Widget, can_focus=True):
         #: carry the row, or 0.0 for none. See `set_current`'s `_reveal_current`
         #: and `_land_pending_reveal`.
         self._pending_reveal_until: float = 0.0
+        #: A reveal that arrived before this widget had a viewport. The app's
+        #: catalog worker can land `set_current`/`set_entries` between
+        #: `display = True` and the first layout, when `size.height` is still 0;
+        #: `_reveal` cannot price a scroll then, so it records the intent here
+        #: and `_size_updated` honors it before the next frame is painted. That
+        #: includes a RE-SHOW: a `display` toggle leaves `_size` unchanged, so
+        #: the reveal must not be gated on the size having changed. Without this
+        #: the reveal silently became "offset = last row" and the one-row window
+        #: it created was permanent (`page_size` at the last row is 1 by
+        #: construction, and `set_entries`' clamp only ever lowers the offset to
+        #: that row).
+        self._reveal_deferred: bool = False
         self.display = False
 
     @property
@@ -761,7 +803,21 @@ class SessionSidebar(Widget, can_focus=True):
         bottom-aligned window the wheel clamp settles on — BEFORE committing
         to either. The bisection is the same question at any offset; this is
         the one place it is asked, so the two callers cannot drift.
+
+        NO VIEWPORT, NO WINDOW (the not-yet-laid-out case). `size.height` is 0
+        before the widget's first layout, and the arithmetic below would then
+        describe a one-row page. That is not a smaller page, it is a page the
+        widget has no evidence for: every caller that reads `visible_entries`
+        pre-layout (prewarm's candidate set, `_reveal`'s guess) would be told
+        that all but one row are hidden when the truth is that the viewport is
+        unknown. So the pre-layout answer is the whole remaining order: nothing
+        can be said to be off a page that does not exist yet. The first layout
+        re-derives this property against the real height, and `_reveal`
+        defers its scroll (`_reveal_deferred`) rather than pinning an offset
+        that only a one-row page could justify.
         """
+        if self.size.height <= 0:
+            return max(1, len(self.entries) - offset)
         chrome = self._header_lines(offset)
         low = max(1, self.size.height - 1 - (0 if chrome else 1) - chrome)
         # No window can be taller than the sidebar, nor longer than the order
@@ -786,6 +842,25 @@ class SessionSidebar(Widget, can_focus=True):
                 high = middle - 1
         return max(1, best)
 
+    def _chrome_count(self, entries: Sequence[CatalogEntry]) -> int:
+        """Heading/blank lines the paint will emit for these entries.
+
+        With grouping OFF this is the historical section formula: two lines per
+        section (heading + blank beneath) plus one blank above every section
+        after the first. With grouping ON each section gains its buckets: the
+        first bucket heading replaces nothing and costs one line, every later
+        bucket costs a blank plus its heading, so over ``S`` sections and ``T``
+        occupied buckets the total is ``2S + 2T - 1``. Row-less sections and
+        buckets never reach here: the caller derives the sets from entries.
+        """
+        if not entries:
+            return 0
+        groups = {self._group_key(entry) for entry in entries}
+        if not self._tag_grouping:
+            return len(groups) * 2 + (len(groups) - 1)
+        sections = {(rank, name) for rank, name, _order, _bucket in groups}
+        return len(sections) * 2 + len(groups) * 2 - 1
+
     def _chrome_for(self, window: Sequence[CatalogEntry]) -> int:
         """Lines the section headings consume for THIS window, note included.
 
@@ -797,8 +872,7 @@ class SessionSidebar(Widget, can_focus=True):
         """
         if not window:
             return 0
-        tiers = {self._section_key(entry) for entry in window}
-        chrome = len(tiers) * 2 + (len(tiers) - 1)
+        chrome = self._chrome_count(window)
         # The `+N more pinned` note is chrome too, and the charge must follow
         # the PAINT: `_display_rows` emits the note whenever a pinned row is not
         # on the window's page — including a page that carries no pinned row at
@@ -830,21 +904,16 @@ class SessionSidebar(Widget, can_focus=True):
         """
         if not self.entries:
             return 0
-        # The SECTION KEY: one heading per distinct section actually painted.
-        tiers = {self._section_key(entry) for entry in self.entries}
-        # Per section: its heading, the blank beneath it, and a blank above
-        # every heading after the first. The leading blank is load-bearing:
-        # without it a heading sits flush against the previous group's last
-        # ENTRY row (the section does not end in a blank — the blank belongs
-        # under the heading), and the two groups read as one. See the comment
-        # in `_display_rows` and the assertion it is defended by.
+        # ONE HEADING PER DISTINCT PAINT GROUP — an outer section, plus each
+        # occupied primary-tag bucket when grouping is on. See `_chrome_count`
+        # for the arithmetic and why row-less groups never reach it.
         #
         # ONE OVER-COUNT IS DELIBERATE: where two ROW-LESS sections meet,
         # `_append_section` declines the second break (design round 4, D28), so
         # this charges one line more than the paint emits. That is the direction
         # this number is allowed to be wrong in — it is `page_size`'s safe seed
         # and a spare line is headroom, where the other direction hides a row.
-        chrome = len(tiers) * 2 + (len(tiers) - 1)
+        chrome = self._chrome_count(self.entries)
         # The `+N more pinned` note (`_display_rows`) is chrome too, and the
         # charge follows the same predicate the paint uses (`_chrome_for`): a
         # pinned row missing from the window. This count's own old rank-0
@@ -998,7 +1067,7 @@ class SessionSidebar(Widget, can_focus=True):
         return 1 if entry.active else 2
 
     def _section_key(self, entry: CatalogEntry) -> tuple[int, str]:
-        """``(rank, section name)`` — the ONE key the PAINT's sort uses.
+        """``(rank, section name)`` — the ONE key the PAINT's outer sort uses.
 
         The name is the section's IDENTITY here, not a label looked up later:
         one rank is one section, and the pair is what `_display_rows` and
@@ -1015,16 +1084,55 @@ class SessionSidebar(Widget, can_focus=True):
         rank = self._section_of(entry)
         return rank, _SECTION_NAMES[rank]
 
-    def _axis_key(self, entry: CatalogEntry) -> tuple[int, str]:
-        """`(rank, section name)` for the SCROLL AXIS — the pin is not a section.
+    def _tag_bucket(self, entry: CatalogEntry) -> tuple[int, str]:
+        """``(registry index, tag id)`` for the row's primary tag, or Untagged.
+
+        THE EXACT PREDICATE is applied before the mapping reaches this widget
+        (``session_tags.effective_primary``): primary non-null, still
+        registered, and still assigned. A secondary tag never chooses a bucket,
+        and a conversation appears under exactly one. Untagged sorts last with
+        an empty id; the registry caps at 32, so it can never collide.
+
+        Grouping OFF returns a constant bucket for every row, which is what
+        keeps the off frame byte-for-byte the old sectioned list.
+        """
+        if not self._tag_grouping:
+            return -1, ""
+        primary = self._tag_primaries.get(entry.id)
+        for index, (key, _name) in enumerate(self._tag_categories):
+            if key == primary:
+                return index, key
+        return len(self._tag_categories), ""
+
+    def _group_key(self, entry: CatalogEntry) -> tuple[int, str, int, str]:
+        """The outer section and, when grouping is on, the primary-tag bucket.
+
+        One key shared by `_display_rows`, `_chrome_for` and `_header_lines`, so
+        the painted headings and the capacity arithmetic cannot disagree. The
+        bucket is last in the tuple because section order is preserved first;
+        registry order orders buckets inside a section, and Untagged follows
+        every registered tag.
+        """
+        rank, section = self._section_key(entry)
+        bucket_order, bucket = self._tag_bucket(entry)
+        return rank, section, bucket_order, bucket
+
+    def _axis_key(self, entry: CatalogEntry) -> tuple[int, str, int, str]:
+        """The SCROLL AXIS key — the pin is not a section.
 
         See `_unpinned_rank` for why the axis is pin-blind: a pinned row that
         jumped to the head of the axis would be LIFTED INTO VIEW, and the
         `+N more pinned` note exists precisely because that deferral was made
         (`_pinned_overflow`).
+
+        Tag grouping participates for the same reason the section does: the
+        window must slide over the order the frame paints, or successive pages
+        would show bucket headings that the entries beneath them were not
+        sliced against.
         """
         rank = self._unpinned_rank(entry)
-        return rank, _SECTION_NAMES[rank]
+        bucket_order, bucket = self._tag_bucket(entry)
+        return rank, _SECTION_NAMES[rank], bucket_order, bucket
 
     def _presentation_order(self, ranked: Sequence[CatalogEntry]) -> tuple[CatalogEntry, ...]:
         """The order the list presents — and therefore the order it SCROLLS.
@@ -1101,16 +1209,21 @@ class SessionSidebar(Widget, can_focus=True):
         # paints under `★ Pinned` at the top. A pinned row the window does NOT
         # carry is not visible until the page reaches its slot — the pin never
         # reaches the axis — which is what the `+N more pinned` note is for.
-        sections: dict[tuple[int, str], list[CatalogEntry]] = {}
-        for entry in sorted(self.visible_entries, key=self._section_key):
-            sections.setdefault(self._section_key(entry), []).append(entry)
+        sections: dict[tuple[int, str], dict[tuple[int, str], list[CatalogEntry]]] = {}
+        for entry in sorted(self.visible_entries, key=self._group_key):
+            group = self._group_key(entry)
+            buckets = sections.setdefault((group[0], group[1]), {})
+            buckets.setdefault((group[2], group[3]), []).append(entry)
         # Sections are built FROM rows, so a section with no rows contributes
         # no header — and a remote row's key is its ordinary rank, so a
         # device's sessions split by their own state and interleave with this
         # device's (see `_unpinned_rank` for the SHARED CONVENTION).
-        for key, entries in sorted(sections.items()):
-            self._append_section(rows, key[1])
-            rows.extend(("entry", entry) for entry in entries)
+        for (_rank, name), buckets in sorted(sections.items()):
+            self._append_section(rows, name)
+            for (_bucket_order, bucket), entries in sorted(buckets.items()):
+                if self._tag_grouping:
+                    self._append_tag_heading(rows, bucket)
+                rows.extend(("entry", entry) for entry in entries)
         # An honest heading: say how many pinned rows are not on this page
         # rather than under-reporting the set. A CHROME row, never an entry —
         # `entry=None` keeps it out of `self.entries` and makes `_entry_at`
@@ -1165,6 +1278,28 @@ class SessionSidebar(Widget, can_focus=True):
         rows.append((f"header:{heading}", None))
         rows.append(("blank", None))
 
+    @staticmethod
+    def _tag_header_kind(tag_id: str) -> str:
+        """The display-row kind for one primary-tag bucket.
+
+        The bucket id is the registry id, or ``untagged`` for the explicit
+        residual bucket. Registry ids are 10 lowercase hex, so the word cannot
+        collide with a real category.
+        """
+        return f"header:tag:{tag_id or 'untagged'}"
+
+    def _append_tag_heading(self, rows: list[tuple[str, CatalogEntry | None]], tag_id: str) -> None:
+        """Append one bucket heading beneath its section heading.
+
+        The section heading has already written the blank beneath itself, so
+        the FIRST bucket heading needs no leading blank; later buckets do —
+        otherwise a heading sits flush against the previous bucket's last row.
+        Never two blanks: the same invariant `_append_section` keeps.
+        """
+        if rows and rows[-1][0] != "blank":
+            rows.append(("blank", None))
+        rows.append((self._tag_header_kind(tag_id), None))
+
     def set_asking(self, marks: Mapping[str, int]) -> None:
         """Mark every row that holds OUTSTANDING ASKS the user has not answered.
 
@@ -1213,6 +1348,21 @@ class SessionSidebar(Widget, can_focus=True):
         self._asks_total = max(0, total)
         self.refresh()
 
+    def set_notifications_total(self, total: int) -> None:
+        """The inbox's unread figure for the footer note (design §11).
+
+        The SAME number every surface badges (``unread_count`` +
+        ``waiting_unread_count``), so the terminal and the desktop never
+        disagree about one inbox. Zero paints nothing: absence is not
+        emptiness, the ask note's rule, so a machine with an empty inbox paints
+        exactly the footer it painted before this feature existed.
+        """
+        total = max(0, int(total or 0))
+        if total == self._notifications_total:
+            return
+        self._notifications_total = total
+        self.refresh()
+
     def set_hub_total(self, total: int) -> None:
         """The Hub links count, for the footer's hub DOOR (the architect's placement).
 
@@ -1232,7 +1382,12 @@ class SessionSidebar(Widget, can_focus=True):
         # The order the list presents — and scrolls in — not the bare ranking:
         # see `_presentation_order` for why the window has to slide over the
         # sections the frame paints.
-        ordered = self._presentation_order(rank_entries(entries))
+        ranked = rank_entries(entries)
+        # Kept before the presentation sort so `set_tag_groups` can rebuild the
+        # OTHER presentation (and restore the exact flat order on `off`) without
+        # a second catalogue read.
+        self._ranked_entries = ranked
+        ordered = self._presentation_order(ranked)
         # A refresh between mouse-down and click must not change what was
         # pressed. Freeze the entire order until that gesture has completed.
         if self._pressed_id is not None:
@@ -1283,6 +1438,44 @@ class SessionSidebar(Widget, can_focus=True):
         # and Textual's compositor every two seconds in every open terminal.
         if self._paint_state() != self._painted_state:
             self.refresh()
+
+    def set_tag_groups(
+        self,
+        enabled: bool,
+        categories: Sequence[tuple[str, str]] = (),
+        primaries: Mapping[str, str] | None = None,
+    ) -> None:
+        """Adopt the tag grouping state and rebuild the presentation.
+
+        ``primaries`` is already filtered through ``effective_primary``; the
+        registry check is repeated here so a caller cannot create a bucket for
+        an id this widget has no heading for. The ranked rows are kept, so
+        ``off`` restores the historical sectioned order exactly — same rows,
+        same within-section order, no title-budget change.
+        """
+        allowed = {key for key, _name in categories}
+        state = (
+            bool(enabled),
+            tuple((str(key), str(name)) for key, name in categories),
+            {
+                str(session_id): str(primary)
+                for session_id, primary in dict(primaries or {}).items()
+                if str(primary) in allowed
+            },
+        )
+        if state == (self._tag_grouping, self._tag_categories, self._tag_primaries):
+            return
+        self._tag_grouping, self._tag_categories, self._tag_primaries = state
+        if self._ranked_entries:
+            self.set_entries(self._ranked_entries)
+        else:
+            self.refresh()
+        # A mode flip may change the row order entirely; keep the attached
+        # conversation on screen when one is a row of this list. Skipped under
+        # a live press so the order a click was aimed at does not move before
+        # the click lands (`set_entries` freezes it in `_deferred`).
+        if self._tag_grouping and self._pressed_id is None:
+            self._reveal_current()
 
     def set_current(self, session_id: str) -> None:
         """Take ``session_id`` as the row the list calls CURRENT, and show it.
@@ -1452,6 +1645,7 @@ class SessionSidebar(Widget, can_focus=True):
             self._asks_hover,
             self._hub_total,
             self._hub_hover,
+            self._notifications_total,
         )
 
     def refresh(
@@ -1566,7 +1760,23 @@ class SessionSidebar(Widget, can_focus=True):
         `end` key — moved the offset to 17 with `page_size` 23 against a row at
         40. Both land it after the walk, which is why the correction belongs in
         this one mechanism rather than at the arrival's call site.
+
+        A REVEAL NEEDS A VIEWPORT. Before the first layout (`size.height == 0`)
+        `page_size` is the whole remaining order by design (see
+        `_page_size_at`), so the guess would be honest but the walk could not
+        be: scrolling is a statement about a screen that does not exist yet.
+        Record the intent instead and let `_size_updated` run this same method
+        before the next real-height frame. Deferring rather than guessing is
+        what keeps the one-row window from forming: the old arithmetic on a
+        0-height widget resolved `page_size` to 1 and pinned the offset to the
+        LAST row, where a one-row page size is self-consistent — so no later
+        poll could recover it (measured: `offset=5, page_size=1, visible=1` over
+        20 idle polls on a six-row catalog).
         """
+        if self.size.height <= 0:
+            self._reveal_deferred = True
+            self._sync_animation()
+            return
         index = self._cursor_index()
         self._offset = max(min(self._offset, index), index - self.page_size + 1)
         while self._offset < index and index >= self._offset + self.page_size:
@@ -2396,7 +2606,50 @@ class SessionSidebar(Widget, can_focus=True):
         self._sync_animation()
         self.refresh()
 
+    def _size_updated(
+        self, size: Size, virtual_size: Size, container_size: Size, layout: bool = True
+    ) -> bool:
+        """Land a deferred reveal in the reflow that first gives a viewport.
+
+        Textual calls this synchronously while reflowing the compositor, BEFORE
+        it paints that frame; the `Resize` message is dispatched on a later
+        event-loop turn. So a reveal armed while `size.height` was 0 has to land
+        here, or the first real-height frame presents the stale page and the
+        next one corrects it — a visible jump, measured on a 101-row catalog as
+        frame 1 at offset 0 and frame 2 at offset 76. `_reveal`'s repaint is
+        harmless: the paint this reflow is about to compose already reads the
+        new offset, and the follow-up refresh produces the identical frame.
+
+        NOT GATED ON `changed`. A `display = False` → `True` toggle collapses the
+        widget's region but leaves `_size` alone, so the re-show pass reports
+        `changed=False` even though it is the first real geometry the widget has
+        had — gating here stranded the arm until some later resize fired it as a
+        scroll jump. `_size_updated` is called on the re-show, and the height
+        check alone is the honest guard; the flag is one-shot, so the repeated
+        no-change passes cannot scroll twice.
+
+        `Widget._size_updated` has assigned `self._size` before returning, so
+        the reveal prices the real page here. This is also the seam
+        `TranscriptView` uses for its tail anchor, for the same reason
+        (`_size_updated` is early enough to change the frame being composed).
+        """
+        changed = super()._size_updated(size, virtual_size, container_size, layout)
+        if size.height > 0 and self._reveal_deferred:
+            self._reveal_deferred = False
+            self._reveal()
+        return changed
+
     def on_resize(self, event: events.Resize) -> None:
+        """Re-derive the window against the new geometry.
+
+        THE ORDINARY RESIZE PATH. A deferred reveal does NOT land here:
+        `Resize` is a message and arrives after the frame has been presented,
+        which is exactly the one-frame jump `_size_updated` exists to remove.
+        `_size_updated` clears that flag before the first height-bearing paint
+        on both paths — a size change and a re-show where `_size` is unchanged;
+        this handler only re-clamps an offset that the new, taller page size has
+        made out of range.
+        """
         self._offset = min(self._offset, max(0, len(self.entries) - self.page_size))
         self._sync_animation()
 
@@ -2433,6 +2686,31 @@ class SessionSidebar(Widget, can_focus=True):
             if kind == "blank":
                 # Whitespace is the separator; the chrome stays borderless.
                 result.append(" " * width)
+                continue
+            if kind.startswith("header:tag:"):
+                # A primary-tag bucket heading under an ordinary section. The
+                # kind carries the registry ID, not the display name, so a
+                # rename in the store cannot leave a stale label painted; the
+                # name is resolved from the registry snapshot the app supplied
+                # with this grouping state. "Untagged" is the explicit residual
+                # bucket and is localised; it is never a registry name (the
+                # store reserves that word).
+                tag_id = kind.removeprefix("header:tag:")
+                if tag_id == "untagged":
+                    label = _t_tags(_tag_keys.untagged())
+                else:
+                    label = next(
+                        (name for key, name in self._tag_categories if key == tag_id),
+                        "",
+                    )
+                if not label:  # a category removed between read and paint
+                    continue
+                # Indented two cells: the bucket is subordinate to the section
+                # above it. No title cells are spent on the rows themselves.
+                result.append(
+                    truncate_cells(f"  {label}", width).ljust(width),
+                    style=theme_mod.semantic_color("muted"),
+                )
                 continue
             if kind.startswith("header:"):
                 # The four section names, and nothing else: sections are built
@@ -2733,6 +3011,7 @@ class SessionSidebar(Widget, can_focus=True):
         # `truncate_cells` would crop it mid-word.
         ask_note = self._asks_note()
         hub_note = self._hub_note()
+        inbox_note = self._notifications_note()
 
         # THE HUB DOOR IS THE FIRST TAIL FACT TO DROP (round-2 D9). The door is a
         # CONTROL whose route outlives it (the mouse and `/hub` both remain), so
@@ -2745,11 +3024,20 @@ class SessionSidebar(Widget, can_focus=True):
             kept = [part for part in parts if part]
             return f" · {' · '.join(kept)}" if kept else ""
 
-        tail_full = _tail(ask_note, hub_note, chip)
-        tail_nohub = _tail(ask_note, chip)
+        # THE INBOX NOTE IS A FACT, BUT A SECOND-HAND ONE (notifications design
+        # §11): it restates a count the `/notifications` page owns, whereas the
+        # ask note is the fleet list's only door. So it sits AFTER the ask note
+        # and yields before every other tail fact — each tail is tried with it,
+        # then without — and it never displaces the hub door's own variant.
+        tail_full = _tail(ask_note, inbox_note, hub_note, chip)
+        tail_nohub = _tail(ask_note, inbox_note, chip)
         tail_variants = [tail_full]
         if hub_note and tail_nohub != tail_full:
             tail_variants.append(tail_nohub)
+        if inbox_note:
+            for plain in (_tail(ask_note, hub_note, chip), _tail(ask_note, chip)):
+                if plain not in tail_variants:
+                    tail_variants.append(plain)
 
         def expand(rung_templates: list[str]) -> list[str]:
             """Every rung, expanded full-tail then hub-free, in preference order."""
@@ -2875,9 +3163,12 @@ class SessionSidebar(Widget, can_focus=True):
                 # before the hub-free ones).
                 head_hide = f"{position} · {lead}{_t(_x.session_sidebar_hide_suffix())}"
                 head_plain = f"{position} · {lead}"
-                candidates = [head_hide + tail_full, head_plain + tail_full]
-                if hub_note and tail_nohub != tail_full:
-                    candidates.extend([head_hide + tail_nohub, head_plain + tail_nohub])
+                # Every tail variant, widest first, each with and without the
+                # hide hint: the inbox note's yield-first rule (above) reaches
+                # this ladder through ``tail_variants`` alone.
+                candidates = [
+                    head + tail for tail in tail_variants for head in (head_hide, head_plain)
+                ]
             else:
                 # THE NOTE AND THE CHIP OUTLIVE THE HINT THEY REPLACE (round 2:
                 # U3), and since the pre-release batch so does the HUB DOOR
@@ -2897,9 +3188,7 @@ class SessionSidebar(Widget, can_focus=True):
                 # displaces asks or the chip — those candidates come first and
                 # the hub-free variants drop the DOOR before either fact yields.
                 templates = [f"{base}", f"{lead}"]
-                candidates = [t + tail_full for t in templates]
-                if hub_note and tail_nohub != tail_full:
-                    candidates.extend(t + tail_nohub for t in templates)
+                candidates = [t + tail for tail in tail_variants for t in templates]
             if chip:
                 candidates.append(f"{lead} · {chip}")
         hint = next(
@@ -2967,6 +3256,15 @@ class SessionSidebar(Widget, can_focus=True):
         if at < 0 or not painted[:at].endswith(" · "):
             return None
         return (at, at + len(note))
+
+    def _notifications_note(self) -> str:
+        """``notifications N`` in the footer, or "" at zero (design §11, no emoji)."""
+        if self._notifications_total <= 0:
+            return ""
+        # ``tui.notifications``, not ``tui.small``: adding a key to the audited
+        # ``tui.small`` catalogue would void every translated locale's ledger
+        # hash for one footer word (docs/I18N.md, the ``/library`` precedent).
+        return _inbox_t(_inbox_keys.sidebar_note(count=str(self._notifications_total)))
 
     def _hub_note(self) -> str:
         """The hub links door's footer note, or "" when there is nothing to state.

@@ -46,6 +46,7 @@ import codecs
 import contextlib
 import difflib
 import fnmatch
+import heapq
 import json
 import logging
 import mimetypes
@@ -74,7 +75,7 @@ from typing import (
     get_args,
     get_origin,
 )
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, quote, urlparse, urlsplit, urlunsplit
 
 from pydantic import (
     BaseModel,
@@ -174,17 +175,19 @@ from local_operator.scratchpad import (
     SCRATCHPAD_NAMESPACE,
     SCRATCHPAD_PATH_ENV,
     SCRATCHPAD_SCHEME,
-    SCRATCHPAD_TOTAL_BUDGET_BYTES,
     SCRATCHPAD_UNAVAILABLE,
     ScratchpadContentError,
     ScratchpadPathError,
     check_scratchpad_write,
     ensure_scratchpad_dir,
     parse_scratchpad_url,
+    scratchpad_budget_bytes,
+    scratchpad_contains,
     scratchpad_dir_of,
     scratchpad_env_injection,
     scratchpad_footprint,
     scratchpad_refusal,
+    scratchpad_size_text,
 )
 from local_operator.text_bounds import OUTPUT_TRUNCATION_MARKER, clip_head_tail
 from local_operator.tools import (
@@ -194,7 +197,12 @@ from local_operator.tools import (
     shell_env,
     sleep_guard,
 )
-from local_operator.tools.confinement import ToolConfinement, confinement_of
+from local_operator.tools.confinement import (
+    ToolConfinement,
+    confinement_of,
+    shell_sandbox_unavailable_reason_async,
+    shell_write_confinement_of,
+)
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -249,6 +257,14 @@ BASH_DEFAULT_TIMEOUT_SECONDS = 120.0
 #: Hard cap on the per-command timeout; longer runs are a session bug, not a
 #: tool feature.
 BASH_MAX_TIMEOUT_SECONDS = 3600.0
+#: How often the live scratchpad watchdog re-walks the pad while a command runs.
+#: One walk is bounded (it stops at the cap or 20k entries), but the interval is
+#: the overshoot window: a command writing at R bytes/s can put R * PAD_TICK_S
+#: extra bytes on disk between the sample that would have caught it and the kill.
+#: A slower tick costs less loop time in aggregate but overshoots further; 1 s
+#: keeps a fast build's overshoot in the same order as the cap itself rather than
+#: letting one command reach multiple GB, which is the incident this bounds.
+PAD_TICK_S = 1.0
 #: Where ``bash.shell`` lives under ``values``, spelled ONCE and shared with
 #: the ``settings_io`` row so the reader and the writer cannot disagree about
 #: the path (the flat-vs-nested mismatch that silenced the #576 opt-out).
@@ -408,8 +424,32 @@ INTERNAL_READ_SHAPE_SLACK_CHARS = 4 * 1024
 #: printed call SUCCEEDS: a suggestion whose own answer gets truncated teaches
 #: the model that expansion does not work.
 SPILL_PAGE_LINES = 200
-#: Per-file size cap for grep; bigger files are skipped and counted.
+#: Per-file size cap for grep; bigger files are skipped, counted AND NAMED (see
+#: ``GREP_SKIPPED_LIST_LIMIT``). This is the DEFAULT of the ``max_filesize_mb``
+#: parameter, not a wall: a model that learns a "no match" was inconclusive for
+#: named files re-runs with a larger cap, up to :data:`GREP_FILE_CEILING_BYTES`.
 GREP_FILE_LIMIT_BYTES = 1 * 1024 * 1024
+#: The hard ceiling ``max_filesize_mb`` can raise the cap to. It bounds the two
+#: things a bigger file costs: the Python engine holds a whole file in memory
+#: (read + decode + split), and ripgrep hands a matching line back whole before
+#: it is clipped (the pipe's line limit is sized from this, so ONE minified
+#: bundle line can never overrun it). 64 MB covers the shipped JS bundles that
+#: motivated the knob (a 3-20 MB renderer chunk) without making a stray
+#: database dump a one-call memory spike.
+GREP_FILE_CEILING_BYTES = 64 * 1024 * 1024
+#: How many skipped files a grep answer NAMES (largest first). The count is
+#: always complete; the names are bounded so a tree of thousands of oversized
+#: files cannot flood the result.
+GREP_SKIPPED_LIST_LIMIT = 8
+#: A matched line longer than this is shown as a window around the match, not in
+#: full. One minified bundle is a single multi-hundred-KB line: unclipped it
+#: floods the context (and the spill) with bytes the reader cannot use, which is
+#: what the pre-fix tool did on the lines it survived long enough to print.
+GREP_LINE_CLIP_CHARS = 500
+#: Characters kept BEFORE the match inside that window; the rest of
+#: ``GREP_LINE_CLIP_CHARS`` follows the match start, so the hit is always inside
+#: the window whatever the pattern's own length.
+GREP_LINE_CLIP_LEAD_CHARS = 200
 
 #: Directory names never worth walking during grep (VCS internals, vendored
 #: trees, build output). Dotdirs are pruned wholesale in addition.
@@ -718,6 +758,17 @@ def truncate_output(text: str, limit: int = TOOL_OUTPUT_LIMIT_CHARS) -> str:
 ElisionSpan = tuple[str, int, int]
 
 
+class _SpillPlace(NamedTuple):
+    """Where a body span's content lives in a spill that is NOT line-for-line
+    with the body (grep: the body has ``--``/context rows, the spill one match
+    per line). ``hidden`` is False when the span held no match, so
+    ``first``/``last`` name the nearest match rather than a hidden one."""
+
+    first: int
+    last: int
+    hidden: bool
+
+
 def _elision_span(text: str, head: str, tail: str) -> tuple[int, int, int] | None:
     """``(total_lines, first_elided_line, last_elided_line)``, all 1-based.
 
@@ -826,11 +877,31 @@ def _spill(text: str, tool_name: str, context: ToolContext | None) -> SpillMeta 
     truncation, which is exactly the behaviour that shipped before this module
     existed — losing expansion is an inconvenience, failing the tool call is a
     bug.
+
+    Span markers are stripped BEFORE the write: the per-session token exists
+    only to protect one rendered result, and a spill file must not preserve it
+    for a later read (LOH-28). A context with no capable store is unchanged.
     """
+    store = getattr(context, "variables", None)
+    spans: list[tuple[int, int, int]] | None = None
+    strip_ranges = cast(
+        Callable[[str], tuple[str, list[tuple[int, int, int]]]] | None,
+        getattr(store, "strip_identifier_spans_with_ranges", None),
+    )
+    if callable(strip_ranges):
+        text, spans = strip_ranges(text)
+    else:
+        strip = cast(
+            Callable[[str], str] | None,
+            getattr(store, "strip_identifier_spans", None),
+        )
+        if callable(strip):
+            text = strip(text)
     return get_store().write(
         text,
         tool_name=tool_name,
         session_id=(context.session_id if context else "") or "",
+        identifier_spans=spans,
     )
 
 
@@ -1091,7 +1162,12 @@ def _elide_string_middle(value: str, string_limit: int) -> str:
     return f"{head}{marker}{tail}"
 
 
-def _elide_inline(text: str, limit: int, offset: int = 0) -> tuple[str, ElisionSpan | None]:
+def _elide_inline(
+    text: str,
+    limit: int,
+    offset: int = 0,
+    remap: Callable[[int, int], _SpillPlace | None] | None = None,
+) -> tuple[str, ElisionSpan | None]:
     """``(body, elided_span)``: the budget-fitting body and where the gap is.
 
     For a payload with line structure the span is stated where the gap is as
@@ -1107,10 +1183,41 @@ def _elide_inline(text: str, limit: int, offset: int = 0) -> tuple[str, ElisionS
     line marker into such a payload is what left risk-assessment readbacks
     unparseable; the JSON branch below avoids the splice entirely.
 
+    ``remap`` is for a body whose lines are NOT the spill's lines: grep renders
+    ``--`` separators and context rows but spills one line per match, so a span
+    counted on the body points at the wrong matches (QA Q7 on #2982). It takes
+    the elided body span ``(first, last)`` and returns the spill span holding
+    those rows' matches; the marker is reworded to say so, and counts "body
+    lines" so its N-of-M does not read as the spill's numbering (review N1 on
+    #2997). It replaces ``offset``, which is a uniform shift and cannot express
+    that mapping.
+
     Returns a ``None`` span when nothing was elided.
     """
     if len(text) <= limit:
         return text, None
+
+    def _place(first: int, last: int) -> tuple[int, int, str | None]:
+        """Spill span of a body span, and the marker's wording for it."""
+        place = remap(first, last) if remap else None
+        if place is None:
+            # No remap, or (unreachable for grep: a body over budget holds a
+            # match row) no match row to map onto — keep the uniform shift.
+            return first + offset, last + offset, None
+        if place.hidden:
+            where = f"their matches are lines {place.first}-{place.last} of the saved output"
+        else:
+            # Only `--`/context rows fell in the gap: the spill holds no context,
+            # so the pointer is the nearest match — one the body may well show.
+            # Saying "their matches are" here claimed a hidden match that does
+            # not exist (review R3 on #2997).
+            where = (
+                f"context rows only, no match hidden; the nearest match is line "
+                f"{place.first} of the saved output"
+            )
+        return place.first, place.last, where
+
+    counted = "body lines" if remap else "lines"
     structured = _elide_json(text, limit)
     if structured is not None:
         # Still valid JSON, so the footer has to say "the whole payload" rather
@@ -1130,18 +1237,32 @@ def _elide_inline(text: str, limit: int, offset: int = 0) -> tuple[str, ElisionS
         # exist.
         return head + BASH_TRUNCATION_MARKER + tail, ("chars", len(head) + len(tail), len(text))
     total, first, last = span
-    marker = _elision_marker(last - first + 1, total, first + offset, last + offset)
+    spill_first, spill_last, where = _place(first, last)
+    marker = _elision_marker(
+        last - first + 1, total, spill_first, spill_last, counted=counted, where=where
+    )
     head, tail = _clip_head_tail(text, limit - len(marker))
     span = _elision_span(text, head, tail)
     if span is None:
         return head + BASH_TRUNCATION_MARKER + tail, ("chars", len(head) + len(tail), len(text))
     total, first, last = span
-    line_span: ElisionSpan = ("lines", first + offset, last + offset)
-    marker = _elision_marker(last - first + 1, total, line_span[1], line_span[2])
+    spill_first, spill_last, where = _place(first, last)
+    line_span: ElisionSpan = ("lines", spill_first, spill_last)
+    marker = _elision_marker(
+        last - first + 1, total, spill_first, spill_last, counted=counted, where=where
+    )
     return head + marker + tail, line_span
 
 
-def _elision_marker(elided: int, total: int, first: int, last: int) -> str:
+def _elision_marker(
+    elided: int,
+    total: int,
+    first: int,
+    last: int,
+    *,
+    counted: str = "lines",
+    where: str | None = None,
+) -> str:
     """The in-band gap marker.
 
     Keeps :data:`BASH_TRUNCATION_MARKER` as an exact substring — renderers and
@@ -1151,8 +1272,8 @@ def _elision_marker(elided: int, total: int, first: int, last: int) -> str:
     """
     return (
         f"{BASH_TRUNCATION_MARKER.rstrip()}\n"
-        f"[{elided} of {total} lines elided — they are lines {first}-{last} "
-        f"of the saved output]\n\n"
+        f"[{elided} of {total} {counted} elided — "
+        f"{where or f'they are lines {first}-{last} of the saved output'}]\n\n"
     )
 
 
@@ -1693,7 +1814,11 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
             # read, so the action can keep its own slot and the string gets the
             # rest.
             return f"{UNRESOLVABLE_MARKER} {action}: {url}"
+        if action in ("network_start", "network_read") and args.get("include_request_body"):
+            return f"capture sensitive request body: {url}"
         return f"{action}: {url}"
+    if action == "network_start" and args.get("include_request_body"):
+        return "capture sensitive request body with exact scope"
     return f"browser: {action}" if action else ""
 
 
@@ -3965,9 +4090,22 @@ async def execute_bash(
     # bash ``env`` argument: a model-authored env map would have to carry
     # the value (or a placeholder we do not have), which is the leak this
     # store exists to prevent.
+    # A WRITE-CONFINED shell (the ``scout`` role, see
+    # ``tools.confinement.ShellWriteConfinement``) is resolved first because it
+    # changes what the child is HANDED, not only how it is spawned. The full
+    # confinement takes precedence: it is the stricter boundary (reads jailed
+    # too), so a session carrying both runs under it.
+    confinement = confinement_of(context)
+    shell_write = None if confinement is not None else shell_write_confinement_of(context)
     store = context.variables if context is not None else None
     credential_env = getattr(store, "credential_env", None)
-    extra = credential_env() if callable(credential_env) else None
+    # NO credentials for a write-confined shell. The sandbox refuses its
+    # network, so a session credential could not be USED for anything a
+    # read-only role is for -- it could only be READ (``env``, ``printenv``)
+    # and carried out through the scout's own ``web_fetch``. Withholding it is
+    # the whole defence; masking the output would be the after-the-fact
+    # filter the secret-sink scan below exists to avoid relying on.
+    extra = credential_env() if callable(credential_env) and shell_write is None else None
 
     # MESH-BORROWED GITHUB, fetch-on-use (network/credentials/github.py). When this
     # device is a holder of a remote ``github`` credential, the env is rebuilt per
@@ -3977,7 +4115,10 @@ async def execute_bash(
     # persisting ``store`` helper can never receive the token — and the token
     # itself rides GH_TOKEN/GITHUB_TOKEN for ``gh`` (which has no helper protocol).
     # On a device that borrows nothing this is a file read and an empty answer.
-    github_env = await _github_git_injections(context)
+    # Not borrowed at all for a write-confined shell, for the reason the
+    # session credentials above are withheld: no network to use it on, so the
+    # token could only leak. Skipping the call also skips the broker round trip.
+    github_env = await _github_git_injections(context) if shell_write is None else {}
 
     # Refuse a call in which a stored secret would be PRINTED, before any child
     # exists. The control this replaces is an output filter (the redaction
@@ -4002,6 +4143,58 @@ async def execute_bash(
             "bash",
             _secret_sink_refusal(scan, text=params.command, tool_name="bash"),
         )
+    # The pad cap, BEFORE the child exists. A shell cannot be refused after the
+    # fact like ``write`` can, and once a pad is over its cap every creating
+    # command made it worse — so a command that would create a path under an
+    # over-cap pad is refused here and nothing runs. Reads and shrinks (``ls``,
+    # ``rm``) do not match the creating-command scan and are unaffected, which is
+    # what keeps the pad's owner able to recover it.
+    pad_refusal = _bash_pad_precheck(params.command, context)
+    if pad_refusal is not None:
+        return _error(tool_call_id, "bash", pad_refusal)
+    # The LIVE half of the same cap, measured once at spawn. The precheck above
+    # only refuses a command when the pad is ALREADY over cap; a command that
+    # starts under it can still grow the pad past the cap in one run (measured: a
+    # 4.5 GiB subagent build), and the after-the-fact ``[scratch]`` line reports
+    # only once the bytes are on disk. So an UNDER-CAP command is watched: its
+    # first sample over the cap is the breach. One bounded walk here, before the
+    # child exists; a missing pad walks as zero. It runs in a thread like the
+    # per-tick samples: a pad just under the cap with many entries can take
+    # hundreds of ms to walk, and that is a TUI frame this start-up measurement
+    # must not stall.
+    #
+    # ARMED ONLY WHEN THE COMMAND CAN REACH THE PAD (the same naming gate the
+    # post-hoc audit uses, or a cwd inside it). A long pytest/git run that never
+    # touches the pad must not pay a walk at spawn and per tick. KNOWN BLIND
+    # SPOT: a child that only reads ``LOCAL_OPERATOR_SCRATCHPAD`` from its
+    # ENVIRONMENT, without naming the pad and with a cwd outside it, is not
+    # armed — and the post-hoc audit shares that gate, so it gets neither the
+    # live watch nor the after-the-fact line.
+    #
+    # DISARMED WHEN THE PAD IS ALREADY OVER CAP. The footprint walk is
+    # cap-truncated, so two samples are LOWER BOUNDS and cannot order a shrink:
+    # files 60/60/200 under a cap of 100 read 120 at spawn, then 60+200=260 after
+    # a 60 is removed — higher than the start although the pad shrank from 320.
+    # A comparison there kills the very recovery command the guidance points at.
+    # So recovery runs; the precheck already refuses a creating command that
+    # NAMES the pad, a cwd-relative grower still gets the after-the-fact line,
+    # and an env-reading child is the documented blind spot.
+    pad_root = _scratchpad_root(context)
+    pad_watch_root: Path | None = None
+    pad_cap = 0
+    pad_start_held = 0
+    if pad_root is not None and _pad_watch_armed(params.command, _safe_cwd(context), pad_root):
+        pad_cap = scratchpad_budget_bytes()
+        try:
+            pad_start_held, start_over, _ = await asyncio.to_thread(
+                scratchpad_footprint, pad_root, pad_cap
+            )
+        except Exception:  # noqa: BLE001 — an unreadable pad must not fail the call
+            # Start-up is also "unknown, never kills": if the pad cannot be
+            # walked now, disarm rather than make every command fail on it.
+            pad_watch_root = None
+        else:
+            pad_watch_root = None if start_over else pad_root
     injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
     # The DELEGATION ALLOWANCE rides the child environment (see the helper for
     # the full three-arm reasoning — it is shared with the ``sessions`` tool's
@@ -4056,16 +4249,26 @@ async def execute_bash(
     # working, and a temp file they leave behind sits inside the same boundary
     # as everything else the session writes. Hosts with no mechanism refuse
     # the command below rather than run it unwrapped.
-    confinement = confinement_of(context)
-    if confinement is not None:
-        temp = confinement.temp_dir()
+    # A write-confined shell gets the same temp redirection, for a sharper
+    # reason: its sandbox refuses every write outside the root, so a tool that
+    # honours ``TMPDIR`` would otherwise fail on the per-user temp dir it can
+    # no longer write (measured: ``python3``'s ``tempfile`` does exactly that).
+    temp_owner = confinement if confinement is not None else shell_write
+    if temp_owner is not None:
+        temp = temp_owner.temp_dir()
         injections["TMPDIR"] = str(temp)
         injections["TMP"] = str(temp)
     env = shell_env.child_environment(
         # A confined session runs STRICT (see ``shell_env.policy_for_confinement``):
         # the model's own command must not read ambient credentials out of its
-        # environment. Ordinary sessions keep the process's configured policy.
-        shell_env.policy_for_confinement(None if confinement is None else confinement.root),
+        # environment. A write-confined shell runs STRICT for the same reason
+        # (the provider key in lop's own environment is a credential too).
+        # Ordinary sessions keep the process's configured policy.
+        (
+            shell_env.CONFINED_SHELL_POLICY
+            if shell_write is not None
+            else shell_env.policy_for_confinement(None if confinement is None else confinement.root)
+        ),
         injections=injections,
     )
 
@@ -4107,6 +4310,20 @@ async def execute_bash(
         wrapped = confinement.wrap(shell_argv)
         if wrapped is None:
             return _error(tool_call_id, "bash", confinement.spawn_refusal())
+        shell_argv = wrapped
+    elif shell_write is not None:
+        # Wrap or refuse; never run unwrapped. This branch is what makes the
+        # ``read`` approval tier ``build_bash_tool`` gives this shell honest:
+        # a call that reaches here either runs inside the sandbox or does not
+        # run. No cwd check: reads are open, so any cwd is legitimate, and a
+        # write relative to it is refused by the kernel like any other.
+        # The first availability probe is a spawn: awaited here on a worker
+        # thread so ``wrap`` below reads it from cache instead of blocking the
+        # event loop (review round 1 R4 on PR #2987).
+        await shell_sandbox_unavailable_reason_async()
+        wrapped = shell_write.wrap(shell_argv)
+        if wrapped is None:
+            return _error(tool_call_id, "bash", shell_write.spawn_refusal())
         shell_argv = wrapped
     try:
         process = await asyncio.create_subprocess_exec(
@@ -4198,7 +4415,11 @@ async def execute_bash(
     spawned_pgid: int | None = None
     with contextlib.suppress(Exception):
         spawned_pgid = os.getpgid(process.pid)
-        group_reaper.register_group(spawned_pgid, params.command)
+        group_reaper.register_group(
+            spawned_pgid,
+            params.command,
+            session_id=(context.session_id if context else "") or "",
+        )
 
     # The memory guard, bound to EXACTLY the group we just spawned. It is built
     # only when we actually captured a pgid AND the budget resolved to something
@@ -4225,14 +4446,19 @@ async def execute_bash(
     memory_advisory: str | None = None
 
     def _unregister_group() -> None:
-        # Drop this group's ledger line once it is confirmed dead, so a clean
+        # Close this group's ledger line once the command has exited, so a clean
         # run leaves nothing for the startup sweep to consider and a long host
-        # session's ledger cannot grow without bound. Best-effort; a miss is
-        # harmless (the sweep finds the leader gone and drops the line anyway).
+        # session's ledger cannot grow without bound. NOT an unconditional drop:
+        # `server & echo $!` exits the shell leader while the server stays in
+        # the group, and dropping the line then hid it from every reaper (a
+        # Storybook server lived 10.5 h). settle_group drops the line only when
+        # no member remains (a zero-fork probe) and otherwise keeps it, with the
+        # survivors recorded, for the session-end reap. Best-effort; a miss is
+        # harmless.
         if spawned_pgid is None:
             return
         with contextlib.suppress(Exception):
-            group_reaper.unregister_group(spawned_pgid)
+            group_reaper.settle_group(spawned_pgid)
 
     def _reap_synchronously() -> None:
         """The drain/reap tail's NON-awaiting cleanup, shareable by early returns.
@@ -4432,6 +4658,13 @@ async def execute_bash(
     # never reported as "continues in the background" (§10).
     memory_exceeded = False
     memory_sample: memory_guard.Sample | None = None
+    # The pad watchdog's state, beside the memory guard's and for the same shape
+    # of reason: a THIRD stop condition, checked on both loops, rendered as its
+    # own head line. ``pad_held`` keeps the LAST sample so the result can name
+    # the measured figure even though the walk that produced it is gone.
+    pad_exceeded = False
+    pad_held = pad_start_held
+    next_pad_sample = loop.time() + PAD_TICK_S
     # The query budget's state, beside the memory guard's and for the same shape
     # of reason. ``query_started`` is the SPAWN time, so the advisory and the stop
     # measure the COMMAND — and a run that detaches into a background job keeps
@@ -4469,6 +4702,55 @@ async def execute_bash(
         notice = guard.soft_notice(sample)
         if notice:
             memory_advisory = notice
+        return False
+
+    async def _pad_sample() -> tuple[int, bool] | None:
+        """``(held, over)`` when this tick is due, else ``None``; never raises.
+
+        Shared by the foreground and detached loops so the two cannot disagree
+        about the cadence or the walk. The walk itself runs in a thread: it
+        touches the filesystem, and a synchronous multi-entry scan on the loop
+        thread is the frame stall every other probe here avoids. An exception
+        (an unreadable pad, a vanished root) is "unknown", which is never a kill
+        — the same rule the memory guard applies to a missing ps reading.
+
+        The cap is re-read every tick: ``session.scratchpad.max_bytes`` is LIVE
+        (the settings row promises an edit takes effect without a relaunch), so a
+        running command must obey the value in the config now, not the one
+        snapshotted at spawn. The read is a small config parse, not a pad walk.
+        """
+        nonlocal next_pad_sample, pad_cap
+        if pad_watch_root is None:
+            return None
+        now = loop.time()
+        if now < next_pad_sample:
+            return None
+        next_pad_sample = now + PAD_TICK_S
+        pad_cap = scratchpad_budget_bytes()
+        try:
+            # ``scratchpad_footprint`` stops the walk at the cap, so a huge pad
+            # costs the same as the first crossing rather than a full scan.
+            held, over, _ = await asyncio.to_thread(scratchpad_footprint, pad_watch_root, pad_cap)
+        except Exception:  # noqa: BLE001 — unknown never kills
+            return None
+        return held, over
+
+    async def _pad_tick() -> bool:
+        """Sample the pad's footprint; kill and return True on a governed breach.
+
+        Returns True the moment the kill is issued so the wait loop breaks in the
+        same tick, exactly like ``_memory_tick``.
+        """
+        nonlocal pad_exceeded, pad_held
+        sample = await _pad_sample()
+        if sample is None:
+            return False
+        held, over = sample
+        pad_held = held
+        if over:
+            pad_exceeded = True
+            _kill()
+            return True
         return False
 
     def _query_tick() -> bool:
@@ -4532,10 +4814,30 @@ async def execute_bash(
             timed_out_bg = False
             cancelled_bg = False
             memory_exceeded_bg = False
+            pad_exceeded_bg = False
+            pad_held_bg = pad_start_held
             query_stopped_bg = False
             query_elapsed_bg = 0.0
             query_advisory_bg: str | None = None
             bg_sample: memory_guard.Sample | None = None
+
+            async def _pad_tick_bg() -> bool:
+                """The detached loop's tick: same probe, same growth rule, and
+                the flag lives HERE rather than in ``pad_exceeded`` so the job
+                row reports the stop it actually took.
+                """
+                nonlocal pad_exceeded_bg, pad_held_bg
+                sample = await _pad_sample()
+                if sample is None:
+                    return False
+                held, over = sample
+                pad_held_bg = held
+                if over:
+                    pad_exceeded_bg = True
+                    _kill()
+                    return True
+                return False
+
             bg_deadline = asyncio.get_running_loop().time() + remaining_timeout
             bg_wait = asyncio.create_task(process.wait())
 
@@ -4595,6 +4897,11 @@ async def execute_bash(
                             memory_exceeded_bg = True
                             _kill()
                             break
+                    # The pad watchdog rides the same wait. It has its own
+                    # cadence (PAD_TICK_S) because a walk is costlier than the
+                    # ps sample, and it samples in a thread for the same reason.
+                    if await _pad_tick_bg():
+                        break
                     # The query budget rides the same wait, from the SPAWN time
                     # (``query_started``), so a command that detached via steering
                     # or background=True keeps the elapsed time it already spent —
@@ -4619,7 +4926,11 @@ async def execute_bash(
                     # repaints per frame would pay for it many times over.
                     report_progress(_bash_progress_line(stdout_chunks, stderr_chunks, context))
                 await cleanup(
-                    kill=cancelled_bg or timed_out_bg or memory_exceeded_bg or query_stopped_bg
+                    kill=cancelled_bg
+                    or timed_out_bg
+                    or memory_exceeded_bg
+                    or pad_exceeded_bg
+                    or query_stopped_bg
                 )
             except asyncio.CancelledError:
                 # Manager cancellation is deliberately immediate. Convert it
@@ -4633,6 +4944,18 @@ async def execute_bash(
             )
             code = process.returncode if process.returncode is not None else -1
             head = f"TIMEOUT after {params.timeout}s (process killed)" if timed_out_bg else ""
+            # Pad before memory: both can fire in the same tick, and the pad
+            # line names the remedy the operator has to take on disk. Same head
+            # position and structured keys as the foreground result.
+            if pad_exceeded_bg:
+                head = _scratchpad_cap_exceeded_message(pad_held_bg, pad_cap)
+                report_progress(
+                    {
+                        "scratchpad_cap_exceeded": True,
+                        "scratchpad_held_bytes": pad_held_bg,
+                        "scratchpad_cap_bytes": pad_cap,
+                    }
+                )
             if memory_exceeded_bg:
                 head = (
                     guard.over_budget_message(bg_sample)
@@ -4804,6 +5127,11 @@ async def execute_bash(
                 next_mem_sample = loop.time() + mem_tick
                 if await _memory_tick():
                     break
+            # The pad watchdog keeps its own cadence; ``_pad_tick`` returns False
+            # until one is due, so calling it on every 250 ms pass costs a clock
+            # read and no walk. A probe failure is "unknown", never a kill.
+            if await _pad_tick():
+                break
             # The query budget rides the same iteration. It is checked every
             # tick (not on the memory cadence) because it needs no probe at all —
             # it is a clock read, and a stop that waited a 250 ms tick to be
@@ -4847,6 +5175,25 @@ async def execute_bash(
             # No job manager to own a detached child: kill rather than leak.
             _kill()
             raise
+        if pad_exceeded:
+            # The same §10 rule for the pad watchdog: a pad-killed command must
+            # never be reported as "continues in the background". Checked BEFORE
+            # the memory branch because the pad line is the actionable one when
+            # both fired in the same tick.
+            _reap_synchronously()
+            partial = await asyncio.to_thread(_bash_partial_summary, stdout_chunks, stderr_chunks)
+            return _error(
+                tool_call_id,
+                "bash",
+                f"{_scratchpad_cap_exceeded_message(pad_held, pad_cap)}\n"
+                f"{_redact_tool_text(params.command, context)}\n"
+                f"{_redact_tool_text(partial, context)}",
+                details={
+                    "scratchpad_cap_exceeded": True,
+                    "scratchpad_held_bytes": pad_held,
+                    "scratchpad_cap_bytes": pad_cap,
+                },
+            )
         if memory_exceeded:
             # §10: a memory-killed command must NEVER be reported as "continues
             # in the background". The guard set the flag before its _kill(), so if
@@ -4989,6 +5336,16 @@ async def execute_bash(
     parts = [f"exit code: {return_code}", _bash_output_summary(stdout, stderr)]
     if timed_out:
         parts.insert(0, f"TIMEOUT after {params.timeout}s (process killed)")
+    if pad_exceeded:
+        # Same head position and ordinary-_error choice as the memory line: the
+        # command was satisfiable, the machine said no, and the head is what a
+        # tool card keeps. Pad wins if the memory guard fired in the same tick.
+        parts.insert(0, _scratchpad_cap_exceeded_message(pad_held, pad_cap))
+        details = dict(spill_details or {})
+        details["scratchpad_cap_exceeded"] = True
+        details["scratchpad_held_bytes"] = pad_held
+        details["scratchpad_cap_bytes"] = pad_cap
+        return _error(tool_call_id, "bash", "\n".join(parts) + footer, details=details)
     if memory_exceeded:
         # The MEMORY LIMIT EXCEEDED line goes FIRST, exactly where TIMEOUT goes,
         # because the tool card keeps the HEAD of at most 40 lines — a line at the
@@ -5169,7 +5526,34 @@ def _bash_oversized_streams(
     return stdout, stderr, footer, spill_details
 
 
-def build_bash_tool() -> AgentTool:
+#: What a WRITE-CONFINED shell (the ``scout`` role) is told about its sandbox,
+#: appended to the ordinary description. Paid only in scout children: the
+#: default session's ``bash`` schema is byte-identical with or without it, so
+#: the start-of-session context budget (``scripts/bench_context_budget.py``)
+#: does not move. It names the refusal's actual spelling because a model that
+#: sees "Operation not permitted" with no explanation retries the write
+#: elsewhere instead of reporting; and it is how an INSTALLED scout whose
+#: frozen instructions still say "you cannot run anything" learns otherwise.
+_WRITE_CONFINED_BASH_NOTE = (
+    f" SANDBOXED: reads anywhere; writes only under ${SCRATCHPAD_PATH_ENV}; no "
+    "network (use web_fetch); known credential stores unreadable (not every "
+    "secret is). A refused write, read or "
+    'connect fails with "Operation not permitted" -- that is the sandbox, not a bug.'
+)
+
+
+def build_bash_tool(context: ToolContext | None = None) -> AgentTool:
+    """The ``bash`` tool; write-confined when ``context`` carries a root.
+
+    ``context`` is the construction-time context (``TOOL_BUILDERS``). Only
+    ``shell_write_root`` is read, and only to describe the sandbox and lower
+    the approval tier: enforcement is ``execute_bash``'s, which reads the
+    per-turn context and wraps or refuses on its own. The two cannot disagree
+    in the dangerous direction -- a ``read``-tier schema with an unwrapped
+    executor -- because the scout child's construction and per-turn contexts
+    carry the same root (``harness.subagent``).
+    """
+    write_confined = shell_write_confinement_of(context) is not None
     return AgentTool(
         name="bash",
         label="Shell",
@@ -5196,9 +5580,15 @@ def build_bash_tool() -> AgentTool:
             # about to run a chain of shell steps reads THIS description, and
             # one short clause here is the whole fix.
             "For multi-step Python, prefer `eval`."
+            + (_WRITE_CONFINED_BASH_NOTE if write_confined else "")
         ),
         parameters=BashParams.model_json_schema(),
-        approval_tier="exec",
+        # ``read`` ONLY when write-confined: such a call can run inside the
+        # write/network-denying sandbox or be refused, never run on the host
+        # (``execute_bash``'s ``elif shell_write`` branch). It changes nothing
+        # a ``read`` call could not, so prompting for it in "ask" mode would
+        # charge the operator an approval per ``strings`` for no protection.
+        approval_tier="read" if write_confined else "exec",
         # bash runs shared when non-pty; models batch independent
         # commands, and exclusive would serialize the common case.
         concurrency="shared",
@@ -5820,6 +6210,7 @@ def _spilled_list_body(
     shown_text: str,
     tool_name: str,
     context: ToolContext | None,
+    remap: Callable[[int, int], _SpillPlace | None] | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     """Join a spill's full line set while preserving an authored shown body.
 
@@ -5828,11 +6219,15 @@ def _spilled_list_body(
     Keeping the join here means the caller's ``to_thread`` truly moves the
     multi-megabyte work rather than eagerly evaluating it on the event loop.
     """
-    return _capped_list_body("\n".join(full_lines), shown_text, tool_name, context)
+    return _capped_list_body("\n".join(full_lines), shown_text, tool_name, context, remap)
 
 
 def _capped_list_body(
-    full: str, shown: str, tool_name: str, context: ToolContext | None
+    full: str,
+    shown: str,
+    tool_name: str,
+    context: ToolContext | None,
+    remap: Callable[[int, int], _SpillPlace | None] | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     """Body + spill details for a list result that has TWO caps on it.
 
@@ -5843,6 +6238,10 @@ def _capped_list_body(
     prefix) is measured against the budget. Writing the spill from ``shown``
     would make the handle a copy of what the model can already see, which is
     the one thing an expansion path must never be.
+
+    ``remap`` translates a ``shown`` line span into ``full``'s coordinates when
+    the two are not line-for-line (see :func:`_elide_inline`); without it both
+    are assumed to share their leading lines.
     """
     if full == shown and len(shown) <= TOOL_OUTPUT_LIMIT_CHARS:
         return shown, None
@@ -5852,15 +6251,81 @@ def _capped_list_body(
     if len(shown) <= TOOL_OUTPUT_LIMIT_CHARS:
         # Fits the prompt, but the count cap still hid entries. Point at the
         # rest explicitly rather than leaving "(capped at N)" as a dead end.
-        hidden_from = len(shown.splitlines()) + 1
-        return shown + _spill_footer(meta, ("lines", hidden_from, meta.lines)), {
-            "spill": _spill_detail(meta)
-        }
-    body, span = _elide_inline(shown, TOOL_OUTPUT_LIMIT_CHARS)
+        shown_lines = len(shown.splitlines())
+        page = remap(1, shown_lines) if remap else _SpillPlace(1, shown_lines, True)
+        if page is None:
+            # An empty page (grep ``skip`` at or past the match count): every
+            # stored entry is one this page did not show.
+            hidden: ElisionSpan | None = ("lines", 1, meta.lines)
+        elif page.last < meta.lines:
+            hidden = ("lines", page.last + 1, meta.lines)
+        elif page.first > 1:
+            # The LAST page: nothing follows it, so ``page.last + 1`` printed
+            # ``range="452-451"``, which ``read`` rejects (QA Q2 on #2997). What
+            # this page hides is everything before it — the skipped entries.
+            hidden = ("lines", 1, page.first - 1)
+        else:
+            hidden = None  # the page shows every entry; the footer names the whole copy
+        return shown + _spill_footer(meta, hidden), {"spill": _spill_detail(meta)}
+    body, span = _elide_inline(shown, TOOL_OUTPUT_LIMIT_CHARS, remap=remap)
     return body + _spill_footer(meta, span), {"spill": _spill_detail(meta)}
 
 
-def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolResult:
+def _spill_span_map(meta: Any) -> dict[int, list[tuple[int, int]]]:
+    """The sidecar's identifier ranges, grouped by 1-based line."""
+    by_line: dict[int, list[tuple[int, int]]] = {}
+    for line_no, start, end in getattr(meta, "identifier_spans", ()) or ():
+        by_line.setdefault(line_no, []).append((start, end))
+    return by_line
+
+
+def _remark_spill_line(
+    line: str,
+    line_number: int,
+    spans: Mapping[int, list[tuple[int, int]]],
+    context: ToolContext | None,
+    *,
+    window_start: int = 0,
+    window_end: int | None = None,
+    offset: int = 0,
+) -> str:
+    """Re-mint this store's span around stored identifier ranges (R3-2).
+
+    The spill keeps PLAIN text and integer positions, never a marker or
+    token. On a read-back the positions become spans again so the read
+    result's redaction pass leaves the identifier readable; a forged or
+    stale range cannot do more than mark bytes that are already in the
+    plain text, and a missing store leaves the line untouched.
+
+    WINDOW (R4-2): ``line`` may be a slice of the stored line. Only ranges
+    FULLY inside ``[window_start, window_end)`` are marked, mapped through
+    ``offset`` (the slice's decoration). A range cut by the window is
+    dropped rather than re-minted, so no token prefix or U+FFFD can reach
+    a search result; the cut identifier is then masked by redaction.
+    """
+    ranges = spans.get(line_number)
+    if not ranges:
+        return line
+    span = cast(
+        Callable[[str], str] | None,
+        getattr(getattr(context, "variables", None), "identifier_span", None),
+    )
+    if not callable(span):
+        return line
+    limit = len(line) - offset if window_end is None else window_end
+    for start, end in sorted(ranges, reverse=True):
+        if start < window_start or end > limit:
+            continue
+        begin = offset + start - window_start
+        finish = offset + end - window_start
+        if 0 <= begin <= finish <= len(line):
+            line = line[:begin] + span(line[begin:finish]) + line[finish:]
+    return line
+
+
+def _read_spill(
+    tool_call_id: str, target: str, range_spec: str | None, context: ToolContext | None = None
+) -> ToolResult:
     """Serve a ``spill://`` handle: a line range, or a regex search inside it.
 
     Routed here BEFORE the host's internal-URL resolver rather than registered
@@ -5896,7 +6361,7 @@ def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolR
         )
 
     if ref.query:
-        return _search_spill(tool_call_id, store, ref, meta, range_spec)
+        return _search_spill(tool_call_id, store, ref, meta, range_spec, context)
 
     start, end = 1, None
     if range_spec:
@@ -5908,6 +6373,11 @@ def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolR
     if result is None:
         return _error(tool_call_id, "read", f"Spilled output {ref.handle} could not be read.")
     selected, total = result
+    span_map = _spill_span_map(meta)
+    selected = [
+        _remark_spill_line(line, start + offset, span_map, context)
+        for offset, line in enumerate(selected)
+    ]
     details: dict[str, Any] = {"url": ref.handle, "range": range_spec or "full"}
     if not selected:
         return _text(
@@ -5957,20 +6427,23 @@ _SPILL_MATCH_CONTEXT_CHARS = 200
 _SPILL_MATCH_LINE_CHARS = 2 * _SPILL_MATCH_CONTEXT_CHARS + 100
 
 
-def _spill_match_window(line: str, regex: re.Pattern[str]) -> str:
-    """``line``, or a window around its first hit when the line is very long.
+def _spill_match_window(line: str, regex: re.Pattern[str]) -> tuple[str, int, int, int]:
+    """``(window_text, start, end, lead)`` around the first hit of a long line.
 
     The window says how much it dropped on each side, so the model knows the
     line continues and can read the whole line with a ``range`` on its number.
+    ``start``/``end`` are offsets in the STORED line; ``lead`` is the length
+    of the decoration prepended to the slice, so an identifier range inside
+    the slice maps to ``start - window_start + lead``.
     """
     if len(line) <= _SPILL_MATCH_LINE_CHARS:
-        return line
+        return line, 0, len(line), 0
     hit = regex.search(line)
     start = max((hit.start() if hit else 0) - _SPILL_MATCH_CONTEXT_CHARS, 0)
     end = min((hit.end() if hit else 0) + _SPILL_MATCH_CONTEXT_CHARS, len(line))
     before = f"[\u2026{start} chars] " if start else ""
     after = f" [{len(line) - end} chars\u2026]" if end < len(line) else ""
-    return f"{before}{line[start:end]}{after}"
+    return f"{before}{line[start:end]}{after}", start, end, len(before)
 
 
 #: The most matches ONE ``?q=`` call will ask the store to materialize. A page
@@ -5987,6 +6460,7 @@ def _search_spill(
     ref: SpillRef,
     meta: SpillMeta,
     range_spec: str | None,
+    context: ToolContext | None = None,
 ) -> ToolResult:
     """``?q=<regex>`` over one spilled output: line numbers, then a range.
 
@@ -6085,8 +6559,19 @@ def _search_spill(
     regex = re.compile(ref.query)
     rows: list[str] = []
     used = 0
+    span_map = _spill_span_map(meta)
     for number, line in matches:
-        row = f"{number:>{width}}| {_spill_match_window(line, regex)}"
+        window, window_start, window_end, lead = _spill_match_window(line, regex)
+        window = _remark_spill_line(
+            window,
+            number,
+            span_map,
+            context,
+            window_start=window_start,
+            window_end=window_end,
+            offset=lead,
+        )
+        row = f"{number:>{width}}| {window}"
         if rows and used + len(row) + 1 > READ_OUTPUT_LIMIT_CHARS:
             break
         rows.append(row)
@@ -6610,7 +7095,7 @@ async def execute_read(
     # handle is that it answers a RANGE. Checked first so a host that also
     # claims 'spill://' cannot shadow the expansion path a footer promised.
     if target.startswith(SPILL_SCHEME):
-        return _read_spill(tool_call_id, target, params.range)
+        return _read_spill(tool_call_id, target, params.range, context)
 
     # ``read https://…`` is sugar for a web fetch: it delegates to the SAME
     # engine web_fetch uses, returning the same bounded preview + spill handle,
@@ -6756,12 +7241,15 @@ def _scheme_refusal(
     # This tool serves NO scheme, so the remedy is a path — and the way to get one
     # for a file in the session's scratch area is usually to read it with the scheme
     # and use the absolute path that result prints. A caller that cannot USE such a
-    # path passes its own remedy instead: ``glob`` searches the working directory
-    # and refuses absolute patterns, so "pass the absolute path" is a dead end
-    # there (round 2, Q7).
-    remedy_text = remedy or (
-        "For a file in this session's scratch area, read it first with "
-        f'read(path="{SCRATCHPAD_SCHEME}<name>") and pass the absolute path that result prints.'
+    # path passes its own remedy instead: ``glob`` lists directories, so "pass the
+    # absolute path" of a FILE is a dead end there (round 2, Q7).
+    remedy_text = (
+        _scheme_specific_remedy(scheme, stripped)
+        or remedy
+        or (
+            "For a file in this session's scratch area, read it first with "
+            f'read(path="{SCRATCHPAD_SCHEME}<name>") and pass the absolute path that result prints.'
+        )
     )
     return _invalid_arguments(
         tool_call_id,
@@ -6770,6 +7258,36 @@ def _scheme_refusal(
         f"as one would walk the relative path '{scheme}:' plus the rest, under the working "
         "directory, so it is refused and nothing was touched. " + remedy_text,
     )
+
+
+def _scheme_specific_remedy(scheme: str, url: str) -> str | None:
+    """The remedy for a scheme ``read`` serves directly, or ``None``.
+
+    The scratchpad remedy (read it, then pass the absolute path) is a dead end for
+    these: a skill is meant to be read through its URL, never found on disk with
+    glob/grep, and a spill handle has no path at all — ``read`` pages it and its
+    ``?q=`` is the search. Naming the caller's own skill or handle makes the
+    redirect one call (QA round 2 N1 on #2982: ``glob skill://foo/*`` was told to
+    read a scratchpad file). Every other scheme keeps the caller's remedy.
+    """
+    rest = url.split("://", 1)[1]
+    # The first segment, minus glob/query syntax, is the skill name or handle id.
+    head = re.split(r"[/?*\[{]", rest, maxsplit=1)[0]
+    lowered = scheme.lower()
+    if lowered == "skill":
+        target = f"skill://{head}" if head else "skill://<name>"
+        return (
+            f'Read the skill with read(path="{target}"): its body lists its reference '
+            f'files, each read as read(path="{target}/<relpath>"); read(path="skill://") '
+            "lists the skills."
+        )
+    if lowered == SPILL_SCHEME.removesuffix("://"):
+        target = f"{SPILL_SCHEME}{head}" if head else f"{SPILL_SCHEME}<id>"
+        return (
+            f'Saved output is read, not searched on disk: read(path="{target}", '
+            f'range="<from>-<to>") pages it and read(path="{target}?q=<regex>") searches it.'
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -7587,17 +8105,19 @@ def _bash_pad_write_check(command: str, context: ToolContext | None) -> str:
 
     Contract, all of it load-bearing:
 
-    * THE MENTION GATE is the no-latency guarantee. This runs on every bash
-      result, so a command that does not NAME the pad returns ``""`` after
-      pure string work — ZERO filesystem calls. ``_command_names_pad`` owns the
-      spellings: the two ``$LOCAL_OPERATOR_SCRATCHPAD`` forms, the literal
+    * THE MENTION GATE keeps the common case cheap. This runs on every bash
+      result: a command that does not NAME the pad (and is not running under
+      it) returns ``""`` after string compares plus, for an outside cwd, the
+      resolve pair that rules out a symlink alias. ``_command_names_pad`` owns
+      the spellings: the two ``$LOCAL_OPERATOR_SCRATCHPAD`` forms, the literal
       path, and the home spellings (``~/…``/``$HOME/…``/``${HOME}/…``) the
       scan has always resolved but the gate could not reach — review round 1,
-      F1, the asymmetry the temp nudge's v0.62.3 fix closed for its arm. A
-      command that reaches the pad through an alias spelling of the store
-      (``/tmp`` against ``/private/tmp``) is a MISS, deliberately: resolving
-      the alias here would cost a syscall on every command to serve a spelling
-      nothing writes.
+      F1, the asymmetry the temp nudge's v0.62.3 fix closed for its arm. The
+      cwd arm is ``_pad_watch_armed``: a relative write under the pad must get
+      the same line even though it names nothing. A command that reaches the
+      pad only through an alias spelling of the store (``/tmp`` against
+      ``/private/tmp``) is still a MISS for the NAMING arm — the guard exists
+      for the shape, not for every spelling.
     * SHAPE arm first, and NO WALK: a CREATED target under the pad whose parent
       parts are a refused segment or whose leaf carries a refused suffix gets
       the sentence the write tools raise, ``[scratch]``-tagged (see
@@ -7648,9 +8168,20 @@ def _bash_pad_write_check(command: str, context: ToolContext | None) -> str:
     pad = _scratchpad_root(context)
     if pad is None:
         return ""
-    if not _command_names_pad(command, pad):
+    # The MENTION gate is widened to the watchdog's arming rule: a command whose
+    # cwd is inside the pad can grow it through a relative path without naming
+    # it, and that shape must still get the post-hoc budget line. The naming
+    # arm stays string-only; the cwd arm costs at most two resolves when the
+    # path is not textually inside.
+    if not _pad_watch_armed(command, _safe_cwd(context), pad):
         return ""
-    for candidate, sources in _bash_created_entries(command):
+    # The pad walk, not the plain one: a relative operand after
+    # ``cd "<pad>"`` is pad-relative (review round 1 M1), and the two known
+    # spellings are expanded so a quoted ``$LOCAL_OPERATOR_SCRATCHPAD`` names
+    # the same target as its literal path.
+    for candidate, sources in _bash_created_entries(
+        _expand_scratchpad_spellings(command, pad), pad=pad
+    ):
         target = _pad_target(candidate, pad)
         if target is None:
             continue
@@ -7731,26 +8262,53 @@ def _eval_pad_write_check(code: str, context: ToolContext | None) -> str:
     return _pad_budget_line(pad)
 
 
-#: One MiB in bytes, for the budget line's DISPLAY only. The policy thresholds
-#: stay exact bytes at the walk's own comparisons; only the rendered sentence is
-#: scaled, because ``268,435,456`` costs 13 cells of a card row where ``256 MiB``
-#: costs 7 — cells the remedy needs inside the crop (design review round 1, D1/D2).
-_PAD_MIB = 1024 * 1024
+def _pad_watch_armed(command: str, cwd: str, pad: Path) -> bool:
+    """Whether the live pad watchdog is armed for this command.
 
+    The watchdog costs one bounded recursive walk at spawn and one per tick, so
+    only a command that can plausibly reach the pad pays it: one that NAMES the
+    pad (the post-hoc audit's own string gate — the two env forms, the absolute
+    path and the home spellings) or one whose working directory is inside it (a
+    relative write then lands in the pad). Everything else — a long pytest or
+    git run — is not watched at all.
 
-def _pad_size_text(value: int, *, attributive: bool = False) -> str:
-    """``value`` in the unit its reader parses without dividing.
-
-    MiB once the value is at least one — FLOORED, so a ``≥`` claim never
-    overstates the walk's lower bound — and bytes below that, which is where a
-    test-scale pad lives and where ``0 MiB`` would be a worse sentence than the
-    number itself. ``attributive`` spells the bytes arm as the noun modifier
-    (``8,191-byte``) that "over its ___ budget" needs; the MiB arm needs no
-    separator (``256 MiB budget``).
+    KNOWN BLIND SPOT: a child that reads ``LOCAL_OPERATOR_SCRATCHPAD`` from its
+    ENVIRONMENT without naming the pad in the command and without a cwd inside
+    it (``cd /tmp && python build.py``, where the script itself reads the
+    variable) is not armed. The post-hoc audit shares this gate, so that shape
+    gets NO live watch and NO after-the-fact line either — the honest gap, and
+    arming every command was the cost this gate exists to avoid. An
+    unresolvable cwd is not evidence the command is inside the pad, so it does
+    not arm either; the command still runs. ``scratchpad_contains`` compares
+    textually first and resolves only when that fails, so a cwd textually
+    inside the pad costs no filesystem call; an outside cwd pays the resolve
+    pair that rules out a symlink alias.
     """
-    if value >= _PAD_MIB:
-        return f"{value // _PAD_MIB:,} MiB"
-    return f"{value:,}-byte" if attributive else f"{value:,} bytes"
+    if _command_names_pad(command, pad):
+        return True
+    try:
+        return scratchpad_contains(Path(cwd), pad)
+    except (OSError, RuntimeError):
+        return False
+
+
+def _scratchpad_cap_exceeded_message(held: int, cap: int) -> str:
+    """The head line for a command the pad watchdog stopped.
+
+    Plain text, no backticks (the tool card paints Text, so they would land
+    literally), and it leads with the CAUSE before the numbers for the same
+    reason the pre-execution refusal does: a card's head is the only part of a
+    long result guaranteed to survive truncation. ``held`` is the watchdog's
+    last sample and a LOWER BOUND when the pad is over — the walk stops at the
+    first crossing — so the sentence says ``>=`` rather than claiming a total.
+    """
+    return (
+        "SCRATCHPAD CAP EXCEEDED: this command's process group was stopped "
+        f"because the session scratchpad crossed its {cap:,}-byte cap "
+        f"(held ≥{held:,} bytes). Build output belongs in a git worktree outside "
+        "the session store; remove or move the output, or raise "
+        "session.scratchpad.max_bytes in /settings → Scratchpad, then retry."
+    )
 
 
 def _pad_budget_line(pad: Path) -> str:
@@ -7770,11 +8328,12 @@ def _pad_budget_line(pad: Path) -> str:
     precise half, where the earlier "refuse further writes" overstated it
     (review round 1, F3).
     """
-    held, over_budget, too_wide = scratchpad_footprint(pad)
+    budget = scratchpad_budget_bytes()
+    held, over_budget, too_wide = scratchpad_footprint(pad, budget)
     if over_budget:
         return (
-            f"[scratch] The pad now holds ≥{_pad_size_text(held)}, over its "
-            f"{_pad_size_text(SCRATCHPAD_TOTAL_BUDGET_BYTES, attributive=True)} budget — "
+            f"[scratch] The pad now holds ≥{scratchpad_size_text(held)}, over its "
+            f"{scratchpad_size_text(budget, attributive=True)} budget — "
             f"{SCRATCHPAD_ELSEWHERE_SHORT}; writes that add are refused."
         )
     if too_wide:
@@ -7783,6 +8342,108 @@ def _pad_budget_line(pad: Path) -> str:
             f"a tree rather than a pad; {SCRATCHPAD_ELSEWHERE_SHORT}."
         )
     return ""
+
+
+def _bash_pad_precheck(command: str, context: ToolContext | None) -> str | None:
+    """The PRE-EXECUTION half of the pad cap: refuse a creating command when the
+    pad is already over its configured cap.
+
+    Why before the child exists: ``_bash_pad_write_check`` reports what a
+    command LEFT BEHIND, and the write tools refuse before the bytes land. The
+    shell was the one channel that could keep growing a pad it was already over
+    — so a build tree that filled it made every later ``mkdir``/``cp`` add more,
+    with the audit line as the only feedback. This refuses at the same boundary
+    the next ``write`` would hit, at the only moment a shell can be stopped.
+
+    Deliberately narrow: only a command the SAME structural scan says creates a
+    path under the pad (``_bash_created_entries`` + ``_pad_target``) is a
+    candidate, and only when the bounded walk says the pad is over
+    ``scratchpad_budget_bytes()``. ``ls``, ``rm``, ``du`` and every other read
+    or shrink still run — they are the documented way back under the cap, and a
+    gate that refused them would strand the pad's owner. Two no-growth shapes
+    are exempt so the gate refuses only commands that ADD bytes: an ``mv`` whose
+    sources and destination are all inside the pad (a rename), and a
+    ``mkdir``/``touch`` target that already exists as an entry. Both exemptions
+    are PRECHECK-ONLY (review round 3, R3-1): the post-hoc shape audit still
+    sees the destination and reports a refused name it left behind. The pad's two
+    known spellings are expanded before the walk, and a ``cd``/``pushd`` into
+    the pad makes the relative creating operands that follow pad-relative
+    (review round 1 M1: ``cd "<pad>" && mkdir d`` was the bypass).
+
+    KNOWN MISS, stated rather than papered over: a destination assembled from an
+    arbitrary shell variable (``D="$PAD/x"; mkdir "$D"``) is not resolved before
+    the child exists, so this gate cannot see it; the post-hoc pad audit still
+    reports what it left behind. A ``cd`` inside a command substitution, or in a
+    construct the tokenizer cannot follow, is likewise outside the walk's model.
+    Do not read this as complete shell coverage — it closes the ordinary idioms,
+    and the after-the-fact line remains the backstop.
+
+    The sentence leads with the CAUSE and the cap before the destination (UX U3):
+    a tool card's head can otherwise spend its useful width on a long absolute
+    path before reaching why the command was stopped. It names held bytes, the
+    cap, the key, the first destination (or ``first of N``), all three remedies,
+    and closes with "The command did not run."
+
+    Returns the refusal sentence, or ``None`` to run the command.
+    """
+    if not command:
+        return None
+    pad = _scratchpad_root(context)
+    if pad is None:
+        return None
+    if not _command_names_pad(command, pad):
+        return None
+    created: list[Path] = []
+    expanded = _expand_scratchpad_spellings(command, pad)
+    for candidate, _sources in _bash_created_entries(expanded, pad=pad, exempt_no_growth=True):
+        target = _pad_target(candidate, pad)
+        if target is not None and scratchpad_contains(target, pad):
+            created.append(target)
+    if not created:
+        return None
+    budget = scratchpad_budget_bytes()
+    held, over_budget, _too_wide = scratchpad_footprint(pad, budget)
+    if not over_budget:
+        return None
+    first = os.fspath(created[0])
+    more = f" (first of {len(created)} destinations)" if len(created) > 1 else ""
+    return (
+        f"[scratch] Scratchpad over cap: holds ≥{held:,} bytes, cap {budget:,} bytes "
+        f"(session.scratchpad.max_bytes). This command would create {first}{more} "
+        "under the pad. Move build output to a git worktree (or another checkout), "
+        "delete what is no longer needed with rm, or raise "
+        "session.scratchpad.max_bytes in /settings → Scratchpad, then retry. "
+        "The command did not run."
+    )
+
+
+def _pad_destination_refusal(
+    tool_call_id: str,
+    tool_name: str,
+    target: str,
+    context: ToolContext | None,
+    size: int | None = None,
+) -> ToolResult | None:
+    """Apply the pad write policy when a tool writes to a PATH under the pad.
+
+    ``write``/``edit`` address the pad through ``scratchpad://`` and are checked
+    in ``_scratchpad_target``. A tool that takes an ordinary filesystem path
+    (browser ``screenshot``) would otherwise bypass the pad policy entirely just
+    because the caller spelled the destination absolutely, so the same
+    ``check_scratchpad_write`` runs here. A destination outside every pad is
+    skipped: this is the pad's policy, not a general file-write gate.
+    """
+    pad = _scratchpad_root(context)
+    if pad is None:
+        return None
+    path = Path(target)
+    if not scratchpad_contains(path, pad):
+        return None
+    try:
+        check_scratchpad_write(path, pad, target, size)
+    except ScratchpadContentError as exc:
+        return _invalid_arguments(tool_call_id, tool_name, str(exc))
+    return None
 
 
 def _expand_scratchpad_spellings(text: str, pad: Path) -> str:
@@ -7869,7 +8530,9 @@ def _pad_target(candidate: str, pad: Path) -> Path | None:
         return None
 
 
-def _bash_created_entries(command: str) -> Iterator[tuple[str, tuple[str, ...]]]:
+def _bash_created_entries(
+    command: str, *, pad: Path | None = None, exempt_no_growth: bool = False
+) -> Iterator[tuple[str, tuple[str, ...]]]:
     """The candidate paths ``command`` creates, in the order the shell meets
     them, each with the SOURCE operands a copy or move reads from.
 
@@ -7887,24 +8550,74 @@ def _bash_created_entries(command: str) -> Iterator[tuple[str, tuple[str, ...]]]
     the same candidate stream it always had — the temp arm's targets cannot be
     derived from a source this way — so the richer shape exists for the pad
     audit alone.
+
+    ``pad`` turns on the PAD walk's extra context, and only that caller passes
+    it: ``cd``/``pushd`` operands update a base directory so a relative creating
+    operand after ``cd "<pad>"`` is judged as pad-relative (review round 1 M1 —
+    the idiom was the bypass), and the base resets on a ``cd`` elsewhere or a
+    subshell/group boundary the walk cannot follow.
+
+    ``exempt_no_growth`` is PRECHECK-ONLY (review round 2, R2-1): it skips an
+    ``mv`` whose sources and destination are all inside the pad (a rename) and an
+    existing entry for ``touch`` / an existing directory for ``mkdir``, because
+    those commands add no bytes and refusing them was a false positive. The
+    POST-HOC shape audit must NOT pass it: ``mkdir -p "$PAD/build/sub"`` leaves a
+    build tree even when it adds no bytes, and the shape line is the only
+    feedback that names it.
     """
     tokens = _bash_tokens(_strip_heredoc_bodies(command))
     index = 0
     at_command = True
+    base: Path | None = None
+
+    def resolved(candidate: str) -> str:
+        """``candidate`` as the shell would resolve it against ``base``.
+
+        Only relative spellings are joined: an absolute path, a home/temp
+        spelling and a scheme are already what they are, and every one of them
+        reaches :func:`_pad_target` unchanged.
+        """
+        if pad is None or base is None:
+            return candidate
+        if not candidate or candidate.startswith(("/", "~", "$")) or "://" in candidate:
+            return candidate
+        return str(base / candidate)
+
     while index < len(tokens):
         kind, text = tokens[index]
         index += 1
         if kind == "redir":
             if index < len(tokens) and tokens[index][0] == "word":
-                yield tokens[index][1], ()
+                yield resolved(tokens[index][1]), ()
                 index += 1
             continue
         if kind == "op":
+            if pad is not None and text == "(":
+                # A subshell cannot be tracked: a ``cd`` inside it must not leak
+                # into the commands that follow the closing parenthesis.
+                base = None
             at_command = True
             continue
         if not at_command:
             continue
         if _ASSIGNMENT.match(text):
+            continue
+        name = text.rsplit("/", 1)[-1]
+        if pad is not None and name in ("cd", "pushd"):
+            operands: list[str] = []
+            while index < len(tokens) and tokens[index][0] == "word":
+                word = tokens[index][1]
+                index += 1
+                if not word.startswith("-"):
+                    operands.append(word)
+            base = _pad_cd_base(operands[0] if operands else None, base, pad)
+            at_command = True
+            continue
+        if pad is not None and text in ("{", "}"):
+            # A brace group is a boundary the token walk cannot open/close with
+            # certainty; reset rather than carry a base across it.
+            base = None
+            at_command = True
             continue
         prefix = _COMMAND_PREFIXES.get(text)
         if prefix is not None:
@@ -7914,26 +8627,105 @@ def _bash_created_entries(command: str) -> Iterator[tuple[str, tuple[str, ...]]]
             # A stray flag in command position names no command, so nothing behind
             # it is a creation this walk can attribute.
             continue
-        mode = _CREATING_COMMANDS.get(text.rsplit("/", 1)[-1])
+        mode = _CREATING_COMMANDS.get(name)
         if mode is None:
             at_command = False
             continue
-        operands: list[str] = []
+        operands = []
         while index < len(tokens) and tokens[index][0] == "word":
             if not tokens[index][1].startswith("-"):
                 operands.append(tokens[index][1])
             index += 1
         if mode == "last":
             if operands:
-                yield operands[-1], tuple(operands[:-1])
+                destination = resolved(operands[-1])
+                sources = tuple(resolved(source) for source in operands[:-1])
+                if (
+                    exempt_no_growth
+                    and pad is not None
+                    and name == "mv"
+                    and _pad_only_rename(destination, sources, pad)
+                ):
+                    continue
+                yield destination, sources
         elif mode == "template":
             for operand in operands:
                 if "X" in operand:
-                    yield operand, ()
+                    yield resolved(operand), ()
         else:
             for operand in operands:
-                yield operand, ()
+                target = resolved(operand)
+                if (
+                    exempt_no_growth
+                    and pad is not None
+                    and name in ("mkdir", "touch")
+                    and _pad_existing_entry(target, pad, allow_file=name == "touch")
+                ):
+                    continue
+                yield target, ()
         at_command = False
+
+
+def _pad_cd_base(operand: str | None, base: Path | None, pad: Path) -> Path | None:
+    """The pad-relative base after a ``cd``/``pushd``, or ``None``.
+
+    ``None`` means "not inside the pad": the walk must not carry a base across a
+    command that left it. A relative operand resolves against the CURRENT base
+    (``cd sub`` twice), an absolute one stands alone, and a destination that is
+    the pad or below it becomes the new base. Anything unresolvable is ``None``
+    — the safe direction, because a base this walk cannot prove is not used to
+    judge a relative creation.
+    """
+    if operand is None:
+        return None  # ``cd`` with no operand goes home; not this pad
+    target = _pad_target(operand, pad)
+    if target is None and base is not None and not operand.startswith(("/", "~", "$")):
+        target = _pad_target(str(base / operand), pad)
+    if target is not None and scratchpad_contains(target, pad):
+        return target
+    return None
+
+
+def _pad_existing_entry(candidate: str, pad: Path, *, allow_file: bool) -> bool:
+    """Whether ``candidate`` is an existing entry inside the pad that adds nothing.
+
+    ``mkdir -p <pad>`` / ``mkdir -p <pad>/build`` (existing dir) and ``touch`` of
+    an existing file or directory add no bytes; refusing them taught the operator
+    the gate fires on no-ops (review round 2, M2). A SYMLINK is never exempt:
+    ``touch`` through a dangling link can create its target outside the pad, and
+    the gate cannot judge where that lands.
+    """
+    # BEFORE any resolve: ``_pad_target`` follows the link, which would erase
+    # the very fact this guard exists to see (review round 3, R3-2). ``touch``
+    # through a symlink can create its target outside the pad; only a real
+    # existing entry is a no-op.
+    if os.path.islink(candidate):
+        return False
+    target = _pad_target(candidate, pad)
+    if target is None or not scratchpad_contains(target, pad):
+        return False
+    try:
+        return target.is_dir() or (allow_file and target.is_file())
+    except OSError:
+        return False
+
+
+def _pad_only_rename(destination: str, sources: tuple[str, ...], pad: Path) -> bool:
+    """Whether ``mv`` only renames inside the pad, adding no bytes.
+
+    A rename changes names, not the pad's total; refusing it would be the
+    conservatism the pre-execution gate's docstring promises not to apply.
+    """
+    target = _pad_target(destination, pad)
+    if target is None or not scratchpad_contains(target, pad):
+        return False
+    if not sources:
+        return False
+    for source in sources:
+        source_target = _pad_target(source, pad)
+        if source_target is None or not scratchpad_contains(source_target, pad):
+            return False
+    return True
 
 
 def _bash_created_paths(command: str) -> Iterator[str]:
@@ -8395,8 +9187,8 @@ def _scratchpad_target(
     url: str,
     context: ToolContext | None,
     size: int | None = None,
-) -> Path | ToolResult:
-    """Resolve a ``scratchpad://`` URL for a MUTATING tool, or return the error.
+) -> tuple[Path, str | None] | ToolResult:
+    """Resolve a pad URL and its crossing advisory, or return the error.
 
     Returns a ``ToolResult`` on every failure, so each caller has ONE branch it
     cannot forget part of: no scratchpad root, a malformed URL, a URL that
@@ -8405,9 +9197,11 @@ def _scratchpad_target(
     file needs a file name — ``write(path="scratchpad://")`` is a refusal, not a
     silent write to the directory's own path.
 
-    ``size`` is the payload's length in bytes when it is already known.
-    ``edit`` does its address/name preflight here, then checks the computed
-    payload under its file transaction before any mutation.
+    ``size`` is the payload's length in bytes when it is already known. The
+    successful pair carries the soft warning with the path so the receipt can
+    report the SAME pre-write crossing the guard measured. ``edit`` does its
+    address/name preflight here, then checks the computed payload under its file
+    transaction before any mutation; only that measured check can cross.
     """
     root = _scratchpad_root(context)
     if root is None:
@@ -8440,12 +9234,12 @@ def _scratchpad_target(
     # refusal is the model's own argument at fault, exactly like a malformed
     # URL, so it carries the same ``invalid arguments`` marker.
     try:
-        check_scratchpad_write(target.path, root, url, size)
+        advisory = check_scratchpad_write(target.path, root, url, size)
     except ScratchpadContentError as exc:
         return _invalid_arguments(tool_call_id, tool_name, str(exc))
     # The root is created lazily by the write itself (``path.parent``), so a
     # scratchpad directory that does not exist yet is a normal first write.
-    return target.path
+    return target.path, advisory
 
 
 async def _read_scratchpad(
@@ -8710,6 +9504,35 @@ async def _read_path(
                         **(spill_details or {}),
                     },
                 )
+
+    # An injected guidance file (AGENTS.md/CLAUDE.md this session's prompt
+    # carries) read whole returns its section index, not the 8 KiB clamp —
+    # that clamp is mostly the head the prompt already holds (measured ~2,700
+    # such reads/week). Only when the plain read WOULD clamp: below that the
+    # whole file arrives in one call and an index would only make it two
+    # (review R1-4 / QA Q1). Same opt-outs as the Python summary below.
+    from local_operator.context_files import CANDIDATE_NAMES, render_read_index
+
+    injected = context.injected_guidance if context is not None else ()
+    if (
+        injected
+        and not params.range
+        and not params.raw
+        and path.name in CANDIDATE_NAMES
+        # Raw length first: numbering only adds characters, so a text already
+        # past the budget is clamped without paying to number a 2 MB file.
+        and (
+            len(text) > READ_OUTPUT_LIMIT_CHARS or not _fits_output_budget(_number_lines(lines, 1))
+        )
+    ):
+        guidance_index = await asyncio.to_thread(render_read_index, path, injected, str(path))
+        if guidance_index is not None:
+            return _text(
+                tool_call_id,
+                "read",
+                guidance_index,
+                details={"path": str(path), "summary": True, "guidance_index": True},
+            )
 
     # Python files read whole get a declaration-only structural summary:
     # the model sees the symbol table (with line ranges) instead of the full
@@ -9059,6 +9882,24 @@ def _scan_for_disk(content: str) -> _FileScan:
     return scan
 
 
+def _exact_windows(content: str, old_text: str) -> list[tuple[int, int, str]]:
+    """Every EXACT occurrence of ``old_text``, overlapping ones included.
+
+    Overlapping on purpose: ``str.count`` counts non-overlapping matches, so
+    ``"- x\n- x"`` in ``"- x\n- x\n- x\n"`` reads as unique while it matches at
+    two offsets, and an edit anchored on it could land on the wrong one. Pass 1
+    of :func:`_match_windows`, and the whole match rule of the configuration
+    run's skill ``edit`` (``desktop_skill_writes.edit_files``), which has no
+    tolerant fallback -- one definition of "occurs exactly once" for both.
+    """
+    windows: list[tuple[int, int, str]] = []
+    start = content.find(old_text)
+    while start != -1:
+        windows.append((start, start + len(old_text), old_text))
+        start = content.find(old_text, start + 1)
+    return windows
+
+
 def _match_windows(content: str, old_text: str) -> list[tuple[int, int, str]]:
     """``(start, end, matched_text)`` windows where ``old_text`` occurs.
 
@@ -9081,11 +9922,7 @@ def _match_windows(content: str, old_text: str) -> list[tuple[int, int, str]]:
     other on a generated corpus. The snapshot's index comes from ``_scan_for``
     so it is shared with the not-found diagnostics of the same edit call.
     """
-    windows: list[tuple[int, int, str]] = []
-    start = content.find(old_text)
-    while start != -1:
-        windows.append((start, start + len(old_text), old_text))
-        start = content.find(old_text, start + 1)
+    windows = _exact_windows(content, old_text)
     if windows:
         return windows
 
@@ -9830,7 +10667,9 @@ async def execute_edit(
         scratchpad_target = _scratchpad_target(tool_call_id, "edit", url, context)
         if isinstance(scratchpad_target, ToolResult):
             return scratchpad_target
-        path = scratchpad_target
+        # The size-less preflight cannot cross the byte threshold; the measured
+        # check inside the file transaction returns the advisory that matters.
+        path, _ = scratchpad_target
     else:
         path, _inside, _resolvable = _resolve_workspace_path(raw, _safe_cwd(context))
         denial = _confinement_denial(path, context, resolvable=_resolvable)
@@ -9885,6 +10724,9 @@ async def execute_edit(
     introduced = details.pop(_MARKER_INTRODUCED_KEY, 0)
     if introduced:
         text = f"{text}\n{_marker_introduced_note(introduced)}"
+    pad_advisory = details.pop(_SCRATCHPAD_ADVISORY_KEY, None)
+    if pad_advisory:
+        text = f"{text}\n{pad_advisory}"
     hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
     return _text(
         tool_call_id,
@@ -10085,6 +10927,7 @@ def _edit_file_result_locked(
             current != original,
         )
 
+    pad_advisory: str | None = None
     if current != original:
         if scratch_root is not None:
             # Hunks do not reveal the final payload size: the early URL/name
@@ -10092,10 +10935,16 @@ def _edit_file_result_locked(
             # this file snapshot is still locked, before truncating anything.
             # The shared guard already excludes the replaced file, preserving
             # overwrite-to-fit recovery without counting its old bytes twice.
-            check_scratchpad_write(path, scratch_root, caller_path, len(current.encode("utf-8")))
+            pad_advisory = check_scratchpad_write(
+                path, scratch_root, caller_path, len(current.encode("utf-8"))
+            )
         with path.open("w", encoding="utf-8", newline="") as stream:
             stream.write(current)
     details = _diff_details(str(path), original, current)
+    if pad_advisory:
+        # The worker thread already returns ``details``; this private, popped key
+        # carries the receipt line without changing that transaction's shape.
+        details[_SCRATCHPAD_ADVISORY_KEY] = pad_advisory
     introduced = _marker_introduced(original, current)
     if introduced:
         # Carried in ``details`` (the file tools' existing structured channel) so the
@@ -10188,6 +11037,10 @@ _DIFF_CONTEXT_LINES = 2
 #: from the worker thread to the coroutine that words the receipt. Popped before the
 #: result is built, so it never reaches the persisted details or a renderer.
 _MARKER_INTRODUCED_KEY = "_redaction_marker_introduced"
+
+#: The same one-way worker-to-receipt channel for a pad's soft crossing line.
+#: It is popped before rendering, so the structured diff remains unchanged.
+_SCRATCHPAD_ADVISORY_KEY = "_scratchpad_advisory"
 
 
 #: One unified-diff hunk header. Counts default to 1 when omitted, which the
@@ -10608,6 +11461,7 @@ async def execute_write(
     if refusal is not None:
         return refusal
     url = raw.strip()
+    pad_advisory: str | None = None
     if _has_scratchpad_scheme(url):
         # The payload is measured in BYTES, not characters: the ceiling is about
         # what this write puts on a disk shared with every other session, and a
@@ -10621,7 +11475,7 @@ async def execute_write(
         )
         if isinstance(scratchpad_target, ToolResult):
             return scratchpad_target
-        path = scratchpad_target
+        path, pad_advisory = scratchpad_target
     else:
         path, _inside, _resolvable = _resolve_workspace_path(raw, _safe_cwd(context))
         denial = _confinement_denial(path, context, resolvable=_resolvable)
@@ -10658,6 +11512,8 @@ async def execute_write(
     introduced = details.pop(_MARKER_INTRODUCED_KEY, 0)
     if introduced:
         text = f"{text}\n{_marker_introduced_note(introduced)}"
+    if pad_advisory:
+        text = f"{text}\n{pad_advisory}"
     # Appended, never substituted: the nudge rides the receipt the caller already
     # reads, and the file itself is written either way (see ``_temp_scratch_hint``).
     hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
@@ -10892,6 +11748,23 @@ class _WalkOutcome(NamedTuple):
     #: ago, so this is rare, which is exactly why an undisclosed gap in a
     #: number would survive.
     unsized: int = 0
+    #: The ``GREP_SKIPPED_LIST_LIMIT`` LARGEST oversized files as
+    #: ``(size_bytes, path relative to the walk root)``, largest first, collected
+    #: in the same pass as ``oversized`` (and only when it is). A count alone made
+    #: "no matches" unactionable: the model could not tell WHICH files were never
+    #: read, nor whether they were the ones it needed (a 28-file skip over an app
+    #: bundle read as a negative answer). Bounded by a heap, so a tree of
+    #: thousands of big files costs N entries, not thousands.
+    oversized_largest: tuple[tuple[int, str], ...] = ()
+
+
+class _OversizedCount(NamedTuple):
+    """``_count_oversized_files``'s answer: the count, whether it is a floor, and
+    the largest offenders by name (see ``_WalkOutcome.oversized_largest``)."""
+
+    skipped: int
+    incomplete: bool
+    largest: tuple[tuple[int, str], ...] = ()
 
 
 class _SearchStop(NamedTuple):
@@ -11004,6 +11877,8 @@ def _walk_entries(
     respect_ignore: bool = True,
     deadline: float | None = None,
     count_oversized: bool = False,
+    oversize_limit: int = GREP_FILE_LIMIT_BYTES,
+    oversize_filter: Callable[[str], bool] | None = None,
     stop_requested: Callable[[], bool] | None = None,
 ) -> _WalkOutcome:
     """Depth-first walk pruning VCS/vendor/build trees, dotdirs, symlinks and
@@ -11037,6 +11912,8 @@ def _walk_entries(
     unsized = 0
     truncated = False
     seen = 0
+    #: Min-heap of the ``GREP_SKIPPED_LIST_LIMIT`` largest oversized files.
+    largest: list[tuple[int, str]] = []
 
     def _stop_now() -> bool:
         """Stop before doing any more work: budget spent, or a stop requested.
@@ -11136,8 +12013,19 @@ def _walk_entries(
                         # holding, which is the whole point: the count used to
                         # be recovered by a second traversal of the same tree
                         # whose only job was to stat these files.
-                        if entry.stat(follow_symlinks=False).st_size > GREP_FILE_LIMIT_BYTES:
+                        size = entry.stat(follow_symlinks=False).st_size
+                        # ``oversize_filter`` is grep's ``include``: a file the
+                        # search would never have opened is not "skipped", and
+                        # naming it would send the model after a file its own
+                        # filter excluded.
+                        if size > oversize_limit and (
+                            oversize_filter is None or oversize_filter(rel)
+                        ):
                             oversized += 1
+                            if len(largest) < GREP_SKIPPED_LIST_LIMIT:
+                                heapq.heappush(largest, (size, rel))
+                            else:
+                                heapq.heappushpop(largest, (size, rel))
                     except OSError:
                         # Counted, not silently dropped: the file was listed a
                         # moment ago, so a failed stat means the count the caller
@@ -11146,7 +12034,13 @@ def _walk_entries(
                         unsized += 1
 
     _walk(root, "", [])
-    return _WalkOutcome(files=files, truncated=truncated, oversized=oversized, unsized=unsized)
+    return _WalkOutcome(
+        files=files,
+        truncated=truncated,
+        oversized=oversized,
+        unsized=unsized,
+        oversized_largest=tuple(sorted(largest, key=lambda item: (-item[0], item[1]))),
+    )
 
 
 def _walk_files(root: Path, *, stop_requested: Callable[[], bool] | None = None) -> _WalkOutcome:
@@ -11187,10 +12081,18 @@ def _grep_file_set(
 
 
 def _count_oversized_files(
-    target: Path, *, stop_requested: Callable[[], bool] | None = None
-) -> tuple[int, bool]:
-    """``(skipped, incomplete)`` for the files over ``GREP_FILE_LIMIT_BYTES``
-    under a DIRECTORY ``target``.
+    target: Path,
+    *,
+    stop_requested: Callable[[], bool] | None = None,
+    limit_bytes: int = GREP_FILE_LIMIT_BYTES,
+    include: str | None = None,
+) -> _OversizedCount:
+    """``(skipped, incomplete, largest)`` for the files over ``limit_bytes``
+    (default ``GREP_FILE_LIMIT_BYTES``) under a DIRECTORY ``target``.
+
+    ``include`` is grep's own filter, applied with the SAME matcher the Python
+    engine uses, so both engines name the same files. ``largest`` is the bounded
+    by-name list the answer prints (see ``_WalkOutcome.oversized_largest``).
 
     The ripgrep engine applies ``--max-filesize`` silently, and the footer
     contract promises the skipped count either way — this recovers it. ONE
@@ -11215,17 +12117,50 @@ def _count_oversized_files(
         target,
         deadline=time.monotonic() + SEARCH_WALK_DEADLINE_S,
         count_oversized=True,
+        oversize_limit=limit_bytes,
+        oversize_filter=(lambda rel: _glob_matches(rel, include)) if include else None,
         stop_requested=stop_requested,
     )
-    return walked.oversized, walked.truncated or bool(walked.unsized)
+    return _OversizedCount(
+        walked.oversized, walked.truncated or bool(walked.unsized), walked.oversized_largest
+    )
 
 
 class GlobParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    pattern: str = Field(
-        description="Glob pattern relative to the working directory ('**/*.py' supported)."
-    )
+    pattern: str = Field(description="Glob pattern ('**/*.py' supported); relative to path or cwd.")
+    # Wire text kept to the minimum that says absolute paths work: every word here
+    # is billed on every request (scripts/bench_context_budget.py); the split rules
+    # and the approval behaviour live in tool_docs.TOOL_NOTES["glob"].
+    path: str = Field(default="", description="Base directory (absolute or cwd-relative).")
+
+
+def _split_absolute_glob(pattern: str) -> tuple[str, str]:
+    """``(base_dir, relative_pattern)`` for an ABSOLUTE glob pattern.
+
+    The base is the longest run of leading components with no glob metacharacter
+    (the "static prefix"), the rest is the pattern relative to it. A pattern with
+    no wildcard names one entry, so its base is the parent and the pattern is the
+    final component. Split on the component boundary, never inside one, so
+    ``/a/b*/c`` becomes ``("/a", "b*/c")`` — the same match set pathlib would
+    produce for the whole absolute pattern.
+
+    WHY it exists: the old refusal made ``glob`` the one reader that could not be
+    pointed outside the working directory, while ``read`` and ``grep`` both take
+    absolute paths — so a model exploring an app bundle fell back to guessing at
+    relative spellings. Accepting the spelling the model naturally writes is the
+    cheap fix; the walk, ignore rules, confinement and the outside-workspace
+    approval then run exactly as for an explicit ``path``.
+    """
+    parts = Path(pattern).parts  # ('/', 'a', 'b*', 'c')
+    anchor, rest = parts[0], list(parts[1:])
+    static: list[str] = []
+    while len(rest) > 1 and not any(ch in rest[0] for ch in "*?["):
+        static.append(rest.pop(0))
+    # The loop keeps the LAST component out of the base even when it is literal,
+    # so a wildcard-free pattern still leaves a directory as the base.
+    return str(Path(anchor, *static)), "/".join(rest) if rest else "*"
 
 
 def _literal_prefix(pattern: str) -> str:
@@ -11582,46 +12517,64 @@ async def execute_glob(
     # cannot be addressed that way" — the same misleading-answer class the other
     # path-taking tools refuse. Found while sweeping for the tools that take a
     # path string (round 1, per-tool refusal).
-    if "://" in pattern:
-        # Its own remedy, not the shared one: this tool's patterns are relative to
-        # the working directory and an absolute pattern is refused below, so
-        # "pass the absolute path read prints" is a route glob cannot take
-        # (round 2, Q7).
-        refusal = _scheme_refusal(
-            tool_call_id,
-            "glob",
-            pattern,
-            remedy=(
-                "glob searches the working directory with a relative pattern, so it cannot be "
-                f'pointed at a scratchpad file at all: read it with read(path="{SCRATCHPAD_SCHEME}'
-                '<name>"), or search inside it with grep(path=<the absolute path that read '
-                "prints>)."
-            ),
-        )
+    # Its own remedy, not the shared one: a scratchpad file's absolute path is a
+    # route glob CAN take, but only as a base DIRECTORY via ``path``, never as the
+    # file itself — "pass the absolute path read prints" would send the model to
+    # list a file (round 2, Q7). ``path`` gets the same check as the pattern: a
+    # URL there would otherwise resolve to ``<cwd>/spill:/abc`` and come back as
+    # "Path does not exist", the misleading answer grep's ``path`` already refuses.
+    scheme_remedy = (
+        "glob lists directories, not a scratchpad file: read the file with "
+        f'read(path="{SCRATCHPAD_SCHEME}<name>"), list the scratch area with glob(path=<the '
+        "directory of the absolute path that read prints>), or search inside the file with "
+        "grep(path=<that absolute path>)."
+    )
+    for raw_target in (pattern, params.path):
+        refusal = _scheme_refusal(tool_call_id, "glob", raw_target, remedy=scheme_remedy)
         if refusal is not None:
             return refusal
-    if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
-        message = (
-            "pattern must be a relative glob within the working directory "
-            "(no absolute paths, no '..')."
+    # An absolute pattern is split into a base directory and a relative pattern
+    # (``_split_absolute_glob``) instead of being refused. ``..`` is still refused
+    # inside the PATTERN — the base is what ``path`` is for, and an explicit
+    # ``path`` is operator-intent exactly as it is for grep, whereas a ``..``
+    # smuggled into a pattern is an escape the model did not name as a target.
+    explicit_base: str | None = params.path.strip() or None
+    is_absolute = Path(pattern).is_absolute()
+    if is_absolute and explicit_base is not None:
+        return _error(
+            tool_call_id,
+            "glob",
+            "pass an absolute pattern OR path, not both: with `path` set the pattern is "
+            "relative to it.",
         )
-        # Skills are virtual resources, not files the model should discover.
-        # Correct only this observed misuse so every ordinary glob error keeps
-        # its concise, generic diagnostic.
-        if Path(pattern).is_absolute() and Path(pattern).name.casefold() == "skill.md":
-            # A conservative resource segment avoids reflecting path syntax or
-            # prose into a URL while still covering normal catalog names.
-            skill_name = Path(pattern).parent.name
-            resource = (
-                f"skill://{skill_name}"
-                if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", skill_name)
-                else "skill://<name>"
-            )
-            message += (
-                " Do not scan the filesystem for SKILL.md; read the selected skill "
-                f"directly with `{resource}`."
-            )
-        return _error(tool_call_id, "glob", message)
+    if is_absolute and Path(pattern).name.casefold() == "skill.md":
+        # Skills are virtual resources, not files the model should discover. It
+        # stays a REFUSAL even though other absolute patterns are now served: a
+        # SKILL.md search is the filesystem scan the skill:// scheme exists to
+        # replace. The redirect stands alone — leading with the generic "no '..'"
+        # sentence described a rule the pattern never broke and offered
+        # path=<directory> as a way to keep scanning (QA round 1, Q4).
+        # A conservative resource segment avoids reflecting path syntax or prose
+        # into a URL while still covering normal catalog names.
+        skill_name = Path(pattern).parent.name
+        resource = (
+            f"skill://{skill_name}"
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", skill_name)
+            else "skill://<name>"
+        )
+        return _error(
+            tool_call_id,
+            "glob",
+            "Do not scan the filesystem for SKILL.md; read the selected skill "
+            f"directly with `{resource}`.",
+        )
+    if ".." in Path(pattern).parts:
+        return _error(
+            tool_call_id,
+            "glob",
+            "pattern must be relative to its base directory (no '..'); to search "
+            "elsewhere pass path=<directory>.",
+        )
 
     root = Path(_safe_cwd(context))
     # A confined session's glob walks are judged against the confinement root
@@ -11632,6 +12585,38 @@ async def execute_glob(
         cwd_denial = confinement.cwd_denial(str(root))
         if cwd_denial is not None:
             return _error(tool_call_id, "glob", cwd_denial)
+    if Path(pattern).is_absolute():
+        explicit_base, pattern = _split_absolute_glob(pattern)
+    if explicit_base is not None:
+        # The same resolution, confinement verdict and outside-workspace approval
+        # grep applies to its ``path`` — one rule for "a tool reads somewhere else".
+        target, inside, resolvable = _resolve_workspace_path(
+            normalise_path_argument(explicit_base), str(root)
+        )
+        denial = _confinement_denial(target, context, resolvable=resolvable)
+        if denial is not None:
+            return _error(tool_call_id, "glob", denial)
+        if not target.exists():
+            return _error(tool_call_id, "glob", f"Path does not exist: {target}")
+        if not target.is_dir():
+            return _error(
+                tool_call_id,
+                "glob",
+                f"path must be a directory: {target} (read or grep take a file).",
+            )
+        if not inside:
+            description = _approval_description(target, inside, "glob", resolvable)
+            try:
+                approved = await _check_approval(context, "read", description)
+            except ApprovalUnavailableError as exc:
+                return _error(
+                    tool_call_id,
+                    "glob",
+                    APPROVAL_UNAVAILABLE_NOTICE.format(tool="glob", reason=exc.reason),
+                )
+            if not approved:
+                return _error(tool_call_id, "glob", "User declined to list this path.")
+        root = target
     # An unbounded ``**`` walk is filesystem work that can freeze the session;
     # off the event loop and raced against abort like the grep scan, and under
     # the same wall-clock budget as every other search walk. ``stop_requested``
@@ -11715,6 +12700,10 @@ async def execute_glob(
     header = f"{len(shown)} match(es) for '{params.pattern}'"
     if total > len(shown):
         header += f" of {total} (capped at {GLOB_RESULT_LIMIT})"
+    if explicit_base is not None:
+        # Paths are printed relative to the base, so a result that does not name
+        # the base cannot be turned back into a file by the reader.
+        header += f" in {root}"
     if stops:
         # Additive to the header contract above, never a replacement for it: the
         # non-truncated spellings ('N match(es)', 'of T (capped at 500)') are
@@ -11757,31 +12746,33 @@ def build_glob_tool() -> AgentTool:
 class GrepParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    pattern: str = Field(description="Python regular expression to search for.")
-    path: str = Field(
-        default=".",
-        description="Directory or file to search (relative to the working directory).",
-    )
+    # Descriptions are terse on purpose: the schema rides every request and the
+    # start-context ratchet (scripts/bench_context_budget.py, both arms) has no
+    # headroom. Rendering and pagination detail lives in tool_docs.TOOL_NOTES["grep"]
+    # (``tool://grep``), which is read on demand.
+    pattern: str = Field(description="Python regex.")
+    path: str = Field(default=".", description="File or directory to search.")
     include: str | None = Field(
         default=None,
-        description=(
-            "Optional glob filter applied to file names/basenames " "(e.g. '*.py', '**/*.ts')."
-        ),
+        description="Glob filter on file names (e.g. '*.py').",
     )
     case: bool = Field(default=True, description="Case-sensitive matching.")
     context_lines: int = Field(
         default=0,
         ge=0,
         le=10,
-        description=(
-            "Lines of surrounding context per match (like grep -C). Context "
-            "lines render as 'path:line-text' (dash) vs matches 'path:line:text'."
-        ),
+        description="Context lines per match (like grep -C).",
     )
     skip: int = Field(
         default=0,
         ge=0,
-        description="Skip the first N matches (pagination for large result sets).",
+        description="Skip the first N matches (pagination).",
+    )
+    max_filesize_mb: int = Field(
+        default=GREP_FILE_LIMIT_BYTES // (1024 * 1024),
+        ge=1,
+        le=GREP_FILE_CEILING_BYTES // (1024 * 1024),
+        description="File size cap, MB.",
     )
 
 
@@ -11871,6 +12862,36 @@ class _GrepScan(NamedTuple):
     stops: tuple[_SearchStop, ...] = ()
     files_searched: int = 0
     files_skipped: int = 0
+    #: The Python engine's by-name list of what ``files_skipped`` counted (largest
+    #: first, ``GREP_SKIPPED_LIST_LIMIT`` entries); the ripgrep engine's comes from
+    #: ``_count_oversized_files`` instead, for the same reason its count does.
+    skipped_largest: tuple[tuple[int, str], ...] = ()
+
+
+def _clip_grep_line(line: str, hit_start: int | None) -> str:
+    """``line`` itself, or a ``GREP_LINE_CLIP_CHARS`` window around its match.
+
+    WHY: a minified bundle is ONE line of hundreds of KB. Unclipped, a single hit
+    floods the context, and on the ripgrep pipe it overran asyncio's 64 KiB line
+    limit and crashed the whole call (``LimitOverrunError`` surfaced as "Tool
+    'grep' failed unexpectedly"). The window keeps the match visible — a head-only
+    preview, which is what ``rg --max-columns-preview`` gives, would show the
+    first N bytes of the minified line and usually NOT the match — and says how
+    much it dropped on each side, so the model knows the line continues and can
+    page the real file with ``read`` instead of guessing.
+
+    ``hit_start`` is the match's character offset in ``line`` (``None`` for a
+    context line, which has no match of its own, so it clips from the start). Both
+    engines call this with the same constants, so one file renders identically
+    under either.
+    """
+    if len(line) <= GREP_LINE_CLIP_CHARS:
+        return line
+    start = max((hit_start or 0) - GREP_LINE_CLIP_LEAD_CHARS, 0)
+    end = min(start + GREP_LINE_CLIP_CHARS, len(line))
+    before = f"[\u2026{start} chars] " if start else ""
+    after = f" [{len(line) - end} chars\u2026]" if end < len(line) else ""
+    return f"{before}{line[start:end]}{after}"
 
 
 def _python_grep_scan(
@@ -11880,6 +12901,7 @@ def _python_grep_scan(
     include: str | None,
     context_lines: int,
     stop_requested: Callable[[], bool] | None = None,
+    max_filesize: int = GREP_FILE_LIMIT_BYTES,
 ) -> _GrepScan:
     """The pure-Python scan, run in a worker thread.
 
@@ -11903,6 +12925,7 @@ def _python_grep_scan(
     records: list[tuple[str, int, str, str]] = []
     files_searched = 0
     files_skipped = 0
+    largest_skipped: list[tuple[int, str]] = []
     stops: tuple[_SearchStop, ...] = ()
     for file_path in files:
         if stop_requested is not None and stop_requested():
@@ -11925,8 +12948,14 @@ def _python_grep_scan(
         if include and not _glob_matches(rel, include):
             continue
         try:
-            if file_path.stat().st_size > GREP_FILE_LIMIT_BYTES:
+            size = file_path.stat().st_size
+            if size > max_filesize:
                 files_skipped += 1
+                # Named, not just counted: see ``_WalkOutcome.oversized_largest``.
+                if len(largest_skipped) < GREP_SKIPPED_LIST_LIMIT:
+                    heapq.heappush(largest_skipped, (size, rel))
+                else:
+                    heapq.heappushpop(largest_skipped, (size, rel))
                 continue
             data = file_path.read_bytes()
         except OSError:
@@ -11939,7 +12968,10 @@ def _python_grep_scan(
         except UnicodeDecodeError:
             text = data.decode("utf-8", errors="replace")
         lines = text.splitlines()
-        hit_lines = [n for n, line in enumerate(lines, start=1) if regex.search(line)]
+        # The first hit's offset is kept per matched line: ``_clip_grep_line`` needs
+        # it to centre the window, and the search already paid for it.
+        hits = {n: m.start() for n, line in enumerate(lines, start=1) if (m := regex.search(line))}
+        hit_lines = list(hits)
         if not hit_lines:
             continue
         wanted: set[int] = set()
@@ -11950,8 +12982,8 @@ def _python_grep_scan(
                     range(max(1, n - context_lines), min(len(lines), n + context_lines) + 1)
                 )
         for n in sorted(wanted):
-            kind = "m" if n in hit_lines else "c"
-            records.append(_match_record(rel, n, lines[n - 1], kind))
+            kind = "m" if n in hits else "c"
+            records.append(_match_record(rel, n, _clip_grep_line(lines[n - 1], hits.get(n)), kind))
         if sum(1 for r in records if r[3] == "m") >= GREP_SPILL_MATCH_LIMIT:
             # A deliberate collector cap, not a budget stop: the header renders
             # it as ``N+`` (see the ``GREP_SPILL_MATCH_LIMIT`` comment), so it
@@ -11962,11 +12994,145 @@ def _python_grep_scan(
         stops=stops,
         files_searched=files_searched,
         files_skipped=files_skipped,
+        skipped_largest=tuple(sorted(largest_skipped, key=lambda item: (-item[0], item[1]))),
     )
 
 
-_RG_LINE_RE = re.compile(r"^(?P<path>.+?):(?P<line>\d+):(?P<text>.*)$")
-_RG_CONTEXT_RE = re.compile(r"^(?P<path>.+?)-(?P<line>\d+)-(?P<text>.*)$")
+#: A ripgrep match line under ``--null --column``: ``path\0line:column:text``. The
+#: path ends at the NUL, never at the first ``:``/``-``+digits: a path such as
+#: ``dash-3-dir/a.txt`` made the old ``path-line-text`` context grammar split
+#: inside the path and the row was dropped, so rg showed no context there while
+#: the Python engine did. A path cannot contain NUL, so the split is exact. The column
+#: (1-based, in BYTES) is the first match's offset, which is what lets a clipped
+#: line keep its match without a second, Python-flavoured regex run over text rg
+#: already matched (rg's regex dialect is not ``re``'s, and a hostile pattern on a
+#: multi-MB line is exactly the cost this tool bounds elsewhere).
+#: Matched on the RAW bytes, not the decoded line: the column is a byte offset
+#: into the bytes rg printed, and turning it into a character offset is only exact
+#: when the byte prefix itself is decoded. Re-encoding already-decoded text inflates
+#: every invalid byte (one byte became U+FFFD, three bytes), which pushed the window
+#: thousands of characters short of the match on a Latin-1 line (review R3, QA Q1).
+_RG_LINE_RE = re.compile(rb"^(?P<path>[^\0]+)\0(?P<line>\d+):(?P<col>\d+):")
+#: What one ripgrep output line carries beyond the file's own line: the path and
+#: the ``:line:col:`` prefix. Part of the per-line cap below.
+_RG_LINE_OVERHEAD_BYTES = 64 * 1024
+#: How much of the pipe is read per await. Small enough that a stuck rg never
+#: parks a large buffer, large enough that a 64 MB file is ~1000 reads.
+_RG_READ_CHUNK_BYTES = 64 * 1024
+#: A context line under ``--null``: ``path\0line-text`` (see ``_RG_LINE_RE``).
+_RG_CONTEXT_RE = re.compile(r"^(?P<path>[^\0]+)\0(?P<line>\d+)-(?P<text>.*)$")
+
+
+class _RgLineReader:
+    """Split ripgrep's stdout into lines that can NEVER fail on length.
+
+    WHY a reader of our own rather than ``StreamReader.readline`` with a bigger
+    ``limit``: any limit is a bet on how long rg's longest line can be, and the
+    bet was lost twice. The 64 KiB default died on a minified bundle; sizing the
+    limit from ``max_filesize`` died again because rg's default ``--encoding auto``
+    TRANSCODES a BOM'd UTF-16 file to UTF-8, so a 1 MB file of CJK text prints a
+    ~1.5 MB line (review R2) — and ``readline`` raises ``LimitOverrunError`` for
+    the whole call, not just that line. Here a line longer than ``cap`` keeps its
+    first ``cap`` bytes and the rest is DRAINED and counted, so the caller can say
+    what it did not read instead of crashing.
+
+    Cancellation-safe by construction: the only await is ``stream.read``, and every
+    byte it returns is moved into ``self`` before the next await, so the caller's
+    1 s ``wait_for`` poll (which cancels a pending read) loses nothing.
+    """
+
+    def __init__(self, stream: asyncio.StreamReader, cap: int) -> None:
+        self._stream = stream
+        self._cap = cap
+        self._pending = bytearray()  # read from the pipe, not yet split
+        self._line = bytearray()  # the current line's kept head
+        self._dropped = 0  # bytes of the current line past ``cap``, discarded
+        self._eof = False
+
+    def _absorb(self, count: int) -> None:
+        """Move ``count`` pending bytes into the current line, honouring ``cap``."""
+        room = max(self._cap - len(self._line), 0)
+        self._line += self._pending[: min(count, room)]
+        self._dropped += max(count - room, 0)
+        del self._pending[:count]
+
+    def _finish(self) -> tuple[bytes, int]:
+        line, dropped = bytes(self._line), self._dropped
+        self._line.clear()
+        self._dropped = 0
+        return line, dropped
+
+    async def readline(self) -> tuple[bytes, int] | None:
+        """``(kept_head, dropped_bytes)`` for the next line (newline stripped), or
+        ``None`` at end of stream."""
+        while True:
+            newline = self._pending.find(b"\n")
+            if newline >= 0:
+                self._absorb(newline)
+                del self._pending[:1]
+                return self._finish()
+            if self._eof:
+                if self._line or self._dropped:
+                    return self._finish()
+                return None
+            # No newline yet: bank what we have (bounded by ``cap``) so a huge line
+            # never accumulates past the cap while we wait for its end.
+            self._absorb(len(self._pending))
+            chunk = await self._stream.read(_RG_READ_CHUNK_BYTES)
+            if chunk:
+                self._pending += chunk
+            else:
+                self._eof = True
+
+
+#: The line boundaries ``str.splitlines`` honours besides ``\n``, each mapped to a
+#: visible stand-in of the same length (its Unicode control picture where one
+#: exists, else U+2424 SYMBOL FOR NEWLINE). rg splits lines only on ``\n``, so its
+#: text can hold these, while the spill store and the elision span count lines
+#: with ``splitlines``: one rg record became 2+ spill lines and every pointer
+#: after it drifted (review R1 on #2997). The Python engine never sees them —
+#: it splits the file with ``splitlines`` itself. One-for-one so the match
+#: offset ``_clip_grep_line`` centres on is unchanged.
+_RG_LINE_BREAK_GLYPHS = str.maketrans(
+    {
+        "\r": "\u240d",
+        "\x0b": "\u240b",
+        "\x0c": "\u240c",
+        "\x1c": "\u241c",
+        "\x1d": "\u241d",
+        "\x1e": "\u241e",
+        "\x85": "\u2424",
+        "\u2028": "\u2424",
+        "\u2029": "\u2424",
+    }
+)
+
+
+def _rg_line_text(text: str) -> str:
+    """One rg output line as ONE display/spill line (see ``_RG_LINE_BREAK_GLYPHS``).
+
+    A trailing ``\r`` is a CRLF line ending, not content: it is dropped, as the
+    Python engine's ``splitlines`` drops it, rather than shown as a glyph."""
+    return text.removesuffix("\r").translate(_RG_LINE_BREAK_GLYPHS)
+
+
+def _rg_match_text(raw_text: bytes, col: int, dropped: int, cap: int) -> str:
+    """The display text of one rg MATCH line: clipped around the match, with the
+    character offset taken from the raw byte prefix (see ``_RG_LINE_RE``), and an
+    explicit note when the line outran the reader's cap (see ``_RgLineReader``)."""
+    text = _rg_line_text(raw_text.decode("utf-8", errors="replace"))
+    lead = col - 1  # rg's column is 1-based, in bytes
+    note = ""
+    if dropped:
+        note = f" [line over {cap} bytes: {dropped} more bytes not read]"
+        if lead >= len(raw_text):
+            # The match itself is in the unread tail; showing the head as if it held
+            # the hit would be the "match not in the window" bug in another form.
+            note += " (the match is past the cut; read the file by line range)"
+    if len(text) <= GREP_LINE_CLIP_CHARS:
+        return text + note
+    hit = len(raw_text[:lead].decode("utf-8", errors="replace")) if lead < len(raw_text) else None
+    return _clip_grep_line(text, hit) + note
 
 
 async def _ripgrep_scan(
@@ -11977,6 +13143,7 @@ async def _ripgrep_scan(
     case: bool,
     context_lines: int,
     signal: AbortSignal | None,
+    max_filesize: int = GREP_FILE_LIMIT_BYTES,
 ) -> _GrepScan | None:
     """Native ripgrep scan; None means "fall back to the Python engine".
 
@@ -12003,7 +13170,20 @@ async def _ripgrep_scan(
     # -H forces the path prefix even for a single explicitly-named file
     # (rg otherwise prints bare "lineno:text", which this parser and the
     # shared path:line:text grammar both expect to carry a path).
-    argv = [rg, "--no-heading", "--color", "never", "--max-filesize", "1M", "-n", "-H"]
+    # --column is what keeps a clipped long line's MATCH in view (see
+    # ``_RG_LINE_RE``). --max-filesize is the caller's cap in plain bytes.
+    argv = [
+        rg,
+        "--no-heading",
+        "--color",
+        "never",
+        "--max-filesize",
+        str(max_filesize),
+        "-n",
+        "-H",
+        "--column",
+        "--null",
+    ]
     if not case:
         argv.append("-i")
     if context_lines:
@@ -12015,6 +13195,11 @@ async def _ripgrep_scan(
     argv += ["--", pattern, rel_target]
 
     try:
+        # The pipe is read by ``_RgLineReader``, never ``readline``: a long line is
+        # cut and counted instead of raising ``LimitOverrunError`` for the whole
+        # call (the "Tool 'grep' failed unexpectedly" crash on minified bundles).
+        # No ``limit=`` here for that reason: with ``read`` it is only the default
+        # flow-control watermark, never a cap on a line.
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(base),
@@ -12028,8 +13213,13 @@ async def _ripgrep_scan(
     deadline = time.monotonic() + GREP_SCAN_DEADLINE_S
     output_cap = (GREP_SPILL_MATCH_LIMIT + 1) * 3 + 1000
     stops: tuple[_SearchStop, ...] = ()
+    # Twice the file cap: an ordinary line is never longer than its file, and rg's
+    # UTF-16 -> UTF-8 transcoding grows text at most 1.5x, so a real line is kept
+    # whole; anything longer is cut and disclosed rather than fatal.
+    line_cap = 2 * max_filesize + _RG_LINE_OVERHEAD_BYTES
     try:
         assert proc.stdout is not None
+        reader = _RgLineReader(proc.stdout, line_cap)
         while len(records) < output_cap:
             if signal and signal.aborted:
                 proc.kill()
@@ -12046,30 +13236,37 @@ async def _ripgrep_scan(
                 )
                 break
             try:
-                raw = await asyncio.wait_for(proc.stdout.readline(), timeout=1.0)
+                next_line = await asyncio.wait_for(reader.readline(), timeout=1.0)
             except (TimeoutError, asyncio.TimeoutError):
                 continue
-            if not raw:
+            if next_line is None:
                 break
-            line = raw.decode("utf-8", errors="replace").rstrip("\n")
-            if line == "--":
+            raw, dropped = next_line
+            if raw == b"--":
                 continue
-            match = _RG_LINE_RE.match(line)
+            match = _RG_LINE_RE.match(raw)
             if match:
-                path = match.group("path")
+                path = match.group("path").decode("utf-8", errors="replace")
                 if path.startswith("./"):
                     path = path[2:]
-                records.append(
-                    _match_record(path, int(match.group("line")), match.group("text"), "m")
+                text = _rg_match_text(
+                    raw[match.end() :], int(match.group("col")), dropped, line_cap
                 )
+                records.append(_match_record(path, int(match.group("line")), text, "m"))
                 continue
+            line = raw.decode("utf-8", errors="replace")
             context = _RG_CONTEXT_RE.match(line)
             if context:
                 path = context.group("path")
                 if path.startswith("./"):
                     path = path[2:]
                 records.append(
-                    _match_record(path, int(context.group("line")), context.group("text"), "c")
+                    _match_record(
+                        path,
+                        int(context.group("line")),
+                        _clip_grep_line(_rg_line_text(context.group("text")), None),
+                        "c",
+                    )
                 )
         if len(records) >= output_cap:
             # The collector cap, not a budget stop — hence a stop record with no
@@ -12105,17 +13302,24 @@ def _render_grep_body(
     records: list[tuple[str, int, str, str]],
     skip: int,
     context_lines: int,
-) -> tuple[str, int, int]:
-    """``(body, shown_matches, total_matches)`` with skip + display cap applied.
+) -> tuple[str, int, int, list[int | None]]:
+    """``(body, shown_matches, total_matches, spill_rows)`` with skip + display cap applied.
 
     Matches paginate (``skip`` then the 200-line display cap); context rides
-    along only for the matches being shown, groups separated by ``--``."""
+    along only for the matches being shown, groups separated by ``--``.
+
+    ``spill_rows[i]`` is the 1-based spill line of body line ``i + 1`` — the
+    spill holds every match, one per line, in ``records`` order and from the
+    first match regardless of ``skip`` — or ``None`` for a ``--`` or context
+    row, which the spill does not hold. Without it the elision footer counted
+    body lines and sent the model to the wrong matches (QA Q7 on #2982)."""
     match_indexes = [i for i, r in enumerate(records) if r[3] == "m"]
     total = len(match_indexes)
     kept = match_indexes[skip:][:GREP_MATCH_LIMIT]
     if not kept:
-        return "", 0, total
+        return "", 0, total, []
     keep_set = set(kept)
+    spill_line_of = {index: n for n, index in enumerate(match_indexes, start=1)}
     # Pull in the context records neighbouring each kept match (same file,
     # within ±context_lines of the match).
     if context_lines:
@@ -12140,6 +13344,7 @@ def _render_grep_body(
                 keep_set.add(j)
                 j += 1
     out: list[str] = []
+    spill_rows: list[int | None] = []
     last_line = None
     last_rel = None
     for i in sorted(keep_set):
@@ -12148,9 +13353,41 @@ def _render_grep_body(
             last_line is None or rel != last_rel or lineno != last_line + 1
         ):
             out.append("--")
+            spill_rows.append(None)
         out.append(f"{rel}:{lineno}:{text}" if kind == "m" else f"{rel}:{lineno}-{text}")
+        spill_rows.append(spill_line_of.get(i))
         last_rel, last_line = rel, lineno
-    return "\n".join(out), len(kept), total
+    return "\n".join(out), len(kept), total, spill_rows
+
+
+def _grep_spill_remap(
+    spill_rows: list[int | None],
+) -> Callable[[int, int], _SpillPlace | None]:
+    """Map a BODY span to the spill span holding its matches.
+
+    When the span holds only ``--``/context rows there is no match to point at,
+    so it collapses onto the nearest match line instead (``hidden=False``) —
+    still a range the store serves, around the rows that were hidden, and the
+    marker says no match was hidden there.
+
+    ``None`` means the body has no match row at all: a page with ``skip`` at or
+    past the match count. Indexing an empty neighbour list there raised
+    IndexError and turned a past-the-end page into a tool crash (QA Q1 on #2997).
+    """
+
+    def remap(first: int, last: int) -> _SpillPlace | None:
+        inside = [row for row in spill_rows[first - 1 : last] if row is not None]
+        if inside:
+            return _SpillPlace(min(inside), max(inside), True)
+        after = [row for row in spill_rows[last:] if row is not None]
+        before = [row for row in spill_rows[: first - 1] if row is not None]
+        if after:
+            return _SpillPlace(after[0], after[0], False)
+        if before:
+            return _SpillPlace(before[-1], before[-1], False)
+        return None
+
+    return remap
 
 
 @_guard("grep")
@@ -12247,9 +13484,12 @@ async def execute_grep(
     target_is_file = target.is_file()
     base = target.parent if target_is_file else target
     use_rg = _use_ripgrep()
+    max_filesize = params.max_filesize_mb * 1024 * 1024
+    # The by-name list behind the skipped count; filled by whichever engine ran.
+    skipped_largest: tuple[tuple[int, str], ...] = ()
     if use_rg and target_is_file:
         try:
-            if target.stat().st_size > GREP_FILE_LIMIT_BYTES:
+            if target.stat().st_size > max_filesize:
                 use_rg = False
         except OSError:
             use_rg = False
@@ -12276,6 +13516,7 @@ async def execute_grep(
             params.case,
             params.context_lines,
             signal,
+            max_filesize,
         )
     if scan_result is not None:
         records = scan_result.records
@@ -12291,7 +13532,13 @@ async def execute_grep(
         # (review F2).
         if not target_is_file:
             counted, aborted = await _run_with_abort(
-                asyncio.to_thread(_count_oversized_files, target, stop_requested=_stop_requested),
+                asyncio.to_thread(
+                    _count_oversized_files,
+                    target,
+                    stop_requested=_stop_requested,
+                    limit_bytes=max_filesize,
+                    include=params.include,
+                ),
                 signal,
                 lambda: None,
             )
@@ -12303,7 +13550,7 @@ async def execute_grep(
             # checker instead of an `or 0` that would silently launder a
             # future internal failure into a zero (review N1).
             assert counted is not None
-            files_skipped, count_incomplete = counted
+            files_skipped, count_incomplete, skipped_largest = counted
     else:
         if signal and signal.aborted:
             return _error(tool_call_id, "grep", "Search aborted.")
@@ -12323,6 +13570,7 @@ async def execute_grep(
                 params.include,
                 params.context_lines,
                 stop_requested=_stop_requested,
+                max_filesize=max_filesize,
             )
             # One stop list, both hops: a file set the walk budget cut short makes
             # the scan's own completeness claim false, so the two stops are
@@ -12347,9 +13595,11 @@ async def execute_grep(
         records = py_result.records
         files_searched = py_result.files_searched
         files_skipped = py_result.files_skipped
+        skipped_largest = py_result.skipped_largest
         stops.extend(py_result.stops)
 
     matches = [r for r in records if r[3] == "m"]
+    cap_label = f"{params.max_filesize_mb}MB"
 
     def _skipped_clause() -> str:
         """The footer's ``file(s) skipped`` suffix, or "" when there is none.
@@ -12366,12 +13616,50 @@ async def execute_grep(
             # (review round 2, R2-4). Zero keeps the bare form: a count that only
             # knows "none so far" has nothing to report as a floor.
             if files_skipped:
-                return f" (at least {files_skipped} file(s) skipped over the 1MB cap)"
-            return " (files over the 1MB cap not fully counted)"
+                return f" (at least {files_skipped} file(s) skipped over the {cap_label} cap)"
+            return f" (files over the {cap_label} cap not fully counted)"
         if not files_skipped:
             return ""
-        return f" ({files_skipped} file(s) skipped over the 1MB cap)"
+        return f" ({files_skipped} file(s) skipped over the {cap_label} cap)"
 
+    def _skipped_names() -> str:
+        """The by-name half of the skipped-files disclosure, or "" when none.
+
+        WHY: the bare count was read as a negative answer — "No matches (28
+        file(s) skipped)" left the model unable to tell which files were never
+        read or what to do about it, and a "no match" about an app bundle's
+        minified chunks is exactly the claim it could not make. Names (largest
+        first, bounded), the sizes that show whether a raise will reach them, and
+        the one parameter that does are what make the footer actionable.
+        """
+        if not skipped_largest:
+            return ""
+        cap_bytes = params.max_filesize_mb * 1024 * 1024
+
+        def _size(size: int) -> str:
+            # One decimal rounds a just-over-cap file DOWN to the cap (1,048,577 B
+            # read "1.0MB" under "skipped over the 1MB cap", QA round 1 Q5), so a
+            # size within 10% of the cap is shown in exact bytes instead.
+            if size < cap_bytes * 1.1:
+                return f"{size:,} B"
+            return f"{size / (1024 * 1024):.1f}MB"
+
+        shown = ", ".join(f"{path} ({_size(size)})" for size, path in skipped_largest)
+        more = files_skipped - len(skipped_largest)
+        if more > 0:
+            shown += f", and {more} more"
+        biggest_mb = -(-skipped_largest[0][0] // (1024 * 1024))
+        ceiling_mb = GREP_FILE_CEILING_BYTES // (1024 * 1024)
+        if biggest_mb <= ceiling_mb:
+            remedy = f"re-run with max_filesize_mb={biggest_mb} to search them all"
+        else:
+            remedy = (
+                f"re-run with max_filesize_mb={ceiling_mb} (the ceiling) to search those up "
+                f"to {ceiling_mb}MB; the largest is beyond grep's reach, so read it in ranges"
+            )
+        return f"not searched (largest first): {shown}; {remedy}"
+
+    skipped_names = _skipped_names()
     if not matches:
         if stops:
             # The honesty contract, and the reason this change exists: "no
@@ -12394,10 +13682,22 @@ async def execute_grep(
                 f"for '{params.pattern}' was found in the part of the tree that "
                 "was read, and the rest was not — so this is not an absence of "
                 "matches. Narrow the search with path=<subdirectory> or "
-                f"include=<glob> and re-run{engine_note}.",
+                f"include=<glob> and re-run{engine_note}."
+                + (f" Also {skipped_names}." if skipped_names else ""),
                 details=_partial_details(stops, None),
             )
         where = f" in {files_searched} file(s)" if not engine_note else ""
+        if skipped_names:
+            # INCONCLUSIVE, not "no matches": files were never read, so the answer
+            # covers only part of the tree. Not ``useless`` either — that flag
+            # tells compaction the result carries nothing worth keeping, and the
+            # list of unread files is the one thing here worth keeping.
+            return _text(
+                tool_call_id,
+                "grep",
+                f"No matches for '{params.pattern}'{where}{_skipped_clause()}{engine_note}"
+                f" — INCONCLUSIVE: {skipped_names}.",
+            )
         return _text(
             tool_call_id,
             "grep",
@@ -12406,7 +13706,7 @@ async def execute_grep(
             details={"useless": True},
         )
 
-    body, shown, total = _render_grep_body(records, params.skip, params.context_lines)
+    body, shown, total, spill_rows = _render_grep_body(records, params.skip, params.context_lines)
     # The spill holds every MATCH line (context excluded — it is render-time
     # decoration, recoverable by re-running with a narrower pattern/range).
     spill_lines = [f"{rel}:{lineno}:{text}" for rel, lineno, text, _kind in matches]
@@ -12414,9 +13714,22 @@ async def execute_grep(
     # The join and spill ride a thread: multi-MB string joins plus the
     # spill's disk write were the loop-bound tail that froze the frame when
     # several searches settled together.
-    body_text, spill_details = await asyncio.to_thread(
-        _spilled_list_body, spill_lines, shown_block, "grep", context
-    )
+    if total <= shown and len(shown_block) <= TOOL_OUTPUT_LIMIT_CHARS:
+        # Every match is already on screen and fits: a spill would only be a copy of
+        # it. It used to be written anyway whenever the body carried a ``--`` group
+        # separator or context lines (the spill holds matches only, so the two never
+        # compare equal), and its footer then pointed at an impossible range — a
+        # two-line spill advertised as ``range="4-2"``.
+        body_text, spill_details = shown_block, None
+    else:
+        body_text, spill_details = await asyncio.to_thread(
+            _spilled_list_body,
+            spill_lines,
+            shown_block,
+            "grep",
+            context,
+            _grep_spill_remap(spill_rows),
+        )
     header = f"{shown} match(es) for '{params.pattern}'"
     if total > shown:
         header += f" of {total}{'+' if total >= GREP_SPILL_MATCH_LIMIT else ''}"
@@ -12443,7 +13756,10 @@ async def execute_grep(
             "path=<subdirectory> or include=<glob> to search further"
         )
         details = _partial_details(stops, spill_details)
-    return _text(tool_call_id, "grep", text + ":\n" + body_text + engine_note, details=details)
+    tail = f"\n[{skipped_names}]" if skipped_names else ""
+    return _text(
+        tool_call_id, "grep", text + ":\n" + body_text + engine_note + tail, details=details
+    )
 
 
 def build_grep_tool() -> AgentTool:
@@ -14721,7 +16037,9 @@ async def execute_send(
         # (`session=`, and `target=` when the needle is a full id) are
         # covered; every other error form returns None before any read; see
         # _peer_holder_hint.
-        hint = await _peer_holder_hint(params.session or "", params.target or "", error or "")
+        hint = await _peer_holder_hint(
+            params.session or "", params.target or "", error or "", context
+        )
         if hint:
             error = hint
         return _error(tool_call_id, "send", error or "no target resolved")
@@ -14815,7 +16133,8 @@ async def execute_send(
         # unchanged — no acknowledged result is NOT an undelivered message — so
         # this must never become the confident arm.
         target = (
-            f"{record.conversation_name or record.session_id} (pid {record.pid})"
+            f"{identifier_text(context, str(record.conversation_name or record.session_id))} "
+            f"(pid {record.pid})"
             if record is not None
             else f"{cold_session_id} (not running)"
         )
@@ -15279,6 +16598,10 @@ def _sessions_tool_description() -> str:
         # The per-op INPUTS above stay: they are the incident fix.
         " `spawn` is for USER-requested work. Address exactly one of `session`"
         " (id), `target` (name/cwd) or `pid`. What each op does: op='help'."
+        # The self-identity sentence: list renders the caller's own row, and
+        # without the marker a model read it as a peer on the same topic.
+        " `list` marks your own row `(this session)` — that row is you, not a"
+        " duplicate."
     )
 
 
@@ -15978,7 +17301,7 @@ async def _sessions_target(
     # THE PEER HINT: the exact-id miss may name a session a PEER holds — in
     # either spelling, `session=` or a full-id `target=`; every other error
     # form is untouched (see _peer_holder_hint).
-    hint = await _peer_holder_hint(params.session or "", params.target or "", error or "")
+    hint = await _peer_holder_hint(params.session or "", params.target or "", error or "", context)
     if hint:
         error = hint
     return _SessionsTarget(None, "", [], False, error or "no session resolved")
@@ -16033,7 +17356,7 @@ _FULL_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 _TARGET_MISS_TAIL = "(searched live and stored sessions)"
 
 
-def _peer_holder_sentence(session_id: str) -> str | None:
+def _peer_holder_sentence(session_id: str, context: ToolContext | None = None) -> str | None:
     """The sentence naming the peer that holds ``session_id``, else ``None``.
 
     Blocking (a cache read, and on a miss one bounded relay fan-out): call
@@ -16080,10 +17403,15 @@ def _peer_holder_sentence(session_id: str) -> str | None:
     if row is None or not row.is_remote or not row.owner_device:
         return None
     device = row.owner_device_name or row.owner_device
-    return f"`{session_id}` is held by {device} — pass `peer={device}`"
+    # Identifier field: the session id the caller must pass back.
+    return (
+        f"`{identifier_text(context, session_id)}` is held by {device} — " f"pass `peer={device}`"
+    )
 
 
-async def _peer_holder_hint(session_id: str, target: str, error: str) -> str | None:
+async def _peer_holder_hint(
+    session_id: str, target: str, error: str, context: ToolContext | None = None
+) -> str | None:
     """``_peer_holder_sentence`` for an exact-id miss refusal, else ``None``.
 
     TWO SPELLINGS of one exact id reach the hint, and both mean "this id,
@@ -16111,7 +17439,7 @@ async def _peer_holder_hint(session_id: str, target: str, error: str) -> str | N
         needle = target.strip()
         if not _FULL_ID_RE.match(needle) or not error.endswith(_TARGET_MISS_TAIL):
             return None
-    return await asyncio.to_thread(_peer_holder_sentence, needle)
+    return await asyncio.to_thread(_peer_holder_sentence, needle, context)
 
 
 def _sessions_candidates_text(target: _SessionsTarget) -> str:
@@ -16173,7 +17501,6 @@ def _sessions_marker_extras(session_id: str) -> dict[str, Any]:
     ``resume.session_origin``; the name follows it.
     """
     from local_operator.resume import (
-        TRANSCRIPT_NAME,
         is_user_session,
         session_origin,
         workstream_opened_by,
@@ -16211,7 +17538,13 @@ def _sessions_marker_extras(session_id: str) -> dict[str, Any]:
     extras["primary"] = assignment["primary"]
 
     try:
-        transcript = directory / TRANSCRIPT_NAME
+        # The PHYSICAL file, not the plain name: a compressed session's bytes are
+        # in the archive, and reporting a path that does not exist to a caller
+        # asking where the conversation lives is the "empty session" reading this
+        # whole module's resolver exists to prevent.
+        from local_operator.session import compression
+
+        transcript, _codec = compression.transcript_source(directory)
         if transcript.is_file():
             extras["transcript_path"] = str(transcript)
     except OSError:
@@ -16223,19 +17556,86 @@ def _sessions_marker_extras(session_id: str) -> dict[str, Any]:
     return extras
 
 
-def _session_row_brief(row: Mapping[str, Any]) -> str:
+def _sessions_peer_status(row: Mapping[str, Any]) -> str:
+    """Render the peer's claim without promoting a cached claim to observation.
+
+    The mesh may retain rows when a link goes down. Their identity and holder
+    remain useful, but busy/gate/wait fields are not current observations. On
+    reachable peers use the catalogue's shared status ladder, not a second
+    hand-written precedence for the sessions tool.
+    """
+    block = row.get("peer") or {}
+    if block.get("reachable") is False:
+        return "link down; status unknown"
+    from local_operator.network.projection import PeerRow
+    from local_operator.resume import SessionRow
+    from local_operator.session.catalog import status_of
+    from local_operator.session.peer_rows import _live_state
+
+    claim = PeerRow.from_json(dict(row), device_id=str(block.get("device_id") or ""))
+    projected = SessionRow(
+        claim.session_id,
+        claim.started,
+        claim.conversation_name,
+        live_state=_live_state(claim),
+        pending=claim.pending,
+        waiting_on=claim.waiting_on,
+        jobs_running=claim.jobs_running,
+        subagents_running=claim.subagents_running,
+        subagents_queued=claim.subagents_queued,
+    )
+    _code, label = status_of(projected, None)
+    return label
+
+
+def _sessions_wait_phrase(row: Mapping[str, Any]) -> str:
+    """A presence addend, not a claim that every background job is awaited."""
+    from local_operator.network.types import peer_whole_int
+
+    count = peer_whole_int(row.get("waiting_on"), default=0)
+    return f"waiting on {count} {'job' if count == 1 else 'jobs'}" if count > 0 else ""
+
+
+def _session_row_brief(
+    row: Mapping[str, Any], context: ToolContext | None = None, own_session_id: str = ""
+) -> str:
     """One lean listing line: the fields a caller acts on. The full published
-    row rides in ``details``, which costs no prompt tokens."""
-    state = str(row.get("state") or "?")
-    name = str(row.get("conversation_name") or "(unnamed)")
-    bits = [f"[{state}] {name}"]
+    row rides in ``details``, which costs no prompt tokens.
+
+    Identifier fields: the conversation title and session id are marked as
+    spans so redaction leaves them readable; neither is a credential.
+
+    ``own_session_id`` is the CALLER's id, and when a row matches it the row
+    is tagged ``(this session)``. The incident this answers: an agent read its
+    own row as a different session working on the same topic, then spawned a
+    duplicate or spent turns on a conflict with itself. The marker rides the
+    name segment — the first thing the eye lands on — rather than a trailing
+    field, because a suffix on a long line is what got skimmed past. The tag
+    applies to LOCAL rows only: ids are minted per device, so a peer's row
+    that happens to share this id is a different session (``locality ==
+    'remote'``).
+    """
+    block = row.get("peer") or {}
+    unreachable = block.get("reachable") is False
+    state = (
+        _sessions_peer_status(row)
+        if row.get("locality") == "remote"
+        else str(row.get("state") or "?")
+    )
+    name = identifier_text(context, str(row.get("conversation_name") or "(unnamed)"))
+    own = bool(
+        own_session_id
+        and str(row.get("session_id") or "") == own_session_id
+        and row.get("locality") != "remote"
+    )
+    bits = [f"[{state}] {name}{' (this session)' if own else ''}"]
     if row.get("session_id"):
-        bits.append(f"session {row['session_id']}")
+        bits.append(f"session {identifier_text(context, str(row['session_id']))}")
     if row.get("pid"):
         bits.append(f"pid {row['pid']}")
     if row.get("model_label"):
         bits.append(str(row["model_label"]))
-    if row.get("busy"):
+    if row.get("busy") and not unreachable:
         bits.append("busy")
     # THE ROW-LEVEL RULE, not the raw field: a STORED row carries no needs
     # claim, whatever its producer said (``network.types.row_needs_claim``) —
@@ -16244,7 +17644,7 @@ def _session_row_brief(row: Mapping[str, Any]) -> str:
     from local_operator.network.types import row_needs_claim
 
     needs = row_needs_claim(state=row.get("state"), pending=row.get("pending"))
-    if needs:
+    if needs and not unreachable:
         bits.append(f"pending {needs}")
     # ``uptime_s`` is meaningful only for a row with a PROCESS: a stored row
     # carries the empty default (0.0, not None), and rendering it as ``up 0ms``
@@ -16380,7 +17780,13 @@ async def _sessions_list(
     }
     if notes:
         details["notes"] = notes
-    lines: list[str] = [_session_row_brief(row) for row in shown]
+    lines: list[str] = [
+        # The CALLER's id, so the caller's own row says so (see
+        # ``_session_row_brief``). ``details['rows']`` above stays the
+        # published shape byte-for-byte: the marker is text only.
+        _session_row_brief(row, context, str(getattr(context, "session_id", "") or ""))
+        for row in shown
+    ]
     if len(deduped) > len(shown):
         if scope == "local":
             lines.append(
@@ -16428,6 +17834,10 @@ async def _sessions_list_query(
     )
     scanned = await asyncio.to_thread(registry.scan)
     live = {rec.session_id: (rec, state) for rec, state in scanned if state in ("live", "wedged")}
+    # ``query`` searches THIS device's store, so every match here is local: no
+    # ``locality`` guard is needed, but the id comparison is the same bytes-on-
+    # bytes rule the listing uses (see ``_session_row_brief``).
+    own_session_id = str(getattr(context, "session_id", "") or "")
     rows: list[dict[str, Any]] = []
     lines: list[str] = []
     for match in matches:
@@ -16443,13 +17853,21 @@ async def _sessions_list_query(
             row["pid"] = entry[0].pid
             row["model_label"] = entry[0].model_label
         rows.append(row)
-        name = session_row.name or "(unnamed)"
+        # Identifier fields: the title and id this search row prints are names
+        # a caller quotes back; both are marked spans, not credentials.
+        name = identifier_text(context, session_row.name or "(unnamed)")
+        if own_session_id and session_row.id == own_session_id:
+            # Same marker, same position as the listing's (agent self-identity):
+            # a query result must not be the one view where the caller's own
+            # session is unrecognisable.
+            name += " (this session)"
+        session_id = identifier_text(context, session_row.id)
         if entry:
-            lines.append(f"- [live] {name}, session {session_row.id}, pid {entry[0].pid}")
+            lines.append(f"- [live] {name}, session {session_id}, pid {entry[0].pid}")
         else:
             age = max(0.0, time.time() - float(session_row.mtime or 0.0))
             age_text = format_duration(int(age * 1000))
-            lines.append(f"- [stored] {name}, session {session_row.id}, last active {age_text} ago")
+            lines.append(f"- [stored] {name}, session {session_id}, last active {age_text} ago")
     details: dict[str, Any] = {
         "op": "list",
         "query": params.query,
@@ -16470,7 +17888,7 @@ async def _sessions_list_query(
     return _text(tool_call_id, "sessions", text, details=details)
 
 
-def _sessions_facts_line(extras: Mapping[str, Any]) -> str:
+def _sessions_facts_line(extras: Mapping[str, Any], context: ToolContext | None = None) -> str:
     """The durable-facts line every ``info`` text ends with.
 
     Shared by the row-backed and the disk-only bodies so the two cannot drift
@@ -16483,11 +17901,13 @@ def _sessions_facts_line(extras: Mapping[str, Any]) -> str:
     ]
     opener = extras.get("opened_by")
     if opener:
-        bits = [str(opener.get("agent") or "?")]
+        # Identifier fields: agent/profile name, its label and the opener
+        # session id are names a caller quotes back.
+        bits = [identifier_text(context, str(opener.get("agent") or "?"))]
         if opener.get("label"):
-            bits.append(f"label {opener['label']!r}")
+            bits.append(f"label {identifier_text(context, repr(opener['label']))}")
         if opener.get("session"):
-            bits.append(f"session {opener['session']}")
+            bits.append(f"session {identifier_text(context, str(opener['session']))}")
         second.append("opened by " + ", ".join(bits))
     if extras.get("tags"):
         second.append("tags: " + ", ".join(extras["tags"]))
@@ -16498,7 +17918,18 @@ def _sessions_facts_line(extras: Mapping[str, Any]) -> str:
     return "; ".join(second)
 
 
-def _sessions_disk_only_body(facts: _SessionsDiskFacts, extras: Mapping[str, Any]) -> str:
+#: The one sentence that says "this row IS the caller". A constant, because two
+#: renderers print it (the row-backed and the disk-only ``info`` bodies) and two
+#: spellings of one identity claim is the drift this change exists to prevent.
+_OWN_SESSION_SENTENCE = "This is YOUR session — the one you are running in. It is not a duplicate."
+
+
+def _sessions_disk_only_body(
+    facts: _SessionsDiskFacts,
+    extras: Mapping[str, Any],
+    context: ToolContext | None = None,
+    is_own: bool = False,
+) -> str:
     """The ``info`` text when no listing row describes the session.
 
     A stored directory can be absent from a listing scan for four reasons,
@@ -16511,8 +17942,16 @@ def _sessions_disk_only_body(facts: _SessionsDiskFacts, extras: Mapping[str, Any
     ``sidebar_visibility``, ``archived_ids``, ``session_activity_path``), so
     the sentence and the scan cannot disagree. The per-row reads need only
     the id, which is why the answer can be composed here at all.
+
+    ``is_own`` carries the same self sentence the row-backed body prints (QA
+    round 1, Q1): an ``agent-shell`` session never appears in a listing scan at
+    any limit, so this is the ONLY way it can be told ``info`` is describing
+    itself. Ids still come from the local store — a peer's row never reaches
+    this body.
     """
-    name = facts.name or "(unnamed)"
+    # Identifier field: the stored title is a name the caller reads; it is
+    # marked as a span so redaction leaves it readable.
+    name = identifier_text(context, facts.name or "(unnamed)")
     directory = str(extras.get("session_dir") or "")
     resumable = True
     if extras.get("sidebar_visibility") == "hidden":
@@ -16535,29 +17974,58 @@ def _sessions_disk_only_body(facts: _SessionsDiskFacts, extras: Mapping[str, Any
     first = f'"{name}" — stored, {why}'
     if resumable:
         first += "; it can still be resumed by its exact session id"
-    return first + "\n" + _sessions_facts_line(extras)
+    text = first + "\n" + _sessions_facts_line(extras, context)
+    if is_own:
+        text += "\n" + _OWN_SESSION_SENTENCE
+    return text
 
 
-def _sessions_info_body(row: Mapping[str, Any], extras: Mapping[str, Any]) -> str:
-    """Two lines: the live-state row, then the durable facts about it."""
-    state = str(row.get("state") or "?")
-    name = str(row.get("conversation_name") or "(unnamed)")
+def _sessions_info_body(
+    row: Mapping[str, Any],
+    extras: Mapping[str, Any],
+    context: ToolContext | None = None,
+    is_own: bool = False,
+) -> str:
+    """Two lines: the live-state row, then the durable facts about it.
+
+    Identifier fields: the conversation title and session id are marked spans;
+    both are names the caller quotes back, not credentials.
+
+    ``is_own`` adds one plain sentence saying this row IS the caller. The
+    wording is deliberately blunt: the failure it answers is a model reading a
+    correct id and a matching title as a *different* session doing the same
+    work, so "same topic, same title" must not be left to inference. Only the
+    local path passes it — a peer's row can share an id and is never us.
+    """
+    state = (
+        _sessions_peer_status(row)
+        if row.get("locality") == "remote"
+        else str(row.get("state") or "?")
+    )
+    unreachable = (row.get("peer") or {}).get("reachable") is False
+    name = identifier_text(context, str(row.get("conversation_name") or "(unnamed)"))
     parts = [f'"{name}" — {state}']
     if row.get("session_id"):
-        parts.append(f"session {row['session_id']}")
+        parts.append(f"session {identifier_text(context, str(row['session_id']))}")
     if row.get("pid"):
         parts.append(f"pid {row['pid']}")
-    if row.get("busy"):
+    if row.get("busy") and not unreachable:
         parts.append("busy")
     # No needs claim on a stored row (``network.types.row_needs_claim``).
     from local_operator.network.types import row_needs_claim
 
     needs = row_needs_claim(state=row.get("state"), pending=row.get("pending"))
-    if needs:
+    if needs and not unreachable:
         parts.append(f"pending {needs}")
+    waiting = _sessions_wait_phrase(row)
+    if waiting and not unreachable:
+        parts.append(waiting)
     if row.get("model_label"):
         parts.append(str(row["model_label"]))
-    return ", ".join(parts) + "\n" + _sessions_facts_line(extras)
+    text = ", ".join(parts) + "\n" + _sessions_facts_line(extras, context)
+    if is_own:
+        text += "\n" + _OWN_SESSION_SENTENCE
+    return text
 
 
 async def _sessions_info_mesh(
@@ -16604,7 +18072,12 @@ async def _sessions_info_mesh(
         lines = [
             f"{peer} holds {len(candidates)} sessions matching {needle!r} — name one by its id:"
         ]
-        lines.extend(f"  {row.id}  {row.name}" for row in candidates)
+        # Identifier fields: candidate ids and names are names the caller quotes
+        # back to disambiguate; both are marked spans.
+        lines.extend(
+            f"  {identifier_text(context, row.id)}  {identifier_text(context, row.name)}"
+            for row in candidates
+        )
         return _error(tool_call_id, "sessions", "\n".join(lines))
     if found is None:
         return _error(
@@ -16616,9 +18089,11 @@ async def _sessions_info_mesh(
     row = next(item for item in rows if str(item.get("session_id")) == found.id)
     block = row.get("peer") or {}
     device = str(block.get("name") or block.get("device_id") or peer)
-    state = str(row.get("state") or "?")
-    name = str(row.get("conversation_name") or "(unnamed)")
-    bits = [f"[{state}] {name}", f"session {found.id}"]
+    state = _sessions_peer_status(row)
+    # Identifier fields: the row's title and session id are names the caller
+    # acts on; both are marked spans, never credentials.
+    name = identifier_text(context, str(row.get("conversation_name") or "(unnamed)"))
+    bits = [f"[{state}] {name}", f"session {identifier_text(context, found.id)}"]
     if row.get("pid"):
         bits.append(f"pid {row['pid']}")
     if row.get("model_label"):
@@ -16627,8 +18102,11 @@ async def _sessions_info_mesh(
     from local_operator.network.types import row_needs_claim
 
     needs = row_needs_claim(state=row.get("state"), pending=row.get("pending"))
-    if needs:
+    if needs and block.get("reachable") is not False:
         bits.append(f"pending {needs}")
+    waiting = _sessions_wait_phrase(row)
+    if waiting and block.get("reachable") is not False:
+        bits.append(waiting)
     text = (
         ", ".join(bits) + f"\nheld by {device} — the session, its directory and its "
         "transcript live on that device; peek reads its live tail there, resume warms "
@@ -16652,11 +18130,20 @@ async def _sessions_info(
     if not target.session_id:
         return _error(tool_call_id, "sessions", target.error)
     stored = target.record is None
+    # The caller's own id, computed BEFORE the branches below: a hidden-origin
+    # session (``agent-shell``) never reaches the row-backed path — it is
+    # excluded from every listing scan — so the disk-only body is the ONLY place
+    # it can be told ``info`` is describing itself (QA round 1, Q1). The mesh
+    # path returned above, so a peer's row — which can share an id, ids are
+    # minted per device — never claims to be us.
+    is_own = bool(context and context.session_id and target.session_id == context.session_id)
     row = await _session_row_for_id(
         target.session_id,
         include_stored=stored,
         stored_limit=_SESSIONS_STORED_LOOKUP_LIMIT,
     )
+    # Identifier fields: the info body prints the session's title and id as
+    # names the caller quotes back; marks are applied inside the body.
     if row is None:
         if stored:
             # Two situations land here, and until review round 1 they shared
@@ -16678,7 +18165,9 @@ async def _sessions_info(
                     "listed": False,
                     **extras,
                 }
-                text = await asyncio.to_thread(_sessions_disk_only_body, facts, extras)
+                text = await asyncio.to_thread(
+                    _sessions_disk_only_body, facts, extras, context, is_own
+                )
                 text, spill = spill_truncate(text, "sessions", context)
                 if spill:
                     details.update(spill)
@@ -16699,7 +18188,7 @@ async def _sessions_info(
         )
     extras = await asyncio.to_thread(_sessions_marker_extras, target.session_id)
     details: dict[str, Any] = {"op": "info", **row, **extras}
-    text = _sessions_info_body(row, extras)
+    text = _sessions_info_body(row, extras, context, is_own=is_own)
     text, spill = spill_truncate(text, "sessions", context)
     if spill:
         details.update(spill)
@@ -16902,15 +18391,19 @@ class _PeekDigest(NamedTuple):
 def _peek_message_entries(entries: Sequence[TranscriptEntry]) -> list[TranscriptEntry]:
     """The entries that RENDER as steps — the renderer's own filter.
 
-    ``_render_transcript_steps`` counts only ``message`` rows (compaction and
-    bookkeeping rows are invisible to a reader), so any step arithmetic must
-    count with the same predicate; keeping it in one place is what stops the
-    walk's window from disagreeing with the renderer's count.
+    ``_render_transcript_steps`` numbers only the rows it renders, so any step
+    arithmetic must count with the SAME predicate; keeping it in one place is
+    what stops the walk's window from disagreeing with the renderer's count.
+    Since round 1 of #3098 that predicate also refuses the account-change
+    notice (``harness/comms.py`` ``is_peek_step_entry``: its sentence names the
+    account, and peek lands in model context), so this function must drop it
+    too — otherwise the window would reserve a slot for a step that is never
+    rendered and every cursor computed from these rows would sit one step off.
     """
 
-    from local_operator.session.transcript import ENTRY_MESSAGE
+    from local_operator.harness.comms import is_peek_step_entry
 
-    return [entry for entry in entries if entry.type == ENTRY_MESSAGE]
+    return [entry for entry in entries if is_peek_step_entry(entry)]
 
 
 def _peek_window(
@@ -17065,13 +18558,18 @@ def _peek_head(directory: Path, *, need: int) -> _PeekWindow:
     ``has_newer`` the way the anchored page's lookahead answers it.
     """
 
-    from local_operator.resume import TRANSCRIPT_NAME
+    from local_operator.session import compression
     from local_operator.session.transcript import (
         TranscriptEntry,
         _iter_complete_lines_forward,
     )
 
-    path = directory / TRANSCRIPT_NAME
+    # A seekable, whole transcript whichever form it is on disk in: the plain
+    # journal, or the archive decompressed into compression's bounded cache. A
+    # peek is a READ, so it must never be answered from the plain name alone.
+    path = compression.transcript_for_read(directory)
+    if path is None:
+        raise FileNotFoundError(f"{directory} holds no transcript")
     entries: list[TranscriptEntry] = []
     scanned = 0
     capped = False
@@ -17162,13 +18660,17 @@ def _peek_search(
     read (a compaction between the two reads, reported as the miss it is).
     """
 
-    from local_operator.resume import TRANSCRIPT_NAME
+    from local_operator.harness.comms import is_peek_step_entry
+    from local_operator.session import compression
     from local_operator.session.transcript import (
         TranscriptEntry,
         _iter_complete_lines_backward,
     )
 
-    path = directory / TRANSCRIPT_NAME
+    # Same resolution as ``_peek_head``: the seekable source, archive included.
+    path = compression.transcript_for_read(directory)
+    if path is None:
+        raise FileNotFoundError(f"{directory} holds no transcript")
     scanned = 0
     hit_id = ""
     budget_stop = False
@@ -17194,15 +18696,25 @@ def _peek_search(
                     break
                 scanned += len(raw) + 1
                 text = raw.decode("utf-8", errors="replace")
+                # A REFUSED ROW CANNOT MATCH (QA round 1, Q1). The step filter is
+                # what keeps the account label out of a peek — and testing the raw
+                # JSON first made the FILTER itself an oracle: a query for a
+                # substring of a label this surface will never print answered
+                # yes/no, and 513 of those rebuilt an email. So the row is parsed
+                # and gated BEFORE the needle is tested, and a refused row can
+                # neither match nor become an anchor. The cost is one parse per
+                # row already inside the byte budget, which is the same decode
+                # this loop was doing anyway.
+                entry = TranscriptEntry.from_json(text)
+                if entry is None or not is_peek_step_entry(entry):
+                    continue
                 if pattern is None:
                     found = needle in text
                 else:
                     found = pattern.search(text) is not None
                 if found:
-                    entry = TranscriptEntry.from_json(text)
-                    if entry is not None:
-                        hit_id = entry.id
-                        break
+                    hit_id = entry.id
+                    break
             if hit_id or budget_stop:
                 break
     if not hit_id:
@@ -17447,10 +18959,14 @@ async def _sessions_peek_mesh(
     }
     if not rows:
         text = (
-            f"{session_id} on {peer}: no steps with text are shown on that device's " "display yet"
+            f"{identifier_text(context, session_id)} on {peer}: no steps with text "
+            "are shown on that device's display yet"
         )
     else:
-        header = f"{session_id} on {peer} — the newest {len(rows)} step(s)"
+        # Identifier field: the session id a caller addresses on that peer.
+        header = (
+            f"{identifier_text(context, session_id)} on {peer} — " f"the newest {len(rows)} step(s)"
+        )
         if payload.get("has_older"):
             header += " (older steps are loaded there too)"
         lines = [header + ":"]
@@ -17486,7 +19002,7 @@ async def _sessions_peek(
     session_id = target.session_id
     directory = config_dir() / "sessions" / session_id
 
-    from local_operator.resume import TRANSCRIPT_NAME, session_name
+    from local_operator.resume import session_name
 
     def _peek_name() -> str:
         """The header's name: the live record's, else the stored title, else the id."""
@@ -17555,9 +19071,10 @@ async def _sessions_peek(
                 text = payload.miss
             else:
                 name = await asyncio.to_thread(_peek_name)
+                # Identifier fields: the header quotes the title and id.
                 text = _peek_body(
-                    name,
-                    session_id,
+                    identifier_text(context, name),
+                    identifier_text(context, session_id),
                     mode,
                     payload,
                     anchor=str(params.before_id or params.around_id or ""),
@@ -17567,9 +19084,11 @@ async def _sessions_peek(
         return _error(
             tool_call_id,
             "sessions",
+            # Naming the DIRECTORY, not the plain file: this error now means
+            # "neither form exists", and printing a path that was legitimately
+            # absent would keep asserting the old, plain-only layout.
             f"session {session_id!r} has no transcript to peek at "
-            f"({directory / TRANSCRIPT_NAME}) — it may not have written a first "
-            "turn yet.",
+            f"({directory}) — it may not have written a first turn yet.",
         )
     text, spill = spill_truncate(text, "sessions", context)
     if spill:
@@ -18014,10 +19533,14 @@ def _sessions_disk_facts(session_id: str) -> _SessionsDiskFacts:
     )
 
 
-def _sessions_open_body(params: SessionsParams, details: Mapping[str, Any]) -> str:
+def _sessions_open_body(
+    params: SessionsParams, details: Mapping[str, Any], context: ToolContext | None = None
+) -> str:
     """The one-line-ish receipt (§5.4): what was opened, where it shows up,
     and — for a hidden run — how each side still reaches it."""
-    name = str(details.get("name") or "")
+    # Identifier fields: the title, session id and opener identity are names
+    # a caller quotes back or addresses.
+    name = identifier_text(context, str(details.get("name") or ""))
     # Two spellings, because the spaces differ per branch: ``named`` carries
     # no trailing space and ``where`` starts with one, so composing them
     # directly produced a double space in the resume receipt (review round 1,
@@ -18027,7 +19550,7 @@ def _sessions_open_body(params: SessionsParams, details: Mapping[str, Any]) -> s
     lead = f"{named} " if named else ""
     bits = []
     if details.get("session_id"):
-        bits.append(f"session {details['session_id']}")
+        bits.append(f"session {identifier_text(context, str(details['session_id']))}")
     if details.get("job_id"):
         bits.append(f"job {details['job_id']}")
     if details.get("pid"):
@@ -18038,11 +19561,11 @@ def _sessions_open_body(params: SessionsParams, details: Mapping[str, Any]) -> s
     opener = details.get("opener") or {}
     opened_by = ""
     if opener.get("agent"):
-        opened_by = f" opened by {opener['agent']}"
+        opened_by = f" opened by {identifier_text(context, str(opener['agent']))}"
         if opener.get("label"):
-            opened_by += f" (label {opener['label']!r})"
+            opened_by += f" (label {identifier_text(context, repr(opener['label']))})"
         if opener.get("session"):
-            opened_by += f" from session {opener['session']}"
+            opened_by += f" from session {identifier_text(context, str(opener['session']))}"
         opened_by += "."
     if params.op == "resume":
         if details.get("readiness") == "starting":
@@ -18101,7 +19624,8 @@ def _sessions_open_body(params: SessionsParams, details: Mapping[str, Any]) -> s
     elif details.get("sidebar_visibility") == "hidden":
         text += (
             " The operator reaches it through `lop sessions` (the live run); your "
-            f"route back is `lop exec --resume {details['session_id']}`."
+            f"route back is `lop exec --resume "
+            f"{identifier_text(context, str(details['session_id']))}`."
         )
     return text
 
@@ -18183,9 +19707,11 @@ async def _sessions_spawn_mesh(
         return _error(tool_call_id, "sessions", refusal, details={"mesh": payload})
     minted = str(payload.get("session_id") or "")
     name = str(params.name or "").strip()
-    head = f'created "{name}" on {peer}' if name else f"created on {peer}"
+    # Identifier fields: the title the caller chose and the minted id.
+    shown_name = identifier_text(context, name)
+    head = f'created "{shown_name}" on {peer}' if name else f"created on {peer}"
     if minted:
-        head += f" (session {minted})"
+        head += f" (session {identifier_text(context, minted)})"
     lines = [head]
     if str(params.prompt or ""):
         admitted = bool(payload.get("admitted"))
@@ -18470,14 +19996,16 @@ async def _sessions_open(
             return _text(
                 tool_call_id,
                 "sessions",
-                _sessions_open_body(params, details) + f" Tags not applied: {exc}. "
+                _sessions_open_body(params, details, context) + f" Tags not applied: {exc}. "
                 "Once listed, the operator can re-tag it from the sidebar Tags… picker; "
                 "do not repeat the spawn to retry tags.",
                 details=details,
             )
     if params.op == "resume":
         details["visibility_changed"] = False
-    return _text(tool_call_id, "sessions", _sessions_open_body(params, details), details=details)
+    return _text(
+        tool_call_id, "sessions", _sessions_open_body(params, details, context), details=details
+    )
 
 
 async def _sessions_resume_batch(
@@ -18574,7 +20102,10 @@ async def _sessions_resume_batch(
         ]
         for session_id, name in rows:
             age = format_age(max(0.0, time.time() - mtime_by_id[session_id]))
-            lines.append(f'- {session_id}  "{name}"  ({age})')
+            lines.append(
+                f"- {identifier_text(context, session_id)}  "
+                f'"{identifier_text(context, name)}"  ({age})'
+            )
         if not rows:
             lines = [f"resume set ({sets_name}): no stored sessions match{capped_note}."]
         text, spill = spill_truncate("\n".join(lines), "sessions", context)
@@ -18617,12 +20148,14 @@ async def _sessions_resume_batch(
     for outcome in outcomes:
         if outcome.ok:
             lines.append(
-                f'- ok    {outcome.session_id}  "{outcome.name}"  '
+                f"- ok    {identifier_text(context, outcome.session_id)}  "
+                f'"{identifier_text(context, outcome.name)}"  '
                 f"({outcome.status}, job {outcome.job_id})"
             )
         else:
             lines.append(
-                f'- FAIL  {outcome.session_id}  "{outcome.name}"  — '
+                f"- FAIL  {identifier_text(context, outcome.session_id)}  "
+                f'"{identifier_text(context, outcome.name)}"  — '
                 f"{outcome.detail or outcome.status}"
             )
     text, spill = spill_truncate("\n".join(lines), "sessions", context)
@@ -18803,6 +20336,26 @@ def _variable_store(context: ToolContext | None) -> VariableStoreProtocol:
     from local_operator.variables import VariableStore
 
     return VariableStore(cwd=_safe_cwd(context))
+
+
+def identifier_text(context: ToolContext | None, value: str) -> str:
+    """Wrap a rendered identifier in the markers redaction honours.
+
+    WHY AT THE RENDER SITE: only the code that prints the value knows it is a
+    NAME rather than a secret. The mark covers the exact bytes being printed in
+    this result — it cannot exempt the same word elsewhere, or outlive the
+    line — which is what keeps a project key named ``token`` from releasing a
+    later ``token: <secret>`` credential (LOH-28 remediation). A store without
+    ``identifier_span`` (an older caller, a test double) renders the plain
+    value.
+    """
+    span = cast(
+        Callable[[str], str] | None,
+        getattr(getattr(context, "variables", None), "identifier_span", None),
+    )
+    if not callable(span):
+        return value
+    return span(value)
 
 
 @_guard("list_variables")
@@ -19109,6 +20662,13 @@ BROWSER_ACTIONS = (
     "styles",
     "hit_test",
     "ancestors",
+    # The read-only DOM query: CSS in, element descriptors out (tag, id, name,
+    # role, aria-label, rendered text, visibility, checked/disabled, rect). It
+    # exists because the one question that unblocked nothing in the measured
+    # incident — "what is the id of this checkbox?" — had no answer: `read`
+    # returns no attributes, `snapshot` returns an AX tree, and `eval` is not a
+    # surface to expose. It never mutates, so it is safe where eval is not.
+    "query",
     # tabs lists every live agent-owned tab (all sessions', read-only
     # awareness) so parallel agents can see what is being driven and know which
     # handle to close. Non-cmux only, like scroll/logs: cmux keeps no
@@ -19142,6 +20702,12 @@ BROWSER_ACTIONS = (
     "recover",
     "retain",
     "release",
+    # Desktop-host network telemetry. Metadata is the default; request-form
+    # bodies require a narrowly scoped, explicitly approved opt-in below.
+    "network_start",
+    "network_stop",
+    "network_read",
+    "network_clear",
 )
 
 #: ``retitle`` is a wire METHOD but deliberately NOT an action: the SESSION
@@ -19165,6 +20731,10 @@ CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
     {
         "scroll",
         "logs",
+        "network_start",
+        "network_stop",
+        "network_read",
+        "network_clear",
         "tabs",
         "request_access",
         "await_access",
@@ -19177,6 +20747,11 @@ CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
         "styles",
         "hit_test",
         "ancestors",
+        "query",
+        "network_start",
+        "network_stop",
+        "network_read",
+        "network_clear",
     }
 )
 
@@ -19186,6 +20761,15 @@ CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
 #: the lane was skipped — a silent wrong action rather than a refusal.
 OWNERSHIP_BROWSER_ACTIONS = frozenset({"recover", "retain", "release"})
 
+#: The three accessibility-locator prefixes `click`/`type` accept in `selector`.
+#:
+#: Recognised here so the tool can (a) refuse one where only CSS makes sense
+#: and (b) explain a cryptic host failure when an OLD host treats `role=…` as
+#: CSS. The grammar itself is matched host-side (`driver/ax-locator.ts`): this
+#: is a recogniser, not a second parser, because two parsers is how
+#: `role=checkbox[name="Active"]` starts meaning two things.
+_LOCATOR_PREFIX_RE = re.compile(r"^(role|label|text)(\*?)=", re.IGNORECASE)
+
 #: Direction keywords ``scroll`` accepts. Mirrors extension/src/commands/scroll.ts
 #: DIRECTIONS; validated here so a bad keyword is refused before it reaches the
 #: wire rather than returning an empty scroll.
@@ -19193,6 +20777,14 @@ _SCROLL_DIRECTIONS = frozenset({"top", "bottom", "up", "down", "left", "right"})
 
 #: Console levels ``logs`` filters on. Mirrors the extension's LEVELS.
 _LOG_LEVELS = frozenset({"error", "warning", "info", "log", "all"})
+
+#: Network telemetry bounds. The desktop host enforces its own lower/equal
+#: ceilings; refusing oversized requests here prevents an older or malicious
+#: peer from turning a read into an unbounded transcript payload.
+NETWORK_MAX_ENTRIES = 200
+NETWORK_MAX_BODY_BYTES = 64 * 1024
+NETWORK_MAX_READ_BODY_BYTES = 256 * 1024
+_NETWORK_ACTIONS = frozenset({"network_start", "network_stop", "network_read", "network_clear"})
 
 #: Style property names ``styles`` accepts as caller-requested extras. The
 #: charset is the CSS ident set that matters here: letters, digits, dashes and
@@ -19209,6 +20801,20 @@ _STYLE_PROPERTY_RE = re.compile(r"^[-_A-Za-z0-9]+$")
 #: list is REFUSED with copy rather than silently clipped into a result that
 #: looks complete.
 _MAX_STYLE_PROPERTIES = 20
+
+#: The most lines one `snapshot` page may ask for. A caller that wants the whole
+#: tree omits `limit` and gets it, unchanged from before; this bounds a NUMBER,
+#: so `limit=10**9` cannot make a host build a payload nobody will read.
+SNAPSHOT_MAX_LINES = 5000
+
+#: The most element descriptors one `query` may return. The page function caps
+#: at 50 too; this is the caller-facing bound so an absurd number is REFUSED
+#: with copy rather than silently clipped into a result that looks complete.
+QUERY_MAX_ELEMENTS = 50
+
+#: A search term names a control, not a page. The cap keeps a pasted document
+#: from becoming a scan over every rendered line on every call.
+SNAPSHOT_MAX_SEARCH_CHARS = 120
 
 #: The hosts an explicit ``backend`` hint on `open` may name, beside "" (the
 #: default availability order). Spellings are the COPY spellings: the paired
@@ -19317,17 +20923,38 @@ class BrowserParams(BaseModel):
     backend: str = Field(
         default="",
         description=(
-            "'open': the host for a FRESH surface — '' (default order), 'ui', "
-            "'extension' (the user's real profile), or 'cmux'. A held handle or "
-            "an adoption outranks it; a host that cannot serve refuses."
+            "'open' fresh surface only: '' (default order), 'ui', 'extension' "
+            "(the user's real profile) or 'cmux'. A held handle or adoption "
+            "outranks it."
         ),
     )
     path: str = Field(default="", description="'screenshot' only: the destination file.")
     selector: str = Field(
         default="",
-        description="CSS selector or a snapshot ref (e5): the click/type "
-        "target, the read scope (default: body), the scroll element, or the "
-        "download/upload control.",
+        description="CSS selector, snapshot ref, or a11y locator for the "
+        'click/type target (role=checkbox[name="Active"], label=…, text=…) '
+        "resolved against the a11y tree, so it survives framework ids. Also the "
+        "read/snapshot scope, query CSS, scroll element or download/upload control.",
+    )
+    # The snapshot window. Three fields rather than a page token, because the
+    # three questions an agent asks a cut tree are different: "give me the next
+    # page" (start), "do not spend my context on all of it" (limit), and "where
+    # is the checkbox called Active" (search). All three act on the rendered
+    # lines, so a ref keeps its name across pages — see `windowSnapshot` in
+    # extension/src/driver/ax-compact.ts.
+    start: int | None = Field(
+        default=None,
+        description=("'snapshot': 1-based first line to return; the footer names the next."),
+    )
+    limit: int | None = Field(
+        default=None,
+        description="'snapshot': the most lines to return in one page.",
+    )
+    search: str = Field(
+        default="",
+        description=(
+            "'snapshot': keep lines whose role or name contains this text, e.g. " "search='Active'."
+        ),
     )
     text: str = Field(
         default="",
@@ -19336,10 +20963,9 @@ class BrowserParams(BaseModel):
     )
     secret_ref: str = Field(
         default="",
-        description="'type': the NAME of a secret to enter instead of 'text' (e.g. "
-        "'SUDO_PASSWORD'); resolved session-first (the `ask` answer, /credential), then "
-        "the encrypted store; never shown in results, traces or logs, and registered "
-        "for redaction.",
+        description="'type': a stored secret's NAME instead of 'text' (e.g. "
+        "'SUDO_PASSWORD'); resolved session-first, then the encrypted store, never "
+        "shown or logged.",
     )
     # One new field for the whole feature (the tool-surface ladder's rung 1):
     # `download` needs no destination (the harness chooses it), so a comma-split
@@ -19349,9 +20975,8 @@ class BrowserParams(BaseModel):
     paths: list[str] = Field(
         default_factory=list,
         description=(
-            "'upload': the local files to attach, one or more (credential files "
-            "and the harness's own config dir are refused; relative paths "
-            "resolve against the session's cwd)."
+            "'upload': local files to attach (credential files and this "
+            "harness's config dir refused; relative = session cwd)."
         ),
     )
     # scroll params. All optional: with none set, 'scroll' pages one viewport
@@ -19359,13 +20984,11 @@ class BrowserParams(BaseModel):
     # extension/src/commands/scroll.ts).
     x: float | None = Field(
         default=None,
-        description="'scroll': horizontal pixel delta (positive = right); "
-        "with 'y', a precise scrollBy; for 'hit_test', the viewport x to probe.",
+        description="'scroll': x delta (right positive); for 'hit_test', the viewport x.",
     )
     y: float | None = Field(
         default=None,
-        description="'scroll': vertical pixel delta (positive = down); for "
-        "'hit_test', the viewport y to probe.",
+        description="'scroll': y delta (down positive); for 'hit_test', the viewport y.",
     )
     direction: str = Field(
         default="",
@@ -19379,21 +21002,38 @@ class BrowserParams(BaseModel):
     )
     limit: int | None = Field(
         default=None,
-        description="'logs' max entries to return (most recent kept); 'scroll' "
-        "ignores it. Omit for no cap.",
+        description="'snapshot'/'logs' max lines or entries; omit for no cap.",
     )
     # Read-action params (styles/hit_test/ancestors). Per-op semantics live in
     # the tool:// doc's ops table; these two descriptions carry only what the
     # caller must know to shape the value.
     properties: list[str] = Field(
         default_factory=list,
-        description="'styles': extra computed properties on top of the defaults "
-        "(max 20; letters, digits, dashes and underscores).",
+        description="'styles': extra computed properties (max 20).",
     )
     depth: int | None = Field(
         default=None,
         description="'ancestors': how many levels to walk up (1..16, default 12).",
     )
+    # Network telemetry. `url` on start/read is the EXACT origin+path scope for
+    # body capture; on read without bodies it is a safe metadata prefix filter.
+    # Bodies never use wildcard/origin-only scopes and never include responses.
+    include_request_body: bool = Field(
+        default=False,
+        description="'network_start'/'network_read': body opt-in; needs url and approved=true.",
+    )
+    approved: bool = Field(default=False, description="Acknowledges the sensitive body.")
+    request_id: str = Field(
+        default="",
+        description="Filter: one request id.",
+    )
+    after_id: int | None = Field(
+        default=None,
+        description="Filter: after this sequence.",
+    )
+    method: str = Field(default="", description="'network_read': HTTP method filter, e.g. POST.")
+    status: int | None = Field(default=None, description="'network_read': HTTP status filter.")
+    resource_type: str = Field(default="", description="'network_read': CDP resource type filter.")
     timeout_s: float | None = Field(
         default=None,
         description="'await_access' max seconds to wait for the user's decision "
@@ -19812,6 +21452,359 @@ def _validate_browser_backend(action: str, params: BrowserParams) -> str:
     return ""
 
 
+def _validate_network_fields(action: str, params: BrowserParams) -> str:
+    """Validate network filters and the sensitive-body authorization contract.
+
+    Body reads need the SAME exact origin+path on start and read plus two
+    independent opt-ins. Query values are deliberately not part of the scope:
+    SAML relays and OAuth transactions put one-time values there, and retaining
+    them in a reusable permission would turn a single approval into a bearer
+    capability. The host repeats these checks at its trust boundary.
+    """
+    if action not in _NETWORK_ACTIONS:
+        if any(
+            (
+                params.include_request_body,
+                params.approved,
+                params.request_id,
+                params.after_id is not None,
+                params.method,
+                params.status is not None,
+                params.resource_type,
+            )
+        ):
+            return "network filters and body options require a network action"
+        return ""
+    if action not in ("network_start", "network_read"):
+        if params.include_request_body or params.approved:
+            return "'include_request_body' and 'approved' require network_start or network_read"
+        if params.url and action in ("network_stop", "network_clear"):
+            return f"'url' is not used by '{action}'"
+        return ""
+    if params.include_request_body != params.approved:
+        return (
+            "sensitive request-body capture requires both "
+            "include_request_body=true and approved=true"
+        )
+    if params.include_request_body:
+        try:
+            scope = urlparse(params.url.strip())
+        except ValueError:
+            return "request-body capture requires an exact HTTP(S) origin and path in 'url'"
+        if (
+            scope.scheme not in ("http", "https")
+            or not scope.hostname
+            or scope.username is not None
+            or scope.password is not None
+            or scope.fragment
+            or not scope.path.startswith("/")
+            or scope.path == "/"
+        ):
+            return (
+                "request-body capture requires an exact HTTP(S) origin and non-root path in 'url'"
+            )
+    elif action == "network_start" and params.url:
+        return (
+            "'url' on network_start requires include_request_body=true; "
+            "metadata captures the owned tab"
+        )
+    if action == "network_start" and any(
+        (
+            params.request_id,
+            params.after_id is not None,
+            params.method,
+            params.status is not None,
+            params.resource_type,
+        )
+    ):
+        return "network filters are for 'network_read'"
+    if action == "network_read":
+        if params.after_id is not None and params.after_id < 0:
+            return "'after_id' must be a non-negative capture sequence"
+        if params.status is not None and not 100 <= params.status <= 599:
+            return "'status' must be an HTTP status between 100 and 599"
+    return ""
+
+
+def _validate_window_fields(action: str, params: BrowserParams) -> str:
+    """The snapshot window's refusals, and the actions that may not use it.
+
+    Refusing a field an action ignores is this tool's house rule (`tab`,
+    `backend` and `secret_ref` all do it): a model that passed `search` to
+    `click` would otherwise believe it had filtered what the click targeted.
+    """
+    # `limit` is shared with `query` (how many descriptors to return); `start`
+    # and `search` are the snapshot window's own coordinates. An action outside
+    # this table takes NONE of the three — and an action inside it takes only
+    # the ones its row names, which is what stops `start` riding a `query`.
+    allowed = {
+        "snapshot": {"start", "limit", "search"},
+        "query": {"limit"},
+        "network_read": {"limit"},
+    }.get(action, set())
+    unused = [
+        name
+        for name, value in (
+            ("start", params.start),
+            ("limit", params.limit),
+            ("search", params.search),
+        )
+        if name not in allowed and value not in (None, "")
+    ]
+    if unused:
+        # Name the actions that ACCEPT each field, not the row they came from:
+        # `search` is snapshot-only while `limit` is shared with `query`, and a
+        # refusal that blurs the two sends the caller to a parameter that will
+        # be refused again.
+        actions_for = {
+            "start": "snapshot",
+            "search": "snapshot",
+            "limit": "snapshot, query, or network_read",
+        }
+        if len(unused) == 1:
+            name = unused[0]
+            return (
+                f"{name!r} only valid for {actions_for[name]!r} (got it on '{action}'): "
+                "it pages or filters the accessibility tree"
+            )
+        parts = "; ".join(f"{name!r} only valid for {actions_for[name]!r}" for name in unused)
+        return f"{parts} (got them on '{action}')"
+    if action == "query":
+        return _validate_query_limit(params)
+    if action == "network_read":
+        if params.limit is not None and not 1 <= params.limit <= NETWORK_MAX_ENTRIES:
+            return f"'limit' must be between 1 and {NETWORK_MAX_ENTRIES} network entries"
+        return ""
+    return _validate_snapshot_window(params)
+
+
+def _validate_query_limit(params: BrowserParams) -> str:
+    if params.limit is None:
+        return ""
+    if params.limit < 1:
+        return f"'limit' must be at least 1 element (got {params.limit})"
+    if params.limit > QUERY_MAX_ELEMENTS:
+        return (
+            f"'limit' takes at most {QUERY_MAX_ELEMENTS} elements (got {params.limit}); "
+            "narrow the selector instead of asking for more"
+        )
+    return ""
+
+
+def _validate_snapshot_window(params: BrowserParams) -> str:
+    if params.start is not None and params.start < 1:
+        return f"'start' is 1-based (got {params.start})"
+    if params.limit is not None and params.limit < 1:
+        return f"'limit' must be at least 1 line (got {params.limit})"
+    if params.limit is not None and params.limit > SNAPSHOT_MAX_LINES:
+        return (
+            f"'limit' takes at most {SNAPSHOT_MAX_LINES} lines (got {params.limit}); "
+            "omit it for the whole tree"
+        )
+    if len(params.search) > SNAPSHOT_MAX_SEARCH_CHARS:
+        return (
+            f"'search' takes at most {SNAPSHOT_MAX_SEARCH_CHARS} characters "
+            f"(got {len(params.search)}); name the control, not the page"
+        )
+    return ""
+
+
+def _window_snapshot_lines(
+    text: str, *, search: str, start: int, limit: int
+) -> tuple[str, int, int, int]:
+    """Narrow a snapshot the TOOL already holds: ``(text, total, matched, returned)``.
+
+    Both browser hosts window at the source (`windowSnapshot` in
+    extension/src/driver/ax-compact.ts) and report the numbers back, because a
+    host that can avoid building the payload should. This is the path for the
+    hosts that cannot say anything about the window: cmux, which has no such
+    flags, and an older desktop app or extension, which ignores the params. It
+    is deliberately the SAME semantics — 1-based lines, case-insensitive
+    substring over the rendered line, refs keep their names because only whole
+    text lines are dropped — so an agent cannot tell which host served the page
+    from the footer's arithmetic.
+
+    A blank search is "no filter", never "match nothing": `search=""` is what a
+    caller sends when it means the whole tree, and zero lines would read as an
+    empty section.
+    """
+    lines = [line for line in text.split("\n") if line] if text else []
+    total = len(lines)
+    term = search.strip().lower()
+    matched_lines = [line for line in lines if term in line.lower()] if term else lines
+    matched = len(matched_lines)
+    first = max(start, 1)
+    end = first - 1 + limit if limit > 0 else matched
+    page = matched_lines[first - 1 : end]
+    return "\n".join(page), total, matched, len(page)
+
+
+def _snapshot_footer(
+    *,
+    total: int,
+    matched: int,
+    returned: int,
+    start: int,
+    search: str,
+    scope: str,
+    scoped: bool,
+    host_ignored_scope: bool,
+    truncated: bool = False,
+) -> str:
+    """The one line that makes a narrowed tree recoverable.
+
+    The measured failure this exists for: a snapshot was cut mid-tree by the
+    model-facing character ceiling and said nothing usable about how to get the
+    rest, so every ref below the cut was unobtainable and the agent guessed CSS
+    instead. A footer that names the next `start`, the match count, or the fact
+    that the host ignored the scope turns that into one follow-up call.
+
+    Silent when there is nothing to say (a complete, unscoped tree): a footer on
+    every call would be noise an agent learns to skip.
+    """
+    notes: list[str] = []
+    if scope and host_ignored_scope:
+        # Honest about WHO is behind: the params are additive on the wire, so a
+        # host that predates them accepts and ignores them, and an agent that
+        # believed the tree was scoped would read the whole page as the section.
+        notes.append(
+            f"this host ignored selector={scope!r}: update the desktop app (or the "
+            "browser extension) to scope a snapshot to a subtree"
+        )
+    elif scope and scoped:
+        notes.append(f"scoped to {scope!r}")
+    if matched == 0:
+        # Zero matches is a RESULT, not a cut: there is no next page to name,
+        # and saying "lines 1-0 of 0" would read as paging trouble rather than
+        # as "this term is not in the tree".
+        notes.append(
+            f"0 of {total} lines matched {search.strip()!r}"
+            if search.strip()
+            else "the accessibility tree is empty"
+        )
+    elif matched < total or returned < matched:
+        if returned == 0:
+            # `lines 500-499 of 203` is an inverted range dressed as arithmetic
+            # (agent review round 1, R1-5): the clause was honest, the numbers
+            # were not. Say only what is true.
+            notes.append(
+                f"start={start} is past the end of {matched} line"
+                f"{'' if matched == 1 else 's'}"
+                + (f" matching {search.strip()!r}" if search.strip() else "")
+                + "; re-run with a smaller start"
+            )
+        else:
+            shown_end = start + returned - 1
+            where = f"lines {start}-{shown_end} of {matched}"
+            if search.strip():
+                where += f" matching {search.strip()!r}"
+            elif matched < total:
+                where += f" ({total} in the tree)"
+            if not truncated and start + returned <= matched:
+                where += (
+                    f"; pass start={start + returned} for the next page, or narrow with "
+                    "selector= or search="
+                )
+            notes.append(where)
+    elif search.strip():
+        notes.append(f"{matched} of {total} lines matched {search.strip()!r}")
+    if truncated and matched:
+        # The page was cut by the model-facing character ceiling AFTER the line
+        # window was applied, so the line numbers above describe a page whose
+        # tail is missing. Name the remedy rather than letting the cut look like
+        # the end of the tree — and never name a next `start` in this case
+        # (agent review round 1, R1-6): the lines the cut removed are whole
+        # lines, so following `start + returned` would skip them.
+        notes.append(
+            "this page was also cut to fit the context; pass a smaller limit= " "to get whole lines"
+        )
+    return f"[snapshot: {'; '.join(notes)}]" if notes else ""
+
+
+def _locator_kind(selector: str) -> str:
+    """``"role"``/``"label"``/``"text"`` for a locator, else "".
+
+    ``label*=``/``text*=`` are the documented substring spellings and are
+    recognised as locators here too: the recogniser's job is "is this a locator,
+    so the action rules apply", and a spelling it cannot see would bypass the
+    refusal for non-target actions (agent review round 1, R1-4).
+    """
+    match = _LOCATOR_PREFIX_RE.match(selector.strip())
+    return match.group(1).lower() if match else ""
+
+
+def _locator_shape_problem(selector: str) -> str:
+    """A malformed locator, or "" when it has the shape the hosts parse.
+
+    Deliberately a SHAPE check (balanced quotes and brackets), not a second
+    parser: it exists so a caller's typo — `role=checkbox[name="Active` — is not
+    reported as "this host predates accessibility locators" (agent review round
+    1, R1-3). Anything it accepts is still validated by the host.
+    """
+    kind = _locator_kind(selector)
+    if not kind:
+        return ""
+    rest = selector.strip().split("=", 1)[1] if "=" in selector else ""
+    # Scan QUOTE-AWARE: a delimiter inside a quoted value is content, not
+    # structure — `text="Array [1]"` is a well-formed locator (agent review
+    # round 2 residual).
+    quote = ""
+    depth = 0
+    closed_at = -1
+    for index, char in enumerate(rest):
+        if quote:
+            if char == quote:
+                quote = ""
+            continue
+        if char in ('"', "'"):
+            quote = char
+            continue
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth < 0:
+                return f"the {kind}= locator has an unbalanced [ ]"
+            if depth == 0:
+                closed_at = index
+    if quote:
+        return f"the {kind}= locator has an unterminated {quote} quote"
+    if depth != 0:
+        return f"the {kind}= locator has an unbalanced [ ]"
+    if closed_at >= 0 and rest[closed_at + 1 :].strip():
+        return f"the {kind}= locator has trailing content after its [ ]"
+    return ""
+
+
+def _validate_locator_target(action: str, params: BrowserParams) -> str:
+    """Locators belong to the actions that RESOLVE a target: click and type.
+
+    `snapshot`'s selector scopes the tree walk, which is a DOM query — a locator
+    there would be passed to `DOM.querySelector` and fail as invalid CSS. `read`
+    takes page text, where an accessible name is the wrong handle entirely.
+    Refused with copy rather than silently treated as CSS, the same house rule
+    `tab`/`backend`/`secret_ref` follow.
+    """
+    kind = _locator_kind(params.selector)
+    if not kind:
+        return ""
+    if action in ("click", "type", "upload"):
+        # `upload` resolves its input through the same ref/CSS/locator path in
+        # both hosts, so `label="Choose file"` names a file input there too
+        # (agent review round 1, R1-5).
+        return ""
+    if action == "snapshot":
+        return (
+            f"snapshot takes a CSS selector for its scope, not a {kind}= locator: "
+            "scope the section with CSS, then use search= (or a locator on the click) "
+            "to find the control inside it"
+        )
+    return (
+        f"{kind}= locators resolve a click/type TARGET; '{action}' takes a CSS "
+        "selector (or a snapshot ref)"
+    )
+
+
 def _validate_browser_args(action: str, params: BrowserParams) -> str:
     """Refuse an unusable argument, or "" when the call may proceed.
 
@@ -19829,6 +21822,15 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
     backend = _validate_browser_backend(action, params)
     if backend:
         return backend
+    window = _validate_window_fields(action, params)
+    if window:
+        return window
+    network = _validate_network_fields(action, params)
+    if network:
+        return network
+    locator = _validate_locator_target(action, params)
+    if locator:
+        return locator
     if action != "type" and params.secret_ref.strip():
         # Refused rather than silently ignored, the same house rule `tab` and
         # `backend` follow: a caller that passed a ref to an action which never
@@ -19861,10 +21863,10 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
             # read-back comparison in the lane still catches a failed fill.
             return ""
         return _validate_typed_text(params.text)
-    if action == "snapshot" and params.selector.strip():
+    if action == "snapshot":
         # Optional here — an absent selector snapshots the whole document —
         # which is why this is not the same shape as click/type.
-        return _validate_selector(params.selector, "snapshot")
+        return _validate_selector(params.selector, "snapshot") if params.selector.strip() else ""
     if action == "scroll":
         # Every scroll param is optional (no params = one viewport down), so the
         # only refusals are a malformed value: a flag-shaped selector (same argv
@@ -19906,6 +21908,12 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
                 f"(expected one of {', '.join(sorted(_LOG_LEVELS))})"
             )
         return ""
+    if action == "query":
+        # CSS only, mandatory: a query with no selector is a whole-page dump,
+        # which is what `snapshot` is for. `_validate_locator_target` above
+        # already refused a locator here, because a locator resolves a TARGET
+        # while a query asks the DOM a question.
+        return _validate_selector(params.selector, "query")
     if action in ("styles", "ancestors"):
         # Both name one element, so the selector is mandatory and the same
         # refusal click/type use keeps the copy consistent. The flag-shaped
@@ -20231,6 +22239,12 @@ async def _browser_screenshot(
         denial = _confinement_denial(resolved, context, resolvable=_resolvable)
         if denial is not None:
             return _error(tool_call_id, "browser", denial)
+        # A screenshot destination is an ordinary path, so the pad policy must
+        # be applied here too: an absolute path into ``scratchpad/`` otherwise
+        # wrote a PNG the next ``write`` would have refused.
+        pad_refusal = _pad_destination_refusal(tool_call_id, "browser", target, context)
+        if pad_refusal is not None:
+            return pad_refusal
     else:
         import tempfile
 
@@ -20996,6 +23010,18 @@ def _browser_ownership_text(state: str, has_surface: bool) -> str:
             "Nothing to recover: an allocation was started but no tab exists. If 'open' "
             "reported the 8-tab limit, none can be allocated until a tab is released."
         )
+    if state == "allocated" and has_surface:
+        # The desktop app reports a live, already-held tab as ``allocated``
+        # (local-operator-ui src/main/browser/ownership.ts), a state this table
+        # did not name, so it fell through to the "no browser tab" default while
+        # the same record held ``ui:<n>`` and ``open`` would reuse it. Deliberately
+        # NOT a catch-all for "any unknown state with a handle": ``pending`` (a
+        # close that failed) also keeps a handle, but its tab is not usable, and
+        # promising reuse there is the same lie in the other direction.
+        return (
+            "Browser tab available (allocated); it is still held by this "
+            "session, so 'open' reuses it."
+        )
     return "Nothing to recover: this session has no browser tab. Use 'open' to start one."
 
 
@@ -21465,11 +23491,29 @@ async def _bridge_call(
     try:
         return await selected.call(action, params), None
     except BridgeError as exc:
-        problem = _error(
-            tool_call_id,
-            "browser",
-            format_error(exc, action=action, surface=surface, host=host),
-        )
+        message = format_error(exc, action=action, surface=surface, host=host)
+        kind = _locator_kind(str(params.get("selector") or ""))
+        if kind and exc.code.value == "internal":
+            # A `role=…` selector that reaches CSS is either a MALFORMED locator
+            # on a current host or a well-formed one on a host that predates
+            # locators. Saying the second alone sent a caller with a typo to
+            # update their app (agent review round 1, R1-3): name the malformed
+            # case first when the shape says so, and never assert one cause.
+            malformed = _locator_shape_problem(str(params.get("selector") or ""))
+            if malformed:
+                message += (
+                    f"\n{malformed}. A locator is role=<role>[name=…], label=… or "
+                    "text=…; fix the quotes/brackets and retry."
+                )
+            else:
+                message += (
+                    f"\nThe {kind}= locator was treated as CSS. Either this browser host "
+                    "predates accessibility locators, or the locator is malformed. If the "
+                    "host is current, check the locator; otherwise update the desktop app "
+                    "(or the browser extension), or pass a snapshot ref ('snapshot' shows "
+                    "them) / a CSS selector instead."
+                )
+        problem = _error(tool_call_id, "browser", message)
         # Carry the TYPED wire code so callers can branch on it (dead-pin
         # recovery, handle-drop) instead of substring-matching the human
         # diagnostic, which broke silently on any rewording (finding m4).
@@ -22238,6 +24282,59 @@ def _geometry_entry_list(result: dict[str, Any], key: str) -> list[dict[str, Any
     return [entry for entry in raw if isinstance(entry, dict)]
 
 
+def _query_entry_list(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """The descriptor list, tolerant of a host that answered something else.
+
+    Malformed entries are dropped rather than rendered as `None`: this is model
+    input, and one bad row must not make the whole answer unreadable.
+    """
+    raw = result.get("matches")
+    if not isinstance(raw, list):
+        return []
+    return [entry for entry in raw if isinstance(entry, dict)]
+
+
+def _query_entries_text(matches: list[dict[str, Any]]) -> str:
+    """One block per element: the identity an agent asked for, then its state.
+
+    The layout is deliberately grep-able and stable: `tag#id[name="…"]` on the
+    first line answers the measured question ("what is the id of this
+    checkbox?"), and the state line carries the three facts that decide whether
+    a click will do anything — visibility, checked, disabled.
+    """
+    lines: list[str] = []
+    for index, entry in enumerate(matches, 1):
+        ident = str(entry.get("tag") or "")
+        if entry.get("id"):
+            ident += f"#{entry['id']}"
+        if entry.get("name"):
+            ident += f"[name={json.dumps(entry['name'], ensure_ascii=False)}]"
+        bits = [ident]
+        for key, label in (("type", "type"), ("role", "role")):
+            if entry.get(key):
+                bits.append(f"{label}={entry[key]}")
+        if entry.get("ariaLabel"):
+            bits.append(f"aria-label={json.dumps(entry['ariaLabel'], ensure_ascii=False)}")
+        lines.append(f"{index}. {' '.join(bits)}")
+        state = ["visible" if entry.get("visible") else "NOT visible"]
+        if entry.get("inView"):
+            state.append("in view")
+        if entry.get("checked") is True:
+            state.append("checked")
+        elif entry.get("checked") is False:
+            state.append("unchecked")
+        if entry.get("disabled"):
+            state.append("disabled")
+        if entry.get("value"):
+            state.append(f"value={json.dumps(entry['value'], ensure_ascii=False)}")
+        detail = "   " + ", ".join(state)
+        text = str(entry.get("text") or "")
+        if text:
+            detail += f" — text: {json.dumps(text, ensure_ascii=False)}"
+        lines.append(detail)
+    return "\n".join(lines)
+
+
 def _bridge_geometry_result(
     tool_call_id: str,
     action: str,
@@ -22294,6 +24391,35 @@ def _bridge_geometry_result(
             tool_call_id,
             "browser",
             f"{head}:\n\n{truncate_output(body, BROWSER_TEXT_LIMIT_CHARS)}",
+            details=details,
+        )
+    if action == "query":
+        # A read-only answer describes ELEMENTS, so the header names the count
+        # the page really had (a selector can match hundreds); `truncated` is
+        # the page function's statement that the caller asked for fewer than
+        # exist, and the remedy is a narrower selector, not a bigger limit.
+        matches = _query_entry_list(result)
+        # `count` is model input: a host that answers `{}` or "abc" must not turn
+        # a readable answer into a tool-level error (agent review round 1, R1-1).
+        raw_count = result.get("count")
+        page_count = raw_count if isinstance(raw_count, int) else len(matches)
+        details.update(
+            selector=selector,
+            count=page_count,
+            returned=len(matches),
+            truncated=bool(result.get("truncated")),
+            matches=matches,
+        )
+        head = f"{len(matches)} match{'' if len(matches) == 1 else 'es'} for {selector!r}"
+        if page_count > len(matches):
+            head += f" (the page has {page_count}); narrow the selector to see the rest"
+        elif not matches:
+            head += " — nothing in the document matches this selector"
+        body = _query_entries_text(matches)
+        return _text(
+            tool_call_id,
+            "browser",
+            f"{head}:\n\n{truncate_output(body, BROWSER_TEXT_LIMIT_CHARS)}" if body else head,
             details=details,
         )
     chain = _geometry_entry_list(result, "chain")
@@ -22967,6 +25093,29 @@ async def _browser_download(
     )
 
 
+def _upload_scheme_refusal(
+    tool_call_id: str, raw: str, context: ToolContext | None
+) -> ToolResult | None:
+    """Refuse a ``scheme://`` upload path, naming the absolute path to use instead.
+
+    Reuses :func:`_scheme_refusal` (one rule for every path-taking tool) but passes the
+    remedy for the one case an agent actually hits: a file it wrote to its scratchpad.
+    ``upload`` never resolved ``scratchpad://``, so the remedy cannot be "read it first":
+    it is the pad's absolute path, taken from the context when there is one.
+    """
+    pad = scratchpad_dir_of(context)
+    where = f" (this session's scratchpad is {pad})" if pad else ""
+    return _scheme_refusal(
+        tool_call_id,
+        "browser",
+        raw,
+        remedy=(
+            "Pass the file's ABSOLUTE filesystem path (or one relative to the working "
+            f"directory), not a URL{where}."
+        ),
+    )
+
+
 async def _browser_upload(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -23000,11 +25149,30 @@ async def _browser_upload(
     session_id = str(getattr(context, "session_id", "") or "")
     resolved: list[Path] = []
     for raw in params.paths:
-        path, reason = files.check_upload(raw, cwd=_safe_cwd(context), policy=limits)
+        # `upload` serves NO URL scheme: without this a `scratchpad://x.png` (the spelling
+        # `read`/`write` take) would be read as the relative path `<cwd>/scratchpad:/x.png`
+        # and refused as "does not exist", with the same-turn hint pointing at a race that is
+        # not there. The remedy is the absolute path, and the pad root is printed when the
+        # context has one so the model does not have to guess it.
+        scheme_problem = _upload_scheme_refusal(tool_call_id, raw, context)
+        if scheme_problem is not None:
+            return scheme_problem
+        # `session_id` is what lets the gate recognise THIS session's own scratchpad as
+        # the agent's working area rather than as the credential store beside it (see
+        # `browser_files.own_scratchpad_root`); an empty id grants nothing.
+        path, reason = files.check_upload(
+            raw, cwd=_safe_cwd(context), policy=limits, session_id=session_id
+        )
         if path is None:
             # Refused as a whole call: attaching the rest would send a set the
             # caller did not name, and the refusal names the one rule that fired.
-            return _error(tool_call_id, "browser", f"refused: nothing was attached — {reason}")
+            # Every gate reason is itself spelled "refused: …" (it is also what other callers
+            # print bare), so the prefix is dropped here rather than doubled.
+            return _error(
+                tool_call_id,
+                "browser",
+                f"refused: nothing was attached — {reason.removeprefix('refused: ')}",
+            )
         resolved.append(path)
     wire: dict[str, Any] = {
         "tab": state.surface_id,
@@ -23314,6 +25482,29 @@ def _unique_name(directory: Path, name: str) -> str:
     return candidate
 
 
+def _target_phrase(selector: str, result: dict[str, Any]) -> str:
+    """What was clicked, in the terms the caller used AND what the host found.
+
+    A locator answer that reads back only as `role=checkbox[name="Active"]`
+    cannot be checked by the caller; one that reads as
+    `role=checkbox "Active" (2 matched, first used)` says exactly which element
+    the click landed on and whether the name was ambiguous. A ref or a CSS
+    selector keeps its historical copy byte for byte — existing tests pin it,
+    and an unchanged message is not worth churning.
+    """
+    resolved = result.get("resolved")
+    if not isinstance(resolved, dict) or resolved.get("by") != "locator":
+        return selector
+    role = str(resolved.get("role") or "")
+    name = str(resolved.get("name") or "")
+    matched = int(resolved.get("matched") or 1)
+    shown_name = json.dumps(name, ensure_ascii=False)
+    phrase = f"{role} {shown_name}" if role else shown_name
+    if matched > 1:
+        phrase += f" ({matched} matched, first used)"
+    return f"{selector} → {phrase}"
+
+
 async def _bridge_action(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -23332,6 +25523,8 @@ async def _bridge_action(
     """
     host = _host_of_client(client)
     surface = state.surface_id
+    if action in _NETWORK_ACTIONS:
+        return await _browser_network(tool_call_id, state, action, params, context, client=client)
     if action == "download":
         return await _browser_download(tool_call_id, state, params, context, client=client)
     if action == "upload":
@@ -23348,6 +25541,20 @@ async def _bridge_action(
     elif action in ("read", "snapshot"):
         if params.selector.strip():
             wire["selector"] = params.selector.strip()
+        if action == "snapshot":
+            # Only what the caller asked for: an absent param must stay absent,
+            # because the host's own default is the pre-existing whole tree and
+            # sending start=1/limit=0 would be this tool inventing a window.
+            if params.start is not None:
+                wire["start"] = params.start
+            if params.limit is not None:
+                wire["limit"] = params.limit
+            if params.search.strip():
+                wire["search"] = params.search.strip()
+    elif action == "query":
+        wire["selector"] = params.selector.strip()
+        if params.limit is not None:
+            wire["limit"] = params.limit
     elif action in ("click", "type"):
         wire["selector"] = params.selector.strip()
         if action == "type":
@@ -23420,13 +25627,61 @@ async def _bridge_action(
             details=details,
         )
     if action == "snapshot":
-        return _text(
-            tool_call_id,
-            "browser",
-            truncate_output(str(result.get("snapshot", "")), BROWSER_TEXT_LIMIT_CHARS)
-            or "(empty snapshot)",
-            details=details,
+        raw = str(result.get("snapshot", ""))
+        reported = result.get("total_lines")
+        if isinstance(reported, int):
+            # A host that windows at the source reports what it narrowed; its
+            # text is already the requested page and must not be windowed twice.
+            total = reported
+            # Explicit None checks, not `or`: a host reporting matched_lines=0
+            # means "the term is not in the tree", and `0 or total` would
+            # silently turn that into "every line matched" — the exact
+            # confidently-wrong footer this helper exists to prevent.
+            raw_matched = result.get("matched_lines")
+            matched = total if raw_matched is None else int(raw_matched)
+            raw_returned = result.get("returned_lines")
+            returned = 0 if raw_returned is None else int(raw_returned)
+            raw_start = result.get("start")
+            start = int(raw_start) if raw_start is not None else (params.start or 1)
+            scoped = bool(result.get("scoped"))
+            body = raw
+        else:
+            # cmux, or a host older than the window params: narrow locally so
+            # paging works everywhere the tool runs.
+            body, total, matched, returned = _window_snapshot_lines(
+                raw,
+                search=params.search,
+                start=params.start or 1,
+                limit=params.limit or 0,
+            )
+            scoped = False
+            start = params.start or 1
+        scope = params.selector.strip()
+        # A scope was asked for and this host cannot say it honoured it. The
+        # params are additive, so an old host accepts and ignores them; the
+        # footer names that rather than letting the agent read a whole page as
+        # "the section".
+        host_ignored_scope = bool(scope) and not scoped
+        page_text = body
+        body = truncate_output(page_text, BROWSER_TEXT_LIMIT_CHARS) or "(empty snapshot)"
+        footer = _snapshot_footer(
+            total=total,
+            matched=matched,
+            returned=returned,
+            start=start,
+            search=params.search,
+            scope=scope,
+            scoped=scoped,
+            host_ignored_scope=host_ignored_scope,
+            truncated=len(page_text) > BROWSER_TEXT_LIMIT_CHARS,
         )
+        if footer:
+            body = f"{body}\n\n{footer}"
+            details["total_lines"] = total
+            details["returned_lines"] = returned
+        if scoped:
+            details["scoped"] = True
+        return _text(tool_call_id, "browser", body, details=details)
     if action == "scroll":
         x = int(result.get("scrollX", 0) or 0)
         y = int(result.get("scrollY", 0) or 0)
@@ -23449,14 +25704,15 @@ async def _bridge_action(
         )
     if action == "logs":
         return _bridge_logs_result(tool_call_id, params, result, details, title, href)
-    if action in ("styles", "hit_test", "ancestors"):
+    if action in ("styles", "hit_test", "ancestors", "query"):
         return _bridge_geometry_result(tool_call_id, action, params, result, details)
     if action == "click":
         navigation = "" if result.get("navigated") else " (no navigation)"
         return _text(
             tool_call_id,
             "browser",
-            f"Clicked {params.selector.strip()}{navigation}. Page: {_page_line(title, href)}",
+            f"Clicked {_target_phrase(params.selector.strip(), result)}{navigation}. "
+            f"Page: {_page_line(title, href)}",
             details=details,
         )
     if action == "type":
@@ -23519,6 +25775,12 @@ async def _bridge_action(
             "browser",
             f"{_host_label(host)} capture is not a PNG ({len(payload)} bytes)",
         )
+    # The payload size is known now, so the cap check can judge the write the
+    # page is about to make (the per-write ceiling included), not just the
+    # destination's name.
+    pad_refusal = _pad_destination_refusal(tool_call_id, "browser", target, context, len(payload))
+    if pad_refusal is not None:
+        return pad_refusal
     try:
         Path(target).parent.mkdir(parents=True, exist_ok=True)
         Path(target).write_bytes(payload)
@@ -23906,6 +26168,241 @@ async def execute_browser(
                 logger.warning("browser ownership record not updated", exc_info=True)
             if pending:
                 resource.recovered = False
+
+
+_NETWORK_BODY_KEY = "request_body_base64"
+_NETWORK_METADATA_KEYS = frozenset(
+    {
+        # EXACTLY the keys the desktop host's `network_read` emits per entry.
+        # Kept as a copy rather than a pass-through because this is the allowlist
+        # that stops a future host field reaching a model unvetted — but a copy
+        # that is wrong in both directions is worse than no copy: the first
+        # version dropped `finished` and all three redirect ids, so redirect
+        # correlation was invisible on the agent path while looking fine on the
+        # wire, and it kept `started_at` (the host deliberately strips it) plus
+        # seven other keys no host ever sends (agent review round 5, R5-1).
+        "id",
+        "request_id",
+        "method",
+        "url",
+        "status",
+        "duration_ms",
+        "resource_type",
+        "loader_id",
+        "frame_id",
+        "wall_time",
+        "redirect_request_id",
+        "redirect_from_id",
+        "redirect_to_id",
+        "encoded_data_length",
+        "from_cache",
+        "error_text",
+        "canceled",
+        "finished",
+    }
+)
+
+
+def _network_safe_url(raw: object) -> str:
+    """Keep URL structure useful for correlation, never query values or credentials."""
+    if not isinstance(raw, str):
+        return ""
+    try:
+        parsed = urlparse(raw)
+        host = parsed.netloc.rsplit("@", 1)[-1]
+        query = "&".join(
+            f"{quote(key, safe='')}=<redacted>"
+            for key, _value in parse_qsl(parsed.query, keep_blank_values=True)
+        )
+        return urlunsplit((parsed.scheme, host, parsed.path, query, ""))
+    except (TypeError, ValueError):
+        return ""
+
+
+def _network_metadata_result(payload: dict[str, Any]) -> dict[str, Any]:
+    """Allowlist model-visible network fields; never forward arbitrary CDP data."""
+    result = {
+        key: value
+        for key, value in payload.items()
+        if key
+        in {
+            # Exactly the desktop host's summary keys. It emits
+            # `dropped_entries`/`dropped_bodies`, and the earlier spelling here
+            # (`body_dropped`) silently deleted the real counter from every
+            # result — a counter nobody can read is the same as no counter, and
+            # it hid an oversize body being discarded (real-path probe,
+            # 2026-10-26). Exactly this set and no wider: a key the host never
+            # sends is dead weight that reads like a contract.
+            "active",
+            "count",
+            "dropped",
+            "dropped_entries",
+            "body_count",
+            "body_bytes",
+            "dropped_bodies",
+            "entries",
+        }
+    }
+    entries: list[dict[str, Any]] = []
+    for raw in payload.get("entries", []):
+        if not isinstance(raw, dict):
+            continue
+        entry = {key: value for key, value in raw.items() if key in _NETWORK_METADATA_KEYS}
+        if "url" in entry:
+            entry["url"] = _network_safe_url(entry["url"])
+        entries.append(entry)
+    result["entries"] = entries
+    return result
+
+
+def _decode_network_body(encoded: object) -> bytes:
+    """Validate and decode one body WITHOUT touching the filesystem.
+
+    Decoding is separated from writing so a read that turns out to be malformed
+    cannot leave the earlier bodies of the same read behind: every byte is
+    proven valid before the first file exists.
+    """
+    if not isinstance(encoded, str) or not encoded:
+        raise ValueError("the host returned no request body")
+    # Bounds-check the ENCODED length first, so a hostile host cannot make this
+    # allocate a 100 MB buffer only to reject it afterwards.
+    if len(encoded) > ((NETWORK_MAX_BODY_BYTES + 2) // 3) * 4 + 4:
+        raise ValueError("the host request body exceeds the 64 KiB limit")
+    data = base64.b64decode(encoded, validate=True)
+    if not data or len(data) > NETWORK_MAX_BODY_BYTES:
+        raise ValueError("the host request body is empty or exceeds the 64 KiB limit")
+    return data
+
+
+def _write_network_body(data: bytes, context: ToolContext | None) -> dict[str, Any]:
+    """Write one decoded body to a randomised, private session scratch file.
+
+    Existence and mode are verified rather than assumed: ``mkstemp`` already
+    creates 0600, and the re-read is what turns "should be private" into a fact
+    this function can report. A failure removes the file it created and never
+    returns a path to material it could not secure.
+    """
+    from local_operator.scratchpad import ensure_scratchpad_dir, scratchpad_dir_of
+
+    directory = ensure_scratchpad_dir(scratchpad_dir_of(context))
+    if not directory:
+        raise OSError("this session has no private scratchpad for a network body")
+    fd, name = tempfile.mkstemp(prefix="network-request-", suffix=".body", dir=directory)
+    path = Path(name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        if path.stat().st_mode & 0o777 != 0o600:
+            raise OSError("private network body file permissions could not be verified")
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        path.unlink(missing_ok=True)
+        raise
+    return {"request_body_file": str(path), "request_body_bytes": len(data)}
+
+
+async def _browser_network(
+    tool_call_id: str,
+    state: BrowserSurfaceProtocol,
+    action: str,
+    params: BrowserParams,
+    context: ToolContext | None,
+    *,
+    client: Any = None,
+) -> ToolResult:
+    """Run bounded network capture and consume sensitive bodies before rendering."""
+    wire: dict[str, Any] = {
+        "tab": state.surface_id,
+        **_browser_identity_params(context, tool_call_id),
+    }
+    for key in (
+        "url",
+        "include_request_body",
+        "approved",
+        "request_id",
+        "after_id",
+        "method",
+        "status",
+        "resource_type",
+        "limit",
+    ):
+        value = getattr(params, key)
+        if value is not None and value != "" and value is not False:
+            wire[key] = value
+    result, problem = await _bridge_call(
+        tool_call_id, action, wire, surface=state.surface_id, client=client
+    )
+    if problem is not None:
+        return problem
+    raw = result if isinstance(result, dict) else {}
+    written: list[Path] = []
+    try:
+        entries = result.get("entries", []) if isinstance(result, dict) else []
+        if not isinstance(entries, list):
+            raise ValueError("the host returned an invalid network entry list")
+        include_body = action == "network_read" and params.include_request_body
+        pending: list[tuple[dict[str, Any], bytes]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            # Remove the body unconditionally, including metadata-only reads:
+            # an old/hostile host cannot turn a response into a secret leak.
+            encoded = entry.pop(_NETWORK_BODY_KEY, None)
+            if encoded is not None and include_body:
+                pending.append((entry, _decode_network_body(encoded)))
+        # ALL bodies are decoded before the FIRST file is written, so a
+        # malformed or oversized entry persists nothing for the whole read
+        # (agent review round 1, R1-2). The same rule is why the total is
+        # bounded here rather than accumulated as files appear.
+        if sum(len(data) for _entry, data in pending) > NETWORK_MAX_READ_BODY_BYTES:
+            raise ValueError("the read's combined request bodies exceed the 256 KiB limit")
+        facts_by_id: dict[int, dict[str, Any]] = {}
+        for entry, data in pending:
+            # A body is only ever attributed by the entry id this module already
+            # trusts. An entry without one, or two entries sharing one, cannot be
+            # attributed at all: raising here runs the rollback below, so the
+            # read fails AND unlinks every body it wrote rather than leaving an
+            # unreferenced secret on disk (agent review round 7, R7-1/R7-2).
+            identifier = entry.get("id")
+            if not isinstance(identifier, int):
+                raise ValueError("the host returned a request body for an entry with no id")
+            if identifier in facts_by_id:
+                raise ValueError("the host returned duplicate network entry ids")
+            facts = _write_network_body(data, context)
+            written.append(Path(facts["request_body_file"]))
+            facts_by_id[identifier] = facts
+        safe = _network_metadata_result(raw)
+        # Facts are attached AFTER the allowlist, keyed by the entry id this
+        # module already trusted, so no host-supplied path can be rendered.
+        for entry in safe.get("entries", []):
+            facts = facts_by_id.get(entry.get("id"))
+            if facts:
+                entry.update(facts)
+        if action == "network_read" and params.include_request_body:
+            files = [
+                entry["request_body_file"]
+                for entry in safe["entries"]
+                if "request_body_file" in entry
+            ]
+            if files:
+                safe["request_body_files"] = files
+                safe["security"] = (
+                    "Request bodies are in private mode-0600 session scratch files; "
+                    "inspect locally without printing secrets."
+                )
+        return _text(tool_call_id, "browser", json.dumps(safe, indent=2, default=str))
+    except Exception as exc:
+        # Never include the host payload in an error: it may contain body bytes.
+        # A read that failed part-way leaves no artefact behind, so "nothing was
+        # persisted" is true of the failure as well as of the success path.
+        for path in written:
+            path.unlink(missing_ok=True)
+        logger.warning("browser network action failed: %s", type(exc).__name__)
+        return _error(tool_call_id, "browser", f"{action} failed: {type(exc).__name__}: {exc}")
 
 
 def _browser_secret_ref(
@@ -24364,11 +26861,40 @@ async def _execute_browser(
         code, out = await _run_cmux(argv)
         if code != 0:
             return _error(tool_call_id, "browser", f"cmux snapshot failed: {out}")
+        # cmux has no window of its own, so the SAME start/limit/search the
+        # bridge path forwards must be applied here, or the claim "cmux degrades
+        # to local windowing with the same semantics" is false and `start=51`
+        # silently re-returns page one forever (agent review round 1, R1-1).
+        text, total, matched, returned = _window_snapshot_lines(
+            out,
+            search=params.search or "",
+            start=params.start or 1,
+            limit=params.limit or 0,
+        )
+        body = truncate_output(text, BROWSER_TEXT_LIMIT_CHARS) or "(empty snapshot)"
+        # Measured against the PRE-truncation text, like the bridge branch: at
+        # exactly the ceiling `truncate_output` returns the text unchanged, so
+        # `>=` reported a cut that never happened and (since R1-6) dropped the
+        # next-page hint for a page that was whole.
+        truncated = len(text) > BROWSER_TEXT_LIMIT_CHARS
+        footer = _snapshot_footer(
+            total=total,
+            matched=matched,
+            returned=returned,
+            start=params.start or 1,
+            search=params.search or "",
+            scope=params.selector.strip(),
+            # cmux has no scope flag of its own; `--selector` narrows the tree
+            # the CLI walks, so a scoped cmux read is scoped in the host.
+            scoped=bool(params.selector.strip()),
+            host_ignored_scope=False,
+            truncated=truncated,
+        )
         return _text(
             tool_call_id,
             "browser",
-            truncate_output(out, BROWSER_TEXT_LIMIT_CHARS) or "(empty snapshot)",
-            details={"surface_id": surface},
+            f"{body}\n\n{footer}" if footer else body,
+            details={"surface_id": surface, "total_lines": total},
         )
     if action == "click":
         return await _browser_click(tool_call_id, surface, params.selector)
@@ -24572,19 +27098,16 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             # correctly. The context-budget guard measures the whole surface; the
             # slimming wave (audit item 2) moved the lifecycle/file-transfer clauses
             # to `read tool://browser`.
-            "Drive the user's REAL browser — the desktop app's tab by default, their "
-            "paired extension, or a cmux panel ('backend' names a host for a fresh "
-            "'open'; actions: `read tool://browser`). Cookies and logins persist "
-            "across calls and sessions, and the user can sign in by hand when you ask "
-            "them to, so this reaches authenticated pages a throwaway browser cannot. "
-            "A fresh 'open' creates one NEW tab owned by this session; reuse it because "
-            "later opens navigate it. "
-            "Before your final response, call 'close' unless the user needs it left "
-            "open for a pending interaction; 'tabs' lists every agent-driven tab "
-            "(handles are redacted: awareness-only), and 'close' ends only your own tab. "
-            "'open'/'goto' to a site the user has not approved fails with "
-            "origin_not_allowed: call 'request_access', NOTIFY the operator to approve "
-            "it, and 'await_access' before navigating again. "
+            "Drive the user's REAL browser — the app's tab, their paired extension or a "
+            "cmux panel ('backend' picks a host; actions: `read tool://browser`). "
+            "Cookies and logins persist across calls and sessions and the user can sign "
+            "in by hand, so this reaches authenticated pages no throwaway browser can. "
+            "A fresh 'open' creates one NEW session-owned tab; reuse it, later opens "
+            "navigate it. Call 'close' before your final response unless a pending "
+            "interaction needs it; 'tabs' lists every tab (redacted handles) and 'close' "
+            "ends only your own tab. "
+            "An unapproved site fails with origin_not_allowed: call 'request_access', "
+            "NOTIFY the operator, then 'await_access' before retrying. "
             "Never install or script a browser engine instead. Playbook: `guide://browser`."
         ),
         parameters=BrowserParams.model_json_schema(),
@@ -24601,11 +27124,25 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         # describer naming what the call will do.
         approval_tier="write",
         # Inspection is a true read: the harness must not ask for a write
-        # approval before it can reach the deliberately effect-free dispatcher.
+        # approval before it can reach the admittedly effect-free dispatcher.
+        # Sensitivity is decided by what the call makes visible, not by whether
+        # it writes anything: a network body read can carry cookies, bearer
+        # tokens or a SAML assertion, so it takes the same exec tier as
+        # `upload` and its approval text names the exact capture scope.
+        # Metadata-only network actions stay on the ordinary write tier.
         call_approval_tier=lambda args: (
             "read"
             if str(args.get("action") or "").strip().lower() == "inspect_ownership"
-            else "exec" if str(args.get("action") or "").strip().lower() == "upload" else "write"
+            else (
+                "exec"
+                if str(args.get("action") or "").strip().lower() == "upload"
+                or (
+                    str(args.get("action") or "").strip().lower()
+                    in ("network_start", "network_read")
+                    and bool(args.get("include_request_body"))
+                )
+                else "write"
+            )
         ),
         concurrency="shared",
         interruptible=False,
@@ -27097,6 +29634,42 @@ def _launched_line(entry: Mapping[str, Any], context: ToolContext | None) -> str
     return f"- {label} ({agent}) {_model_clause(model, owns, session_model)}: job {job_id}"
 
 
+def _not_applied_note(entry: Mapping[str, Any]) -> str:
+    """Say so when a tier or model this call passed was NOT applied.
+
+    A role whose own pin is the inherit sentinel states an ABSOLUTE decision
+    ("always run on the launching session's model"), and it outranks anything
+    the delegating model passed. The launch still names the model the child will
+    run on, but a caller whose ``effort=`` or ``model=`` was dropped has to be
+    told: a silent substitution is the very thing this rule exists to prevent,
+    and a receipt that reads as though the pick took effect IS the substitution
+    by another name. The note is therefore appended to the launch line rather
+    than left in the model's head, and it names the value that was passed so
+    the reader can see which one was ignored. Both launch surfaces call it —
+    ``task``'s launch line and ``hub op='resume'``'s receipt — because a resume
+    re-resolves the model and is therefore a launch too.
+    """
+    if entry.get("model_selection_source") != "role_inherit":
+        return ""
+    passed: list[str] = []
+    if entry.get("effort"):
+        passed.append(f"effort={entry['effort']!r}")  # i18n: ignore model-facing tool output
+    # ``model='inherit'`` is NOT a pick this machine failed to apply: it is the
+    # wire's "no specific model" (see ``_validate_task_model``), and a role that
+    # pins the session's model produces exactly the inheritance it asked for.
+    # Reporting it as dropped would invent a substitution, which is the same
+    # class of lie in the other direction.
+    if entry.get("model_pick") and entry["model_pick"] != "inherit":
+        passed.append(f"model={entry['model_pick']!r}")  # i18n: ignore model-facing tool output
+    if not passed:
+        return ""
+    verb = "was" if len(passed) == 1 else "were"
+    return (
+        f" [the {' and '.join(passed)} you passed {verb} NOT applied: "
+        "this role pins the launching session's model]"
+    )
+
+
 def _model_clause(model: str, owns: bool | None, session_model: str) -> str:
     """``on <model>`` or ``on this session's model (<model>)``.
 
@@ -27286,6 +29859,12 @@ async def execute_task(
                     if context and context.jobs
                     else ""
                 ),
+                # WHAT THIS CALL ASKED FOR, kept beside what the launch
+                # decided: the two can differ now, and only the pair says
+                # whether the caller's pick was applied (see
+                # ``_not_applied_note``).
+                "effort": item.effort,
+                "model_pick": item.model,
             }
         )
     if not launched:
@@ -27298,6 +29877,7 @@ async def execute_task(
             if entry.get("model_selection_source")
             else ""
         )
+        + _not_applied_note(entry)
         for entry in launched
     ]
     body = (
@@ -27417,200 +29997,234 @@ async def execute_wait(
     if missing:
         return _error(tool_call_id, "wait", f"unknown job {', '.join(missing)}")
 
-    def _settled() -> Any:
-        """The first of the awaited jobs that is no longer running, or None."""
+    def _note_waiting(count: int) -> None:
+        # The callback only changes session-owned memory: a tool must not write
+        # discovery files or know its serving host. on_update is the existing
+        # serving event path, so publishing the snapshot there makes a parked
+        # wait visible now, not only after the next heartbeat. Both carry the
+        # canonical deduplicated id count, never the caller's aliases.
+        # Presence is advisory: neither observer may replace a settled result,
+        # timeout or cancellation while finally clears the parked count. Isolate
+        # them independently so a broken host callback still permits the update
+        # observer to see the transition. BaseException (notably CancelledError)
+        # deliberately remains outside these ordinary observer-failure guards.
+        if context is not None and context.note_waiting is not None:
+            try:
+                context.note_waiting(count)
+            except Exception:  # noqa: BLE001 — presence must not change wait semantics
+                logger.debug("could not record wait presence", exc_info=True)
+        if on_update is not None:
+            try:
+                on_update(AgentToolUpdate(details={"waiting_on": count}))
+            except Exception:  # noqa: BLE001 — a failed observer must not mask cancellation
+                logger.debug("could not emit wait presence", exc_info=True)
 
-        for job_id in job_ids:
-            job = jobs.get(job_id)
-            if job is not None and job.status != "running":
-                return job
-        return None
+    async def _park() -> ToolResult:
+        def _settled() -> Any:
+            """The first of the awaited jobs that is no longer running, or None."""
 
-    def _still_running() -> list[str]:
-        """The awaited ids that are still running, in the order given.
+            for job_id in job_ids:
+                job = jobs.get(job_id)
+                if job is not None and job.status != "running":
+                    return job
+            return None
 
-        The unsettled branches report THIS rather than ``job_ids[0]``: on the
-        multi-id path the first id is simply the first the caller passed and
-        may itself have settled, so pinning it in ``details`` tells a caller
-        that reads the payload (rather than parsing the text) about the wrong
-        job.
-        """
+        def _still_running() -> list[str]:
+            """The awaited ids that are still running, in the order given.
 
-        return [
-            job_id
-            for job_id in job_ids
-            if (row := jobs.get(job_id)) is not None and row.status == "running"
-        ]
+            The unsettled branches report THIS rather than ``job_ids[0]``: on the
+            multi-id path the first id is simply the first the caller passed and
+            may itself have settled, so pinning it in ``details`` tells a caller
+            that reads the payload (rather than parsing the text) about the wrong
+            job.
+            """
 
-    deadline = time.monotonic() + params.wait_ms / 1000.0
-    # Snapshot the peer count and RE-ARM the event before parking.
-    #
-    # Two halves, both load-bearing. The COUNT is what the wake decision reads
-    # (not `is_set()`), so a message that landed between two waits, or before
-    # this wait began, is still seen exactly once. The CLEAR is what stops a
-    # stale set event from making `asyncio.wait` return instantly on every
-    # iteration, which would spin this `while` loop at full speed until the
-    # deadline — the same event-loop burn `_await_any_settled` documents for
-    # evicted job rows, and worse than the poll it replaced.
-    #
-    # The producer only ever sets and increments; re-arming is the consumer's
-    # job. No `await` separates the snapshot from the clear, so the sequence is
-    # atomic with respect to the loop, and the producer runs on that same loop
-    # (see PeerArrivalProtocol), so a message cannot slip between them and be
-    # lost: it either lands before the snapshot and is counted, or after the
-    # clear and re-sets the event. Do NOT "tidy" this by moving the count and
-    # the clear adjacent to each other or by reordering them — what matters is
-    # only that nothing awaits in between.
-    peer = context.peer_arrival if context is not None else None
-    peer_event = peer.event() if peer is not None else None
-    peer_seen = peer.count() if peer is not None else 0
-    # The per-kind snapshot rides the same atomic window as the count: it is
-    # only ever DIFFED against the live tally after a wake, so the model can
-    # be told which producer woke it (peer message, scheduled wake, hub note)
-    # rather than blaming every wake on a peer.
-    peer_kinds_seen = dict(peer.arrivals()) if peer is not None else {}
-    if peer_event is not None:
-        peer_event.clear()
+            return [
+                job_id
+                for job_id in job_ids
+                if (row := jobs.get(job_id)) is not None and row.status == "running"
+            ]
 
-    def _peer_interrupt(reason: str, arrivals: dict[str, int] | None = None) -> ToolResult:
-        """The still-running payload for a wait cut short by a message/steer.
+        deadline = time.monotonic() + params.wait_ms / 1000.0
+        # Snapshot the peer count and RE-ARM the event before parking.
+        #
+        # Two halves, both load-bearing. The COUNT is what the wake decision reads
+        # (not `is_set()`), so a message that landed between two waits, or before
+        # this wait began, is still seen exactly once. The CLEAR is what stops a
+        # stale set event from making `asyncio.wait` return instantly on every
+        # iteration, which would spin this `while` loop at full speed until the
+        # deadline — the same event-loop burn `_await_any_settled` documents for
+        # evicted job rows, and worse than the poll it replaced.
+        #
+        # The producer only ever sets and increments; re-arming is the consumer's
+        # job. No `await` separates the snapshot from the clear, so the sequence is
+        # atomic with respect to the loop, and the producer runs on that same loop
+        # (see PeerArrivalProtocol), so a message cannot slip between them and be
+        # lost: it either lands before the snapshot and is counted, or after the
+        # clear and re-sets the event. Do NOT "tidy" this by moving the count and
+        # the clear adjacent to each other or by reordering them — what matters is
+        # only that nothing awaits in between.
+        peer = context.peer_arrival if context is not None else None
+        peer_event = peer.event() if peer is not None else None
+        peer_seen = peer.count() if peer is not None else 0
+        # The per-kind snapshot rides the same atomic window as the count: it is
+        # only ever DIFFED against the live tally after a wake, so the model can
+        # be told which producer woke it (peer message, scheduled wake, hub note)
+        # rather than blaming every wake on a peer.
+        peer_kinds_seen = dict(peer.arrivals()) if peer is not None else {}
+        if peer_event is not None:
+            peer_event.clear()
 
-        Deliberately the SAME shape the deadline branch returns, so the model
-        gets the job id and status back and can simply re-issue the wait. The
-        jobs are untouched: nothing is cancelled and, critically, nothing is
-        consumed, so auto-delivery still hands over the result later.
+        def _peer_interrupt(reason: str, arrivals: dict[str, int] | None = None) -> ToolResult:
+            """The still-running payload for a wait cut short by a message/steer.
 
-        ``arrivals`` is the per-kind count of what landed during the park
-        (``reason == "inbound"``). The kinds are the producers' message
-        types, so the note can say "a scheduled wake fired" for the user's
-        reminder and "a subagent/parent hub message" for a child speaking up,
-        and the model knows what to read before re-issuing the wait.
-        """
+            Deliberately the SAME shape the deadline branch returns, so the model
+            gets the job id and status back and can simply re-issue the wait. The
+            jobs are untouched: nothing is cancelled and, critically, nothing is
+            consumed, so auto-delivery still hands over the result later.
 
-        running = _still_running()
-        # The note must agree with details["interrupted_by"]: the text is what
-        # the model actually reads, so rendering "steering" for a cancel we
-        # cannot attribute would keep the mislabelled claim alive in the one
-        # place it matters (review finding N1).
-        details: dict[str, Any] = {
-            "job_id": (running or job_ids)[0],
-            "status": "running",
-            "interrupted_by": reason,
-        }
-        if reason == "inbound":
-            kinds = arrivals or {}
-            notes = [_ARRIVAL_NOTES.get(kind, f"a {kind} message arrived") for kind in kinds]
-            note = "; ".join(notes) or _ARRIVAL_NOTES["peer_message"]
-            # One kind is the common case, and naming it keeps the existing
-            # machine contract (``interrupted_by == "peer_message"``) intact
-            # for peer-only wakes; several at once stay "inbound" and the
-            # breakdown rides ``arrivals``.
-            if len(kinds) == 1:
-                details["interrupted_by"] = next(iter(kinds))
-            details["arrivals"] = dict(kinds)
-        else:
-            note = "the wait was cancelled"
+            ``arrivals`` is the per-kind count of what landed during the park
+            (``reason == "inbound"``). The kinds are the producers' message
+            types, so the note can say "a scheduled wake fired" for the user's
+            reminder and "a subagent/parent hub message" for a child speaking up,
+            and the model knows what to read before re-issuing the wait.
+            """
+
+            running = _still_running()
+            # The note must agree with details["interrupted_by"]: the text is what
+            # the model actually reads, so rendering "steering" for a cancel we
+            # cannot attribute would keep the mislabelled claim alive in the one
+            # place it matters (review finding N1).
+            details: dict[str, Any] = {
+                "job_id": (running or job_ids)[0],
+                "status": "running",
+                "interrupted_by": reason,
+            }
+            if reason == "inbound":
+                kinds = arrivals or {}
+                notes = [_ARRIVAL_NOTES.get(kind, f"a {kind} message arrived") for kind in kinds]
+                note = "; ".join(notes) or _ARRIVAL_NOTES["peer_message"]
+                # One kind is the common case, and naming it keeps the existing
+                # machine contract (``interrupted_by == "peer_message"``) intact
+                # for peer-only wakes; several at once stay "inbound" and the
+                # breakdown rides ``arrivals``.
+                if len(kinds) == 1:
+                    details["interrupted_by"] = next(iter(kinds))
+                details["arrivals"] = dict(kinds)
+            else:
+                note = "the wait was cancelled"
+            return _text(
+                tool_call_id,
+                "wait",
+                f"job {', '.join(running or job_ids)} still running ({note})",
+                details=details,
+            )
+
+        job = _settled()
+        while job is None:
+            if signal is not None and signal.aborted:
+                running = _still_running()
+                return _text(
+                    tool_call_id,
+                    "wait",
+                    f"job {', '.join(running or job_ids)} still running (wait aborted)",
+                    details={"job_id": (running or job_ids)[0], "status": "running"},
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                running = _still_running()
+                return _text(
+                    tool_call_id,
+                    "wait",
+                    f"job {', '.join(running or job_ids)} still running after {params.wait_ms}ms",
+                    details={"job_id": (running or job_ids)[0], "status": "running"},
+                )
+            try:
+                await _await_any_settled(jobs, job_ids, remaining, signal, peer_event)
+            except asyncio.CancelledError:
+                # `lop send --now` steers, which makes interruptible_runner cancel
+                # this tool task and hand the model SKIPPED_RESULT_TEXT - losing
+                # the job id and telling it the wait never happened. Reporting the
+                # still-running payload ourselves makes --now and the mailbox path
+                # return the same shape.
+                #
+                # ABORT MUST STAY STRONGER THAN STEERING. Esc sets signal.aborted
+                # and expects the tool to stop; a tool that swallows
+                # CancelledError unconditionally defeats that contract outright
+                # (see the abort/steer split in harness/loop.py). So re-raise when
+                # the signal is aborted, and only absorb the plain steer cancel.
+                if signal is not None and signal.aborted:
+                    raise
+                # A cancel with NO signal at all cannot be a steer: steering rides
+                # interruptible_runner, which always passes one. Absorbing it here
+                # would invent a steering event on a host that has no steering, so
+                # let it propagate as the plain cancellation it is.
+                if signal is None:
+                    raise
+                # Steering is not the only remaining cancel source - a batch
+                # teardown (`GeneratorExit` in _execute_batch's finally) cancels
+                # the task with a live, non-aborted signal too, and the tool
+                # cannot tell the two apart from here: ToolContext deliberately
+                # exposes no steering capability, and adding one just to label a
+                # string would put loop state in a tool for no behavioural gain.
+                # `interrupted_by` is machine-readable and "steering" is the one
+                # value implying a human or peer acted, so report the neutral,
+                # always-true cause instead of guessing. The still-running payload
+                # (the point of this branch) is unchanged either way.
+                return _peer_interrupt("cancelled")
+            # Settle BEFORE peer: when a job settles on the same loop iteration as
+            # a message arrives, the finished result is strictly more valuable than
+            # "a message arrived", and reporting the peer branch would describe a
+            # completed job as running (and, via _still_running() == [], pin the
+            # WRONG job id in details - the exact failure _still_running's
+            # docstring exists to prevent). The message is not lost either way: it
+            # is already parked in the session journal and lands at the next
+            # turn-safe boundary.
+            job = _settled()
+            if job is None and peer is not None and peer.count() > peer_seen:
+                arrivals = {
+                    kind: total - peer_kinds_seen.get(kind, 0)
+                    for kind, total in peer.arrivals().items()
+                    if total > peer_kinds_seen.get(kind, 0)
+                }
+                return _peer_interrupt("inbound", arrivals)
+            if job is None and all(jobs.get(job_id) is None for job_id in job_ids):
+                return _error(tool_call_id, "wait", f"job {', '.join(job_ids)} disappeared")
+        # Handing the result to the model HERE means auto-delivery must not
+        # repeat it when the session next goes idle (see Session._on_job_completed
+        # and AsyncJob.consumed).
+        cast(Any, jobs).mark_consumed(job.id)
+        text, spill_details = _job_summary(job, context)
+        if len(job_ids) > 1:
+            still = [
+                job_id
+                for job_id in job_ids
+                if job_id != job.id
+                and (other := jobs.get(job_id)) is not None
+                and other.status == "running"
+            ]
+            if still:
+                text += f"\n({len(still)} still running: {', '.join(still)})"
+        details = {"job_id": job.id, "status": job.status}
+        if spill_details:
+            details.update(spill_details)
         return _text(
             tool_call_id,
             "wait",
-            f"job {', '.join(running or job_ids)} still running ({note})",
+            text,
             details=details,
         )
 
-    job = _settled()
-    while job is None:
-        if signal is not None and signal.aborted:
-            running = _still_running()
-            return _text(
-                tool_call_id,
-                "wait",
-                f"job {', '.join(running or job_ids)} still running (wait aborted)",
-                details={"job_id": (running or job_ids)[0], "status": "running"},
-            )
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            running = _still_running()
-            return _text(
-                tool_call_id,
-                "wait",
-                f"job {', '.join(running or job_ids)} still running after {params.wait_ms}ms",
-                details={"job_id": (running or job_ids)[0], "status": "running"},
-            )
-        try:
-            await _await_any_settled(jobs, job_ids, remaining, signal, peer_event)
-        except asyncio.CancelledError:
-            # `lop send --now` steers, which makes interruptible_runner cancel
-            # this tool task and hand the model SKIPPED_RESULT_TEXT - losing
-            # the job id and telling it the wait never happened. Reporting the
-            # still-running payload ourselves makes --now and the mailbox path
-            # return the same shape.
-            #
-            # ABORT MUST STAY STRONGER THAN STEERING. Esc sets signal.aborted
-            # and expects the tool to stop; a tool that swallows
-            # CancelledError unconditionally defeats that contract outright
-            # (see the abort/steer split in harness/loop.py). So re-raise when
-            # the signal is aborted, and only absorb the plain steer cancel.
-            if signal is not None and signal.aborted:
-                raise
-            # A cancel with NO signal at all cannot be a steer: steering rides
-            # interruptible_runner, which always passes one. Absorbing it here
-            # would invent a steering event on a host that has no steering, so
-            # let it propagate as the plain cancellation it is.
-            if signal is None:
-                raise
-            # Steering is not the only remaining cancel source - a batch
-            # teardown (`GeneratorExit` in _execute_batch's finally) cancels
-            # the task with a live, non-aborted signal too, and the tool
-            # cannot tell the two apart from here: ToolContext deliberately
-            # exposes no steering capability, and adding one just to label a
-            # string would put loop state in a tool for no behavioural gain.
-            # `interrupted_by` is machine-readable and "steering" is the one
-            # value implying a human or peer acted, so report the neutral,
-            # always-true cause instead of guessing. The still-running payload
-            # (the point of this branch) is unchanged either way.
-            return _peer_interrupt("cancelled")
-        # Settle BEFORE peer: when a job settles on the same loop iteration as
-        # a message arrives, the finished result is strictly more valuable than
-        # "a message arrived", and reporting the peer branch would describe a
-        # completed job as running (and, via _still_running() == [], pin the
-        # WRONG job id in details - the exact failure _still_running's
-        # docstring exists to prevent). The message is not lost either way: it
-        # is already parked in the session journal and lands at the next
-        # turn-safe boundary.
-        job = _settled()
-        if job is None and peer is not None and peer.count() > peer_seen:
-            arrivals = {
-                kind: total - peer_kinds_seen.get(kind, 0)
-                for kind, total in peer.arrivals().items()
-                if total > peer_kinds_seen.get(kind, 0)
-            }
-            return _peer_interrupt("inbound", arrivals)
-        if job is None and all(jobs.get(job_id) is None for job_id in job_ids):
-            return _error(tool_call_id, "wait", f"job {', '.join(job_ids)} disappeared")
-    # Handing the result to the model HERE means auto-delivery must not
-    # repeat it when the session next goes idle (see Session._on_job_completed
-    # and AsyncJob.consumed).
-    cast(Any, jobs).mark_consumed(job.id)
-    text, spill_details = _job_summary(job, context)
-    if len(job_ids) > 1:
-        still = [
-            job_id
-            for job_id in job_ids
-            if job_id != job.id
-            and (other := jobs.get(job_id)) is not None
-            and other.status == "running"
-        ]
-        if still:
-            text += f"\n({len(still)} still running: {', '.join(still)})"
-    details = {"job_id": job.id, "status": job.status}
-    if spill_details:
-        details.update(spill_details)
-    return _text(
-        tool_call_id,
-        "wait",
-        text,
-        details=details,
-    )
+    try:
+        _note_waiting(len(job_ids))
+        return await _park()
+    finally:
+        # A parked count is meaningful only while this invocation owns the
+        # wait. Clear even if cancellation unwinds the coroutine, a row vanishes,
+        # or a producer/update callback fails: otherwise idle heartbeats would
+        # faithfully republish a wait that no longer exists. Do not intercept
+        # CancelledError here; _park preserves the existing abort/steer split.
+        _note_waiting(0)
 
 
 async def _await_any_settled(
@@ -28817,6 +31431,24 @@ def _hub_roster_lines(rows: list[Any]) -> list[str]:
         # provider failure — the recorded cause reached no surface (design D4).
         # Rendered through the same ``render_cut_off_reason`` every other
         # surface uses, so the words cannot drift.
+        # Reduced/older row-shaped hosts predate checkpoint evidence. These
+        # additive fields must not make their otherwise valid roster unreadable.
+        last_step = getattr(row, "last_step", "")
+        wip_ref = getattr(row, "wip_ref", "")
+        death_cause = getattr(row, "death_cause", "")
+        if last_step:
+            lines.append(f"    last completed step: {last_step}")
+        if wip_ref:
+            wip_files = getattr(row, "wip_files", 0)
+            wip_at = getattr(row, "wip_at", 0.0)
+            lines.append(
+                f"    WIP: {wip_ref} ({wip_files} files, "
+                f"{subagent_ledger.format_duration(now - wip_at)})"
+            )
+        if death_cause:
+            from local_operator.incidents import render_child_death
+
+            lines.append(f"    {death_cause}: {render_child_death(death_cause)}")
         if row.cut_off_cause:
             # FUNCTION-LOCAL import: this module is a denied-module boundary and
             # must not import ``incidents`` at module scope (see the denied-module
@@ -29074,6 +31706,13 @@ async def _execute_hub_parent(
                 # Each success carries the NEW job id it was resumed as; the
                 # transcript-replay guidance is stated once in the footer
                 # rather than repeated on every line.
+                # The resume follows the LAUNCH model rule, so a role that pins
+                # the inherit sentinel ignores a ``model=`` passed here exactly
+                # as it ignores one passed to ``task``. The task path says so on
+                # its receipt; a resume that stayed silent would be the one
+                # surface where a dropped pick reads as honoured, and a resume
+                # is a launch that costs money.
+                source = str(getattr(comms.job(new_job_id), "model_selection_source", "") or "")
                 lines.append(
                     _resumed_line(
                         comms,
@@ -29083,11 +31722,9 @@ async def _execute_hub_parent(
                         previous_models.get(from_id, ""),
                         session_model,
                     )
-                    + (
-                        " [selection: "
-                        f"{getattr(comms.job(new_job_id), 'model_selection_source', '')}]"
-                        if getattr(comms.job(new_job_id), "model_selection_source", "")
-                        else ""
+                    + (f" [selection: {source}]" if source else "")
+                    + _not_applied_note(
+                        {"model_selection_source": source, "model_pick": params.model}
                     )
                 )
             else:
@@ -29294,9 +31931,26 @@ def build_hub_tool(context: ToolContext) -> AgentTool | None:
 class AskParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    questions: list[AskQuestion] = Field(
+    # OPTIONAL since #2520, because the same tool now has two sources for the
+    # question: the model's own (``questions``) and ANOTHER SESSION'S pending ask
+    # (``relay``). The validator below holds the line at exactly one — a call
+    # that carried both would have to decide which list the receipt describes,
+    # and a call that carried neither asks nothing.
+    questions: list[AskQuestion] | None = Field(
+        default=None,
         min_length=1,
         description="The questions to ask, put to the user one screen at a time.",
+    )
+
+    # `relay` (#2520): re-raise another session's pending ask in THIS session's
+    # queue by reference. A pointer, not a copy — one answer settles both — so
+    # the ref must name the ask AND the session that owns it.
+    relay: str | None = Field(
+        default=None,
+        description=(
+            "Relay another session's pending ask instead of asking your own: "
+            "'<session_id>/<ask_id>'. One answer settles both."
+        ),
     )
 
     # The `timeout` field ships with the queued-ask engine (design
@@ -29319,6 +31973,23 @@ class AskParams(BaseModel):
             "(24 h). Out-of-range values are rejected, never clamped."
         ),
     )
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> "AskParams":
+        """EXACTLY ONE of `questions` / `relay` (#2520).
+
+        Enforced as a MODEL validator rather than two `required` fields because
+        the two shapes are alternatives, and a JSON schema that expressed that
+        as `oneOf` would cost the wire more than the sentence does. The message
+        is what the model reads when it gets it wrong, so it names both halves
+        and the remedy.
+        """
+        if (self.questions is not None) == (self.relay is not None):
+            raise ValueError(
+                "exactly one of `questions` or `relay` must be given: ask your own "
+                "questions, or relay another session's pending ask by ref, not both."
+            )
+        return self
 
 
 #: What the tool reports when the user closed the picker without choosing.
@@ -29518,16 +32189,16 @@ def _ask_report(
 #: it would let the two modes drift into disagreeing about what warrants asking,
 #: which is the one thing about this tool that must not vary.
 _ASK_DESCRIPTION_RESTRAINT = (
-    "Ask the user to choose. LAST RESORT, not a checkpoint: research it, run it, "
-    "or delegate it to a subagent and decide yourself, then report what you chose. "
+    "Ask the user to decide, never for FYI. LAST RESORT, not a checkpoint: research, "
+    "run or delegate it to a subagent and decide yourself, then report the choice. "
     "Ask only when: the action is destructive or irreversible and the user has not "
     "EXPLICITLY approved that action; the REQUEST ITSELF has two plausible readings "
     "and no evidence picks between them; you need something only the user has (a "
-    "credential, an access decision); or the answer is genuinely theirs to state. "
+    "credential, access); or the answer is genuinely theirs to state. "
     "Two technical approaches is not ambiguity. Work the user already asked for is "
     "authorized: do not stop to confirm it — but that never extends to an "
-    "irreversible step by implication. Never put the question in your reply text; "
-    "mechanics: `read tool://ask`."
+    "irreversible step by implication. Asking notifies: never also `notify` it or "
+    "reply with it; mechanics: `read tool://ask`."
 )
 
 #: The tail for a host whose ``ask`` BLOCKS — the KILL-SWITCH arm.
@@ -29574,6 +32245,9 @@ _ASK_DESCRIPTION_QUEUED = (
     "routine, 5-10 minutes when someone should answer now, up to 24 h otherwise "
     "(floor 2 min); on a timeout notice take your own recommendation and say what "
     "you assumed. At most 8 asks can be open at once; duplicates are refused. "
+    "Settle one with `ask_withdraw` the moment it stops mattering. "
+    "To re-raise another session's pending ask instead, pass that one ask's "
+    "`relay` ref ('<session_id>/<ask_id>'; one answer settles both). "
     "Credentials: secret=true on that question (see `read tool://ask`)."
 )
 
@@ -29729,6 +32403,35 @@ async def execute_ask(
     if bounds_error is not None:
         return _error(tool_call_id, "ask", bounds_error)
     enqueue: Any = getattr(context, "enqueue_ask", None) if context is not None else None
+    if params.relay is not None:
+        # A RELAY NEVER ENTERS THE BLOCKING ARM (#2520). A relay is a pointer at
+        # a row in another session's LOG; with no queue there is no log to point
+        # at and no reconciliation to derive the status, so the honest answer is
+        # the refusal below rather than a `ask_user` call that would re-ask the
+        # origin's question as this session's own (the exact copy #2520 exists to
+        # remove). Bounds were validated above, so a bad `timeout` is still a
+        # bounds error on both arms.
+        from local_operator.asks import render as _ask_render
+
+        if not callable(enqueue):
+            return _error(tool_call_id, "ask", _ask_render.RELAY_NEEDS_QUEUE)
+        relayed: Any = enqueue([], params.timeout, tool_call_id=tool_call_id, relay=params.relay)
+        if not relayed.get("ok"):
+            return _error(
+                tool_call_id,
+                "ask",
+                str(relayed.get("error") or _ask_render.RELAY_ORIGIN_UNKNOWN),
+            )
+        return _text(
+            tool_call_id,
+            "ask",
+            str(relayed.get("text") or ""),
+            details=dict(relayed.get("details") or {}),
+        )
+    # The validator guarantees `questions` here (exactly one of the two fields),
+    # but the narrowing is not in the type: one local list serves every use below
+    # so the blocking arm and the queued arm cannot disagree about what was asked.
+    questions = list(params.questions or ())
     if callable(enqueue):
         # THE ASK GATE (design docs/design/ask-gate.md §2.2), composed AROUND
         # the unchanged enqueue: one awaited clearance check, whose ONLY
@@ -29751,7 +32454,7 @@ async def execute_ask(
                 # an un-cast ``await`` on that narrowing is a pyright error
                 # about a value whose real shape is an awaited mapping-or-None.
                 verdict: Any = await cast("Any", gate)(
-                    params.questions, params.timeout, tool_call_id=tool_call_id
+                    questions, params.timeout, tool_call_id=tool_call_id
                 )
             except Exception:  # noqa: BLE001 — a broken gate must never cost the ask
                 verdict = None
@@ -29771,7 +32474,7 @@ async def execute_ask(
         # ``Any`` is deliberate: ``callable()`` narrows an untyped callable to
         # ``Callable[..., object]``, which would make every ``outcome.get`` below
         # a type error on a value whose real shape is a mapping.
-        outcome: Any = enqueue(params.questions, params.timeout, tool_call_id=tool_call_id)
+        outcome: Any = enqueue(questions, params.timeout, tool_call_id=tool_call_id)
         if not outcome.get("ok"):
             return _error(
                 tool_call_id,
@@ -29788,7 +32491,21 @@ async def execute_ask(
             str(outcome.get("text") or ""),
             details=dict(outcome.get("details") or {}),
         )
-    answers = await ask_user(params.questions)
+    # A HOST THAT KNOWS IT CANNOT ASK REFUSES IN WORDS (review round 1,
+    # MINOR-1 / QA Q1). ``AskUnavailableError`` is raised only by the
+    # queued-only ask surface when something awaits it with the engine off;
+    # left to ``_guard`` it reached the model as "Tool 'ask' failed
+    # unexpectedly" plus a traceback of our own paths, which is the register
+    # ``_guard`` reserves for defects, not for a host stating a fact. Same
+    # reasoning as ``ApprovalUnavailableError``'s call sites. Imported here
+    # rather than at module scope for the reason every engine import in this
+    # function is: the runtime package is not on the tool module's path.
+    from local_operator.session.runtime.serving import AskUnavailableError
+
+    try:
+        answers = await ask_user(questions)
+    except AskUnavailableError as exc:
+        return _error(tool_call_id, "ask", str(exc))
     if not answers or not any(any(text.strip() for text in chosen) for chosen in answers.values()):
         # One outcome, whether the host answered None (escaped) or handed back
         # a mapping with nothing in it (confirmed an empty multi-select): the
@@ -29802,17 +32519,17 @@ async def execute_ask(
         # answer — a decline — so the batch reports that instead (UX round 1,
         # U3). A partially answered mixed batch keeps the normal path, where a
         # declined secret is already reported as ASK_SECRET_NOT_PROVIDED.
-        if any(question.secret for question in params.questions):
+        if any(question.secret for question in questions):
             return _text(tool_call_id, "ask", ASK_SECRET_UNANSWERED_TEXT)
         return _text(tool_call_id, "ask", ASK_UNANSWERED_TEXT)
     # Secret answers are stored by the host and reported as the KEY NAME
     # only. The raw value must never ride the tool result: that text is
     # persisted to the transcript and replayed to the provider.
-    reported = _report_secret_answers(params.questions, answers, context)
+    reported = _report_secret_answers(questions, answers, context)
     return _text(
         tool_call_id,
         "ask",
-        _ask_report(params.questions, reported),
+        _ask_report(questions, reported),
         details={"answers": {key: list(value) for key, value in reported.items()}},
     )
 
@@ -29862,7 +32579,10 @@ class AskWithdrawParams(BaseModel):
         description=(
             "answered_in_chat only: the user's words verbatim, one cell per "
             "question the message answers and an empty list for a question it "
-            "does not cover. Every question id must appear."
+            "does not cover — an empty list closes that question unanswered in "
+            "the same write, so re-ask any you still need. Every question id "
+            "must appear, spelled exactly as it was asked; a key that is not a "
+            "question id is refused."
         ),
     )
 
@@ -29875,13 +32595,19 @@ class AskWithdrawParams(BaseModel):
 _ASK_WITHDRAW_DESCRIPTION = (
     "Close a queued ask you no longer need answered — the asker's own settle. "
     "reason='moot': the question stopped mattering (you found the answer "
-    "yourself, the work moved on); it settles as withdrawn and nothing more is "
-    "delivered for it. reason='answered_in_chat': the user's latest chat "
-    "message IS the answer — record their words VERBATIM in `answers`; the "
-    "standard response arrives as usual. If the user's message answers a "
-    "queued ask, settle it with this tool rather than leaving the ask reading "
-    "as waiting. A secret question cannot be settled from chat — its card is "
-    "the only path. A settled ask is refused with its own words; do not retry."
+    "yourself, the work moved on, or the user dropped or handed off the work "
+    "the question was about); it settles as withdrawn and nothing more is "
+    "delivered for it. reason='answered_in_chat': the user's chat message that "
+    "answered it (latest or earlier) IS the answer — an answer is "
+    "`answered_in_chat`, never `moot`, even if they used their own words "
+    "rather than the options: record their words VERBATIM in `answers`; the "
+    "standard response arrives as usual. To settle only some of its questions, "
+    "put the user's words in their cells and an empty list on the rest — those "
+    "close unanswered; re-ask any you still need. Every cell empty is refused "
+    "(that is a `moot`, not an answer). If the user's message answers a queued "
+    "ask, settle it with this tool rather than leaving the ask reading as "
+    "waiting. A secret question cannot be settled from chat — its card is the "
+    "only path. A settled ask is refused with its own words; do not retry."
 )
 
 
@@ -30129,3 +32855,196 @@ async def execute_no_reply(
         useless=True,
         details={QUIET_TURN_KEY: True},
     )
+
+
+# ---------------------------------------------------------------------------
+# notify — post an item to the operator's inbox
+# ---------------------------------------------------------------------------
+#
+# ``docs/design/notifications-inbox.md`` §3. A push or banner is gone once seen;
+# an inbox item stays until the operator reads or dismisses it, so a watcher's
+# finding (an outside PR needing review, a fraud attempt, a campaign's numbers)
+# is not buried by the next morning's backlog.
+#
+# createIf, footprint rung 3: the builder returns ``None`` unless the session
+# bound its inbox door (``ToolContext.notify_inbox``), which only a top-level
+# conversation the operator's listings show does (``Session.
+# _notify_inbox_callable``). PUBLISHED: the completed deferred pilot confused
+# notify with todo and falsely claimed delivery. The measured 573-token cost
+# is explicit in bench_context_budget.py; discovery cannot be a budget trick.
+# The system.md has_notify clause names when to reach for it. Appended at END
+# of TOOL_BUILDERS/DEFAULT_TOOL_NAMES for the prompt-cache reason every other
+# append states.
+
+#: The kill switch: ``LOP_NOTIFY=0`` (or false/no/off) removes the tool — env
+#: only, no config key, the ``LOP_NO_REPLY`` discipline: only an explicit off
+#: value turns it off, read ONCE at import; a test monkeypatches this attribute.
+NOTIFY_ENABLED: bool = os.environ.get("LOP_NOTIFY", "").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
+
+def notify_enabled() -> bool:
+    """Whether this process offers ``notify`` (``LOP_NOTIFY``, default on)."""
+    return NOTIFY_ENABLED
+
+
+class NotifyLink(BaseModel):
+    """One link the operator may follow from the item (http(s) only)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(max_length=80)
+    url: str = Field(max_length=500)
+
+    @field_validator("url")
+    @classmethod
+    def _http_only(cls, value: str) -> str:
+        # The inbox renders links as clickable on every surface; a `file:`,
+        # `javascript:` or app-scheme URL is not something an agent should be
+        # able to put one click from the operator.
+        if not value.strip().lower().startswith(("http://", "https://")):
+            raise ValueError("links must be http(s) URLs")
+        return value.strip()
+
+
+class NotifyParams(BaseModel):
+    """Kept small on purpose (§3.1): metrics ride ``body`` as a markdown table,
+    and related projects come from the session's own project links."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(
+        min_length=1, max_length=120, description="One line the operator scans in a list."
+    )
+    body: str = Field(
+        "",
+        max_length=4000,
+        description="Markdown: what happened, numbers, what they may want to do.",
+    )
+    priority: Literal["normal", "high", "low"] = Field(
+        "normal", description="high also raises a banner; reserve for what needs them soon."
+    )
+    key: str = Field(
+        "",
+        max_length=120,
+        description=(
+            "Stable id for the thing; reuse it to update the same item instead of adding another."
+        ),
+    )
+    links: list[NotifyLink] = Field(default_factory=list, max_length=5)
+
+
+#: The HOW lives here; the WHEN also lives in the gated ``system.md`` clause.
+#: Published after the live deferred pilot failed reliable tool discovery.
+_NOTIFY_DESCRIPTION = (
+    "Post an item to the operator's Notifications inbox; it stays until read or "
+    "dismissed, on every device. For FYI results, metrics or events to see on "
+    "return; never routine progress or a question (`ask` notifies). Pass a "
+    "stable `key` so a repeat (a wake tick, a new count) updates one item."
+)
+
+
+def build_notify_tool(context: ToolContext) -> AgentTool | None:
+    """CreateIf builder: present only where the session bound its inbox door.
+
+    ``approval_tier="read"``: writing the operator's own inbox touches no world
+    state, the ``no_reply`` reasoning. ``shared`` concurrency: an item write is
+    an independent, short transaction and never decides the turn's shape.
+    """
+    if getattr(context, "notify_inbox", None) is None:
+        return None
+    return AgentTool(
+        name="notify",
+        label="Notify",
+        description=_NOTIFY_DESCRIPTION,
+        parameters=NotifyParams.model_json_schema(),
+        approval_tier="read",
+        concurrency="shared",
+        execute=execute_notify,
+    )
+
+
+@_guard("notify")
+async def execute_notify(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Validate, scrub, write through the session's door, and report what happened.
+
+    REDACTION HAPPENS HERE, before the door: the raw arguments are not redacted
+    by the loop (only the public start event is), so the store is the last
+    point a scrub can happen and an unredacted credential must never be
+    persisted into an inbox every surface paints (§1.5).
+    """
+    try:
+        params = NotifyParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "notify", exc)
+    door = getattr(context, "notify_inbox", None) if context is not None else None
+    if door is None:
+        return _error(
+            tool_call_id,
+            "notify",
+            "this session has no inbox door wired in — nothing was posted; say it in text instead.",
+        )
+    title = _redact_tool_text(params.title, context)
+    body = _redact_tool_text(params.body, context)
+    # A redacted URL is no longer necessarily the same destination. Drop the
+    # whole link rather than turn a credential-bearing URL into an ambiguous,
+    # actionable replacement. Decode every component too: encoded credentials
+    # in path/query/userinfo are just as sensitive as the raw spelling.
+    from urllib.parse import unquote, urlsplit
+
+    links = []
+    for link in params.links:
+        candidate = link.url
+        sensitive = False
+        for _ in range(len(candidate) + 1):
+            if _redact_tool_text(candidate, context) != candidate:
+                sensitive = True
+                break
+            decoded = unquote(candidate)
+            if decoded == candidate:
+                break
+            candidate = decoded
+        try:
+            parsed = urlsplit(link.url)
+            safe = bool(parsed.hostname) and parsed.username is None and parsed.password is None
+        except ValueError:
+            safe = False
+        if safe and not sensitive:
+            links.append({"label": _redact_tool_text(link.label, context), "url": link.url})
+    try:
+        sentence = await door(
+            title=title,
+            body=body,
+            priority=params.priority,
+            key=params.key,
+            links=links,
+            anchor_id=tool_call_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — every store refusal is a sentence
+        from local_operator.notifications.store import NotifyRefused
+
+        if isinstance(exc, NotifyRefused):
+            return _error(tool_call_id, "notify", str(exc))
+        from local_operator.session.store_failures import STORE_BUSY, store_failure
+
+        failure = store_failure(exc)
+        if failure is not None and failure.code == STORE_BUSY:
+            return _error(
+                tool_call_id,
+                "notify",
+                "the inbox store is busy (another process holds its lock); nothing was "
+                "posted — retry this call once.",
+            )
+        logger.exception("notify: the inbox write failed")
+        return _error(tool_call_id, "notify", "the inbox could not be written; nothing was posted.")
+    return _text(tool_call_id, "notify", sentence)

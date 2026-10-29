@@ -35,22 +35,41 @@
  * wording of one rule. The card renders `error.message` verbatim, and only
  * falls back to a plain line when the daemon said nothing usable.
  */
-import { useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { HttpError, sendCommand } from "../api";
 import { cn } from "../lib/cn";
 import { Disclosure } from "./ui/disclosure";
 import {
 	answeredPairs,
 	askStateLine,
-	LAPSED_BODY,
+	dismissedReasonKey,
 	isAnswerable,
 	isDeadConversation,
 	isLapsed,
 	unansweredQuestions,
 } from "../lib/asks";
-import { clearAskDraft, useAskDraft } from "../store";
+import { clearAskDraft, messageRuntime, useAskDraft } from "../store";
 import type { AskDraft } from "../store";
 import type { AskQuestion, PendingAsk } from "../types";
+
+/** The two dismissal reasons, in the order the card offers them (design §17:
+    "No longer needed" first, then "Answered in chat"), with the catalogue keys
+    each row paints.
+
+    A LOOKUP RATHER THAN A TEMPLATE. The keys used to be built by interpolation
+    (``relay.ask.dismiss.${reason}`` / ``..._note``), which no static check can
+    verify — a renamed key would render as the key text on screen — and which
+    the relay copy gate counts as unextracted literals. Spelling each key here
+    keeps them greppable and type-checked against the generated key union. */
+const DISMISS_COPY = {
+	moot: { key: "relay.ask.dismiss.moot", note: "relay.ask.dismiss.moot_note" },
+	answered_in_chat: {
+		key: "relay.ask.dismiss.answered_in_chat",
+		note: "relay.ask.dismiss.answered_in_chat_note",
+	},
+} as const;
+
+const DISMISS_REASONS = ["moot", "answered_in_chat"] as const;
 
 /** The daemon's sentence, or the plainest honest thing when it gave none.
  *
@@ -59,10 +78,38 @@ import type { AskQuestion, PendingAsk } from "../types";
  *  the browser's own TypeError. Neither is the queue's refusal copy, so neither
  *  may be rendered as though it were. */
 function refusalText(error: unknown): string {
-	if (error instanceof TypeError) return "could not reach the daemon";
+	if (error instanceof TypeError) return messageRuntime.t("relay.asks.error.reach_failed");
 	const message = error instanceof Error ? error.message : String(error);
-	if (message === "" || /^\d{3}$/.test(message)) return "the daemon did not say why";
+	if (message === "" || /^\d{3}$/.test(message)) return messageRuntime.t("relay.asks.error.no_reason");
 	return message;
+}
+
+/** The stale-ask context line (SA-D7 / R5), or `null` when there is none.
+ *
+ *  "3 messages from you since this was asked (last 19:36)": operator messages
+ *  admitted since the ask was raised, and when the latest one was. It is the one
+ *  line on this card that says a question may ALREADY have been answered in
+ *  chat — the reason the card can be closed with `answered_in_chat`.
+ *
+ *  ABSENCE IS THE CONTRACT, exactly as `asks/store.pending_row` writes it: an
+ *  older runtime sends no field, and that draws NOTHING rather than a zero the
+ *  reader would have to disbelieve. A zero is a fact (the ask is newer than every
+ *  message) and draws nothing either — there is no staleness to report. An OPEN
+ *  ask only: a settled one has no wait left to be stale.
+ *
+ *  The clock is formatted HERE rather than through ICU: it is a wall-clock time,
+ *  not prose, and every locale's catalogue carries the finished string inside the
+ *  sentence it belongs to. Latin digits in 24-hour form, matching the terminal's
+ *  own rendering of the same pair (`tui.widgets.ask_queue.context_text`). */
+function contextLine(row: PendingAsk): string | null {
+	if (String(row.status || "open") !== "open") return null;
+	const count = row.user_messages_since;
+	if (typeof count !== "number" || count <= 0) return null;
+	const last = row.last_user_message_at;
+	if (typeof last !== "number" || last <= 0) return null;
+	const at = new Date(last);
+	const time = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+	return messageRuntime.t("relay.ask.context.messages", { count, time });
 }
 
 /** The sentence a row shows when the aggregate ALREADY reports its conversation
@@ -78,9 +125,80 @@ function refusalText(error: unknown): string {
  *  is the one the primary control would have produced, and `start a new
  *  conversation and ask again` is the user's actual next move. The ops that
  *  carry their own sentence (a dismissal, a handed-over decision) are only told
- *  apart when the refusal comes FROM THE WIRE, which this branch never does. */
-const CONVERSATION_GONE_COPY =
-	"this conversation no longer exists — the ask can never be read; start a new conversation and ask again.";
+ *  apart when the refusal comes FROM THE WIRE, which this branch never does.
+ *  The sentence itself is `relay.asks.card.gone`. */
+
+/** Not a wire cap: the daemon stores whatever string it is given. 32768 is the
+    bound the desktop client's answer schema uses, and the phone matches it so the
+    same typed answer is accepted on both surfaces and a runaway paste stops at the
+    field rather than after the tap. */
+const ANSWER_MAX_CHARS = 32768;
+
+/** The card's own record of its `Other` row: whether it is the selected one, and
+ *  what its field holds (UNTRIMMED).
+ *
+ *  KEPT BESIDE THE DRAFT CELL, NOT DERIVED FROM IT, for the two reasons the
+ *  desktop panel learned the hard way. The cell is trimmed on the way in, so a
+ *  field fed from it would eat a space typed between two words on the keystroke.
+ *  And a text equal to an option's label is indistinguishable from that option in
+ *  the cell, so a field whose visibility followed the cell would close mid-
+ *  sentence the moment `No` was typed beside an option `No`. Single-select keeps
+ *  `text` while `open` is false, so choosing an option and coming back does not
+ *  make the user type it again. */
+interface OtherState {
+	open: boolean;
+	text: string;
+}
+
+/** The marker the cell holds for an `Other` that is open but EMPTY: the empty
+ *  string, exactly (the desktop's own spelling). It is what lets the open state
+ *  survive an unmount through the store-backed draft, and what keeps the
+ *  question incomplete — see `filled`. It is never sent. */
+const isOtherPending = (value: string): boolean => value === "";
+
+/** The `Other` state on mount: open, with the text, when the cell already holds a
+ *  value the options did not offer, or the blank marker. Seeded open but never
+ *  focused — a mount takes no focus, only the user's own press does.
+ *
+ *  More than one out-of-list value cannot come from this card (it writes at most
+ *  one); they are joined rather than hidden so a draft written by something else
+ *  loses nothing the user could see. */
+function otherSeed(cell: readonly string[], labels: readonly string[]): OtherState {
+	const values = cell.filter((value) => value.trim() !== "" && !labels.includes(value));
+	return { open: values.length > 0 || cell.some(isOtherPending), text: values.join(", ") };
+}
+
+/** The option labels ticked in the cell. A typed `Other` equal to an option's
+ *  label sits in the cell as that label, so the LAST such entry is the Other's,
+ *  not a tick — otherwise typing `No, thanks` through `No` would tick an option
+ *  the user never chose. */
+function otherTicks(
+	cell: readonly string[],
+	labels: readonly string[],
+	other: OtherState,
+): string[] {
+	const labelled = cell.filter((value) => labels.includes(value));
+	const entry = other.open ? other.text.trim() : "";
+	if (entry === "" || !labels.includes(entry)) return labelled;
+	const at = labelled.lastIndexOf(entry);
+	return labelled.filter((_, index) => index !== at);
+}
+
+/** The cell for a set of ticks and an `Other` state. The Other entry goes LAST,
+ *  after the ticked labels, which is the order the answer travels in. */
+function cellWith(ticks: readonly string[], multi: boolean, other: OtherState): string[] {
+	if (!other.open) return multi ? [...ticks] : [];
+	const entry = other.text.trim();
+	return multi ? [...ticks, entry] : [entry];
+}
+
+/** What travels for one cell: every value trimmed, blanks dropped, the first of
+ *  any duplicate kept, tick order preserved with the `Other` text last. A blank
+ *  string must never reach `answers` — the runtime would store it as a deliberate
+ *  empty answer — and the open-but-empty marker is exactly such a string. */
+function answerValues(cell: readonly string[]): string[] {
+	return Array.from(new Set(cell.map((value) => value.trim()).filter((value) => value !== "")));
+}
 
 /** One question's control, plus whether it currently holds a complete answer. */
 function QuestionField({
@@ -98,15 +216,41 @@ function QuestionField({
 	disabled: boolean;
 }) {
 	const options = Array.isArray(question.options) ? question.options : [];
-	const chosen = new Set(value);
+	const labels = options.map((option) => option.label);
+	const multi = question.multi === true;
+	/* The free-text door is on every option question except a secret one: a
+	   secret's value is a credential the agent asked for by name, and an arbitrary
+	   typed string beside its options would not be one. A question with no options
+	   already IS a text field. */
+	const offersOther = !question.secret && options.length > 0;
+	const [other, setOther] = useState<OtherState>(() => otherSeed(value, labels));
+	const ticks = otherTicks(value, labels, other);
+	const otherField = useRef<HTMLInputElement>(null);
+	/* FOCUS IS TAKEN ONLY INSIDE THE USER'S PRESS ON THE ROW, never on mount: a
+	   seeded-open field (a draft restored after a collapse) must not pull the
+	   keyboard up under a thumb that did nothing. The flag is raised by the press
+	   and spent here, once the field it points at is mounted. The dependency is
+	   the trigger (the field mounting), not a value read in the body. */
+	const focusOther = useRef(false);
+	useLayoutEffect(() => {
+		if (!focusOther.current) return;
+		focusOther.current = false;
+		otherField.current?.focus();
+	}, [other.open]);
+	const writeOther = (next: OtherState) => {
+		setOther(next);
+		onChange(cellWith(ticks, multi, next));
+	};
+	const chosen = new Set(ticks);
 	if (options.length === 0) {
 		/* A free-text or secret question: the answer IS the typed string. */
 		return (
 			<div className="flex flex-col gap-1">
 				{question.secret ? (
 					<p className="text-meta text-ink-dim">
-						secret — sent directly, not shown in the transcript
-						{question.persist ? ", and saved to your credential store" : ""}
+						{question.persist
+							? messageRuntime.t("relay.asks.card.secret_notice_persisted")
+							: messageRuntime.t("relay.asks.card.secret_notice")}
 					</p>
 				) : null}
 				<input
@@ -118,8 +262,12 @@ function QuestionField({
 					autoCapitalize={question.secret ? "none" : undefined}
 					autoCorrect={question.secret ? "off" : undefined}
 					spellCheck={question.secret ? false : undefined}
-					placeholder={question.secret ? "paste secret" : "your answer"}
-					className="min-h-11 w-full rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim disabled:opacity-50"
+					placeholder={
+						question.secret
+							? messageRuntime.t("relay.asks.card.placeholder_secret")
+							: messageRuntime.t("relay.asks.card.placeholder_answer")
+					}
+					className="min-h-11 w-full rounded-sm bg-canvas px-3 text-body text-ink outline-none placeholder:text-ink-dim disabled:opacity-50"
 				/>
 			</div>
 		);
@@ -127,6 +275,12 @@ function QuestionField({
 
 	return (
 		<div className="flex flex-col gap-2">
+			{/* Describes the option list, so it sits with it, above the rows. */}
+			{multi ? (
+				<span className="text-meta text-ink-dim">
+					{messageRuntime.t("relay.asks.card.choose_any")}
+				</span>
+			) : null}
 			{options.map((option, index) => {
 				const on = chosen.has(option.label);
 				/* THE RECOMMENDATION IS AN INDEX, not a flag (see `AskQuestion`): the
@@ -142,23 +296,37 @@ function QuestionField({
 						type="button"
 						disabled={disabled}
 						onClick={() => {
-							if (!question.multi) {
+							if (!multi) {
+								/* An option and `Other` are one choice in single-select, so
+								   picking an option CLOSES `Other` — its typed text stays in
+								   card state (the user need not retype it on coming back) but
+								   is no longer the answer. */
+								setOther({ ...other, open: false });
 								onChange([option.label]);
 								return;
 							}
 							/* Multi-select toggles; the answer map holds a list either
-							   way, so the wire shape does not depend on `multi`. */
+							   way, so the wire shape does not depend on `multi`. `Other`
+							   is additive here and is rebuilt LAST, so a tick never
+							   reorders the typed text ahead of the labels. */
 							const next = new Set(chosen);
 							if (next.has(option.label)) next.delete(option.label);
 							else next.add(option.label);
-							onChange(Array.from(next));
+							onChange(cellWith(Array.from(next), true, other));
 						}}
 						aria-pressed={on}
 						className={cn(
-							"flex min-h-11 flex-col justify-center rounded-sm border border-l-2 px-3 py-2 text-left",
+							/* A TONE STEP, NOT AN OUTLINE (design review round 2, NIT): the
+							   option's ground was the sheet's own ground, so a 1 px
+							   `border-control` box was the only thing drawing it — the one
+							   place this PR's "separate by the ladder, not by a box" rule had
+							   not reached. `bg-surface` on the sheet's `bg-elevated` draws it
+							   with the ground ladder instead; the 2 px accent start edge stays,
+							   because that is the option's authority mark, not its boundary. */
+							"flex min-h-11 flex-col justify-center rounded-sm border-s-2 border-s-accent px-3 py-2 text-start",
 							on
-								? "border-accent border-l-accent bg-accent-wash"
-								: "border-control border-l-accent bg-elevated active:bg-accent-wash",
+								? "bg-accent-wash"
+								: "bg-surface active:bg-accent-wash",
 							"disabled:opacity-50",
 						)}
 					>
@@ -169,7 +337,7 @@ function QuestionField({
 								   position as the only channel for older clients, but this
 								   client is told outright, and a badge that says so is
 								   cheaper to read than "the first one means it". */
-								<span className="text-ink-dim"> · recommended</span>
+								<span className="text-ink-dim"> {messageRuntime.t("relay.asks.card.recommended")}</span>
 							) : null}
 						</span>
 						{option.description ? (
@@ -178,8 +346,80 @@ function QuestionField({
 					</button>
 				);
 			})}
-			{question.multi ? (
-				<span className="text-meta text-ink-dim">choose any that apply</span>
+			{offersOther ? (
+				<>
+					{/* THE `Other` ROW: the free-text door on every non-secret option
+					    question (the desktop and the terminal already have it), so how
+					    to give an answer the list did not offer is on the card rather
+					    than something the user has to know. The hint is the same
+					    "your answer" the field's placeholder says; it goes while the
+					    field is open, where it would print the same words twice.
+					    A real button with `aria-pressed`, like the option rows. */}
+					<button
+						type="button"
+						data-ask-option-other=""
+						disabled={disabled}
+						aria-pressed={other.open}
+						onClick={() => {
+							/* A single-select `Other` is the selected one of a radio-like
+							   group, which does not deselect: pressing it again re-focuses
+							   the field. A multi-select one is a checkbox and unticks. */
+							if (multi && other.open) {
+								writeOther({ ...other, open: false });
+								return;
+							}
+							focusOther.current = true;
+							if (other.open) {
+								focusOther.current = false;
+								otherField.current?.focus();
+							} else {
+								writeOther({ ...other, open: true });
+							}
+						}}
+						className={cn(
+							"flex min-h-11 items-center gap-2 rounded-sm border-s-2 border-s-accent px-3 py-2 text-start",
+							other.open ? "bg-accent-wash" : "bg-surface active:bg-accent-wash",
+							"disabled:opacity-50",
+						)}
+					>
+						<span className="text-body-sm font-medium text-ink">
+							{messageRuntime.t("relay.asks.card.other")}
+						</span>
+						{other.open ? null : (
+							<span className="text-body-sm text-ink-dim">
+								{messageRuntime.t("relay.asks.card.placeholder_answer")}
+							</span>
+						)}
+					</button>
+					{other.open ? (
+						<input
+							ref={otherField}
+							type="text"
+							value={other.text}
+							maxLength={ANSWER_MAX_CHARS}
+							onChange={(event) => writeOther({ open: true, text: event.target.value })}
+							onKeyDown={(event) => {
+								/* A single-line field: Enter neither submits nor inserts anything,
+								   it only dismisses the keyboard. An IME confirming a composition
+								   also sends Enter, which must reach the IME untouched — Safari
+								   delivers that keydown with `isComposing` already false and the
+								   legacy `keyCode` 229, so both signals are checked. */
+								if (
+									event.key !== "Enter" ||
+									event.nativeEvent.isComposing ||
+									event.keyCode === 229
+								)
+									return;
+								event.preventDefault();
+								event.currentTarget.blur();
+							}}
+							disabled={disabled}
+							aria-label={question.question}
+							placeholder={messageRuntime.t("relay.asks.card.placeholder_answer")}
+							className="min-h-11 w-full rounded-sm bg-canvas px-3 text-body text-ink outline-none placeholder:text-ink-dim disabled:opacity-50"
+						/>
+					) : null}
+				</>
 			) : null}
 		</div>
 	);
@@ -190,6 +430,7 @@ export function AskCard({
 	sessionId,
 	nowMs,
 	onSettled,
+	onDismissed,
 }: {
 	row: PendingAsk;
 	sessionId: string;
@@ -197,8 +438,16 @@ export function AskCard({
 	    from `expires_at` locally, never from a server-computed at-push string). */
 	nowMs: number;
 	/** Called after this surface settles, declines or dismisses the ask, so an
-	    aggregate list can re-read the index rather than guess the new state. */
-	onSettled?: () => void;
+	    aggregate list can re-read the index rather than guess the new state. It
+	    names the OP: a sheet holding a dismissal receipt must retire it when the
+	    operator's next act was an answer, not keep describing the old one
+	    (agent review round 2, M1 = UX round 2, U9). */
+	onSettled?: (kind: "respond" | "decline" | "dismiss") => void;
+	/** Called after a DISMISSAL is accepted, with the ask it was about and the
+	    reason that was sent. The sheet needs both: the reason for the receipt's
+	    words, and the id so a later dismissal replaces this one instead of being
+	    confused with it (M1). */
+	onDismissed?: (askId: string, reason: "moot" | "answered_in_chat" | undefined) => void;
 }) {
 	/* The draft map: question id → the labels (or the typed string) the user has
 	   chosen but not yet sent. IT LIVES IN THE STORE, not in this component
@@ -217,6 +466,20 @@ export function AskCard({
 	/** The conversation is GONE (`ask_session_gone`): terminal, so no control may
 	    stay live (design round 1, D3). */
 	const [gone, setGone] = useState(false);
+	/** The two reason buttons are showing (`close…` pressed on an open ask).
+	    A separate state from `busy`: revealing the choice sends NOTHING, so a
+	    card that showed the in-flight mark here would claim a dismissal the
+	    operator has not made. */
+	const [closing, setClosing] = useState(false);
+	/** Which reason was SENT, so the button that carries it keeps its label while
+	    the dismissal is in flight (UX round 1, U3). Both buttons used to collapse
+	    to `…`, which erased the only on-screen statement of what the operator
+	    chose. */
+	const [sentReason, setSentReason] = useState<"moot" | "answered_in_chat" | undefined>(
+		undefined,
+	);
+	/** A dismiss refusal has been read: the reasons stay visible, inert (U8). */
+	const [dismissRefused, setDismissRefused] = useState(false);
 
 	/* THE COLD CASE, and only the known one (design round 1, D1/D4 = UX U1/U3/U4):
 	   `runtime_live === false` means the relay will have to bring the conversation
@@ -230,8 +493,13 @@ export function AskCard({
 	   aggregate's own fields (`PendingAsk.runtime_live` / `.durable`), and a
 	   second copy of them on the component was exactly the drift D7 was made of. */
 	const cold = row.runtime_live === false;
-
-	const state = askStateLine(row, nowMs);
+	const state = askStateLine(row, nowMs, messageRuntime.t);
+	/* A DISMISSED ROW STATES ITS REASON (SA-D8, design §17). The reason is a
+	   catalogue sentence rather than a literal here, so the card says it in the
+	   operator's language: `askStateLine`'s `dismissed` arm is the fallback for a
+	   row that recorded none (and for an older daemon that never sent the key). */
+	const dismissReason = dismissedReasonKey(row);
+	const stateLine = dismissReason ? messageRuntime.t(dismissReason) : state.text;
 	const status = String(row.status || "open");
 	const answerable = isAnswerable(status);
 	/* A LAPSED ASK IS SHOWN, NOT OFFERED (Ben's report, 2026-10-15). Its deadline
@@ -256,12 +524,17 @@ export function AskCard({
 	   not a dead end, and must keep its receipt. */
 	const goneFromWire = isDeadConversation(row) && answerable;
 	const terminal = gone || goneFromWire;
-	/* DISMISS IS `timed_out`-ONLY, and the queue is the authority: `AskQueue.dismiss`
-	   accepts no other status (`asks/queue.py`), and the design states the rule twice
-	   (§2.2's table and `:115`). Offering it on an open or answered ask collected a
-	   refusal whose sentence — "only a timed-out ask can be dismissed; it is still
-	   open." — is FALSE about the row it sat under (agent review round 1, R1). */
+	/* A LAPSED ASK KEEPS ITS ONE-TAP DISMISS (D11, §14), and an OPEN one now has a
+	   door of its own (R5 / SA-D4): `AskQueue.dismiss` accepts `open` on every live
+	   session (the live refusal was retired — see the design's amended §15 D6), so
+	   the refusal this comment used to record ("only a timed-out ask can be
+	   dismissed; it is still open.") no longer exists to collect. The two doors
+	   differ in what they ASK the operator, not in whether they are allowed: a
+	   lapsed ask was already walked past by the agent, so it goes at once; an open
+	   one is still owed an answer, so the card asks WHY first and sends nothing
+	   until a reason is chosen. */
 	const dismissible = status === "timed_out";
+	const reason_needed = status === "open";
 	const questions = useMemo(() => (Array.isArray(row.questions) ? row.questions : []), [row]);
 	const open_questions = useMemo(
 		() => (offered ? unansweredQuestions(row) : []),
@@ -293,23 +566,34 @@ export function AskCard({
 	const filled = (id: string): boolean => {
 		if (skipped.has(id)) return true;
 		const cell = draft.answers[id] ?? [];
+		/* DELIBERATELY NOT THE DESKTOP'S RULE. The desktop holds a question open
+		   while ANY entry is the blank `Other` marker; here a tick IS a complete
+		   answer, so an open-but-empty `Other` beside one does not grey send. The
+		   blank marker is dropped by `answerValues` on submit. On a single-select
+		   the marker is the cell's only entry, which is blank, so it still holds
+		   the question open. */
 		return cell.some((value) => value.trim() !== "");
 	};
 	const complete = open_questions.length > 0 && open_questions.every((q) => filled(String(q.id)));
 
-	async function run(kind: "respond" | "decline" | "dismiss", send: () => Promise<unknown>) {
+	async function run(
+		kind: "respond" | "decline" | "dismiss",
+		send: () => Promise<unknown>,
+		onAccepted?: () => void,
+	) {
 		if (busy) return;
 		setBusy(kind);
 		setError("");
 		setErrorOp("");
 		try {
 			await send();
+			onAccepted?.();
 			/* THE DRAFT IS SPENT ONCE THE ASK SETTLES. Cleared here rather than left
 			   for the next mount: the sheet re-reads the aggregate, so a settled card
 			   can come back in the list, and a re-filled card the user already
 			   answered reads as if their answer never landed. */
 			clearAskDraft(row.ask_id);
-			onSettled?.();
+			onSettled?.(kind);
 		} catch (failure) {
 			setError(refusalText(failure));
 			setErrorOp(kind);
@@ -321,6 +605,14 @@ export function AskCard({
 			if (failure instanceof HttpError && failure.code === "ask_session_gone") {
 				setGone(true);
 			}
+			/* A REFUSED DISMISSAL STOPS INVITING ANOTHER (UX round 1, U8). The
+			   daemon's most common sentence here is "you already dismissed this":
+			   the ask is settled and every further tap is a guaranteed repeat. The
+			   reasons stay on screen — the sentence belongs beside the control that
+			   produced it (design D5) — but they go inert, and `cancel` is the way
+			   back to a fresh attempt if the refusal was momentary (a dead
+			   connection rather than a settled ask). */
+			if (kind === "dismiss") setDismissRefused(true);
 			/* The controls come back: a refusal is a state the user can act on
 			   (answer again, or read who beat them to it), and a card left inert
 			   by its own error is the greyed-out-buttons defect the blocking card
@@ -352,7 +644,7 @@ export function AskCard({
 			for (const question of questions) {
 				const id = String(question.id);
 				if (skipped.has(id)) answers[id] = [];
-				else answers[id] = (draft.answers[id] ?? []).map((value) => value.trim());
+				else answers[id] = answerValues(draft.answers[id] ?? []);
 			}
 			return sendCommand(sessionId, { op: "ask_respond", ask_id: row.ask_id, answers });
 		});
@@ -362,10 +654,26 @@ export function AskCard({
 			sendCommand(sessionId, { op: "ask_decline", ask_id: row.ask_id }),
 		);
 
-	const dismiss = () =>
-		run("dismiss", () =>
-			sendCommand(sessionId, { op: "ask_dismiss", ask_id: row.ask_id }),
+	const dismiss = (reason?: "moot" | "answered_in_chat") => {
+		setSentReason(reason);
+		return run(
+			"dismiss",
+			() =>
+			/* The reason rides only when there is one: a lapsed ask's door is the
+			   one-key dismissal the queue has always taken, whose body must stay the
+			   shape every older daemon accepts. An OPEN ask's reason is the whole
+			   point of the two-choice row — `moot` closes the question, and
+			   `answered_in_chat` tells the agent the answer is already in the
+			   conversation, so it stops waiting and reads what was typed. */
+				sendCommand(
+					sessionId,
+					reason
+						? { op: "ask_dismiss", ask_id: row.ask_id, reason }
+						: { op: "ask_dismiss", ask_id: row.ask_id },
+				),
+			() => onDismissed?.(row.ask_id, reason),
 		);
+	};
 
 	const settledPairs = answeredPairs(row.questions, row.answers);
 	/* INK FOLLOWS THE PROMISE, not the mood (design round 1, D2). An open ask's
@@ -396,9 +704,11 @@ export function AskCard({
 					{/* Under the `Timed out` badge the line starts at what that means:
 					    the badge says the word one line above (#2481 UX round 2, U13). A
 					    lapsed, non-terminal card is always inside that Disclosure. */}
-					<span role="status">{lapsed ? LAPSED_BODY : state.text}</span>
+					<span role="status">
+						{lapsed ? messageRuntime.t("relay.asks.status.lapsed_body") : stateLine}
+					</span>
 					{row.urgent && offered ? (
-						<span className="text-ink-dim">· urgent</span>
+						<span className="text-ink-dim">{messageRuntime.t("relay.asks.card.urgent")}</span>
 					) : null}
 				</span>
 			)}
@@ -415,7 +725,7 @@ export function AskCard({
 				   nothing was sent, an answer is told to ask again, a decision is told
 				   the ask can never be read (U9). */
 				<p className="text-body-sm text-danger">
-					{gone ? error : CONVERSATION_GONE_COPY}
+					{gone ? error : messageRuntime.t("relay.asks.card.gone")}
 				</p>
 			) : lapsed ? (
 				<>
@@ -445,8 +755,11 @@ export function AskCard({
 								type="button"
 								disabled={busy !== ""}
 								aria-busy={busy === "dismiss" || undefined}
-								onClick={dismiss}
-								className="flex min-h-11 self-start items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated disabled:opacity-50"
+								/* No reason: a lapsed ask's door is the one-key dismissal, and
+								   the queue records its own default (the agent already walked past
+								   that deadline, so nothing turns on the operator naming one). */
+								onClick={() => dismiss()}
+								className="flex min-h-11 self-start items-center rounded-sm px-3 text-body-sm text-ink-muted active:bg-elevated disabled:opacity-50"
 							>
 								{/* D1 (design round 1): the label IS the width, so it stays put while
 								    the dismissal is in flight. The in-flight mark used to be the bare
@@ -455,7 +768,7 @@ export function AskCard({
 								    in-flight life of a dismissal is one append and a flash. The only
 								    change is that it dims (`disabled`) and says it is busy. Kept off the
 								    answer/decline pair, where D1 called the same glyph optional. */}
-								dismiss — send no reply
+								{messageRuntime.t("relay.asks.card.dismiss")}
 							</button>
 							{/* NO COLD LINE, AND NO COLD CLOCK (fork A, 2026-10-16). A dismissal
 							    on a conversation with no runtime used to ENGAGE it to record the
@@ -517,11 +830,13 @@ export function AskCard({
 											patchDraft(() => ({ skipped: Array.from(next) }));
 										}}
 										className={cn(
-											"flex min-h-11 self-start items-center rounded-sm border border-control px-3 text-body-sm active:bg-elevated disabled:opacity-50",
+											"flex min-h-11 self-start items-center rounded-sm px-3 text-body-sm active:bg-elevated disabled:opacity-50",
 											skipped.has(id) ? "text-ink" : "text-ink-muted",
 										)}
 									>
-										{skipped.has(id) ? "answer this after all" : "skip — send no answer"}
+										{skipped.has(id)
+											? messageRuntime.t("relay.asks.card.unskip")
+											: messageRuntime.t("relay.asks.card.skip")}
 									</button>
 								) : null}
 							</div>
@@ -535,10 +850,27 @@ export function AskCard({
 					    so instead of inviting a tap that cannot land. */}
 					{open_questions.length === 0 ? (
 						<p className="text-body-sm text-ink-muted">
-							nothing left to answer here — another surface has already taken these
-							questions.
+							{messageRuntime.t("relay.asks.card.nothing_left")}
 						</p>
 					) : null}
+
+					{/* THE STALE-ASK CONTEXT LINE (SA-D7 / R5), UNDER the question it
+					    refers to (design round 1, D3): it used to sit above the question,
+					    so "this was asked" pointed at a sentence the reader had not read
+					    yet — and the terminal paints the same line under its row. It is
+					    the card's one statement that the question may already be settled
+					    in chat, which is exactly the case the `answered_in_chat` reason
+					    exists for. No line at all when the runtime sent no count (an older
+					    runtime), when the count is zero, or on a settled card — see
+					    `contextLine`. */}
+					{(() => {
+						const context = terminal ? null : contextLine(row);
+						return context ? (
+							<p className="text-meta text-ink-dim" data-testid="ask-context">
+								{context}
+							</p>
+						) : null;
+					})()}
 
 					{/* THE COLD ANSWER'S CLOCK, STATED (design round 1, D1 = UX U1). A cold
 					    answer is an engage plus a dial plus an ack in ONE call — ~30 s
@@ -546,9 +878,15 @@ export function AskCard({
 					    existed the whole in-flight affordance was a bare `…` with the state
 					    line still reading "Queued — the agent is continuing". Saying nothing
 					    is also a claim, and it was the wrong one. */}
-					{busy !== "" && cold ? (
+					{busy !== "" && busy !== "dismiss" && cold ? (
+						/* NOT FOR A DISMISSAL (agent review round 1, M1): the engine takes
+						   the no-boot door on every surface (`dismiss_cold`, §14/fork A),
+						   so the dismissal this card offers is one append whether the
+						   conversation is live or cold — the ~30 s bring-up belongs to the
+						   ANSWER and DECLINE below, which really do engage. The gate is
+						   the op, not the row: `cold` says what an answer would cost. */
 						<p className="text-body-sm text-ink-muted">
-							bringing the session up — this can take up to ~30 s
+							{messageRuntime.t("relay.asks.card.cold_wait")}
 						</p>
 					) : null}
 
@@ -571,18 +909,120 @@ export function AskCard({
 							{busy === "respond"
 								? "…"
 								: open_questions.length > 1
-									? "send answers"
-									: "send answer"}
+									? messageRuntime.t("relay.asks.card.send_answers")
+									: messageRuntime.t("relay.asks.card.send_answer")}
 						</button>
 						<button
 							type="button"
 							disabled={busy !== ""}
 							onClick={decline}
-							className="flex min-h-11 items-center justify-center rounded-sm border border-danger-border bg-danger-wash px-3 text-body-sm text-danger active:bg-danger-wash disabled:opacity-50"
+							className="flex min-h-11 items-center justify-center rounded-sm bg-danger-wash px-3 text-body-sm text-danger active:bg-danger-wash disabled:opacity-50"
 						>
-							{busy === "decline" ? "…" : "decline"}
+							{busy === "decline" ? "…" : messageRuntime.t("relay.asks.card.decline")}
 						</button>
 					</div>
+
+					{/* THE OPEN ASK'S OWN DOOR (R5, §15's amended D6): `close…` puts the
+					    QUESTION away without answering anybody, which is the act a stale
+					    ask needs and the one the card never offered on an open row. It
+					    asks WHY first — the two reasons are what the agent acts on — and
+					    a tap on `close…` sends nothing: the reason row is a choice, not a
+					    dismissal.
+
+					    IT IS NOT A SECOND `decline`. Declining ANSWERS the agent ("no"),
+					    buys nothing and is irreversible; closing says the question stopped
+					    mattering and asks the agent for nothing at all, and on a live
+					    conversation it need not even start a turn (a dismissal is held
+					    durably until the agent's next turn). */}
+					{reason_needed ? (
+						<div className="flex flex-col gap-2">
+							{closing ? (
+								/* THE REASONS ARE FULL-WIDTH ROWS WITH THEIR OWN NOTES (design
+								   round 1, D1 = UX U6). They used to be three controls on one
+								   flex-wrap line — no heading, no explanation, `cancel` orphaned
+								   onto a second line in Urdu — and "Answered in chat" sat 8.5 px
+								   under a live `decline`, so a reader with a drafted answer could
+								   read it as "send my answer". The heading names the act (the
+								   same words the terminal uses), and each row states what the
+								   agent will be told, in the same shape the answer options above
+								   already use. */
+								<div className="flex flex-col gap-2">
+									{/* THE QUIET CONTROLS SIT ON THE CARD'S TEXT AXIS (design round
+									    2, D10): `cancel` and the `dismiss…` reveal are borderless, and
+									    their `px-2` box put their words 7.5 px inside the heading and
+									    the question, which the eye reads as a misalignment. `px-0`
+									    aligns the words to the box's own edge; `min-h-11` keeps the
+									    44 px target and the label's width keeps it above the 24 px
+									    floor. */}
+									<span className="text-meta text-ink-dim">
+										{messageRuntime.t("relay.ask.dismiss.title")}
+									</span>
+									{DISMISS_REASONS.map((reason) => (
+										<button
+											key={reason}
+											type="button"
+											disabled={busy !== "" || dismissRefused}
+											aria-busy={
+												(busy === "dismiss" && sentReason === reason) || undefined
+											}
+											onClick={() => dismiss(reason)}
+											className={cn(
+												"flex w-full flex-col items-start gap-0.5 rounded-sm px-3 py-2 text-start active:bg-elevated disabled:opacity-50",
+												sentReason === reason && busy === "dismiss"
+													? "text-ink"
+													: "text-ink-muted",
+											)}
+										>
+											{/* THE PRESSED LABEL STAYS PUT (UX round 1, U3). Both buttons
+											    used to collapse to `…`, erasing the only statement of
+											    which reason had been sent; the pressed row keeps its
+											    words and gains the in-flight mark, the sibling dims. */}
+											<span className="text-body-sm">
+												{messageRuntime.t(DISMISS_COPY[reason].key)}
+												{busy === "dismiss" && sentReason === reason ? " …" : ""}
+											</span>
+											<span className="text-meta text-ink-dim">
+												{messageRuntime.t(DISMISS_COPY[reason].note)}
+											</span>
+										</button>
+									))}
+									<button
+										type="button"
+										disabled={busy !== ""}
+										onClick={() => {
+											/* THE REFUSAL GOES WITH THE BLOCK IT EXPLAINED (UX round 2,
+											   U10 = agent review round 2, m1): the sentence renders
+											   outside the `closing` ternary, so leaving it behind put
+											   an old refusal under a fresh-looking `dismiss…`. */
+											setClosing(false);
+											setDismissRefused(false);
+											setError("");
+											setErrorOp("");
+										}}
+										className="flex min-h-11 self-start items-center rounded-sm px-0 text-body-sm text-ink-dim active:bg-elevated disabled:opacity-50"
+									>
+										{messageRuntime.t("relay.ask.dismiss.cancel")}
+									</button>
+								</div>
+							) : (
+								<button
+									type="button"
+									disabled={busy !== "" || dismissRefused}
+									onClick={() => setClosing(true)}
+										className="flex min-h-11 self-start items-center rounded-sm px-0 text-body-sm text-ink-dim active:bg-elevated disabled:opacity-50"
+								>
+									{messageRuntime.t("relay.ask.dismiss.open")}
+								</button>
+							)}
+							{/* THE REFUSAL SITS WITH THE CONTROL THAT PRODUCED IT (design
+							    round 1, D5): a relay or bridge ask refuses the dismissal in
+							    the queue's own words, and that sentence belongs beside the
+							    reason the operator pressed, not 60 px above it. */}
+							{error && errorOp === "dismiss" ? (
+								<p className="text-body-sm text-danger">{error}</p>
+							) : null}
+						</div>
+					) : null}
 				</>
 			) : (
 				<>
@@ -594,11 +1034,32 @@ export function AskCard({
 					    ~10 px vs ~12 px, so a two-question receipt read as one
 					    four-line block. The gap BETWEEN pairs is now the container's;
 					    the gap inside a pair stays tight. */}
-					{settledPairs.length > 0 ? (
+					{status === "dismissed" && settledPairs.length > 0 ? (
+						/* A DISMISSED ROW HAS NO PAIRS, so it is not a `<dl>` (UX round
+						   2, U5). U3 removed the answer slot on a dismissal, which left
+						   each `<dt>` without its `<dd>` — a description list whose
+						   entries describe nothing, for a reader on assistive tech as
+						   much as on screen. The questions are the whole receipt here, so
+						   they are plain lines in the same register, one per question:
+						   dropping them would lose what the row is a receipt FOR, and a
+						   visually hidden `<dd>` would keep a value that does not exist. */
+						<div className="flex flex-col gap-1">
+							{settledPairs.map((pair) => (
+								<span key={pair.question} className="text-body-sm text-ink-muted">
+									{pair.question}
+								</span>
+							))}
+						</div>
+					) : settledPairs.length > 0 ? (
 						<dl className="flex flex-col gap-3">
 							{settledPairs.map((pair) => (
 								<div key={pair.question} className="flex flex-col">
 									<dt className="text-body-sm text-ink-muted">{pair.question}</dt>
+									{/* The bare `—` is the settled register's placeholder for
+									    "an answer was expected here and is missing" (a declined
+									    row's, pre-existing); every status that reaches THIS
+									    branch answered or was put away by someone else, so it
+									    keeps the placeholder exactly as it was. */}
 									<dd className="text-body-sm text-ink">{pair.answer || "—"}</dd>
 								</div>
 							))}
@@ -628,7 +1089,7 @@ export function AskCard({
 			data-testid="ask-card"
 			data-ask-id={row.ask_id}
 			data-ask-status={String(row.status || "open")}
-			className="flex flex-col gap-2 rounded-md border border-hairline bg-surface p-2.5"
+			className="flex flex-col gap-2 rounded-md bg-surface p-2.5"
 		>
 			{lapsed && !terminal ? (
 				/* A LAPSED ASK IS COLLAPSED BEHIND ITS BADGE (decision D11, Ben's
@@ -644,8 +1105,8 @@ export function AskCard({
 					headerClassName="gap-2"
 					header={(open: boolean) => (
 						<>
-							<span className="shrink-0 rounded-sm border border-hairline px-1.5 text-meta text-ink-muted">
-								Timed out
+							<span className="shrink-0 rounded-sm px-1.5 text-meta text-ink-muted">
+								{messageRuntime.t("relay.asks.card.timed_out_badge")}
 							</span>
 							{/* The header names the question only while CLOSED (#2481 UX U7):
 							    open, the body states it in full, and a truncated copy one line

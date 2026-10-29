@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.80.0"
+version = "0.92.1"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -55,6 +55,13 @@ dependencies = [
     # combination it has not published for.
     "pyyaml",
     "python-dotenv",
+    # Document attachments: PDF pages are extracted to page-marked text when
+    # the selected provider cannot take the file natively (the fallback arm of
+    # the attachment contract). Base rather than an extra because admission
+    # and every provider render may need it, and the desktop installer runs a
+    # bare `pip install local-operator`. Imported lazily so a conversation
+    # with no documents never pays the import.
+    "pypdf>=5.0",
     # Terminal UI. This is the default entry point of the `local-operator`
     # command, so it stays required rather than optional. Pure Python, no
     # compiled wheels — textual pulls rich, which pulls pygments and
@@ -111,6 +118,22 @@ dependencies = [
     # the ``mcp`` dependency already installs on every supported platform.
     "jsonschema>=4.18",
     "pillow-heif",
+    # The Library's background indexer watches the session journals so a list
+    # request never scans them. FSEvents (macOS), inotify (Linux) and
+    # ReadDirectoryChangesW (Windows) each need their own binding, and a
+    # hand-rolled ctypes FSEvents shim was measured NOT delivering events on the
+    # macOS host this ships to while watchdog 6.0.0 did — so this is a real
+    # dependency, not a convenience.
+    #
+    # INSTALL CAVEAT, measured on 2026-10-22: watchdog 6.0.0 publishes macOS
+    # wheels for cp39-cp313 only, so CPython 3.14 (the operator's runtime) builds
+    # the sdist and its ``_watchdog_fsevents`` C extension. That build works
+    # here (2.5 s with the Xcode toolchain) but a compiler-less 3.14 host cannot
+    # install it — and that failure happens before any of this code runs. Only a
+    # wheel that INSTALLS but whose extension cannot load is covered by
+    # ``indexer.py``'s optional-observer fallback, which hands over to the timed
+    # reconcile: a failed watch costs a slower refresh, not a broken runtime.
+    "watchdog>=6.0.0",
 ]
 requires-python = ">=3.12"
 
@@ -356,6 +379,16 @@ local_operator = [
     "mobile/web/src/*.tsx",
     "mobile/web/src/components/*.tsx",
     "mobile/web/src/components/ui/*.tsx",
+    # The modal layer's own hook (`ui/use-modal-layer.ts`): drawer and sheet both
+    # import it, and an omitted `.ts` glob here is the same omission class as the
+    # library block below — the installed tree cannot compile without it.
+    "mobile/web/src/components/ui/*.ts",
+    # The Library surface's own components: `screens/library.tsx` and
+    # `screens/library-asset.tsx` import them, and the installed source tree
+    # compiles every file under src, so an omitted glob breaks the documented
+    # repair build (the same omission class the fixtures glob above records).
+    "mobile/web/src/components/library/*.tsx",
+    "mobile/web/src/components/library/*.ts",
     "mobile/web/src/lib/*.ts",
     "mobile/web/src/i18n/*.ts",
     # The mandatory build/check/test scanner reads this exact fingerprint state.
@@ -377,6 +410,11 @@ local_operator = [
     # later and only in the shipped tree's own suite. It still ships, because a
     # source snapshot that is missing files it references is not one.
     "mobile/web/src/lib/*.json",
+    # The chrome brand artwork, imported by components/ui/brand-mark.tsx and the
+    # chrome test. One directory, one extension: the `.png` glob is deliberate so
+    # a future non-image asset (or a stray editor file) still needs review rather
+    # than riding a `*` into the wheel.
+    "mobile/web/src/assets/*.png",
     # The login page's LO mark, served unauthenticated at /mark.png from
     # mobile/static/. Missing it shows a broken image on sign-in.
     "mobile/static/*",
@@ -624,6 +662,10 @@ markers = [
     # only coverage of the actual subprocess boundary, so they are marked for
     # selection rather than exclusion.
     "slow: tests that spawn real subprocesses and take seconds rather than ms",
+    # The autouse ``refuse_real_secret_broker_spawn`` gate in tests/conftest.py
+    # blocks the production daemon for every unit test; a cell that genuinely
+    # exercises the broker opts in here and owns its teardown.
+    "allow_secret_broker: the cell starts a real secret broker daemon and tears it down",
 ]
 
 # Coverage is measured through pytest-cov (`--cov`), which understands xdist

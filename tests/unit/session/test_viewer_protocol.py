@@ -306,6 +306,20 @@ _OWNER_ONLY_CAPABILITY_PROBES = frozenset(
         "attach_agent_profile",
         "attach_team",
         "attachment_restore_notice",
+        # The conversation's HELD reasoning level — an owner-side fact, not a
+        # viewer one. ``Session.chosen_effort`` is the level the operator chose
+        # for THIS conversation, held BESIDE the serving spec precisely so a
+        # route that cannot express it cannot erase it. The facade cannot
+        # invent one: the owner's canonical state publishes the DISPLACEMENT
+        # (``effort_displacement`` — the visible "falls back to high while on
+        # sonnet" form), but a displacement is ABSENT when the serving level IS
+        # the chosen one, so a viewer's ``None`` would claim "this conversation
+        # holds no choice" and be indistinguishable from the truth. The TUI's
+        # three reads are the 3-argument getattr probe this set exists for,
+        # and each has a working fallback: the restore seed is follower-gated
+        # (a follower's remembered effort must not rewrite the owner's model),
+        # and the two "already <level>" paths fall through to the plain no-op.
+        "chosen_effort",
         "clear_agent_profile",
         "has_pending_fork",
         "journal_credential_change",

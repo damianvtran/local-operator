@@ -1,6 +1,7 @@
 """Native relay/PeerLink sockets, two isolated homes, no live mesh mutation."""
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -516,3 +517,550 @@ def test_offline_return_restarts_real_relay_same_roots_and_catches_up(devices, m
         )
     finally:
         returned.stop()
+
+
+class _StubMemoryLink:
+    """A link that answers memory frames with canned payloads, no socket.
+
+    This is the reviewer/QA shape that exposed the silent refusal: `_push_to_peer`
+    talks to the peer only through `link.request`, so a stub is honest here — the
+    assertion is about what the RECEIPT keeps, not about the transport.
+    """
+
+    def __init__(self, answers: list[dict[str, Any]]) -> None:
+        self.capabilities = (wire.MEMORY_SYNC_V1,)
+        self.network_id = "n_memory_stub"
+        self.answers = list(answers)
+        self.frames: list[dict[str, Any]] = []
+
+    def request(self, frame: dict[str, Any], timeout: float = 30) -> dict[str, Any]:
+        self.frames.append(frame)
+        return self.answers.pop(0)
+
+
+def _memory_server(root: Path) -> Any:
+    from local_operator.network import relay
+
+    return relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+
+
+def _stub_memory_sync(server: Any, link: _StubMemoryLink, monkeypatch: pytest.MonkeyPatch) -> None:
+    from argparse import Namespace
+
+    monkeypatch.setattr(memory, "settings", lambda root: (True, list(memory.SCOPES), []))
+    monkeypatch.setattr(server, "_ensure_link", lambda device_id: link)
+    monkeypatch.setattr(server, "_next_relay_req", lambda: 1)
+    # The push batch is built for the active origins; a one-member namespace is
+    # enough and keeps this test off the network store entirely.
+    monkeypatch.setattr(
+        memory.network_store,
+        "load",
+        lambda *args, **kwargs: Namespace(active_members=lambda: [Namespace(device_id="device-a")]),
+    )
+
+
+def test_a_peer_refusal_message_reaches_the_receipt_and_status(tmp_path, monkeypatch):
+    """Round-2 MAJOR: the actionable sentence was dropped and status claimed success."""
+    from local_operator.memory_cli import render_human, run
+
+    store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
+    store.put("global", {"title": "Sync proof", "body": "Durable preference for tea"})
+    server = _memory_server(tmp_path)
+    refusal = (
+        "Memory move refused: resolve the conflict on this device. Memory sync retries "
+        "automatically after about 30 minutes; restarting this device picks the retry up sooner."
+    )
+    link = _StubMemoryLink(
+        [
+            {
+                "op": "ack",
+                "req": 1,
+                "detail": {"v": 1, "generation": 0, "scopes": ["global"], "vector": {}},
+            },
+            {"op": "error", "req": 1, "code": "bad_memory", "message": refusal},
+        ]
+    )
+    _stub_memory_sync(server, link, monkeypatch)
+    device = "d_" + "a" * 32
+
+    result = memory.push_to_peer(server, device)
+    assert result == {
+        "ok": False,
+        "code": "bad_memory",
+        "message": refusal,
+        "batches": 0,
+    }
+    receipt = memory.peer_status(tmp_path)[0]
+    assert receipt["code"] == "bad_memory"
+    assert receipt["message"] == refusal
+
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    assert "Peers synced: 0" in human
+    assert "1 failing" in human
+    assert device in human and "bad_memory" in human
+    # The sentence is wrapped at the row bar, so the assertion is per clause.
+    assert "Memory move" in human
+    assert "resolve the conflict on this device" in human
+
+    # A healthy answer clears the stale sentence: a recovered peer must not keep
+    # showing the failure that was just resolved.
+    monkeypatch.setattr(
+        memory, "_push_to_peer", lambda server, device_id: {"ok": True, "code": "in_sync"}
+    )
+    assert memory.push_to_peer(server, device)["code"] == "in_sync"
+    recovered = memory.peer_status(tmp_path)[0]
+    assert recovered["message"] == ""
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert "Peers synced: 1" in render_human(text, failed)
+    assert "Not syncing with" not in render_human(text, failed)
+
+
+def test_bad_memory_is_a_policy_refusal_not_a_fast_retry():
+    """The refusal repeats until the conflict is resolved; 15 s retries only flood logs."""
+    from local_operator.network import definitions
+
+    assert "bad_memory" in definitions.POLICY_REFUSAL_CODES
+
+
+def test_peer_refusal_text_reaches_the_terminal_inert(tmp_path):
+    """A paired peer must not be able to paint the operator's terminal.
+
+    The refusal sentence is the first peer-controlled text rendered by a `lop`
+    status surface. It is stripped with the repo's own `strip_control_sequences`
+    (which removes OSC payloads with their terminator) and then flattened, so an
+    erase-screen or hyperlink sequence is inert while the ordinary words — the
+    ones that name the remedy — still read.
+    """
+    from local_operator.memory_cli import render_human, run
+
+    store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
+    device = "d_" + "c" * 32
+    hostile = (
+        "safe-start \x1b[2J middle "
+        "\x1b]8;;https://evil.invalid\x07click here\x1b]8;;\x07 safe-end"
+    )
+    with store.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES (?,?)",
+            (
+                "sync-status:" + device,
+                json.dumps(
+                    {
+                        "device": device,
+                        "code": "bad_memory",
+                        "at": 1.0,
+                        "batches": 0,
+                        "last_withheld": [],
+                        "message": hostile,
+                    }
+                ),
+            ),
+        )
+        db.commit()
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    assert "\x1b" not in human
+    assert "\x07" not in human
+    assert "safe-start" in human and "safe-end" in human
+    # OSC 8's visible label is ordinary text and stays; its URL is device data and
+    # is removed with the terminator, so no clickable link can be forged.
+    assert "click here" in human
+    assert "evil.invalid" not in human
+    assert "bad_memory" in human and "Peers synced: 0" in human
+
+
+def test_a_missing_admin_grant_has_a_real_remedy(tmp_path):
+    """`skipped:no_admin` used to fall through to circular advice."""
+    from local_operator.memory_cli import render_human, run
+
+    store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
+    device = "d_" + "d" * 32
+    with store.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES (?,?)",
+            (
+                "sync-status:" + device,
+                json.dumps(
+                    {
+                        "device": device,
+                        "code": "skipped:no_admin",
+                        "at": 1.0,
+                        "batches": 0,
+                        "last_withheld": [],
+                        "message": "",
+                    }
+                ),
+            ),
+        )
+        db.commit()
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    assert "skipped:no_admin" in human
+    # Wrapped at the row bar, so assert the distinctive word rather than the phrase.
+    assert "receiver-admin" in human
+    assert "exclude" in human
+
+
+def test_status_bounds_a_long_peer_message(tmp_path):
+    """D2: peer verbosity must not push the failure out of the viewport."""
+    from local_operator.memory_cli import render_human, run
+
+    store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
+    device = "d_" + "f" * 32
+    long_message = "diagnostic word " * 200
+    with store.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES (?,?)",
+            (
+                "sync-status:" + device,
+                json.dumps(
+                    {
+                        "device": device,
+                        "code": "bad_memory",
+                        "at": 1.0,
+                        "batches": 0,
+                        "last_withheld": [],
+                        "message": long_message,
+                    }
+                ),
+            ),
+        )
+        db.commit()
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    lines = human.splitlines()
+    start = next(i for i, line in enumerate(lines) if "Not syncing with" in line)
+    # The failure and its remedy are near the top, not after 30 lines of prose.
+    assert start < 10
+    assert any("1 failing" in line for line in lines[:start])
+    assert "Full peer text" in human
+    # The bounded excerpt is a handful of lines; the remedy and the pointer follow.
+    end = next(i for i, line in enumerate(lines[start:], start) if "Full peer text" in line)
+    remedy = next(i for i, line in enumerate(lines[start:end], start) if line.startswith("Remedy:"))
+    assert remedy - start <= 6
+    assert end > remedy
+    # Nothing is lost: the full sentence is still in the machine-readable output.
+    assert json.loads(text)["sync"]["peers"][0]["message"] == long_message
+
+
+def test_status_names_a_failing_peer_from_the_network_records(tmp_path):
+    """D4: an operator must recognise the machine, not just its 32-hex id."""
+    from local_operator.memory_cli import render_human, run
+    from local_operator.network import store as network_store
+    from local_operator.network.types import MemberRecord, NetworkRecord
+
+    device = "d_" + "e" * 32
+    network_store.save(
+        NetworkRecord(
+            network_id="n_0123456789abcdef01234567",
+            name="studio",
+            self_device_id="d_" + "a" * 32,
+            members=[
+                MemberRecord(device_id=device, name="laptop-b", role="admin"),
+                MemberRecord(device_id="d_" + "a" * 32, name="studio-mac", role="admin"),
+            ],
+        ),
+        tmp_path,
+    )
+    store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
+    with store.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES (?,?)",
+            (
+                "sync-status:" + device,
+                json.dumps(
+                    {
+                        "device": device,
+                        "code": "bad_memory",
+                        "at": 1.0,
+                        "batches": 0,
+                        "last_withheld": [],
+                        "message": "",
+                    }
+                ),
+            ),
+        )
+        db.commit()
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    assert "laptop-b" in human
+    assert device in human
+    # The machine-readable row carries the same resolved label.
+    assert json.loads(text)["sync"]["peers"][0]["name"] == "laptop-b"
+
+
+def _named_peer(tmp_path, name: str) -> str:
+    from local_operator.network import store as network_store
+    from local_operator.network.types import MemberRecord, NetworkRecord
+
+    peer = "d_" + "e" * 32
+    network_store.save(
+        NetworkRecord(
+            network_id="n_0123456789abcdef01234567",
+            name="studio",
+            self_device_id="d_" + "a" * 32,
+            members=[MemberRecord(device_id=peer, name=name, role="admin")],
+        ),
+        tmp_path,
+    )
+    return peer
+
+
+def _seed_receipt(tmp_path, peer: str, message: str = "") -> None:
+    store = MemoryStore(tmp_path, MemoryIdentity("s", "", ""), origin="device-a")
+    with store.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES (?,?)",
+            (
+                "sync-status:" + peer,
+                json.dumps(
+                    {
+                        "device": peer,
+                        "code": "bad_memory",
+                        "at": 1.0,
+                        "batches": 0,
+                        "last_withheld": [],
+                        "message": message,
+                    }
+                ),
+            ),
+        )
+        db.commit()
+
+
+def _peer_block(human: str) -> list[str]:
+    lines = human.splitlines()
+    start = next(i for i, line in enumerate(lines) if "Not syncing with" in line)
+    end = next(i for i, line in enumerate(lines[start:], start) if line.startswith("Stored:"))
+    return lines[start:end]
+
+
+def test_status_sanitises_a_hostile_peer_name(tmp_path):
+    """A name is peer-supplied and stored verbatim; the render point strips it."""
+    from local_operator.memory_cli import render_human, run
+
+    peer = _named_peer(
+        tmp_path,
+        "safe \x1b[2J\x1b]8;;https://evil.invalid\x07click\x1b]8;;\x07 end",
+    )
+    _seed_receipt(tmp_path, peer)
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    assert "\x1b" not in human
+    assert "\x07" not in human
+    assert "evil.invalid" not in human
+    assert "safe" in human and "end" in human
+    assert all(len(line) <= 80 for line in _peer_block(human))
+
+
+def test_status_bounds_a_300_char_peer_name(tmp_path):
+    from local_operator.memory_cli import render_human, run
+
+    long_name = "n" * 300
+    peer = _named_peer(tmp_path, long_name)
+    _seed_receipt(tmp_path, peer)
+    text, failed = run("status", config=tmp_path, identity=MemoryIdentity("s", "", ""))
+    assert not failed, text
+    human = render_human(text, failed)
+    block = _peer_block(human)
+    assert long_name not in human
+    assert "…" in " ".join(block)
+    assert all(len(line) <= 80 for line in block)
+
+
+def test_peer_without_item_512_receives_a_withheld_skip_not_a_gap_refusal(devices, monkeypatch):
+    """Slice A1 over a REAL link: a fact over the old 256-wire-token cap is withheld
+    from a peer that did not advertise ``memory-item-512``, as a content-free skip.
+    The push succeeds (no permanent sequence gap) and the other facts land."""
+    from local_operator.compaction.tokens import count_text_tokens
+    from local_operator.memory import LEGACY_ITEM_WIRE_TOKENS, _dump
+
+    a, b = linked(devices, monkeypatch)
+    sender = bank(a)
+    sender.put("global", {"title": "Elara", "body": "Elara lives in Dunedin"})
+    big = sender.put("global", {"title": "Mira", "body": "Mira likes long coastal walks " * 50})
+    sender.put("global", {"title": "Kai", "body": "Kai lives in Nelson"})
+    assert count_text_tokens(_dump(sender.show("global", big["id"])["fact"])) > (
+        LEGACY_ITEM_WIRE_TOKENS
+    )
+    link = a._ensure_link(b.identity.device_id)
+    assert link is not None and wire.MEMORY_ITEM_512 in link.capabilities
+    monkeypatch.setattr(
+        link, "capabilities", tuple(c for c in link.capabilities if c != wire.MEMORY_ITEM_512)
+    )
+    result = memory.push_to_peer(a, b.identity.device_id)
+    # Owed, not synced: a distinct non-healthy code with a pending count (review M1).
+    assert result["code"] == "withheld_pending" and result["pending"] == 1, result
+    assert result["code"] not in memory.HEALTHY_PEER_CODES
+    receiving = bank(b)
+    assert receiving.search("Elara", "global") and receiving.search("Kai", "global")
+    assert not receiving.search("coastal walks", "global")
+    # A later write still flows: the skip advanced the cursor, no gap remains.
+    sender.put("global", {"title": "Ana", "body": "Ana lives in Napier"})
+    again = memory.push_to_peer(a, b.identity.device_id)
+    assert again["code"] == "withheld_pending", again
+    assert receiving.search("Napier", "global")
+    # `lop memory status` names the peer as not syncing, with the lop-update remedy.
+    from local_operator.memory_cli import render_human, run
+
+    text, failed = run("status", config=a.root, identity=MemoryIdentity("memory-session"))
+    human = render_human(text, failed)
+    assert "withheld_pending" in human and "lop-update" in human, human
+    print("M1 before upgrade:", result, again)
+
+    # The peer updates: it now advertises memory-item-512. The single-revision
+    # fact that was skipped is redelivered and the peer is in sync again.
+    monkeypatch.undo()
+    link = a._ensure_link(b.identity.device_id)
+    assert link is not None and wire.MEMORY_ITEM_512 in link.capabilities
+    upgraded = memory.push_to_peer(a, b.identity.device_id)
+    assert receiving.search("coastal walks", "global"), upgraded
+    assert upgraded["code"] in ("in_sync", "catching_up") and upgraded["pending"] == 0, upgraded
+    settled = memory.push_to_peer(a, b.identity.device_id)
+    assert settled["code"] == "in_sync" and settled["ok"], settled
+    assert memory.legacy_pending(memory._store(a.root), b.identity.device_id) == {
+        "ids": [],
+        "overflow": False,
+    }
+    print("M1 after upgrade:", upgraded, settled)
+
+
+def _legacy_link(a: Any, b: Any) -> Any:
+    link = a._ensure_link(b.identity.device_id)
+    assert link is not None and wire.MEMORY_ITEM_512 in link.capabilities
+    return link
+
+
+def _without_item_512(link: Any) -> tuple[str, ...]:
+    return tuple(c for c in link.capabilities if c != wire.MEMORY_ITEM_512)
+
+
+def _converges(a: Any, b: Any, needle: str, pushes: int = 4) -> list[dict[str, Any]]:
+    """Push until in_sync (bounded); every result is returned for the assertion text."""
+    results = []
+    for _ in range(pushes):
+        results.append(memory.push_to_peer(a, b.identity.device_id))
+        if results[-1]["code"] == "in_sync" and bank(b).search(needle, "global"):
+            break
+    return results
+
+
+def test_m4_a_generation_change_before_the_upgrade_does_not_wedge_sync(devices, monkeypatch):
+    """Review round 2 M4, repro 1: the stream generation moved after the legacy push
+    (gap fill / another peer's re-baseline), so the upgraded peer's cursor is empty and
+    the pending op is NOT behind it. Redelivering it was refused on every push and
+    stalled every scope; it must instead fall to the ordinary (full) resend."""
+    a, b = linked(devices, monkeypatch)
+    sender = bank(a)
+    sender.put("global", {"title": "Mira", "body": "Mira likes long coastal walks " * 50})
+    link = _legacy_link(a, b)
+    with pytest.MonkeyPatch.context() as legacy:
+        legacy.setattr(link, "capabilities", _without_item_512(link))
+        first = memory.push_to_peer(a, b.identity.device_id)
+    assert first["code"] == "withheld_pending" and first["pending"] == 1, first
+    with sender.connection() as db:
+        row = db.execute("SELECT value FROM meta WHERE key='stream-generation'").fetchone()
+        db.execute(
+            "INSERT OR REPLACE INTO meta VALUES ('stream-generation',?)",
+            (str(int(row[0]) + 1 if row else 1),),
+        )
+        db.commit()
+    sender.put("global", {"title": "Ana", "body": "Ana lives in Napier"})
+    results = _converges(a, b, "coastal walks")
+    print("M4 repro 1:", first, results)
+    assert all(r["code"] != "bad_memory" for r in results), results
+    assert bank(b).search("coastal walks", "global") and bank(b).search("Napier", "global")
+    assert results[-1]["code"] == "in_sync" and results[-1]["pending"] == 0, results
+
+
+def test_m4_a_failed_legacy_push_does_not_wedge_sync_after_upgrade(devices, monkeypatch):
+    """Review round 2 M4, repro 2: the id is recorded BEFORE the push that would
+    advance the cursor past it; when that push fails, the id is ahead of the cursor."""
+    a, b = linked(devices, monkeypatch)
+    sender = bank(a)
+    sender.put("global", {"title": "Mira", "body": "Mira likes long coastal walks " * 50})
+    link = _legacy_link(a, b)
+    real = link.request
+
+    def refuse_push(frame: dict[str, Any], timeout: float = 30) -> Any:
+        if frame.get("phase") == "push":
+            return {"op": "error", "ok": False, "code": "bad_memory", "message": "transient"}
+        return real(frame, timeout=timeout)
+
+    with pytest.MonkeyPatch.context() as legacy:
+        legacy.setattr(link, "capabilities", _without_item_512(link))
+        legacy.setattr(link, "request", refuse_push)
+        refused = memory.push_to_peer(a, b.identity.device_id)
+    assert refused["ok"] is False, refused
+    assert memory.legacy_pending(memory._store(a.root), b.identity.device_id)["ids"]
+    results = _converges(a, b, "coastal walks")
+    print("M4 repro 2:", refused, results)
+    assert all(r["code"] != "bad_memory" for r in results), results
+    assert bank(b).search("coastal walks", "global")
+    assert results[-1]["code"] == "in_sync" and results[-1]["pending"] == 0, results
+
+
+def test_a_refused_redelivery_falls_back_to_a_resend_instead_of_retrying(devices, monkeypatch):
+    """No single redelivered op may wedge the stream: a refusal drops it from the owed
+    list and re-baselines, and the ordinary resend delivers it."""
+    a, b = linked(devices, monkeypatch)
+    sender = bank(a)
+    sender.put("global", {"title": "Mira", "body": "Mira likes long coastal walks " * 50})
+    link = _legacy_link(a, b)
+    with pytest.MonkeyPatch.context() as legacy:
+        legacy.setattr(link, "capabilities", _without_item_512(link))
+        assert memory.push_to_peer(a, b.identity.device_id)["code"] == "withheld_pending"
+    original = memory.receive
+    refusals = []
+
+    def refuse_redelivery(server, peer, payload, scopes, origins):  # noqa: ANN001
+        # EVERY redelivery is refused (a peer-side rule that will never accept
+        # it): a sender that retries the same op wedges forever.
+        if payload.get("redeliver"):
+            refusals.append(1)
+            raise MemoryError("synthetic redelivery refusal")
+        return original(server, peer, payload, scopes, origins)
+
+    monkeypatch.setattr(memory, "receive", refuse_redelivery)
+    results = _converges(a, b, "coastal walks", pushes=5)
+    print("refused redelivery:", results)
+    assert len(refusals) == 1 and results[0]["code"] == "bad_memory", results
+    # Review round 3 m1: the refusal receipt says the peer is still owed (re-baseline).
+    assert results[0]["pending"] == "overflow", results
+    assert bank(b).search("coastal walks", "global")
+    assert results[-1]["code"] == "in_sync", results
+
+
+def test_a_redelivery_with_no_answer_keeps_the_ops_owed_and_reports_them(devices, monkeypatch):
+    """Review round 3 m1: the no-answer return carries ``pending`` like the others,
+    and nothing is dropped (nothing was refused), so a later push still delivers."""
+    a, b = linked(devices, monkeypatch)
+    sender = bank(a)
+    sender.put("global", {"title": "Mira", "body": "Mira likes long coastal walks " * 50})
+    link = _legacy_link(a, b)
+    with pytest.MonkeyPatch.context() as legacy:
+        legacy.setattr(link, "capabilities", _without_item_512(link))
+        assert memory.push_to_peer(a, b.identity.device_id)["code"] == "withheld_pending"
+    real = link.request
+
+    def drop_redelivery(frame: dict[str, Any], timeout: float = 30) -> Any:
+        if frame.get("phase") == "push" and (frame.get("payload") or {}).get("redeliver"):
+            return None
+        return real(frame, timeout=timeout)
+
+    with pytest.MonkeyPatch.context() as gone:
+        gone.setattr(link, "request", drop_redelivery)
+        lost = memory.push_to_peer(a, b.identity.device_id)
+    assert lost["code"] == "push_failed" and lost["pending"] == 1, lost
+    results = _converges(a, b, "coastal walks")
+    assert bank(b).search("coastal walks", "global")
+    assert results[-1]["code"] == "in_sync" and results[-1]["pending"] == 0, results

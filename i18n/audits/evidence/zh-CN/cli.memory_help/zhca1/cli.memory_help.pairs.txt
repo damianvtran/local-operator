@@ -1,0 +1,7 @@
+# cli.memory_help — sampled en/zh pairs for attestation zhca1
+# 1/1 keys; all >120 chars and all plurals included
+
+## cli.memory_help.memory  [33 chars]
+EN: Inspect and correct scoped memory
+ZH: 检查和修正限定范围的记忆
+

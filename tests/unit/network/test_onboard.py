@@ -682,13 +682,15 @@ HAPPY_OUTPUTS = [
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("approved_name", ["Research node; $(not-a-command) 'one'", "--automated"])
 def test_the_step_machine_runs_the_frozen_order_and_folds_to_connected(
-    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, approved_name: str
 ) -> None:
     _install_fakes(monkeypatch)
     token = tmp_path / "invite.token"
     token.write_text("token-bytes", encoding="utf-8")
     record = _record()
+    record["device"]["name"] = approved_name
     fake = FakeApprovals(record)
     monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
     transport = FakeTransport(outputs=HAPPY_OUTPUTS)
@@ -733,6 +735,21 @@ def test_the_step_machine_runs_the_frozen_order_and_folds_to_connected(
     join_calls = [c for c in transport.calls if c[0] == "run" and "network join" in " ".join(c[1])]
     assert len(join_calls) == 1
     assert "--automated" in " ".join(join_calls[0][1])
+    # Metacharacters must remain one signed name, never shell syntax or a
+    # silent fallback to the node's hostname.
+    join_argv = shlex.split(join_calls[0][1][-1])
+    assert next(arg for arg in join_argv if arg.startswith("--name=")) == f"--name={approved_name}"
+    # Shell quoting alone does not protect an option-shaped value from argparse.
+    # Feed the actual receiving parser, not a duplicate list-splitting oracle.
+    import argparse
+
+    from local_operator.network import cli as network_cli
+
+    parser = argparse.ArgumentParser()
+    network_cli.add_parser(parser.add_subparsers(dest="subcommand"))
+    received = parser.parse_args(join_argv[join_argv.index("network") :])
+    assert received.name == approved_name
+    assert received.automated is True
 
 
 def _drill_run_local(token: Path, ready_payload: dict[str, Any]):
@@ -1396,6 +1413,61 @@ def test_an_unmapped_contradiction_mints_no_identical_replacement(
 # ---------------------------------------------------------------------------
 # Failure, refusal and retry
 # ---------------------------------------------------------------------------
+
+
+def test_an_approved_advertise_host_reaches_the_peers_usable_endpoints(tmp_path: Path) -> None:
+    """The card's address survives runner argv and leads the joined member's endpoints."""
+    from local_operator.network import relay
+
+    endpoint = "8.8.8.8:4097"
+    record = _record()
+    record["device"]["advertise_host"] = endpoint
+
+    class JoinTransport(FakeTransport):
+        def run(
+            self, argv: Sequence[str], *, timeout: float, stdin: bytes | None = None
+        ) -> onboard.CommandResult:
+            command = str(argv[-1])
+            self.calls.append(("run", tuple(str(part) for part in argv)))
+            if "lop network join " not in command:
+                return _result(tuple(str(part) for part in argv), stdout="{}")
+            join = command[command.index("lop network join ") :]
+            arguments = shlex.split(join)
+            declared = next(
+                part.split("=", 1)[1] for part in arguments if part.startswith("--advertise-host=")
+            )
+            # Derive the result through the real address path. A runner that drops
+            # the signed value cannot be hidden by a hard-coded successful payload.
+            endpoints = relay.advertise_endpoints(
+                relay.NetworkSettings(port=4097), declared=(declared,)
+            )
+            payload = {
+                "ok": True,
+                "device_id": "d_node",
+                "fingerprint": "FP",
+                "network_id": "n_1",
+                "name": "mesh",
+                "members": [{"device_id": "d_node", "endpoints": endpoints}],
+                "sas": "code",
+            }
+            return _result(tuple(str(part) for part in argv), stdout=json.dumps(payload))
+
+    token = tmp_path / "invite.token"
+    token.write_text("token", encoding="utf-8")
+    run = onboard.OnboardRun(
+        record["approval_id"],
+        view=onboard_approvals._view(record, run_id="run_advertise"),
+        transport=JoinTransport(),
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+    )
+    run.invite_id = "in_advertise"
+    run.invite_path = token
+
+    outcome = run.step_join()
+
+    assert outcome.ok, outcome.detail
+    assert outcome.data["members"][0]["endpoints"][0] == endpoint
 
 
 def test_a_join_mismatch_is_a_failed_receipt_naming_the_step(

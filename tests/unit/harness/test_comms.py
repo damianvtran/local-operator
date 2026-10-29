@@ -2834,6 +2834,78 @@ async def _until_peek(comms, job_id, want, timeout: float = 10.0):
 
 
 @pytest.mark.asyncio
+async def test_peek_never_renders_an_account_change_notice_as_a_step(tmp_path):
+    """hub peek is MODEL CONTEXT, so the account-change notice must not be a step.
+
+    Round 1, R1. The notice's sentence NAMES THE ACCOUNT since #3098, and this
+    reader rendered that row as a ``system`` step whose body IS the sentence — so
+    a parent peeking its own child got the child's account label (an email) back
+    inside a ``hub`` tool result. The type's contract
+    (``SESSION_BINDING_NOTICE_MESSAGE_TYPE``) is operator-facing only. The step
+    list is read straight off the session directory, so this ONE call covers a
+    running child and the persisted replay path alike.
+
+    Also pins the accounting: a hidden row consumes no step NUMBER, so the numbers
+    stay dense and "give me step 2" keeps naming the same row.
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage, Message
+    from local_operator.session.transcript import Transcript
+
+    label = "bound-account@example.test"
+    directory = tmp_path / "child"
+    directory.mkdir()
+    (directory / "created_at.json").write_text("1700000000.0", encoding="utf-8")
+    # Seeded through the real writer: the row shape is then the one the
+    # transcript actually persists, which is the shape peek must tolerate.
+    journal = Transcript(directory)
+    await journal.append_message(Message.user("please fix it"))
+    await journal.append_message(
+        CustomMessage(
+            custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": f"[session credential] This session is now using {label} on my-mac.",
+                "provider": "stub",
+                "owner_device": "d_local",
+                "credential_id": 125,
+            },
+        ),
+        preserve_mtime=True,
+    )
+    await journal.append_message(Message.assistant("on it"))
+
+    jobs = FakeJobs()
+    comms = SubagentComms(FakeParent(jobs))  # type: ignore[arg-type]
+    jobs.add("job-1", status="completed")
+    comms.record_launch("job-1", "parser")
+    comms._records["job-1"].session_dir = directory
+    comms._records["job-1"].settled = True
+
+    window = await comms.peek("job-1", steps=10)
+
+    assert window.error is None, window.error
+    assert window.total == 2, "the hidden notice must not consume a step number"
+    assert [step.index for step in window.steps] == [1, 2]
+    assert [step.kind for step in window.steps] == ["user", "assistant"]
+    for step in window.steps:
+        assert label not in step.heading and label not in step.body
+
+    # ...and the MODEL-VISIBLE artefact the reviewer reproduced, end to end.
+    result = await execute_hub(
+        "call-peek",
+        {"op": "peek", "to": ["job-1"], "steps": 10},
+        None,
+        None,
+        ToolContext(cwd=str(tmp_path), subagent_comms=comms),
+    )
+    rendered = body(result)
+    assert result.is_error is False, rendered
+    assert label not in rendered
+    assert "session credential" not in rendered
+
+
+@pytest.mark.asyncio
 async def test_peek_refuses_an_unknown_child():
     comms, _jobs, _child, _parent = wire()
     window = await comms.peek("nope")
@@ -3509,6 +3581,32 @@ def test_a_child_whose_transcript_vanished_is_not_resumable(tmp_path) -> None:
     [row] = comms.roster()
 
     assert row.status == "failed"
+    assert row.resumable is False
+    assert row.detail == "no transcript on disk"
+
+
+def test_a_child_whose_directory_was_reaped_reports_gone(tmp_path) -> None:
+    """The retention pass removes whole session directories; the roster must
+    answer with the existing clean ``gone`` row rather than raise or advertise
+    a resume of nothing. This is the shape a parent reaches after its child's
+    record was reaped, and the one the module docstring promises (accepted
+    trade-off: a resumed ancient parent gets "gone").
+    """
+    import shutil
+
+    comms, jobs, _child, _parent = wire()
+    session_dir = tmp_path / "reaped"
+    session_dir.mkdir()
+    comms.attach("job-1", FakeChild(), session_dir)
+    comms.detach("job-1")
+    shutil.rmtree(session_dir)
+    # The job row was swept with the record (the reaped-directory case), which
+    # lands the status on the ``gone`` fallback.
+    del jobs.jobs["job-1"]
+
+    [row] = comms.roster()
+
+    assert row.status == "gone"
     assert row.resumable is False
     assert row.detail == "no transcript on disk"
 

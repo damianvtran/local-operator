@@ -1965,12 +1965,14 @@ def test_the_probe_is_a_reader(tmp_path):
     asyncio.run(feed.close())
 
 
-def test_a_quiet_tick_costs_five_stats_and_no_record_reads(tmp_path):
+def test_a_quiet_tick_costs_eight_stats_and_no_record_reads(tmp_path):
     """THE I/O BUDGET, as a COUNT. One extra stat is the whole cost of watching.
 
     The record doorbell is one ``os.stat`` on ``run/mobile`` and the settings
     doorbell one on ``config.yml``, added to a tick that already made three (the
-    attention store and its two journal sidecars), and on
+    attention store and its two journal sidecars); the inbox doorbell adds
+    three (``notifications.db`` and the same two sidecars through the shared
+    fingerprint, docs/design/notifications-inbox.md §5.3). On
     a store where nothing moved it must read NOTHING: not one record, not the
     wake index, no SQL. Every later byte on this path is paid per event rather
     than per tick, which is the difference between this and the whole-list refetch
@@ -1994,10 +1996,11 @@ def test_a_quiet_tick_costs_five_stats_and_no_record_reads(tmp_path):
     feed._status_probed_at = time.monotonic()
     feed._authoring_probed_at = time.monotonic()
     feed._voice_probed_at = time.monotonic()
+    feed._asks_probed_at = time.monotonic()
     with _io_watch(feed._registry_dir) as counts:
         _tick(feed)
     assert _statuses(_queued(subscription)) == []
-    assert counts["stat"] + counts["lstat"] <= 5, counts
+    assert counts["stat"] + counts["lstat"] <= 8, counts
     assert counts["record_reads"] == 0, counts
     assert counts["scandir"] == 0, counts
     asyncio.run(feed.close())
@@ -4417,3 +4420,145 @@ def monkeypatch_read_text(replacement):
             Path.read_text = original
 
     return _manage()
+
+
+# -- CD1: an optional store nobody can read must not take the feed down --------
+
+
+def _corrupt_inbox(root: Path) -> Path:
+    """A ``notifications.db`` whose bytes are not a database (the audit's repro)."""
+    store = root / "notifications.db"
+    store.write_bytes(b"this is not a database, it is a complaint")
+    return store
+
+
+def _queued_types(subscription: Any) -> list[str]:
+    return [frame["type"] for frame in _queued(subscription)]
+
+
+def test_a_corrupt_inbox_store_still_opens_the_feed(tmp_path: Path) -> None:
+    """CD1: ``DatabaseError`` from the inbox baseline failed every subscriber.
+
+    Measured before the fix: garbage in ``notifications.db`` made
+    ``GET /v1/desktop/events`` answer an empty 200, because ``_take_baseline``
+    raised and ``baseline_ready`` carried the exception to every waiter. The
+    inbox is an OPTIONAL store: attention, completion, catalogue and status
+    frames must not depend on it being readable.
+    """
+    _listable_session(tmp_path, "ea" * 6)
+    _corrupt_inbox(tmp_path)
+    feed = _feed(tmp_path)
+
+    feed._take_baseline()  # must not raise
+
+    # UNKNOWN, not zero: nothing was read, so nothing is claimed.
+    assert feed._notifications_seen is None
+
+    subscription = feed.subscribe()
+    frames = asyncio.run(_drain(feed, subscription, 1))
+    assert [frame["type"] for frame in frames] == ["open"]
+    asyncio.run(feed.close())
+
+
+def test_an_unreadable_inbox_store_still_opens_the_feed(tmp_path: Path) -> None:
+    """The same property for ``chmod 000``: unopenable is not a database, either."""
+    _listable_session(tmp_path, "eb" * 6)
+    store = _corrupt_inbox(tmp_path)
+    store.chmod(0o000)
+    try:
+        feed = _feed(tmp_path)
+        feed._take_baseline()
+        assert feed._notifications_seen is None
+        subscription = feed.subscribe()
+        frames = asyncio.run(_drain(feed, subscription, 1))
+        assert [frame["type"] for frame in frames] == ["open"]
+        asyncio.run(feed.close())
+    finally:
+        store.chmod(0o600)
+
+
+def test_a_released_item_is_not_reclaimed_on_every_tick(tmp_path: Path) -> None:
+    """R5-1: the release rolls the cooldown back, so the FEED bounds the retry.
+
+    Without the deadline the 100 ms tick would claim and release the same row
+    forever on a host whose producer reports nothing (the M2 shape, one store
+    generation later).
+    """
+    import sqlite3
+    import time as _time
+
+    from local_operator.notifications.store import NotificationStore
+    from local_operator.server.utils.desktop_feed import ITEM_RETRY_BACKOFF_S
+    from tests.unit.notifications.test_delivery import _advertise
+
+    feed = _feed(tmp_path)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _advertise(feed, subscription)
+    store = NotificationStore(tmp_path)
+    item = store.notify("a1" * 6, title="owed", priority="high")
+    # Past the grace, so the row is genuinely owed rather than held.
+    conn = sqlite3.connect(tmp_path / "notifications.db")
+    with conn:
+        conn.execute("UPDATE items SET updated_at=?", (int(_time.time() * 1000) - 60_000,))
+    conn.close()
+
+    row = store.get(item.item_id)
+    assert row is not None
+    # The release path: what a raise that produced nothing does.
+    asyncio.run(feed._release_item_claims(store, [dict(row)]))
+    assert feed._item_retry_after.get(item.item_id, 0.0) > _time.monotonic()
+    released = store.get(item.item_id)
+    assert (
+        released is not None and released["delivered_at"] is None
+    ), "the cooldown stamp is rolled back"
+
+    # A tick inside the deadline claims nothing, and the pass stays owed so the
+    # retry happens once the deadline lifts rather than at the next doorbell.
+    _tick(feed)
+    unchanged = store.get(item.item_id)
+    assert unchanged is not None and unchanged["delivered_rev"] == 0
+    assert feed._items_owed is True
+    assert feed._item_retry_after[item.item_id] <= _time.monotonic() + ITEM_RETRY_BACKOFF_S
+    asyncio.run(feed.close())
+
+
+def test_the_inbox_tick_reports_unknown_instead_of_ending_the_loop(tmp_path: Path) -> None:
+    """A failing inbox read returns, and the OTHER channels keep publishing.
+
+    ``_maybe_emit_notifications`` used to re-raise so the fingerprint was not
+    advanced. Correct about the retry, fatal about the loop: the exception
+    escaped ``_tick`` into ``_poll_loop``.
+    """
+    _listable_session(tmp_path, "ec" * 6)
+    feed = _feed(tmp_path)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    _corrupt_inbox(tmp_path)
+    feed._notifications_pending = True
+    _tick(feed)  # must not raise
+
+    # THE PREVIOUS STATE IS KEPT: the healthy baseline read (0, 0, 0, 0) stands,
+    # because an unreadable store is "unknown", not "the operator has nothing".
+    assert feed._notifications_seen == (0, 0, 0, 0)
+    assert feed._notifications_pending is True, "the retry must survive the failure"
+
+    # An attention frame published afterwards still reaches the subscriber.
+    _record_publish(tmp_path, "ec" * 6)
+    _tick(feed)
+    types = _queued_types(subscription)
+    assert "session_status" in types or "notification" in types, types
+    asyncio.run(feed.close())
+
+
+def test_the_inbox_failure_warning_is_rate_limited(tmp_path: Path, caplog: Any) -> None:
+    """One line a minute, not one per 100 ms tick: the condition repeats."""
+    _listable_session(tmp_path, "ed" * 6)
+    _corrupt_inbox(tmp_path)
+    feed = _feed(tmp_path)
+    with caplog.at_level(logging.WARNING, logger=feed_module.logger.name):
+        for _ in range(5):
+            assert feed._notifications_state_or_none() is None
+    lines = [r for r in caplog.records if "notifications store could not be read" in r.message]
+    assert len(lines) == 1, [r.message for r in lines]

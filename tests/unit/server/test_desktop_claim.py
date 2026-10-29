@@ -915,11 +915,15 @@ def test_only_desktop_posture_reads_the_desktop_environment() -> None:
     """
     package = Path(desktop.__file__).resolve().parent.parent
     offenders: list[str] = []
-    allowed = {Path(desktop.__file__).resolve(): "desktop_posture"}
+    # ``adopt_spawn_bearer`` is the second reader, and it is the one that REMOVES the value:
+    # it moves the spawner's bearer out of ``os.environ`` into the module state
+    # ``desktop_posture`` reads, at serve start-up (operator ask a-772b). Same module, same
+    # single source of truth; it answers no gate question itself.
+    allowed = {Path(desktop.__file__).resolve(): {"desktop_posture", "adopt_spawn_bearer"}}
     for path in sorted(package.rglob("*.py")):
         relative = path.resolve().relative_to(package.parent).as_posix()
         for function, line in _env_reads_by_function(path):
-            if allowed.get(path.resolve()) == function:
+            if function in allowed.get(path.resolve(), set()):
                 continue
             offenders.append(f"{relative}:{line} in {function}")
 

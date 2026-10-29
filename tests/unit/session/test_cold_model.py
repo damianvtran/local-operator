@@ -33,18 +33,30 @@ DIRECT_PROVIDER, DIRECT_MODEL = "deepseek", "deepseek-flash"
 DIRECT_SELECTOR = f"{DIRECT_PROVIDER}/{DIRECT_MODEL}"
 
 
-async def _seed_selection(config_dir: Path, selector: str, *, effort: str | None) -> None:
-    """A conversation whose journal records ``selector`` as its own selection."""
+async def _seed_selection(
+    config_dir: Path, selector: str, *, effort: str | None, fast: bool | None = None
+) -> None:
+    """A conversation whose journal records ``selector`` as its own selection.
+
+    ``fast`` is omitted from the row when it is ``None``, which is the exact shape
+    every row written before the dial was journalled has (``paste`` of a snapshot
+    with no key, never an explicit ``null``).
+    """
     from local_operator.session.transcript import Transcript
 
     session_id = "resumed"
     directory = config_dir / "sessions" / session_id
     directory.mkdir(parents=True, exist_ok=True)
     transcript = Transcript(directory)
-    await transcript.append_custom(
-        "selected_model",
-        {"version": 2, "selector": selector, "effort": effort, "boot": selector},
-    )
+    row: dict[str, object] = {
+        "version": 2,
+        "selector": selector,
+        "effort": effort,
+        "boot": selector,
+    }
+    if fast is not None:
+        row["fast"] = fast
+    await transcript.append_custom("selected_model", row)
 
 
 async def _cold_state(config_dir: Path):
@@ -235,3 +247,62 @@ async def test_a_birth_selections_own_choices_are_never_replaced(tmp_path) -> No
     spec = state.selected_model
     assert spec is not None
     assert spec.reasoning_effort == "low", "the caller's chosen level is its own opinion"
+
+
+#: A shipped pair that SELLS the fast tier (``model/speed.py``'s Anthropic list),
+#: resolved entirely from the registry so this file never touches the network.
+FAST_PROVIDER, FAST_MODEL = "anthropic", "claude-opus-5"
+
+
+@pytest.mark.asyncio
+async def test_the_saved_dial_is_the_one_the_first_frame_paints(tmp_path) -> None:
+    """A resumed conversation's FIRST frame shows the speed the row recorded.
+
+    The cold state is what a desktop pane paints before a runtime exists, so it
+    is the frame the reopen in ui#1266 lands on: the journal restore in
+    ``Session`` cannot help here because there is no ``Session`` yet. Reading
+    the row's pair and level but not its dial painted ``fast_mode: false`` over
+    a conversation that recorded ``true``, and the toggle flipped OFF at exactly
+    the moment the user reopened it.
+    """
+    await _seed_selection(tmp_path, f"{FAST_PROVIDER}/{FAST_MODEL}", effort="high", fast=True)
+
+    state = await _cold_state(tmp_path)
+
+    assert state.selected_model is not None
+    assert state.selected_model.fast_mode is True, "the row's dial must reach the first frame"
+    assert state.selected_model.supports_fast_mode is True, "and the route does sell it"
+
+
+@pytest.mark.asyncio
+async def test_the_saved_dial_is_clamped_to_a_route_without_the_tier(tmp_path) -> None:
+    """A row can outlive the model table; the frame must not promise a 400.
+
+    ``spec_for_target`` builds the TARGET's own spec, so the route's answer is
+    authoritative here exactly as it is in ``Session._restore_selected_model``:
+    a stale ``fast: true`` on a pair with no fast tier is dropped rather than
+    painted on a chip whose first request would be refused.
+    """
+    await _seed_selection(tmp_path, DIRECT_SELECTOR, effort="high", fast=True)
+
+    state = await _cold_state(tmp_path)
+
+    assert state.selected_model is not None
+    assert state.selected_model.supports_fast_mode is False
+    assert state.selected_model.fast_mode is False
+
+
+@pytest.mark.asyncio
+async def test_a_row_without_a_dial_paints_a_standard_speed_frame(tmp_path) -> None:
+    """Absence is not a decision, and the frame's own default is the honest answer.
+
+    Every row written before the dial was journalled lands here; the frame must
+    not invent an ON it cannot evidence, and the row's absence must not be
+    written back as an OFF anyone acts on.
+    """
+    await _seed_selection(tmp_path, f"{FAST_PROVIDER}/{FAST_MODEL}", effort="high")
+
+    state = await _cold_state(tmp_path)
+
+    assert state.selected_model is not None
+    assert state.selected_model.fast_mode is False

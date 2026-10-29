@@ -596,7 +596,7 @@ login-capable provider; the ids and plan requirements:
 | --- | --- | --- |
 | ChatGPT | `lop login openai` (`openai-device` on a headless box) | ChatGPT Plus/Pro |
 | Claude | `lop login anthropic` | Claude Pro/Max |
-| Kimi | `lop login kimi` | Kimi (Moonshot) |
+| Kimi | `lop login kimi` (international kimi.ai), or `lop login kimi-wechat` (mainland/WeChat kimi.com) | Kimi (Moonshot) |
 | Meta Muse Code (unofficial) | `lop login meta-muse` | Active Muse Code plan; [billing/privacy limitations](docs/META_MUSE.md) |
 | Grok | `lop login xai-oauth` (`xai` = API key) | Grok OAuth |
 | Z.AI / GLM | `lop login zai-oauth` (`zai` = API key) | GLM Coding Plan |

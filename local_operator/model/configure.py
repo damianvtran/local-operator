@@ -24,7 +24,6 @@ import inspect
 import json
 import logging
 import math
-import os
 import re
 import threading
 import time
@@ -42,10 +41,17 @@ from local_operator.harness.types import (
     ChatRequest,
     ModelSpec,
     StreamEvent,
+    StreamStartEvent,
     Usage,
+    stamp_cache_diagnostics_id,
 )
 from local_operator.model import tariff
-from local_operator.model.catalogue import DEFAULT_TTL_S
+from local_operator.model.catalogue import (
+    DEFAULT_TTL_S,
+    LISTING_FAILURE_BACKOFF_S,
+    collect_unavailable,
+    note_unavailable,
+)
 from local_operator.model.defaults import DEFAULT_MODEL_NAMES as _DEFAULT_MODEL_NAMES
 from local_operator.model.effort import (
     default_effort,
@@ -63,6 +69,9 @@ from local_operator.model.registry import (
     unknown_model_info,
 )
 from local_operator.model.speed import supports_fast_mode
+from local_operator.providers.registry import (
+    env_secret_is_oauth as _env_secret_is_oauth,
+)
 from local_operator.session.request_observation import (
     RequestSubscriberHolder,
     build_request_final_observation,
@@ -923,6 +932,10 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # to fall back to) rather than as a live default anywhere.
     max_output = 0
     supports_images = True
+    # Recorded beside the default rather than folded into it: ``True`` above is
+    # the right thing to SEND an undescribed model, not a fact about it. See
+    # ``ModelSpec.supports_images_stated`` for the decisions that need the fact.
+    supports_images_stated = False
     # The mirror of ``supports_images`` with the OPPOSITE default, and the
     # asymmetry is deliberate (see ``ModelSpec.supports_audio_input``): a wrong
     # ``True`` spends a paid turn the model refuses, so only a stated capability
@@ -941,6 +954,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
             max_output = info.max_tokens
         if info.supports_images is not None:
             supports_images = info.supports_images
+            supports_images_stated = True
         stated_audio = getattr(info, "supports_audio_input", None)
         if stated_audio is not None:
             supports_audio_input = bool(stated_audio)
@@ -1259,6 +1273,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
             else True
         ),
         supports_images=supports_images,
+        supports_images_stated=supports_images_stated,
         supports_audio_input=supports_audio_input,
         supports_prompt_cache=supports_cache,
         supports_responses_api=supports_responses_api,
@@ -1286,11 +1301,16 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         # same normalisation the rest of this function runs on, so an alias
         # spelling of a provider cannot silently lose the dial.
         #
-        # Only the AVAILABILITY is seeded. `fast_mode` stays False until the
-        # user turns it on, and that asymmetry is deliberate: fast mode is
-        # billed at a premium (Anthropic and OpenAI both charge roughly double),
-        # so it is the one dial that must never arrive switched on by
-        # inference. `/fast` is an explicit, session-scoped opt-in.
+        # Only the AVAILABILITY is seeded. `fast_mode` starts False on every
+        # freshly built spec and is carried by the CONVERSATION, never by
+        # inference: fast mode is billed at a premium (Anthropic and OpenAI both
+        # charge roughly double), so it is the one dial that must never arrive
+        # switched on because a table happened to name the model. `/fast` is an
+        # explicit opt-in, and it is now durable within its scope — the
+        # `selected_model` journal row stores the dial beside the model and its
+        # level, so a reopen restores the operator's choice
+        # (`damianvtran/local-operator-ui#1266`) while a NEW conversation still
+        # starts at standard speed.
         supports_fast_mode=supports_fast_mode(canonical, model_name),
         display_name=resolved_name,
     )
@@ -1877,34 +1897,6 @@ def _catalogue_api_key(provider: str, *, base: Path | None = None) -> str:
     return ""
 
 
-def _env_secret_is_oauth(secret: str) -> bool:
-    """True when ``secret`` came ONLY out of OAuth-named env variables.
-
-    The callable ``env_keys`` resolvers can hand back either kind of credential —
-    ``_anthropic_env_key`` prefers ``ANTHROPIC_OAUTH_TOKEN`` over
-    ``ANTHROPIC_API_KEY`` — and return only the VALUE, so the caller cannot tell
-    which it got. Getting that wrong is not cosmetic: Anthropic rejects an OAuth
-    token sent as ``x-api-key`` with a 401, which is exactly the "model cannot be
-    described" outcome this whole path exists to avoid.
-
-    Matching on the variable NAME keeps this a general rule instead of a second
-    place that knows about Anthropic specifically, and it runs at most once per
-    model id per TTL bucket.
-
-    ``all`` and not ``any``, because the two misclassifications do not cost the
-    same. A plain ``OPENAI_API_KEY`` whose value happens to equal that of any
-    other variable with OAUTH in its name was reported as an OAuth token, and
-    OpenAI's OAuth route needs a ChatGPT account id that an env key cannot
-    supply — so the provider became unlistable outright, silently and for as
-    long as the variables stayed set. An OAuth token misread as a key costs one
-    401 on one provider and falls back to the bundled registry. When a value
-    appears under both kinds of name it is genuinely ambiguous, and this resolves
-    the ambiguity toward the cheaper mistake.
-    """
-    names = [name.upper() for name, value in os.environ.items() if value == secret]
-    return bool(names) and all("OAUTH" in name for name in names)
-
-
 def _catalogue_credential(
     provider: str, *, base: Path | None = None
 ) -> tuple[str, bool, str | None]:
@@ -1924,6 +1916,68 @@ def _catalogue_credential(
     if key:
         return key, _env_secret_is_oauth(key), None
     return _oauth_listing_token(provider, base=base)
+
+
+#: How long the synchronous listing bridge waits for its borrow thread. The
+#: borrow itself is bounded well below classification's budget; this adds thread
+#: startup and store teardown, and caps the caller's wait so a stuck daemon thread
+#: cannot freeze the event loop it was created to protect.
+_LISTING_BORROW_JOIN_S = 1.5
+
+
+def _borrowed_listing_token(provider: str, *, base: Path | None = None) -> str:
+    """A listing credential this device may BORROW from a mesh owner, or ``""``.
+
+    THE MODEL PICKER'S HALF OF THE MESH CREDENTIAL RUNG. ``_oauth_listing_token``
+    reads the local store only, so a provider login that exists on the head of a
+    mesh leaves a node unable to list that provider's models — the same measured
+    gap classification had (``docs/design/mesh-mcp-credentials.md`` §7). The
+    borrow helper is the one mechanism: it returns an access token, never copies a
+    refresh token, and is a no-op unless local placement says this device is a
+    holder.
+
+    Best-effort and silent: every failure is ``""``, no value is printed, logged
+    or persisted here, and the caller falls back to its unchanged "no listing"
+    shape.
+
+    WHY A THREAD IN THE RUNNING-LOOP CASE: this function is synchronous (the
+    catalogue/diagnostics callers are), while the borrow is async by contract.
+    ``asyncio.run`` handles the ordinary path; inside a live event loop (the TUI
+    can reach a listing call from a handler) it cannot nest, so the borrow runs in
+    one short-lived thread with its own loop. The listing path already blocks on
+    provider HTTP, so this adds no new blocking pattern.
+    """
+    try:
+        from local_operator.network.credentials.placement import placement_for_store
+
+        # Zero-peer devices pay nothing: no store, no client, no socket, exactly
+        # the pre-slice path.
+        if placement_for_store(base) is None:
+            return ""
+        from local_operator.network.credentials import borrowed_provider_key
+        from local_operator.providers.registry import credential_provider_id
+
+        storage = credential_provider_id(provider)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(borrowed_provider_key(storage, base)) or ""
+
+        outcome: list[str] = []
+
+        def _run() -> None:
+            try:
+                outcome.append(asyncio.run(borrowed_provider_key(storage, base)) or "")
+            except BaseException:  # noqa: BLE001 — a listing token is never worth a raise
+                outcome.append("")
+
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+        worker.join(timeout=_LISTING_BORROW_JOIN_S)
+        return outcome[0] if outcome else ""
+    except Exception as exc:  # noqa: BLE001 - metadata is never worth a failed start
+        logger.debug("could not borrow a %s token for the listing: %s", provider, exc)
+        return ""
 
 
 def _oauth_listing_token(
@@ -1983,6 +2037,15 @@ def _oauth_listing_token(
                 )
     except Exception as exc:  # noqa: BLE001 - metadata is never worth a failed start
         logger.debug("could not read a stored %s token for the listing: %s", provider, exc)
+    borrowed = _borrowed_listing_token(provider, base=base)
+    if borrowed:
+        # The borrow returns a VALUE only (its contract is ``str | None``), so the
+        # credential KIND is unknown here. Reporting a plain key is the
+        # conservative reading: send it down the key wire, and a token that needed
+        # the OAuth wire costs one 401 that falls back to the bundled registry —
+        # exactly what "no listing" did before this rung existed. The provider
+        # this path was measured for (Radient) does not branch on the flag.
+        return borrowed, False, None
     return "", False, None
 
 
@@ -2041,6 +2104,7 @@ def _info_from_discovery(
         )
     except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
         logger.debug("%s discovery unavailable for %s: %s", provider, model_name, exc)
+        note_unavailable(f"{provider} discovery")
         return fallback
 
     if provider == "openai" and is_oauth and status == "static":
@@ -2305,6 +2369,7 @@ def _from_price_catalogue(
         row = price_catalogue_row(provider, model_id, timeout=budget)
     except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
         logger.debug("price catalogue unavailable for %s/%s: %s", provider, model_id, exc)
+        note_unavailable("price catalogue")
         return info
     if row is None:
         logger.debug("price catalogue has no entry for %s/%s", provider, model_id)
@@ -2360,6 +2425,7 @@ def _from_aggregator_catalogue(
         rows, _status = available_models(provider, api_key=None, timeout=budget, want_id=model_id)
     except Exception as exc:  # noqa: BLE001 — metadata is never worth a failed start
         logger.debug("aggregator catalogue unavailable for %s/%s: %s", provider, model_id, exc)
+        note_unavailable(f"{provider} aggregator catalogue")
         return info
 
     # Priced rows only. An unpriced aggregator row is a routing stub that can
@@ -2433,9 +2499,55 @@ _listing_credential: ContextVar[tuple[str, bool, str | None] | None] = ContextVa
 )
 
 
+#: How long a resolution built from a FAILED leg may be reused, in seconds.
+#:
+#: WHY (PR #2992, review MAJOR-1). The memo below is keyed on a day bucket, and
+#: every leg degrades to its fallback instead of raising, so a 401/DNS/5xx/timeout
+#: on the first resolution used to be stored as an ordinary answer and served for
+#: up to 24 h after the network recovered — a default 128k window and zero prices
+#: in place of the listing's real numbers. A degraded answer now lives only this
+#: long. It is the listing's own sync failure backoff
+#: (``catalogue.LISTING_FAILURE_BACKOFF_S``), so the retry that follows expiry is
+#: one the listing will actually attempt rather than answer from its backoff.
+DEGRADED_MEMO_TTL_S: float = LISTING_FAILURE_BACKOFF_S
+
+#: ``{memo key: wall-clock expiry}`` for memo entries a failed leg produced. The
+#: key is the cached body's own arguments; read and written under the GIL by
+#: plain dict operations, the same discipline as ``_paint_memo``.
+_degraded_until: dict[tuple[Any, ...], float] = {}
+
+#: ``{memo key: retry generation}``. An expired degraded entry cannot be evicted
+#: from ``lru_cache`` on its own, so the next call passes a NEW generation, which
+#: is a different cache key and therefore a fresh resolution; the stale entry
+#: ages out of the 64-entry bound like any other. Absent (generation 0) for every
+#: key that never degraded, which is why the argument is only passed when set.
+_degraded_generation: dict[tuple[Any, ...], int] = {}
+
+
+def _memo_attempt(key: tuple[Any, ...]) -> dict[str, int]:
+    """The extra memo-key argument for ``key``: none, or the retry generation."""
+    expiry = _degraded_until.get(key)
+    if expiry is not None and time.time() >= expiry:
+        _degraded_until.pop(key, None)
+        _degraded_generation[key] = _degraded_generation.get(key, 0) + 1
+    elif expiry is not None:
+        # Served from a still-degraded entry: the caller is getting the failed
+        # answer again, and a collector around it must hear that just as it would
+        # have heard the failure itself.
+        note_unavailable("degraded metadata memo")
+    generation = _degraded_generation.get(key, 0)
+    return {"_attempt": generation} if generation else {}
+
+
 @functools.lru_cache(maxsize=64)
 def _resolve_model_info_cached(
-    provider: str, model_id: str, _bucket: int, _scope: str = "", _base: Path | None = None
+    provider: str,
+    model_id: str,
+    _bucket: int,
+    _scope: str = "",
+    _base: Path | None = None,
+    *,
+    _attempt: int = 0,
 ) -> ModelInfo:
     """Memoized body of :func:`resolve_model_info`.
 
@@ -2446,7 +2558,30 @@ def _resolve_model_info_cached(
     long-lived process (the HTTP server, a scheduler worker) would pin whatever
     metadata it saw at boot for as long as it ran — the disk cache would refresh
     underneath it and nothing would ever read the new numbers.
+
+    ``_attempt`` is likewise key-only: see :data:`_degraded_generation`. A body
+    during which any leg reported that it could not answer
+    (:func:`catalogue.collect_unavailable`) marks its entry DEGRADED, and
+    :func:`resolve_model_info` stops serving it after :data:`DEGRADED_MEMO_TTL_S`.
     """
+    with collect_unavailable() as unavailable:
+        info = _resolve_model_info_body(provider, model_id, _base)
+    if unavailable:
+        logger.debug(
+            "%s/%s metadata degraded (%s); memoised for %.0fs only",
+            provider,
+            model_id,
+            ", ".join(sorted(set(unavailable))),
+            DEGRADED_MEMO_TTL_S,
+        )
+        _degraded_until[(provider, model_id, _bucket, _scope, _base)] = (
+            time.time() + DEGRADED_MEMO_TTL_S
+        )
+    return info
+
+
+def _resolve_model_info_body(provider: str, model_id: str, _base: Path | None) -> ModelInfo:
+    """The resolution itself, uncached: registry first, then the listing legs."""
     canonical = "test" if provider == "noop" else provider
     started = time.monotonic()
     info = _registry_fallback(canonical, model_id)
@@ -2541,6 +2676,24 @@ def _resolve_model_info_cached(
                 )
             )
         )
+    if info.supports_images is None or not _has_real_window(info):
+        # Every source was silent on something the session acts on, so it will
+        # run on the placeholder's defaults for it. Logged per UNCACHED
+        # resolution — a degraded answer is memoised only briefly
+        # (``DEGRADED_MEMO_TTL_S``), so a cold start may log it a few times; at
+        # INFO that is cheap, and silence was the defect: an OSWorld
+        # session ran a vision model as text-only for its whole life on a cold
+        # listing cache and nothing in its log said the metadata was a stand-in
+        # (PR #3071). A log line, not a user notice — the defaults are usually
+        # right, and the provider's own refusal is what the user needs to see.
+        logger.info(
+            "%s/%s: no metadata source described this model (image input %s, "
+            "context window %s); using placeholder defaults",
+            canonical,
+            model_id,
+            "unknown" if info.supports_images is None else "stated",
+            "unknown" if not _has_real_window(info) else "known",
+        )
     return info
 
 
@@ -2554,6 +2707,8 @@ def invalidate_model_info_cache() -> None:
     numbers, so the fix path gets a way to say so.
     """
     _resolve_model_info_cached.cache_clear()
+    _degraded_until.clear()
+    _degraded_generation.clear()
     _paint_refreshing.clear()
     _paint_memo.clear()
     # The ladder memo is fed by the same resolution, so it degrades for the same
@@ -2629,22 +2784,38 @@ def resolve_model_info(
 
             account_id = "credential:" + hashlib.sha256(credential[0].encode()).hexdigest()
         scope = _cache_key(provider, account_scoped=credential[1], account_id=account_id)
-        if provider == "meta-muse":
+        if provider in {"openai", "meta-muse"}:
             from local_operator.model.catalogue import _cache_path, _document_stamp
 
             # Existing file identity changes on a refreshed account document.
             # A daily memo bucket must not hide newly returned limits/efforts;
             # this needs neither a global epoch nor paint-triggered network IO.
+            # Binding both account-scoped providers also keeps an explicit
+            # resolver's document and first-frame/live catalogue identical.
             scope = f"{scope}:{_document_stamp(_cache_path(scope, None))}"
         if provider == "openai" and credential[1] and not credential[2]:
             scope = "openai-oauth-unscoped"
         token = _listing_credential.set(credential)
         try:
-            info = _resolve_model_info_cached(provider, model_id, bucket, scope, base)
+            info = _resolve_model_info_cached(
+                provider,
+                model_id,
+                bucket,
+                scope,
+                base,
+                **_memo_attempt((provider, model_id, bucket, scope, base)),
+            )
         finally:
             _listing_credential.reset(token)
     else:
-        info = _resolve_model_info_cached(provider, model_id, bucket, "", base)
+        info = _resolve_model_info_cached(
+            provider,
+            model_id,
+            bucket,
+            "",
+            base,
+            **_memo_attempt((provider, model_id, bucket, "", base)),
+        )
     # Feed the paint memo from the authoritative answer, so a renderer that
     # resolves AFTER the session does (the common order) paints the real row,
     # and so the background refresh is the only writer on a cold process.
@@ -2676,6 +2847,74 @@ _paint_refreshing: set[tuple[str, str]] = set()
 #: background refresh), so a cold process paints registry rows until the first
 #: full resolve lands, which the background refresh schedules on the first miss.
 _paint_memo: dict[tuple[str, str, int], ModelInfo] = {}
+
+
+def warm_model_info(provider: str, model_id: str) -> ModelInfo | None:
+    """The memoised metadata row a live switch may build from inline, or None.
+
+    WHY. A live ``/model`` builds its spec on the session loop's critical path,
+    and the serving handle used to send EVERY build to the default executor
+    (``asyncio.to_thread``) because a cold build can run discovery's synchronous
+    HTTP legs. On a busy manager that executor is shared with every lane's
+    blocking work, and the switch queued behind it: measured with
+    ``scripts/bench_model_switch.py --condition busy`` (12 lanes, a 1,000-child
+    roster), the build STARTED up to 750 ms after the handler asked for it, for
+    a body that takes well under 1 ms once the memo holds the model.
+
+    WHY A ROW AND NOT A BOOLEAN (review round 2, R2-1). This used to be a
+    ``model_spec_is_warm`` predicate, and the caller then ran
+    ``build_model_spec(provider, model_id)``, which resolves AGAIN through the
+    ``lru_cache`` — a different cache keyed differently (by ``base``, capped at
+    64 entries) from the ``_paint_memo`` the predicate read. The two disagreed
+    in reproducible ways (a base-scoped ``configure_model`` resolve; LRU
+    eviction past 64 keys), and each disagreement ran the cold body INLINE on
+    the loop. Returning the row and passing it as ``build_model_spec(...,
+    info=row)`` means the inline build performs no lookup at all, so "warm" and
+    "IO-free" are the same fact by construction rather than by two caches
+    happening to agree.
+
+    ``None`` (build off-loop, which resolves normally) whenever the answer could
+    involve IO or the row could be stale:
+
+    * ``openai``/``meta-muse`` resolve through ``_catalogue_credential`` on
+      every call (a credential-store read that keys the memo), so they never
+      have a warm row here;
+    * local runtimes resolve through their own endpoint-scoped path;
+    * a key that DEGRADED is re-resolved once its short TTL expires
+      (``_memo_attempt``), so a model with a degraded marker under ANY
+      base/scope in this bucket is never warm;
+    * otherwise the row is what the full resolver answered for this exact key
+      in the CURRENT TTL bucket — ``_paint_memo`` is written only by
+      :func:`resolve_model_info`, after the cached body ran.
+
+    Canonicalised exactly as :func:`build_model_spec` does before it resolves,
+    so the row is the one the build would have resolved. A deep copy, the same
+    contract :func:`resolve_model_info` keeps: the memo row is shared.
+    """
+    from local_operator.providers.local import LOCAL_PROVIDER_IDS
+
+    try:
+        bare = _hosting_qualified_bare_id(provider, model_id)
+        name = bare if bare is not None else model_id
+        canonical = "test" if provider.strip().lower() == "noop" else provider.strip().lower()
+        if canonical in ("openai", "meta-muse") or canonical in LOCAL_PROVIDER_IDS:
+            return None
+        bucket = int(time.time() // DEFAULT_TTL_S)
+        # ANY degraded marker for this model in this bucket refuses the row,
+        # whatever its scope and base (review round 3, R3-1). ``_paint_memo``
+        # is keyed WITHOUT base, but every session start resolves with
+        # ``base=config_dir`` (``configure_model``), so a degraded start marks
+        # the config_dir-scoped key while writing the shared row; checking only
+        # the ``base=None`` key served that 128k/no-cap row to every switch for
+        # the rest of the day. An EXPIRED marker still refuses: it is popped
+        # only by the re-resolve in ``_memo_attempt``, which rewrites the row,
+        # so until then the row is still the degraded answer.
+        if any(key[:3] == (canonical, name, bucket) for key in list(_degraded_until)):
+            return None
+        info = _paint_memo.get((canonical, name, bucket))
+        return None if info is None else info.model_copy(deep=True)
+    except Exception:  # noqa: BLE001 — "not warm" is always a safe answer
+        return None
 
 
 def resolve_model_info_paint(provider: str, model_id: str) -> tuple[ModelInfo, bool]:
@@ -3203,6 +3442,9 @@ def context_spec_for_access(
             value = getattr(info, field, None)
             if value is not None:
                 update[field] = value
+        if getattr(info, "supports_images", None) is not None:
+            # The account's own statement replaces whatever the spec defaulted.
+            update["supports_images_stated"] = True
         return spec.model_copy(update=update)
     return spec.model_copy(
         update={
@@ -3250,6 +3492,37 @@ def _anthropic_cache_ttl_1h_min_context_tokens(settings: Mapping[str, Any] | Non
     if isinstance(configured, int) and not isinstance(configured, bool) and configured >= 0:
         return configured
     return ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+
+
+#: Default for ``providers.anthropic.subagent_cache_ttl_1h_min_context_tokens``:
+#: ``0``, never 1h for a delegated child. Measured over this harness's own 7-day
+#: ledger (2026-10-26), a subagent's 1h writes cost more than the expiries they
+#: avoid at EVERY size: about 15M base-equivalent tokens worse than 5m above
+#: 150k (345 expiries avoided vs 113M of extra 2x write cost) and about 57M
+#: worse below it. Kept configurable because the trade depends on how a
+#: workload's children idle; see ``providers/anthropic_cache_ttl.py``.
+ANTHROPIC_SUBAGENT_CACHE_TTL_1H_MIN_CONTEXT_TOKENS = 0
+
+
+def _anthropic_subagent_cache_ttl_1h_min_context_tokens(
+    settings: Mapping[str, Any] | None,
+) -> int:
+    """Resolve the context size above which a SUBAGENT turn uses the 1h TTL.
+
+    Same resolution rule as ``_anthropic_cache_ttl_1h_min_context_tokens``:
+    only an explicit non-negative integer is honoured, anything else falls back
+    to the default (here ``0``, never).
+    """
+    providers = settings.get("providers") if isinstance(settings, Mapping) else None
+    anthropic = providers.get("anthropic") if isinstance(providers, Mapping) else None
+    configured = (
+        anthropic.get("subagent_cache_ttl_1h_min_context_tokens")
+        if isinstance(anthropic, Mapping)
+        else None
+    )
+    if isinstance(configured, int) and not isinstance(configured, bool) and configured >= 0:
+        return configured
+    return ANTHROPIC_SUBAGENT_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
 
 
 #: Decode rate (output tokens per second of streaming) below which a host that
@@ -3447,6 +3720,68 @@ def _decode_measure(
     return (decode_us, output_tokens, 1) if eligible else (0, 0, 0)
 
 
+#: Characters per output token for :func:`_estimate_consumer_cut_usage`. The same
+#: coarse 4:1 the local context estimators use when no tokenizer is in play
+#: (``providers/clients._CHARS_PER_TOKEN``, ``compaction/tokens.py``). Measured on
+#: the trace that motivated the guard, it is CONSERVATIVE for looping reasoning:
+#: 225,423 characters were billed as 131,072 output tokens (~1.7 chars/token),
+#: so the estimate undercounts output by roughly 2x there and never overcounts.
+_CUT_CHARS_PER_OUTPUT_TOKEN = 4
+
+
+def _estimate_consumer_cut_usage(
+    request: ChatRequest, final_usage: Usage | None, *, cut_chars: int
+) -> Usage:
+    """An ESTIMATED ``Usage`` for a call the consumer cut before usage arrived.
+
+    Why: a provider reports usage in the stream's closing frames, so a call the
+    loop's degeneration guard cancels has none, and an unreported call is booked
+    as UNKNOWN spend -- for a call that billed its whole input plus ~10 KB of
+    output, that reads as free (review round 1, m3). Benchmark cost accounting
+    sums these usages, so the cut call has to carry a figure.
+
+    The estimator, and what it is not:
+
+    - INPUT: the provider's own partial count when one arrived before the cut
+      (some wires send input usage at stream start), else the local request
+      estimate ``providers.context.measure_request`` already uses for admission
+      sizing (messages tokenized, system blocks and tool schemas at 4 chars per
+      token). Not cache-aware: a cached prefix is billed lower, so this can
+      overstate input for a warm cache.
+    - OUTPUT: the provider's partial count when larger, else the characters
+      streamed before the cut divided by :data:`_CUT_CHARS_PER_OUTPUT_TOKEN`
+      (counted toward ``reasoning_tokens`` too, since the guard cuts reasoning).
+    - PROVENANCE: ``billing_basis="estimated"``, the vocabulary the spend ledger
+      already reads as "a figure, never a charge" (``session.channel_spend``).
+      NO money is stamped -- neither ``usd_cost`` (a provider receipt) nor
+      ``estimated_usd_cost``, which ``model.costs._recorded_cost`` counts as
+      RECORDED money and would therefore book this guess as known spend. The
+      tokens alone are priced downstream by the ordinary table estimate
+      (``cost_summary(recorded_only=False)``, the analytics writer), while
+      ``recorded_only=True`` keeps treating the call as unknown. An unpriceable
+      model stays unpriced, exactly as for any other call.
+    """
+    from local_operator.providers.context import measure_request
+
+    estimate = Usage()
+    if final_usage is not None:
+        estimate = final_usage.model_copy(deep=True)
+        # A partial provider frame is not a receipt for the whole call.
+        estimate.usd_cost = None
+    if not estimate.input_tokens:
+        try:
+            estimate.input_tokens = int(measure_request(request).tokens)
+        except Exception:  # noqa: BLE001 -- an estimate is never worth a broken turn
+            logger.debug("consumer-cut input estimate failed", exc_info=True)
+    streamed = max(0, int(cut_chars)) // _CUT_CHARS_PER_OUTPUT_TOKEN
+    if streamed > estimate.output_tokens:
+        estimate.output_tokens = streamed
+        estimate.reasoning_tokens = max(estimate.reasoning_tokens, streamed)
+    estimate.estimated_usd_cost = None
+    estimate.billing_basis = "estimated"
+    return estimate
+
+
 def _stamp_decode_window(
     usage: Any,
     *,
@@ -3630,6 +3965,37 @@ class SessionStreamFn:
         self._settings = settings
         self._session_id = session_id
         self._parent_session_id: str | None = None
+        # The Anthropic response id of this conversation's last DIAGNOSED turn,
+        # i.e. the ``previous_message_id`` the next turn's cache diagnostics
+        # compare against (``ChatRequest.cache_diagnostics``). Instance state,
+        # never shared: ``fork`` builds a fresh stream, so a subagent starts its
+        # own chain at ``None`` and can never be diffed against its parent's
+        # prompt (a guaranteed, meaningless ``system_changed``).
+        #
+        # PERSISTED through the transcript: every diagnosed turn stamps this
+        # value on its usage (``stamp_cache_diagnostics_id``), the transcript
+        # writes it into the row, and a resumed ``Session`` hands the newest
+        # one back through :meth:`seed_cache_diagnostics` — so a new process
+        # continues the chain instead of recording ``baseline`` after an
+        # edited instruction file rewrote the prefix (PR #2984 QA Q1). A
+        # transcript FORK ignores the rows it copied and starts at ``None``.
+        self._cache_diagnostics_previous_id: str | None = None
+        # The credential that served the response ``_cache_diagnostics_previous_id``
+        # names. Anthropic keeps diagnostics fingerprints per account, so after
+        # a mid-session switch to another credential the old id cannot be found
+        # and every such call recorded ``previous_message_not_found`` instead of
+        # the ``baseline`` it really is. ``None`` = unknown (no chain yet, or a
+        # chain seeded from the transcript), which never triggers a reset.
+        self._cache_diagnostics_credential_id: int | None = None
+        # Whether one of this conversation's turns already ran for at least
+        # ``SUBAGENT_LONG_CALL_1H_THRESHOLD_S`` (request start to stream end).
+        # Stamped on every later request as ``ChatRequest.cache_after_long_call``
+        # so the cache-TTL policy can move a subagent to 1h: the 5m TTL is
+        # refreshed at request START, so a call that streams past five minutes
+        # expires its own prefix, and long calls cluster within a session (see
+        # the constant). Instance state, so a fork starts clean: a child's
+        # workload says nothing about its parent's.
+        self._had_long_call = False
         # -- Opt-in request observation (local_operator.session.request_observation).
         #
         # ``_observation_root`` is a reference to the ROOT stream of this fork
@@ -3684,6 +4050,20 @@ class SessionStreamFn:
         # session, its own request calls still never count as child activity.
         self._descendant_request_counter = self._child_request_counter
         self._context_tracker = ContextTokenTracker()
+        # Radient Saver (contract §7, §9): this conversation's chain, built on the
+        # first turn the gate allows and never shared — a fork starts its own.
+        # ``_saver_availability_read`` is the gate's account half: a background
+        # read started at enable and after a 402 (§8), re-tried after its own
+        # back-off when it timed out, and never awaited on a turn (R-1). The
+        # redaction and the spend sink are bound by the owning Session
+        # (:meth:`bind_saver`); until then the projection uses the
+        # credential-shape floor and records no spend.
+        self._saver_chain: Any | None = None
+        self._saver_availability_read: Any | None = None
+        #: One local sign-in check per session for the `opt_in` notice.
+        self._saver_signed_out_checked = False
+        self._saver_redaction: Any | None = None
+        self._saver_spend: Callable[[Any], None] | None = None
         self._notice_handler: Callable[[str, str], Awaitable[None] | None] | None = None
         # The session's route bridge: called with the pinned fallback target
         # (or None on recovery) so the host can keep its model display and its
@@ -3855,6 +4235,9 @@ class SessionStreamFn:
             openai_api=_openai_api_mode(self._settings),
             anthropic_cache_ttl_1h_min_context_tokens=_anthropic_cache_ttl_1h_min_context_tokens(
                 self._settings
+            ),
+            anthropic_subagent_cache_ttl_1h_min_context_tokens=(
+                _anthropic_subagent_cache_ttl_1h_min_context_tokens(self._settings)
             ),
             # Resolved here, not inside the client: `client_for_spec` stays
             # settings-free, and `self._settings` is rebound by
@@ -4481,6 +4864,7 @@ class SessionStreamFn:
         ok: bool,
         outcome: str,
         duration_ms: float,
+        usage_estimated: bool = False,
     ) -> None:
         """Build and deliver one record; never raises into the request path.
 
@@ -4506,6 +4890,7 @@ class SessionStreamFn:
                 ok=ok,
                 outcome=outcome,
                 duration_ms=duration_ms,
+                usage_estimated=usage_estimated,
             )
             holder.notify(handlers, observation)
         except asyncio.CancelledError:
@@ -4705,12 +5090,17 @@ class SessionStreamFn:
         # it, and the fixed text is kept short (design D7): with Anthropic's
         # measured message the line is 129 cells, inside the 140-cell notice
         # budget at the 150-cell reference frame.
-        await self._notice(
-            f"fast mode: refused by {selector} — {message.strip().rstrip('.')}; "
-            "switched off, serving at standard speed",
-            "warning",
-        )
         if self._fast_refused_handler is None:
+            # NO SESSION TO TELL: a bare stream fn (a subagent's, a harness's)
+            # speaks for itself. With a handler installed the OWNING SESSION is
+            # the narrator, because it is the only side that knows whether a
+            # dial actually moved — and two lines for one refusal is its own
+            # defect. See ``Session._on_fast_refused``.
+            await self._notice(
+                f"fast mode: refused by {selector} — {message.strip().rstrip('.')}; "
+                "switched off, serving at standard speed",
+                "warning",
+            )
             return
         result = self._fast_refused_handler(selector, message)
         if inspect.isawaitable(result):
@@ -4747,6 +5137,23 @@ class SessionStreamFn:
         # a fresh probe at the next boundary instead of inheriting the stale
         # verdict.
         self._usage_checked_at = 0.0
+
+    def seed_cache_diagnostics(self, previous_id: str) -> None:
+        """Continue a persisted cache-diagnostics chain after a resume.
+
+        ``Session`` calls this at construction with the newest diagnosed id its
+        transcript recorded, so the first turn of a resumed process compares
+        against the previous process's last turn instead of opening at
+        ``previous_message_id: null`` (which recorded a prefix break caused by
+        an edited instruction file as ``baseline``; PR #2984 QA Q1). A stale
+        id is harmless: the API answers ``previous_message_not_found`` once
+        its fingerprint has expired, and that verdict is already handled.
+
+        Never overwrites a live chain: a stream that already diagnosed a turn
+        in THIS process holds a fresher id than any transcript row.
+        """
+        if self._cache_diagnostics_previous_id is None and previous_id:
+            self._cache_diagnostics_previous_id = previous_id
 
     def begin_message(self) -> None:
         """Mark the next model call as a user-message boundary."""
@@ -4843,6 +5250,179 @@ class SessionStreamFn:
             else False
         )
         return map_tier_to_effort(self._message_tier, model.reasoning_efforts, allow_max=allow_max)
+
+    # -- Radient Saver (contract §6, §7, §9) ------------------------------------
+
+    def bind_saver(
+        self,
+        *,
+        redaction: Any | None = None,
+        spend: Callable[[Any], None] | None = None,
+    ) -> None:
+        """Bind the owning session's redactor and spend sink for Radient Saver.
+
+        Called by ``Session.__init__`` (the same division of labour as the notice
+        bridge): the session owns the ``VariableStore`` whose two passes the
+        upload must re-apply (§3.1, C-S2-3) and the channel ledger the ``saver``
+        spend line lands in. A stream with no owner keeps the shape-table floor.
+        """
+        self._saver_redaction = redaction
+        self._saver_spend = spend
+        chain = self._saver_chain
+        if chain is not None:
+            if redaction is not None:
+                from local_operator.saver.chain import upload_redaction
+
+                chain.redaction = upload_redaction(redaction)
+            chain.spend = spend
+
+    def _saver_bypassed(self, request: ChatRequest) -> bool:
+        """The silent bypasses (§6): nothing is uploaded and no notice is shown."""
+        return (
+            request.purpose != "turn"
+            or request.isolated
+            or request.has_one_turn_secrets
+            or request.model.provider in {"radient", "radient-key"}
+            or not request.messages
+        )
+
+    async def _apply_saver(self, request: ChatRequest) -> ChatRequest:
+        """Splice this conversation's Saver epochs into ``request``, or return it unchanged.
+
+        Never raises and never fails the turn (§6): every failure path returns
+        the request as given. With the gate off this reads one setting and
+        returns, so no Saver client, task or socket ever exists.
+
+        Whenever this returns the request UNSPLICED, the chain's frozen set is
+        cleared (R-2): the session's prune sweep restricts itself to the
+        frontier only while Saver is actually reducing the request, so a flip to
+        off, a silent bypass (a Radient-served model) or a 402 gives back
+        main's prune exactly.
+        """
+        spliced = request
+        try:
+            if not self._saver_bypassed(request):
+                spliced = await self._saver_splice(request)
+        except Exception as exc:  # noqa: BLE001 — an optimisation must never fail a turn
+            # The type only (S-9): never ``exc_info`` or args, which could carry
+            # conversation text into a DEBUG log.
+            logger.debug("saver: apply failed (%s); sending unreduced", type(exc).__name__)
+            spliced = request
+        chain = self._saver_chain
+        # R2-4: only a MAIN-TURN request may lift the prune restriction. An
+        # `aside`, `clearance` or `compaction_advisor` call rides the session's
+        # stream fn with `purpose != "turn"`, never touches the chain, and used
+        # to clear the ids anyway — a sweep in between then blanked frozen
+        # prefix rows, truncating the chain and paying for a re-upload.
+        if (
+            chain is not None
+            and request.purpose == "turn"
+            and spliced.frozen_prefix_messages is None
+        ):
+            chain.frozen_ids = frozenset()
+        return spliced
+
+    async def _saver_splice(self, request: ChatRequest) -> ChatRequest:
+        from local_operator.saver.gate import (
+            Availability,
+            configured_mode,
+            resolve_saver,
+            start_availability_read,
+        )
+
+        mode = configured_mode(self._settings)
+        if mode == "off":
+            return request
+        # NO BALANCE READ FOR A MODE THAT CANNOT TURN ON (R-1, S-22). The read
+        # sends the user's Radient bearer, so it is only worth making when a
+        # signed-in account with credit WOULD resolve on. Asking the resolver
+        # that question with a best-case answer keeps this in step with the
+        # gate instead of duplicating it: in LO1 `auto` is refused
+        # (`auto_unavailable`) and `opt_in` has no session choice wired, so
+        # neither reaches the network.
+        if not resolve_saver(self._settings, Availability(True, True)).on:
+            if mode == "opt_in":
+                await self._saver_signed_out_notice()
+            return request
+        # The availability read is NEVER awaited on the turn (R-1/S-4/Q1): it
+        # runs in the background under its own total deadline, and until it
+        # answers "signed in with credit" this turn goes unreduced.
+        availability = self._saver_availability_read
+        if availability is None or availability.expired():
+            availability = start_availability_read()
+            self._saver_availability_read = availability
+        decision = resolve_saver(self._settings, availability.result())
+        if not decision.on:
+            return request
+        chain = self._ensure_saver_chain()
+        spliced = await chain.apply(request)
+        if chain.needs_availability_refresh:
+            # A 402 is the one runtime event that re-reads the balance (§8).
+            self._saver_availability_read = None
+            chain.needs_availability_refresh = False
+        return spliced
+
+    async def _saver_signed_out_notice(self) -> None:
+        """Tell an `opt_in` user once per session that Saver needs a sign-in.
+
+        Without a chain nothing else can say it (QA round 7, Q-R7-4): the
+        chain's own signed-out notice only fires from a Radient answer, and
+        this path never calls Radient. The check is LOCAL — whether exactly one
+        Radient login is stored (`tunnels.api.credential_id`, the same rule the
+        availability read uses) — so no request and no bearer leave the
+        machine. Run off the loop because the credential store is a file.
+        """
+        if self._saver_signed_out_checked:
+            return
+        self._saver_signed_out_checked = True
+        from local_operator.saver.chain import NOTICE_SIGNED_OUT, notice_message
+        from local_operator.tunnels.api import credential_id
+
+        try:
+            await asyncio.to_thread(credential_id, None)
+            return
+        except Exception:  # noqa: BLE001 — no single Radient login: signed out
+            pass
+        try:
+            await self._saver_notice(notice_message(NOTICE_SIGNED_OUT))
+        except Exception as exc:  # noqa: BLE001 — a notice must never fail the turn
+            logger.debug("saver: signed-out notice failed (%s)", type(exc).__name__)
+
+    def _ensure_saver_chain(self) -> Any:
+        chain = self._saver_chain
+        if chain is not None:
+            return chain
+        from local_operator.saver.chain import (
+            SaverChain,
+            shared_client,
+            upload_redaction,
+        )
+        from local_operator.saver.projection import shape_only_redaction
+
+        # A stream with no session id still gets its own chain; the id is only
+        # the correlation header and the turn-binding key, both per-object.
+        chain = SaverChain(
+            session_id=self._session_id or f"stream-{id(self):x}",
+            client=shared_client(),
+            redaction=upload_redaction(self._saver_redaction or shape_only_redaction()),
+            notice=self._saver_notice,
+            spend=self._saver_spend,
+        )
+        self._saver_chain = chain
+        return chain
+
+    async def _saver_notice(self, message: Any) -> None:
+        """Deliver one keyed Saver notice through the session's notice bridge.
+
+        The bridge carries ``(text, kind)``; the text is rendered from the
+        catalogue in the active locale, and the reason behind it is a closed
+        enum — never a server sentence (S-31).
+        """
+        from local_operator.i18n.messages import render
+        from local_operator.i18n.text import active_locale
+
+        text = render(message.code, dict(message.params), locale=active_locale())
+        await self._notice(text, "warning")
 
     async def _notice(self, text: str, kind: str = "warning") -> None:
         if self._notice_handler is None:
@@ -6529,6 +7109,7 @@ class SessionStreamFn:
         # the shared event loop; the estimator memoizes settled old messages.
         import asyncio
 
+        from local_operator.providers.anthropic_cache_ttl import cache_role
         from local_operator.providers.clients import _estimate_slope
         from local_operator.providers.context import (
             ContextBinding,
@@ -6538,6 +7119,16 @@ class SessionStreamFn:
         from local_operator.providers.failover import stream_with_failover
 
         preparation_started = time.perf_counter()
+        # RADIENT SAVER SEAM (contract §7). Spliced HERE — before the request
+        # is measured, admitted, sized and handed to ``stream_with_failover``
+        # below — so the context tracker, output sizing and EVERY failover hop,
+        # credential rotation or OAuth account switch serialise the SAME reduced,
+        # provider-neutral history for their own provider. Never in
+        # ``wrap_client``: that is per provider, and a fallback would then send
+        # the unreduced history. Bypassed silently for every non-turn purpose,
+        # an isolated errand, a one-turn-secret request and a Radient-served
+        # session (§6); with the gate off nothing here runs at all.
+        request = await self._apply_saver(request)
         measured = await asyncio.to_thread(measure_request, request)
         tracks_context = not request.isolated and request.purpose == "turn"
         binding = ContextBinding(self._context_tracker, measured) if tracks_context else None
@@ -6569,6 +7160,14 @@ class SessionStreamFn:
                 "context_tokens_hint_model": model_key(request) if hint is not None else None,
                 "context_tokens_hint_measured": reconciled[1] if reconciled is not None else None,
                 "context_binding": binding,
+                # Who is asking, for the Anthropic cache-TTL policy: only this
+                # stream knows it is a delegated child (``fork`` sets the
+                # parent link, the same edge analytics records).
+                "cache_role": cache_role(
+                    request.purpose if not request.isolated else "isolated",
+                    delegated=bool(getattr(self, "_parent_session_id", None)),
+                ),
+                "cache_after_long_call": self._had_long_call,
                 "preparation_ms": request.preparation_ms
                 + (time.perf_counter() - preparation_started) * 1000,
             }
@@ -6716,8 +7315,42 @@ class SessionStreamFn:
         # no rotation, no chain), and an exhausted or disabled pinned route
         # therefore stops the recovery with that failure as its reason
         # instead of re-pointing the call at another credential or model.
+        if request.purpose == "turn":
+            # Conversation turns only: an aside, a compaction summary or a
+            # helper carries a different prompt, so comparing it with the
+            # turn chain would report a break that is by design. Isolated
+            # decoration returned above and never reaches here.
+            request = request.model_copy(
+                update={
+                    "cache_diagnostics": True,
+                    "cache_diagnostics_previous_id": self._cache_diagnostics_previous_id,
+                }
+            )
         if request.purpose == "turn" and not request.same_route_retry:
             await self.preflight_usage(request.model)
+        current_credential_id = (
+            self._auth_store.session_credential_id(request.model.provider, self._session_id)
+            if request.cache_diagnostics_previous_id is not None
+            and self._cache_diagnostics_credential_id is not None
+            else None
+        )
+        if (
+            current_credential_id is not None
+            and current_credential_id != self._cache_diagnostics_credential_id
+        ):
+            # Checked AFTER the preflight, which is what may have moved the
+            # session to another account. The previous response lives in the
+            # old account's fingerprint store, so comparing against it can only
+            # answer ``previous_message_not_found``; restart the chain so this
+            # call records ``baseline``, which is what it is.
+            #
+            # An UNSET sticky (``None``: a released pin, a rotation that cleared
+            # it) is "unknown", not "switched": the next resolve usually lands
+            # on the same account, and dropping a live chain there loses a real
+            # comparison, so only a known different credential resets it.
+            self._cache_diagnostics_previous_id = None
+            self._cache_diagnostics_credential_id = None
+            request = request.model_copy(update={"cache_diagnostics_previous_id": None})
         # The binding boundary (``_note_serving_binding``): after the preflight
         # above has settled and pinned the session's credential, note it for the
         # recorder. Outside the purpose gate on purpose — a helper's request is
@@ -6739,6 +7372,41 @@ class SessionStreamFn:
             usage = getattr(event, "usage", None)
             if tracks_context and usage is not None:
                 self._context_tracker.record(binding.measured if binding else measured, usage)
+            if (
+                request.cache_diagnostics
+                and isinstance(event, StreamStartEvent)
+                and event.cache_miss_type is not None
+                and event.response_id
+            ):
+                # Only a DIAGNOSED response advances the chain: the API stores
+                # a fingerprint only for requests that opted in, so a fallback
+                # turn served elsewhere (or with the latch off) would name an id
+                # the comparison cannot find. The latest attempt supersedes,
+                # exactly as ``StreamStartEvent`` documents for retries.
+                # Advanced on ``message_start`` rather than at stream end on
+                # purpose: the API fingerprints the REQUEST when it accepts
+                # it, so even a stream that dies afterwards left a comparable
+                # entry, and the worst case is a benign
+                # ``previous_message_not_found`` on the next turn.
+                self._cache_diagnostics_previous_id = event.response_id
+                # The resolve that served this response re-pinned the session
+                # to its credential, so the sticky names the account holding
+                # the fingerprint (read once per diagnosed response).
+                self._cache_diagnostics_credential_id = self._auth_store.session_credential_id(
+                    request.model.provider, self._session_id
+                )
+            if (
+                request.cache_diagnostics
+                and usage is not None
+                and self._cache_diagnostics_previous_id
+            ):
+                # The chain's position travels on the turn's usage so the
+                # transcript can persist it and a RESUME can continue the chain
+                # (``seed_cache_diagnostics``; PR #2984 QA Q1). The chain value
+                # rather than this response's own id: on a turn served by an
+                # undiagnosed fallback the chain did not advance, and the row
+                # must say what the NEXT turn would have compared against.
+                stamp_cache_diagnostics_id(usage, self._cache_diagnostics_previous_id)
             yield event
 
     @property
@@ -6809,6 +7477,10 @@ class SessionStreamFn:
         first_output_at: float | None = None
         last_output_at: float | None = None
         outcome = "incomplete"
+        # Anthropic cache diagnostics from the LATEST ``StreamStartEvent``
+        # (a retried attempt supersedes an abandoned one); ``""`` = undiagnosed.
+        cache_miss_type = ""
+        cache_missed_tokens = 0
         # Snapshot char lengths BEFORE streaming: cheap (string length reads,
         # sub-millisecond even on a very large context) and safe to hand a
         # background thread, unlike the live message objects.
@@ -6918,6 +7590,9 @@ class SessionStreamFn:
                         last_output_at=last_output_at,
                         output_deltas=output_deltas,
                     )
+                if event_type == "start":
+                    cache_miss_type = getattr(event, "cache_miss_type", None) or ""
+                    cache_missed_tokens = int(getattr(event, "cache_missed_tokens", 0) or 0)
                 stop_reason = getattr(event, "stop_reason", None)
                 if stop_reason is not None:
                     outcome = str(stop_reason)
@@ -7043,7 +7718,42 @@ class SessionStreamFn:
                     last_output_at=last_output_at,
                     output_deltas=output_deltas,
                 )
+            # A CONSUMER CUT (the loop's degeneration guard) arrives with no
+            # final usage: the provider's usage frame never came. Book it as an
+            # ESTIMATE rather than as unknown spend -- see
+            # ``_estimate_consumer_cut_usage`` for the estimator and its labels.
+            # Only when the consumer actually marked a cut: an ordinary abort or
+            # failure keeps today's honest "unknown".
+            cut = request.consumer_cut
+            cut_chars = cut.output_chars if cut is not None else None
+            usage_estimated = cut_chars is not None
+            if cut is not None and cut_chars is not None:
+                final_usage = _estimate_consumer_cut_usage(
+                    request, final_usage, cut_chars=cut_chars
+                )
+                cut.estimated_usage = final_usage
             duration_ms = (time.monotonic() - started_at) * 1000
+            # Lazy, like this file's other ``anthropic_cache_ttl`` reads: a
+            # module-dict lookup once per request, never per delta.
+            from local_operator.providers.anthropic_cache_ttl import (
+                SUBAGENT_LONG_CALL_1H_THRESHOLD_S,
+            )
+
+            if (
+                ok
+                and request.purpose == "turn"
+                and not request.isolated
+                and duration_ms >= SUBAGENT_LONG_CALL_1H_THRESHOLD_S * 1000
+            ):
+                # Request start to stream end, the clock the ledger records, and
+                # the one that matters: the 5m TTL was refreshed at the start, so
+                # this is how long the prefix has already been ageing. Completed
+                # turns only; the policy reads it for subagents alone. The span
+                # also covers failed failover attempts and their backoff before
+                # the serving one; that is accepted because it can only arm
+                # early (paying the 1h premium, never losing a cache), and the
+                # prefix's write already started ageing at the first attempt.
+                self._had_long_call = True
             self._record_usage(
                 request,
                 component_chars,
@@ -7060,13 +7770,19 @@ class SessionStreamFn:
                     else -1
                 ),
                 outcome=outcome,
-                usage_reported=final_usage is not None,
+                # An estimate is NOT a provider report: the ledger's
+                # ``usage_reported`` column stays honest, and ``usage_estimated``
+                # is what lets the writer price the estimated tokens anyway.
+                usage_reported=final_usage is not None and not usage_estimated,
+                usage_estimated=usage_estimated,
                 # The decode window, closed here rather than inside the loop:
                 # ``first_output_at is None`` means the stream produced no
                 # output deltas at all, which is "no window" (0 microseconds),
                 # not a zero-length one.
                 decode_us=ledger_window_us,
                 output_deltas=output_deltas,
+                cache_miss_type=cache_miss_type,
+                cache_missed_tokens=cache_missed_tokens,
             )
             # The observation rides AFTER the analytics ledger, alongside it in
             # the same ``finally``: same facts, ONE clock read (``duration_ms``
@@ -7082,6 +7798,7 @@ class SessionStreamFn:
                     ok=ok and outcome != "incomplete",
                     outcome=outcome,
                     duration_ms=duration_ms,
+                    usage_estimated=usage_estimated,
                 )
 
     def _record_usage(
@@ -7099,8 +7816,19 @@ class SessionStreamFn:
         usage_reported: bool = True,
         decode_us: int = 0,
         output_deltas: int = 0,
+        cache_miss_type: str = "",
+        cache_missed_tokens: int = 0,
+        usage_estimated: bool = False,
     ) -> None:
-        """Enqueue one call sample. Off the hot path; never raises."""
+        """Enqueue one call sample. Off the hot path; never raises.
+
+        ``usage_estimated`` marks ``usage`` as the harness's estimate for a call
+        the consumer cut (``_estimate_consumer_cut_usage``): it is priced by the
+        background writer like any tokens-only call, but its basis is recorded
+        as ``estimated`` and ``usage_reported`` stays False, so no reader can
+        mistake it for a provider receipt.
+        """
+        self._log_cache_break(usage, cache_miss_type, cache_missed_tokens)
         try:
             import time as _time
 
@@ -7162,15 +7890,30 @@ class SessionStreamFn:
             from local_operator.providers.registry import credential_provider_id
             from local_operator.session.spend import inference_billing_labels
 
-            # The basis/source labels are decided from the RAW provider id and
-            # the receipt BEFORE the collapse below (PR-3, design §3.4): the
-            # raw stamp is the only place a subscription login flavour
-            # (``openai-device``) is distinguishable from the metered provider
-            # it stores under, and the receipt is a fact of this call alone.
-            # The background writer prices later and cannot recover either.
+            # Prefer the credential-stamped relationship while retaining raw-id
+            # defaults for direct/old streams. Canonicalizing the provider first
+            # would erase login-flavour provenance on those unstamped calls.
             billing_basis, cost_source = inference_billing_labels(
                 str(serving_provider or ""), getattr(usage, "usd_cost", None)
             )
+            from local_operator.session.channel_spend import BASIS_VALUES
+
+            stamped_basis = getattr(usage, "billing_basis", None)
+            if stamped_basis in BASIS_VALUES:
+                billing_basis = stamped_basis
+                # The final payment relationship owns the source too. In
+                # particular, an OpenAI key overrides the old plan default,
+                # so its receipt must not keep the plan's catalogue label.
+                if billing_basis == "billed":
+                    cost_source = (
+                        "provider_reported"
+                        if getattr(usage, "usd_cost", None) is not None
+                        else "catalogue"
+                    )
+                elif billing_basis == "not_tracked":
+                    cost_source = "none"
+                else:
+                    cost_source = "catalogue"
 
             # Login flavours (``xai-oauth``, ``openai-device``) are the same
             # billable provider as their storage id. Canonicalize at record
@@ -7213,18 +7956,62 @@ class SessionStreamFn:
                     usage_reported=usage_reported,
                     # A failed request with no usage is unknown spend, not a
                     # known zero-dollar call. Keep it visible without pricing
-                    # invented token counts on the background writer.
-                    priced=not usage_reported,
+                    # invented token counts on the background writer. The ONE
+                    # exception is a consumer-cut estimate: its tokens are a
+                    # documented estimate (basis ``estimated``), and leaving it
+                    # unpriced is the "cut calls read as free" gap (review m3).
+                    priced=not (usage_reported or usage_estimated),
                     # Ineligible writes 0 to all three, so "no window" is one
                     # value on every surface and the coverage count is what
                     # disambiguates it from a measured zero-length window.
                     decode_us=measured_us,
                     decode_tokens=measured_tokens,
                     decode_calls=measured_calls,
+                    cache_miss_type=cache_miss_type,
+                    cache_missed_tokens=int(cache_missed_tokens),
                 )
             )
         except Exception:  # noqa: BLE001 — recording is best-effort
             logger.debug("analytics: usage record failed", exc_info=True)
+
+    def _log_cache_break(self, usage: Usage, miss_type: str, missed_tokens: int) -> None:
+        """One ``[prompt cache break]`` INFO line for a costly diagnosed break.
+
+        Called once per call from ``_record_usage``, so the line is emitted at
+        most once per call. It fires only when the API NAMED a divergence
+        (``*_changed``, not the baseline/unchanged/pending states and not
+        "no comparison") AND the call actually rewrote a large share of its
+        context: a small late-prompt change behind a still-hitting breakpoint
+        is the API's documented "rare, low impact" case and would be noise.
+        The thresholds mirror the benchmark's break classifier (>= 20k written
+        and >= half the context), so log counts and ledger analysis agree.
+        """
+        try:
+            from local_operator.providers.clients import (
+                ANTHROPIC_CACHE_DIAGNOSIS_NO_BREAK,
+            )
+
+            if (
+                not miss_type
+                or miss_type in ANTHROPIC_CACHE_DIAGNOSIS_NO_BREAK
+                or miss_type in ("previous_message_not_found", "unavailable")
+            ):
+                return
+            written = int(usage.cache_write_tokens)
+            context = int(usage.input_tokens) + int(usage.cache_read_tokens) + written
+            if written < 20_000 or written * 2 < context:
+                return
+            logger.info(
+                "[prompt cache break] session=%s type=%s missed_tokens=%d "
+                "cache_write=%d context=%d",
+                self._session_id or "-",
+                miss_type,
+                int(missed_tokens),
+                written,
+                context,
+            )
+        except Exception:  # noqa: BLE001 — telemetry must never break a turn
+            logger.debug("cache-break log failed", exc_info=True)
 
     async def close(self) -> None:
         if self._closed:
@@ -7233,6 +8020,14 @@ class SessionStreamFn:
         self._transport.owners -= 1
         if self._transport.owners == 0:
             await self._http.aclose()
+        chain, self._saver_chain = self._saver_chain, None
+        if chain is not None:
+            # Cancels this conversation's in-flight prefetch; the process-wide
+            # Saver client stays open for other sessions.
+            try:
+                await chain.aclose()
+            except Exception:  # noqa: BLE001 — teardown, never fatal
+                pass
         if self._usage_cache is not None:
             try:
                 self._usage_cache.close()

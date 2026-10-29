@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "audit_id": "ntt2",
+  "audit_round": 2,
+  "supersedes": "ntt1",
+  "locale": "es",
+  "namespace": "tui.notifications",
+  "record": "i18n/audits/evidence/es/tui.notifications/ntt2/record.json",
+  "provenance": "Delta audit by the independent translation-auditor of session 288dd1136395, actual model radient/auto (disclosed fallback), 2026-10-25. Actual command output captured in-session. Binds the uncommitted on-disk es catalogue c4c2c502...588ac4 and the uncommitted on-disk context sidecar 9d10eb5d...645b6; the committed context sidecar 0a9ee260...5907 is retained as the control.",
+  "audited_target_sha256": "c4c2c502cd3805687bdaeb505b579c629a259bdbee3c453ba72539cca4588ac4",
+  "previous_target_sha256": "559d097210d68f5a15e3da4c584ba613360d63e3a2a4667602be7bcc1758f783",
+  "source_sha256": "b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68",
+  "context_sha256_on_disk": "9d10eb5db735fc9cbfb5152f9106a296f39bc85a722ff67b38ee5233c4d645b6",
+  "context_sha256_committed": "0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907",
+  "audited_revision": "8976104b83b1f4af2fa6014ae5c73d9bbcdebc0a",
+  "key_count": 72,
+  "verdict": "passed",
+  "es_delta": {
+    "changed_strings": 1,
+    "byte_identical": 71,
+    "keys": 72
+  },
+  "hashes": {
+    "record.json": "f9d69ade154455bf138285c77368b9b46e64cdfc995fa17afd017398e04b9117",
+    "report.md": "bb4c48abdc44e49a398e220565aab00d0a8084747286f5097c1a767bebdad3fd",
+    "audit.log": "78609aca4cf70db7c44806068e395a482598f788d01989205f0bddfd6db79fe0"
+  },
+  "companions_in_bundle": [
+    "record.json",
+    "report.md",
+    "audit.log",
+    "receipt.json",
+    "target.json",
+    "source.en.json",
+    "context.disk.json",
+    "context.committed.json"
+  ]
+}

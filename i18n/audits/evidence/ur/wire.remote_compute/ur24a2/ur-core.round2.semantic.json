@@ -1,0 +1,168 @@
+{
+  "schema": 1,
+  "record_kind": "semantic_audit_summary",
+  "round": 2,
+  "revision": "d3f5e21b6b01e82ff20faa4dc49f4f9420a5c40a",
+  "scoped_keys_read": 676,
+  "changed_keys_read": 657,
+  "neighbor_keys_read": 19,
+  "verdict": "failed",
+  "auditor_findings": 2,
+  "round_1_findings_resolved": 10,
+  "namespaces": [
+    {
+      "namespace": "cli.exec_remote_help",
+      "namespace_key_count": 11,
+      "scoped_keys_read": 3,
+      "changed_keys": 3,
+      "direct_neighbor": false,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "relay.ask",
+      "namespace_key_count": 11,
+      "scoped_keys_read": 5,
+      "changed_keys": 5,
+      "direct_neighbor": false,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.asks",
+      "namespace_key_count": 11,
+      "scoped_keys_read": 1,
+      "changed_keys": 1,
+      "direct_neighbor": false,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.review",
+      "namespace_key_count": 73,
+      "scoped_keys_read": 2,
+      "changed_keys": 2,
+      "direct_neighbor": false,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.tags",
+      "namespace_key_count": 27,
+      "scoped_keys_read": 6,
+      "changed_keys": 6,
+      "direct_neighbor": false,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.viewer",
+      "namespace_key_count": 19,
+      "scoped_keys_read": 1,
+      "changed_keys": 1,
+      "direct_neighbor": false,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "tui.welcome",
+      "namespace_key_count": 30,
+      "scoped_keys_read": 2,
+      "changed_keys": 2,
+      "direct_neighbor": false,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.errors.settings",
+      "namespace_key_count": 12,
+      "scoped_keys_read": 4,
+      "changed_keys": 4,
+      "direct_neighbor": false,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.remote_compute",
+      "namespace_key_count": 43,
+      "scoped_keys_read": 21,
+      "changed_keys": 21,
+      "direct_neighbor": false,
+      "verdict": "clean_with_followups",
+      "finding_ids": [
+        "UR-R2-006"
+      ],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 1,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.settings",
+      "namespace_key_count": 818,
+      "scoped_keys_read": 589,
+      "changed_keys": 589,
+      "direct_neighbor": false,
+      "verdict": "failed",
+      "finding_ids": [
+        "UR-R2-001",
+        "UR-R2-002",
+        "UR-R2-003",
+        "UR-R2-005",
+        "UR-R2-007"
+      ],
+      "unresolved_blocker_major": 2,
+      "unresolved_minor": 3,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "wire.slash",
+      "namespace_key_count": 52,
+      "scoped_keys_read": 23,
+      "changed_keys": 23,
+      "direct_neighbor": false,
+      "verdict": "clean_with_followups",
+      "finding_ids": [
+        "UR-R2-004"
+      ],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 1,
+      "unresolved_nit": 0
+    },
+    {
+      "namespace": "relay.session.tags",
+      "namespace_key_count": 19,
+      "scoped_keys_read": 19,
+      "changed_keys": 0,
+      "direct_neighbor": true,
+      "verdict": "clean",
+      "finding_ids": [],
+      "unresolved_blocker_major": 0,
+      "unresolved_minor": 0,
+      "unresolved_nit": 0
+    }
+  ]
+}

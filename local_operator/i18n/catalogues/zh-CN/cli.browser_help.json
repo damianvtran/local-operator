@@ -1,0 +1,22 @@
+{
+  "cli.browser_help.browser": "将browser工具连接至Chromium扩展",
+  "cli.browser_help.install": "安装桥接守护进程",
+  "cli.browser_help.status": "显示守护进程、扩展和配对状态",
+  "cli.browser_help.status_repair": "将公布的状态与实际状态对齐：移除已不存在的标签页并重新发布最新心跳。会话运行中也可安全执行。",
+  "cli.browser_help.json": "机器可读输出",
+  "cli.browser_help.cleanup": "重新验证后关闭已确认终止的浏览器所有者",
+  "cli.browser_help.cleanup_yes": "批准这一次确切的清理",
+  "cli.browser_help.daemon_action": "{action, select, start{启动} stop{停止} restart{重启} other{{action}}}守护进程",
+  "cli.browser_help.pair": "显示扩展配对码",
+  "cli.browser_help.pair_reset": "先撤销已配对的浏览器",
+  "cli.browser_help.pair_list": "列出已授权的浏览器扩展及当前驱动者",
+  "cli.browser_help.pair_revoke": "撤销一个已授权扩展（使用其ID、无歧义的ID前缀或部分标签），保留其他所有配对",
+  "cli.browser_help.drive": "选择驱动浏览器的已授权扩展",
+  "cli.browser_help.drive_target": "扩展ID（或无歧义的前缀），或部分标签",
+  "cli.browser_help.logs": "跟踪守护进程日志末尾",
+  "cli.browser_help.uninstall": "移除桥接守护进程",
+  "cli.browser_help.uninstall_purge": "同时删除配对状态",
+  "cli.browser_help.serve": "运行桥接守护进程（前台）",
+  "cli.browser_help.tabs": "列出持久化所有权记录和当前标签页（只读）",
+  "cli.browser_help.reconcile": "作为'tabs'的别名：检查所有权，不关闭任何内容"
+}

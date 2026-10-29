@@ -121,8 +121,32 @@ default keep "difference" honest:
   status line "bookkeeping" and suppress it. **Appended content is never
   gated**: a delta that only adds lines (a log tail, a new row) is delivered
   as-is. Suppressions are counted (`suppressed.*` in the monitor's state file)
-  and logged at INFO, but the `N checks, 0 deliveries — nothing has changed`
-  hint does not say so — it can mean "suppressed", not only "unchanged".
+  and logged at INFO, and the listing says so: a row with checks, no deliveries
+  and suppressions reads `N changes suppressed as non-material (M checks, 0
+  deliveries) — the call may have changed without telling you`, not `nothing
+  has changed`. That distinction is the point — a gate filing real news as
+  bookkeeping is invisible otherwise. The fact leads the sentence because the
+  TUI band renders the first clause and used to drop it.
+- **A delta whose preview hides its change is never gated.** Long single-line
+  results (a compact JSON thread, `gh pr view --json`, `jq -c`) used to render
+  as two identical 200-character prefix clips, so the gate's only visible
+  "difference" was a spill footer's char count and it called that non-material
+  metadata — the 2026-10-20 Slack monitor lost seven replies that way. A long
+  changed line now shows a window around the first differing character, and if
+  a preview still hides the difference the gate is skipped and the change is
+  delivered (fail open, by design).
+- **Long results are compared in full — up to a bound.** A result over the
+  tool-output limit is spilled to disk and the model sees a head+tail
+  projection; the monitor reads the FULL stored body back for its comparison,
+  so a change past the visible head is still seen. The comparison has its own
+  budget (1 MiB or 8,000 lines, whichever comes first): past it the monitor
+  does not diff at all and delivers a `change beyond the stored snapshot
+  window` delta instead — the materiality gate is skipped, so it cannot be
+  suppressed, but the delta does not show what changed. Narrow the watched call
+  (`grep -c`, `wc -l`, `tail -n 20`, a filtered `jq`) so its result stays inside
+  the window; a watch whose output is that large is usually watching too much.
+  If the full body is gone (evicted) or was stored incompletely, the monitor
+  goes **blind** rather than comparing a truncated view — see below.
 - A `read` of a file numbers its lines (`12| …`), truncates at ~8 KB and prints a
   `[truncated … N more lines]` footer. A log that grows past that window only
   shows its head, so the monitor cannot see appended lines: watch it with
@@ -157,12 +181,34 @@ always announced: a disable, a stall and a recovery each arrive as a message
 naming the monitor, the cause, its delivery count and how to reactivate it.
 Nothing stops silently.
 
+A monitor can also be **blind**: its call still runs, but the full result it
+needs to compare is no longer available — the saved output was evicted from
+the bounded spill store, or it was too large to keep whole. A blind monitor
+charges no failure and does not advance its baseline (so nothing is lost), but
+it reports nothing, and it says so: one notice when it goes blind
+("cannot compare its result … changes are not being reported"), the row leads
+with the state word `blind`, and a matching "seeing its full result again"
+arrives when a comparable check succeeds. The check after that recovery diffs
+against the last good baseline, so everything missed during the episode arrives
+as one delta — unless the episode began before any baseline existed (a first
+check that was already blind), in which case the first full result is adopted
+silently and both notices say there is no gap to report.
+
+An **expired** monitor (`until_at` has passed) outranks blind everywhere: it
+will not tick again, so a blind state describes a failure that can no longer
+cost a missed change. That is one rule for the shared health line, the CLI
+state word, the TUI band and the desktop/mobile rows.
+
 The list surfaces say what a row's counters alone cannot: `idle` (overdue
 because no session is hosting it), `never checked`, `N checks, 0 deliveries —
-nothing has changed`, and `tool unavailable since HH:MM — retrying`. The
-status band is a two-row glance surface, so it carries the STATE in the due
-slot (`disabled` / `stalled` / `idle`) and the state clause of a hint; the
-`lop monitor status` table and the expanded receipt carry each hint whole.
+nothing has changed` (or the suppression sentence above, when changes were
+suppressed), `BLIND: cannot compare its result — <reason>; changes are not
+being reported`, and `tool unavailable since HH:MM — retrying`. The status band
+is a two-row glance surface, so it carries the STATE in the due slot
+(`disabled` / `stalled` / `blind` / `idle`) and the state clause of a hint; the
+`lop monitor status` table prints each row, then its health hint on an indented
+wrapped line beneath it (a narrow terminal wraps the fact rather than clipping
+it), and `--json` carries it inline.
 
 ## No action needed is a first-class outcome
 

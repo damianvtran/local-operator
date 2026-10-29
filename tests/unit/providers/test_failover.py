@@ -3088,12 +3088,70 @@ def test_an_image_rejection_is_recognised_in_both_the_raised_and_rendered_forms(
         "dimensions exceed max allowed size for many-image requests: 2000 pixels",
         "messages.5.content.1.image.source.base64.data: At least one of the image "
         "dimensions exceed max allowed size: 8000 pixels",
+        # The per-request image COUNT refusal, measured live on
+        # claude-haiku-4-5 with 101 images (PR #3004 QA round 1, C2c).
+        "Too much media: 0 document pages + 101 images > 100",
     ],
 )
 def test_the_wordings_providers_actually_use_are_all_recognised(message: str) -> None:
     """Sampled from the reports this degrade exists for, not invented:
     anthropics/claude-code#12009, #13594, #31142, #50708, #12351, #39185."""
     assert is_image_rejection(ProviderError(400, message))
+
+
+@pytest.mark.parametrize(
+    "status, message",
+    [
+        # OpenRouter, when no endpoint behind the id takes images.
+        (404, "No endpoints found that support image input"),
+        # DeepSeek direct: the wire schema has no image part at all.
+        (
+            422,
+            "Failed to deserialize the JSON body into the target type: messages[0]: "
+            "unknown variant `image_url`, expected `text` at line 1 column 120",
+        ),
+        (
+            400,
+            "Failed to deserialize the JSON body into the target type: messages[0]: "
+            "unknown variant `image_url`, expected `text`",
+        ),
+        # OpenAI-compatible gateways.
+        (400, "Invalid content type. image_url is only supported by certain models."),
+        (400, "image_url is not supported"),
+    ],
+)
+def test_a_text_only_model_refusing_images_is_an_image_rejection(status, message) -> None:
+    """The MODALITY refusals (PR #3071 M1/Q1): an undescribed model is sent
+    images, so a text-only endpoint behind one must be recognised in BOTH
+    forms, or the session re-sends the image and fails every turn."""
+    from local_operator.providers.failover import is_image_modality_rejection
+
+    raised = ProviderError(status, message)
+    assert is_image_rejection(raised)
+    assert is_image_rejection(str(raised))
+    assert is_image_modality_rejection(raised)
+    assert is_image_modality_rejection(str(raised))
+
+
+def test_a_block_refusal_is_not_a_modality_refusal_and_5xx_is_neither() -> None:
+    from local_operator.providers.failover import is_image_modality_rejection
+
+    assert not is_image_modality_rejection(ProviderError(400, "Could not process image"))
+    assert not is_image_modality_rejection(
+        ProviderError(503, "No endpoints found that support image input")
+    )
+    assert not is_image_rejection(ProviderError(503, "No endpoints found that support image input"))
+
+
+def test_only_the_count_refusal_is_provider_scoped() -> None:
+    """The count refusal names a per-request limit, not a bad block, so it is
+    the one image rejection the session may lift on a provider switch."""
+    from local_operator.providers.failover import is_image_count_rejection
+
+    count = "Too much media: 0 document pages + 101 images > 100"
+    assert is_image_count_rejection(ProviderError(400, count))
+    assert not is_image_count_rejection(ProviderError(400, "Could not process image"))
+    assert not is_image_count_rejection(ProviderError(500, count))
 
 
 def test_the_many_image_refusal_degrades_in_the_rendered_form_too() -> None:
@@ -7957,3 +8015,133 @@ async def test_quota_blocked_recovers_with_paid_only(
         assert store.is_blocked_for_model(row.id, "openai", "gpt-codex") is not expected
     finally:
         store.close()
+
+
+class TestAFailureIsAttributedToTheTargetThatProducedIt:
+    """The operator's screenshot, at the level where the string is assembled.
+
+    A turn that STARTED on ``anthropic/claude-opus-5-5`` was served by OpenAI
+    after Anthropic's quota ran out; OpenAI refused with a ``cyber_policy``
+    content filter, and the incident was rendered against Anthropic. Nothing in
+    the error carried the target that produced it, so every reporting surface
+    fell back to the session's selected model.
+    """
+
+    REFUSAL = (
+        "cyber_policy: This content was flagged for possible cybersecurity risk. "
+        "If this seems wrong, try rephrasing your request. If you're doing authorized "
+        "security work that requires more cyber permissive safeguards, apply for "
+        "Daybreak access via https://platform.openai.com/settings/organization/"
+        "status-and-access before retrying."
+    )
+
+    async def _run(self, request: ChatRequest, error: ProviderError) -> ProviderError:
+        async def client_for(spec: ModelSpec) -> Any:
+            return ScriptedClient(error)
+
+        auth = FakeAuth({request.model.provider: ["k1"]})
+        settings = {"retry": {"baseDelayMs": 1, "maxRetries": 0, "fallbackChains": {"default": []}}}
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(request, auth, settings, client_for):
+                pass
+        return excinfo.value
+
+    async def test_the_error_carries_the_provider_that_returned_it(self) -> None:
+        error = await self._run(
+            _request("openai", "gpt-5"), ProviderError(None, self.REFUSAL, retryable=True)
+        )
+        assert error.selector == "openai/gpt-5"
+        assert error.provider == "openai"
+        assert error.model == "gpt-5"
+        # The walk never left its own entry selector here (the session had
+        # already routed onto the fallback), so there is no hop for IT to
+        # narrate; the session supplies the selection it moved off.
+        assert error.failover_from == ""
+
+    async def test_the_failure_class_survives_the_attribution(self) -> None:
+        """``content-filter`` and ``cyber_policy`` are the diagnosable part.
+
+        A reader needs to know a retry on this model fails identically, so the
+        attribution is a PREFIX in ``describe()`` and ``str()`` is untouched.
+        """
+        error = await self._run(
+            _request("openai", "gpt-5"), ProviderError(None, self.REFUSAL, retryable=True)
+        )
+        assert str(error) == f"transient provider error: {self.REFUSAL}"
+        assert error.describe() == f"failed on openai/gpt-5: {str(error)}"
+
+    async def test_a_hop_is_named_as_a_hop(self) -> None:
+        """A fallback target's error says what it failed over FROM."""
+        error = failover_module._attribute_failure(
+            ProviderError(None, self.REFUSAL, retryable=True),
+            FallbackTarget("openai/gpt-5", None),
+            "anthropic/claude-opus-5-5",
+        )
+        assert error.failover_from == "anthropic/claude-opus-5-5"
+        assert error.provenance == (
+            "failed on openai/gpt-5 after failing over from anthropic/claude-opus-5-5"
+        )
+
+    async def test_a_primary_failure_states_no_hop(self) -> None:
+        error = failover_module._attribute_failure(
+            ProviderError(None, self.REFUSAL, retryable=True),
+            FallbackTarget("anthropic/claude-opus-5-5", None),
+            "anthropic/claude-opus-5-5",
+        )
+        assert error.failover_from == ""
+        assert error.provenance == "failed on anthropic/claude-opus-5-5"
+
+    async def test_an_unattributed_error_degrades_to_its_old_text(self) -> None:
+        """Nothing constructed outside the walk gains a sentence."""
+        error = ProviderError(429, "quota exceeded", retryable=True)
+        assert error.selector == ""
+        assert error.provenance == ""
+        assert error.describe() == str(error)
+
+    async def test_a_mid_stream_failure_from_a_fallback_is_attributed(self) -> None:
+        """The arm that raised BEFORE the reported slot was ever offered.
+
+        A fallback that forwarded bytes cannot be retried, so the walk
+        re-raises the provider's error directly. That exit skipped `record()`
+        entirely and left the error unattributed — the same misattribution,
+        one arm further along (agent review round 1, MAJOR 1).
+        """
+
+        class _DeltaThenRaise:
+            def __init__(self, error: ProviderError) -> None:
+                self._error = error
+
+            async def stream(
+                self, request: ChatRequest, api_key: str | None, oauth_access: Any = None
+            ):
+                # A TEXT delta, not a start event: ``_RETRY_SAFE_STREAM_EVENTS``
+                # lets the walk replay a stream whose only output is acceptance,
+                # and this arm is specifically the one the caller has SEEN.
+                yield StreamTextDelta(delta="The answer so far")
+                raise self._error
+
+        refusal = ProviderError(None, self.REFUSAL, retryable=True)
+
+        def client_for(spec: ModelSpec) -> Any:
+            if spec.model_id == "gpt-5":
+                return _DeltaThenRaise(refusal)
+            return ScriptedClient(ProviderError(429, "quota exceeded", retryable=True))
+
+        auth = FakeAuth({"anthropic": ["k1"], "openai": ["k2"]})
+        settings = {
+            "retry": {
+                "baseDelayMs": 1,
+                "maxRetries": 0,
+                "fallbackChains": {"default": ["openai/gpt-5"]},
+            }
+        }
+        with pytest.raises(ProviderError) as excinfo:
+            async for _ in stream_with_failover(
+                _request("anthropic", "claude-opus-5-5"), auth, settings, client_for
+            ):
+                pass
+
+        error = excinfo.value
+        assert error.selector == "openai/gpt-5"
+        assert error.failover_from == "anthropic/claude-opus-5-5"
+        assert "cyber_policy" in str(error)

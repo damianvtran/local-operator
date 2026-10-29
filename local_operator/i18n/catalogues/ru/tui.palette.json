@@ -1,0 +1,9 @@
+{
+  "tui.palette.kind_agent": "агент",
+  "tui.palette.kind_command": "команда",
+  "tui.palette.kind_session": "сессия",
+  "tui.palette.kind_setting": "настройка",
+  "tui.palette.kind_team": "ИИ-команда",
+  "tui.palette.no_matches": "Ничего не найдено",
+  "tui.palette.placeholder": "Поиск команд, настроек, сессий, агентов…"
+}

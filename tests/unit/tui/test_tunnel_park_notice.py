@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -281,3 +283,109 @@ def test_every_card_branch_leads_with_its_command_and_fits_one_row() -> None:
     )
     # A park with no remedy at all names no command rather than an empty one.
     assert tunnel_park_card("login_required", "") == (f"{ICON_APPROVALS} Radient sign-in expired")
+
+
+#: What the poll must never pull onto the event loop. `tunnels.gateway` is the
+#: connector's HTTP server and drags these in at module level; a measured cold
+#: first tick that imported it held the loop for 36 ms with no park and 340 ms
+#: with one (PR #3046 review, m2) — on a five-second interval that is ALWAYS on,
+#: so a conversation switch or a keystroke landing on it waited that long.
+_HEAVY_TUNNEL_MODULES = ("local_operator.tunnels.gateway", "jwt", "starlette", "httpx")
+
+#: Runs in a FRESH interpreter, because `sys.modules` in the pytest process
+#: already holds every one of those (this very file imports the gateway for its
+#: fixture), so an in-process check could never fail. Drives the REAL timer-less
+#: entry point `_poll_tunnel_park` inside a mounted app, once with no park and
+#: once with a park whose reason the card has its own words for, and prints what
+#: the ticks imported that the booted app had not.
+_TICK_IMPORT_PROBE = """
+import asyncio, json, sys
+from pathlib import Path
+import os
+
+from local_operator.tui.app import OperatorApp
+from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+OperatorApp._check_for_update = lambda self: None
+heavy = json.loads(sys.argv[1])
+
+async def main():
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(160, 48)) as pilot:
+        await pilot.pause()
+        booted = {m for m in heavy if m in sys.modules}
+        app._poll_tunnel_park()
+        d = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"]) / "tunnel"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "config.json").write_text(json.dumps({"tunnel_id": "t-1", "stopped": False}))
+        (d / "state.json").write_text(json.dumps({"state": "parked", "reason": "login_required",
+            "remedy": {"command": "lop login radient"}}))
+        app._poll_tunnel_park()
+        await pilot.pause()
+        shown = app._tunnel_park_notice
+        print(json.dumps({"booted": sorted(booted), "after_ticks":
+            sorted(m for m in heavy if m in sys.modules and m not in booted), "shown": shown}))
+
+asyncio.run(main())
+"""
+
+
+def _isolated_env(tmp_path: Path) -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("CMUX_")}
+    env.update(
+        HOME=str(tmp_path),
+        LOCAL_OPERATOR_CONFIG_DIR=str(tmp_path / "config"),
+        LOCAL_OPERATOR_NO_NOTIFICATIONS="1",
+        LOCAL_OPERATOR_NO_TERMINAL_TITLE="1",
+    )
+    return env
+
+
+def test_importing_the_park_store_does_not_import_the_gateway(tmp_path) -> None:
+    """`tunnels.state` is what the TUI poll imports; it must stay a file reader.
+
+    A structural fact rather than a time bound (AGENTS.md, "Prefer a structural
+    invariant to a numeric one"): the cost was the import, so the test is that
+    the import does not happen.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json, sys; import local_operator.tunnels.state; "
+            f"print(json.dumps([m for m in {list(_HEAVY_TUNNEL_MODULES)!r} if m in sys.modules]))",
+        ],
+        env=_isolated_env(tmp_path),
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == []
+
+
+def test_a_poll_tick_imports_nothing_heavy_onto_the_event_loop(tmp_path) -> None:
+    """The tick runs ON the loop (`set_interval`), so whatever it imports blocks it.
+
+    Both branches a tick takes in practice: nothing parked (every machine, every
+    five seconds) and a park the card has its own wording for. `shown` proves
+    the second tick really reached the card rather than returning early.
+    """
+    root = Path(__file__).resolve().parents[3]
+    env = _isolated_env(tmp_path)
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(root), env.get("PYTHONPATH", "")]))
+    result = subprocess.run(
+        [sys.executable, "-c", _TICK_IMPORT_PROBE, json.dumps(_HEAVY_TUNNEL_MODULES)],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert report["shown"] == "login_required", report
+    assert report["after_ticks"] == [], report

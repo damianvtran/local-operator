@@ -1,0 +1,19 @@
+# cli.mcp_help — sampled en/zh pairs for attestation zhca1
+# 4/19 keys; all >120 chars and all plurals included
+
+## cli.mcp_help.add_oauth  [37 chars]
+EN: Enable OAuth for a remote HTTP server
+ZH: 为远程HTTP服务器启用OAuth
+
+## cli.mcp_help.list  [48 chars]
+EN: List configured MCP servers (all sources merged)
+ZH: 列出已配置的MCP服务器（合并所有来源）
+
+## cli.mcp_help.logout  [53 chars]
+EN: Remove the stored OAuth credential for one MCP server
+ZH: 移除一个MCP服务器已存储的OAuth凭据
+
+## cli.mcp_help.remove_name  [21 chars]
+EN: Server name to remove
+ZH: 要移除的服务器名称
+

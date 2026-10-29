@@ -105,7 +105,11 @@ def test_ineligible_bytes_never_reach_hash_or_conditional_response(
     client, monkeypatch, tmp_path, disabled: bool
 ) -> None:
     root = tmp_path / "catalogues"
-    locale = "fr" if disabled else "zh-CN"
+    # Every supported locale now ships (zh-CN included after its disposition),
+    # so the ineligible-by-shipment arm uses a synthetic tag with
+    # committed-shaped bytes; eligibility must come from the generated set,
+    # never from disk presence.
+    locale = "fr" if disabled else "xx"
     (root / locale).mkdir(parents=True)
     (root / locale / "wire.held.json").write_text('{"wire.held.label": "Held fixture copy"}')
     monkeypatch.setattr(catalogues, "_CATALOGUES", root)
@@ -131,6 +135,19 @@ def test_ineligible_bytes_never_reach_hash_or_conditional_response(
         assert response.status_code == 404
         assert "etag" not in response.headers
         assert "Held fixture copy" not in response.text
+
+
+def test_released_chinese_catalogue_is_served(client) -> None:
+    # The disposition made zh-CN eligible: the mobile route serves its audited
+    # committed bytes with the file-hash ETag, not a 404 or an English copy.
+    response = client.get("/api/i18n/catalogues/zh-CN/wire.exec")
+    assert response.status_code == 200
+    result = response.json()["result"]
+    raw = (catalogues.catalogue_root() / "zh-CN/wire.exec.json").read_bytes()
+    sha = hashlib.sha256(raw).hexdigest()
+    assert result == {"messages": json.loads(raw), "content_sha256": sha}
+    assert response.headers["etag"] == f'"{sha}"'
+    assert response.headers["cache-control"] == "no-cache"
 
 
 def test_adapter_does_not_import_core_route_models() -> None:

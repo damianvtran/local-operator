@@ -105,15 +105,17 @@ function projection(): SessionProjection {
 async function openSheet() {
 	render(
 		<Composer
+			ended={false}
 			pid="p1"
 			projection={projection()}
 			onOpenModels={() => {}}
+			onReturnToModels={() => {}}
 			onOpenEffort={() => {}}
 			effortOpen={false}
 			onCloseEffort={() => {}}
 		/>,
 	);
-	const field = screen.getByPlaceholderText("Message…") as HTMLTextAreaElement;
+	const field = screen.getByPlaceholderText("Ask anything…") as HTMLTextAreaElement;
 	fireEvent.change(field, { target: { value: "/" } });
 	await waitFor(() => expect(screen.getByRole("button", { name: /\/goal/ })).toBeTruthy());
 	return field;

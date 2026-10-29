@@ -267,9 +267,17 @@ def _selected(body: dict[str, Any], allowed: tuple[str, ...]) -> dict[str, Any]:
 
 
 def list_payload(config_dir: Path) -> dict[str, Any]:
-    """``GET /api/projects`` — the listing (summaries), board order."""
+    """``GET /api/projects`` — the listing (summaries), board order.
+
+    The listing is the registry's recency PAGE, so the payload declares the
+    page beside it (the desktop listing's fields, verbatim): ``total_rows`` is
+    the addressable set, ``loaded_rows`` what this answer holds, and
+    ``truncated`` says rows are beyond it — a project missing from the list is
+    still reachable by key or name through the detail route.
+    """
     registry = _registry(config_dir)
     listed = registry.list_projects()
+    counts = registry.page_counts
     live = _live_counts(registry, listed)
     rows = [
         project_summary(
@@ -280,7 +288,12 @@ def list_payload(config_dir: Path) -> dict[str, Any]:
         for project in listed
     ]
     rows.sort(key=lambda row: (STATUS_RANK.get(row.status, 99), -row.updated_at))
-    return {"projects": [row.model_dump(mode="json") for row in rows]}
+    return {
+        "projects": [row.model_dump(mode="json") for row in rows],
+        "total_rows": counts.total_rows,
+        "loaded_rows": counts.loaded,
+        "truncated": counts.truncated,
+    }
 
 
 def detail_payload(config_dir: Path, key: str) -> dict[str, Any]:

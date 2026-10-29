@@ -90,6 +90,14 @@ async def _allow_quiet() -> None:
     return None
 
 
+async def _allow_notify(**_kwargs: Any) -> str:
+    """An inbox door that accepts — the value a real top-level session binds.
+
+    ``build_notify_tool`` only checks PRESENCE; the body is never run.
+    """
+    return "Notified."
+
+
 def build_real_tool_context(cwd: str) -> ToolContext:
     """A ToolContext whose capabilities are all present.
 
@@ -148,6 +156,11 @@ def build_real_tool_context(cwd: str) -> ToolContext:
         # short of a real signed-in session's (``bridge``), the same defect
         # the project registry above records. Never called by a measurement.
         bridge_runtime=_UntypedStub(),
+        # The inbox door (docs/design/notifications-inbox.md §3.2): a bare
+        # callable a real top-level session binds, so leaving it unbound would
+        # measure a surface one tool short of every such session's
+        # (``notify``). The builder checks presence only; never awaited here.
+        notify_inbox=_allow_notify,
     )
 
 
@@ -294,6 +307,25 @@ def _forced_audio_backend() -> Iterator[None]:
         audio_tool.audio_availability.sound_effect_reachable = saved_effect
 
 
+@contextmanager
+def _forced_artifact_data_backend() -> Iterator[None]:
+    """Make ``build_artifact_data_tool`` say yes regardless of stored logins.
+
+    The SIXTH machine-probing leg: the tool exists only where an ``anthropic``
+    OAuth grant is stored, so a CI runner would measure a surface one tool
+    lighter than a signed-in session — the same green-by-fiction the legs
+    above prevent, same fix (patched on the module the builder resolves).
+    """
+    from local_operator.tools import artifact_data_tool
+
+    saved = artifact_data_tool.anthropic_grant_stored
+    artifact_data_tool.anthropic_grant_stored = lambda *args, **kwargs: True
+    try:
+        yield
+    finally:
+        artifact_data_tool.anthropic_grant_stored = saved
+
+
 def build_real_tools(cwd: str) -> list[AgentTool]:
     """The default tool set as a fully-capable session would advertise it.
 
@@ -312,6 +344,7 @@ def build_real_tools(cwd: str) -> list[AgentTool]:
         _forced_image_backend(),
         _forced_video_backend(),
         _forced_audio_backend(),
+        _forced_artifact_data_backend(),
     ):
         return registry.create_tools(build_real_tool_context(cwd))
 

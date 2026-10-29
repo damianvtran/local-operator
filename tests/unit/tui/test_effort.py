@@ -20,6 +20,7 @@ from rich.cells import cell_len
 from textual.geometry import Size
 from textual.widgets import Static
 
+from local_operator.harness.types import EFFORT_CHOICE_UNSET
 from local_operator.model.configure import build_model_spec
 from local_operator.model.effort import EFFORT_ORDER, default_effort, supported_efforts
 from local_operator.paths import DEFAULT_CONFIG_DIRNAME
@@ -51,6 +52,17 @@ class EffortSession(FakeSession):
     own variable and nothing would prove the request changed.
     """
 
+    #: The CONVERSATION's chosen level, as the real session reports it. Declared
+    #: so the app's adoption path can read it (a typed attribute, not a
+    #: ``setattr``), and asserted by the tests below.
+    chosen_effort: str | None = None
+
+    #: What the app LAST stated to the session: the level it chose, or ``None``
+    #: for the withdrawal. The real session records this on the spec; the
+    #: double records it here so a test can prove the TUI stated the decision
+    #: rather than only moving the band.
+    last_effort_choice: object = EFFORT_CHOICE_UNSET
+
     def __init__(self, provider: str = "anthropic", model_id: str = "claude-opus-5") -> None:
         super().__init__()
         self._spec = build_model_spec(provider, model_id)
@@ -63,8 +75,15 @@ class EffortSession(FakeSession):
     def model(self) -> Any:
         return self._spec
 
-    def set_model(self, model: Any, *, explicit: bool = False) -> None:
+    def set_model(
+        self,
+        model: Any,
+        *,
+        explicit: bool = False,
+        effort_choice: object = EFFORT_CHOICE_UNSET,
+    ) -> None:
         self._spec = model
+        self.last_effort_choice = effort_choice
 
 
 class EffortProviderController(FakeProviderController):
@@ -242,17 +261,26 @@ async def test_effort_with_a_level_sets_it_and_says_what_changed() -> None:
         level = _level(app)
         notices = _notices(app)
         band = _band(app)
+        session = app._session
     assert level == "low"
+    # FAIL-CLOSED: the default is the UNSET sentinel, not ``None``. A missing
+    # attribute must FAIL this assertion rather than satisfy it — the whole
+    # point is that the TUI stated the decision to the session, and a test that
+    # tolerates the attribute's absence proves nothing.
+    assert (
+        getattr(session, "last_effort_choice", EFFORT_CHOICE_UNSET) == "low"
+    ), "the TUI applied but never stated the choice"
     assert "low" in band
     receipt = [n for n in notices if "reasoning effort" in n]
     assert receipt, notices
     # Names the old level and the new one, and how long the choice lasts: it is
-    # session-scoped by design and nothing else on screen would say so. The scope
-    # word is `(session)`, one word shorter than the siblings' `(this session)`
-    # because this receipt's two rung words are both variable and this one has to
-    # hold every pair at 80 columns (round-2 D9).
+    # kept for THIS CONVERSATION (the journal row is written on every change,
+    # so a restart keeps it) while `/new` still starts from the configured
+    # default. The scope word is `(saved)`, which is both honest and short
+    # enough that this receipt's two variable rung words still hold every pair
+    # at 80 columns (round-2 D9).
     assert "high" in receipt[-1] and "low" in receipt[-1]
-    assert "(session)" in receipt[-1]
+    assert "(saved)" in receipt[-1]
 
 
 @pytest.mark.asyncio
@@ -291,8 +319,10 @@ async def test_bare_effort_lists_the_ladder_and_marks_the_current_level() -> Non
     # The scope statement is this command's answer to `PERSIST_HINT`, which a
     # bare `/model` prints in the same slot: /model volunteers that a pick CAN
     # be persisted (`/model default`, or the settings page), so /effort has to
-    # volunteer that a level cannot.
-    assert "this session only" in listing
+    # volunteer the unit its level lasts for. It is the CONVERSATION now — the
+    # journal row is written on every effort change, so a restart keeps it —
+    # while `/new` still starts from the configured default.
+    assert "this conversation" in listing
 
 
 @pytest.mark.asyncio
@@ -306,8 +336,13 @@ async def test_effort_auto_returns_to_the_models_own_default() -> None:
         await _submit(pilot, app, "/effort auto")
         level = _level(app)
         remembered = app._effort_choice
+        session = app._session
     assert level == "high"
     assert remembered is None
+    # Same fail-closed default: an ABSENT attribute is not a withdrawal.
+    assert (
+        getattr(session, "last_effort_choice", EFFORT_CHOICE_UNSET) is None
+    ), "the withdrawal was never stated to the session"
 
 
 @pytest.mark.asyncio
@@ -356,6 +391,29 @@ async def test_the_chosen_level_survives_a_session_rebuild() -> None:
         band = _band(app)
     assert level == "low"
     assert "low" in band
+
+
+@pytest.mark.asyncio
+async def test_a_restored_choice_follows_the_first_model_switch() -> None:
+    """The journal's choice is the app's STARTING preference after a restart.
+
+    ``_effort_choice`` is in-process state and starts empty when the app adopts
+    a resumed session. Without seeding it from ``Session.chosen_effort``, the
+    first ``/model`` lands on the target's seed and the band reads as though the
+    stored choice had been dropped — the reported defect one step later.
+    """
+    session = EffortSession()
+    session._spec = build_model_spec("anthropic", "claude-opus-5").model_copy(
+        update={"reasoning_effort": "max"}
+    )
+    session.chosen_effort = "max"
+    app = OperatorApp(lambda: _factory(session), provider_controller=EffortProviderController())
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/model anthropic/claude-sonnet-5-5")
+        level = _level(app)
+        band = _band(app)
+    assert level == "max", band
 
 
 @pytest.mark.asyncio
@@ -530,24 +588,24 @@ async def test_effort_auto_on_a_model_with_no_documented_default_sends_nothing()
         receipt = [n for n in _notices(app) if "reasoning effort" in n][-1]
         band = _band(app)
     assert level is None
-    assert receipt == "reasoning effort: high → auto (this session) — /settings sets auto", receipt
+    assert receipt == "reasoning effort: high → auto (saved) — /settings sets auto", receipt
     assert "▴ auto" in band
 
 
 @pytest.mark.asyncio
-async def test_effort_auto_says_the_withdrawal_is_for_this_session_only() -> None:
-    """U2: `/effort auto` withdraws the level for THIS conversation, and the
-    stored key still governs the next one — so the receipt has to say both, and
-    name the one route that changes the standing default (`/settings`; a stored
-    level survives a bare `/model default` by design, D6, so that command is not
-    that route)."""
+async def test_effort_auto_says_the_withdrawal_is_for_this_conversation() -> None:
+    """U2: `/effort auto` withdraws the level for THIS conversation — durably,
+    since the withdrawal is journalled — and the stored key still governs the
+    next one, so the receipt has to say both, and name the one route that
+    changes the standing default (`/settings`; a stored level survives a bare
+    `/model default` by design, D6, so that command is not that route)."""
     app = OperatorApp(lambda: _factory(EffortSession()))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
         await _submit(pilot, app, "/effort xhigh")
         await _submit(pilot, app, "/effort auto")
         receipt = [n for n in _notices(app) if "reasoning effort" in n][-1]
-    assert receipt == "reasoning effort: xhigh → high (this session) — /settings sets auto", receipt
+    assert receipt == "reasoning effort: xhigh → high (saved) — /settings sets auto", receipt
     assert len(receipt) <= 70, receipt
 
 

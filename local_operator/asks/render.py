@@ -180,6 +180,10 @@ def response_text(
 
     status = str(record.get("status") or "")
     questions = list(record.get("questions") or [])
+    if status == "dismissed":
+        # NEVER through ``_ask_report``: a dismissal has no answers, and the report
+        # would render the absence as an empty answer (design §15).
+        return dismissed_text(record)
     answers = {
         str(k): [str(v) for v in (vals or [])] for k, vals in (record.get("answers") or {}).items()
     }
@@ -216,6 +220,43 @@ def response_text(
     if status == "late":
         return LATE_LEAD.format(deadline=_stamp(record.get("expires_at"))) + text
     return text
+
+
+#: What an OPEN-ask dismissal tells the agent (design §15, D1). One row per
+#: ``reason``; the secret variant names no value and says where else the credential
+#: may be found.
+DISMISSED_ANSWERED_IN_CHAT = (
+    "The user dismissed ask {ask_id}: they say it was settled in the conversation. "
+    "Take the answer from what was said in chat and do not ask again; there is no "
+    "need to call `ask_withdraw` for it (it would be refused). If the chat did not "
+    "settle it for you, say so in one line instead of re-asking."
+)
+DISMISSED_MOOT = (
+    "The user dismissed ask {ask_id} as no longer needed. Do not ask it again; carry "
+    "on without it and say in one line what you assumed."
+)
+DISMISSED_SECRET = (
+    "The user dismissed the credential ask {ask_id} without entering a value "
+    "({reason_label}). Do not run anything that needed it unless the conversation "
+    "says where the credential is, such as a stored secret."
+)
+#: The operator-facing label of each reason (design §3.2).
+DISMISS_REASON_LABELS = {
+    "answered_in_chat": "settled in chat",
+    "moot": "no longer needed",
+}
+
+
+def dismissed_text(record: Mapping[str, Any]) -> str:
+    """The ``ask_response`` text for an ask the operator dismissed before its deadline."""
+    from local_operator.asks import store
+
+    reason = store.normalize_dismiss_reason(record.get("dismissed_reason"))
+    ask_id = str(record.get("ask_id") or "")
+    if any(q.get("secret") for q in (record.get("questions") or ()) if isinstance(q, Mapping)):
+        return DISMISSED_SECRET.format(ask_id=ask_id, reason_label=DISMISS_REASON_LABELS[reason])
+    template = DISMISSED_ANSWERED_IN_CHAT if reason == "answered_in_chat" else DISMISSED_MOOT
+    return template.format(ask_id=ask_id)
 
 
 def _timeout_listing_line(question: Mapping[str, Any]) -> str:
@@ -307,6 +348,13 @@ REVISED_ALREADY_DELIVERED = "already delivered — send a new message"
 #: role they were never shown.
 ROLE_BY_WORDS = frozenset({"operator"})
 
+#: No such ask in THIS session's log. Named rather than inlined because a caller
+#: can be looking at a list of OTHER conversations' asks, where the sentence is
+#: true of the row and false of the screen — that caller substitutes its own
+#: wording and must key the substitution on a constant, not on prose (UX round 1,
+#: U5).
+NOT_IN_QUEUE = "that ask is not in this session's queue — it may belong to another session."
+
 
 def refusal_copy(record: Mapping[str, Any] | None) -> str:
     """Why an answer was refused, in one sentence per state (design §2.2).
@@ -319,7 +367,7 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
     from local_operator.asks import store
 
     if record is None:
-        return "that ask is not in this session's queue — it may belong to another session."
+        return NOT_IN_QUEUE
     status = str(record.get("status") or "")
     if status == store.STATUS_OPEN:
         return ""  # accepted
@@ -353,23 +401,27 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
     return "this ask is no longer open."
 
 
-#: The refusal a DISMISSAL returns when the ask is not lapsed.
-#:
-#: ONE constant, read by both doors — ``AskQueue.dismiss`` when a runtime is live
-#: and :func:`local_operator.asks.dismiss.dismiss_cold` when there is none (fork A,
-#: §14). Each used to spell the sentence itself, and two wordings for one state
-#: would make a stale tap look like a different rule depending on which process
-#: answered it.
-#:
-#: WHY IT NAMES ONLY THE LAPSED CASE. :func:`refusal_copy` answers "why can I not
-#: ANSWER this", and it has a better sentence per state for that question. This
-#: op's question is "why can I not DISMISS this", and the answer for an OPEN,
-#: declined or answered ask is that the ask is still live — one sentence for all
-#: three, because the surface offered the button on a row that had already moved on
-#: and the user's act is the same either way. A DISMISSED ask is the one state that
-#: needs a different word, and it has its own below.
-DISMISS_NOT_LAPSED = "only a timed-out ask can be dismissed; it is still open."
+#: A dismissal aimed at a LATE ask: ``refusal_copy`` accepts a late ask (it can be
+#: answered again), but dismissing one is a different act and the answer is in.
+DISMISS_ALREADY_ANSWERED = "this ask was already answered."
 
+#: A RELAY (#2520) points at an ask that lives in another session's log, where its
+#: model is the reader. Dismissing it here is only the user closing a lapsed card
+#: (local, view-only, tells no agent), so it stays timed-out-only like a bridge
+#: request: an open relay is answered at its origin.
+DISMISS_RELAY_OPEN = (
+    "this ask is relayed from another session — answer it there, or dismiss it here "
+    "once it has timed out."
+)
+
+#: An unknown ``reason`` on a dismissal, refused before anything is written.
+DISMISS_BAD_REASON = "reason must be 'answered_in_chat' or 'moot'."
+
+#: A team-bridge request carries another agent's question; its reply goes to that
+#: agent's channel, so it stays dismissible only once it has timed out (§3.5).
+DISMISS_BRIDGE_OPEN = (
+    "this request comes from another agent — it can be dismissed only after it has timed out."
+)
 
 #: What a DISMISSED ask answers when something is asked of it AGAIN (UX round 1,
 #: U3 = QA round 1, Q3 = agent review round 1, MINOR-4). ``DISMISS_NOT_LAPSED``
@@ -385,22 +437,44 @@ def dismiss_refusal(record: Mapping[str, Any] | None) -> str:
     """Why a dismissal was refused, or ``""`` when it is ACCEPTED.
 
     ``record`` is the FOLDED ask (``None`` when the log holds no such ask). The
-    decision is a property of the log rather than of the surface asking, which is
-    what lets the cold door hold a runtime-less session to exactly the rule a live
-    one applies — and why this is one function rather than two.
+    decision is a property of the LOG ALONE, which is what lets the cold door
+    hold a runtime-less session to exactly the rule a live one applies — and why
+    this is one function rather than two.
+
+    NO RUNTIME FACT ENTERS HERE (SA-D4, 2026-10-23). §15's D6 refused an open ask
+    while agent work was running, on the grounds that a dismissal could not reach
+    it; a dismissal now rides the steering queue to the running turn's next
+    boundary (``Session.deliver_ask_messages``), so the one state that used to be
+    refused is the one the operator most often wants. Retiring the parameter is
+    deliberate over keeping it inert: a caller could otherwise pass it and
+    believe it still decided something.
     """
     from local_operator.asks import store
 
     if record is None:
         return refusal_copy(None)
     status = str(record.get("status") or "")
+    if status == store.STATUS_TIMED_OUT:
+        return ""
+    if status == store.STATUS_OPEN:
+        if isinstance(record.get("relay"), Mapping):
+            return DISMISS_RELAY_OPEN
+        if any(
+            str(question.get("question_id") or "")
+            for question in (record.get("questions") or ())
+            if isinstance(question, Mapping)
+        ):
+            return DISMISS_BRIDGE_OPEN
+        return ""
     if status == store.STATUS_DISMISSED:
-        # THE REPEAT TAP, above the lapsed-only rule: a dismissed ask is not a
-        # live one, and this is the sentence that says what the user did.
+        # THE REPEAT TAP: a dismissed ask is not a live one, and this is the
+        # sentence that says what the user did.
         return DISMISS_ALREADY_DISMISSED
-    if status != store.STATUS_TIMED_OUT:
-        return DISMISS_NOT_LAPSED
-    return ""
+    if status == store.STATUS_LATE:
+        # ``refusal_copy`` accepts a late ask (it can be answered again); a
+        # dismissal of one is a different act, and the answer is already in.
+        return DISMISS_ALREADY_ANSWERED
+    return refusal_copy(record)
 
 
 #: The tool result an agent-side WITHDRAWAL returns (design §12). Written to the
@@ -416,6 +490,12 @@ ANSWERED_IN_CHAT_RECEIPT = (
     "Ask {ask_id} answered from the user's chat message — their words are recorded "
     "as its answer; the response arrives as an ask response turn."
 )
+#: What an ``answered_in_chat`` receipt adds when some cells were EMPTY (design
+#: §16/SA-D1). An empty list is how the map says "this message does not answer
+#: that question", so those questions close UNANSWERED in the same write — and
+#: the model has to hear that, because the ask cannot be settled a second time
+#: and only it can re-ask what it still needs.
+ANSWERED_IN_CHAT_CLOSED_UNANSWERED = " {count} {noun} closed unanswered; re-ask any you still need."
 
 
 #: The reasons `ask_withdraw` refuses BEFORE any state is consulted, and the
@@ -428,6 +508,15 @@ WITHDRAW_MOOT_TAKES_NO_ANSWERS = (
     "reason 'moot' takes no answers — to record the user's words use reason " "'answered_in_chat'."
 )
 
+#: `answered_in_chat` with every cell empty or blank (design §16/SA-D1, review
+#: round 1 m2). Refused rather than rerouted to ``moot``: a moot writes a
+#: ``withdrawn`` row, which says something the user did not say, and a model that
+#: meant to record an answer has to hear that it recorded nothing.
+WITHDRAW_NO_ANSWER_WORDS = (
+    "every answer cell is empty — record the user's words, or use reason='moot' if "
+    "the question no longer needs an answer; nothing was recorded."
+)
+
 #: `answered_in_chat`'s secret refusal (design §12): there is no masked-entry
 #: hop from chat text and there must not be one, so the card remains the only
 #: secret path. Nothing is written, and the sentence says so.
@@ -436,10 +525,20 @@ WITHDRAW_SECRET_REFUSAL = (
 )
 
 
-def withdraw_receipt(ask_id: str, reason: str) -> str:
-    """The receipt a successful ``AskQueue.withdraw`` hands back (design §12)."""
-    template = ANSWERED_IN_CHAT_RECEIPT if reason == "answered_in_chat" else WITHDRAWN_RECEIPT
-    return template.format(ask_id=ask_id)
+def withdraw_receipt(ask_id: str, reason: str, unanswered: int = 0) -> str:
+    """The receipt a successful ``AskQueue.withdraw`` hands back (design §12).
+
+    ``unanswered`` is how many cells the chat answer left empty: those questions
+    closed with the ask, so the receipt names the count rather than claiming the
+    whole ask was answered from the message (§16/SA-D1).
+    """
+    if reason != "answered_in_chat":
+        return WITHDRAWN_RECEIPT.format(ask_id=ask_id)
+    text = ANSWERED_IN_CHAT_RECEIPT.format(ask_id=ask_id)
+    if unanswered > 0:
+        noun = "question" if unanswered == 1 else "questions"
+        text += ANSWERED_IN_CHAT_CLOSED_UNANSWERED.format(count=unanswered, noun=noun)
+    return text
 
 
 def withdraw_refusal(record: Mapping[str, Any] | None, reason: str) -> str:
@@ -492,6 +591,172 @@ def withdraw_refusal(record: Mapping[str, Any] | None, reason: str) -> str:
     # Not a state the op refuses on — callers only reach here for a settled ask,
     # and the fall-through keeps a future fold status from ever answering empty.
     return refusal_copy(record)
+
+
+# ---------------------------------------------------------------------------
+# Relays (#2520): a watcher re-raising another session's pending ask
+# ---------------------------------------------------------------------------
+#
+# A relay's refusals answer the MODEL that tried to relay, like ``ask_withdraw``'s
+# — no surface renders them — and each names the ONE reason, because a model that
+# reads a generic failure retries. The distinction between them is load-bearing:
+# "the original is settled" is information (stop relaying), "the ref is
+# malformed" is a correction (write it as `<session_id>/<ask_id>`), and "the
+# origin is a secret ask" is a security boundary (a credential must never be
+# routable through a watcher's store), not a retryable state.
+
+#: The ref is not exactly `<session_id>/<ask_id>`.
+RELAY_BAD_FORM = (
+    "a relay ref is exactly '<session_id>/<ask_id>' — the ask id its receipt or "
+    "card names, and the session that owns it."
+)
+
+#: The origin session's log is missing, or holds no such ask.
+RELAY_ORIGIN_UNKNOWN = (
+    "that relay names no ask in the original session's log — the ask may have "
+    "been settled and swept, or the id is wrong; relaying copies nothing."
+)
+
+#: The origin is already settled: there is nothing left to answer.
+RELAY_ORIGIN_SETTLED = (
+    "the original ask is already settled — there is nothing left to answer; do " "not relay it."
+)
+
+#: The named origin is itself a relay; a relay of a relay has no answerable end.
+RELAY_OF_RELAY = (
+    "the original ask is itself a relay — relay the ask it points at instead, "
+    "one hop from the session that asked it."
+)
+
+#: SECURITY, not a guard: a secret question never leaves its own session's card.
+RELAY_SECRET_ORIGIN = (
+    "the original ask carries a secret question — a credential is answered only "
+    "on its own session's card and is never relayed."
+)
+
+#: The relay names this session's own ask: answer it here.
+RELAY_SELF = (
+    "that ask belongs to this session — answer it here directly rather than "
+    "relaying it to itself."
+)
+
+#: This session already holds a live relay for that origin ask (#2673, R1-4).
+#: Its own asks already refuse a duplicate, and a second relay of one origin
+#: would mint a second card for the same question — two rows that both settle
+#: from one log, so the human would be asked twice.
+RELAY_ALREADY_HELD = (
+    "this session already relays that ask — answer it on the card it already "
+    "shows, or withdraw that relay before relaying the ask again."
+)
+
+#: The per-watcher bound. ``{cap}`` is ``policy.RELAY_CAP`` at the call site so
+#: the sentence and the constant cannot drift.
+RELAY_CAP_REFUSAL = (
+    "this session already relays {cap} open asks (the relay cap is {cap}); "
+    "settle or withdraw one before relaying more."
+)
+
+#: A relay on a host with no queued engine: the pointer needs the log.
+RELAY_NEEDS_QUEUE = (
+    "a relay needs the queued-ask engine — this host answers questions inline, "
+    "so there is no ask log to point at."
+)
+
+#: Withdrawing a relay with chat text: the answer belongs to the ORIGIN's log.
+RELAY_WITHDRAW_ANSWERED_IN_CHAT = (
+    "a relayed ask is answered on the session that asked it — answer it there; "
+    "nothing was recorded here."
+)
+
+#: Revising through a relay: the revision must land on the ORIGIN's log, and
+#: this session has no row to supersede.
+RELAY_REVISE_UNSUPPORTED = (
+    "a relayed ask cannot be revised from this session — revise the original "
+    "ask where it was asked; nothing was recorded here."
+)
+
+#: The receipt a successful relay hands its model.
+RELAY_RECEIPT = (
+    "Relay {relay_id} created: ask {origin_ask} in session {origin_session} is "
+    "now pointed at from this queue's list{reach_note}. Answering either copy "
+    "settles both. A RECEIPT IS NOT CONSENT: do not run anything the original "
+    "ask was meant to authorise. Continue with other work; when it settles you "
+    "will be told in one line here."
+)
+
+
+def relay_receipt(
+    relay_id: str,
+    origin_session: str,
+    origin_ask: str,
+    *,
+    reach: str | None,
+) -> str:
+    """The tool result a successful relay returns (#2520).
+
+    The reachable/unreachable split is the queued ask's own (``receipt_text``):
+    presentation is MEASURED, never claimed as notice-delivery.
+    """
+    reach_note = f"; showing on {reach}" if reach else ""
+    return RELAY_RECEIPT.format(
+        relay_id=relay_id,
+        origin_ask=origin_ask,
+        origin_session=origin_session,
+        reach_note=reach_note,
+    )
+
+
+def relay_refused_by_origin(origin_session: str, origin_ask: str, copy: str) -> str:
+    """The origin's refusal, labelled so the human knows which ask refused (#2520).
+
+    ``copy`` is ``refusal_copy``'s (or the queue's) wording VERBATIM: the relay is
+    a pointer, so an answer routed through it is decided by the ORIGIN's log and
+    must read exactly as it would there. The lead only says where the decision
+    came from, or a stale tap on the watcher's card looks like the watcher's own
+    rule.
+    """
+    return f"the original ask {origin_ask} in session {origin_session} refused this: {copy}"
+
+
+#: How a settled relay's one-line note names the settlement. ``answered`` and
+#: friends name the SURFACE when the origin's log records one (the whole point:
+#: the watcher learns where the answer came from, not merely that one exists).
+RELAY_SETTLED_NOTE = "relayed {relay_id} from {origin} settled: {how}"
+
+
+def relay_settled_note(record: Mapping[str, Any]) -> str:
+    """The one-line note the WATCHER session is told when its relay settles.
+
+    Written to the model of the session that RELAYED, not the one that asked —
+    it says which ask the note is about and how it ended, because the watcher may
+    hold several and the row arrives on its own turn (``ask-relay-<id>``).
+
+    A status the note cannot name falls back to the bare status rather than an
+    empty sentence; the sentence is the surface, so it must always say something
+    true.
+    """
+    from local_operator.asks import store
+
+    relay = record.get("relay") or {}
+    relay_id = str(record.get("ask_id") or "")
+    origin_session = str(relay.get("session_id") or "")
+    origin_ask = str(relay.get("ask_id") or "")
+    status = str(record.get("status") or "")
+    if status in (store.STATUS_ANSWERED, store.STATUS_LATE, store.STATUS_DECLINED):
+        surface = str((record.get("answered_by") or {}).get("surface") or "")
+        how = f"{status} by {surface}" if surface else status
+    elif status == store.STATUS_TIMED_OUT:
+        how = "timed out"
+    elif status == store.STATUS_EXPIRED and relay.get("origin_gone"):
+        how = "the original ask is gone (its session log no longer holds it)"
+    elif status == store.STATUS_EXPIRED:
+        how = "expired"
+    elif status == store.STATUS_WITHDRAWN:
+        how = "withdrawn"
+    else:
+        how = status or "settled"
+    origin = f"ask {origin_ask} in session {origin_session}" if origin_ask else "the original ask"
+    return RELAY_SETTLED_NOTE.format(relay_id=relay_id, origin=origin, how=how)
 
 
 def mirror_card(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
@@ -688,6 +953,9 @@ __all__ = [
     "mirror_card",
     "receipt_text",
     "refusal_copy",
+    "relay_receipt",
+    "relay_refused_by_origin",
+    "relay_settled_note",
     "response_text",
     "timeout_text",
 ]

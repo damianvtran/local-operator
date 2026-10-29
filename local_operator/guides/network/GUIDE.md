@@ -22,6 +22,29 @@ rendering is not a contract.
 
 ## When the user asks to set it up
 
+Desktop clients advertising `mesh_onboard: 1` expose the existing signed SSH
+runner through a **restricted network-enrollment-only** Add remote server path:
+public host-key observation, a new `apn_` unsigned card, the same human presence
+signer with an exact network-only snapshot acknowledgment, then backend-owned
+run and durable receipts. The new mode shares no account logins or broker access;
+its provision stage is explicitly skipped. Legacy `ap_` cards keep their original
+policy and are not silently converted. The probe's fingerprint is **observed (TOFU)**,
+not independently verified; edits need a corrected card. There is no new trust
+engine or automatic grant. Capability absent means use the existing CLI/agent
+path below, not a fabricated button. Backend contract: `docs/DESKTOP_API.md`,
+“Signed remote-server onboarding”. Normal Radient tunnel/phone access is a
+separate, unchanged path; adding a mesh device is not enrolling a phone tunnel.
+For the new CLI equivalent, explicitly select the existing network and bootstrap
+reference: `lop network approvals request --network-only --host <host> --network
+<network> --credential-ref <reference>`. Review the exact card/digest, then use
+`lop network approvals approve-network-enrollment <apn_id> --request-digest
+<displayed_digest>` before `lop network approvals run <apn_id>`. Generic Approve
+refuses these cards; never fall back to a legacy provisioning request. A failed
+changed-host-key run points to a corrected unsigned card: review that one rather
+than repeating the old facts. Enrollment verified does not mean task-ready; git,
+model and MCP/tooling warnings remain visible and do not trigger secret sharing.
+
+
 For a reachable SSH target, use the existing **signed remote onboarding** path
 below: `lop network approvals request` proposes a `device_onboard` record, the
 human approves the existing presence-gated card, and `lop network approvals run`
@@ -1137,6 +1160,30 @@ they die with `node: command not found` however well the credentials were
 brokered: the node runs what its own disk has, and the mesh moves credentials
 and definitions, never installers. That is the contract in one lane: what
 inherits, what is lent per command, and what must already be on the node.
+
+## Provisioning a working copy on a peer
+
+Phase 2 already says a checkout is not something it can deliver, and pairing
+does not create one either. An offloaded session can only touch
+repository files the peer holds, so a lane that expects `~/local-operator` on a
+node without one fails at the first `git` call.
+
+Provision the copy on the device that will run the work, in a session created
+there (`lop network sessions --peer <id> --create --prompt <p>`) or over SSH:
+
+```bash
+git clone https://github.com/<owner>/<repo>.git ~/<repo>   # or: gh repo clone <owner>/<repo> ~/<repo>
+git config --global user.name         # ready reads this scope, not the repo's
+git config --global user.email
+gh auth status                        # optional: its own login, if any
+```
+
+Without `user.name` and `user.email` that peer cannot commit. Push and PR-write
+need a granted `github` credential, not a login: a peer with no grant and no
+login gets no `GH_TOKEN` and cannot push, and a share is what makes it work.
+All of it is per-device, and none of it is inherited. Re-read `tooling` in
+`lop network ready --peer <id>`: it still warns about what the node has not
+installed, and that install is the same kind of local step.
 
 ## When something looks wrong
 

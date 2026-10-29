@@ -370,6 +370,7 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
+        id: lint_install
         run: |
           python -m pip install --upgrade pip
           pip install flake8==7.4.1 black==26.1.0 isort==5.13.2
@@ -377,11 +378,25 @@ jobs:
       - name: Run flake8
         run: flake8 .
 
+      # BOTH FORMATTERS RUN once the tools are installed, whatever an earlier check
+      # said. With the default `success()` a flake8 or Black failure skipped isort
+      # (PR #2783 head ed2dfa64: Black failed and isort never ran, so its result was
+      # unknown and a second push was needed to learn it). The gate is the install
+      # step's outcome, not `always()`: a failed install must still block them, and
+      # a cancelled run must not start them. Each step still fails the job on its
+      # own (no `continue-on-error`), and `--diff` puts the actual rewrite in the
+      # log, so one failed run reports every formatter's whole answer.
       - name: Run black
-        run: black --check .
+        if: >-
+          !cancelled() &&
+          steps.lint_install.outcome == 'success'
+        run: black --check --diff .
 
       - name: Run isort
-        run: isort --check .
+        if: >-
+          !cancelled() &&
+          steps.lint_install.outcome == 'success'
+        run: isort --check --diff .
 
   # The i18n gate: the committed `Intl` tables and per-key modules must match
   # their generator (blocking), and the string ratchet + catalogue parity run
@@ -466,6 +481,18 @@ jobs:
           python -m pip install build
           python -m build --wheel --outdir dist/packaging-smoke
 
+      # The release ships a comment-stripped wheel (scripts/slim_wheel.py, for
+      # PyPI's 10 GB project cap), so the smoke legs must install that exact
+      # shape, and a PR whose code the slimmer cannot verify must fail here
+      # rather than at release time. The size guard runs at --budget-mib 17.5, not
+      # the release's 18: this wheel lacks the phone bundle and the key-agent helper
+      # (~0.37 MiB together), so the plain budget would first go red in the release's
+      # keyagent-macos job, after the tag exists (see scripts/check_dist_size.py).
+      - name: Slim the wheel and check its size budget
+        run: |
+          python scripts/slim_wheel.py dist/packaging-smoke/local_operator-*-py3-none-any.whl
+          python scripts/check_dist_size.py --budget-mib 17.5 dist/packaging-smoke
+
       - uses: actions/upload-artifact@v7
         with:
           name: packaging-smoke-wheel
@@ -481,6 +508,20 @@ jobs:
     timeout-minutes: 10
     strategy:
       fail-fast: false
+      # ONE AT A TIME, on 2026-10-19. These three legs are cheap (a wheel
+      # install and a server start, MEASURED at 44-52 s each in run
+      # 39316047502 and 44 s locally) and they are NOT on any
+      # critical path, so running them three at a time bought nothing and
+      # cost three pending jobs per run. Under a saturated account-wide pool a
+      # PENDING job is the expensive kind: it is what a release gate's jobs
+      # queue behind. These legs each also hold a runner slot while they
+      # install, so a run that starts all three at once is three slots of
+      # contention for a check whose own deadline is generous.
+      #
+      # The three interpreter classes are still all covered, and `fail-fast:
+      # false` still reports each class separately: the COVERAGE is unchanged,
+      # only the ORDER in which the three legs are scheduled.
+      max-parallel: 1
       matrix:
         # Each entry is a DIFFERENT failure class, not a hunch:
         #   3.12 - the `requires-python` floor and today's only PR-CI
@@ -851,9 +892,49 @@ jobs:
     # minimum, ceil((1500.42 + 60)/60); measured walls are still far below it.
     # Leave growth margin: the 2026-10-15 merge refs project up to 1562.952s
     # plus 60s setup overhead, exceeding the former 27-minute ceiling.
-    # Thirty minutes leaves 177s of headroom; weights, worker count, shard
-    # formula and watchdogs are unchanged. This is not a test-failure waiver.
-    timeout-minutes: 30
+    # Thirty minutes left 177s of headroom at that tree. P3a's test growth
+    # projects 1741.21s on the heaviest shard, just beyond the 1740s test
+    # budget at 30 minutes after setup. 31 is the guard's minimum ceiling:
+    # ceil((1741.21 + 60)/60). Weights, workers, partition and watchdogs stay
+    # unchanged; this is scheduling headroom, not a test-failure waiver.
+    #
+    # 32 (2026-10-19 and 2026-10-21), twice over and by the same one-line change. The
+    # credential-repair slices' new test files run at the manifest's 30.786s
+    # fallback and push the heaviest shard to 7202.00s of serial weight
+    # (1800.39s on 4 workers), 0.39s past the 1800s budget at 31. At the same
+    # time the composed main-recovery change measures 7239.26s serial
+    # (1809.82s on 4 workers), 9.82s past that same budget. The larger figure
+    # dominates, and 32 is the guard's own minimum: ceil((1809.82 + 60)/60),
+    # passing by 50.18s. Both sides carried the identical `timeout-minutes: 32`
+    # and only the prose differed, so this merges the two rationales rather
+    # than raising the ceiling a second time. Weights, workers, partition and
+    # watchdogs remain unchanged.
+    #
+    # 32 -> 38 on 2026-10-28, and unlike every step above this is NOT a guard
+    # minimum: `shard_tests.py --report` projects the heaviest shard at 86.4
+    # serial test-minutes (~1296s on 4 workers), so the guard's minimum is
+    # ceil((1296 + 60)/60) = 23, well below 32. The ceiling is raised for
+    # runner speed variance instead. Measured from the API over 59 CI runs
+    # (378 shard jobs, 13:36Z-21:00Z): success walls by shard, p50/p90/max in
+    # minutes, were s0 27.2/28.8/29.1, s1 25.6/31.7/31.9, s2 26.9/30.6/31.3,
+    # s3 27.0/28.9/29.6 and s4 25.1/31.6/31.9. Eighteen jobs were cancelled at
+    # 32.0-32.9 minutes by this ceiling (seven on main, fifteen of them
+    # shard 1). Twelve of those had already printed a green pytest summary
+    # (1848-1882s of test time) and were cut in the ~0.1-minute tail; the
+    # other six were at 99% progress. Identical files swing by runner:
+    # #3087's shard 1 ran 12436 passed in 1881.59s and was cancelled at 32:15
+    # on attempt 2, then the SAME files passed in 1212.19s (21:11 wall) on
+    # attempt 3. That 1.55x swing is runner-side, so this buys protection
+    # against slow runners and is not a waiver for a test-cost regression.
+    # Formula: worst healthy wall W = 32.38 minutes (the slowest job to reach
+    # a green pytest summary, at 32.23, plus the slowest observed 0.15-minute
+    # tail), and 38 = ceil(1.15 * W). That also covers the worst cut-off run
+    # projected to completion (99% at 31.92 plus the slowest observed 3.50
+    # minutes from 99% to the summary, about 35.4). Weights are relative and
+    # the guard passes, so reweighting moves no runner's speed. More shards
+    # would spend the 20-job concurrency budget. Weights, workers, partition,
+    # and the per-test and stall watchdogs are unchanged.
+    timeout-minutes: 38
     strategy:
       fail-fast: false
       matrix:
@@ -878,6 +959,24 @@ jobs:
       # ~18 minutes, and the 30s repeat still gets several more prints before
       # the 26-minute ceiling.
       LOCAL_OPERATOR_SHARD_STALL_SECONDS: "240"
+      # THE SIX SERIAL CONTROLS — one list, read by every step below and by
+      # `tests/unit/test_ci_hygiene.py`. They hold REAL threads, a real child
+      # process in its own session and real loopback sockets, and flaked when
+      # scheduled among ~1,700 files under `-n auto` on a shared runner (store
+      # walk: the walker finished before the observer ran; status verb: a
+      # legitimate admit-time pass published into a cache the cell assumed
+      # empty). They are deselected from EVERY shard's xdist run and run once,
+      # serially (`-n0`), in a follow-up step of shard 0 only. Coverage is the
+      # union of both, so nothing is skipped; each case runs exactly once.
+      # `--deselect` is a PREFIX match on the node id, so the hygiene test also
+      # proves no other test name begins with any of these.
+      SERIAL_CONTROLS: |
+        tests/unit/test_session_factory.py::test_a_leaving_runtime_stops_the_store_walk_at_a_directory
+        tests/unit/test_session_factory.py::test_cell_a_control_the_old_observer_setup_fails_its_precondition
+        tests/unit/test_session_factory.py::test_cell_a_control_a_consumer_that_ignores_a_set_stop_runs_the_walk_to_the_end
+        tests/unit/network/test_membership_convergence.py::test_the_status_verb_asks_over_the_control_socket_for_a_fresh_pass
+        tests/unit/network/test_membership_convergence.py::test_status_verb_control_a_dropped_refresh_field_is_rejected_for_not_asking
+        tests/unit/network/test_membership_convergence.py::test_status_verb_control_the_old_empty_assertion_fails_after_a_legitimate_pass
     steps:
       - uses: actions/checkout@v7
 
@@ -892,6 +991,35 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+
+      - name: Install ripgrep
+        # The ubuntu runner image ships no `rg`, and grep's real-ripgrep tests
+        # (`_grep_on_engine(..., "rg", ...)` in tests/unit/tools/test_builtin_tools.py)
+        # SKIP without it, so the engine most users run went untested in CI while
+        # the job stayed green (review N1 on #2982). The version print puts proof
+        # in the log that the binary those tests find is really there.
+        #
+        # A pinned upstream release tarball, checksum-verified, rather than apt:
+        # `apt-get update` fetched a 3.6 MB index (7-18 s per shard) from a mirror
+        # the PR cannot control, could hang with no bound, and installed whatever
+        # version the runner image's archive carried (review R2 on #2997). The
+        # static musl build has no runtime dependencies. Fail-hard on purpose: a
+        # silently missing rg is what let the rg tests skip green before. Bump by
+        # changing RG_VERSION and RG_SHA256 together (the `.sha256` asset beside
+        # the tarball on the GitHub release).
+        timeout-minutes: 2
+        env:
+          RG_VERSION: "15.1.0"
+          RG_SHA256: "1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599"
+        run: |
+          set -euo pipefail
+          name="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl"
+          curl -fsSL --retry 3 --max-time 60 -o "$RUNNER_TEMP/rg.tgz" \
+            "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${name}.tar.gz"
+          echo "${RG_SHA256}  $RUNNER_TEMP/rg.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/rg.tgz" -C "$RUNNER_TEMP" "${name}/rg"
+          sudo install -m 0755 "$RUNNER_TEMP/${name}/rg" /usr/local/bin/rg
+          rg --version
 
       - name: Partition test suite
         # Balanced by MEASURED per-file duration (tests/durations.json), not by
@@ -916,10 +1044,100 @@ jobs:
             --shard ${{ matrix.shard }} --total 5 --out shard_tests.txt
 
       - name: Run test shard with coverage
+        id: shard_pytest
+        # `LOCAL_OPERATOR_SHARD_MEMORY_DIR` is where `tests/shard_memory_dump.py`
+        # writes an ENOMEM snapshot when a cell dies of `OSError: [Errno 12]`.
+        # It is set HERE, on the pytest step, because the `runner` context is not
+        # available at job-level `env`; the serial-controls step and the upload
+        # step spell the same path again and all three must stay in step. Under
+        # `runner.temp` on
+        # purpose: the dump must never land in the checkout (a test run writing
+        # into the repo tree is its own defect), and an absolute path is what
+        # `upload-artifact` documents as supported. The shard and attempt are in
+        # the directory name so a later attempt cannot mix evidence with an
+        # earlier one.
+        env:
+          LOCAL_OPERATOR_SHARD_MEMORY_DIR: ${{ runner.temp }}/lo-shard-memory/${{ matrix.python-version }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+        # The six serial controls are deselected here (see SERIAL_CONTROLS above).
+        # The `.coverage` rename is NOT done here any more: shard 0 appends the
+        # serial run's data to this file first, so the rename moved to the
+        # finalisation step below, after every pytest step of this job.
         run: |
-          pytest $(cat shard_tests.txt | tr '\n' ' ') --cov --cov-fail-under=0 --cov-report= \
+          pytest $(cat shard_tests.txt | tr '\n' ' ') $(printf -- '--deselect %s ' $SERIAL_CONTROLS) \
+            --cov --cov-fail-under=0 --cov-report= \
             --junit-xml=junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml
-          mv .coverage .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
+
+      - name: Prove the serial controls were deselected from this shard
+        id: serial_absent
+        # Every shard, including those whose file list never held the two files:
+        # an XML that names one of the six means the deselect failed and a case
+        # is about to run twice (or under xdist, which is what is being avoided).
+        # `always()` so a failing ordinary run still reports it; a missing or empty
+        # XML is BLOCKED (exit 2), never a pass.
+        if: always() && steps.shard_pytest.outcome != 'skipped'
+        run: |
+          python scripts/check_serial_controls.py absent \
+            --junit junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml \
+            --ids "$SERIAL_CONTROLS"
+
+      - name: Run the serial controls once (shard 0)
+        id: serial_controls
+        # DISPATCH REQUIRES SUCCESS, not merely "not cancelled": the implicit
+        # `success()` means setup, the ordinary shard run AND the absence proof all
+        # passed. An unrelated failure on this shard therefore leaves the serial
+        # proof BLOCKED rather than running the cases against a broken tree, and
+        # no `continue-on-error` masks anything. Only shard 0 runs them: one
+        # execution per python leg (a PR is the 3.12 leg only; `main` also runs 3.13).
+        #
+        # THE BOUND. `timeout-minutes: 7` is a declared, UNMEASURED ceiling (the
+        # six cases build a 60-directory synthetic store three times and two relay
+        # pairs), not a speed claim: shard 0's budget is the heaviest shard's
+        # modelled wall plus this full 420 s, asserted by test_ci_hygiene. Inside
+        # it, `run_bounded` puts pytest in its own process group and escalates
+        # SIGTERM -> SIGKILL on the bound (--timeout 400 --grace 10 fits under the
+        # 420 s step). The store-walk child is in a NEW SESSION by design and is
+        # outside that group, so it carries its own parent-death guard (it exits
+        # within a second of pytest disappearing); a step timeout therefore leaves
+        # no native child behind. `--memory-mb 0` is passed EXPLICITLY because this
+        # job has no memory policy today: nothing else in it is capped, and a cap
+        # guessed for six untimed cases could kill a healthy test, so none is invented.
+        # The wrapper reports it as "memory guard disabled (explicit)". No inherited
+        # positive CI budget was verified here, and Ubuntu's ability to measure memory
+        # is not the reason; a real cap is a separate, measured decision.
+        #
+        # COVERAGE: the exact source of the ordinary run, appended to its data.
+        # A bare `--cov` would reset the selection; `--cov-fail-under=0` and the
+        # empty report keep the gate where it already is (the combine job).
+        if: matrix.shard == 0
+        timeout-minutes: 7
+        # Same dump directory as the ordinary shard run, so an ENOMEM in this
+        # -n0 stage lands in the one artifact the shard job uploads. `runner` is
+        # not available at job-level `env`, hence the repetition.
+        env:
+          LOCAL_OPERATOR_SHARD_MEMORY_DIR: ${{ runner.temp }}/lo-shard-memory/${{ matrix.python-version }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+        run: |
+          python scripts/run_bounded.py --timeout 400 --grace 10 --memory-mb 0 -- \
+            python -m pytest $SERIAL_CONTROLS -n0 -q \
+            --cov=local_operator --cov-append --cov-fail-under=0 --cov-report= \
+            --junit-xml=junit-serial-controls-${{ matrix.python-version }}-0.xml
+
+      - name: Prove the serial controls ran once, with their receipts
+        id: serial_proof
+        # `always()` for the same reason as the upload below: a serial step that
+        # FAILED (or hit its bound) still wrote what it wrote, and a missing XML
+        # must read BLOCKED here rather than vanish. Skipped when the serial step
+        # was never attempted (every shard but 0, or a broken ordinary run).
+        if: always() && steps.serial_controls.outcome != 'skipped'
+        run: |
+          python scripts/check_serial_controls.py present \
+            --junit junit-serial-controls-${{ matrix.python-version }}-0.xml \
+            --ids "$SERIAL_CONTROLS"
+
+      - name: Finalise shard coverage data
+        # AFTER the serial step: the rename that used to end the ordinary run.
+        # Default `success()`, as before: a failed shard uploads no coverage and
+        # the combine job is skipped, exactly as when pytest alone failed.
+        run: mv .coverage .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
 
       - name: Upload junit timings
         # WHY THE SUITE PAYS FOR A JUNIT FILE EVERY RUN: this is the only
@@ -966,11 +1184,31 @@ jobs:
           # never upload arbitrary test scratch or an entire working tree.
           path: |
             junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml
+            junit-serial-controls-${{ matrix.python-version }}-0.xml
             test-artifacts/tui-proof/**/*.svg
             test-artifacts/tui-proof/**/*.geometry.json
             test-artifacts/tui-proof/manifest.json
           # 7 days, not 1: post-hoc flake/review evidence reads must survive past
           # the next day (PR #2470: XML expired at ~24.5 h, forced a re-run).
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Upload shard memory dumps
+        # WHY `always()`: the dump exists only on the run where a cell died of
+        # ENOMEM, and that run is a FAILED job -- a default `success()` condition
+        # would upload exactly when there is nothing to see. A healthy shard
+        # writes no file, so `if-no-files-found: ignore` keeps this step green.
+        #
+        # The path and name repeat the shard step's `LOCAL_OPERATOR_SHARD_MEMORY_DIR`
+        # (the `runner` context cannot be used in job-level `env`). The attempt
+        # number is in both: a re-run must be distinguishable from the run it
+        # replaces, because the memory reading of one attempt is not evidence
+        # about another.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: shard-memory-${{ matrix.python-version }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lo-shard-memory/${{ matrix.python-version }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}/**
           retention-days: 7
           if-no-files-found: ignore
 
@@ -1270,24 +1508,57 @@ jobs:
     # own `flock` files and its own app lifecycles, so no shard can see a
     # sibling's hang.
     #
-    # WHY THREE AND NOT TWO, and what the trade is. Measured on run 35420676112
-    # (the split from CI-measured timings): legs of 414/412/401 s on ubuntu and
-    # 442/441/400 s on macOS, i.e. ~7.5 min per leg including install, against a
-    # unit shard whose job wall is ~12-15 min. So the e2e job is NO LONGER the
-    # critical path at three shards, and two shards (~11 min per leg) would also
-    # finish first. Three buys earlier freeze-guard feedback on a tree that only
-    # grows, and costs two more jobs per run: this matrix takes a pull request
-    # from 17 jobs to 21, against the ~20-job account-wide budget the `test`
+    # WHY TWO SHARDS, and what the trade is. This matrix was three shards
+    # until 2026-10-19, and the trade was recorded then: three bought earlier
+    # freeze-guard feedback and cost two more jobs per run, on the explicit
+    # understanding that "if runner queue pressure becomes the binding
+    # constraint, `shard: [0, 1]` with `--total 2` restores the job count at
+    # the same critical path". Runner queue pressure then became the binding
+    # constraint, and this is the trade being taken.
+    #
+    # The critical path is unchanged, and that is the property three shards
+    # were buying. At two shards the heaviest e2e leg projects 1165.8350s
+    # (19.4 min) on one worker, against the unit shard's 1805.1008s (30.1
+    # min) on 4, so the freeze guard still lands first. (The "~7.5 min per
+    # leg" figure below was measured on run 35420676112, when the e2e tree was
+    # half this size; the leg grew with it, and the number that matters now is
+    # the projection above.)
+    #
+    # What it costs is two jobs per run, and the two it costs are the ones the
+    # account cannot afford: HALF of this matrix's jobs land on macOS, whose
+    # concurrent-job cap is 5 for the WHOLE ACCOUNT, so 22 in-flight pull
+    # requests were asking for 66 macOS jobs to compete for 5 slots. Two
+    # shards ask for 44.
+    #
+    # The job count this matrix contributes to a pull request went from 6 to
+    # 4, against the ~20-job account-wide budget the `test`
     # job's comment names, on main from 20 to 24. That is a deliberate trade,
     # not an oversight: if runner queue pressure becomes the binding constraint,
     # `shard: [0, 1]` with `--total 2` restores the job count at the same
     # critical path — which is why the matrix and `--total` are asserted equal
     # in tests/unit/test_ci_hygiene.py rather than kept in sync by hand.
+    #
+    # AND THAT TRADE WAS TAKEN, on 2026-10-19, because the account-wide runner
+    # pool turned out to be the binding constraint. Measured across the three
+    # active repositories: 26-28 workflow runs in flight, 53-118 jobs queued,
+    # a median pending-job AGE of 25.8 min (p90 35.0, max 48.8), and a
+    # four-minute sample in which zero jobs started. This stage is the worst
+    # offender because HALF of its jobs land on macOS, and macOS has its own
+    # cap of 5 concurrent jobs for the WHOLE account (the standard-runner
+    # table: Pro is 40 total and 5 macOS) -- so 22 in-flight pull requests
+    # asked for 66 macOS jobs to compete for 5 slots. Two shards ask for 44.
+    #
+    # It is still NOT the critical path, which is the property three shards
+    # were buying. At 2 shards the heaviest e2e leg projects 1165.8350s
+    # (19.4 min) on one worker, against the unit shard's 1805.1008s (30.1 min)
+    # at this tree, so the freeze guard still finishes before the unit suite
+    # does. The coverage is unchanged either way: the same e2e tree, the same
+    # two platforms, the same test files -- only the partition differs.
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        shard: [0, 1, 2]
+        shard: [0, 1]
     runs-on: ${{ matrix.os }}
     # NO fork gate, deliberately, unlike cli-sanity/server-sanity below. Those
     # need a real OpenRouter key, so they are skipped on fork PRs that cannot
@@ -1356,7 +1627,13 @@ jobs:
     # real hang report any sooner. `tests/unit/test_ci_hygiene.py` pins the
     # relationship in the direction that matters: the ceiling must exceed every
     # shard wall the manifest projects.
-    timeout-minutes: 20
+    # 20 -> 22 on 2026-10-19, for the two-shard partition above: the heaviest
+    # e2e leg projects 1165.8350s, so the guard's own minimum is
+    # ceil((1165.8350 + 60)/60) = 21 minutes, and 22 leaves +94.1650s over
+    # the 1200s budget at 21. A ceiling is not a reservation -- it is only
+    # paid by a leg that is genuinely stuck -- and the e2e tree grows, so the
+    # extra minute is cheaper here than a cancellation.
+    timeout-minutes: 22
     steps:
       - uses: actions/checkout@v7
       - name: Set Up Python 3.12
@@ -1385,7 +1662,7 @@ jobs:
         # log records exactly which files ran in this shard, on this leg.
         run: |
           python scripts/shard_tests.py \
-            --tree e2e --shard ${{ matrix.shard }} --total 3 --out e2e_tests.txt
+            --tree e2e --shard ${{ matrix.shard }} --total 2 --out e2e_tests.txt
       - name: Print the shard's file list
         # Cheap, and it is the difference between "a shard failed" and "which
         # tests were in it". Ordered as the partitioner ordered it.

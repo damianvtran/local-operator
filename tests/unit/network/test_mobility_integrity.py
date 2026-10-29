@@ -1217,3 +1217,274 @@ def test_a_destination_entry_with_bytes_still_staged_is_never_settled(
     assert mobility.settle_promoted_handoff(root, session_id) is True
     assert read_handoff_journal(root).get(session_id) is None
     assert handoff_guard_refusal(root, session_id) == ""
+
+
+def test_a_move_of_a_session_with_session_roles_is_refused_by_default(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811 — the imported fixture
+) -> None:
+    """LOH-9 S2: v1 does not carry ``<session>/roles``, and a move DELETES the
+    source directory — so the default has to be a refusal that names the
+    definitions, not a silent loss no other device can restore."""
+    from local_operator.agent_profiles import install_seed
+    from local_operator.agents import AgentRegistry
+    from local_operator.profile_scope import scope_agent_registry
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    directory = _owned_session(server_a)
+    scoped = scope_agent_registry(AgentRegistry(server_a.root), directory)
+    assert install_seed("reviewer", registry=scoped, scope="session") is not None
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert result.get("ok") is not True, result
+    assert result.get("code") == "session_roles", result
+    assert "reviewer" in str(result.get("message")), result
+    assert "--drop-session-roles" in str(result.get("message")), result
+    # Number agreement in the same sentence (round 4): one definition is
+    # "does not carry it", not "them".
+    assert "1 session definition" in str(result.get("message")), result
+    assert "does not carry it" in str(result.get("message")), result
+    assert directory.is_dir(), "the refusal must change nothing on the source"
+    assert not (server_b.root / "sessions" / SESSION).exists(), "and nothing on the target"
+
+
+def test_drop_session_roles_moves_and_reports_what_stayed_behind(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811 — the imported fixture
+) -> None:
+    """The explicit opt-out: the conversation moves, the definitions stay, and the
+    receipt says so with the count and the device — never a silent drop."""
+    from local_operator.agent_profiles import install_seed
+    from local_operator.agents import AgentRegistry
+    from local_operator.profile_scope import scope_agent_registry
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    directory = _owned_session(server_a)
+    scoped = scope_agent_registry(AgentRegistry(server_a.root), directory)
+    assert install_seed("reviewer", registry=scoped, scope="session") is not None
+
+    result = _move(server_b, SESSION, drop_session_roles=True, monkeypatch=monkeypatch)
+
+    assert result.get("ok") is True, result
+    carry = result.get("carry") or {}
+    assert carry.get("session_roles") == 1, result
+    notice = str(carry.get("session_roles_notice") or "")
+    assert "was stashed on" in notice and "does not carry" in notice, notice
+    # U9: the notice says what the stash HOLDS and how to get the definitions
+    # back; the record file is the named handle.
+    assert "stash.json" in notice, notice
+
+    landed = server_b.root / "sessions" / SESSION
+    assert (landed / "transcript.jsonl").is_file()
+    assert not (landed / "roles").exists(), "v1 must not invent definitions on the target"
+
+    # THE DEFINITIONS SURVIVE THE COMMIT (blocker Q-2). The source directory is
+    # gone, so the only copy is the device-level stash the notice names.
+    stash = server_a.root / mobility.DROPPED_ROLES_DIRNAME / SESSION
+    assert str(stash) in notice, notice
+    assert (stash / "agents").is_dir(), "the agents tree was not stashed"
+    record = json.loads((stash / "stash.json").read_text(encoding="utf-8"))
+    assert record["definitions"] == ["reviewer"], record
+    assert not (server_a.root / "sessions" / SESSION).exists(), "the source directory is gone"
+
+
+def test_an_unreadable_roles_tree_refuses_the_move_instead_of_failing_open(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811 — the imported fixture
+) -> None:
+    """M5/R-M5: a gate that answers "no definitions" for a tree it could not read
+    is worse than no gate — the commit would delete what it never saw."""
+    import os
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    directory = _owned_session(server_a)
+    roles = directory / "roles"
+    (roles / "agents").mkdir(parents=True)
+    (roles / "teams").mkdir()
+    os.chmod(roles / "agents", 0)
+    try:
+        result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+    finally:
+        os.chmod(roles / "agents", 0o700)
+
+    assert result.get("ok") is not True, result
+    assert result.get("code") == "session_roles_unreadable", result
+    assert directory.is_dir(), "the refusal changed nothing on the source"
+
+
+def test_a_corrupt_role_file_refuses_the_move_instead_of_being_skipped(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch  # noqa: F811 — the imported fixture
+) -> None:
+    """Round-3 item 1: the store LOGS and SKIPS a file that does not parse.
+
+    A skipped row made `_session_role_definitions` answer [] — the same answer a
+    clean tree gives — so a deleting move proceeded with no refusal and no stash.
+    The gate now walks the store and refuses, naming the offending path.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin")
+    from local_operator.agent_profiles import install_seed
+    from local_operator.agents import AgentRegistry
+    from local_operator.profile_scope import scope_agent_registry
+
+    directory = _owned_session(server_a)
+    # A VALID row first, so ``markers[0]`` is NOT the broken one: the round-4
+    # finding was that the message named the first marker rather than the file
+    # the walk failed on, which here would have been this row's directory.
+    scoped = scope_agent_registry(AgentRegistry(server_a.root), directory)
+    assert install_seed("reviewer", registry=scoped, scope="session") is not None
+    broken = directory / "roles" / "agents" / "zzz-broken" / "agent.yml"
+    broken.parent.mkdir(parents=True)
+    broken.write_text("name: [unclosed\n", encoding="utf-8")
+
+    result = _move(server_b, SESSION, monkeypatch=monkeypatch)
+
+    assert result.get("ok") is not True, result
+    assert result.get("code") == "session_roles_unreadable", result
+    assert "zzz-broken/agent.yml" in str(result.get("message") or ""), result
+    assert directory.is_dir(), "the refusal changed nothing on the source"
+
+
+def test_a_recall_receipt_reads_the_sources_stamped_promise(tmp_path: Path) -> None:
+    """MAJOR 1: the destination has no queue record and no definitions.
+
+    The source stamps the count and the sentence on the record; a receipt built
+    on the recalling device (``queued_receipt["carry"]`` absent, ``root`` with no
+    session) must still name the stash from the record alone.
+    """
+    from local_operator.network import move_queue
+
+    record, _ = move_queue.enqueue(
+        tmp_path,
+        SESSION,
+        to_device="d_b",
+        to_name="dev-b",
+        request_id="rq1",
+        requested_by="d_a",
+        drop_session_roles=True,
+        session_roles=1,
+        session_roles_notice="1 session role/team definition will be stashed on dev-a at /x",
+    )
+    result = mobility._queued_receipt(
+        SESSION,
+        move_queue.payload(record) or {},
+        keep=False,
+        from_block={"device_id": "d_a", "name": "dev-a"},
+        to_block={"device_id": "d_b", "name": "dev-b"},
+    )
+
+    carry = result.get("carry") or {}
+    assert carry.get("session_roles") == 1, result
+    assert "/x" in str(carry.get("session_roles_notice") or ""), result
+
+
+def test_the_queued_notice_is_future_tense_and_agrees_with_the_count() -> None:
+    """U12 + agreement: a queued move says "will be stashed", one row is singular."""
+    one_future = mobility._session_roles_notice(1, "dev-a", Path("/stash"), future=True)
+    one_past = mobility._session_roles_notice(1, "dev-a", Path("/stash"))
+    two_past = mobility._session_roles_notice(2, "dev-a", Path("/stash"))
+    assert "1 session role/team definition will be stashed" in one_future, one_future
+    assert "1 session role/team definition was stashed" in one_past, one_past
+    assert "2 session role/team definitions were stashed" in two_past, two_past
+
+
+def test_a_dot_staging_dir_and_a_renamed_row_are_not_corrupt(tmp_path: Path) -> None:
+    """Round-3 false positives: the walk must not refuse a parseable tree.
+
+    The team store stages writes under a dot-prefixed sibling, and a row's YAML
+    id need not equal its directory name (a copied/hand-edited store). Neither
+    is a skipped row, so neither may raise.
+    """
+    import os
+
+    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    base = tmp_path / "sessions" / SESSION / "roles"
+    agents = AgentRegistry(base, initialize=True)
+    row = agents.create_agent(
+        AgentEditFields(
+            name="Alpha",
+            description="d",
+            tags=["role"],
+            categories=None,
+            security_prompt=None,
+            hosting=None,
+            model=None,
+            last_message=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
+        )
+    )
+    os.rename(base / "agents" / str(row.id), base / "agents" / "renamed-dir")
+
+    teams = TeamRegistry(base)
+    teams.create_team(TeamEditFields(name="Staged", manager="m", members=[]))
+    (staged,) = [p for p in (base / "teams").iterdir() if p.is_dir()]
+    os.rename(staged, base / "teams" / ".staging-tmp")
+
+    assert mobility._session_role_definitions(tmp_path, SESSION) == ["Alpha"]
+
+
+def test_a_relayed_receipt_states_the_live_count_not_the_enqueue_stamp(
+    tmp_path: Path,
+) -> None:
+    """Round 4: the stamp is a queue-time fact.
+
+    A definition added between enqueue and the safe point must show up in the
+    receipt the re-delivery prints: the stamp said 1, the stash will hold 2.
+    """
+    from local_operator.agent_profiles import install_seed
+    from local_operator.agents import AgentRegistry
+    from local_operator.network import move_queue
+    from local_operator.profile_scope import scope_agent_registry
+
+    scoped = scope_agent_registry(AgentRegistry(tmp_path), tmp_path / "sessions" / SESSION)
+    assert install_seed("reviewer", registry=scoped, scope="session") is not None
+    record, _ = move_queue.enqueue(
+        tmp_path,
+        SESSION,
+        to_device="d_b",
+        to_name="dev-b",
+        request_id="rq1",
+        requested_by="d_a",
+        drop_session_roles=True,
+        session_roles=1,
+        session_roles_notice=(
+            "1 session role/team definition will be stashed on dev-a at /x "
+            "when this queued move runs"
+        ),
+    )
+    blocks = {
+        "keep": False,
+        "from_block": {"device_id": "d_a", "name": "dev-a"},
+        "to_block": {"device_id": "d_b", "name": "dev-b"},
+    }
+
+    while_queued = mobility._queued_receipt(
+        SESSION, move_queue.payload(record) or {}, root=tmp_path, **blocks
+    )
+    assert (while_queued.get("carry") or {}).get("session_roles") == 1, while_queued
+
+    assert install_seed("coder", registry=scoped, scope="session") is not None
+    move_queue.transition(tmp_path, SESSION, "paused")
+    relayed = mobility._queued_receipt(
+        SESSION,
+        move_queue.payload(move_queue.read_record(tmp_path, SESSION)) or {},
+        root=tmp_path,
+        **blocks,
+    )
+
+    carry = relayed.get("carry") or {}
+    assert carry.get("session_roles") == 2, relayed
+    assert "2 session role/team definitions will be stashed" in str(
+        carry.get("session_roles_notice")
+    ), carry

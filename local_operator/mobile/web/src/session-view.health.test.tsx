@@ -20,7 +20,7 @@
 // captures and their measured y-stability numbers. What IS pinned here is the
 // structure that makes it true (`absolute` + `pointer-events-none` on the
 // ladder container, `pointer-events-auto` on the resume control).
-import { cleanup, fireEvent, render, screen, waitFor, act } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionScreen } from "./screens/session-view";
 import type { SessionProjection, TranscriptEntry } from "./types";
@@ -146,109 +146,149 @@ afterEach(() => {
 	delete document.documentElement.dataset.view;
 });
 
+/** A minimal roster row, copied from the sibling render test rather than
+    trimmed: SubagentsPanel reads most of these fields. */
+function subagentRow(): SessionProjection["subagents"][number] {
+	return {
+		job_id: "j1",
+		label: "audit",
+		agent: "coder",
+		status: "completed",
+		progress: "",
+		elapsed_s: 1,
+		model_label: "",
+		result_text: "",
+		error_text: "",
+		parent_job_id: null,
+		session_id: "j1-session",
+		prompt: "",
+		launch_message_id: "",
+		effort: "high",
+		ancestors: [],
+		ancestor_ids: [],
+		child_ids: [],
+		peer_ids: [],
+		transcript: [],
+		todos: [],
+		activity: "",
+	};
+}
+
+/** A retained projection carrying every disclosure the tray can hold. */
+function retained(flags: Partial<SessionProjection>): Partial<SessionProjection> {
+	return {
+		todos: [{ name: "Todos", items: [{ text: "audit", status: "pending", reason: "" }] }],
+		subagents: [subagentRow()],
+		...flags,
+	};
+}
+
+/* THE BANNER NEVER OWNS THE ONLY DOOR (agent review round 1, C1-1 = QA Q1-2).
+   The ended/degraded banner used to REPLACE the tray, and the tray held the one
+   setter that opens the Tasks and Agents sheets — so a finished conversation's
+   own history became unreadable without restarting its runtime. These cases go
+   through the real SessionScreen and assert the DOORS, then open them. */
+describe.each<[string, Partial<SessionProjection>]>([
+	["ended", { ended: true }],
+	["degraded", { degraded: true }],
+])("a %s conversation keeps its retained history reachable (C1-1)", (_state, flags) => {
+	it("exposes the tasks and agents doors and opens both sheets from them", () => {
+		slot = { projection: projection(retained(flags)), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+
+		/* Named by their own words, not by a hidden gesture: the tray chips are
+		   BUTTONs, `aria-expanded` describes the sheet they own, and the chip
+		   primitive's `lo-hit` gives them the 44 px floor inside the tray's own
+		   44 px strip. happy-dom does no layout, so the BAND is a rendered-audit
+		   number; this pins the structure that makes it real. */
+		const tasks = screen.getByRole("button", { name: /^Tasks/ });
+		const agents = screen.getByRole("button", { name: /^Agents/ });
+		for (const door of [tasks, agents]) {
+			expect(door.tagName).toBe("BUTTON");
+			expect(door.className).toContain("lo-hit");
+			expect(door.closest("div")?.className).toContain("h-11");
+			expect(door.getAttribute("aria-expanded")).toBe("false");
+		}
+
+		/* The sheet is MODAL, so it takes the rest of the screen out of the
+		   accessibility tree while it is open — the door is read through the
+		   handle captured above, and the sheet is asserted by its own name. */
+		fireEvent.click(tasks);
+		expect(tasks.getAttribute("aria-expanded")).toBe("true");
+		expect(screen.getByRole("dialog", { name: "Tasks" })).toBeTruthy();
+		fireEvent.click(screen.getByRole("button", { name: "close sheet" }));
+
+		fireEvent.click(agents);
+		expect(agents.getAttribute("aria-expanded")).toBe("true");
+		expect(screen.getByRole("dialog", { name: "Agents" })).toBeTruthy();
+	});
+});
+
+/* THE ENDED SESSION (U7), now the header's grey status dot (operator request:
+   the permanent banner above the composer is gone). The resume path itself —
+   acceptance line (U24), same-route survival (U16), the refusal voice (D5/U26)
+   and where it reopens (U18, #1875) — moved with its code into the dot's sheet
+   and is asserted there, in `session-view.status-dot.test.tsx`. What stays here
+   is the ladder's honesty about the state. */
 describe("an ended session (U7)", () => {
-	it("says so and offers the documented resume, which reopens the conversation", async () => {
+	/** The status dot's sheet — the one place an ended session offers Resume. */
+	function openHealthSheet(): HTMLElement {
+		fireEvent.click(document.querySelector<HTMLElement>("button[data-health]")!);
+		return screen.getByRole("dialog");
+	}
+
+	it("says so in the header and offers the documented resume from the dot", async () => {
 		slot = { projection: projection({ ended: true }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
 
-		// The reader is told what happened, in the strip's own words.
-		expect(screen.getByText("session ended — history kept")).toBeTruthy();
+		// The reader is told what happened, in the header's own word.
+		const control = document.querySelector<HTMLElement>("button[data-health]")!;
+		expect(control.dataset.health).toBe("ended");
+		expect(control.getAttribute("title")).toBe("Ended");
+		expect(within(control).getByText("Ended")).toBeTruthy();
 
-		fireEvent.click(screen.getByRole("button", { name: "resume" }));
+		fireEvent.click(within(openHealthSheet()).getByRole("button", { name: "Resume" }));
 		await waitFor(() => expect(mocks.resumeSession).toHaveBeenCalledWith("s1"));
-		// The route echoes the id, so the phone lands on the SAME session route —
-		// the shape that makes U16 (below) a same-route survival problem.
 		await waitFor(() => expect(mocks.navigate).toHaveBeenCalledWith("/s/s1"));
 	});
 
 	it("an ended CUT-OFF session offers exactly ONE resume affordance (U15)", () => {
-		/* The shape the daemon serves after a mid-turn death: the terminal
-		   repaint fills the end from the durable record, so `ended` and the
-		   cut-off receipt coexist. The composer used to grow a second, prominent
-		   `turn cut off — tap to resume` whose `continue` the dead runtime can
-		   never take — the strip's resume is the one path that respawns, so it
-		   must be the only one offered. */
+		/* The shape the daemon serves after a mid-turn death: `ended` and the
+		   cut-off receipt coexist. The composer's `turn cut off — tap to resume`
+		   sends `continue` to a runtime that is gone; the dot's Resume is the one
+		   path that respawns, so it must be the only one offered — and it is not
+		   painted at rest at all, so nothing in the thumb zone competes. */
 		slot = {
 			projection: projection({ ended: true, stop_reason: "aborted", cut_off: true }),
 			connected: true,
 		};
 		render(<SessionScreen sessionId="s1" />);
 
-		expect(screen.getByRole("button", { name: "resume" })).toBeTruthy();
 		expect(screen.queryByRole("button", { name: /tap to resume/ })).toBeNull();
 		expect(screen.queryByText("turn cut off — tap to resume")).toBeNull();
+		expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
+		expect(within(openHealthSheet()).getAllByRole("button", { name: "Resume" })).toHaveLength(1);
 	});
 
-	it("a SUCCEEDED resume that does not revive the session leaves the button usable (U16)", async () => {
-		/* The same-route no-op: the POST answers, the navigation lands where the
-		   component already is, and no live frame arrives. `busy` used to stay
-		   set, stranding `resuming…` disabled with no way out. */
-		slot = { projection: projection({ ended: true }), connected: true };
-		render(<SessionScreen sessionId="s1" />);
-
-		fireEvent.click(screen.getByRole("button", { name: "resume" }));
-		await waitFor(() => expect(mocks.resumeSession).toHaveBeenCalledTimes(1));
-		// Retrying is safe (the daemon coalesces concurrent resumes), so the
-		// control must come back — and a second press must actually fire again.
-		const again = await screen.findByRole("button", { name: "resume" });
-		expect((again as HTMLButtonElement).disabled).toBe(false);
-		fireEvent.click(again);
-		await waitFor(() => expect(mocks.resumeSession).toHaveBeenCalledTimes(2));
-	});
-
-	it("renders the daemon's sentence when the resume is refused, in one refusal voice (D5)", async () => {
-		mocks.resumeSession.mockImplementation(async () => {
-			throw new Error("no runtime to resume into");
-		});
-		slot = { projection: projection({ ended: true }), connected: true };
-		render(<SessionScreen sessionId="s1" />);
-
-		fireEvent.click(screen.getByRole("button", { name: "resume" }));
-		await waitFor(() =>
-			expect(screen.getByRole("alert").textContent).toContain(
-				"Could not resume: no runtime to resume into",
-			),
-		);
-		// The affordance survives the refusal — retrying is the reader's call.
-		expect(screen.getByRole("button", { name: "resume" })).toBeTruthy();
-		expect(mocks.navigate).not.toHaveBeenCalled();
-	});
-
-	it("the ended strip rides the header as an overlay, not an in-flow row (U19/D4)", () => {
-		slot = { projection: projection({ ended: true }), connected: true };
-		render(<SessionScreen sessionId="s1" />);
-
-		/* The ladder container: absolutely positioned under the header, and
-		   pointer-events-none so its dead space passes touches through to the
-		   transcript beneath (scrolling from the strip's own row must work). */
-		const row = screen.getByText("session ended — history kept");
-		const ladder = row.closest("div.absolute");
-		expect(ladder?.className).toContain("pointer-events-none");
-		expect(ladder?.className).toContain("top-full");
-		// ...while the one control the rung owns opts back in.
-		expect(screen.getByRole("button", { name: "resume" }).className).toContain(
-			"pointer-events-auto",
-		);
-	});
-
-	it("carries the wide-view control on the screen the reading happens on (D2, #1870)", () => {
+	it("reaches wide view through the session menu, with its state visible (D2, #1870)", () => {
 		slot = { projection: projection(), connected: true };
 		render(<SessionScreen sessionId="s1" />);
 
+		/* The header no longer carries a permanent `[wide]` toggle; the menu row
+		   names the setting and states it. */
+		expect(screen.queryByRole("button", { name: "wide view" })).toBeNull();
+		fireEvent.click(screen.getByRole("button", { name: "session menu" }));
+
 		const control = screen.getByRole("button", { name: "wide view" });
-		// D3: a WORD, not the glyph alone — `⇔` reads as swap/pan with nothing to
-		// learn it from, and the word fits the same target.
-		expect(control.textContent).toBe("wide");
+		expect(control.textContent).toContain("Wide view");
+		expect(control.textContent).toContain("off");
 		expect(control.getAttribute("aria-pressed")).toBe("false");
 
 		fireEvent.click(control);
 
 		const pressed = screen.getByRole("button", { name: "wide view" });
 		expect(pressed.getAttribute("aria-pressed")).toBe("true");
-		// D4: pressed is FILLED, not a hue change — the palette delta is ~1:1
-		// luminance in most shipped themes, so weight has to carry it.
-		expect(pressed.className).toContain("bg-accent");
-		expect(pressed.className).toContain("text-on-accent");
+		expect(pressed.textContent).toContain("on");
 		expect(document.documentElement.dataset.view).toBe("wide");
 		expect(localStorage.getItem("lo-mobile-wide-view")).toBe("1");
 
@@ -257,108 +297,20 @@ describe("an ended session (U7)", () => {
 		expect(localStorage.getItem("lo-mobile-wide-view")).toBeNull();
 	});
 
-	it("says where an ended session reopens, and that a send does it too (U18, #1875)", () => {
-		slot = { projection: projection({ ended: true }), connected: true };
+	it("keeps spend reachable from the composer on an ended session", () => {
+		slot = { projection: projection({ ended: true, context_tokens: 12400, context_window: 200000 }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
-		/* The words are spelled out, not a bare `~` (UX round 2, U25 = D8). */
-		expect(screen.getByText("a send or resume reopens it in your home folder")).toBeTruthy();
+		const spend = screen.getByRole("button", { name: /Spend & context:/ });
+		expect(spend.closest(".lo-composer")).toBeTruthy();
 	});
 
-	it("a resume that succeeds without a live frame says so (U24)", async () => {
-		slot = { projection: projection({ ended: true }), connected: true };
+	it("spends no transcript top inset and no strip above the composer", () => {
+		slot = { projection: projection({ ended: true, transcript: [userRow("prompt")] }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
-		fireEvent.click(screen.getByRole("button", { name: "resume" }));
-		expect(
-			await screen.findByText("reopening — this can take a few seconds"),
-		).toBeTruthy();
-	});
-
-	it("and the line says what is true if the session still has not come up (U24)", async () => {
-		vi.useFakeTimers();
-		try {
-			slot = { projection: projection({ ended: true }), connected: true };
-			render(<SessionScreen sessionId="s1" />);
-			fireEvent.click(screen.getByRole("button", { name: "resume" }));
-			// Flush the POST's promise without advancing the clock.
-			await act(async () => {
-				await Promise.resolve();
-			});
-			expect(screen.getByText("reopening — this can take a few seconds")).toBeTruthy();
-			await act(async () => {
-				vi.advanceTimersByTime(21_000);
-			});
-			expect(screen.getByText("still reopening — it has not come up yet")).toBeTruthy();
-			expect(screen.queryByText("reopening — this can take a few seconds")).toBeNull();
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-
-	it("maps the resume 404 onto the reader's sentence, not the raw id (U26)", async () => {
-		const api = await import("./api");
-		mocks.resumeSession.mockImplementation(async () => {
-			throw new api.HttpError(404, "no such past session: s1");
-		});
-		slot = { projection: projection({ ended: true }), connected: true };
-		render(<SessionScreen sessionId="s1" />);
-		fireEvent.click(screen.getByRole("button", { name: "resume" }));
-		await waitFor(() =>
-			expect(screen.getByRole("alert").textContent).toBe(
-				"Could not resume: this session is no longer saved",
-			),
-		);
-	});
-
-	it("anchors the ladder under the spend/context glance, not over it (D9)", () => {
-		slot = {
-			projection: projection({
-				ended: true,
-				context_tokens: 12400,
-				context_window: 200000,
-			}),
-			connected: true,
-		};
-		render(<SessionScreen sessionId="s1" />);
-		const status = screen.getByTestId("session-status");
-		const row = screen.getByText("session ended — history kept");
-		const ladder = row.closest("div.absolute");
-		/* One wrapper holds the header, the glance row and the ladder, so the
-		   ladder's `top-full` anchor is BELOW the glance row by construction:
-		   the strip can no longer paint over the numbers a struggling session
-		   most needs. */
-		expect(ladder).toBeTruthy();
-		expect(status.parentElement).toBe(ladder?.parentElement);
-	});
-
-	it("reserves the rung's measured height inside the transcript (U23 = D7)", () => {
-		/* happy-dom lays nothing out (every rect is 0), so the rung's height is
-		   injected at the one place the screen measures it — the ladder
-		   container's own rect — and the assertion reads the spacer the screen
-		   then hands the transcript. */
-		const original = Element.prototype.getBoundingClientRect;
-		Element.prototype.getBoundingClientRect = function (this: Element) {
-			if (
-				typeof this.className === "string" &&
-				this.className.includes("top-full")
-			) {
-				return { height: 52 } as unknown as DOMRect;
-			}
-			return original.call(this);
-		};
-		try {
-			slot = {
-				projection: projection({ ended: true, transcript: [userRow("prompt")] }),
-				connected: true,
-			};
-			render(<SessionScreen sessionId="s1" />);
-			const spacer = document.querySelector<HTMLElement>("[data-scroll-top-inset]");
-			expect(spacer).toBeTruthy();
-			expect(spacer?.style.height).toBe("52px");
-			// Above every reachable row, not between them.
-			expect(spacer?.parentElement?.firstElementChild).toBe(spacer);
-		} finally {
-			Element.prototype.getBoundingClientRect = original;
-		}
+		expect(document.querySelector("[data-scroll-top-inset]")).toBeNull();
+		expect(screen.getByText("prompt")).toBeTruthy();
+		expect(screen.queryByText("Session ended · history kept")).toBeNull();
+		expect(document.querySelector("[data-above-composer]")).toBeNull();
 	});
 });
 
@@ -379,11 +331,17 @@ describe("a degraded session (U7)", () => {
 		slot = { projection: projection({ degraded: true }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
 
-		expect(screen.getByText("not answering — showing its last synced view")).toBeTruthy();
-		// `ended` and `degraded` are different facts; the degraded strip must
+		const control = document.querySelector<HTMLElement>("button[data-health]")!;
+		expect(control.dataset.health).toBe("not_answering");
+		expect(within(control).getByText("Not answering")).toBeTruthy();
+		// What a send does now is one tap away, in the dot's sheet — and it is
+		// the truth (#3008 review U1): refused at once, text kept, no queue.
+		fireEvent.click(control);
+		expect(within(screen.getByRole("dialog")).getByText("Your computer can't reach this session right now and keeps trying. Until it does, a send fails straight away and your text stays in the message box.")).toBeTruthy();
+		// `ended` and `degraded` are different facts; the degraded state must
 		// not drag the resume affordance (and its restart offer) in with it.
-		expect(screen.queryByRole("button", { name: "resume" })).toBeNull();
-		expect(screen.queryByText(/session ended/)).toBeNull();
+		expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
+		expect(screen.queryByText(/session ended/i)).toBeNull();
 	});
 });
 
@@ -395,17 +353,26 @@ describe("the health ladder renders exactly one rung", () => {
 		};
 		render(<SessionScreen sessionId="s1" />);
 
-		expect(screen.getByText("session ended — history kept")).toBeTruthy();
-		expect(screen.queryByText("not answering — showing its last synced view")).toBeNull();
-		expect(screen.queryByText("reconnecting — showing the last synced view")).toBeNull();
+		const control = document.querySelector<HTMLElement>("button[data-health]")!;
+		expect(control.dataset.health).toBe("ended");
+		expect(within(control).getByText("Ended")).toBeTruthy();
+		expect(screen.queryByText("Not answering")).toBeNull();
+		expect(screen.queryByText("Reconnecting…")).toBeNull();
+		expect(document.querySelectorAll("[data-health-dot]")).toHaveLength(1);
 	});
 
-	it("prefers degraded over the phone's own link", () => {
+	it("prefers the phone's own link over degraded — its last frame may be stale", () => {
+		/* #3008 copy sign-off: an offline phone cannot vouch for a degraded
+		   reading taken from its last frame; it can only say its own link is
+		   down. Previously the reverse (degraded over the link). */
 		slot = { projection: projection({ degraded: true }), connected: false };
 		render(<SessionScreen sessionId="s1" />);
 
-		expect(screen.getByText("not answering — showing its last synced view")).toBeTruthy();
-		expect(screen.queryByText("reconnecting — showing the last synced view")).toBeNull();
+		const control = document.querySelector<HTMLElement>("button[data-health]")!;
+		expect(control.dataset.health).toBe("reconnecting");
+		expect(control.textContent).toContain("Reconnecting");
+		expect(screen.queryByText("Not answering")).toBeNull();
+		expect(document.querySelectorAll("[data-health-dot]")).toHaveLength(1);
 	});
 });
 
@@ -413,14 +380,18 @@ describe("the phone's own dropped link (U11)", () => {
 	it("says reconnecting once a projection is on screen, and nothing while it has none", () => {
 		slot = { projection: projection(), connected: false };
 		const first = render(<SessionScreen sessionId="s1" />);
-		expect(screen.getByText("reconnecting — showing the last synced view")).toBeTruthy();
+		const control = document.querySelector<HTMLElement>("button[data-health]")!;
+		expect(control.dataset.health).toBe("reconnecting");
+		expect(control.textContent).toContain("Reconnecting");
+		// ...and it is announced once, through the health live region (U2).
+		expect(document.querySelector("[data-health-announce]")!.textContent).toBe("Reconnecting");
 		first.unmount();
 
 		// With no data yet the view already says `connecting to session…`;
 		// a second line would be noise about noise.
 		slot = { projection: null, connected: false };
 		render(<SessionScreen sessionId="s1" />);
-		expect(screen.queryByText("reconnecting — showing the last synced view")).toBeNull();
+		expect(screen.queryByText(/Reconnecting/)).toBeNull();
 	});
 });
 
@@ -429,9 +400,10 @@ describe("a refused pin (U2)", () => {
 		mocks.setSessionPin.mockImplementation(async () => {
 			throw new Error("no saved messages yet — pin it after you send one");
 		});
-		render(<SessionScreen sessionId="s1" />);
+		const { getByRole } = render(<SessionScreen sessionId="s1" />);
 
-		const star = await screen.findByRole("button", { name: "pin this session" });
+		fireEvent.click(await screen.findByRole("button", { name: "session menu" }));
+		const star = getByRole("button", { name: "Pin session" });
 		fireEvent.click(star);
 
 		await waitFor(() =>
@@ -439,9 +411,15 @@ describe("a refused pin (U2)", () => {
 				"Could not save the pin: no saved messages yet — pin it after you send one",
 			),
 		);
-		// The optimistic mark went back with the refusal — the button offers the
-		// press again rather than showing a ★ the daemon never accepted.
-		expect(screen.getByRole("button", { name: "pin this session" })).toBeTruthy();
+		// R1-3/U2: the refusal closed the sheet, so the in-flow receipt is the
+		// visible thing. The optimistic mark went back with it — reopening the
+		// menu offers the press again rather than showing a state the daemon
+		// never accepted.
+		expect(screen.queryByRole("dialog")).toBeNull();
+		/* The sheet restores the header's inert/aria-hidden in its cleanup,
+		   which lands a tick after the close; poll the accessible name. */
+		fireEvent.click(await screen.findByRole("button", { name: "session menu" }));
+		expect(await screen.findByRole("button", { name: "Pin session" })).toBeTruthy();
 	});
 });
 
@@ -452,7 +430,8 @@ describe("the refused pin's own exit (U17)", () => {
 		});
 		const { rerender } = render(<SessionScreen sessionId="s1" />);
 
-		fireEvent.click(await screen.findByRole("button", { name: "pin this session" }));
+		fireEvent.click(await screen.findByRole("button", { name: "session menu" }));
+		fireEvent.click(await screen.findByRole("button", { name: "Pin session" }));
 		const refusal = await waitFor(() => screen.getByRole("alert"));
 		expect(refusal.textContent).toContain("pin it after you send one");
 

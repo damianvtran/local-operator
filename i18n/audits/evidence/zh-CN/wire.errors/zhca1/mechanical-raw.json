@@ -1,0 +1,97 @@
+{
+ "namespace": "wire.errors",
+ "prior_status": "passed",
+ "prior_auditor": {
+  "agent": "i18n-auditor",
+  "model": "openai/gpt-6.1-sol",
+  "date": "2026-10-11",
+  "result": "passed",
+  "findings": 0
+ },
+ "prior_translator": {
+  "agent": "i18n-translator",
+  "model": "deepseek/deepseek-flash",
+  "date": "2026-10-11"
+ },
+ "prior_note": "Independent carry audit passed0; empty namespace byte-identical to en (3 bytes, {}+LF; ca3d163b). Translator deepseek/deepseek-flash; auditor openai/gpt-6.1-sol. | Carried byte-identical on held/i18n-zh-core 2026-10-19; source hash unchanged; re-verified by the 2026-10-19 audit.",
+ "hash_equality": {
+  "source_sha256_prior_row": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+  "source_sha256_held_candidate": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+  "source_sha256_current": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+  "source_equal": true,
+  "target_sha256_prior_row": null,
+  "target_sha256_held_candidate": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+  "target_sha256_current": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+  "target_equal": true
+ },
+ "key_parity": {
+  "en_count": 0,
+  "zh_count": 0,
+  "missing_in_zh": [],
+  "unknown_in_zh": [],
+  "set_equal": true,
+  "order_equal": true,
+  "first_order_divergence": null,
+  "en_duplicate_keys": [],
+  "zh_duplicate_keys": []
+ },
+ "icu": {
+  "messages_checked": 0,
+  "parse_errors": [],
+  "argument_mismatches": [],
+  "plural_errors": []
+ },
+ "exact_english_values": [],
+ "width": {
+  "over_max_cells": [],
+  "longer_than_english": []
+ },
+ "whole_file_bytes_equal_held": true,
+ "sample": {
+  "policy": "empty namespace (no messages)",
+  "buckets": {},
+  "sampled_by_bucket": {},
+  "all_over_120": [],
+  "all_plurals": [],
+  "keys_sampled": 0,
+  "fraction_of_namespace": 0.0,
+  "selected": []
+ },
+ "src_ok": true,
+ "tgt_ok": true,
+ "old_src": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+ "cur_src": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+ "old_tgt": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+ "new_tgt": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+ "attest_sample": {
+  "policy": "empty namespace (no messages)",
+  "buckets": {},
+  "sampled_by_bucket": {},
+  "all_over_120": [],
+  "all_plurals": [],
+  "keys_sampled": 0,
+  "fraction_of_namespace": 0.0,
+  "selected": []
+ },
+ "attest_verdict": "carried",
+ "technical_tokens": {
+  "patterns": {
+   "backtick_span": "`[^`\\n]+`",
+   "long_flag": "(?<![A-Za-z0-9_/])--[A-Za-z0-9][A-Za-z0-9_-]*",
+   "angle_token": "<[A-Za-z][^>\\n]*>",
+   "url_scheme": "(?:https?|ssh)://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+",
+   "home_or_absolute_path": "(?:~/[A-Za-z0-9_./-]+|/(?:bin|Users|Volumes|tmp|var|etc)/[A-Za-z0-9_./-]+)",
+   "percent_token": "%\\([A-Za-z_]+\\)[sdif]|%[sdif]",
+   "ansi_escape": "\\x1b\\[[0-9;]*m"
+  },
+  "failures": [],
+  "kept_english_missing": [],
+  "emphasis_tokens_rendered_lexically": [],
+  "caps_disposition": "Uppercase tokens outside KEPT_ENGLISH are English emphasis (STALE, ONE, ONLY, NOT, FINAL, APPROVE, WORKSTREAM, ...). Chinese has no case and renders the emphasis lexically; their absence is recorded as emphasis_tokens_rendered_lexically, not as a dropped placeholder."
+ },
+ "icu_number_date_skeletons": {
+  "keys_checked": 0,
+  "failures": []
+ },
+ "width_max_cells": []
+}

@@ -1,0 +1,13 @@
+{
+  "tui.asks.context.messages": "{count, plural, one {# сообщение от вас после этого вопроса (последнее в {time})} few {# сообщения от вас после этого вопроса (последнее в {time})} many {# сообщений от вас после этого вопроса (последнее в {time})} other {# сообщения от вас после этого вопроса (последнее в {time})}}",
+  "tui.asks.dismiss.answered_in_chat": "Ответ дан в чате",
+  "tui.asks.dismiss.answered_in_chat_note": "вы уже ответили в чате",
+  "tui.asks.dismiss.fleet_gone": "этого вопроса больше нет в журнале того разговора.",
+  "tui.asks.dismiss.hint": "enter убрать · esc отмена",
+  "tui.asks.dismiss.moot": "Больше не нужно",
+  "tui.asks.dismiss.moot_note": "агент больше не будет ждать ответа",
+  "tui.asks.dismiss.notice_answered_in_chat": "Убрано — ответ дан в чате",
+  "tui.asks.dismiss.notice_moot": "Убрано — больше не нужно",
+  "tui.asks.dismiss.notice_no_reply": "Убрано — ответ не отправлен",
+  "tui.asks.dismiss.title": "Убрать этот вопрос"
+}

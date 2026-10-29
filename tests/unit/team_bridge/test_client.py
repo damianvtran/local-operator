@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -114,10 +115,10 @@ def _err(status: int, code: str, *, details: dict[str, Any] | None = None) -> ht
 
 
 def _make_client(
-    handler, *, store: Any = None, credential_id: int | None = None
+    handler, *, store: Any = None, credential_id: int | None = None, config_dir: Path | None = None
 ) -> TeamBridgeClient:
     return TeamBridgeClient(
-        None,
+        config_dir,
         base_url="https://hub.example/v1",
         store=store or FakeStore(),
         transport=httpx.MockTransport(handler),
@@ -338,7 +339,11 @@ async def test_consent_version_unknown_is_a_refresh_status_signal():
     client = _make_client(handler)
     with pytest.raises(BridgeRefusal) as info:
         await client.put_settings(
-            state="active", consent_version="bridge_consent_v1", endpoint=None
+            state="active",
+            consent_version="bridge_consent_v1",
+            endpoint=None,
+            expected_account_id="acc_1",
+            tenant_id="tnt_1",
         )
     assert info.value.refreshes_status is True
     assert info.value.advice is None
@@ -404,7 +409,11 @@ async def test_every_field_rule_case_renders_its_client_sentence_or_none(field: 
     client = _make_client(handler)
     with pytest.raises(BridgeRefusal) as info:
         await client.put_settings(
-            state="active", consent_version="bridge_consent_v1", endpoint=None
+            state="active",
+            consent_version="bridge_consent_v1",
+            endpoint=None,
+            expected_account_id="acc_1",
+            tenant_id="tnt_1",
         )
 
     expected = VALIDATION_SENTENCES.get((field, rule))
@@ -453,7 +462,14 @@ async def test_a_pause_or_opt_out_is_sent_alone(bundled: str):
     assert sent == []
 
     # The name change as its own request is fine (state=active).
-    await client.put_settings(state="active", consent_version="v1", label="My agent", endpoint=None)
+    await client.put_settings(
+        state="active",
+        consent_version="v1",
+        label="My agent",
+        endpoint=None,
+        expected_account_id="acc_1",
+        tenant_id="tnt_1",
+    )
     assert len(sent) == 1
 
 
@@ -480,11 +496,21 @@ async def test_consented_via_is_the_closed_set():
 
     with pytest.raises(ValueError, match="consented_via"):
         await client.put_settings(
-            state="active", consent_version="v1", consented_via="email", endpoint=None
+            state="active",
+            consent_version="v1",
+            consented_via="email",
+            endpoint=None,
+            expected_account_id="acc_1",
+            tenant_id="tnt_1",
         )
 
     await client.put_settings(
-        state="active", consent_version="v1", consented_via="dialog", endpoint=None
+        state="active",
+        consent_version="v1",
+        consented_via="dialog",
+        endpoint=None,
+        expected_account_id="acc_1",
+        tenant_id="tnt_1",
     )
     assert sent[-1]["consented_via"] == "dialog"
 
@@ -493,7 +519,12 @@ async def test_the_body_bound_is_checked_before_the_wire():
     client = _make_client(lambda request: _ok({}))
     with pytest.raises(BridgeRefusal) as info:
         await client.put_settings(
-            state="active", consent_version="v1", label="x" * 5000, endpoint=None
+            state="active",
+            consent_version="v1",
+            label="x" * 5000,
+            endpoint=None,
+            expected_account_id="acc_1",
+            tenant_id="tnt_1",
         )
     assert info.value.code == "payload_too_large"
     assert info.value.http_status == 413
@@ -508,7 +539,11 @@ async def test_tenant_id_rides_the_body_when_given():
 
     client = _make_client(handler)
     await client.put_settings(
-        state="active", consent_version="v1", tenant_id="tnt_1", endpoint=None
+        state="active",
+        consent_version="v1",
+        tenant_id="tnt_1",
+        endpoint=None,
+        expected_account_id="acc_1",
     )
     assert sent == [{"state": "active", "tenant_id": "tnt_1", "consent_version": "v1"}]
 
@@ -733,3 +768,660 @@ async def test_tenant_state_reads_the_frozen_route_with_the_pinned_bearer():
 
     assert result["effective"] is True
     assert seen == [("/v1/tenants/tnt_1/messaging/state", "Bearer token-1")]
+
+
+async def test_directory_sends_the_tenant_as_a_query_parameter():
+    """The directory is one org's answer: one GET, tenant in the QUERY, no body."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"members": [{"account_id": "acc_2"}]})
+
+    client = _make_client(handler)
+    result = await client.directory("tnt_1")
+
+    assert result == {"members": [{"account_id": "acc_2"}]}
+    assert len(seen) == 1
+    assert seen[0].method == "GET"
+    assert seen[0].url.path == "/v1/messaging/directory"
+    assert dict(seen[0].url.params) == {"tenant_id": "tnt_1"}
+    assert seen[0].content == b""
+    assert seen[0].headers["authorization"] == "Bearer token-1"
+
+
+# ---------------------------------------------------------------------------
+# the account-scope read surface (desktop multi-org forwarding)
+# ---------------------------------------------------------------------------
+
+
+async def test_conversations_sends_the_scope_and_cursor_wire_names():
+    """The merged page's names belong to the other repo; pin the seam here."""
+
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        return _ok({"conversations": [], "cursor": None})
+
+    client = _make_client(handler)
+    await client.conversations(scope="account", cursor="bcur_x", limit=20)
+
+    assert len(seen) == 1
+    assert seen[0].path == "/v1/messaging/conversations"
+    assert dict(seen[0].params) == {
+        "limit": "20",
+        "cursor": "bcur_x",
+        "scope": "account",
+    }
+
+
+async def test_unread_sends_the_scope_wire_name():
+    """The badge's aggregate is one GET; a dropped name would read one org."""
+
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        return _ok({"total": 0, "organizations": []})
+
+    client = _make_client(handler)
+    await client.unread(scope="account")
+
+    assert len(seen) == 1
+    assert seen[0].path == "/v1/messaging/unread"
+    assert dict(seen[0].params) == {"scope": "account"}
+
+
+# ---------------------------------------------------------------------------
+# agent actors, discovery and notification policy (contract §10.1)
+# ---------------------------------------------------------------------------
+
+
+async def test_create_conversation_sends_the_agent_actor_wire_names():
+    """The actor fields are the server PR's names; a rename would act human."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"id": "conv_1", "kind": "channel", "members": []})
+
+    client = _make_client(handler)
+    await client.create_conversation(
+        {
+            "tenant_id": "tnt_1",
+            "kind": "channel",
+            "name": "build",
+            "visibility": "tenant",
+            "members": [
+                {"account_id": "acc_1", "kind": "agent", "endpoint_id": "bep_1"},
+            ],
+        },
+        actor_endpoint_id="bep_1",
+        origin_session_id="sess_1",
+    )
+
+    assert seen[0].method == "POST"
+    assert seen[0].url.path == "/v1/messaging/conversations"
+    assert json.loads(seen[0].content) == {
+        "tenant_id": "tnt_1",
+        "kind": "channel",
+        "name": "build",
+        "visibility": "tenant",
+        "members": [{"account_id": "acc_1", "kind": "agent", "endpoint_id": "bep_1"}],
+        "actor_endpoint_id": "bep_1",
+        "origin_session_id": "sess_1",
+    }
+
+
+async def test_conversation_send_sends_the_agent_actor_and_never_agent_label():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"message": {"id": "cmsg_1", "seq": 4}})
+
+    client = _make_client(handler)
+    await client.conversation_send(
+        "conv_1",
+        client_ref="ref-1",
+        text="hello",
+        tenant_id="tnt_1",
+        actor_endpoint_id="bep_1",
+        origin_session_id="sess_1",
+    )
+
+    assert seen[0].url.path == "/v1/messaging/conversations/conv_1/messages"
+    payload = json.loads(seen[0].content)
+    assert payload == {
+        "client_ref": "ref-1",
+        "body": "hello",
+        "tenant_id": "tnt_1",
+        "actor_endpoint_id": "bep_1",
+        "origin_session_id": "sess_1",
+    }
+    assert "agent_label" not in payload
+
+
+async def test_the_human_conversation_calls_are_unchanged_without_an_actor():
+    """No actor means no actor field — the pre-agent wire shape, exactly."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"message": {"id": "cmsg_1"}})
+
+    client = _make_client(handler)
+    await client.conversation_send("conv_1", client_ref="ref-1", text="hello")
+    assert json.loads(seen[0].content) == {"client_ref": "ref-1", "body": "hello"}
+
+    await client.create_conversation({"kind": "dm", "members": []})
+    assert json.loads(seen[1].content) == {"kind": "dm", "members": []}
+
+
+async def test_conversation_notify_posts_the_policy_on_the_read_route():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"muted": False})
+
+    client = _make_client(handler)
+    await client.conversation_notify("conv_1", tenant_id="tnt_1", notify="mention")
+
+    assert seen[0].url.path == "/v1/messaging/conversations/conv_1/read"
+    assert json.loads(seen[0].content) == {"notify": "mention", "tenant_id": "tnt_1"}
+
+    with pytest.raises(ValueError):
+        await client.conversation_notify("conv_1", notify="loud")  # type: ignore[arg-type]
+
+
+async def test_conversations_passes_discoverable_rows_through_untouched():
+    """Discovery is the server's authorization answer, not the client's to edit."""
+
+    row = {
+        "id": "conv_2",
+        "kind": "channel",
+        "visibility": "tenant",
+        "discoverable": True,
+        "member": False,
+        "member_count": 4,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok({"conversations": [row], "next_cursor": "bcur_2"})
+
+    client = _make_client(handler)
+    result = await client.conversations(tenant_id="tnt_1", limit=10)
+
+    assert result["conversations"] == [row]
+    assert result["next_cursor"] == "bcur_2"
+
+
+# ---------------------------------------------------------------------------
+# the explicit settings write is the only native-enrollment path (consent hold)
+# ---------------------------------------------------------------------------
+
+
+async def test_an_explicit_enable_commits_the_native_receipt(tmp_path: Path):
+    """A user's own ACTIVE settings PUT commits the owner + consent receipt.
+
+    #2712's status-read enrollment is gone; this is the path that keeps an
+    explicit enable able to receive.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(
+        state="active",
+        tenant_id="tnt_1",
+        consent_version="bridge_consent_v1",
+        consented_via="settings",
+        endpoint=None,
+        expected_account_id="acc_1",
+    )
+
+    from local_operator.team_bridge.store import Store
+
+    store = Store(tmp_path)
+    owner = store.active_owner()
+    assert owner is not None
+    assert (owner.account_id, owner.tenant_id, owner.endpoint_id) == ("acc_1", "tnt_1", "bep_1")
+    assert store.owner_consent_receipt(owner) == {
+        "consent_version": "bridge_consent_v1",
+        "consent_ref": "bep_1",
+    }
+
+
+def _enable_kwargs() -> dict[str, Any]:
+    return {
+        "state": "active",
+        "tenant_id": "tnt_1",
+        "consent_version": "bridge_consent_v1",
+        "consented_via": "settings",
+        "endpoint": None,
+        "expected_account_id": "acc_1",
+    }
+
+
+def _seeded(tmp_path: Path) -> int:
+    from local_operator.team_bridge.store import Store
+
+    store = Store(tmp_path)
+    owner = store.active_owner()
+    assert owner is not None
+    return int(store.sync_state(owner)["feed_seq"])
+
+
+async def test_an_explicit_enable_seeds_the_feed_cursor_at_the_hub_head(tmp_path: Path):
+    """Review R1-2/R2-1: ONE no-cursor events read, BEFORE the PUT, learns a used
+    endpoint's head, and the never-polled store starts there — no 7-day replay."""
+
+    order: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        order.append(request.url.path.rsplit("/", 1)[-1])
+        if request.url.path.endswith("/messaging/events"):
+            assert "after" not in request.url.params
+            return _ok({"events": [], "cursor": 412})
+        return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(**_enable_kwargs())
+
+    assert order == ["events", "settings"]
+    assert _seeded(tmp_path) == 412
+
+
+async def test_a_message_sent_between_the_enable_and_the_seed_is_never_skipped(tmp_path: Path):
+    """Review R2-1: the hub's head advances between the enable write and any later
+    read (a message lands). The seed must be the position at or BEFORE the PUT, so
+    that message's seq stays above the cursor and is delivered."""
+
+    head = {"seq": 7}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/messaging/events"):
+            return _ok({"events": [], "cursor": head["seq"]})
+        # The enable is accepted, and a message lands for this endpoint at once.
+        head["seq"] += 1
+        return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(**_enable_kwargs())
+
+    assert head["seq"] == 8
+    assert _seeded(tmp_path) == 7  # after=7 → the seq-8 message is delivered
+
+
+async def test_a_brand_new_endpoint_keeps_cursor_zero(tmp_path: Path):
+    """F2-safe: a first enable has no endpoint yet, so the pre-read is refused
+    and the first message (seq 1) is still delivered from cursor 0."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/messaging/events"):
+            return _err(403, "bridge_not_available")
+        return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(**_enable_kwargs())
+    assert _seeded(tmp_path) == 0
+
+
+async def test_a_slow_head_read_never_holds_the_enable(tmp_path: Path, monkeypatch):
+    """Review R2-2: the head read is bounded; past the bound the enable returns
+    and the cursor stays 0 (the F2-safe path)."""
+
+    import asyncio as _asyncio
+
+    from local_operator.team_bridge import client as client_mod
+
+    monkeypatch.setattr(client_mod, "SEED_HEAD_TIMEOUT_S", 0.05)
+
+    async def slow_events(**kwargs):
+        await _asyncio.sleep(5)
+        return {"events": [], "cursor": 999}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok({"endpoint": {"id": "bep_1", "state": "active"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    monkeypatch.setattr(client, "events", slow_events)
+    started = _asyncio.get_running_loop().time()
+    await client.put_settings(**_enable_kwargs())
+    assert _asyncio.get_running_loop().time() - started < 2
+    assert _seeded(tmp_path) == 0
+
+
+async def test_a_pause_never_commits_a_receipt(tmp_path: Path):
+    """Turning off is not consent: a pause leaves the store empty."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _ok({"endpoint": {"id": "bep_1", "state": "paused"}, "settings": {}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    await client.put_settings(state="paused", endpoint={"state": "active"})
+
+    from local_operator.team_bridge.store import Store
+
+    assert Store(tmp_path).committed_owner_count() == 0
+
+
+@pytest.mark.parametrize(
+    "consent",
+    [
+        pytest.param(None, id="no-consent-record"),
+        pytest.param(
+            {"version": "bridge_consent_v1", "consented_via": "dialog", "current": False},
+            id="record-no-longer-binds",
+        ),
+    ],
+)
+async def test_a_resume_without_an_echo_or_a_binding_record_commits_nothing(
+    tmp_path: Path, consent: Any
+):
+    """A bare resume is not an opt-in UNLESS the hub holds a binding consent
+    record for this member (D1 path c, review R1-2 — pinned on the commit
+    side in ``test_enrol_truth.py``). This pins the no-record side explicitly:
+    no echo and no current record means nothing commits, and the answer says
+    why, rather than passing by fixture shape."""
+
+    endpoint: dict[str, Any] = {"id": "bep_1", "state": "active"}
+    if consent is not None:
+        endpoint["consent"] = consent
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/messaging/events"):
+            return httpx.Response(403, json={"error": "no", "code": "bridge_not_available"})
+        return _ok({"endpoint": endpoint, "settings": {"tenant_id": "tnt_1"}})
+
+    client = _make_client(handler, config_dir=tmp_path)
+    result = await client.put_settings(
+        state="active", endpoint={"state": "paused"}, tenant_id="tnt_1", expected_account_id="acc_1"
+    )
+
+    from local_operator.team_bridge.store import Store
+
+    assert Store(tmp_path).committed_owner_count() == 0
+    assert result["local_enrollment"] == {"committed": False, "code": "no_consent_echo"}
+
+
+# ---------------------------------------------------------------------------
+# events long-poll (live E2E finding F1)
+# ---------------------------------------------------------------------------
+
+
+async def test_events_sends_the_long_poll_wait_and_outlives_the_park():
+    """F1: without ``wait`` the hub answers at once, so the loop hot-spun into
+    429s (124 calls in < 2 s against a real hub). The park must reach the wire,
+    and the read timeout must outlive it, or every quiet poll would end as a
+    client-side timeout instead of the server's 204."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(204)
+
+    client = _make_client(handler)
+    assert await client.events(tenant_id="tnt_1", after=0, wait=25) is None
+    params = seen[0].url.params
+    assert params["wait"] == "25"
+    # F2 on the wire: cursor 0 is a real position, never "no cursor".
+    assert params["after"] == "0"
+    timeout = seen[0].extensions["timeout"]
+    assert timeout["read"] > 25
+
+
+async def test_events_without_wait_keeps_the_plain_poll_shape():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(204)
+
+    client = _make_client(handler)
+    await client.events(tenant_id="tnt_1")
+    assert "wait" not in seen[0].url.params and "after" not in seen[0].url.params
+
+
+async def test_events_429_carries_the_retry_after_header():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429, json={"error": "slow down", "code": "rate_limited"}, headers={"Retry-After": "42"}
+        )
+
+    client = _make_client(handler)
+    with pytest.raises(BridgeRefusal) as refusal:
+        await client.events(tenant_id="tnt_1", after=3, wait=25)
+    assert refusal.value.http_status == 429 and refusal.value.retry_after_seconds == 42
+
+
+async def test_conversation_react_percent_encodes_and_uses_delete_query():
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return _ok({"message_id": "bcmsg_abc12345", "reactions": []})
+
+    client = _make_client(handler)
+    longest = "🧑🏻\u200d❤️\u200d💋\u200d🧑🏼"
+    await client.conversation_react(
+        "bcv_abc12345",
+        "bcmsg_abc12345",
+        longest,
+        active=True,
+        tenant_id="tnt_1",
+        actor_endpoint_id="bep_1",
+    )
+    assert seen[0].method == "PUT"
+    assert seen[0].url.path.endswith("/reactions/" + longest)
+    assert b"%F0" in seen[0].url.raw_path
+    assert json.loads(seen[0].content) == {"tenant_id": "tnt_1", "actor_endpoint_id": "bep_1"}
+    await client.conversation_react(
+        "bcv_abc12345", "bcmsg_abc12345", "👍", active=False, tenant_id="tnt_1"
+    )
+    assert seen[1].method == "DELETE"
+    assert seen[1].url.params["tenant_id"] == "tnt_1"
+    assert not seen[1].content
+
+
+async def test_conversations_sends_the_status_wire_name_only_when_asked():
+    """``status`` selects the archived half; the default must not change the wire."""
+
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        return _ok({"conversations": []})
+
+    client = _make_client(handler)
+    await client.conversations(tenant_id="tnt_1", status="archived")
+    await client.conversations(tenant_id="tnt_1")
+
+    assert dict(seen[0].params) == {"tenant_id": "tnt_1", "status": "archived"}
+    assert "status" not in dict(seen[1].params), "an older server must see the unchanged request"
+
+
+async def test_conversation_delete_is_a_delete_on_the_conversation_with_the_tenant():
+    """The irreversible verb: method, path and the tenant it names are the contract."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"id": "bcv_abc12345", "deleted": True, "messages_erased": 2})
+
+    client = _make_client(handler)
+    out = await client.conversation_delete("bcv_abc12345", tenant_id="tnt_1")
+
+    assert out["deleted"] is True
+    assert len(seen) == 1
+    assert seen[0].method == "DELETE"
+    assert seen[0].url.path == "/v1/messaging/conversations/bcv_abc12345"
+    assert dict(seen[0].url.params) == {"tenant_id": "tnt_1"}
+    assert seen[0].content == b""
+
+
+async def test_conversation_delete_surfaces_the_servers_refusal_unchanged():
+    """not_archived is the server's rule; the client must not translate or retry it."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _err(409, "invalid_transition", details={"rule": "not_archived"})
+
+    client = _make_client(handler)
+    with pytest.raises(BridgeRefusal) as exc:
+        await client.conversation_delete("bcv_abc12345")
+    assert exc.value.code == "invalid_transition"
+
+
+# ---------------------------------------------------------------------------
+# owner agent consent: withdraw, endpoint pin, owned invitations (agent-server #227)
+# ---------------------------------------------------------------------------
+
+
+async def test_withdraw_sends_no_consent_version_and_an_optional_endpoint_pin():
+    """Leaving is not consenting: the wire carries the decision and the pin only."""
+
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return _ok({"member": {"state": "left"}})
+
+    client = _make_client(handler)
+    await client.conversation_consent(
+        "bcv_abc12345", "acc_1", decision="withdraw", endpoint_id="bep_1", tenant_id="tnt_1"
+    )
+    await client.conversation_consent(
+        "bcv_abc12345", "acc_1", decision="accept", consent_version="v1"
+    )
+    # The unpinned accept is the pre-#227 wire byte for byte.
+    assert bodies == [
+        {"decision": "withdraw", "endpoint_id": "bep_1", "tenant_id": "tnt_1"},
+        {"decision": "accept", "consent_version": "v1"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "details"),
+    [
+        (409, "invalid_transition", {"rule": "not_invited"}),
+        (409, "invalid_transition", {"rule": "not_active"}),
+        (400, "invalid_request", {"field": "endpoint_id", "rule": "ambiguous"}),
+    ],
+)
+async def test_consent_state_refusals_pass_through_untouched(status, code, details):
+    """#227's refusals are answers about the caller's rows, not an old hub."""
+
+    client = _make_client(lambda request: _err(status, code, details=details))
+    with pytest.raises(BridgeRefusal) as info:
+        await client.conversation_consent(
+            "bcv_abc12345", "acc_1", decision="withdraw", endpoint_id="bep_1"
+        )
+    assert (info.value.http_status, info.value.code, info.value.details) == (
+        status,
+        code,
+        details,
+    )
+
+
+async def test_an_old_hub_refusing_the_new_wire_is_outdated_hub():
+    """The one CODED shape a pre-#227 hub answers `withdraw` with, and #227 cannot."""
+
+    response = _err(400, "invalid_request", details={"field": "decision", "rule": "unknown_value"})
+    client = _make_client(lambda request: response)
+    with pytest.raises(BridgeRefusal) as info:
+        await client.conversation_consent("bcv_abc12345", "acc_1", decision="withdraw")
+    assert info.value.code == tb_client.OUTDATED_HUB
+    assert info.value.http_status == 409
+    assert info.value.details == {"hub_status": 400, "hub_code": "invalid_request"}
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        # An uncoded body is what a strict body decoder, a proxy and an unrelated
+        # refusal all look like: not evidence of an old hub (review R1-3), so the
+        # hub's own answer surfaces instead of "the server needs an update".
+        httpx.Response(400, json={"error": "invalid request body"}),
+        httpx.Response(422, json={"error": "unprocessable"}),
+        # Plain text (a proxy page) is the same class.
+        httpx.Response(400, text="Bad Request"),
+    ],
+)
+async def test_an_uncoded_400_or_422_is_never_an_update_prompt(response):
+    client = _make_client(lambda request: response)
+    with pytest.raises(BridgeRefusal) as info:
+        await client.conversation_consent(
+            "bcv_abc12345", "acc_1", decision="withdraw", endpoint_id="bep_1"
+        )
+    assert info.value.code == "bridge_error"
+    assert info.value.http_status == response.status_code
+
+
+async def test_an_old_wire_refusal_is_never_reclassified_as_outdated_hub():
+    """Accept/decline without a pin is the old wire: its 400 is the hub's own."""
+
+    client = _make_client(lambda request: httpx.Response(400, json={"error": "bad"}))
+    with pytest.raises(BridgeRefusal) as info:
+        await client.conversation_consent(
+            "bcv_abc12345", "acc_1", decision="accept", consent_version="v1"
+        )
+    assert info.value.code == "bridge_error"
+    assert info.value.http_status == 400
+
+
+async def test_owned_invitations_reads_the_hub_path_and_forwards_the_cursor_verbatim():
+    seen: list[httpx.Request] = []
+    page = {
+        "invitations": [{"conversation_id": "bcv_abc12345", "endpoint_id": "bep_1"}],
+        "next_cursor": "opaque+/=cursor",
+        "has_more": True,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok(page)
+
+    client = _make_client(handler)
+    result = await client.owned_agent_invitations(
+        expected_account_id="acc_1", tenant_id="tnt_1", limit=20, cursor="opaque+/=cursor"
+    )
+
+    assert result == page
+    assert len(seen) == 1
+    assert seen[0].method == "GET"
+    assert seen[0].url.path == "/v1/messaging/agents/owned/invitations"
+    assert dict(seen[0].url.params) == {
+        "tenant_id": "tnt_1",
+        "limit": "20",
+        "cursor": "opaque+/=cursor",
+    }
+
+
+async def test_owned_invitations_refuses_a_foreign_receipt_before_any_request():
+    requests: list[httpx.Request] = []
+    client = _make_client(lambda request: requests.append(request) or _ok({}))
+    with pytest.raises(BridgeRefusal) as info:
+        await client.owned_agent_invitations(expected_account_id="acc_b")
+    assert info.value.code == "account_mismatch"
+    assert requests == []
+
+
+async def test_owned_invitations_on_an_old_hub_is_outdated_hub_but_a_coded_404_is_not():
+    client = _make_client(lambda request: httpx.Response(404, json={"message": "Not Found"}))
+    with pytest.raises(BridgeRefusal) as info:
+        await client.owned_agent_invitations(expected_account_id="acc_1")
+    assert info.value.code == tb_client.OUTDATED_HUB
+
+    # A coded 404 is the hub speaking about the caller (e.g. no membership).
+    client = _make_client(lambda request: _err(404, "tenant_not_found"))
+    with pytest.raises(BridgeRefusal) as info:
+        await client.owned_agent_invitations(expected_account_id="acc_1")
+    assert info.value.code == "tenant_not_found"

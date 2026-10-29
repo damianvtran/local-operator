@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "tui.palette",
+  "revision": "f7a884b7b73e0b92d2b44ea2020c46b9b0d4843f",
+  "method": "Deterministic wide-substitution fit probe: every placeholder is replaced with a deliberately generous representative value and the result measured in display cells against the en sidecar maxCells. zh-CN is LTR CJK, so the ur bundle's Arabic tatweel stretch probe has no counterpart here; this is the analogue. No source or catalogue files are written. This is a synthetic fit probe, not native or rendered proof.",
+  "argument_parity_errors": [],
+  "plural_render_count": 0,
+  "plural_render_errors": [],
+  "width_rows": [
+    {
+      "key": "tui.palette.kind_agent",
+      "maxCells": 12,
+      "zh_cells": 6,
+      "zh_rendered_cells": 6,
+      "zh_wide_cells": 6,
+      "over": -6
+    },
+    {
+      "key": "tui.palette.kind_command",
+      "maxCells": 12,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "zh_wide_cells": 4,
+      "over": -8
+    },
+    {
+      "key": "tui.palette.kind_session",
+      "maxCells": 12,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "zh_wide_cells": 4,
+      "over": -8
+    },
+    {
+      "key": "tui.palette.kind_setting",
+      "maxCells": 12,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "zh_wide_cells": 4,
+      "over": -8
+    },
+    {
+      "key": "tui.palette.kind_team",
+      "maxCells": 12,
+      "zh_cells": 4,
+      "zh_rendered_cells": 4,
+      "zh_wide_cells": 4,
+      "over": -8
+    },
+    {
+      "key": "tui.palette.no_matches",
+      "maxCells": 24,
+      "zh_cells": 12,
+      "zh_rendered_cells": 12,
+      "zh_wide_cells": 12,
+      "over": -12
+    },
+    {
+      "key": "tui.palette.placeholder",
+      "maxCells": 48,
+      "zh_cells": 30,
+      "zh_rendered_cells": 30,
+      "zh_wide_cells": 30,
+      "over": -18
+    }
+  ],
+  "static_or_reserved_over_budget": []
+}

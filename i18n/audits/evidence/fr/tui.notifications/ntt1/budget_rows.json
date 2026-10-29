@@ -1,0 +1,725 @@
+{
+  "budget_rows": [
+    {
+      "key": "tui.notifications.ago",
+      "maxCells": 12,
+      "en_worst": 7,
+      "fr_worst": 10,
+      "fr_params": {
+        "age": "59m"
+      },
+      "fr_text": "il y a 59m",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.arg_read",
+      "maxCells": 44,
+      "en_worst": 35,
+      "fr_worst": 43,
+      "fr_params": {},
+      "fr_text": "Marquer toutes les notifications comme lues",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.ask_expires",
+      "maxCells": 18,
+      "en_worst": 14,
+      "fr_worst": 15,
+      "fr_params": {
+        "time": "38m"
+      },
+      "fr_text": "expire dans 38m",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.ask_kind",
+      "maxCells": 8,
+      "en_worst": 3,
+      "fr_worst": 7,
+      "fr_params": {},
+      "fr_text": "demande",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.back",
+      "maxCells": 24,
+      "en_worst": 15,
+      "fr_worst": 15,
+      "fr_params": {},
+      "fr_text": "← Notifications",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.banner_digest_body",
+      "maxCells": 60,
+      "en_worst": 32,
+      "fr_worst": 43,
+      "fr_params": {},
+      "fr_text": "Saisissez /notifications pour les afficher.",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.banner_digest_title",
+      "maxCells": 60,
+      "en_worst": 35,
+      "fr_worst": 41,
+      "fr_params": {
+        "count": 99
+      },
+      "fr_text": "99 autres notifications de priorité haute",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.chip_high",
+      "maxCells": 6,
+      "en_worst": 4,
+      "fr_worst": 5,
+      "fr_params": {},
+      "fr_text": "haute",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.empty_caught_up_title",
+      "maxCells": 30,
+      "en_worst": 13,
+      "fr_worst": 16,
+      "fr_params": {},
+      "fr_text": "Vous êtes à jour",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.empty_filtered_title",
+      "maxCells": 40,
+      "en_worst": 29,
+      "fr_worst": 32,
+      "fr_params": {},
+      "fr_text": "Rien ne correspond à ces filtres",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.empty_none_title",
+      "maxCells": 30,
+      "en_worst": 20,
+      "fr_worst": 26,
+      "fr_params": {},
+      "fr_text": "Pas encore de notification",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.filter_all",
+      "maxCells": 8,
+      "en_worst": 3,
+      "fr_worst": 6,
+      "fr_params": {},
+      "fr_text": "toutes",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.filter_unread",
+      "maxCells": 8,
+      "en_worst": 6,
+      "fr_worst": 8,
+      "fr_params": {},
+      "fr_text": "non lues",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.group_conversation",
+      "maxCells": 12,
+      "en_worst": 12,
+      "fr_worst": 12,
+      "fr_params": {},
+      "fr_text": "conversation",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.group_older",
+      "maxCells": 30,
+      "en_worst": 5,
+      "fr_worst": 14,
+      "fr_params": {},
+      "fr_text": "Plus anciennes",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.group_time",
+      "maxCells": 12,
+      "en_worst": 4,
+      "fr_worst": 4,
+      "fr_params": {},
+      "fr_text": "date",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.group_today",
+      "maxCells": 30,
+      "en_worst": 5,
+      "fr_worst": 11,
+      "fr_params": {},
+      "fr_text": "Aujourd’hui",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.group_waiting",
+      "maxCells": 30,
+      "en_worst": 14,
+      "fr_worst": 27,
+      "fr_params": {},
+      "fr_text": "En attente de votre réponse",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.group_week",
+      "maxCells": 30,
+      "en_worst": 17,
+      "fr_worst": 22,
+      "fr_params": {},
+      "fr_text": "Plus tôt cette semaine",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.group_yesterday",
+      "maxCells": 30,
+      "en_worst": 9,
+      "fr_worst": 4,
+      "fr_params": {},
+      "fr_text": "Hier",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.header_counts",
+      "maxCells": 40,
+      "en_worst": 43,
+      "fr_worst": 44,
+      "fr_params": {
+        "unread": 1000000,
+        "waiting": 1000000
+      },
+      "fr_text": "1 000 000 de non-lues · 1 000 000 en attente",
+      "en_over": true,
+      "fr_over": true
+    },
+    {
+      "key": "tui.notifications.header_partial",
+      "maxCells": 12,
+      "en_worst": 9,
+      "fr_worst": 12,
+      "fr_params": {
+        "count": "100"
+      },
+      "fr_text": "100 visibles",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.hint_answer",
+      "maxCells": 8,
+      "en_worst": 6,
+      "fr_worst": 8,
+      "fr_params": {},
+      "fr_text": "répondre",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.hint_back",
+      "maxCells": 8,
+      "en_worst": 4,
+      "fr_worst": 6,
+      "fr_params": {},
+      "fr_text": "retour",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.hint_clear",
+      "maxCells": 8,
+      "en_worst": 5,
+      "fr_worst": 7,
+      "fr_params": {},
+      "fr_text": "effacer",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.hint_conversation",
+      "maxCells": 14,
+      "en_worst": 12,
+      "fr_worst": 12,
+      "fr_params": {},
+      "fr_text": "conversation",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.hint_dismiss",
+      "maxCells": 10,
+      "en_worst": 7,
+      "fr_worst": 7,
+      "fr_params": {},
+      "fr_text": "ignorer",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.hint_dismiss_all",
+      "maxCells": 12,
+      "en_worst": 11,
+      "fr_worst": 12,
+      "fr_params": {},
+      "fr_text": "tout ignorer",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.hint_filter",
+      "maxCells": 8,
+      "en_worst": 6,
+      "fr_worst": 7,
+      "fr_params": {},
+      "fr_text": "filtrer",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.hint_open",
+      "maxCells": 10,
+      "en_worst": 4,
+      "fr_worst": 6,
+      "fr_params": {},
+      "fr_text": "ouvrir",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.hint_read",
+      "maxCells": 8,
+      "en_worst": 4,
+      "fr_worst": 2,
+      "fr_params": {},
+      "fr_text": "lu",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.hint_select",
+      "maxCells": 8,
+      "en_worst": 6,
+      "fr_worst": 6,
+      "fr_params": {},
+      "fr_text": "cocher",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.hint_undo",
+      "maxCells": 8,
+      "en_worst": 4,
+      "fr_worst": 7,
+      "fr_params": {},
+      "fr_text": "annuler",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.hint_unread",
+      "maxCells": 8,
+      "en_worst": 6,
+      "fr_worst": 6,
+      "fr_params": {},
+      "fr_text": "non lu",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.just_now",
+      "maxCells": 12,
+      "en_worst": 8,
+      "fr_worst": 11,
+      "fr_params": {},
+      "fr_text": "à l’instant",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.kind_asks",
+      "maxCells": 8,
+      "en_worst": 4,
+      "fr_worst": 8,
+      "fr_params": {},
+      "fr_text": "demandes",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.kind_updates",
+      "maxCells": 8,
+      "en_worst": 7,
+      "fr_worst": 5,
+      "fr_params": {},
+      "fr_text": "infos",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.no_body",
+      "maxCells": 40,
+      "en_worst": 25,
+      "fr_worst": 19,
+      "fr_params": {},
+      "fr_text": "Aucun détail joint.",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.position",
+      "maxCells": 12,
+      "en_worst": 10,
+      "fr_worst": 11,
+      "fr_params": {
+        "index": "100",
+        "total": "100"
+      },
+      "fr_text": "100 sur 100",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.priority_high",
+      "maxCells": 8,
+      "en_worst": 4,
+      "fr_worst": 5,
+      "fr_params": {},
+      "fr_text": "haute",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.priority_normal_up",
+      "maxCells": 8,
+      "en_worst": 7,
+      "fr_worst": 8,
+      "fr_params": {},
+      "fr_text": "normale+",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.row_now",
+      "maxCells": 5,
+      "en_worst": 3,
+      "fr_worst": 3,
+      "fr_params": {},
+      "fr_text": "<1m",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.section_history",
+      "maxCells": 30,
+      "en_worst": 15,
+      "fr_worst": 24,
+      "fr_params": {},
+      "fr_text": "Mises à jour précédentes",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.section_links",
+      "maxCells": 20,
+      "en_worst": 5,
+      "fr_worst": 5,
+      "fr_params": {},
+      "fr_text": "Liens",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.section_projects",
+      "maxCells": 30,
+      "en_worst": 16,
+      "fr_worst": 12,
+      "fr_params": {},
+      "fr_text": "Projets liés",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.section_waiting_here",
+      "maxCells": 40,
+      "en_worst": 35,
+      "fr_worst": 40,
+      "fr_params": {},
+      "fr_text": "Demandes en attente dans la conversation",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.seen_in_chat",
+      "maxCells": 12,
+      "en_worst": 12,
+      "fr_worst": 12,
+      "fr_params": {},
+      "fr_text": "vue en conv.",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.seen_live",
+      "maxCells": 12,
+      "en_worst": 9,
+      "fr_worst": 12,
+      "fr_params": {},
+      "fr_text": "vue aussitôt",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.selected",
+      "maxCells": 16,
+      "en_worst": 11,
+      "fr_worst": 14,
+      "fr_params": {
+        "count": "12"
+      },
+      "fr_text": "Sélection : 12",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.sidebar_note",
+      "maxCells": 18,
+      "en_worst": 16,
+      "fr_worst": 16,
+      "fr_params": {
+        "count": "12"
+      },
+      "fr_text": "notifications 12",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.title",
+      "maxCells": 20,
+      "en_worst": 13,
+      "fr_worst": 13,
+      "fr_params": {},
+      "fr_text": "Notifications",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.update_kind",
+      "maxCells": 8,
+      "en_worst": 6,
+      "fr_worst": 4,
+      "fr_params": {},
+      "fr_text": "info",
+      "en_over": false,
+      "fr_over": false
+    },
+    {
+      "key": "tui.notifications.updates_since",
+      "maxCells": 30,
+      "en_worst": 29,
+      "fr_worst": 38,
+      "fr_params": {
+        "count": 1000000,
+        "time": "14:05"
+      },
+      "fr_text": "1 000 000 de mises à jour depuis 14:05",
+      "en_over": false,
+      "fr_over": true
+    }
+  ],
+  "renders": {
+    "tui.notifications.asks_stay": {
+      "en": {
+        "0": "0 asks stay until they're answered.",
+        "1": "1 ask stays until it's answered.",
+        "2": "2 asks stay until they're answered.",
+        "5": "5 asks stay until they're answered.",
+        "21": "21 asks stay until they're answered.",
+        "1000": "1,000 asks stay until they're answered.",
+        "9999": "9,999 asks stay until they're answered.",
+        "1000000": "1,000,000 asks stay until they're answered.",
+        "1500000": "1,500,000 asks stay until they're answered."
+      },
+      "fr": {
+        "0": "0 demande reste jusqu’à votre réponse.",
+        "1": "1 demande reste jusqu’à votre réponse.",
+        "2": "2 demandes restent jusqu’à votre réponse.",
+        "5": "5 demandes restent jusqu’à votre réponse.",
+        "21": "21 demandes restent jusqu’à votre réponse.",
+        "1000": "1 000 demandes restent jusqu’à votre réponse.",
+        "9999": "9 999 demandes restent jusqu’à votre réponse.",
+        "1000000": "1 000 000 de demandes restent jusqu’à votre réponse.",
+        "1500000": "1 500 000 demandes restent jusqu’à votre réponse."
+      }
+    },
+    "tui.notifications.banner_digest_title": {
+      "en": {
+        "0": "0 more high-priority notifications",
+        "1": "1 more high-priority notification",
+        "2": "2 more high-priority notifications",
+        "5": "5 more high-priority notifications",
+        "21": "21 more high-priority notifications",
+        "1000": "1,000 more high-priority notifications",
+        "9999": "9,999 more high-priority notifications",
+        "1000000": "1,000,000 more high-priority notifications",
+        "1500000": "1,500,000 more high-priority notifications"
+      },
+      "fr": {
+        "0": "0 autre notification de priorité haute",
+        "1": "1 autre notification de priorité haute",
+        "2": "2 autres notifications de priorité haute",
+        "5": "5 autres notifications de priorité haute",
+        "21": "21 autres notifications de priorité haute",
+        "1000": "1 000 autres notifications de priorité haute",
+        "9999": "9 999 autres notifications de priorité haute",
+        "1000000": "1 000 000 d’autres notifications de priorité haute",
+        "1500000": "1 500 000 autres notifications de priorité haute"
+      }
+    },
+    "tui.notifications.confirm_dismiss_session": {
+      "en": {
+        "0": "Dismiss 0 updates from général? y/n",
+        "1": "Dismiss 1 update from général? y/n",
+        "2": "Dismiss 2 updates from général? y/n",
+        "5": "Dismiss 5 updates from général? y/n",
+        "21": "Dismiss 21 updates from général? y/n",
+        "1000": "Dismiss 1,000 updates from général? y/n",
+        "9999": "Dismiss 9,999 updates from général? y/n",
+        "1000000": "Dismiss 1,000,000 updates from général? y/n",
+        "1500000": "Dismiss 1,500,000 updates from général? y/n"
+      },
+      "fr": {
+        "0": "Ignorer 0 mise à jour de « général » ? y/n",
+        "1": "Ignorer 1 mise à jour de « général » ? y/n",
+        "2": "Ignorer 2 mises à jour de « général » ? y/n",
+        "5": "Ignorer 5 mises à jour de « général » ? y/n",
+        "21": "Ignorer 21 mises à jour de « général » ? y/n",
+        "1000": "Ignorer 1 000 mises à jour de « général » ? y/n",
+        "9999": "Ignorer 9 999 mises à jour de « général » ? y/n",
+        "1000000": "Ignorer 1 000 000 de mises à jour de « général » ? y/n",
+        "1500000": "Ignorer 1 500 000 mises à jour de « général » ? y/n"
+      }
+    },
+    "tui.notifications.dismissed": {
+      "en": {
+        "0": "Dismissed 0 updates.",
+        "1": "Dismissed 1 update.",
+        "2": "Dismissed 2 updates.",
+        "5": "Dismissed 5 updates.",
+        "21": "Dismissed 21 updates.",
+        "1000": "Dismissed 1,000 updates.",
+        "9999": "Dismissed 9,999 updates.",
+        "1000000": "Dismissed 1,000,000 updates.",
+        "1500000": "Dismissed 1,500,000 updates."
+      },
+      "fr": {
+        "0": "0 mise à jour ignorée.",
+        "1": "1 mise à jour ignorée.",
+        "2": "2 mises à jour ignorées.",
+        "5": "5 mises à jour ignorées.",
+        "21": "21 mises à jour ignorées.",
+        "1000": "1 000 mises à jour ignorées.",
+        "9999": "9 999 mises à jour ignorées.",
+        "1000000": "1 000 000 de mises à jour ignorées.",
+        "1500000": "1 500 000 mises à jour ignorées."
+      }
+    },
+    "tui.notifications.header_counts": {
+      "en": {
+        "0": "0 unread · 0 waiting on you",
+        "1": "1 unread · 1 waiting on you",
+        "2": "2 unread · 2 waiting on you",
+        "5": "5 unread · 5 waiting on you",
+        "21": "21 unread · 21 waiting on you",
+        "1000": "1,000 unread · 1,000 waiting on you",
+        "9999": "9,999 unread · 9,999 waiting on you",
+        "1000000": "1,000,000 unread · 1,000,000 waiting on you",
+        "1500000": "1,500,000 unread · 1,500,000 waiting on you"
+      },
+      "fr": {
+        "0": "0 non lue · 0 en attente",
+        "1": "1 non lue · 1 en attente",
+        "2": "2 non lues · 2 en attente",
+        "5": "5 non lues · 5 en attente",
+        "21": "21 non lues · 21 en attente",
+        "1000": "1 000 non lues · 1 000 en attente",
+        "9999": "9 999 non lues · 9 999 en attente",
+        "1000000": "1 000 000 de non-lues · 1 000 000 en attente",
+        "1500000": "1 500 000 non lues · 1 500 000 en attente"
+      }
+    },
+    "tui.notifications.stale_skipped": {
+      "en": {
+        "0": "0 changed since you looked and were left.",
+        "1": "1 changed since you looked and was left.",
+        "2": "2 changed since you looked and were left.",
+        "5": "5 changed since you looked and were left.",
+        "21": "21 changed since you looked and were left.",
+        "1000": "1,000 changed since you looked and were left.",
+        "9999": "9,999 changed since you looked and were left.",
+        "1000000": "1,000,000 changed since you looked and were left.",
+        "1500000": "1,500,000 changed since you looked and were left."
+      },
+      "fr": {
+        "0": "0 notification modifiée entre-temps, laissée intacte.",
+        "1": "1 notification modifiée entre-temps, laissée intacte.",
+        "2": "2 notifications modifiées entre-temps, laissées intactes.",
+        "5": "5 notifications modifiées entre-temps, laissées intactes.",
+        "21": "21 notifications modifiées entre-temps, laissées intactes.",
+        "1000": "1 000 notifications modifiées entre-temps, laissées intactes.",
+        "9999": "9 999 notifications modifiées entre-temps, laissées intactes.",
+        "1000000": "1 000 000 de notifications modifiées entre-temps, laissées intactes.",
+        "1500000": "1 500 000 notifications modifiées entre-temps, laissées intactes."
+      }
+    },
+    "tui.notifications.updates_since": {
+      "en": {
+        "0": "0 updates since 14:05",
+        "1": "1 update since 14:05",
+        "2": "2 updates since 14:05",
+        "5": "5 updates since 14:05",
+        "21": "21 updates since 14:05",
+        "1000": "1,000 updates since 14:05",
+        "9999": "9,999 updates since 14:05",
+        "1000000": "1,000,000 updates since 14:05",
+        "1500000": "1,500,000 updates since 14:05"
+      },
+      "fr": {
+        "0": "0 mise à jour depuis 14:05",
+        "1": "1 mise à jour depuis 14:05",
+        "2": "2 mises à jour depuis 14:05",
+        "5": "5 mises à jour depuis 14:05",
+        "21": "21 mises à jour depuis 14:05",
+        "1000": "1 000 mises à jour depuis 14:05",
+        "9999": "9 999 mises à jour depuis 14:05",
+        "1000000": "1 000 000 de mises à jour depuis 14:05",
+        "1500000": "1 500 000 mises à jour depuis 14:05"
+      }
+    }
+  }
+}

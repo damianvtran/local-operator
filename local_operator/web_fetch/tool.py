@@ -35,7 +35,13 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.paths import config_dir
-from local_operator.tools.builtin import spill_truncate, validation_error_result
+from local_operator.tools.builtin import (
+    TOOL_OUTPUT_LIMIT_CHARS,
+    _elide_inline,
+    _spill_footer,
+    spill_truncate,
+    validation_error_result,
+)
 from local_operator.tools.confinement import confinement_of
 from local_operator.tools.spill import get_store
 from local_operator.web_fetch.failure import (
@@ -44,6 +50,7 @@ from local_operator.web_fetch.failure import (
     retry_after_note,
 )
 from local_operator.web_fetch.models import FetchResult
+from local_operator.web_fetch.passages import select_passages
 from local_operator.web_fetch.service import (
     CacheEntry,
     FetchError,
@@ -63,20 +70,21 @@ _DESCRIPTION = (
     "Fetch a web page or file over HTTP(S) once and make it readable without "
     "pulling the whole thing into context. Returns a short preview plus a "
     "`spill://` handle; expand it with `read` using a line range or `?q=<regex>` "
-    "search, exactly like any other large output. Renders HTML to clean markdown, "
-    "pretty-prints JSON, returns text as-is, and reports type and size for "
-    "PDFs/binaries instead of inlining them. Re-fetching the same URL within the "
-    "cache TTL reuses stored content with no network call. Use this (or "
-    "`read <url>`) instead of `browser` for headless, subagent, and server "
-    "contexts; use `browser` only when a page needs a real logged-in session or "
-    # The retry/block sentence is deliberately terse: this string is billed on
-    # EVERY turn of every session, and `scripts/bench_context_budget.py` had
-    # ~41 tokens of headroom before this change. It has to say only what the
-    # agent cannot work out from the result itself — that retries already
-    # happened, so a blocked result is final and the named step is the move.
+    "search. Renders HTML to markdown, pretty-prints JSON, returns text as-is, and "
+    "reports type and size for PDFs/binaries. Re-fetching within the cache TTL makes "
+    "no network call. Use this (or `read <url>`) instead of `browser` in headless, "
+    "subagent and server contexts; use `browser` only when a page needs a real "
+    "logged-in session or "
+    # Every sentence here is billed on EVERY turn of every session, and
+    # `scripts/bench_context_budget.py` leaves only a few dozen tokens of
+    # headroom. The retry/block sentence says only what the agent cannot work
+    # out from the result itself — that retries already happened, so a blocked
+    # result is final. The last two sentences are the research-speed steer: a
+    # `query` puts the answer in the first preview instead of a `read spill://`
+    # round trip, and batching turns N sequential model turns into one.
     "JavaScript rendering. Transient failures retry themselves; a blocked result "
-    "is final, so take the step it names. Need several pages? Issue multiple "
-    "web_fetch calls in one turn — they run in parallel instead of one-at-a-time."
+    "is final, so take the step it names. Looking for something specific? Pass "
+    "`query`. Batch several fetches/searches in one turn — they run in parallel."
 )
 
 
@@ -86,6 +94,17 @@ class WebFetchParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     url: str = Field(description="Absolute http:// or https:// URL to fetch.", min_length=1)
+    # Terse on purpose: this description is billed on every turn of every
+    # session. It must say only what changes the model's behaviour — that an
+    # oversized page answers with the matching passages instead of its ends.
+    query: str | None = Field(
+        default=None,
+        max_length=500,
+        description=(
+            "What you need from the page; a page too long to show whole then "
+            "previews its best-matching passages, not just its start and end."
+        ),
+    )
     raw: bool = Field(
         default=False,
         description=(
@@ -243,12 +262,111 @@ def _header_line(result_like: dict[str, Any]) -> str:
     return f"{warn}\n{tail}\n(The body below is the error response, not the requested page.)"
 
 
+#: Room the lead (title + opening lines) of a query preview may take. Enough
+#: for a title, a breadcrumb and the first sentence — the orientation a reader
+#: needs to trust the passages below came from the page they asked for — and
+#: small enough to leave the bulk of the budget to the passages themselves.
+_QUERY_LEAD_CHARS = 700
+
+#: Rendered methods whose content is prose/markdown a passage ranker can
+#: chunk. JSON keeps the structured head+tail elision (a passage cut out of a
+#: JSON document is not JSON), and a binary notice has nothing to rank.
+_RANKABLE_METHODS = frozenset({"markdownify", "stdlib", "text"})
+
+
+def _lead_lines(lines: list[str], budget: int) -> tuple[int, str]:
+    """``(last_line, text)`` of the page's opening lines within ``budget``.
+
+    Whole lines only, so the lead's label names a range a ``read`` returns
+    verbatim. A first line longer than the budget is clipped and marked; the
+    lead then claims line 1 so no passage repeats it.
+    """
+    taken: list[str] = []
+    size = 0
+    for line in lines:
+        if size + len(line) + 1 > budget:
+            break
+        taken.append(line)
+        size += len(line) + 1
+    if not taken and lines:
+        return 1, lines[0][: budget - 1] + "…"
+    # Trailing blank lines are noise in a 700-char window; drop them from the
+    # shown text but keep the range honest by ending it on the last shown line.
+    while taken and not taken[-1].strip():
+        taken.pop()
+    return len(taken), "\n".join(taken)
+
+
+def _query_preview(
+    header: str, query: str, handle: str, limit: int
+) -> tuple[str, dict[str, Any]] | None:
+    """A passage preview of the spilled entry ``handle`` for ``query``.
+
+    ``None`` when the entry cannot be read back or no passage matches; the
+    caller then keeps the head/tail preview. Ranks the STORED lines (what
+    ``read spill://<h> range=`` serves), never the pre-spill string, so every
+    ``lines a-b`` label resolves to exactly the text shown — span stripping and
+    the per-entry clip change coordinates, and the stored copy is the only
+    space the model can address. The whole preview, header and footer
+    included, stays within ``limit`` so asking for passages never costs more
+    context than not asking.
+    """
+    store = get_store()
+    meta = store.stat(handle)
+    read = store.read_lines(handle, 1, None)
+    if meta is None or read is None:
+        return None
+    lines, total = read
+    if total < 3:
+        # One unbroken line (minified text): there is no line space for the
+        # labels to point into, so a passage preview could not be addressed.
+        return None
+    lead_end, lead_text = _lead_lines(lines, _QUERY_LEAD_CHARS)
+    footer = _spill_footer(meta, ("lines", lead_end + 1, total))
+    framing = f"{header}\n\n[lines 1-{lead_end} of {total}]\n{lead_text}\n"
+    # Reserve the more-matches hint line (~170 chars with a long regex) and a
+    # label + separator per passage (~60 each, six at most) out of the budget.
+    budget = limit - len(framing) - len(footer) - 170 - 6 * 60
+    if budget < 400:
+        return None
+    selection = select_passages(lines, query, budget=budget, skip_through=lead_end)
+    if selection is None:
+        return None
+    parts = [framing]
+    for passage in selection.passages:
+        if passage.excerpt:
+            label = f"[line {passage.start}, excerpt"
+        else:
+            label = f"[lines {passage.start}-{passage.end}"
+        first_line = lines[passage.start - 1].lstrip()
+        if passage.heading and not first_line.startswith("#"):
+            label += f" · § {passage.heading[:60]}"
+        parts.append(f"\n{label}]\n{passage.text}\n")
+    if selection.more:
+        noun = "passage matches" if selection.more == 1 else "passages match"
+        parts.append(
+            f'\n[{selection.more} more {noun} — read(path="{handle}?q={selection.search_hint}")]'
+        )
+    preview = "".join(parts).rstrip("\n") + "\n" + footer
+    if len(preview) > limit:
+        # The reservations above are estimates; the limit is the contract. A
+        # preview that would overshoot falls back to head/tail rather than
+        # make asking for passages cost more context than not asking.
+        return None
+    details = {
+        "query_passages": [[p.start, p.end] for p in selection.passages],
+        "query_more": selection.more,
+    }
+    return preview, details
+
+
 def _shape_from_content(
     result_like: dict[str, Any],
     content: str,
     tool_name: str,
     context: ToolContext | None,
     variant: str | None = None,
+    query: str | None = None,
 ) -> tuple[str, dict[str, Any], str | None]:
     """Build ``(preview_text, details, spill_handle)`` from full ``content``.
 
@@ -264,6 +382,13 @@ def _shape_from_content(
       requirement #3. The store is content-addressed, so this write is idempotent
       and costs one entry, not a duplicate per fetch.
 
+    - **A query reshapes only the oversized case.** With ``query`` set and an
+      oversized prose/markdown page, the preview is the page lead plus the
+      passages that best match (see :func:`_query_preview`); no match falls
+      back to the head/tail preview and says so. Inline-sized pages, JSON and
+      binary results ignore the query, and no query is byte-identical to the
+      shape that shipped before it existed.
+
     The returned handle is the cache pointer (``None`` only when the store could
     not accept the content, e.g. a read-only config dir — then caching is simply
     skipped rather than pointing at nothing).
@@ -272,6 +397,62 @@ def _shape_from_content(
     body, spill_details = spill_truncate(content, tool_name, context)
     preview = f"{header}\n\n{body}" if body else header
     details = dict(result_like)
+    wants_passages = (
+        bool(query and query.strip()) and result_like.get("render_method") in _RANKABLE_METHODS
+    )
+    if wants_passages and spill_details is not None:
+        shaped = _query_preview(
+            header, str(query), spill_details["spill"]["handle"], TOOL_OUTPUT_LIMIT_CHARS
+        )
+        if shaped is not None:
+            preview, query_details = shaped
+            details.update(query_details)
+        else:
+            # Say WHY the middle is missing: without this the model cannot tell
+            # "nothing matched" from "the query was ignored", and would retry
+            # the same query instead of searching the handle with a regex.
+            # The notice is ADDED framing, so the body must give that room
+            # back: appending it to the already-truncated head/tail body would
+            # push the query fallback past the preview cap the no-query shape
+            # is sized to. Re-elide the content under limit - header - notice;
+            # the no-query path above is untouched (byte-identical by pin).
+            notice = "[No passage matched the query; showing the start and end.]"
+            meta = get_store().stat(spill_details["spill"]["handle"])
+            # Two passes, mirroring _elide_inline: the footer's suggested range
+            # depends on where the body was clipped, which depends on the
+            # footer's length. Pass one learns the real footer size, pass two
+            # sizes the body against it, so the assembled preview fits the cap
+            # by construction rather than by a guard that cuts the footer off.
+            budget = TOOL_OUTPUT_LIMIT_CHARS - len(header) - 2 - len(notice) - 1
+            fallback_body, span = _elide_inline(content, max(0, budget))
+            footer = _spill_footer(meta, span) if meta is not None else ""
+            fallback_body, span = _elide_inline(content, max(0, budget - len(footer)))
+            footer = _spill_footer(meta, span) if meta is not None else ""
+            preview = f"{header}\n\n{notice}\n{fallback_body}{footer}"
+            if len(preview) > TOOL_OUTPUT_LIMIT_CHARS:
+                # The notice is framing the no-query shape does not have, and
+                # the header can itself be enormous (a multi-kilobyte URL),
+                # which no framing can fix. Try in order of preference: the
+                # notice + re-elided body, notice + the page's own head/tail
+                # body, then the head/tail body alone. All three carry the
+                # spill footer, i.e. the handle; only if none fits (the header
+                # alone is already over the cap) is a content slice used, and
+                # that slice still ends with the footer. A preview without the
+                # handle cannot be expanded at all, which is worse than
+                # exceeding the cap by the length of the header.
+                candidates = (
+                    f"{header}\n\n{notice}\n{body}",
+                    f"{header}\n\n{body}",
+                )
+                preview = next(
+                    (text for text in candidates if len(text) <= TOOL_OUTPUT_LIMIT_CHARS),
+                    "",
+                )
+                if not preview:
+                    footer_text = _spill_footer(meta) if meta is not None else ""
+                    keep = TOOL_OUTPUT_LIMIT_CHARS - len(header) - 2 - len(footer_text)
+                    preview = f"{header}\n\n{content[: max(0, keep)]}{footer_text}"
+            details["query_passages"] = []
     # A re-fetch of the same URL in the same rendition supersedes this result:
     # both describe the live state of one resource. Scoped by ``cache_variant``
     # for the same reason the cache is -- a raw fetch and a rendered fetch of
@@ -301,6 +482,7 @@ def _cache_hit_result(
     tool_name: str,
     context: ToolContext | None,
     variant: str | None = None,
+    query: str | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """Rebuild a result from a cache entry, or ``None`` when the hit is unusable.
 
@@ -353,8 +535,11 @@ def _cache_hit_result(
     # Same declared supersede key as a fresh fetch: a cached re-read describes
     # the same resource, so it must group with the fresh ones rather than
     # escaping the supersede pass for having been served from cache.
+    # The query re-shapes the CACHED content: it is a view over the page, not
+    # part of the page, so it never enters the cache variant and a second
+    # question about the same page costs no network call.
     preview, details, _handle = _shape_from_content(
-        result_like, content, tool_name, context, variant=variant
+        result_like, content, tool_name, context, variant=variant, query=query
     )
     return preview, details
 
@@ -413,6 +598,7 @@ async def run_fetch(
     context: ToolContext | None = None,
     signal: AbortSignal | None = None,
     transport: Any = None,
+    query: str | None = None,
 ) -> tuple[str, dict[str, Any], bool]:
     """Fetch → (cache lookup | network) → spill → cache. The shared engine.
 
@@ -478,7 +664,12 @@ async def run_fetch(
         entry = read_cache_entry(normalized, variant)
         if entry is not None:
             hit = _cache_hit_result(
-                entry, settings.cache_ttl_seconds, tool_name, context, variant=base_variant
+                entry,
+                settings.cache_ttl_seconds,
+                tool_name,
+                context,
+                variant=base_variant,
+                query=query,
             )
             if hit is not None:
                 preview, details = hit
@@ -594,7 +785,7 @@ async def run_fetch(
         result_like["suggested_tool"] = "browser"
 
     preview, details, handle = _shape_from_content(
-        result_like, result.content, tool_name, context, variant=base_variant
+        result_like, result.content, tool_name, context, variant=base_variant, query=query
     )
 
     # Record the cache entry pointing at the spill handle (metadata only). Only
@@ -656,6 +847,7 @@ async def execute_web_fetch(
         refresh=params.refresh,
         context=context,
         signal=signal,
+        query=params.query,
     )
     return _result(tool_call_id, "web_fetch", preview, error=is_error, details=details)
 

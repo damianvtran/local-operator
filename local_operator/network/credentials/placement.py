@@ -48,11 +48,12 @@ from pathlib import Path
 from typing import Any, Iterator, NoReturn, Sequence
 
 from local_operator.network.credentials.types import (
-    DEVICE_BOUND_PROVIDERS,
     CredentialPlacementEntry,
     Holder,
     credential_key_for_mcp,
     credential_key_for_provider,
+    credential_key_for_secret,
+    is_device_bound_provider,
     peer_int,
 )
 
@@ -450,12 +451,12 @@ def refuse_device_bound(key: str, provider: str) -> None:
     """Refuse to place a provider whose grants are device-bound.
 
     Called on DECLARE and on GRANT, both, because either one alone leaves a way in:
-    a document written before this rule existed would otherwise still be honoured,
-    and the check is cheap (a set membership on a name).
+    a document written before this rule existed would otherwise still be honoured.
+    Both key and provider are resolved through the one alias-aware predicate.
     """
     from local_operator.network.types import MeshRefusal
 
-    if provider in DEVICE_BOUND_PROVIDERS:
+    if is_device_bound_provider(key) or is_device_bound_provider(provider):
         from local_operator.network.credentials.types import device_bound_refusal
 
         raise MeshRefusal("device_bound", device_bound_refusal(provider))
@@ -869,15 +870,23 @@ def placement_entries_for(
     *,
     provider: str = "",
     mcp_url: str = "",
+    secret: str = "",
     root: Path | None = None,
 ) -> tuple[str, CredentialPlacementEntry] | None:
-    """The placement entry for a provider or an MCP server URL, if this device has one.
+    """The placement entry for a provider, an MCP server URL or a store secret.
 
     The MCP path's lookup: ``mcp/manager.py`` knows a server URL and nothing else,
     so the key is built here rather than at the call site — one spelling of
-    ``mcp:<url>`` for the whole slice.
+    ``mcp:<url>`` for the whole slice. ``secret`` is the class-2 sibling, used by
+    readiness to decide whether a peer's missing reference has a share behind it
+    (copy remedy) or no source anywhere (set-it-here remedy).
     """
-    key = credential_key_for_mcp(mcp_url) if mcp_url else credential_key_for_provider(provider)
+    if secret:
+        key = credential_key_for_secret(secret)
+    elif mcp_url:
+        key = credential_key_for_mcp(mcp_url)
+    else:
+        key = credential_key_for_provider(provider)
     from local_operator.network import store
 
     for record in store.list_networks(root):
@@ -939,6 +948,66 @@ def merge_from_peer(
         _clear_refusals_the_merge_contradicts(
             network_id, changed, self_device=self_device, root=root
         )
+    return changed
+
+
+def revoke_device_everywhere(
+    network_id: str,
+    device: str,
+    *,
+    root: Path | None = None,
+    by: str = "",
+    only_owner: str = "",
+) -> list[str]:
+    """Remove ``device`` from EVERY placement row it appears in. Returns the keys.
+
+    THE MEMBER-REMOVAL PRUNE (design §4). ``remove_member`` already tombstones the
+    row and rotates the epoch, which ends authority at the next handshake — but
+    the placement document is a separate file and would otherwise keep naming the
+    removed device as a holder, so every status surface would keep offering a copy
+    that a removed device can no longer take. The prune is best-effort: a failure
+    here must never block the removal (the caller reports it), which is why the
+    write happens under the SAME lock discipline as every other placement write
+    rather than in a bespoke path.
+
+    AN ENTRY OWNED BY ``device`` IS DELETED ENTIRELY, not just stripped: its
+    owner is gone from the network, so leaving the row would keep a share alive
+    that nobody can serve. Everything else is a holder-list edit, and an entry that
+    did not name the device is left byte-identical (no ``doc_rev`` bump, so no
+    merge churn).
+
+    ``by`` rides the audit row the caller writes; it is not used in the edit.
+
+    ``only_owner`` LIMITS THE HOLDER EDITS TO ROWS THAT DEVICE OWNS (#2991 review
+    round 1, R1). A row owned by a third device is that owner's to revise: a local
+    strip bumps ``doc_rev`` on a copy the owner never saw, so the owner's next real
+    revision arrives at an equal ``doc_rev`` and ``merge`` drops it as a replay,
+    and the one after that brings the removed holder straight back. Rows owned by
+    ``device`` itself are still deleted with the filter on: their owner is removed,
+    so no authenticated revision of them can ever arrive to collide with.
+    """
+    root = _config_root(root)
+    path = placement_path(network_id, root)
+    if not device or not path.exists():
+        return []
+    changed: list[str] = []
+    with _document_lock(path, root=root):
+        document = PlacementDocument.load(network_id, root, self_device=by)
+        for key, entry in sorted(document.entries.items()):
+            if str(entry.owner_device) == device:
+                del document.entries[key]
+                changed.append(key)
+                continue
+            if only_owner and str(entry.owner_device) != only_owner:
+                continue
+            rows = [row for row in entry.holders if row.device != device]
+            if len(rows) == len(entry.holders):
+                continue
+            entry.holders = rows
+            entry.doc_rev += 1
+            changed.append(key)
+        if changed:
+            document.save()
     return changed
 
 

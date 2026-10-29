@@ -116,9 +116,11 @@ function projection(): SessionProjection {
 function renderComposer() {
 	return render(
 		<Composer
+			ended={false}
 			pid="p1"
 			projection={projection()}
 			onOpenModels={() => {}}
+			onReturnToModels={() => {}}
 			onOpenEffort={() => {}}
 			effortOpen={false}
 			onCloseEffort={() => {}}
@@ -127,7 +129,7 @@ function renderComposer() {
 }
 
 function field(): HTMLTextAreaElement {
-	return screen.getByPlaceholderText("Message…") as HTMLTextAreaElement;
+	return screen.getByPlaceholderText("Ask anything…") as HTMLTextAreaElement;
 }
 
 function availableCapability(): Capabilities {

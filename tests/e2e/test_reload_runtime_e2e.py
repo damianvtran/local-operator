@@ -117,7 +117,8 @@ async def test_relaunch_preserves_owner_turn_and_gate(
                     pending = tuple(handle._pending_futures.values())
                     assert len(pending) == 1
                     if approval == "answered":
-                        app._answer_live_approval_as_allowed()
+                        if app._approval is not None:
+                            app._approval.resolve(True, answer="y")
                         await entered.wait()
                         pending = ()
                 else:
@@ -144,7 +145,8 @@ async def test_relaunch_preserves_owner_turn_and_gate(
                     await _pump(pilot, lambda: replacement._approval is not None)
                 await _capture(replacement, pilot, f"reload-after-{command[1:]}-{approval}")
                 if approval is True:
-                    replacement._answer_live_approval_as_allowed()
+                    if replacement._approval is not None:
+                        replacement._approval.resolve(True, answer="y")
                     await entered.wait()
                 release.set()
                 await _pump(pilot, lambda: not owner.is_streaming and bool(writes))

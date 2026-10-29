@@ -17,6 +17,7 @@ from local_operator.harness.types import (
     AttachmentContent,
     AudioContent,
     ChatRequest,
+    DocumentContent,
     ImageContent,
     Message,
     Usage,
@@ -54,6 +55,14 @@ def _message_key(message: Message) -> tuple[Any, ...]:
     # every provider stream call measures first, so ONE artifact in a
     # conversation's history killed the next request before dispatch (agent
     # review round 1, F2).
+    #
+    # DOCUMENTS have no `.text` either, and the same class of defect returned
+    # with them: every document-bearing turn died at this key before dispatch
+    # (QA round 1, Q1/Q2 — `'DocumentContent' object has no attribute 'text'`,
+    # durable across restarts because the row stays in history). They key on
+    # the store digest when one exists and on the payload hash otherwise, plus
+    # the facts the fallback text prints (mime, bytes, filename) so a renamed
+    # re-send re-measures — the wire header names the file.
     return (
         message.id,
         message.role,
@@ -69,7 +78,17 @@ def _message_key(message: Message) -> tuple[Any, ...]:
                         block.size_bytes,
                     )
                     if isinstance(block, AttachmentContent)
-                    else (block.type, hash(block.text))
+                    else (
+                        (
+                            block.type,
+                            block.digest if block.digest else hash(block.data),
+                            block.mime_type,
+                            block.bytes,
+                            block.filename,
+                        )
+                        if isinstance(block, DocumentContent)
+                        else (block.type, hash(block.text))
+                    )
                 )
             )
             for block in message.content

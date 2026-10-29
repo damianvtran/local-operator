@@ -49,6 +49,9 @@ from collections.abc import Collection, Mapping
 #: sessions of EITHER kind; ``lsp`` and ``patience`` by roughly none. ``ask`` is
 #: deliberately NOT here: the ``<interactivity>`` bodies name it as the channel
 #: to the operator.
+# notify deliberately stays published: the completed live deferred pilot
+# repeatedly called todo and falsely claimed delivery with no durable row.
+# Correct reachability is worth its measured 573-billed-token publication cost.
 DEFERRED_TOOLS: frozenset[str] = frozenset(
     {
         "console",
@@ -114,6 +117,13 @@ DEFERRED_TOOLS: frozenset[str] = frozenset(
         # adoption removes it from this set (one line — ``network`` and
         # ``ask_withdraw`` were re-admitted on exactly this signal).
         "no_reply",
+        # ``artifact_data`` is deferred on the start-context budget's arithmetic,
+        # the ``library`` precedent: unpublished it measured +785 billed tokens
+        # over the ceiling on both arms, and it is a niche tool (only sessions
+        # that hold a claude.ai artifact link ever call it). Skills that use it
+        # name it, and the purpose phrase below keeps it findable; the first
+        # call or ``tool://`` read publishes its schema.
+        "artifact_data",
     }
 )
 
@@ -136,6 +146,7 @@ DEFERRED_TOOL_PURPOSES: Mapping[str, str] = {
     "code_requests": "PR/MR status, review rounds, CI",
     "library": "long-term asset catalog",
     "no_reply": "end a turn silently",
+    "artifact_data": "claude.ai artifact shared data store",
 }
 
 #: ``tools.defer`` — the kill switch. On by default; off publishes every

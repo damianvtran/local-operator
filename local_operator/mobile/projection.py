@@ -52,6 +52,7 @@ from local_operator.harness.message_types import (
 from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
+    SESSION_INCIDENT_MESSAGE_TYPE,
 )
 
 # The row DECISIONS both this fold and the TUI's must make identically. They
@@ -247,7 +248,7 @@ FRAME_CAP_PROMPT_CHARS = 120
 FRAME_CAP_RESULT_CHARS = 200
 FRAME_CAP_ERROR_CHARS = 400
 
-#: Floor for the transcript tail under the frame cap. Tier 3 halves the tail
+#: Floor for the transcript tail under the frame cap. Tier 4 halves the tail
 #: toward this bound; below it the phone keeps the opening user message plus
 #: the newest few rows and pages the rest from /history, which is exactly the
 #: scroll contract the 80-row cap already established.
@@ -279,12 +280,15 @@ FRAME_CAP_TODO_TEXT_CHARS = 120
 FRAME_CAP_PENDING_TITLE_CHARS = 2_000
 FRAME_CAP_PENDING_DETAIL_CHARS = 2_000
 
-#: The roster fields that survive everything except the LAST shed tier: each is
-#: a pure derivation of ``parent_job_id``, which is why they can be dropped at
-#: all. ``peer_ids`` is the one that actually grows the frame — it is every
-#: sibling's job id, so a wide fan-out (256 children under one parent) makes
-#: every row list the other 255 and the field becomes O(n^2) in roster WIDTH:
-#: measured at 1,044,480 B of a 1,254,249-byte frame, 83% of it.
+#: The roster fields a "derived graph" shed can take: each is a pure
+#: derivation of ``parent_job_id``, which is why they can be dropped at all.
+#: ``peer_ids`` is the one that actually grows the frame — it is every sibling's
+#: job id, so a wide fan-out (256 children under one parent) makes every row
+#: list the other 255 and the field becomes O(n^2) in roster WIDTH: measured at
+#: 1,044,992 B of a 1,396,444 B frame, 74.8% of it. Their order position is
+#: decided by measurement, not by rank: see ``cap_projection_frame`` tiers 2
+#: and 5 — early only when the graph alone brings the frame under the cap,
+#: otherwise after the cheaper transcript tiers and before row text.
 FRAME_CAP_DERIVED_ROSTER_FIELDS = ("peer_ids", "child_ids", "ancestor_ids", "ancestors")
 
 #: What a roster row keeps in the LAST tier, when even the derived graph is not
@@ -1025,25 +1029,35 @@ def cap_projection_frame(
     1b. A pending card's option consequence lines shrink to a readable bound.
        The card itself is the loudest thing on the phone and is never dropped;
        only the prose under each option is trimmed.
-    2. Transcript rows lose their ``details`` expand payload (args/output/
+    2. The DERIVED roster graph is shed (``peer_ids``, ``child_ids``,
+       ``ancestor_ids``, ``ancestors``) WHEN THAT ALONE BUYS THE FRAME. Each
+       field is a derivation of ``parent_job_id``, which stays on every row
+       (see ``FRAME_CAP_DERIVED_ROSTER_FIELDS``), and the one that scales with
+       roster WIDTH: ``peer_ids`` is O(n^2) across a flat sibling group, so a
+       wide roster's frame is mostly this graph and dropping it is the whole
+       fix. When it is NOT enough on its own it is offered again as tier 5 —
+       after the cheaper transcript tiers and before row text — because a small
+       roster's graph buys the frame nothing and the Agents sheet still reads
+       it. Tiers 3-4 shrink TEXT, so none of them can touch the field that
+       scales with roster WIDTH.
+    3. Transcript rows lose their ``details`` expand payload (args/output/
        diff). The collapsed row still renders; expanding an old row is the
-       one gesture that can re-fetch from /history.
-    3. The transcript tail halves toward ``FRAME_CAP_TRANSCRIPT_FLOOR``,
+       one gesture that can re-fetch from /history. The derived-graph test is
+       asked again here: after a spend, shedding the graph may now be enough on
+       its own, and it is still cheaper than a whole row.
+    4. The transcript tail halves toward ``FRAME_CAP_TRANSCRIPT_FLOOR``,
        keeping the pinned opening user message — the same scroll contract the
-       80-row cap already establishes, just tighter.
-    4. Row TEXT (plus ``summary``/``error``) is truncated, walking down from
+       80-row cap already establishes, just tighter. Pinning here also sets
+       ``transcript_head_pinned``, which is how the client learns the head is
+       not the tail's chronological neighbour.
+    5. The derived roster graph, if tier 2 did not already take it.
+    6. Row TEXT (plus ``summary``/``error``) is truncated, walking down from
        ``FRAME_CAP_ENTRY_TEXT_CHARS`` to ``FRAME_CAP_ENTRY_TEXT_FLOOR``. This
        is last because the text is what the reader came for — but one pasted
-       file can exceed the whole cap by itself, and tiers 1-3 cannot touch it,
+       file can exceed the whole cap by itself, and tiers 1-5 cannot touch it,
        so without this the function returned a frame the socket then dropped
        whole. The full text stays one /history fetch away.
-    5. The DERIVED roster graph is shed (``peer_ids``, ``child_ids``,
-       ``ancestor_ids``, ``ancestors``). Tiers 1-4 shrink TEXT, so none of them
-       can touch the one field that scales with roster WIDTH: ``peer_ids`` is
-       O(n^2) across a flat sibling group (see
-       ``FRAME_CAP_DERIVED_ROSTER_FIELDS``). ``parent_job_id`` stays on every
-       row, so the same graph is rebuildable by the reader.
-    6. The roster drops to identity rows (``FRAME_CAP_ROSTER_IDENTITY_FIELDS``).
+    7. The roster drops to identity rows (``FRAME_CAP_ROSTER_IDENTITY_FIELDS``).
        A viewer renders one row per child with its label, lifecycle state and
        parent; per-child detail is fetched on demand, the same trade the
        transcript already makes.
@@ -1053,7 +1067,7 @@ def cap_projection_frame(
     repaint that nobody can see is exactly the failure mode this cap exists to
     make impossible, so it must at least be visible in the log. That is now a
     genuine last resort rather than the shape of an ordinary wide-fan-out
-    session: tiers 5-6 are what make a 256-sibling roster fit, and a frame that
+    session: tiers 2 and 6 are what make a 256-sibling roster fit, and a frame that
     survives them carries something else that is not bounded at all (see the
     ``_send_to`` ceiling in ``session/runtime/server.py``, which refuses to put
     what is left on the wire).
@@ -1211,14 +1225,59 @@ def cap_projection_frame(
     if fits():
         return data, True
 
-    # Tier 2: drop the expand payload of every transcript row.
+    # Tier 2: shed the DERIVED roster graph WHEN THAT ALONE BUYS THE FRAME.
+    #
+    # The four fields are pure derivations of ``parent_job_id``, which every
+    # tier keeps, so they are the most recoverable thing in the frame — and
+    # ``peer_ids`` is every sibling's job id, so a flat fan-out costs O(n^2).
+    # At 256 siblings it is 1,044,992 B of a 1,396,444 B frame (74.8%).
+    #
+    # MEASURED, NOT UNCONDITIONAL. Shed after the transcript tiers (the order
+    # this tier shipped in), that dominance made the cap spend the reader's
+    # messages first — text floored to 200 chars and the tail cut to 16 rows —
+    # and then drop the graph anyway. Shed unconditionally FIRST, the opposite
+    # failure appears: a small roster's graph costs a few hundred bytes, cannot
+    # bring the frame under the cap by itself, and is still taken away from the
+    # Agents sheet (``agents-sheet.tsx`` reads ``peer_ids``/``ancestor_ids`` and
+    # nothing on the client rebuilds them) while the transcript pays anyway.
+    # So shed it here only when ``total - derived <= cap``: that is the case
+    # where this tier is the WHOLE fix and nothing else has to be spent. When
+    # it is not, the graph is offered again below, after details and the tail
+    # have been tried and before row text — never before the cheaper tiers.
+    derived_bytes = sum(
+        _subtree_bytes(row.get(field))
+        for row in data.get("subagents") or []
+        for field in FRAME_CAP_DERIVED_ROSTER_FIELDS
+    )
+    if derived_bytes and total - derived_bytes <= cap_bytes:
+        for row in data.get("subagents") or []:
+            for field in FRAME_CAP_DERIVED_ROSTER_FIELDS:
+                row[field] = []
+        dirty.add("subagents")
+        if fits():
+            return data, True
+
+    # Tier 3: drop the expand payload of every transcript row.
     for entry in data.get("transcript") or []:
         entry["details"] = {}
     dirty.add("transcript")
     if fits():
         return data, True
 
-    # Tier 3: halve the transcript tail toward the floor, pinning the opening
+    # Tier 3b: re-offer the derived graph now that details are gone. Tier 2's
+    # test is about the SAME question — does shedding the graph alone buy the
+    # frame — and the answer can only improve after a spend. Without this, a
+    # roster whose graph plus details is the whole weight sends the tail and the
+    # text to the floor and drops the graph afterwards anyway.
+    if derived_bytes and total - derived_bytes <= cap_bytes:
+        for row in data.get("subagents") or []:
+            for field in FRAME_CAP_DERIVED_ROSTER_FIELDS:
+                row[field] = []
+        dirty.add("subagents")
+        if fits():
+            return data, True
+
+    # Tier 4: halve the transcript tail toward the floor, pinning the opening
     # user message exactly like ``ProjectionFold._cap_tail`` does.
     entries = data.get("transcript") or []
     limit = max(FRAME_CAP_TRANSCRIPT_FLOOR, PROJECTION_TRANSCRIPT_LIMIT // 2)
@@ -1227,13 +1286,35 @@ def cap_projection_frame(
         entries = entries[-limit:]
         if first_user is not None and first_user not in entries:
             entries = [first_user, *entries[1:]]
+            # THE PINNED-HEAD FACT reaches the client here, because the client
+            # cannot infer it: a frame-cap tail can be SHORTER than
+            # ``PROJECTION_TRANSCRIPT_LIMIT`` while still pinning the opener,
+            # and length is the only thing it could otherwise test (see
+            # ``ProjectionFold._cap_tail``).
+            data["transcript_head_pinned"] = True
+            # IN THE ACCOUNTING TOO: this key is a real part of the frame, and
+            # leaving it out of ``sizes`` runs ``total`` low until the final
+            # full measurement — the very window the tiers decide in.
+            dirty.add("transcript_head_pinned")
         data["transcript"] = entries
         dirty.add("transcript")
         if fits():
             return data, True
         limit = max(FRAME_CAP_TRANSCRIPT_FLOOR, limit // 2)
 
-    # Tier 4: truncate row text. Tiers 1-3 cannot shrink a single oversized
+    # Tier 5: shed the derived roster graph. Reached only when tier 2 could not
+    # buy the frame with it — so details and the tail have already been spent,
+    # and the remaining choice is the graph or the reader's words. The graph
+    # wins that comparison: it is a derivation of ``parent_job_id``, which stays
+    # on every row, and the transcript is not recoverable without a fetch.
+    for row in data.get("subagents") or []:
+        for field in FRAME_CAP_DERIVED_ROSTER_FIELDS:
+            row[field] = []
+    dirty.add("subagents")
+    if fits():
+        return data, True
+
+    # Tier 6: truncate row text. Tiers 1-5 cannot shrink a single oversized
     # row, so this is the only tier that bounds the pasted-file case.
     text_limit = FRAME_CAP_ENTRY_TEXT_CHARS
     while True:
@@ -1253,22 +1334,7 @@ def cap_projection_frame(
             break
         text_limit = max(FRAME_CAP_ENTRY_TEXT_FLOOR, text_limit // 4)
 
-    # Tier 5: shed the DERIVED roster graph. Nothing is lost that the reader
-    # cannot rebuild: all four fields are derivations of ``parent_job_id``,
-    # which every tier keeps — the canonical side already reasons this way
-    # (``frontend_state`` rebuilds its parent/peer/child edges from its job
-    # rows, and its ``peers()`` derives what this field precomputes), and the
-    # phone's store treats a missing list as empty rather than unmounting the
-    # session. Empty lists rather than deleted keys: the wire shape stays
-    # uniform, and an absent list and an empty one normalise identically.
-    for row in data.get("subagents") or []:
-        for field in FRAME_CAP_DERIVED_ROSTER_FIELDS:
-            row[field] = []
-    dirty.add("subagents")
-    if fits():
-        return data, True
-
-    # Tier 6: identity rows. What stays is what a reader can neither derive nor
+    # Tier 7: identity rows. What stays is what a reader can neither derive nor
     # fetch per child: the job id, the label, the parent edge and the lifecycle
     # state. What goes is recoverable through the per-child fetch the transcript
     # already relies on — with ONE exception, named rather than glossed:
@@ -1302,6 +1368,33 @@ def cap_projection_frame(
             cap_bytes,
         )
     return data, True
+
+
+def _stop_reason_of(message: Any) -> str:
+    """The provider's own phase declaration on an assistant message, or ``""``.
+
+    ONE spelling for both arms. The durable ``Message`` carries it as
+    ``stop_reason``; a live event's message is the same shape, but a test double
+    or an older rehydrated row may not carry the attribute at all, and a missing
+    phase is the desktop's "unknown is absent" case - never an invented
+    ``"stop"``.
+    """
+    value = getattr(message, "stop_reason", None)
+    return value if isinstance(value, str) else ""
+
+
+def _calls_tools_of(message: Any) -> bool:
+    """Whether an assistant message carried calls of its own (the fold's fact).
+
+    ONE spelling for both arms, and tolerant of the event type: a
+    ``MessageEndEvent`` carries a ``Message`` and its ``tool_calls`` list today, but
+    a ``CustomMessage`` travels the same union in other arms, so the attribute is
+    read through ``getattr`` rather than assumed. A message that has no calls at
+    all answers ``False``, which is the desktop's "unknown is absent" for the
+    pre-V5 wire.
+    """
+    calls = getattr(message, "tool_calls", None)
+    return bool(calls)
 
 
 def fold_messages_to_entries(
@@ -1442,6 +1535,7 @@ def fold_messages_to_entries(
                                 400,
                             ),
                             details={"notice_kind": "wake"},
+                            custom_type=message.custom_type,
                         )
                     )
                 continue
@@ -1562,13 +1656,29 @@ def fold_messages_to_entries(
                             kind="notice",
                             text=_compact(text, _NOTICE_CHARS),
                             details={"severity": severity},
+                            custom_type=message.custom_type,
                         )
                     )
                     continue
             text = _message_text(message)
             if text:
                 entries.append(
-                    TranscriptEntry(id=message.id, kind="notice", text=_compact(text, 400))
+                    TranscriptEntry(
+                        id=message.id,
+                        kind="notice",
+                        text=_compact(text, 400),
+                        # THE RECEIPT FAMILY, verbatim from the producer: the
+                        # client's fold reads it to decide whether a wall of
+                        # deliveries is one group and whether a row OPENS a
+                        # cycle at all (a job result or a monitor prompt does,
+                        # a generic notice does not).
+                        custom_type=message.custom_type,
+                        # A session incident ENDS the turn. The relay paints no
+                        # separate row for a ``completion_attention`` marker,
+                        # so this flag is the only terminal fact some runs
+                        # carry.
+                        terminal=message.custom_type == SESSION_INCIDENT_MESSAGE_TYPE,
+                    )
                 )
             continue
         if message.role == "user":
@@ -1672,7 +1782,20 @@ def fold_messages_to_entries(
             assistant_text = assistant_row_text(message.text)
             if assistant_text:
                 entries.append(
-                    TranscriptEntry(id=message.id, kind="assistant", text=assistant_text)
+                    TranscriptEntry(
+                        id=message.id,
+                        kind="assistant",
+                        text=assistant_text,
+                        # The condensation facts (types.TranscriptEntry): the
+                        # provider's phase declaration and whether this row
+                        # carried calls of its own. Both arms set them, and
+                        # ``tests/unit/mobile/test_projection_condense_fields.py``
+                        # is what pins them (``test_the_assistant_phase_survives_
+                        # both_arms``); the arm each row type really reaches is
+                        # stated in that file's comments.
+                        stop_reason=_stop_reason_of(message),
+                        calls_tools=_calls_tools_of(message),
+                    )
                 )
             for call in message.tool_calls:
                 # Only the FIRST call of a bang assistant message is the
@@ -1750,6 +1873,12 @@ def fold_messages_to_entries(
                         kind="notice",
                         text=_compact(text, 400),
                         details={"severity": severity},
+                        # A TERMINAL MARKER closes the turn (the plan's
+                        # ``boundaryKindOf``/``settledCloseOf`` read it). An
+                        # explicit flag rather than a severity heuristic:
+                        # ``compaction_refused`` is error-level and is NOT
+                        # terminal.
+                        terminal=True,
                     )
                 )
         elif message.role == "tool":
@@ -2238,7 +2367,12 @@ class ProjectionFold:
             if event.error:
                 self._append(
                     TranscriptEntry(
-                        id=f"err-{time.time_ns()}", kind="notice", text=_compact(event.error, 400)
+                        id=f"err-{time.time_ns()}",
+                        kind="notice",
+                        text=_compact(event.error, 400),
+                        # The run ended in an error: a terminal marker, the same
+                        # fact the durable fold gets from its ``:stop`` notice.
+                        terminal=True,
                     )
                 )
         elif isinstance(event, TurnEndEvent):
@@ -2262,6 +2396,11 @@ class ProjectionFold:
                     kind="assistant",
                     text=event.message.text,
                     final=False,
+                    # The condensation facts, set from the SAME fields the
+                    # history fold reads, so a row cannot change meaning when a
+                    # reconnect re-seeds it (the equivalence test pins it).
+                    stop_reason=_stop_reason_of(event.message),
+                    calls_tools=_calls_tools_of(event.message),
                 )
                 self._append(entry)
                 self._open_message_id = event.message.id
@@ -2288,6 +2427,13 @@ class ProjectionFold:
             if row is not None:
                 row.text = _message_text(event.message)
                 row.final = True
+                # The provider's phase declaration arrives WITH the end frame,
+                # so it is stamped here rather than at start: a lead-in frame
+                # (prose that settles before its own tool row) is only
+                # distinguishable from a real close once this field is on the
+                # row.
+                row.stop_reason = _stop_reason_of(event.message)
+                row.calls_tools = _calls_tools_of(event.message)
             self._close_reasoning_row()
             self._open_message_id = None
         elif isinstance(event, ToolCallComposeEvent):
@@ -2679,7 +2825,7 @@ class ProjectionFold:
             # is what ``durable.py`` fills from the journal on a cold open.
             held = p.supplements.get(event.anchor)
             if held is None or event.version >= int(held.get("version") or 0):
-                p.supplements[event.anchor] = {
+                beat = {
                     "anchor": event.anchor,
                     "job": event.job,
                     "version": event.version,
@@ -2691,6 +2837,18 @@ class ProjectionFold:
                     "error": event.error,
                     "error_type": event.error_type,
                 }
+                # Sounds ride the beat only when it has one: the event serializer's
+                # own absence rule, so a beat with no audio keeps the exact bytes
+                # this fold produced before the field existed (the frame pins hold
+                # supplement-free projections to the parent's bytes).
+                if event.sounds:
+                    beat["sounds"] = [dict(item) for item in event.sounds]
+                # The bound's disclosure is part of the list: 200 shown + no count
+                # reads as a complete list on the phone until a cold open restores
+                # the row's own ``sounds_more``. Same absence rule (zero is no fact).
+                if event.sounds_more:
+                    beat["sounds_more"] = int(event.sounds_more)
+                p.supplements[event.anchor] = beat
         # Unknown events are dropped by design: the fold renders a SUBSET of
         # the harness taxonomy (the phone has no use for wake/loop internals),
         # and ``extra="allow"`` on AgentEvent means matching must stay
@@ -2770,6 +2928,7 @@ class ProjectionFold:
                 kind="notice",
                 text=_compact(text, _NOTICE_CHARS),
                 details=details,
+                custom_type=custom_type or "",
             )
         )
         self._bump()
@@ -3974,8 +4133,7 @@ class ProjectionFold:
                 if row.id in live
             }
 
-    @staticmethod
-    def _cap_tail(entries: list[TranscriptEntry]) -> list[TranscriptEntry]:
+    def _cap_tail(self, entries: list[TranscriptEntry]) -> list[TranscriptEntry]:
         """Trim to the render tail WITHOUT losing the opening user message.
 
         A bare ``[-LIMIT:]`` drops the first user turn on any session longer
@@ -3985,8 +4143,19 @@ class ProjectionFold:
         pinned at the head, then fill the rest from the tail. The web client
         still pages older history on scroll; this is about the projection
         never omitting the conversation's own opening.
+
+        THE PIN IS A WIRE FACT, not something the client can recover. The
+        client's first history cursor must be the oldest row of the TAIL, not
+        the pinned opener (paging from the opener asks for history older than
+        the conversation's first message and gets nothing), and it used to
+        decide that from ``len(transcript) == PROJECTION_TRANSCRIPT_LIMIT``.
+        The frame cap can publish a SHORTER pinned tail —
+        ``FRAME_CAP_TRANSCRIPT_FLOOR`` rows at its floor — so length is not a
+        reliable signal. This flag is set here and by the cap's tail tier, and
+        it rides the projection.
         """
         if len(entries) <= PROJECTION_TRANSCRIPT_LIMIT:
+            self.projection.transcript_head_pinned = False
             return entries
         tail = entries[-PROJECTION_TRANSCRIPT_LIMIT:]
         first_user = next((e for e in entries if e.kind == "user"), None)
@@ -4000,7 +4169,9 @@ class ProjectionFold:
             # calls I can't see"). Dropping the oldest keeps the bound (one
             # pinned + LIMIT-1 newest = LIMIT) while the newest row always
             # survives. Older rows page back in on scroll via the history API.
+            self.projection.transcript_head_pinned = True
             return [first_user, *tail[1:]]
+        self.projection.transcript_head_pinned = False
         return tail
 
     def _find(self, entry_id: str | None) -> TranscriptEntry | None:

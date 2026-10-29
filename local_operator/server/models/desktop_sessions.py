@@ -69,6 +69,9 @@ class SessionRow(BaseModel):
     # an optimistic client assignment. Local projection supplies both explicitly.
     tags: list[dict[str, str]] = Field(default_factory=list)
     primary: str | None = None
+    # Local rows always supply a token, including "0" for empty assignments.
+    # Remote owners do not publish this local store's revision; omit, not invent.
+    tags_revision: str | None = Field(default=None, exclude_if=lambda value: value is None)
     #: -- THE MESH'S FIVE KEYS (mesh-session-mobility.md §9.2). Additive and
     #: defaulted, so every existing client reads exactly what it read before;
     #: they are DECLARED here rather than left to ``extra="allow"`` so the shape
@@ -165,6 +168,9 @@ class SessionRow(BaseModel):
     #: unusable value becomes ``null`` — which every client already handles —
     #: instead of a 500 the list cannot survive. The same rule runs in
     #: ``info.collect`` and in the sidebar's ``resume._counted``.
+    #: Additive wait presence; nullable job counts distinguish no report from zero.
+    waiting_on: int = 0
+    jobs_running: int | None = None
     subagents_running: int | None = None
     subagents_queued: int | None = None
 
@@ -199,7 +205,7 @@ class SessionRow(BaseModel):
     #: which is also what it does before the first user message exists.
     last_user_at: float | None = None
 
-    @field_validator("subagents_running", "subagents_queued", mode="before")
+    @field_validator("jobs_running", "subagents_running", "subagents_queued", mode="before")
     @classmethod
     def _a_reported_count(cls, value: Any) -> int | None:
         """Refuse an unusable count the way every other reader does."""
@@ -1537,3 +1543,26 @@ class PresenceKinds(BaseModel):
     """
 
     can_notify_kinds: list[str]
+
+
+class StoredFile(BaseModel):
+    """One uploaded attachment, as the composer receives it back.
+
+    The client holds this record while a file sits on the composer chip and
+    sends ONLY its ``digest`` (plus display fields) in ``Prompt.files``: the
+    bytes never ride the 900 kB control frame. ``path`` is the ORIGIN path the
+    client supplied — provenance the transcript keeps — while
+    ``stored_path`` is the retained copy inside the attachment store, which
+    is what survives the user moving or deleting the original.
+
+    The sidecar behind these fields deliberately stores only MIME and size
+    (contract amendment 7): a repeat upload of identical bytes returns THIS
+    send's name/path, never an earlier selection's.
+    """
+
+    digest: str
+    name: str | None = None
+    mime_type: str
+    bytes: int
+    path: str | None = None
+    stored_path: str

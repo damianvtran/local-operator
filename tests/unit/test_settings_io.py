@@ -26,7 +26,10 @@ from rich.cells import cell_len
 from local_operator import keymap, settings_io
 from local_operator.config import DEFAULT_CONFIG, ConfigManager
 from local_operator.memory import DEFAULT_EXCLUDED_DEVICES, SCOPES
-from local_operator.memory_capture import MEMORY_DEFAULT_ENABLED
+from local_operator.memory_capture import (
+    LOCATORS_DEFAULT_ENABLED,
+    MEMORY_DEFAULT_ENABLED,
+)
 from local_operator.model.effort import EFFORT_ORDER
 from local_operator.providers import local as local_providers
 from local_operator.settings_io import Kind
@@ -76,6 +79,7 @@ def _consumer_defaults() -> dict[str, object]:
     )
     from local_operator.model.configure import (
         ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
+        ANTHROPIC_SUBAGENT_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
         OPENAI_USE_MAX_CONTEXT_WINDOW,
         OPENROUTER_RETIRE_BELOW_TPS,
     )
@@ -118,6 +122,9 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_PINNED_FALLBACK,
         RetrySettings,
     )
+    from local_operator.remote_compute import DEFAULT_REMOTE_COMPUTE_ENABLED
+    from local_operator.saver.gate import DEFAULT_MODE as SAVER_DEFAULT_MODE
+    from local_operator.scratchpad import SCRATCHPAD_TOTAL_BUDGET_BYTES
     from local_operator.session.cleanup import (
         DEFAULT_DELEGATED_ENABLED,
         DEFAULT_DELEGATED_MAX_AGE_HOURS,
@@ -126,6 +133,16 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_MAX_SESSIONS,
         DEFAULT_MAX_TOTAL_BYTES,
         DEFAULT_REMOVE_EMPTY,
+    )
+
+    # The compression policy's own constants, from the module that READS them
+    # (``policy_from_config``). Aliased because ``cleanup`` exports the same
+    # names for its own, unrelated switch.
+    from local_operator.session.compression import (
+        DEFAULT_AFTER_DAYS as DEFAULT_COMPRESSION_AFTER_DAYS,
+    )
+    from local_operator.session.compression import (
+        DEFAULT_ENABLED as DEFAULT_COMPRESSION_ENABLED,
     )
     from local_operator.session.runtime.control import DEFAULT_BACKGROUND_ON_RESUME
     from local_operator.session.runtime.process import (
@@ -253,6 +270,16 @@ def _consumer_defaults() -> dict[str, object]:
         "session.cleanup.remove_empty": DEFAULT_REMOVE_EMPTY,
         "session.cleanup.delegated.enabled": DEFAULT_DELEGATED_ENABLED,
         "session.cleanup.delegated.max_age_hours": DEFAULT_DELEGATED_MAX_AGE_HOURS,
+        # The compression switch and threshold. ``enabled`` defaults TRUE here,
+        # unlike every cleanup switch: nothing is removed, so the page must
+        # advertise the value the pass actually runs with.
+        "session.compression.enabled": DEFAULT_COMPRESSION_ENABLED,
+        "session.compression.after_days": DEFAULT_COMPRESSION_AFTER_DAYS,
+        # The pad cap's reader falls back to this module constant when the key is
+        # absent (``scratchpad.scratchpad_budget_bytes``); the registry row
+        # carries a literal because settings_io stays off the write path's
+        # import graph, so this pin is what makes a drift red.
+        "session.scratchpad.max_bytes": SCRATCHPAD_TOTAL_BUDGET_BYTES,
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,
         # Read at every child build by ``subagent.read_slim_child_knowledge``;
         # the constant sits beside that reader, not here, so the registry
@@ -276,6 +303,7 @@ def _consumer_defaults() -> dict[str, object]:
         "network.rollout_on_update": DEFAULT_ROLLOUT_ON_UPDATE,
         "memory.enabled": MEMORY_DEFAULT_ENABLED,
         "memory.capture": MEMORY_DEFAULT_ENABLED,
+        "memory.capture.locators": LOCATORS_DEFAULT_ENABLED,
         "memory.suggest": MEMORY_DEFAULT_ENABLED,
         "network.memory.enabled": MEMORY_DEFAULT_ENABLED,
         "network.memory.scopes": list(SCOPES),
@@ -298,6 +326,9 @@ def _consumer_defaults() -> dict[str, object]:
         # key); the config default is checked against the same constant below.
         "providers.anthropic.cache_ttl_1h_min_context_tokens": (
             ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
+        ),
+        "providers.anthropic.subagent_cache_ttl_1h_min_context_tokens": (
+            ANTHROPIC_SUBAGENT_CACHE_TTL_1H_MIN_CONTEXT_TOKENS
         ),
         # The openrouter routing rows are guarded against the shipped config
         # block itself: their consumer is the single-shot resolver
@@ -345,6 +376,10 @@ def _consumer_defaults() -> dict[str, object]:
         # constant here, and DEFAULT_CONFIG against it in
         # ``test_the_retire_below_tps_default_config_matches_the_consumer``.
         "providers.openrouter.retire_below_tps": OPENROUTER_RETIRE_BELOW_TPS,
+        # Radient Saver's gate reads ``saver.gate.DEFAULT_MODE`` when nothing is
+        # configured; the registry row and DEFAULT_CONFIG restate it, and the
+        # contract's "later flip" must move all three together.
+        "radient.saver.mode": SAVER_DEFAULT_MODE,
         # The fork keys have REAL single-value consumers — the constants
         # ``/fork`` itself reads — so they are mapped here rather than
         # allow-listed. An allow-list entry would buy a green test while leaving
@@ -360,6 +395,11 @@ def _consumer_defaults() -> dict[str, object]:
     consumers["shell_environment.mode"] = shell_env.MODE_DEFAULT
     consumers["shell_environment.inherit"] = []
     consumers["shell_environment.exclude"] = []
+    # The remote-compute preview switch, from the module that READS it (the
+    # capability bit calls ``is_enabled``). The registry carries a literal
+    # ``False`` because settings_io must not import the mesh-facing package;
+    # this entry is what keeps the two from drifting.
+    consumers["remote_compute.enabled"] = DEFAULT_REMOTE_COMPUTE_ENABLED
     # The hotkeys have a REAL single-value consumer for the same reason the
     # fork keys do, and a stricter one: `KeyAction.default` is what
     # `OperatorApp.BINDINGS` binds and what `resolved_keymap` falls back to
@@ -414,6 +454,17 @@ def _consumer_defaults() -> dict[str, object]:
     consumers["aida.cadence.max_extra_per_day"] = aida_proactive.DEFAULT_MAX_EXTRA_PER_DAY
     consumers["aida.cadence.min_gap_minutes"] = aida_proactive.DEFAULT_MIN_GAP_MINUTES
     consumers["aida.onboarding.nudge_days"] = aida_onboarding.DEFAULT_NUDGE_DAYS
+    # The Librarian keys, asked of the package that reads them — the same split
+    # and the same reason as the Aida block above.
+    from local_operator.librarian import bootstrap as librarian_bootstrap
+    from local_operator.librarian import proactive as librarian_proactive
+
+    consumers["librarian.enabled"] = librarian_proactive.DEFAULT_ENABLED
+    consumers["librarian.name"] = librarian_bootstrap.SESSION_TITLE
+    consumers["librarian.cadence.at"] = librarian_proactive.DEFAULT_CADENCE_AT
+    consumers["librarian.cadence.paused"] = librarian_proactive.DEFAULT_PAUSED
+    consumers["librarian.cadence.max_extra_per_day"] = librarian_proactive.DEFAULT_MAX_EXTRA_PER_DAY
+    consumers["librarian.cadence.min_gap_minutes"] = librarian_proactive.DEFAULT_MIN_GAP_MINUTES
 
     # The wake-trigger keys, asked of the layer that reads them
     # (``local_operator/wakes/triggers/``). The registry rows carry literals
@@ -996,6 +1047,7 @@ _VALID_TEXT_SAMPLES: dict[object, str] = {
     # arbitrary "round-trip-probe" spelling would do fine — but a real name
     # keeps the sample honest about what the field carries).
     settings_io._validate_aida_name: "Sovereign",
+    settings_io._validate_librarian_name: "Archivist",
     # A subagent tier's ordinary form is still a bare selector (#2428 adds the
     # ``{model, effort}`` mapping beside it; test_config covers that form).
     settings_io.validate_tier_value: "openai/gpt-5-mini",
@@ -3215,3 +3267,91 @@ def test_transcription_cleanup_setting_is_an_enum_with_a_safe_default(
         settings_io.write_setting(manager, setting, "bogus")
     # The rejected write did not land.
     assert settings_io.read_setting(manager, setting) == "off"
+
+
+# ---------------------------------------------------------------------------
+# A reset must REMOVE the leaf, not have it copied back off disk
+# ---------------------------------------------------------------------------
+
+
+def test_a_reset_removes_the_leaf_it_promises_to_remove(tmp_path: Path) -> None:
+    """Deep preservation is why ``_delete`` has to DECLARE its deletion.
+
+    ``ConfigManager._write_config`` now copies every disk value the payload does
+    not model straight back into the file — that is what keeps an unknown
+    ``retry.fallbackChains`` alive through a writer whose dict is default-shaped.
+    The same mechanism resurrects a key ``/settings`` just removed unless the
+    delete names it, so ``reset_setting`` would report success and the value
+    would still be there after the next read: silently, because the page's own
+    manager sees the deleted state until it reloads.
+    """
+    manager = ConfigManager(tmp_path)
+    settings_io.write_setting(manager, settings_io.BY_KEY["retry.maxRetries"], 4)
+    settings_io.write_setting(manager, settings_io.BY_KEY["model_name"], "openai/gpt-5")
+
+    settings_io.reset_setting(manager, settings_io.BY_KEY["retry.maxRetries"])
+    settings_io.reset_setting(manager, settings_io.BY_KEY["model_name"])
+
+    # Read the FILE, not a fresh manager's view: ``_load_config`` back-fills the
+    # shipped top-level defaults, so ``model_name`` would be there either way.
+    stored = yaml.safe_load((tmp_path / "config.yml").read_text(encoding="utf-8"))["values"]
+    assert "maxRetries" not in stored["retry"], stored["retry"]
+    # The sibling a defaults-shaped write would have taken with it is untouched.
+    assert stored["retry"]["baseDelayMs"] == 500
+    assert "model_name" not in stored
+    assert settings_io.read_setting(manager, settings_io.BY_KEY["retry.maxRetries"]) == 10
+
+
+def test_the_account_policy_reset_retires_its_legacy_aliases(tmp_path: Path) -> None:
+    """``_reset_account_policy`` is a DELIBERATE deletion, so it must declare one.
+
+    It pops the four legacy aliases and writes the ``retry`` subtree whole; under
+    deep preservation an undeclared pop is copied straight back off disk and the
+    reset is a no-op that reports success (review round 1, n2 — the same story as
+    B1, caught here rather than in production).
+    """
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value(
+        "retry",
+        {
+            "maxRetries": 4,
+            "accountSelectionPolicy": "headroom",
+            "account_selection_policy": "headroom",
+            "usageAwareAccountPick": True,
+            "usage_aware_account_pick": True,
+        },
+    )
+
+    settings_io.reset_setting(manager, settings_io.BY_KEY["retry.accountSelectionPolicy"])
+
+    stored = ConfigManager(tmp_path).get_config().values["retry"]
+    for alias in (
+        "accountSelectionPolicy",
+        "account_selection_policy",
+        "usageAwareAccountPick",
+        "usage_aware_account_pick",
+    ):
+        assert alias not in stored, f"{alias} survived the reset: {stored!r}"
+    assert stored["maxRetries"] == 4
+
+
+def test_deleting_a_chain_actually_deletes_it(tmp_path: Path) -> None:
+    """``write_chains`` removes chains; the removal has to be declared (n2).
+
+    ``merged`` is built from what is on disk plus the caller's edits, so a chain
+    that is on disk and absent from the result is one this call deleted. Without
+    the declaration, preservation re-adds it and the page's delete does nothing.
+    """
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value(
+        "retry",
+        {"fallbackChains": {"default": ["openai/gpt-5"], "extra": ["openrouter/x"]}},
+    )
+    base = settings_io.read_chains(manager)
+    assert set(base) == {"default", "extra"}
+
+    settings_io.write_chains(manager, {"default": ["openai/gpt-5"]}, base=base)
+
+    stored = ConfigManager(tmp_path).get_config_value("retry")["fallbackChains"]
+    assert "extra" not in stored, stored
+    assert stored["default"] == ["openai/gpt-5"]

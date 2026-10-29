@@ -1,0 +1,170 @@
+{
+ "namespace": "tui.library",
+ "prior_status": "passed",
+ "prior_auditor": {
+  "agent": "i18n-auditor",
+  "model": "anthropic/claude-sonnet-5-5",
+  "date": "2026-10-19",
+  "result": "passed",
+  "findings": 0
+ },
+ "prior_translator": {
+  "agent": "i18n-translator",
+  "model": "openai/gpt-6.1-sol",
+  "date": "2026-10-19"
+ },
+ "prior_note": "zh-CN core held-candidate wave 2026-10-19. 108 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor anthropic/claude-sonnet-5-5: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round.",
+ "hash_equality": {
+  "source_sha256_prior_row": "5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11",
+  "source_sha256_held_candidate": "5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11",
+  "source_sha256_current": "5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11",
+  "source_equal": true,
+  "target_sha256_prior_row": null,
+  "target_sha256_held_candidate": "c8db59a6cdc011050c9dd8944eafad703a4f4723095a5e069a72cc8aac0af813",
+  "target_sha256_current": "c8db59a6cdc011050c9dd8944eafad703a4f4723095a5e069a72cc8aac0af813",
+  "target_equal": true
+ },
+ "key_parity": {
+  "en_count": 108,
+  "zh_count": 108,
+  "missing_in_zh": [],
+  "unknown_in_zh": [],
+  "set_equal": true,
+  "order_equal": true,
+  "first_order_divergence": null,
+  "en_duplicate_keys": [],
+  "zh_duplicate_keys": []
+ },
+ "icu": {
+  "messages_checked": 108,
+  "parse_errors": [],
+  "argument_mismatches": [],
+  "plural_errors": []
+ },
+ "exact_english_values": [
+  "tui.library.detail_meta",
+  "tui.library.detail_occurrence",
+  "tui.library.error_body",
+  "tui.library.form_error"
+ ],
+ "width": {
+  "over_max_cells": [],
+  "longer_than_english": []
+ },
+ "whole_file_bytes_equal_held": true,
+ "sample": {
+  "policy": "stratified by English message length (<40, 40-80, 80-120, >120); >=15% of each stratum (min 1), ALL messages >120 chars, ALL plural messages",
+  "buckets": {
+   "short_lt40": 91,
+   "medium_40_80": 15,
+   "long_80_120": 2,
+   "over_120": 0
+  },
+  "sampled_by_bucket": {
+   "short_lt40": 14,
+   "medium_40_80": 3,
+   "long_80_120": 1,
+   "over_120": 0
+  },
+  "all_over_120": [],
+  "all_plurals": [
+   "tui.library.asset_count",
+   "tui.library.detail_sources"
+  ],
+  "keys_sampled": 20,
+  "fraction_of_namespace": 0.1852,
+  "selected": [
+   "tui.library.ask_prompt_digest",
+   "tui.library.ask_seeded",
+   "tui.library.asset_count",
+   "tui.library.detail_meta",
+   "tui.library.detail_no_description",
+   "tui.library.detail_organized",
+   "tui.library.detail_sources",
+   "tui.library.detail_unorganized",
+   "tui.library.form_description_placeholder",
+   "tui.library.hint_cancel",
+   "tui.library.hint_move",
+   "tui.library.hint_open",
+   "tui.library.librarian_no_launcher",
+   "tui.library.librarian_status",
+   "tui.library.loading",
+   "tui.library.no_matches_body",
+   "tui.library.no_matches_title",
+   "tui.library.notice_open_missing",
+   "tui.library.sort_type",
+   "tui.library.status_highlighted"
+  ]
+ },
+ "src_ok": true,
+ "tgt_ok": true,
+ "old_src": "5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11",
+ "cur_src": "5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11",
+ "old_tgt": "c8db59a6cdc011050c9dd8944eafad703a4f4723095a5e069a72cc8aac0af813",
+ "new_tgt": "c8db59a6cdc011050c9dd8944eafad703a4f4723095a5e069a72cc8aac0af813",
+ "attest_sample": {
+  "policy": "stratified by English message length (<40, 40-80, 80-120, >120); >=15% of each stratum (min 1), ALL messages >120 chars, ALL plural messages",
+  "buckets": {
+   "short_lt40": 91,
+   "medium_40_80": 15,
+   "long_80_120": 2,
+   "over_120": 0
+  },
+  "sampled_by_bucket": {
+   "short_lt40": 14,
+   "medium_40_80": 3,
+   "long_80_120": 1,
+   "over_120": 0
+  },
+  "all_over_120": [],
+  "all_plurals": [
+   "tui.library.asset_count",
+   "tui.library.detail_sources"
+  ],
+  "keys_sampled": 20,
+  "fraction_of_namespace": 0.1852,
+  "selected": [
+   "tui.library.ask_prompt_digest",
+   "tui.library.ask_seeded",
+   "tui.library.asset_count",
+   "tui.library.detail_meta",
+   "tui.library.detail_no_description",
+   "tui.library.detail_organized",
+   "tui.library.detail_sources",
+   "tui.library.detail_unorganized",
+   "tui.library.form_description_placeholder",
+   "tui.library.hint_cancel",
+   "tui.library.hint_move",
+   "tui.library.hint_open",
+   "tui.library.librarian_no_launcher",
+   "tui.library.librarian_status",
+   "tui.library.loading",
+   "tui.library.no_matches_body",
+   "tui.library.no_matches_title",
+   "tui.library.notice_open_missing",
+   "tui.library.sort_type",
+   "tui.library.status_highlighted"
+  ]
+ },
+ "attest_verdict": "carried",
+ "technical_tokens": {
+  "patterns": {
+   "backtick_span": "`[^`\\n]+`",
+   "long_flag": "(?<![A-Za-z0-9_/])--[A-Za-z0-9][A-Za-z0-9_-]*",
+   "angle_token": "<[A-Za-z][^>\\n]*>",
+   "url_scheme": "(?:https?|ssh)://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+",
+   "home_or_absolute_path": "(?:~/[A-Za-z0-9_./-]+|/(?:bin|Users|Volumes|tmp|var|etc)/[A-Za-z0-9_./-]+)",
+   "percent_token": "%\\([A-Za-z_]+\\)[sdif]|%[sdif]",
+   "ansi_escape": "\\x1b\\[[0-9;]*m"
+  },
+  "failures": [],
+  "kept_english_missing": [],
+  "emphasis_tokens_rendered_lexically": [],
+  "caps_disposition": "Uppercase tokens outside KEPT_ENGLISH are English emphasis (STALE, ONE, ONLY, NOT, FINAL, APPROVE, WORKSTREAM, ...). Chinese has no case and renders the emphasis lexically; their absence is recorded as emphasis_tokens_rendered_lexically, not as a dropped placeholder."
+ },
+ "icu_number_date_skeletons": {
+  "keys_checked": 0,
+  "failures": []
+ },
+ "width_max_cells": []
+}

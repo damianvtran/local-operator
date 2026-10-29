@@ -1,0 +1,4 @@
+tui.asks.dismiss.answered_in_chat
+EN Answered in chat
+OLD گفتگو میں جواب دیدہ
+NEW گفتگو میں جواب دے دیا

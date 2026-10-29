@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "audit_id": "zh24r2",
+  "locale": "zh-CN",
+  "namespace": "tui.team_authoring",
+  "fix_commit": "cb716031e335aa27e632227f1a0303e143dcd19f",
+  "source_revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "method": "Read-only comparison of the pre-fix target at cb716031e3^, the current target at HEAD, and the exact proposed text parsed from the pre-fix zh24a1 report. ICU arguments and plural selectors are parsed by the repo's own runtime; width is measured in display cells with representative values.",
+  "changed_key_count": 1,
+  "all_values_match_proposal": true,
+  "all_values_changed": true,
+  "all_argument_sets_equal": true,
+  "all_renders_ok": true,
+  "over_budget": [],
+  "rows": [
+    {
+      "key": "tui.team_authoring.members_hint",
+      "pre_fix": "逗号分隔：coder、coder:2、team:pod",
+      "current": "逗号分隔：coder, coder:2, team:pod",
+      "proposed_by_pre_fix_audit": "逗号分隔：coder, coder:2, team:pod",
+      "proposal_found": true,
+      "matches_proposed_text_exactly": true,
+      "changed_from_pre_fix": true,
+      "en_sha256": "125532033fcbd25117be967481ad2381743b27dffa601a5cbacb266ee7c38dfa",
+      "current_sha256": "7a8914a2d9e9fe197ab761f9f255c8b9a617e672218efc6d95d778b308c4a72c",
+      "en_arguments": [],
+      "zh_arguments": [],
+      "argument_sets_equal": true,
+      "en_plural_selectors": [],
+      "zh_plural_selectors": [],
+      "rendered": "逗号分隔：coder, coder:2, team:pod",
+      "render_error": null,
+      "rendered_cells": 34,
+      "maxCells": null,
+      "over_budget": null
+    }
+  ]
+}

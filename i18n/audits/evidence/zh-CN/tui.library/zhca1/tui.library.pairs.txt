@@ -1,0 +1,83 @@
+# tui.library — sampled en/zh pairs for attestation zhca1
+# 20/108 keys; all >120 chars and all plurals included
+
+## tui.library.ask_prompt_digest  [91 chars]
+EN: Tell me about this asset: {name} (asset {id}) — {kind}. What is it, and how might I use it?
+ZH: 介绍一下这个资源：{name}（资源{id}）— {kind}。它是什么，我可以如何使用？
+
+## tui.library.ask_seeded  [51 chars]
+EN: The composer is ready with a question about {name}.
+ZH: 输入框已填入关于{name}的问题。
+
+## tui.library.asset_count  [47 chars, PLURAL]
+EN: {count, plural, one {# asset} other {# assets}}
+ZH: {count, plural, other {#个资源}}
+
+## tui.library.detail_meta  [35 chars]
+EN: {kind} · {origin} · {size} · {when}
+ZH: {kind} · {origin} · {size} · {when}
+
+## tui.library.detail_no_description  [14 chars]
+EN: no description
+ZH: 无描述
+
+## tui.library.detail_organized  [16 chars]
+EN: organized {when}
+ZH: 整理于{when}
+
+## tui.library.detail_sources  [61 chars, PLURAL]
+EN: {count, plural, one {# conversation} other {# conversations}}
+ZH: {count, plural, other {#个会话}}
+
+## tui.library.detail_unorganized  [13 chars]
+EN: not organized
+ZH: 未整理
+
+## tui.library.form_description_placeholder  [22 chars]
+EN: what this asset is for
+ZH: 此资源的用途
+
+## tui.library.hint_cancel  [6 chars]
+EN: cancel
+ZH: 取消
+
+## tui.library.hint_move  [4 chars]
+EN: move
+ZH: 移动
+
+## tui.library.hint_open  [4 chars]
+EN: open
+ZH: 打开
+
+## tui.library.librarian_no_launcher  [69 chars]
+EN: Opening the Librarian needs a session-capable launcher — see the CLI.
+ZH: 打开Librarian需要支持会话的启动器 — 参见CLI。
+
+## tui.library.librarian_status  [18 chars]
+EN: Librarian: {state}
+ZH: Librarian：{state}
+
+## tui.library.loading  [20 chars]
+EN: Reading the library…
+ZH: 正在读取资料库……
+
+## tui.library.no_matches_body  [54 chars]
+EN: Clear a filter or the search to see the whole library.
+ZH: 清除筛选条件或搜索内容以查看整个资料库。
+
+## tui.library.no_matches_title  [15 chars]
+EN: Nothing matches
+ZH: 无匹配项
+
+## tui.library.notice_open_missing  [28 chars]
+EN: {name} is no longer on disk.
+ZH: {name}已不在磁盘上。
+
+## tui.library.sort_type  [4 chars]
+EN: type
+ZH: 类型
+
+## tui.library.status_highlighted  [11 chars]
+EN: Highlighted
+ZH: 已突出显示
+

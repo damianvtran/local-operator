@@ -450,3 +450,162 @@ async def test_real_wheel_simulator_answer_enters_public_artifact_and_next_reque
         "Answer from the user: simulated user answer"
         in stream.requests[1].messages[-1].content[0].text
     )
+
+
+@pytest.mark.asyncio
+async def test_real_worker_fresh_capture_changes_pixels_and_next_receipt_binding(
+    tmp_path: Path, adapter_wheel: Path, episode_id: str
+) -> None:
+    """The real installed OSWorld adapter and worker, canonical RPC and parent
+    verification must adopt LIVE pixels without replaying the refused input.
+
+    A private interpreter's startup hook instruments only the fake guest seam:
+    its desktop colour changes autonomously via a parent-written file, its
+    first execute refuses before dispatch, and each capture/execute is logged.
+    No package bytes/RECORDs are changed and no shared interpreter is patched.
+    The independent QA rig covers real loopback AWS transport refusal; this
+    test discriminates the fresh capture/sequence/receipt boundary itself.
+    """
+    import json
+
+    from local_operator.evaluation.adapters.api import (
+        ExecuteParams,
+        InspectRequirementsParams,
+        ObserveParams,
+        PrepareParams,
+        ResetStartParams,
+    )
+    from local_operator.evaluation.adapters.rpc import RpcRemoteError
+    from local_operator.evaluation.adapters.supervisor import (
+        HostVerifier,
+        VerifiedAdapterSession,
+    )
+    from local_operator.evaluation.evidence.models import canonical_digest
+    from local_operator.evaluation.protocol import ActionBatch, TypeAction
+    from tests.unit.evaluation.copied_interpreter import site_packages_of
+
+    interpreter = spawn_helpers.build_spawn_interpreter(tmp_path / "private-worker", adapter_wheel)
+    site = site_packages_of(interpreter.executable)
+    shade = tmp_path / "guest-shade"
+    ledger = tmp_path / "guest-calls.jsonl"
+    shade.write_text("0")
+    # This module is outside the attested wheel; it changes only the synthetic
+    # provider seam, not adapter/worker/supervisor code under test.
+    (site / "zz_fresh_guest.py").write_text(
+        "from pathlib import Path\n"
+        "import json\n"
+        "from local_operator.evaluation.adapters import discovery\n"
+        f"SHADE = Path({str(shade)!r})\nLEDGER = Path({str(ledger)!r})\n"
+        "original_load = discovery.load_selected_adapter\n"
+        "def load(selector):\n"
+        "    adapter = original_load(selector)\n"
+        # Verification deliberately purges pre-imported wheel modules; patch
+        # the synthetic provider only AFTER the real verified load completes.
+        "    from lop_osworld_v2_adapter.providers.fake import FakeProvider\n"
+        "    from lop_osworld_v2_adapter.providers.aws import GuestExecutionError\n"
+        "    from lop_osworld_v2_adapter.observation import write_png_rgb\n"
+        "    def log(kind):\n"
+        "        with LEDGER.open('a') as out: out.write(json.dumps(kind) + '\\n')\n"
+        "    original_observe = FakeProvider.observe\n"
+        "    original_execute = FakeProvider.execute\n"
+        "    async def observe(self):\n"
+        "        log('capture')\n"
+        "        return await original_observe(self)\n"
+        "    async def execute(self, statements, *, settle=True):\n"
+        "        log('execute')\n"
+        "        if not getattr(self, '_test_refused', False):\n"
+        "            self._test_refused = True\n"
+        "            raise GuestExecutionError('refused before input', nothing_sent=True)\n"
+        "        return await original_execute(self, statements, settle=settle)\n"
+        "    def frame(self):\n"
+        "        channel = int(SHADE.read_text())\n"
+        "        return write_png_rgb(1920, 1080, bytes((channel, 0, 0)) * (1920 * 1080))\n"
+        "    FakeProvider.observe = observe\n"
+        "    FakeProvider.execute = execute\n"
+        "    FakeProvider._frame = frame\n"
+        "    return adapter\n"
+        "discovery.load_selected_adapter = load\n"
+    )
+    (site / "zz_fresh_guest.pth").write_text("import zz_fresh_guest\n")
+    selector = spawn_helpers.build_spawnable_adapter(
+        tmp_path, adapter_wheel, _TASKS, provider={"provider": "fake"}, interpreter=interpreter
+    )
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    supervisor = AdapterSupervisor.launch(selector)
+    verifier = HostVerifier("task_plain", episode_id, artifacts)
+    try:
+        await supervisor.handshake(timeout=60)
+        session = VerifiedAdapterSession(supervisor, verifier)
+        await session.inspect_requirements(InspectRequirementsParams(), timeout=60)
+        session.mark_rescue_persisted("0" * 64)
+        await session.prepare(
+            PrepareParams(
+                operation_id="prepare-fresh",
+                episode_id=episode_id,
+                secret_refs=(),
+                infra_values=_spec_for_spawn(episode_id).infra_values,
+            ),
+            timeout=60,
+        )
+        initial = (
+            await session.reset_start(
+                ResetStartParams(
+                    operation_id="reset-fresh",
+                    task_id="task_plain",
+                    episode_id=episode_id,
+                    artifact_root=str(artifacts),
+                ),
+                timeout=60,
+            )
+        ).observation
+
+        def params(current: Any, operation: str) -> ExecuteParams:
+            batch = ActionBatch(
+                protocol_version="1.0",
+                task_id="task_plain",
+                episode_id=episode_id,
+                observation_id=current.observation_id,
+                actions=(TypeAction(observation_id=current.observation_id, text="once"),),
+            )
+            return ExecuteParams(
+                operation_id=operation,
+                action_batch=batch,
+                action_batch_id=canonical_digest("adapter-action-batch-v1", batch),
+            )
+
+        with pytest.raises(RpcRemoteError) as refused:
+            await session.execute(params(initial, "first-refused"), timeout=60)
+        assert refused.value.detail is not None and refused.value.detail.phase == "not_applied"
+        # Change the guest WITHOUT an action; default observe must remain cached.
+        shade.write_text("200")
+        assert (
+            await session.observe(ObserveParams(episode_id=episode_id), timeout=60)
+        ).observation == initial
+        live = (
+            await session.observe(ObserveParams(episode_id=episode_id, fresh=True), timeout=60)
+        ).observation
+        assert live.sequence == initial.sequence + 1
+        assert live.frames[0].artifact.sha256 != initial.frames[0].artifact.sha256
+        assert (artifacts / live.frames[0].artifact.sha256).read_bytes() != (
+            artifacts / initial.frames[0].artifact.sha256
+        ).read_bytes()
+        assert verifier.current_observation == live
+        # A stale pre-capture binding is refused locally, without another send.
+        with pytest.raises(ValueError):
+            await session.execute(params(initial, "stale-binding"), timeout=60)
+        result = await session.execute(params(live, "next-batch"), timeout=60)
+        assert result.receipt.input_observation_id == live.observation_id
+        assert result.receipt.output_observation_id == result.observation.observation_id
+        assert result.observation.sequence == live.sequence + 1
+        assert verifier.current_observation == result.observation
+        assert [json.loads(line) for line in ledger.read_text().splitlines()] == [
+            "capture",
+            "execute",
+            "capture",
+            "execute",
+            "capture",
+        ]
+    finally:
+        await supervisor.terminate()
+    assert supervisor.process.returncode is not None

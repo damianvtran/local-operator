@@ -1,0 +1,76 @@
+relay.session.tags.action
+EN "Tags…"
+ZH "标签……"
+CX {"note": "Owned relay SPA session copy. Rendered only when capabilities.session_tags.available is true; the row itself never carries tag controls.", "role": "long-press action sheet entry that opens the tag sheet", "tone": "Sentence-ish label, the ellipsis is U+2026 and means a sheet opens."}
+relay.session.tags.sheet_title
+EN "tags"
+ZH "标签"
+CX {"note": "Owned relay SPA session copy. The conversation's name is deliberately not repeated here: the action sheet that opened this one already named it.", "role": "tag sheet's title", "tone": "lowercase, one word."}
+relay.session.tags.loading
+EN "loading…"
+ZH "正在加载……"
+CX {"note": "Owned relay SPA session copy.", "role": "catalogue read in flight", "tone": "lowercase, U+2026."}
+relay.session.tags.empty
+EN "no tag categories yet"
+ZH "尚无标签分类"
+CX {"note": "Owned relay SPA session copy. Shown only when the catalogue resolved and has no entries; the phone cannot create categories.", "role": "tag sheet's empty-catalogue state", "tone": "lowercase; no advice, the hint below carries it."}
+relay.session.tags.empty_hint
+EN "create one in the desktop app or the terminal"
+ZH "在桌面应用或终端中创建一个"
+CX {"note": "Owned relay SPA session copy. Category create/rename deliberately lives in the desktop app and agent callers, not the phone.", "role": "empty-catalogue hint naming the surfaces that own category identity", "tone": "lowercase, no terminal punctuation."}
+relay.session.tags.load_error
+EN "Could not load the tag catalogue."
+ZH "无法加载标签目录。"
+CX {"note": "Owned relay SPA session copy. Paired with the retry control; the daemon's own refusal is not shown here because the read carries none.", "role": "catalogue read failure", "tone": "Sentence, sentence case."}
+relay.session.tags.retry
+EN "try again"
+ZH "重试"
+CX {"note": "Owned relay SPA session copy.", "role": "re-read the catalogue after a failure", "tone": "lowercase, imperative."}
+relay.session.tags.limit_hint
+EN "{count} tags is the most a conversation can carry — remove one to add another."
+ZH "每段对话最多可有{count}个标签 — 移除一个才能再添加。"
+CX {"note": "Owned relay SPA session copy. Also the aria-describedby target of every disabled row, so the reason is audible, not only visible.", "role": "explains why unchecked categories are disabled at the cap", "tone": "Sentence, em dash, {count} is the relay's cap."}
+relay.session.tags.primary
+EN "primary"
+ZH "主标签"
+CX {"note": "Owned relay SPA session copy. The primary mark is a shape plus this word, never colour alone.", "role": "screen-reader word beside the row's leading dot", "tone": "lowercase, one word."}
+relay.session.tags.make_primary
+EN "make {name} the primary tag"
+ZH "将{name}设为主标签"
+CX {"note": "Owned relay SPA session copy. The radio itself is mark-only; this sentence is what a screen reader hears.", "role": "accessible name of a selected row's primary radio", "tone": "lowercase, {name} is the category's own name."}
+relay.session.tags.more
+EN "{count, plural, one {# more tag} other {# more tags}}"
+ZH "{count, plural, other {另有#个标签}}"
+CX {"note": "Owned relay SPA session copy. The visible mark is only +N, so this is the whole sentence assistive tech gets.", "role": "accessible name of the row's +N mark", "tone": "ICU plural on count; lowercase."}
+relay.session.tags.missing
+EN "not in the catalogue"
+ZH "不在目录中"
+CX {"note": "Owned relay SPA session copy. Such a row stays selectable so the reader can remove an assignment the catalogue can no longer explain.", "role": "note beside an assigned category absent from the registry", "tone": "lowercase, no terminal punctuation."}
+relay.session.tags.saving
+EN "saving…"
+ZH "正在保存……"
+CX {"note": "Owned relay SPA session copy.", "role": "per-row pending mark while an assignment write is in flight", "tone": "lowercase, U+2026."}
+relay.session.tags.save_error
+EN "Could not save the tags"
+ZH "无法保存标签"
+CX {"note": "Owned relay SPA session copy. Shared refusal hygiene (lib/refusal) appends the relay's sentence, which is written for this reader and passes through unrewritten.", "role": "refusal lead for a rejected assignment write", "tone": "Sentence case, no terminal punctuation: the daemon's own sentence follows after a colon."}
+relay.session.tags.remove_all
+EN "remove all tags"
+ZH "移除所有标签"
+CX {"note": "Owned relay SPA session copy. Turns into the confirm pair; no write happens on this press.", "role": "first press of the two-step clear", "tone": "lowercase, imperative."}
+relay.session.tags.remove_all_confirm
+EN "remove all tags?"
+ZH "移除所有标签？"
+CX {"note": "Owned relay SPA session copy. Sends the exact empty desired state {tags: [], primary: null}.", "role": "the confirmation press that clears the assignment", "tone": "lowercase, question mark."}
+relay.session.tags.cancel
+EN "cancel"
+ZH "取消"
+CX {"note": "Owned relay SPA session copy. Cancels the pending remove-all confirmation and writes nothing.", "role": "inline confirm's cancel button in the remove-all row", "tone": "lowercase, imperative."}
+relay.session.tags.done
+EN "done"
+ZH "完成"
+CX {"note": "Owned relay SPA session copy. Closes the sheet; every assignment already landed as its own write.", "role": "tag sheet's closing button", "tone": "lowercase, imperative."}
+relay.session.tags.pin_and_tags_hint
+EN "touch and hold a row to pin or tag it"
+ZH "长按一行即可固定或添加标签"
+CX {"note": "Owned relay SPA session copy. Rendered only when capabilities.session_tags.available is true; relays without the tag routes keep the pin-only sentence, so the hint never promises a screen this build cannot serve.", "role": "long-press discoverer when the relay also serves tags", "tone": "Preserve current copy and casing, lowercase. Names both verbs a long-press offers."}

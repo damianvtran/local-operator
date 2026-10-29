@@ -76,12 +76,12 @@ def test_qa_resolves_without_unknown_role_fallback_and_preserves_custom_copy(tmp
     assert qa.effort is None and qa.model == ""
     assert qa.tools is not None and "browser" in qa.tools
     assert not {"edit", "write", "task"}.intersection(qa.tools)
-    assert install_seed("qa-tester", registry=registry) is not None
+    assert install_seed("qa-tester", registry=registry, scope="global") is not None
     row = registry.get_agent_by_name("qa-tester")
     assert row is not None
     custom = qa.instructions + "\nCUSTOM isolation constraint"
     registry.set_agent_system_prompt(row.id, custom)
-    install_seed("qa-tester", registry=registry)
+    install_seed("qa-tester", registry=registry, scope="global")
     sync_installed_seeds(registry)
     assert registry.get_agent_system_prompt(row.id) == custom
     loaded = resolve_profile("qa-tester", registry=registry)

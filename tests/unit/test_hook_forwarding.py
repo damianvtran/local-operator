@@ -495,6 +495,27 @@ async def test_hook_env_exports_claude_placeholders(tmp_path: Path) -> None:
     assert run.exit_code == 0 and run.stdout.endswith("|/plug")
 
 
+@pytest.mark.asyncio
+async def test_hook_env_withholds_the_desktop_plane_bearer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hook is a command a model can cause to run (a project settings file it
+    wrote names one), so it never sees the desktop plane's bearer (#3022 r2 M2:
+    on c7901757 this printed PRESENT). The operator's other variables still
+    reach it -- hooks are their configured tools."""
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "hook-probe-bearer")
+    monkeypatch.setenv("HOOK_PROBE_KEEP", "kept")
+    hook = hf.HookCommand(
+        event=hf.POST_TOOL_USE,
+        matcher=None,
+        command='printf "%s|%s" "${LOCAL_OPERATOR_DESKTOP_TOKEN:-ABSENT}" "$HOOK_PROBE_KEEP"',
+        timeout_s=10,
+        source="test",
+    )
+    run = await hf.run_hook(hook, {}, str(tmp_path))
+    assert run.exit_code == 0 and run.stdout == "ABSENT|kept", run
+
+
 # ---------------------------------------------------------------------------
 # End to end: the operator's real hook through the real loop
 # ---------------------------------------------------------------------------

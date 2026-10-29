@@ -550,6 +550,54 @@ def test_tool_rows_gate_on_what_the_session_actually_holds() -> None:
     assert [row.name for row in rows] == ["send"]
 
 
+def test_the_secret_roster_row_describes_only_this_machines_store() -> None:
+    """The existing local tool is recommendable, with no remote-store ambiguity."""
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.secret_tool import build_secret_tool
+
+    tool = build_secret_tool(ToolContext())
+    assert tool is not None
+
+    rows = session_factory._tool_roster_rows([tool])
+
+    assert [(row.kind, row.name, row.resource_url) for row in rows] == [
+        ("tool", "secret", "tool://secret")
+    ]
+    assert rows[0].description == (
+        "Store and use secrets in this machine's encrypted store (`lop secret`)."
+    )
+
+
+@pytest.mark.asyncio
+async def test_local_credential_intent_recommends_secret_without_echoing_its_value() -> None:
+    """Drive the real roster/request/render path with a synthetic credential canary."""
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.secret_tool import build_secret_tool
+
+    tool = build_secret_tool(ToolContext())
+    assert tool is not None
+    row = session_factory._tool_roster_rows([tool])[0]
+    classifier = _FakeClassifier(_Recommendation(resources=(row,)))
+    hooks = _hooks(classifier=classifier)
+    hooks.tool_roster = (row,)
+    secret_value = "synthetic-local-credential-value-do-not-echo"
+
+    block = await session_factory._select_knowledge_block(
+        hooks,
+        f"Save this credential locally for future sessions: {secret_value}",
+        task_id="local-credential-intent",
+    )
+
+    assert len(classifier.requests) == 1
+    request = classifier.requests[0]
+    assert row in request.candidates
+    recommendation_text = "\n".join(candidate.description for candidate in request.candidates)
+    assert "this machine's encrypted store" in recommendation_text
+    assert "- tool://secret" in block
+    assert secret_value not in recommendation_text
+    assert secret_value not in block
+
+
 def test_the_generate_image_row_is_appended_last_and_membership_gated(
     monkeypatch,
 ) -> None:
@@ -1638,3 +1686,61 @@ async def test_the_trigger_respects_the_configured_cap() -> None:
         hooks, "merge it once CI is green", task_id="t-cr2"
     )
     assert "tool://code_requests" not in blocked
+
+
+@pytest.mark.asyncio
+async def test_a_local_credential_intent_never_reaches_vault_through_the_roster() -> None:
+    """Vault guidance is gated off the recommendation path for everyone, today.
+
+    Operator requirement: local use recommends the ``secret`` tool, and Vault is
+    advertised only to a user with a paid Team plan. No cheap, already-fetched
+    Team-plan signal exists in a session (the membership plan summary arrives
+    only from an on-demand ``GET /me/memberships``), and a session-start network
+    call is ruled out — so NO roster row may name Vault. The guide's sharing
+    section is reachable only once a model already reads ``guide://credentials``
+    for a credential task. This drives the REAL packaged guide and the REAL
+    secret tool through the roster builder, and EVERY packaged guide rather than
+    only ``credentials``, so a later description edit to any guide that starts
+    advertising Vault fails here, not in a user's prompt.
+    """
+    from local_operator.guides import discover_guides
+    from scripts.real_tool_surface import build_real_tools
+
+    guides = discover_guides()
+    # Guard the guard: an empty catalogue would make the all() below vacuous.
+    assert len(guides) > 1
+    assert "credentials" in {guide.name for guide in guides}
+    # The whole real tool surface too, not just ``secret``: a Vault pitch in
+    # any tool description would reach the classifier the same way.
+    tools = build_real_tools(".")
+    assert "secret" in {each.name for each in tools}
+    hooks = _hooks(_FakeIndex(skills=guides))  # type: ignore[arg-type]
+    hooks.tool_roster = session_factory._tool_roster_rows(tools)
+
+    roster = session_factory._build_classification_roster(hooks)
+
+    assert ("tool", "secret", "tool://secret") in [
+        (row.kind, row.name, row.resource_url) for row in roster
+    ]
+    assert ("guide", "credentials", "guide://credentials") in [
+        (row.kind, row.name, row.resource_url) for row in roster
+    ]
+    assert {row.name for row in roster if row.kind == "guide"} == {guide.name for guide in guides}
+    assert all("vault" not in row.description.lower() for row in roster)
+    # The roster lists only a subset of tools, so it cannot speak for the
+    # rest: check every description directly as well.
+    assert [each.name for each in tools if "vault" in each.description.lower()] == []
+
+    secret_row = next(row for row in roster if row.name == "secret")
+    classifier = _FakeClassifier(_Recommendation(resources=(secret_row,)))
+    hooks.classifier = classifier
+    block = await session_factory._select_knowledge_block(
+        hooks, "Keep this API key on my machine for later sessions", task_id="local-cred"
+    )
+
+    assert "- tool://secret" in block
+    assert "vault" not in block.lower()
+    request_text = "\n".join(
+        candidate.description for candidate in classifier.requests[0].candidates
+    )
+    assert "vault" not in request_text.lower()

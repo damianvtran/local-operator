@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "record_kind": "audit_evidence_validation",
+  "all_passed": true,
+  "checks": {
+    "scope_19_plus_8": true,
+    "four_scoped_namespaces": true,
+    "pair_workbook_complete": true,
+    "disposition_keys_within_scope": true,
+    "all_13_dispositions_fixed": true,
+    "no_findings": true,
+    "terminal_clean_with_followups": true,
+    "namespace_verdicts": true,
+    "credential_artifact_removed": true,
+    "credential_native_plural_and_safety": true,
+    "mechanical_zero_failures": true,
+    "fit_risk_explicit": true,
+    "no_unearned_maxcells_pass": true,
+    "all_namespace_hashes_fresh": true,
+    "hash_provenance_clean": true,
+    "english_context_unchanged": true,
+    "repository_log_green": true,
+    "report_covers_audit_and_fit": true,
+    "independence_recorded": true
+  }
+}

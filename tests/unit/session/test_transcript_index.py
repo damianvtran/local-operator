@@ -10,11 +10,13 @@ without touching the operator's live sessions.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import threading
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -816,8 +818,13 @@ def test_probe_reports_missing_ready_and_stale(tmp_path):
     assert ti.probe_index(tmp_path, SID).state == "missing"
     write_rows(tmp_path, [user("u1", 1.0), assistant("a1", 1.1)])
     assert ti.probe_index(tmp_path, SID).state == "stale"
+    # The stale answer carries the journal's size, which is what the view's
+    # budget wager reads (one stat, no second syscall).
+    assert ti.probe_index(tmp_path, SID).journal_bytes == journal_path(tmp_path).stat().st_size
     refreshed(tmp_path)
-    assert ti.probe_index(tmp_path, SID).state == "ready"
+    probe = ti.probe_index(tmp_path, SID)
+    assert probe.state == "ready"
+    assert probe.journal_bytes == journal_path(tmp_path).stat().st_size
     write_rows(tmp_path, [assistant("a2", 1.2)])
     assert ti.probe_index(tmp_path, SID).state == "stale"
 
@@ -863,6 +870,135 @@ async def test_checkpoints_view_builds_in_background_then_settles(tmp_path, monk
     assert [c["id"] for c in view["checkpoints"]] == ["u1", "a1"]
     assert view["checkpoints"][1]["outcome"] == "complete"
     assert view["checkpoints"][1]["naming"]["state"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_a_journal_too_large_for_the_budget_is_not_waited_on(tmp_path, monkeypatch):
+    """The first-paint budget is a wager the scan lands inside it — don't stake it.
+
+    A cold open of a 20k-entry conversation answered ``building`` 819.8 ms into
+    ``GET .../checkpoints`` (an UPPER BOUND: host at ~92% swap). In-process that
+    path is 204.0 ms nominal, 200 ms of which is this budget spent on a journal
+    that scans in 943.5 ms — so the wait could not have produced ``ready``, and
+    the caller paid for nothing. Pinned STRUCTURALLY like its neighbour: a spy
+    records every timeout ``checkpoints_view`` passes to ``asyncio.wait``, and a
+    journal over ``_FIRST_PAINT_SCAN_BYTES_PER_S * wait_s`` must pass NONE.
+    """
+    write_rows(
+        tmp_path,
+        [
+            start("s1", 1.0, "t1"),
+            user("u1", 1.1),
+            assistant("a1", 1.2, "x" * (2 << 20)),
+            marker("m1", 1.3, "t1"),
+        ],
+    )
+    assert journal_path(tmp_path).stat().st_size > ti._FIRST_PAINT_SCAN_BYTES_PER_S * 0.05
+    entered, release = threading.Event(), threading.Event()
+    real = ti.refresh_index
+
+    def slow(config_dir, session_id):
+        entered.set()
+        assert release.wait(30), "test never released the build"
+        return real(config_dir, session_id)
+
+    monkeypatch.setattr(ti, "refresh_index", slow)
+
+    timeouts: list[float | None] = []
+    real_wait = asyncio.wait
+
+    async def spying_wait(fs, *, timeout=None, **kwargs):
+        timeouts.append(timeout)
+        return await real_wait(fs, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(asyncio, "wait", spying_wait)
+    try:
+        view = await ti.checkpoints_view(tmp_path, SID, wait_s=0.05)
+        assert view["index"]["state"] == "building"
+        assert timeouts == [], "a journal too large for the budget was still waited on"
+        assert await asyncio.to_thread(entered.wait, 30)
+    finally:
+        release.set()
+
+    deadline = asyncio.get_running_loop().time() + 30.0
+    while True:
+        view = await ti.checkpoints_view(tmp_path, SID, wait_s=0.05)
+        if view["index"]["state"] == "ready":
+            break
+        assert asyncio.get_running_loop().time() < deadline, view
+        await asyncio.sleep(0.02)
+    assert [c["id"] for c in view["checkpoints"]] == ["u1", "a1"]
+
+
+@pytest.mark.asyncio
+async def test_a_stale_cache_with_one_appended_row_still_waits(tmp_path, monkeypatch):
+    """A usable previous index must still get the budget (review MAJOR-1 / QA Q1).
+
+    A conversation that gained a row since its cache was written is the common
+    open, not the rare one, and `refresh_index` resumes from the recorded offset
+    (measured 2.1-2.4 ms for a one-row append) so the wait returns at the
+    build's own time rather than at the budget. Gating that on TOTAL bytes
+    refused a wait that always pays and answered `building` where the old answer
+    was `ready` — and the consumer does not re-read a `building`: the rail's
+    poll is armed only while naming ids are pending (`use-checkpoints.ts`), so
+    it kept painting the previous tick set.
+
+    The fixture is deliberately larger than the COLD gate, so this test fails
+    if the gate is keyed on total bytes again.
+    """
+    rows: list[dict[str, Any]] = [start("s1", 1.0, "t1")]
+    for index in range(1, 76):
+        if index % 2 == 0:
+            rows.append(user(f"u{index}", 1.0 + index / 100))
+        else:
+            rows.append(assistant(f"a{index}", 1.0 + index / 100, "x" * 150_000))
+    rows.append(marker("m1", 2.0, "t1"))
+    write_rows(tmp_path, rows)
+    refreshed(tmp_path)
+    assert journal_path(tmp_path).stat().st_size > ti._FIRST_PAINT_SCAN_BYTES_PER_S * (
+        ti._FIRST_PAINT_WAIT_S
+    ), "fixture must exceed the cold gate or this test proves nothing"
+
+    # One row lands after the cache was written — the state every open after a
+    # turn is in.
+    write_rows(tmp_path, [user("late", 3.0, "one more turn")])
+
+    timeouts: list[float | None] = []
+    real_wait = asyncio.wait
+
+    async def spying_wait(fs, *, timeout=None, **kwargs):
+        timeouts.append(timeout)
+        return await real_wait(fs, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(asyncio, "wait", spying_wait)
+    view = await ti.checkpoints_view(tmp_path, SID)  # the route's own default
+    assert timeouts == [ti._FIRST_PAINT_WAIT_S], "a usable previous index lost the wait"
+    assert view["index"]["state"] == "ready"
+    # Freshness, not just state: the appended row is in the manifest this ask
+    # answered with, checked against a full scan of the same journal.
+    expected = [checkpoint.id for checkpoint in refreshed(tmp_path).checkpoints]
+    assert [entry["id"] for entry in view["checkpoints"]] == expected
+    assert "late" in expected
+
+
+@pytest.mark.asyncio
+async def test_a_small_journal_still_pays_the_budget(tmp_path, monkeypatch):
+    """The other half of the rule: a scan that CAN land inside the budget still
+    gets the chance to, so a small cold conversation keeps answering ``ready``
+    in one round trip rather than making the rail poll for its own ticks."""
+    write_rows(tmp_path, [user("u1", 1.0), assistant("a1", 1.1)])
+    assert journal_path(tmp_path).stat().st_size <= ti._FIRST_PAINT_SCAN_BYTES_PER_S * 5
+    timeouts: list[float | None] = []
+    real_wait = asyncio.wait
+
+    async def spying_wait(fs, *, timeout=None, **kwargs):
+        timeouts.append(timeout)
+        return await real_wait(fs, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(asyncio, "wait", spying_wait)
+    view = await ti.checkpoints_view(tmp_path, SID, wait_s=5)
+    assert view["index"]["state"] == "ready"
+    assert timeouts == [5]
 
 
 @pytest.mark.asyncio
@@ -2026,3 +2162,676 @@ def test_journal_order_uses_complete_scanned_lines_not_visible_subset(tmp_path: 
     assert index is not None
     assert index.journal_rows == {"line-u": 0, "line-a": 2}
     assert index.scan.rows == 3
+
+
+# ---------------------------------------------------------------------------
+# The paint hold (CORE-PROFILE L2): a cold unpayable scan waits for the first
+# frame; a payable one never does.
+# ---------------------------------------------------------------------------
+
+
+def _big_journal(root: Path) -> None:
+    """A journal over the COLD gate at the manifest's own wait (~4.8 MB)."""
+    write_rows(
+        root,
+        [
+            start("s1", 1.0, "t1"),
+            user("u1", 1.1),
+            assistant("a1", 1.2, "x" * (6 << 20)),
+            marker("m1", 1.3, "t1"),
+        ],
+    )
+    assert not ti.scan_payable_in_budget(
+        journal_path(root).stat().st_size, has_previous=False, wait_s=ti._FIRST_PAINT_WAIT_S
+    ), "fixture must exceed the cold gate or these tests prove nothing"
+
+
+def _count_scans(monkeypatch) -> list[str]:
+    starts: list[str] = []
+    real = ti.refresh_index
+
+    def counting(config_dir, session_id):
+        starts.append(session_id)
+        return real(config_dir, session_id)
+
+    monkeypatch.setattr(ti, "refresh_index", counting)
+    return starts
+
+
+def test_the_payable_rule_is_the_manifest_rule() -> None:
+    """One predicate: a previous index is always payable; otherwise bytes vs rate."""
+    rate = ti._FIRST_PAINT_SCAN_BYTES_PER_S
+    assert ti.scan_payable_in_budget(10**12, has_previous=True, wait_s=0.2)
+    assert ti.scan_payable_in_budget(int(rate * 0.2), has_previous=False, wait_s=0.2)
+    assert not ti.scan_payable_in_budget(int(rate * 0.2) + 1, has_previous=False, wait_s=0.2)
+    assert not ti.scan_payable_in_budget(None, has_previous=False, wait_s=0.2)
+    # R2: with a previous index the RE-READ is planned against the same rate;
+    # an unknown re-read (a pre-head cache) keeps the old "payable".
+    budget = int(rate * 0.2)
+    assert ti.scan_payable_in_budget(10**12, has_previous=True, rederive_bytes=budget, wait_s=0.2)
+    assert not ti.scan_payable_in_budget(
+        10**3, has_previous=True, rederive_bytes=budget + 1, wait_s=0.2
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_held_cold_unpayable_scan_waits_for_the_release(tmp_path, monkeypatch):
+    """The scan does not start while the hold is live, and starts on release."""
+    _big_journal(tmp_path)
+    scans = _count_scans(monkeypatch)
+    release = ti.hold_paint(tmp_path, SID)
+    task, started = ti.start_refresh(tmp_path, SID)
+    assert started and ti.refresh_deferred(tmp_path, SID)
+    await asyncio.sleep(0.2)
+    assert scans == [] and not task.done(), "the scan ran under a live paint hold"
+    release()
+    built = await asyncio.wait_for(task, 30)
+    assert built is not None and len(scans) == 1
+    assert not ti.refresh_deferred(tmp_path, SID)
+
+
+@pytest.mark.asyncio
+async def test_a_small_journal_is_never_deferred(tmp_path):
+    """Payable scans run under a hold exactly as without one (ready on first frame)."""
+    write_rows(tmp_path, [user("u1", 1.0), assistant("a1", 1.1)])
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        task, _ = ti.start_refresh(tmp_path, SID)
+        assert not ti.refresh_deferred(tmp_path, SID)
+        assert await asyncio.wait_for(task, 30) is not None
+        view = await ti.checkpoints_view(tmp_path, SID)
+        assert view["index"]["state"] == "ready"
+    finally:
+        release()
+
+
+def _big_closed_prefix(root: Path) -> None:
+    """A journal over the cold gate whose resume window sits AFTER the big row.
+
+    Two small closed turns follow the big one because the window rewinds one
+    turn behind the last run start (``_Derivation.window``): with only one turn
+    after the big row the window would still land above it.
+    """
+    write_rows(
+        root,
+        [
+            start("s1", 1.0, "t1"),
+            user("u1", 1.1),
+            assistant("a1", 1.2, "x" * (6 << 20)),
+            marker("m1", 1.3, "t1"),
+            start("s2", 2.0, "t2"),
+            user("u2", 2.1),
+            assistant("a2", 2.2),
+            marker("m2", 2.3, "t2"),
+            start("s3", 3.0, "t3"),
+            user("u3", 3.1),
+            assistant("a3", 3.2),
+            marker("m3", 3.3, "t3"),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_near_window_makes_the_held_refresh_run_now(tmp_path):
+    """An incremental refresh whose RE-READ is small is payable, so it is not
+    deferred even though the journal itself is over the cold gate."""
+    _big_closed_prefix(tmp_path)
+    previous = refreshed(tmp_path)  # writes the cache file
+    write_rows(tmp_path, [user("late", 4.0)])
+    size = journal_path(tmp_path).stat().st_size
+    assert not ti.scan_payable_in_budget(size, has_previous=False, wait_s=ti._FIRST_PAINT_WAIT_S)
+    assert size - previous.scan.window_offset < 4096, "the fixture's window must be near"
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        task, _ = ti.start_refresh(tmp_path, SID)
+        assert not ti.refresh_deferred(tmp_path, SID)
+        assert await asyncio.wait_for(task, 30) is not None
+    finally:
+        release()
+
+
+@pytest.mark.asyncio
+async def test_a_far_window_defers_the_held_refresh_like_a_cold_scan(tmp_path):
+    """R2 (conversation-first-paint): "a previous index exists" is not "cheap".
+
+    The incremental path re-derives from ``scan.window_offset``, which sits at
+    the start of the run holding the last user turn, so after a one-row append
+    to a long agent run it re-reads nearly the whole journal (measured: 37.9 MB
+    and 304-637 ms CPU on the 51.7 MB fixture, more than a cold scan). The hold
+    must judge that by the bytes the refresh will actually read. Fails on the
+    pre-R2 rule (``has_previous`` -> always payable -> not deferred). The index
+    it lands is the one a full rescan builds.
+    """
+    _big_journal(tmp_path)
+    previous = refreshed(tmp_path)
+    write_rows(tmp_path, [user("late", 3.0)])
+    assert previous.scan.window_offset == 0, "the fixture's window must sit above the big row"
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        task, started = ti.start_refresh(tmp_path, SID)
+        assert started and ti.refresh_deferred(tmp_path, SID)
+        await asyncio.sleep(0.2)
+        assert not task.done(), "the far-window refresh ran under a live paint hold"
+    finally:
+        release()
+    built = await asyncio.wait_for(task, 30)
+    assert built is not None and not ti.refresh_deferred(tmp_path, SID)
+    os.remove(ti.index_path(tmp_path, SID))
+    assert _derived(built) == _derived(refreshed(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_a_far_window_refresh_yields_to_another_open(tmp_path):
+    """The same rule gates #3026's pause: a far-window incremental refresh is a
+    multi-hundred-ms scan and must step aside for another conversation's first
+    frame. Fails on the pre-R2 rule (payable -> never pauses -> done at once)."""
+    _big_journal(tmp_path)
+    refreshed(tmp_path)
+    write_rows(tmp_path, [user("late", 3.0)])
+    release = ti.hold_paint(tmp_path, OTHER)
+    try:
+        task, _ = ti.start_refresh(tmp_path, SID)
+        await asyncio.sleep(0.3)
+        assert not task.done(), "the far-window refresh kept the GIL during another open"
+    finally:
+        release()
+    assert await asyncio.wait_for(task, 30) is not None
+
+
+def test_the_cache_head_states_the_resume_point_without_a_full_parse(tmp_path):
+    """The hold decides on the loop, so it must not parse the multi-MB cache:
+    the resume point is read from the document's HEAD, and it is the same
+    figure the full parse gives."""
+    _big_closed_prefix(tmp_path)
+    index = refreshed(tmp_path)
+    head = ti._read_resume_head(tmp_path, SID)
+    assert head is not None
+    sig, scan, generation = head
+    assert scan == index.scan and generation == index.journal_generation
+    assert (sig["size"], sig["inode"]) == (index.sig["size"], index.sig["inode"])
+    raw = ti.index_path(tmp_path, SID).read_bytes()
+    assert raw.index(b'"scan":') < ti._RESUME_HEAD_BYTES, "scan must ride in the head"
+
+
+@pytest.mark.asyncio
+async def test_a_cache_written_before_the_head_layout_keeps_the_old_rule(tmp_path):
+    """A cache whose ``scan`` sits at the END (every cache written before R2)
+    cannot state its resume point cheaply; it is treated as before -- payable,
+    never deferred -- and the next write moves it to the head."""
+    _big_journal(tmp_path)
+    refreshed(tmp_path)
+    path = ti.index_path(tmp_path, SID)
+    doc = json.loads(path.read_text())
+    scan = doc.pop("scan")
+    doc["scan"] = scan  # re-inserted last: the pre-R2 key order
+    path.write_text(json.dumps(doc, separators=(",", ":")))
+    assert ti._read_resume_head(tmp_path, SID) is None
+    write_rows(tmp_path, [user("late", 3.0)])
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        task, _ = ti.start_refresh(tmp_path, SID)
+        assert not ti.refresh_deferred(tmp_path, SID)
+        assert await asyncio.wait_for(task, 30) is not None
+    finally:
+        release()
+    assert ti._read_resume_head(tmp_path, SID) is not None
+
+
+@pytest.mark.asyncio
+async def test_holds_are_refcounted_and_release_is_idempotent(tmp_path, monkeypatch):
+    """Two opens of one session: the scan waits for the LAST release, and a
+    release called twice (snapshot written, then teardown) counts once."""
+    _big_journal(tmp_path)
+    scans = _count_scans(monkeypatch)
+    first, second = ti.hold_paint(tmp_path, SID), ti.hold_paint(tmp_path, SID)
+    task, _ = ti.start_refresh(tmp_path, SID)
+    first()
+    first()  # idempotent: must not release the second open's hold
+    await asyncio.sleep(0.2)
+    assert scans == [] and ti.refresh_deferred(tmp_path, SID)
+    second()
+    assert await asyncio.wait_for(task, 30) is not None
+    assert len(scans) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_leaked_hold_is_bounded_by_the_ceiling(tmp_path, monkeypatch):
+    """A release nobody called costs one ceiling, never a scan that never runs."""
+    _big_journal(tmp_path)
+    monkeypatch.setattr(ti, "_PAINT_HOLD_CEILING_S", 0.1)
+    ti.hold_paint(tmp_path, SID)  # never released
+    task, _ = ti.start_refresh(tmp_path, SID)
+    assert await asyncio.wait_for(task, 30) is not None
+    assert not ti.refresh_deferred(tmp_path, SID)
+
+
+@pytest.mark.asyncio
+async def test_the_manifest_never_waits_on_a_deferred_build(tmp_path, monkeypatch):
+    """No deadlock: a /checkpoints racing a held open answers ``building`` at
+    once (it is unpayable, so main answered that too) and ``ready`` after."""
+    _big_journal(tmp_path)
+    release = ti.hold_paint(tmp_path, SID)
+    view = await asyncio.wait_for(ti.checkpoints_view(tmp_path, SID), 5)
+    assert view["index"]["state"] == "building"
+    release()
+    deadline = asyncio.get_running_loop().time() + 30
+    while view["index"]["state"] != "ready":
+        assert asyncio.get_running_loop().time() < deadline, view
+        await asyncio.sleep(0.02)
+        view = await ti.checkpoints_view(tmp_path, SID)
+    assert [c["id"] for c in view["checkpoints"]] == ["u1", "a1"]
+
+
+@pytest.mark.asyncio
+async def test_no_hold_means_no_deferral(tmp_path):
+    """The TUI, mobile relay and prewarm take no hold: today's behaviour exactly."""
+    _big_journal(tmp_path)
+    task, _ = ti.start_refresh(tmp_path, SID)
+    assert not ti.refresh_deferred(tmp_path, SID)
+    assert await asyncio.wait_for(task, 30) is not None
+
+
+# ---------------------------------------------------------------------------
+# Yielding to other opens (conversation-first-paint residual 2): a background
+# scan of one session steps aside while ANOTHER session's first frame is held.
+# Every test here fails (never hangs) under its named mutant; holds are released
+# in ``finally`` so a regression ends the test instead of wedging a worker.
+# ---------------------------------------------------------------------------
+
+OTHER = "aabbccddee02"
+
+
+def _derived(index: ti.TranscriptIndex) -> tuple[Any, ...]:
+    """Everything a refresh derives, minus the per-scan generation uuid."""
+    return (
+        index.checkpoints,
+        index.messages,
+        index.runs,
+        index.journal_rows,
+        index.journal_ranges,
+        index.source_projection_facts,
+        index.coverage,
+        index.scan,
+    )
+
+
+def _three_turns(root: Path) -> None:
+    write_rows(
+        root,
+        [
+            user("u1", 1.0),
+            assistant("a1", 1.1),
+            user("u2", 2.0),
+            assistant("a2", 2.1),
+            user("u3", 3.0),
+            assistant("a3", 3.1),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unpayable_background_refresh_pauses_while_another_open_is_held(tmp_path):
+    """Mutant: pause disabled -> the task finishes under the other hold."""
+    _big_journal(tmp_path)
+    release = ti.hold_paint(tmp_path, OTHER)
+    try:
+        task, started = ti.start_refresh(tmp_path, SID)
+        assert started and not ti.refresh_deferred(tmp_path, SID), "another's hold never defers"
+        await asyncio.sleep(0.3)
+        assert not task.done(), "the scan kept the GIL while another first frame was held"
+    finally:
+        release()
+    built = await asyncio.wait_for(task, 30)
+    assert built is not None
+    os.remove(ti.index_path(tmp_path, SID))
+    rebuilt = ti.refresh_index(tmp_path, SID)
+    assert rebuilt is not None
+    assert _derived(built) == _derived(rebuilt), "yielding changed what the scan derived"
+
+
+# Its OWN open pauses an unpayable scan too (own-open-yield, 2026-10-28). #3026
+# exempted the scan's own session ("an open that waits on its own refresh would
+# otherwise wait on itself"), but the only own-refresh waiter is
+# ``checkpoints_view``'s 0.2 s wait, and that wait is only ever spent on a
+# PAYABLE scan -- which ``may_yield`` already never pauses. The exemption bought
+# nothing and cost the warm re-open of a conversation still being indexed its
+# GIL share (desktop legacy warm-after-miss 12 ms on v0.90.19 -> ~500 ms). The
+# two tests below pin both halves: unpayable pauses for its own open, payable
+# never does.
+
+
+@pytest.mark.asyncio
+async def test_the_pause_honours_its_own_hold_when_unpayable(tmp_path, monkeypatch):
+    """Mutant: the own-session exemption (#3026) -> the pause returns at once."""
+    _big_journal(tmp_path)
+    monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 0.3)
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        pause = ti._yield_to_other_opens(ti._key(tmp_path, SID), tmp_path, SID)
+        started = time.monotonic()
+        await asyncio.to_thread(pause)
+        assert time.monotonic() - started >= 0.25, "the scan kept the GIL during its own open"
+    finally:
+        release()
+
+
+@pytest.mark.asyncio
+async def test_a_payable_pause_ignores_its_own_hold(tmp_path, monkeypatch):
+    """Mutant: ``may_yield`` dropped -> the payable pause sleeps out the 1 s budget,
+    which is the 0.2 s ``checkpoints_view`` wait stalling on its own open."""
+    _three_turns(tmp_path)
+    monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 1.0)
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        pause = ti._yield_to_other_opens(ti._key(tmp_path, SID), tmp_path, SID)
+        started = time.monotonic()
+        await asyncio.to_thread(pause)
+        assert time.monotonic() - started < 0.5
+    finally:
+        release()
+
+
+@pytest.mark.asyncio
+async def test_a_running_unpayable_refresh_pauses_while_its_own_open_is_held(tmp_path):
+    """The warm re-open: the scan is already running (no deferral), then the same
+    conversation is opened again. Mutant: own-session exemption -> done under the hold."""
+    _big_journal(tmp_path)
+    task, started = ti.start_refresh(tmp_path, SID)
+    # Same loop tick: the task has not run yet, so the hold is live before the
+    # worker's first row, and taken AFTER start_refresh, so it never defers.
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        assert started and not ti.refresh_deferred(tmp_path, SID)
+        await asyncio.sleep(0.3)
+        assert not task.done(), "the scan kept the GIL while its own warm open was held"
+    finally:
+        release()
+    assert await asyncio.wait_for(task, 30) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_running_unpayable_refresh_reads_as_paused_for_its_own_open(tmp_path):
+    """The open frame's question once the scan pauses for its own open: awaiting
+    it from inside that open can only idle out the snapshot budget. Mutant:
+    ``refresh_paused_for_paint`` answers only ``refresh_deferred`` -> False here."""
+    _big_journal(tmp_path)
+    task, _ = ti.start_refresh(tmp_path, SID)
+    assert not ti.refresh_paused_for_paint(tmp_path, SID), "no hold: nothing to pause for"
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        assert not ti.refresh_deferred(tmp_path, SID), "already running: not deferred"
+        assert ti.refresh_paused_for_paint(tmp_path, SID)
+    finally:
+        release()
+    assert not ti.refresh_paused_for_paint(tmp_path, SID)
+    assert await asyncio.wait_for(task, 30) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_running_payable_refresh_is_never_paused_for_paint(tmp_path):
+    """A payable scan never pauses (``may_yield``), so waiting on it may pay."""
+    _three_turns(tmp_path)
+    task, _ = ti.start_refresh(tmp_path, SID)
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        assert not ti.refresh_paused_for_paint(tmp_path, SID)
+    finally:
+        release()
+    assert await asyncio.wait_for(task, 30) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_cold_payable_view_is_ready_while_its_own_open_is_held(tmp_path):
+    """No self-wait: the view's 0.2 s wait on a payable refresh, under its own
+    open's hold, still answers ``ready``. Mutant: ``may_yield`` dropped -> ``building``."""
+    _three_turns(tmp_path)
+    release = ti.hold_paint(tmp_path, SID)
+    try:
+        view = await asyncio.wait_for(ti.checkpoints_view(tmp_path, SID), 5)
+    finally:
+        release()
+    assert view["index"]["state"] == "ready"
+    assert [c["id"] for c in view["checkpoints"]] == ["u1", "a1", "u2", "a2", "u3", "a3"]
+
+
+@pytest.mark.asyncio
+async def test_a_synchronous_refresh_never_pauses(tmp_path, monkeypatch):
+    """The TUI / peer-cycle callers run ``refresh_index`` directly. Mutant: the
+    default ``_YIELD_TO`` pauses -> the refresh sleeps out the 1 s budget."""
+    _big_journal(tmp_path)
+    monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 1.0)
+    release = ti.hold_paint(tmp_path, OTHER)
+    try:
+        started = time.monotonic()
+        assert await asyncio.to_thread(ti.refresh_index, tmp_path, SID) is not None
+        assert time.monotonic() - started < 0.8
+    finally:
+        release()
+
+
+@pytest.mark.asyncio
+async def test_a_leaked_other_hold_costs_at_most_the_yield_budget(tmp_path, monkeypatch):
+    """Mutant: no budget -> the wait times out here (and ``finally`` frees the worker)."""
+    _big_journal(tmp_path)
+    monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 0.1)
+    release = ti.hold_paint(tmp_path, OTHER)  # "leaked": released only after the assert
+    try:
+        task, _ = ti.start_refresh(tmp_path, SID)
+        assert await asyncio.wait_for(task, 5) is not None
+    finally:
+        release()
+
+
+@pytest.mark.asyncio
+async def test_a_stale_other_hold_is_not_yielded_to(tmp_path, monkeypatch):
+    """Review round 1 MINOR-2. Mutant: no staleness check -> the refresh sleeps
+    out the 30 s budget and the 3 s wait fails."""
+    _big_journal(tmp_path)
+    monkeypatch.setattr(ti, "_YIELD_BUDGET_S", 30.0)
+    release = ti.hold_paint(tmp_path, OTHER)
+    ti._PAINT_HOLD_SINCE[ti._key(tmp_path, OTHER)] -= ti._YIELD_HOLD_STALE_S + 1
+    try:
+        task, _ = ti.start_refresh(tmp_path, SID)
+        assert await asyncio.wait_for(task, 3) is not None
+    finally:
+        release()
+
+
+@pytest.mark.asyncio
+async def test_a_name_saved_during_a_pause_survives_the_refresh_write(tmp_path):
+    """Review round 1 MAJOR-1: the pre-write pause must sit ABOVE the on-disk
+    naming re-read, so the merge and the write stay adjacent. The other open's
+    hold is taken the moment the scan returns, so the refresh pauses at its
+    pre-write point; a name is bought during that pause. On 85bba77d60f the
+    re-read ran before the pause and the write dropped the name."""
+    _big_journal(tmp_path)
+    loop = asyncio.get_running_loop()
+    releases: list[Callable[[], None]] = []
+    scanned = threading.Event()
+    real_scan = ti._scan_full
+
+    def scan_then_hold(path, raw):
+        index = real_scan(path, raw)
+
+        def take() -> None:
+            releases.append(ti.hold_paint(tmp_path, OTHER))
+            scanned.set()
+
+        loop.call_soon_threadsafe(take)
+        assert scanned.wait(5)
+        return index
+
+    ti._scan_full = scan_then_hold
+    try:
+        task, _ = ti.start_refresh(tmp_path, SID)
+        while not scanned.is_set():
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.1)
+        assert not task.done(), "the refresh did not pause before its write"
+        ti.patch_naming(tmp_path, SID, {"u1": {"name": "Bought mid-pause", "summary": "S."}})
+    finally:
+        ti._scan_full = real_scan
+        for release in releases:
+            release()
+    assert await asyncio.wait_for(task, 30) is not None
+    on_disk = ti.read_index(tmp_path, SID)
+    assert on_disk is not None
+    assert on_disk.naming["items"]["u1"]["name"] == "Bought mid-pause"
+
+
+async def _view_while_another_open_is_held(root: Path, hold_s: float) -> dict[str, Any]:
+    release = ti.hold_paint(root, OTHER)
+    asyncio.get_running_loop().call_later(hold_s, release)
+    try:
+        return await ti.checkpoints_view(root, SID)
+    finally:
+        await asyncio.sleep(hold_s)
+        release()
+
+
+@pytest.mark.asyncio
+async def test_a_cold_payable_view_is_ready_while_another_open_is_held(tmp_path):
+    """Review round 1 MAJOR-2: the view waits 0.2 s for a refresh it starts; a
+    payable one must never pause, or the answer is ``building`` -- which the rail
+    does not re-read. Fails on 85bba77d60f (``building``)."""
+    _three_turns(tmp_path)
+    view = await _view_while_another_open_is_held(tmp_path, 0.3)
+    assert view["index"]["state"] == "ready"
+    assert [c["id"] for c in view["checkpoints"]] == ["u1", "a1", "u2", "a2", "u3", "a3"]
+
+
+@pytest.mark.asyncio
+async def test_an_incremental_view_is_ready_and_complete_while_another_open_is_held(tmp_path):
+    """The reviewer's stale case: a previous index plus appended rows. Fails on
+    85bba77d60f (``building`` with the six pre-append checkpoints)."""
+    _three_turns(tmp_path)
+    refreshed(tmp_path)
+    write_rows(tmp_path, [user("u4", 4.0), assistant("a4", 4.1)])
+    view = await _view_while_another_open_is_held(tmp_path, 0.3)
+    assert view["index"]["state"] == "ready"
+    assert [c["id"] for c in view["checkpoints"]][-2:] == ["u4", "a4"]
+    assert len(view["checkpoints"]) == 8
+
+
+# ---------------------------------------------------------------------------
+# Incremental == full for EVERY run field, outcome included
+# ---------------------------------------------------------------------------
+
+
+def _settled_prefix() -> list[dict[str, Any]]:
+    """Three settled runs (error, error, complete) and a fourth still working.
+
+    The shape the real fixture showed: settled runs sit ABOVE the resume window
+    (which backs up only to the start of the run holding the last user row), so
+    an append re-derives only the fourth run and must carry the first three
+    unchanged — outcome and all.
+    """
+    return [
+        start("s1", 1.0, "t1"),
+        user("u1", 1.1, "one"),
+        assistant("a1", 1.2, "working", tool_calls=True),
+        tool_row("x1", 1.3, is_error=True),
+        marker("m1", 1.4, "t1", kind="error"),
+        start("s2", 2.0, "t2"),
+        user("u2", 2.1, "two"),
+        assistant("a2", 2.2, "failed again"),
+        marker("m2", 2.3, "t2", kind="error"),
+        start("s3", 3.0, "t3"),
+        user("u3", 3.1, "three"),
+        assistant("a3", 3.2, "done"),
+        marker("m3", 3.3, "t3"),
+        start("s4", 4.0, "t4"),
+        user("u4", 4.1, "four"),
+        assistant("a4", 4.2, "working", tool_calls=True),
+        tool_row("x4", 4.3),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("label", "appended"),
+    [
+        # (a) one row that neither opens nor closes a run
+        ("one_row", [tool_row("x5", 4.4)]),
+        # (b) the open run's own marker lands: the append CLOSES it
+        ("closes_run", [assistant("a5", 4.4, "finished"), marker("m4", 4.5, "t4")]),
+        # (c) the open run closes and a NEW one opens and starts working
+        (
+            "starts_run",
+            [
+                marker("m4", 4.5, "t4", kind="error"),
+                start("s5", 5.0, "t5"),
+                user("u5", 5.1, "five"),
+                assistant("a6", 5.2, "on it", tool_calls=True),
+            ],
+        ),
+    ],
+)
+def test_incremental_append_equals_a_full_scan_for_every_run_field(
+    tmp_path, monkeypatch, label, appended
+):
+    """THE INCREMENTAL PATH MUST NOT REWRITE A RUN IT DID NOT RE-READ.
+
+    Regression (pre-fix, every append): ``_emit_runs`` recomputed ``outcome`` for
+    the carried-over prior runs from the markers of the re-derived region alone,
+    so runs settled above the window came back ``outcome=None`` — the rail's and
+    the mobile run bar's error/complete marks vanished after any new row until a
+    full rescan. The whole ``RunRecord`` (every field) and every checkpoint must
+    equal what a full scan of the same bytes derives.
+    """
+    write_rows(tmp_path, _settled_prefix())
+    calls = _scanners(monkeypatch)
+    initial = refreshed(tmp_path)
+    assert [run.outcome for run in initial.runs] == ["error", "error", "complete", "open"]
+
+    write_rows(tmp_path, appended)
+    incremental = refreshed(tmp_path)
+    assert calls == {"full": 1, "incremental": 1}, label
+    full = ti._scan_full(journal_path(tmp_path), None)
+
+    assert [dataclasses.asdict(r) for r in incremental.runs] == [
+        dataclasses.asdict(r) for r in full.runs
+    ]
+    assert [r.outcome for r in incremental.runs][:3] == ["error", "error", "complete"]
+    assert incremental.checkpoints == full.checkpoints
+    assert incremental.messages == full.messages
+
+
+def test_incremental_scan_records_the_journals_total_row_count(tmp_path: Path, tmp_path_factory):
+    """``scan.rows`` is the JOURNAL's row count on both scan paths (O1, #3034 QA).
+
+    The incremental path used to record only the rows its suffix re-read, so a
+    one-row append to a 10,377-row journal answered 6,973; the open frame's
+    reachability check reads this field as the total.
+    """
+    write_rows(
+        tmp_path,
+        [user("t-u1", 1.0), assistant("t-a1", 1.1), user("t-u2", 2.0), assistant("t-a2", 2.1)],
+    )
+    before = refreshed(tmp_path)
+    assert before.scan.window_rows > 0  # the append below re-reads a SUFFIX only
+    write_rows(tmp_path, [assistant("t-a3", 2.2)])
+    grown = refreshed(tmp_path)
+    other = tmp_path_factory.mktemp("reference")
+    write_rows(
+        other, [json.loads(line) for line in journal_path(tmp_path).read_text().splitlines()]
+    )
+    reference = refreshed(other)
+    assert grown.scan.rows == reference.scan.rows == 5
+    assert grown.scan.rows == len(grown.source_projection_facts)
+    # And the persisted document reloads with the same total.
+    cached = ti.read_index(tmp_path, SID)
+    assert cached is not None and cached.scan.rows == 5
+
+
+def test_a_cached_suffix_only_row_count_reads_back_as_the_total(tmp_path: Path):
+    """Caches written before the fix carry a suffix-only ``scan.rows``; reading
+    one restates the journal's total instead of serving the understated count."""
+    write_rows(tmp_path, [user("c-u1", 1.0), assistant("c-a1", 1.1), user("c-u2", 2.0)])
+    refreshed(tmp_path)
+    path = ti.index_path(tmp_path, SID)
+    raw = json.loads(path.read_text())
+    raw["scan"]["rows"] = 1  # the shape an incremental refresh used to write
+    path.write_text(json.dumps(raw))
+    cached = ti.read_index(tmp_path, SID)
+    assert cached is not None
+    assert cached.scan.rows == 3

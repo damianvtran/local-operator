@@ -1,40 +1,62 @@
-"""Dismiss a lapsed ask with NO runtime — the cold door (design §2.2, §14).
+"""Dismiss an ask with NO runtime — the cold door (design §2.2, §14, §15).
 
 WHY THIS MODULE EXISTS (fork A, 2026-10-16). Every other ask op needs a runtime:
 an answer is READ by the model, so a session with no runtime must be engaged to
 receive one — that is the whole reason ``_ASK_ANSWER_OPS`` engages. A dismissal
-has no reader. It is one append plus a derived-index rewrite, decided entirely by
-the fold, and the phone's own promise has always been the plain one: "dismiss —
-send no reply". Yet the only door was the engage, so a stopped conversation was
-BOOTED, and the boot reconcile delivered the deadline notice the dismissal had not
-cancelled yet, which started a paid turn (measured end to end; the architect's E1).
+has no reader AT THE MOMENT it is made. It is one append plus a derived-index
+rewrite, decided entirely by the fold, and the phone's own promise has always been
+the plain one: "dismiss — send no reply". Yet the only door was the engage, so a
+stopped conversation was BOOTED, and the boot reconcile delivered a row the
+dismissal had not cancelled yet, which started a paid turn (measured end to end;
+the architect's E1).
+
+WHAT IT ACCEPTS (D6, amended by SA-D4, design §15): a TIMED-OUT ask, and an
+OPEN one. The cold session is "no agent work is running", so an open ask may be
+dismissed there; the LIVE doors accept one in every live state too (mid-turn the
+response row rides the steering queue, idle it is held with no turn), which is
+why this module's rule is the fold's alone and not a runtime fact. Nothing HERE
+starts, wakes or injects; the agent hears at the next boot of a runtime. THAT
+BOOT COSTS A TURN, stated plainly: any engage (including a warm-up that only
+opens the conversation) reconciles and delivers ``ask-response-<id>`` into an
+idle runtime with no pending abort, which runs ONE paid turn — the same cost
+§14 already accepted for a timed-out ask's notice. Only a STOPPED or IDLE live
+runtime holds the row without a turn (D2, SA-D4).
+
+THE OWNER-CHECK -> APPEND -> WAKE-CANCEL WINDOW now applies to open asks too: a
+runtime that boots in that gap can republish the wake list with
+``ask-timeout-<id>`` still in it. Harmless: the fold ignores that fire for a
+dismissed ask (``notice_owed`` needs a dismissal at/after the deadline, and the
+runtime's reconcile delivers the response row instead), so at worst a stale row
+fires once and delivers nothing.
 
 THREE PROPERTIES MAKE WRITING FROM HERE SAFE, and each one is a check below:
 
 * **A live owner is refused, never written behind.** A runtime republishes its
   in-memory wake list over an outside write (``wakes/arm.py`` :41-49) and tracks
   the rows it has handed out internally (``AskQueue._handed``), so an outside
-  append under a running session can be lost, or can deliver a notice without the
-  turn the notice is for. The caller falls back to the dial on
-  ``ask_owner_present`` — and ONLY on that, because every other refusal is an
-  answer rather than a reason to boot something.
+  append under a running session can be lost, or can deliver a row without the
+  turn the row is for. The caller falls back to the dial on ``ask_owner_present``
+  — and ONLY on that, because every other refusal is an answer rather than a
+  reason to boot something. (The live door applies the queue's own fold rule in
+  whatever state the owner is in: SA-D4 retired D6's stopped-session gate.)
 * **The fold decides, in the queue's own words.** The refusal sentence comes from
   :func:`asks.render.dismiss_refusal`, the same function ``AskQueue.dismiss``
   calls, so a surface cannot tell which door answered it by the wording.
-* **The deadline wake row goes with it.** ``ask-timeout-<id>`` is what makes a
-  deadline survive a runtime that does not exist: the supervisor engages a runtime
-  for it. Removing it is the reason a dismissal boots nothing at all — and it is
-  safe for exactly ONE reason, which is the condition this module is allowed to
-  exist under:
+* **The deadline wake row goes with it, on the grounds that fit the timing.**
+  ``ask-timeout-<id>`` is what makes a deadline survive a runtime that does not
+  exist: the supervisor engages a runtime for it. Removing it is the reason a
+  dismissal boots nothing at all, and it is safe for ONE of two reasons:
 
-  **Only a timed-out ask can be dismissed, so its deadline has already passed and
-  the wake row has nothing left to deliver except the boot itself.** The notice
-  the row would have delivered is not lost: the fold keeps it owed
-  (``store.fold``'s ``notice_owed``) and the next real reconcile delivers it in
-  its dismissed wording. If a dismissal is ever allowed BEFORE the deadline,
-  removing the row becomes wrong — the fire would be the only thing that delivers
-  a notice for a live ask — and this module must change in the same edit as that
-  rule.
+  - **Timed-out ask:** the deadline has passed, so the row has nothing left to
+    deliver except the boot itself. The notice it would have delivered is not
+    lost: the fold keeps it owed (``store.fold``'s ``notice_owed``) and the next
+    real reconcile delivers it in its dismissed wording.
+  - **Open ask (D3, §15):** a dismissal stamped BEFORE the deadline owes an
+    ``ask-response-<id>`` row (``response_owed``), not a deadline notice, and ANY
+    boot's reconcile delivers that row — the wake row's fire is no longer the
+    only thing that tells the agent. The cost is stated in the design: an idle
+    cold asker no longer wakes at the deadline, so if nothing starts it within
+    7 days the row lapses unread.
 
 The dismissal is durable before anything else happens: ``append_event`` is the
 truth (``O_APPEND``, one line) and the index is derived from it, so a failure to
@@ -94,9 +116,10 @@ async def dismiss_cold(
     ask_id: str,
     *,
     by: str = "unknown",
+    reason: str | None = None,
     now_ms: int | None = None,
 ) -> dict[str, Any]:
-    """Settle a TIMED-OUT ask and boot nothing. ``{"ok": True}`` or a refusal.
+    """Settle a timed-out or OPEN ask and boot nothing. ``{"ok": True}`` or a refusal.
 
     The refusals are the queue's own ``{"ok": False, "error": <sentence>}`` shape
     plus one code no live dismissal can produce — ``ask_owner_present``, which the
@@ -107,6 +130,8 @@ async def dismiss_cold(
     (they sent nothing), which is the word the live path records for the same tap;
     an omitted ``by`` is the caller's honest "unknown".
     """
+    if reason is not None and reason not in store.DISMISS_REASONS:
+        return {"ok": False, "error": render.DISMISS_BAD_REASON}
     root = Path(config_dir)
     directory = store.session_dir(root, session_id)
     now = now_ms if now_ms is not None else store.now_ms()
@@ -115,6 +140,21 @@ async def dismiss_cold(
     # its own record of what it delivered and republishes its schedule list, so a
     # write from here would be lost — or would leave the owed notice delivered by
     # a boot with nobody's turn to read it.
+    #
+    # THE WINDOW AFTER THIS CHECK IS BENIGN, and deliberately not narrowed (agent
+    # review round 1, open question b). A runtime that boots between the probe and
+    # the append finds the dismissal in the LOG: the append is one `write` under
+    # an `O_APPEND` flock (`store.append_event`), so it lands whole beside whatever
+    # the new owner writes, and the owner's next reconcile folds it — a boot
+    # reconcile reads the log before its first turn, so the owed response row is
+    # delivered then. The two cold-door writes beside the log are healed or
+    # refused, not lost: the derived index has every writer's "the log is the
+    # truth" contract (`_dismiss_in_index` warns and the next reconcile rewrites
+    # it), and the wake disarm answers `wake_owner_present`, which this module
+    # already treats as "the owner owns the list now" (`_WAKE_REFUSALS`). Between
+    # the check and the append there is no READ that could go stale, which is why
+    # a second probe or a lock around the pair would add a race without removing
+    # one.
     if _live_owner(root, session_id) is not None:
         return {"ok": False, "code": "ask_owner_present"}
 
@@ -133,11 +173,12 @@ async def dismiss_cold(
         "ask_id": ask_id,
         "at": now,
         "by": {"surface": by or _REMOTE_SURFACE},
+        "reason": reason or store.DISMISS_REASON_DEFAULT,
     }
     if not store.append_event(directory, payload):
         return {"ok": False, "error": "the dismissal could not be recorded."}
 
-    _dismiss_in_index(root, session_id, ask_id)
+    _dismiss_in_index(root, session_id, ask_id, at=now, reason=payload["reason"])
     await _cancel_deadline_wake(root, session_id, ask_id)
     return {"ok": True}
 
@@ -159,14 +200,29 @@ def _live_owner(root: Path, session_id: str) -> int | None:
     return live_runtime_pid(root, session_id)
 
 
-def _dismiss_in_index(config_dir: Path, session_id: str, ask_id: str) -> None:
-    """Set this ask's row in the derived index to ``dismissed``.
+def _dismiss_in_index(
+    config_dir: Path,
+    session_id: str,
+    ask_id: str,
+    *,
+    at: int,
+    reason: str,
+) -> None:
+    """Set this ask's row in the derived index to a settled DISMISSAL.
 
     The index is what the cross-session view reads with no runtime to ask, so
     without this the phone keeps offering Dismiss on an ask the log has already
     settled until some runtime happens to reconcile. Best-effort by the same
     contract the queue's own writer keeps (``AskQueue._refresh``): the log is the
     truth and any writer heals the entry.
+
+    THREE FIELDS, NOT ONE (SA-D8). A stopped session has no runtime to reconcile
+    the entry from its log, so this write is the only chance the row has to state
+    WHEN and WHY it was dismissed — and both are load-bearing rather than nice:
+    the shared visibility rule (``store.dismissed_hidden``) decides "settled
+    receipt" from ``dismissed_at``, so a row carrying only ``status`` would hide
+    a pre-deadline dismissal the operator is owed a receipt for, and a surface
+    would have a chip with no reason to show under it.
     """
     try:
         entry = store.read_entry(config_dir, session_id)
@@ -177,6 +233,8 @@ def _dismiss_in_index(config_dir: Path, session_id: str, ask_id: str) -> None:
         for row in rows:
             if str(row.get("ask_id")) == ask_id:
                 row["status"] = store.STATUS_DISMISSED
+                row["dismissed_at"] = int(at)
+                row["dismissed_reason"] = store.normalize_dismiss_reason(reason)
                 touched = True
         if not touched:
             return

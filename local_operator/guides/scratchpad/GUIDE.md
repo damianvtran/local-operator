@@ -57,7 +57,10 @@ Left in their tree, this is litter they cannot tell apart from output.
   INSIDE the session's directory, so it **survives runtime restarts and
   rollovers**, and it is cleared only when the session is deleted or expires —
   deleting the session (or the cleanup pass, when its policy is on) takes the
-  whole folder. A long-running loop or a multi-turn state file has no reason to
+  whole folder. The cleanup pass may additionally reclaim build shapes, stale
+  output and merged-clean git clones (never notes or transcripts) from a
+  session past the retention window, recording every path in a manifest under
+  `sessions/.cleanup-manifests/`. A long-running loop or a multi-turn state file has no reason to
   keep a second copy anywhere else.
 - **Do not put these here: build trees, dependency trees, compiled artefacts,
   archives, anything the shell built.** `write`/`edit` refuse them by NAME — a
@@ -69,19 +72,41 @@ Left in their tree, this is litter they cannot tell apart from output.
   That is where the output is wanted and can be rebuilt from the commit rather
   than carried as bytes. A pad is the wrong home for it both ways: it is
   billed to a disk shared with every other session, and it ends with the
-  session. **This rule is enforced at the TOOLS, and the shell channel is
-  CHECKED AFTER THE FACT.** `write` and `edit` carry their payload inline and
-  are refused before the write; `bash` and the `eval` kernel get this pad as a
-  path (`$LOCAL_OPERATOR_SCRATCHPAD`) and are never refused — so a
-  `pnpm install`, a `cargo build` or a redirect into the pad still succeeds —
-  but a command that names the pad (`$LOCAL_OPERATOR_SCRATCHPAD`, its path, or a
-  leading `~/`, `$HOME/` or `${HOME}/` spelling of it) carries a `[scratch]`
-  line when it took the pad over its budget or entry cap, or put a refused name
-  in it — whether the command spelled the name or copied it in. A copied name
-  is judged as the copy WOULD have created it: the check reads the command,
-  not the disk, so a copy whose source is missing still reports. The `eval`
-  kernel gets the budget and entry-cap line only. It reports; it cannot undo
-  what a shell has already put there.
+  session. **This rule is enforced at the TOOLS, and the shell is refused
+  BEFORE IT RUNS when it would ADD bytes to an over-cap pad.** `write` and
+  `edit` carry their payload inline and are refused before the write. A `bash`
+  command that would create a path under a pad already over its configured cap
+  is stopped before the child exists; the ordinary absolute/two-spelling forms
+  and `cd "<pad>" && …` are resolved, and a rename wholly inside the pad or a
+  `mkdir -p` of an existing directory still runs because it adds no bytes.
+  A `bash` command that starts UNDER the cap is also watched WHILE IT RUNS —
+  but only when the command NAMES the pad or runs with its working directory
+  inside it: the harness re-measures the pad about once a second, and a command
+  whose process group takes the pad over the configured cap is stopped during the
+  command with an actionable error instead of being reported after the bytes are
+  on disk. A pad that is ALREADY over cap is not watched during the command —
+  recovery commands (`rm`, a shrinking overwrite) run; a creating command that
+  names the pad is still refused before it runs; the after-the-fact line
+  reports. An unrelated long command (`pytest`, `git`) is not watched and pays
+  no walk.
+  **KNOWN MISS: a destination assembled from an arbitrary shell variable
+  (`D="$PAD/x"; mkdir "$D"`) is not resolved before the child exists** — the
+  after-the-fact line still reports what it left behind, so treat this as the
+  backstop rather than complete shell coverage; the line remains for every
+  command that names the pad or runs with its working directory inside it,
+  including one that finishes under the cap or writes through a path the
+  watchdog cannot attribute to the pad. **KNOWN BLIND SPOT: a child that only
+  reads `LOCAL_OPERATOR_SCRATCHPAD` from its environment, without naming the pad
+  and with a cwd outside it, gets neither the live watch nor the after-the-fact
+  line.** Reads and shrinks (`ls`, `rm`) always run. A command that names the
+  pad (`$LOCAL_OPERATOR_SCRATCHPAD`, its
+  path, or a leading `~/`, `$HOME/` or `${HOME}/` spelling of it) also carries
+  the `[scratch]` line when it ran and left the pad over its budget or entry
+  cap, or put a refused name in it — whether it spelled the name or copied it
+  in. A copied name is judged as the copy WOULD have created it: the check
+  reads the command, not the disk, so a copy whose source is missing still
+  reports. The `eval` kernel gets the budget and entry-cap line only; Python
+  creations there cannot be attributed to a position in a command.
 - **A NON-image binary** (an archive, a model file, a `.bin`) → not here: it
   has no text to return, so the reader refuses it as text. (`bash mktemp -d`
   with NO template lands in `$TMPDIR`, the per-user temp directory; a template
@@ -208,17 +233,22 @@ and no viewer. One file per subject; subdirectories are free
   cannot flood the transcript; a very large file comes back truncated, with the
   `read` call that continues it.
 - A pad is capped THREE times, because it is disk shared with every other
-  session on the machine and is reclaimed only when its session ends: a SINGLE
-  write at 32 MiB (33,554,432 bytes); the whole pad at 256 MiB (268,435,456
-  bytes), past which every write is refused whatever filled it — no list of
-  names knows every shape of build tree, so the last rule is the pad's own
-  total; and, as a tree rather than a pad, a folder holding over 20,000 entries.
+  session on the machine and is reclaimed when its session ends (and, for
+  build/cache shapes only, once the session is past the retention window): a SINGLE
+  write at 32 MiB (33,554,432 bytes); the whole pad at the configured cap —
+  `session.scratchpad.max_bytes`, default 256 MiB (268,435,456 bytes), 16 MiB
+  to 8 GiB — past which every write that ADDS bytes is refused whatever filled
+  it; no list of names knows every shape of build tree, so the last rule is the
+  pad's own total; and, as a tree rather than a pad, a folder holding over
+  20,000 entries.
   Overwriting the file that took the pad over DOES still work — a replaced file
   is not counted twice, and with nothing here deleting anything that is the only
   way back under. Reading is deliberately NOT gated, so a pad written before
   these rules can still be listed, read and cleaned up. Nothing removes the
   folder later either — only the session going away does that, by the cleanup
-  pass (when its policy is switched on) or by the session being deleted.
+  pass (when its policy is switched on) or by the session being deleted; the
+  content pass can take build/cache shapes from a session past the retention
+  window, but never the transcript or the pad root.
 - Paths are resolved and must stay inside the scratchpad; a symlink pointing out
   is refused rather than followed.
 - Any other URL scheme in a path argument is refused: a scheme the tools do not

@@ -26,8 +26,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from local_operator.network import approval_ops
 from local_operator.network import approvals as approval_store
-from local_operator.network.credentials import inheritance
+from local_operator.network.credentials import desktop_approval, inheritance
 from local_operator.network.types import MeshRefusal
 
 
@@ -48,7 +49,18 @@ def approval_rows(root: Path | None = None) -> list[dict[str, Any]]:
         extras = inheritance.row_extras(record)
         if extras is not None:
             row.update(extras)
+        # THE TYPED CREDENTIAL APPROVAL (``features.credential_approvals``): the structured
+        # disclosure, both digests to echo, the assurance level and the upgrade offer.
+        # ``can_approve_here`` stays False on purpose -- an old UI keyed on it must never
+        # offer a bodiless Approve; only a renderer that knows ``typed_approval`` can sign.
+        typed = desktop_approval.row_fields(record)
+        if typed is not None:
+            row["typed_approval"] = typed
+            row.setdefault("can_approve_here", False)
         rows.append(row)
+    # NO cancel-latch reset here: the desktop polls this list every 15 s, so clearing it
+    # on a list read made the latch last one poll (review #3002 round 1, R2). Only the
+    # per-card detail read (``GET /v1/desktop/approvals/{id}``) clears it.
     return rows
 
 
@@ -61,20 +73,20 @@ def approve(root: Path | None, approval_id: str) -> dict[str, Any]:
     """
     import time
 
+    from local_operator.network import enrollment
+
+    if approval_id.startswith("apn_"):
+        raise MeshRefusal(enrollment.CONFIRMATION, enrollment.REMEDY)
     record = approval_store.load_record(approval_id, root=root)
-    if inheritance.intent(record) is not None:
-        # REFUSED BEFORE THE SIGNER RUNS. The desktop card cannot yet state what a credential
-        # permission signs (it would read the request's operator-key anchor as an
-        # "install anchor" scope and show a blind Approve), and the signature is the
-        # authority-increasing act. The command-line path prints the full disclosure first.
-        # Deny stays available: it is the safe direction and needs no description.
-        raise MeshRefusal(
-            "inherit_terminal_approval_required",
-            "This credential permission can only be approved from the command line on this "
-            "machine for now, where its account, recipient and duration are shown before you "
-            "sign: "
-            f"lop network approvals approve {approval_id}. Nothing was approved.",
-        )
+    if record.get("kind") not in approval_store.KINDS:
+        raise MeshRefusal("approval_invalid", "This build cannot approve this authority kind")
+    # THE ONE TYPED-OP CHECK, BEFORE THE SIGNER (S4a-core). A record carrying a registered
+    # typed operation cannot be signed by this bodiless route: it carries no digest, so it
+    # cannot prove which disclosure was on screen. The refusal is the op's own (the
+    # credential ops keep their frozen codes and sentences); deny stays open.
+    approval_ops.require_generic_approvable(
+        record, approval_id, surface=approval_ops.SURFACE_DESKTOP
+    )
     decided_at = time.time()
     signature_hex = approval_store.sign_decision(
         kind=record["kind"],

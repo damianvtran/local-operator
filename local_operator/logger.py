@@ -105,6 +105,8 @@ def _get_log_level() -> int:
 def configure_console_logging(
     level: Optional[int] = None,
     fmt: str = DEFAULT_LOG_FORMAT,
+    *,
+    advisories_require_terminal: bool = False,
 ) -> None:
     """Route the root logger to stderr, replacing whatever was there.
 
@@ -118,6 +120,14 @@ def configure_console_logging(
     JSON event per line there, and any log record interleaved into it corrupts
     the stream for a strict per-line ``json.loads`` consumer (httpx logs an INFO
     line per request, which is exactly the traffic an agent run generates).
+
+    ``advisories_require_terminal`` is set by the CLI and by nothing else (see
+    :func:`configure_cli_logging`): the desktop app captures an update child's
+    stderr and diagnoses from its head, so a startup advisory on a captured
+    stream is noise that displaced the real cause (2026-10-24). The filter is
+    attached HERE, to the handler that actually writes, so it can ask the
+    handler's own stream whether a person is watching; a file handler attached
+    by a caller is unaffected and keeps every record.
     """
     resolved = _get_log_level() if level is None else level
 
@@ -127,6 +137,10 @@ def configure_console_logging(
 
     handler = logging.StreamHandler(stream=sys.stderr)
     handler.setFormatter(logging.Formatter(fmt))
+    if advisories_require_terminal:
+        from local_operator import advisories
+
+        handler.addFilter(advisories.console_filter(sys.stderr))
     root_logger.addHandler(handler)
     root_logger.setLevel(resolved)
 
@@ -142,8 +156,16 @@ def configure_cli_logging() -> None:
     ``helpers.py`` passed a literal ``logging.INFO``, so the variable never
     reached the CLI and raising it here would start printing records to users
     who set ``LOG_LEVEL`` for the server.
+
+    ADVISORIES ARE TERMINAL-ONLY HERE. The CLI is the process the desktop app
+    spawns and captures for ``lop update``, and its stderr head is what the
+    failure modal reads; see :mod:`local_operator.advisories` for the measured
+    incident. Server and daemon surfaces configure the console directly and
+    keep every record, because their stderr IS their log destination.
     """
-    configure_console_logging(level=logging.INFO, fmt=CLI_LOG_FORMAT)
+    configure_console_logging(
+        level=logging.INFO, fmt=CLI_LOG_FORMAT, advisories_require_terminal=True
+    )
 
 
 def quiet_wire_clients(level: Optional[int] = None) -> None:

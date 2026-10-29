@@ -303,6 +303,29 @@ async def test_success_registers_the_attachment_and_caption_first(
 
 
 @pytest.mark.asyncio
+async def test_the_request_names_the_registered_image(
+    monkeypatch: pytest.MonkeyPatch, _isolate_attachments: Path
+) -> None:
+    async def fake_cascade(**kwargs):
+        return _outcome()
+
+    _patch_cascade(monkeypatch, fake_cascade)
+    explicit = await image_tool.execute_generate_image(
+        "call-1", {"prompt": "a cat", "filename": "Red Fox in Snow"}, None, None, None
+    )
+    assert [b.name for b in explicit.content if isinstance(b, AttachmentContent)] == [
+        "red-fox-in-snow.png"
+    ], "an explicit filename is the stem; the extension follows the bytes"
+
+    derived = await image_tool.execute_generate_image(
+        "call-2", {"prompt": "A red fox in snow, painterly"}, None, None, None
+    )
+    assert [b.name for b in derived.content if isinstance(b, AttachmentContent)] == [
+        "red-fox-in-snow-painterly.png"
+    ], "omitted, the name derives from the prompt (never the model template)"
+
+
+@pytest.mark.asyncio
 async def test_partial_registration_failure_is_a_caption_note(
     monkeypatch: pytest.MonkeyPatch, _isolate_attachments: Path
 ) -> None:

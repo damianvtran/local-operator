@@ -27,6 +27,68 @@ class AttachmentUnavailable(ValueError):
         )
 
 
+class AttachmentMissing(ValueError):
+    """A ``Prompt.files`` digest does not resolve in the owner's store.
+
+    A REFUSAL of the send, never a silent drop: the composer showed a file
+    chip, so forwarding the prompt without it would answer a question the
+    user believes was asked about the document. Raised at admission, before
+    any paid work (contract §1.2 / amendment 3), and decoded on the viewer
+    side from ``error_code`` + ``error_name`` so the sentence is rebuilt
+    locally — the same rule every other admission category follows.
+    """
+
+    code = "attachment_missing"
+
+    def __init__(self, filename: str = "") -> None:
+        self.filename = filename
+        named = f"{filename} " if filename else "An attached file "
+        super().__init__(
+            f"{named}is no longer in the attachment store (its upload may have been "
+            "interrupted). Remove it and attach the file again — the message was "
+            "not sent."
+        )
+
+
+class RemoteDocumentUnsupported(ValueError):
+    """A document-bearing send to a conversation owned by another device.
+
+    v1 does not transfer document bytes between devices (contract amendment
+    2): the local upload lands in THIS device's store while the peer owner
+    reads its own, so forwarding the digest would promise a file the owner
+    cannot resolve. Images keep today's peer staging; documents refuse here,
+    on the sending side, before a frame is dialled.
+    """
+
+    code = "attachment_remote_unsupported"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This conversation runs on another device, and document attachments "
+            "are not transferred between devices yet. Remove the file to send "
+            "the message, or attach it to a session on that device."
+        )
+
+
+class DocumentCarriageUnsupported(ValueError):
+    """The owner (or a hop on the way to it) cannot carry document blocks.
+
+    Raised where a send would otherwise be forwarded WITHOUT its files — an
+    older runtime whose ``prompt``/``steer`` has no ``files``/``documents``
+    parameter, or a reduced handle in a test rig. Contract amendment 1 makes
+    this a refusal, never a drop: the user watched a file chip leave.
+    """
+
+    code = "attachment_carriage_unsupported"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This session's runtime cannot receive document attachments. "
+            "Remove the file, or restart the session and attach it again — "
+            "the message was not sent."
+        )
+
+
 def team_owns_the_agent_slot_message(team: str, manager: str) -> str:
     """THE sentence for an agent attach refused while a TEAM owns the slot.
 
@@ -935,6 +997,7 @@ def admission_error(
     report: str | None = None,
     format_unsupported: bool | None = None,
     reason: str | None = None,
+    filename: str | None = None,
 ) -> ValueError | None:
     """Decode only an enumerated category, never owner-supplied message text.
 
@@ -1002,6 +1065,16 @@ def admission_error(
         )
     if code == AttachmentUnavailable.code:
         return AttachmentUnavailable()
+    if code == DocumentCarriageUnsupported.code:
+        return DocumentCarriageUnsupported()
+    if code == AttachmentMissing.code:
+        # The FILE NAME rides its own bounded field (``error_name``), the same
+        # closed-shape carriage ``error_model`` established: the refusal must
+        # name the file the composer showed, and the sentence is rebuilt
+        # locally around the sanitised value. A frame without it (an older
+        # runtime) rebuilds the unnamed sentence rather than rendering prose
+        # from the wire.
+        return AttachmentMissing(filename=_wire_text(filename, limit=200))
     if code == RuntimeRetiring.code:
         return RuntimeRetiring(
             trigger=trigger if isinstance(trigger, str) else "",

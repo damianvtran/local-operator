@@ -21,6 +21,98 @@ plus `local_operator.computer_input` and `local_operator.helpers` — by design:
 session construction belongs to the driver process, never to the isolated
 adapter worker.
 
+## Guest-local action-server supervision
+
+During allocation, after disk preparation and **before task setup**, the adapter
+uses the existing `/execute` endpoint to configure the action server's existing
+private systemd service. Installation does not restart or signal a healthy
+server. Discovery follows only the command's `/proc` ancestry and cgroup;
+MainPID must be the server itself, stderr must already go to the journal, and
+services with desktop-affecting start/stop hooks are refused. The effective
+systemd configuration is verified after reload and on idempotent re-entry:
+oneshot/unloaded units, an overridden restart policy or capture hook, nonempty
+`RestartPreventExitStatus` exclusions, `ExitType=cgroup`, and service sandboxes
+that could prevent diagnostic writes are refused. Existing exit-status exclusions
+are not erased: their intent is unknown. Successful installation requires the
+effective `RestartPreventExitStatus` to be empty and `ExitType` to be `main`. Shell/session-scope
+launches and unsupported guests remain unchanged. No SSH, SSM or new credentials
+are used; privilege escalation is the existing guest-preparation ladder.
+
+`guest-supervisor-setup.json` records either `status: supervised` and the unit,
+or **`status: supervision unavailable` with a reason**, once per provider. This
+is an optional capability, never an allocation gate. The real benchmark AMI's
+service layout is an **unverified deployment prerequisite** until that setup
+record is inspected on a live run; cloud-free tests do not establish AMI coverage.
+
+The systemd drop-in sets `Restart=always`, a one-second backoff and a three-start
+per-hour limit (including starts already counted by systemd). Once the limit is
+hit the unit stays failed; the adapter never resets it. `KillMode=process`
+prevents service restarts from killing desktop applications descended from old
+server requests. A fixed root-owned `ExecStopPost` helper retains the previous
+process's `EXIT_CODE`, `EXIT_STATUS` (including signal names), `SERVICE_RESULT`
+and a bounded journal tail in `/var/lib/lop-action-supervisor/<unit>.json`.
+The exit fields are written before querying the journal; a journal failure retains
+them and marks `journal_tail_status: unavailable`. The file is an initialized
+`schema_version: 1` envelope containing `records`, the installation's
+`baseline_nrestarts` / `baseline_active_enter`, and a total `captured_exits` count.
+Reports independently query systemd's `NRestarts` and
+`ActiveEnterTimestampMonotonic` and include them as `systemd_nrestarts` /
+`systemd_active_enter`. A valid empty history proves no restart only when the
+manager's generation still matches that baseline. A counter/history mismatch or
+an activation change without a capture forces a fresh binding and records
+`receipt_unavailable` with `receipt_failure: systemd_generation_disagreement`.
+Thus ENOSPC/EROFS before the helper's first write cannot silently authorize input
+against the old screen. Manual restarts/counter resets that cannot be correlated
+also fail closed; this mechanism never resets systemd's counters. Only four records and 4096 tail characters per record are retained. This helper
+writes harness diagnostics only; it does not touch desktop or task paths.
+
+Before each action and observation the adapter checks for a new restart receipt.
+A failed receipt read is retried once; if still unavailable, remaining input is
+skipped and a fresh observation is required, just as for a restart. Evidence
+marks `receipt_unavailable` and `read_failed`; failed reads never authorize input
+on the old binding. Secret-withheld record payloads are marked `records_withheld`,
+not silently represented as clean empty histories. A recovered action batch is **not replayed**: its remaining input is skipped and
+the adapter returns a newly read observation, establishing a fresh binding before
+more input can be accepted. Ambiguous failed input stays explicitly ambiguous in
+`guest-supervisor-recovery.json`; recovery does not claim it was unapplied.
+Recovery evidence includes the restart ID, exit status and secret-scrubbed stderr
+tail. A bounded recovery wait ends a still-unreachable episode through the usual
+guest-down diagnostics when the server ANSWERED but would not serve. When every
+probe failed on the connect instead, the wait is what decides: the action is
+attempted under the transport classifier rather than refused unseen. That
+exhaustion record lists every probe's verdict (`probe_outcomes`), each entry
+carrying `answered` plus either the transport `delivery`/`kind`/`errno`/
+`error_class` or the `status` the server answered with, and its own `at_s` /
+`timeout_s` -- so a future loss says WHICH element of the host-to-guest path
+failed rather than only that it did. The record also states `budget_s`,
+`probe_timeout_s` and `waited_s`, which is what distinguishes "gave up while
+busy" from "wedged".
+The last retrieved records are retained; the final
+crash-loop record may exist only on the guest when the sole HTTP transport stays
+down, and the evidence explicitly marks it **not retrieved**, not as a known
+exit cause. A genuinely stopped EC2 instance is still reported as such by the
+existing health probe.
+
+## Guest-down health evidence
+
+After an execute connection failure whose readiness check also fails, the AWS
+provider saves `guest-health-execute.json` beside `guest-preparation.json` in the
+episode cache. One shared four-second budget covers the EC2 instance-state
+lookup and, only for a running instance, one read-only command over the existing
+control-server transport. The command reports root disk free/total bytes,
+`/proc/meminfo` memory/swap counters, and whether the action-server port has a
+listening socket. No process arguments, environment values or arbitrary guest
+output are retained. Probe errors/timeouts do not replace the original action
+outcome; terminal diagnostics distinguish an absent/stopped/terminated instance
+from a running instance whose guest channel cannot answer.
+
+This evidence does **not** establish an independent recovery channel: the
+adapter currently has neither SSH credentials nor an SSM-agent/service-unit
+contract. The command endpoint is hosted by the same action server, so a dead
+server cannot be restarted through it. An unreachable guest is not proof that
+the service process is absent. No restart or successful recovery is claimed.
+The existing console capture remains complementary out-of-band evidence.
+
 ## Why it is its own distribution
 
 The adapter imports `local_operator.evaluation.adapters.api`, so it is coupled
@@ -224,26 +316,32 @@ BASE=$(python3.12 -c 'import sys; print(sys.base_prefix)')   # e.g. ~/.local/sha
 #     copy); the -V beside it is the real check and catches a genuine miss.
 cp "$BASE/lib/libpython3.12.dylib" "$VENV/lib/" 2>/dev/null || true   # macOS only
 "$VENV/bin/python3.12" -V   # must print the version, not abort
-uv pip install --python "$VENV/bin/python3.12" \
-    --no-deps dist/lop_osworld_v2_adapter-0.1.1-py3-none-any.whl
+# (The single-wheel --no-deps install that used to follow belongs to the
+#  superseded step 3b below: use scripts/build_osworld_arm.py, which installs
+#  both wheels against a resolved closure.)
 
-# 3b. install the locked set. For the PAID path export WITH the osworld extra
-#     (~380 packages the cloud-free wheel does not need); omit --extra for a
-#     cloud-free venv. Export to a FILE and keep it beside the venv: it is the
-#     record of what was actually installed, and the lock's own
-#     local-operator pin lags the harness (schema 1.2 and host_secrets only
-#     exist from 0.44.30+), so substitute the harness version you are running
-#     and note the substitution in the build record.
-uv export --frozen --no-emit-project --extra osworld --no-hashes \
-    -o "$VENV/build/requirements.locked.txt"
-sed -i '' 's/^local-operator==.*/local-operator==<harness version>/' \
-    "$VENV/build/requirements.locked.txt"   # macOS sed; GNU sed wants -i without ''
-# The export is the full resolved closure. --no-deps preserves those rows and
-# the lock's requests override instead of re-resolving upstream's stale pin.
-uv pip install --no-deps --python "$VENV/bin/python3.12" -r "$VENV/build/requirements.locked.txt"
-
-# The one expected `uv pip check` incompatibility is the documented
-# requests>=2.32 override onto OSWorld's ~=2.31 pin (see [tool.uv] above).
+# 3b. install the locked set. SUPERSEDED -- read this before copying it.
+#     The recipe that used to sit here was
+#         uv export --frozen --no-emit-project --extra osworld --no-hashes \
+#             -o "$VENV/build/requirements.locked.txt"
+#         sed -i '' 's/^local-operator==.*/local-operator==<harness version>/' ...
+#         uv pip install --no-deps --python "$VENV/bin/python3.12" \
+#             -r "$VENV/build/requirements.locked.txt"
+#     and it is exactly how main16 ended up with a missing `miniaudio`: a frozen
+#     export replays the rows the LOCK knew about, `--no-deps` installs them
+#     without resolving anything, and a harness that has since added a mandatory
+#     dependency produces an arm whose own requirement is unmet. The sed also
+#     rewrote evidence.
+#
+#     Use scripts/build_osworld_arm.py instead: it re-resolves the closure under
+#     the committed overrides, keeps the raw pip-check output, and admits or
+#     refuses the result under the reviewed policy --
+#         python scripts/build_osworld_arm.py --source-sha <40-hex-main-commit> --plan ...
+#         python scripts/build_osworld_arm.py --source-sha <40-hex-main-commit> \
+#             --out <new arm dir> --execute --plan ...
+#     See docs/benchmarks/osworld_2/arm-build.md for the sequence, the receipts
+#     and what a build does NOT prove. Steps 3/3a above remain the venv recipe
+#     the tool implements.
 
 # 4. compute package_digest FIRST: it digests the installed wheel's RECORD and
 #    does not depend on the workspace, while step 5's --package-digest does
@@ -726,11 +824,67 @@ was never established (refused, connect timeout, name resolution) sent no byte:
 the message reads `guest action N was not sent (...)` and carries
 `delivery=not_sent`. Everything else (a read timeout, a dropped or reset
 connection, an HTTP error) stays `outcome is unknown ... delivery=ambiguous`
-and is never replayed. Neither verdict triggers a retry of the batch: with the
-control server gone a retry cannot succeed. The `delivery=ambiguous` verdict
+and is never replayed. Neither verdict permits replaying the whole batch.
+Only a provably unsent request can be retried inside `AwsProvider.execute`: at
+most four total sends (the first attempt plus three retries) with a 0.5 s /
+1 s / 2 s backoff (plus up to 25% jitter), and only while a **wall-clock retry
+window** (20 s per statement, started before the first send) has time left. The
+window is what bounds a persistent fault, and it is not a nicety: with an
+attempt-count bound alone, four attempts each spending the 90 s socket deadline
+measured ~366 s per statement against the base's ~92 s. With the window, a
+statement that ends in a terminal transport failure costs at most one attempt's
+own deadline (~90 s, unchanged from a single send) plus the window; a fast
+refusal still gets its full schedule (~3.5 s). A refused port and an
+unreachable host (`EHOSTUNREACH`) are both retryable, because neither sent a
+byte. The bounded liveness GET to `/platform` is taken once per statement and
+is **evidence, not a veto**: it rides the same host-to-guest path as the request
+that just failed, so a transient path failure fails the probe too, and
+requiring it would turn exactly that blip into a dead episode. Each retry logs
+the upcoming attempt number, `delivery=not_sent`, the exception class (never its
+potentially sensitive text), whether readiness passed, the classifier's cause,
+the errno and the delay taken; it also appends a ledger event to
+`guest-transport-retries.json` in the episode cache root. The event holds
+`statement`, `attempt` (the send about to happen), `delivery`, `cause`,
+`errno`, `error_class`, `delay_ms`, and a `readiness` object stamped with the
+attempt it was measured on plus the probe's own verdict and errno -- the probe
+is not re-taken per retry, so the stamp is what stops a copy reading as a fresh
+measurement. The ledger's `<n> retries, <m> recovered` is what tells a
+post-mortem how much of a run's apparent transport loss was the network.
+Exhaustion preserves the existing failed-action message (adding `transport
+retries exhausted (N)`), console evidence, and the guest-down cause of death.
+
+**The pre-action receipt check gets the same treatment.** Before an action it
+waits for the control server with bounded backoff for up to 15 s of wall clock
+(~7x the observed time for a blipped path to come back). Each probe gets the
+watchdog's own 5 s bound, and asks `GET /platform` -- upstream's
+`platform.system()`, no desktop work -- never `/terminal`. Upstream's
+`/terminal` serialises the whole AT-SPI desktop tree whenever a terminal is
+active; on a v2.1 guest it measured 0.06 s fresh, 4-6 s with a focused
+terminal over other apps, and 8-31 s beside a concurrent `/accessibility`
+read, while `/platform` stayed at 0.05-0.18 s in every state. Probing
+`/terminal` mid-episode turned a live server into a ReadTimeout (ambiguous:
+the path connected, the HTTP never answered) and refused the action unsent;
+that was 7 of the 10 main16 "action bridge wedged" endings. `/terminal` stays
+only as the allocation readiness check (`_ALLOCATION_READY_PATH`), upstream's
+own `ensure_ready` admission on a fresh desktop. The probe is classification,
+not a kill, so patience costs only time inside the fixed budget. Every
+recovery record also says whether its `watchdog` block was read in that call
+(`watchdog_source: fresh_receipt`) or re-emitted from the last successful read
+(`cached_last_receipt`, with `watchdog_observed_at` and `watchdog_age_s`): a
+cached `serving` is not evidence the watchdog sees the server now. If every probe in that
+wait failed on the CONNECT -- `probe_outcomes` all `not_sent`, recorded as
+`path_unreachable` -- nothing was learned about the server's generation, so the
+action is compiled and attempted anyway and the transport classifier decides
+what happened. That case used to end the episode without making a single
+request, while reporting `connection could not be established` for an action it
+had never attempted. If the server answered unhealthily (a non-200) or the
+failure was post-handshake, the receipt is genuinely unavailable and the action
+is not attempted: the message reads `guest action N was not attempted (...)` and
+carries no `delivery=` token, because no delivery happened.
+The `delivery=ambiguous` verdict
 does feed exactly ONE gated harness measure: after such a failure the session
 asks a single read-only question, `probe` -- a bounded GET to the guest's
-readiness endpoint (`providers.aws._READY_PATH`) -- and only an ANSWERING
+liveness endpoint (`providers.aws._LIVENESS_PATH`) -- and only an ANSWERING
 control server lets the episode continue, with the model told the batch's
 effect is UNKNOWN and instructed to verify the screen before re-issuing
 anything. A probe that cannot answer fails closed, and an adapter that does

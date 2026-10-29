@@ -1644,6 +1644,32 @@ def test_a_disabled_bound_arms_nothing(tmp_path: Path, monkeypatch: pytest.Monke
     assert not list(tmp_path.glob(f"{stall_watchdog.DUMP_PREFIX}-*.log"))
 
 
+def test_the_readiness_fact_is_the_handler_not_the_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An armed bound whose signal registration failed is NOT a ready probe.
+
+    Review round 2 reproduced this shape: monkeypatching ``faulthandler.register``
+    to raise still left ``arm`` returning True, so a readiness line gated on
+    ``is_armed()`` said the evidence signal was installed while SIGUSR1 kept its
+    default fatal disposition. ``evidence_signal()`` reads the handler's own
+    record, and this cell pins the distinction.
+    """
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise OSError("register refused")
+
+    monkeypatch.setattr(stall_watchdog.faulthandler, "register", _boom)
+    assert stall_watchdog.arm(seconds=30.0, directory=tmp_path) is True
+    try:
+        assert stall_watchdog.is_armed() is True
+        assert (
+            stall_watchdog.evidence_signal() is None
+        ), "a failed signal registration read as an installed evidence signal"
+    finally:
+        stall_watchdog.disarm()
+
+
 def test_an_unusable_dump_directory_disarms_rather_than_failing_the_boot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2800,21 +2826,32 @@ def test_a_real_runtime_child_arms_its_bound_and_disarms_on_a_clean_stop(
         ), "a healthy runtime reported a fired bound"
         assert stall_watchdog.fired_pids(config_dir / "logs") == set()
 
-        # HANDLER READINESS, by the child's own hand: the SIGUSR1 task dump is
-        # armed in the block directly after the SIGTERM handler, so seeing it is
-        # proof the clean-stop path under test exists in the child.
+        # HANDLER READINESS, by the child's own hand: the runtime states whether the
+        # SIGUSR1 task-dump block is installed, so the probe waits for that FACT
+        # instead of manufacturing it. THIS REPLACES A SIGNAL STORM: the cell used to
+        # send SIGUSR1 every 0.2 s from spawn until this block took effect — a storm
+        # through boot's thread-churn window, and never a fact the child had stated.
+        # Whether that storm produced the 2026-10-20 rc=-11 (run 39411075050, job
+        # 118592852441) is NOT claimed: that death left no stack. The probe is now ONE
+        # signal after the child says it is listening — the same proof, no storm.
+        readiness = _await_log(config_dir, "signal handlers ready", child, timeout=60.0)
+        assert "signal handlers ready" in readiness, (
+            "the runtime never armed its signal handlers:\n"
+            f"{_capture_text(child)}\n{_log_text(config_dir)[-1000:]}"
+        )
+        assert "SIGUSR1 evidence signal installed" in readiness, readiness[-1000:]
+        os.kill(pid, signal_module.SIGUSR1)
         deadline = time.monotonic() + 60.0
         while "state: streaming=" not in _log_text(config_dir):
             assert child.poll() is None, (
-                f"the runtime exited (rc={child.returncode}) before it armed its handlers:\n"
+                f"the runtime exited (rc={child.returncode}) after its one SIGUSR1 probe:\n"
                 f"{_capture_text(child)}\n{_log_text(config_dir)[-1000:]}"
             )
             assert time.monotonic() < deadline, (
-                "the runtime never armed its signal handlers; the readiness probe is stale:\n"
+                "the runtime did not take the SIGUSR1 task dump after readiness:\n"
                 f"{_log_text(config_dir)[-1000:]}"
             )
-            os.kill(pid, signal_module.SIGUSR1)
-            time.sleep(0.2)
+            time.sleep(0.1)
 
         # A CLEAN STOP RECORDS ITSELF AND LEAVES THE FILE. Nothing is in flight,
         # so the runtime leaves at once and ``main``'s finally disarm writes the
@@ -2840,6 +2877,110 @@ def test_a_real_runtime_child_arms_its_bound_and_disarms_on_a_clean_stop(
         signal_module.signal(signal_module.SIGUSR1, previous_usr1)
         if child is not None:
             _reap(child, config_dir)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fatal signals are POSIX semantics here")
+def test_a_native_crash_of_an_armed_child_leaves_its_stack_in_the_dump(
+    tmp_path: Path,
+) -> None:
+    """THE WITNESS: a SIGSEGV in an armed runtime writes a thread and a frame.
+
+    The defect this exists for is not the crash — it is the SILENCE. On 2026-10-20 a
+    real runtime child died ``rc=-11`` before publication with an empty stderr and a
+    header-only stall dump (run 39411075050, job 118592852441), so the one artifact a
+    reader opens after a runtime death named no thread and no line. ``arm`` now takes
+    ``fatal_report=True`` from the entry point and points CPython's fatal-signal
+    handler at the same dump; this proves that wiring on a real child that dies of a
+    real fatal signal.
+
+    DETERMINISTIC AND CHEAP BY CONSTRUCTION: the child raises SIGSEGV at itself after
+    arming, so there is no race to reproduce and no real runtime to boot (one
+    interpreter start, ~0.3 s). The assertion is on the ARTIFACT, not on the exit
+    status alone: a crash that leaves only ``rc=-11`` is exactly the failure this
+    fixes.
+    """
+    config_dir = tmp_path / "config"
+    dump_dir = config_dir / "logs"
+    script = tmp_path / "crash_probe.py"
+    script.write_text(
+        "import os, signal\n"
+        "from pathlib import Path\n"
+        "from local_operator.session.runtime import stall_watchdog\n"
+        "assert stall_watchdog.arm(\n"
+        "    seconds=60, directory=Path(os.environ['CRASH_DUMP_DIR']), fatal_report=True\n"
+        "), 'the probe could not arm'\n"
+        "print(os.getpid(), flush=True)\n"
+        "os.kill(os.getpid(), signal.SIGSEGV)\n",
+        encoding="utf-8",
+    )
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path / "home"),
+        "LOCAL_OPERATOR_CONFIG_DIR": str(config_dir),
+        "CRASH_DUMP_DIR": str(dump_dir),
+        "PYTHONPATH": str(REPO),
+    }
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        env=env,
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert (
+        result.returncode == -signal.SIGSEGV
+    ), f"the probe did not die of its own SIGSEGV: rc={result.returncode}\n{result.stderr}"
+    pid = int(result.stdout.strip().splitlines()[-1])
+    dump = stall_watchdog.dump_path(pid, dump_dir)
+    text = dump.read_text(encoding="utf-8")
+    assert "Fatal Python error: Segmentation fault" in text, text[-2000:]
+    assert "crash_probe.py" in text, text[-2000:]
+    assert "in <module>" in text, text[-2000:]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fatal signals are POSIX semantics here")
+def test_the_fatal_report_is_cleared_by_the_arm_that_installed_it(tmp_path: Path) -> None:
+    """The handler holds a bare fd, so a clean stop must disable it before the close.
+
+    ``faulthandler.enable`` stores the file descriptor, not the object. A ``disarm``
+    that closed the handle and left the handler installed would point a fatal signal
+    at a descriptor the process may reuse — a diagnostic that can corrupt a file is
+    worse than one that is absent. This pins the ownership rule in a child (the test
+    process's own faulthandler belongs to pytest and must not be touched): arm with
+    ``fatal_report=True``, observe enabled, disarm, observe disabled.
+    """
+    dump_dir = tmp_path / "logs"
+    script = tmp_path / "disarm_probe.py"
+    script.write_text(
+        "import faulthandler, os\n"
+        "from pathlib import Path\n"
+        "from local_operator.session.runtime import stall_watchdog\n"
+        "assert stall_watchdog.arm(\n"
+        "    seconds=60, directory=Path(os.environ['CRASH_DUMP_DIR']), fatal_report=True\n"
+        "), 'the probe could not arm'\n"
+        "print('enabled', faulthandler.is_enabled(), flush=True)\n"
+        "stall_watchdog.disarm()\n"
+        "print('after', faulthandler.is_enabled(), flush=True)\n",
+        encoding="utf-8",
+    )
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path / "home"),
+        "LOCAL_OPERATOR_CONFIG_DIR": str(tmp_path / "config"),
+        "CRASH_DUMP_DIR": str(dump_dir),
+        "PYTHONPATH": str(REPO),
+    }
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        env=env,
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["enabled True", "after False"], result.stdout
 
 
 @pytest.mark.slow

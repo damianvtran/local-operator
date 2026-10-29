@@ -1,0 +1,61 @@
+tui.schedule.cadence_every | every {interval} | ہر {interval}
+tui.schedule.cadence_once | one-shot | ایک بار
+tui.schedule.cancel_confirm | cancel {id}? · y cancel · esc keep | {id} منسوخ کریں؟ · y منسوخ · esc رکھیں
+tui.schedule.detail_cadence | Cadence | تکرار
+tui.schedule.detail_ends | Ends | اختتام
+tui.schedule.detail_fired | Fired | چلنے کی تعداد
+tui.schedule.detail_next | Next | اگلی بار
+tui.schedule.detail_notify | Notify | اطلاع
+tui.schedule.detail_status | Status | حالت
+tui.schedule.due_in | in {duration} | {duration} بعد
+tui.schedule.due_now | due now | ابھی چلنے کا وقت
+tui.schedule.due_overdue | overdue {age} | {age} سے تاخیر
+tui.schedule.empty_body | Press n to schedule one — a wake starts a turn in this conversation at the time you choose. | شیڈول کرنے کے لیے n دبائیں — بیداری آپ کے منتخب وقت پر اس گفتگو میں ٹرن شروع کرتی ہے۔
+tui.schedule.empty_header | No scheduled wakes | کوئی بیداری شیڈول نہیں
+tui.schedule.ends_left | {count, plural, one {# left} other {# left}} | {count, plural, one {# باقی} other {# باقی}}
+tui.schedule.ends_limit | limit {limit} | حد {limit}
+tui.schedule.ends_until | until {time} | {time} تک
+tui.schedule.ends_until_left | {duration} left | {duration} باقی
+tui.schedule.fired | {count, plural, one {# fired} other {# fired}} | {count, plural, one {# بار چلی} other {# بار چلی}}
+tui.schedule.fired_detail | {count} | {count}
+tui.schedule.fired_detail_of | {count} of {limit} | {count} / {limit}
+tui.schedule.fired_of | {count, plural, one {# of {limit} fired} other {# of {limit} fired}} | {count, plural, one {# / {limit} چلی} other {# / {limit} چلی}}
+tui.schedule.form_ends_hint | blank = no bound | خالی = کوئی حد نہیں
+tui.schedule.form_ends_label | ends | اختتام
+tui.schedule.form_ends_placeholder | limit 3 · until 2026-10-20 09:00 | limit 3 · until 2026-10-20 09:00
+tui.schedule.form_keys_hint | ctrl+s save · tab next field · esc back | ctrl+s محفوظ · tab اگلا خانہ · esc واپس
+tui.schedule.form_message_label | message | پیغام
+tui.schedule.form_message_placeholder | the prompt this wake runs | وہ پرامپٹ جو یہ بیداری چلائے گی
+tui.schedule.form_notify_hint | tell me when the wake's turn finishes | بیداری کا ٹرن مکمل ہو تو مجھے بتائیں
+tui.schedule.form_notify_label | notify | اطلاع
+tui.schedule.form_repeat_hint | blank = one-shot | خالی = ایک بار
+tui.schedule.form_repeat_label | repeat | تکرار
+tui.schedule.form_repeat_placeholder | every 1d | every 1d
+tui.schedule.form_title_edit | Edit wake {id} | بیداری {id} میں ترمیم کریں
+tui.schedule.form_title_new | New wake | نئی بیداری
+tui.schedule.form_when_hint | a bare duration means 'in'; a clock, ISO time or +duration means 'at'; blank keeps the time | صرف مدت یعنی 'in'؛ گھڑی، ISO وقت یا +duration یعنی 'at'؛ خالی موجودہ وقت رکھتا ہے
+tui.schedule.form_when_label | when | وقت
+tui.schedule.form_when_placeholder | in 30m · at 09:00 | in 30m · at 09:00
+tui.schedule.hint_back | back | واپس
+tui.schedule.hint_cancel | cancel | منسوخ
+tui.schedule.hint_edit | edit | ترمیم
+tui.schedule.hint_move | move | منتقلی
+tui.schedule.hint_new | new | نئی
+tui.schedule.hint_refresh | reread | دوبارہ پڑھیں
+tui.schedule.notice_cancelled | Cancelled {id}. | بیداری {id} منسوخ کر دی گئی۔
+tui.schedule.notice_created | Scheduled {id} for {due}. | بیداری {id} کو {due} کے لیے شیڈول کی گئی۔
+tui.schedule.notice_edited | Saved {id} — next {due}. | بیداری {id} محفوظ — اگلی بار {due}۔
+tui.schedule.notice_no_scheduler | Read-only: this runtime has no wake scheduler. | صرف پڑھنے کے لیے: اس رن ٹائم میں بیداری شیڈولر نہیں۔
+tui.schedule.notice_read_only | Read-only: this conversation's runtime is on another device, so its wakes are listed, not changed. | صرف پڑھنے کے لیے: اس گفتگو کا رن ٹائم دوسرے ڈیوائس پر ہے، اس لیے اس کی بیداریاں صرف دکھائی جاتی ہیں، بدلی نہیں جاتیں۔
+tui.schedule.notice_supervisor | Nothing supervises these wakes — they fire only while this conversation is running. | ان بیداریوں کی نگرانی کوئی نہیں کرتا — یہ صرف اس گفتگو کے چلنے کے دوران چلتی ہیں۔
+tui.schedule.notice_write_failed | The change was not saved: {error} | تبدیلی محفوظ نہیں ہوئی: {error}
+tui.schedule.notify_on | notify | اطلاع
+tui.schedule.session_unavailable | This conversation is still starting; its wakes are not available yet. | گفتگو ابھی شروع ہو رہی ہے؛ اس کی بیداریاں ابھی دستیاب نہیں۔
+tui.schedule.slash_help | This conversation's scheduled wakes | اس گفتگو کی شیڈول شدہ بیداریاں
+tui.schedule.status_due | due now | ابھی چلنے کا وقت
+tui.schedule.status_overdue | overdue {age} | {age} سے تاخیر
+tui.schedule.status_scheduled | scheduled | شیڈول شدہ
+tui.schedule.subtitle | {count, plural, one {# wake in this conversation} other {# wakes in this conversation}} | {count, plural, one {# بیداری اس گفتگو میں} other {# بیداریاں اس گفتگو میں}}
+tui.schedule.title | Scheduled wakes | شیڈول شدہ بیداریاں
+tui.schedule.value_off | off | بند
+tui.schedule.value_on | on | چالو

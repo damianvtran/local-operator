@@ -1,0 +1,173 @@
+{
+  "schema": 1,
+  "audit_id": "zh24r2",
+  "locale": "zh-CN",
+  "namespace": "wire.remote_compute",
+  "fix_commit": "cb716031e335aa27e632227f1a0303e143dcd19f",
+  "source_revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "method": "Read-only comparison of the pre-fix target at cb716031e3^, the current target at HEAD, and the exact proposed text parsed from the pre-fix zh24a1 report. ICU arguments and plural selectors are parsed by the repo's own runtime; width is measured in display cells with representative values.",
+  "changed_key_count": 6,
+  "all_values_match_proposal": true,
+  "all_values_changed": true,
+  "all_argument_sets_equal": true,
+  "all_renders_ok": true,
+  "over_budget": [],
+  "rows": [
+    {
+      "key": "wire.remote_compute.api_override",
+      "pre_fix": "由于设置了LOP_REMOTE_COMPUTE_API_URL，远程计算正将你的Radient登录信息和请求发送到{host}，而不是默认的Radient API。除非你控制该主机，否则取消该设置。",
+      "current": "由于设置了LOP_REMOTE_COMPUTE_API_URL，远程计算正将你的Radient登录信息和请求发送到{host}，而不是默认的Radient API。除非你控制该主机，否则取消设置该变量。",
+      "proposed_by_pre_fix_audit": "由于设置了LOP_REMOTE_COMPUTE_API_URL，远程计算正将你的Radient登录信息和请求发送到{host}，而不是默认的Radient API。除非你控制该主机，否则取消设置该变量。",
+      "proposal_found": true,
+      "matches_proposed_text_exactly": true,
+      "changed_from_pre_fix": true,
+      "en_sha256": "9d3a0731178ec1b3d9a2a1141f873ff0ea0ec14fd1377c041aa8aefaecd77451",
+      "current_sha256": "5d439e07cf40c34089719b594fc587034b93c3cbb82204ab273228933daea66e",
+      "en_arguments": [
+        [
+          "host",
+          "simple"
+        ]
+      ],
+      "zh_arguments": [
+        [
+          "host",
+          "simple"
+        ]
+      ],
+      "argument_sets_equal": true,
+      "en_plural_selectors": [],
+      "zh_plural_selectors": [],
+      "rendered": "由于设置了LOP_REMOTE_COMPUTE_API_URL，远程计算正将你的Radient登录信息和请求发送到<host>，而不是默认的Radient API。除非你控制该主机，否则取消设置该变量。",
+      "render_error": null,
+      "rendered_cells": 152,
+      "maxCells": null,
+      "over_budget": null
+    },
+    {
+      "key": "wire.remote_compute.bad_sha",
+      "pre_fix": "--sha值必须是完整的40字符提交SHA：分支名或缩写哈希可能解析为与本次运行提交时不同的提交。",
+      "current": "--sha值必须是完整的40字符提交SHA：分支名或缩写哈希可能解析成另一个提交，而不是本次运行提交时指定的那个提交。",
+      "proposed_by_pre_fix_audit": "--sha值必须是完整的40字符提交SHA：分支名或缩写哈希可能解析成另一个提交，而不是本次运行提交时指定的那个提交。",
+      "proposal_found": true,
+      "matches_proposed_text_exactly": true,
+      "changed_from_pre_fix": true,
+      "en_sha256": "b7075613b114d247c89a46a072ad3c360f2ef4b66afab54b37bf2f0260aa162a",
+      "current_sha256": "94132776b44b8559b1d5b0c380401cff84ddf96dbfaf09901962e8fee4ebb962",
+      "en_arguments": [],
+      "zh_arguments": [],
+      "argument_sets_equal": true,
+      "en_plural_selectors": [],
+      "zh_plural_selectors": [],
+      "rendered": "--sha值必须是完整的40字符提交SHA：分支名或缩写哈希可能解析成另一个提交，而不是本次运行提交时指定的那个提交。",
+      "render_error": null,
+      "rendered_cells": 108,
+      "maxCells": null,
+      "over_budget": null
+    },
+    {
+      "key": "wire.remote_compute.finished_unknown",
+      "pre_fix": "远程运行{run_id}已不再运行，但Radient未报告此版本能够识别的结果。",
+      "current": "远程运行{run_id}已不再运行，但Radient未报告此构建能够识别的结果。",
+      "proposed_by_pre_fix_audit": "远程运行{run_id}已不再运行，但Radient未报告此构建能够识别的结果。",
+      "proposal_found": true,
+      "matches_proposed_text_exactly": true,
+      "changed_from_pre_fix": true,
+      "en_sha256": "00d80a224d3472f364daa1740cc33cfe68dcb66d85206b79f079e80a78e7b643",
+      "current_sha256": "e2634b51f77fb413931b2888d6fa13c40bcf0d55d4a1028990f34703aee75739",
+      "en_arguments": [
+        [
+          "run_id",
+          "simple"
+        ]
+      ],
+      "zh_arguments": [
+        [
+          "run_id",
+          "simple"
+        ]
+      ],
+      "argument_sets_equal": true,
+      "en_plural_selectors": [],
+      "zh_plural_selectors": [],
+      "rendered": "远程运行01J8Z3K4M5N6P7Q8R9S0T1U2V3已不再运行，但Radient未报告此构建能够识别的结果。",
+      "render_error": null,
+      "rendered_cells": 83,
+      "maxCells": null,
+      "over_budget": null
+    },
+    {
+      "key": "wire.remote_compute.needs_prompt",
+      "pre_fix": "--remote需要提示词：将任务作为唯一的定位参数传入。",
+      "current": "--remote需要提示词：将任务作为唯一的位置参数传入。",
+      "proposed_by_pre_fix_audit": "--remote需要提示词：将任务作为唯一的位置参数传入。",
+      "proposal_found": true,
+      "matches_proposed_text_exactly": true,
+      "changed_from_pre_fix": true,
+      "en_sha256": "4e4fccf3dec00375fd672e72d3343105c5c16fa6a645403bf6a2313998d2b45e",
+      "current_sha256": "8b446b0c9c4321d802db3b771363f0f5e9318ab4360928a01865968b765c9269",
+      "en_arguments": [],
+      "zh_arguments": [],
+      "argument_sets_equal": true,
+      "en_plural_selectors": [],
+      "zh_plural_selectors": [],
+      "rendered": "--remote需要提示词：将任务作为唯一的位置参数传入。",
+      "render_error": null,
+      "rendered_cells": 50,
+      "maxCells": null,
+      "over_budget": null
+    },
+    {
+      "key": "wire.remote_compute.retrying",
+      "pre_fix": "Radient报告此运行出错并正在重试，因此继续监视。",
+      "current": "Radient报告此运行出错并正在重试，因此本次监视继续。",
+      "proposed_by_pre_fix_audit": "Radient报告此运行出错并正在重试，因此本次监视继续。",
+      "proposal_found": true,
+      "matches_proposed_text_exactly": true,
+      "changed_from_pre_fix": true,
+      "en_sha256": "fd1ba910af329c4e9e46359abe2a1527e92c59cd047d0f255d05e1255535f87f",
+      "current_sha256": "9b2c80948d2b79c98508108816812e5c20cf0348a14ec5f873d91d7d61b3d9f3",
+      "en_arguments": [],
+      "zh_arguments": [],
+      "argument_sets_equal": true,
+      "en_plural_selectors": [],
+      "zh_plural_selectors": [],
+      "rendered": "Radient报告此运行出错并正在重试，因此本次监视继续。",
+      "render_error": null,
+      "rendered_cells": 51,
+      "maxCells": null,
+      "over_budget": null
+    },
+    {
+      "key": "wire.remote_compute.status_unknown",
+      "pre_fix": "状态：{status}（此版本不认识的状态；仍在监视）",
+      "current": "状态：{status}（此构建不认识的状态；仍在监视）",
+      "proposed_by_pre_fix_audit": "状态：{status}（此构建不认识的状态；仍在监视）",
+      "proposal_found": true,
+      "matches_proposed_text_exactly": true,
+      "changed_from_pre_fix": true,
+      "en_sha256": "a97cdb0839bebf04398ec2b6db0c418435521a2a37cee4f49e03f56299e95042",
+      "current_sha256": "f0826278c21269fa14827fcd00983af080c7660e0fb09e7306dcc76c5161e8f0",
+      "en_arguments": [
+        [
+          "status",
+          "simple"
+        ]
+      ],
+      "zh_arguments": [
+        [
+          "status",
+          "simple"
+        ]
+      ],
+      "argument_sets_equal": true,
+      "en_plural_selectors": [],
+      "zh_plural_selectors": [],
+      "rendered": "状态：running（此构建不认识的状态；仍在监视）",
+      "render_error": null,
+      "rendered_cells": 45,
+      "maxCells": null,
+      "over_budget": null
+    }
+  ]
+}

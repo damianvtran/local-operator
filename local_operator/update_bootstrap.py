@@ -203,6 +203,47 @@ def _run(argv: list[str], *, env: dict[str, str], deadline: float) -> None:
         raise BootstrapError(f"controller preparation exited {code}; no forced fallback")
 
 
+def _base_interpreter() -> Path:
+    """The real interpreter a freshly prepared controller venv is built from.
+
+    THE SEED RUNS WITH THE *INSTALLED* GENERATION'S PACKAGE, NOT THIS REF'S.
+    ``scripts/lop-update.sh`` extracts the seed from the target ref and runs it
+    with ``-P`` under the interpreter of the generation already installed, so a
+    name introduced by a newer ref is simply ABSENT at import time: asking for
+    ``procname.real_interpreter`` directly raised ``AttributeError`` on the
+    first update that carried it, and ``main`` catches only
+    ``BootstrapError``/``OSError``/``ValueError``/``KeyError``/``BadZipFile`` —
+    the machine stayed on the old build with a traceback.
+
+    So the seam is asked for by BOTH spellings it has ever had, and the answer
+    falls back to resolving ``sys.executable``, which is what the pre-runtime
+    layout's module answered for a venv interpreter. The fallback cannot reach a
+    runtime clone: a package with neither name predates the clone layout
+    entirely, so its ``sys.executable`` is the generation venv's link into the
+    shared build.
+    """
+    try:
+        from local_operator import procname
+    except Exception:  # noqa: BLE001 — an unimportable probe is a fallback, not a failure
+        return _resolved_executable()
+    for attribute in ("real_interpreter", "_real_interpreter"):
+        resolve = getattr(procname, attribute, None)
+        if resolve is None:
+            continue
+        try:
+            answer = resolve()
+        except Exception:  # noqa: BLE001 — the probe's own contract is never raise
+            answer = None
+        if answer is not None:
+            return Path(answer)
+    return _resolved_executable()
+
+
+def _resolved_executable() -> Path:
+    executable = sys.executable or ""
+    return Path(os.path.realpath(executable)) if executable else Path(executable)
+
+
 def bootstrap(args: argparse.Namespace) -> int:
     if args.caller != CALLER_CONTRACT:
         raise BootstrapError(
@@ -229,7 +270,21 @@ def bootstrap(args: argparse.Namespace) -> int:
         for key in tuple(env):
             if key.startswith("CMUX_") or key == "XPC_FLAGS":
                 env.pop(key, None)
-        _run([uv, "venv", "--python", sys.executable, str(prefix)], env=env, deadline=deadline)
+        # The base for the controller venv must be the REAL interpreter, not
+        # ``sys.executable``: once this process runs through the branded
+        # symlink, that path is the runtime clone. ``uv venv --python <clone>``
+        # does build a working venv, but its ``pyvenv.cfg`` then names the
+        # clone, so the controller is based on a copy this layout may replace
+        # (a corrupt image is republished) and every plant from it has to map
+        # back through the clone's ``source`` marker.
+        # ``_base_interpreter`` owns the version-skew rule; the local import it
+        # performs is why this module stays stdlib-only up to that call.
+        base_interpreter = _base_interpreter()
+        _run(
+            [uv, "venv", "--python", str(base_interpreter), str(prefix)],
+            env=env,
+            deadline=deadline,
+        )
         python = prefix / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
         _run(
             [uv, "pip", "install", "--python", str(python), str(wheel)],

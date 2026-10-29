@@ -54,18 +54,31 @@ def test_locator_regex_is_bounded_and_scans_in_fixed_windows():
 def test_pathological_inputs_extract_nothing_and_do_not_blow_up():
     for text in ("a" * 32768, "a@" + "b" * 32768, "a" * 16384 + "b" * 16384, "a.-" * 11000):
         assert extract(text) == []
-    # Legitimate locators are still found, including inside a long run of filler.
-    found = extract("x" * 30000 + " see docs/plan.md and ops@example.com " + "y" * 30000)
-    assert {row["body"] for row in found} == {"docs/plan.md", "ops@example.com"}
+    # Legitimate locators still ride as context on a knowledge fact, including
+    # from inside a long run of filler.
+    found = extract(
+        "## Progress\n- Checked the plan.\n"
+        + "x" * 30000
+        + " see docs/plan.md and ops@example.com "
+        + "y" * 30000,
+        locators=True,
+    )
+    assert len(found) == 1
+    assert "docs/plan.md" in found[0]["body"]
+    assert "ops@example.com" in found[0]["body"]
 
 
 def test_capture_keeps_short_shas_and_drops_bare_long_hex():
-    found = {
-        row["body"]
-        for row in extract("fix in a3bf4f1b2c3d; key 0123456789abcdef0123456789abcdef01234567")
-    }
-    assert "a3bf4f1b2c3d" in found
-    assert not any(len(body) > 12 and body.isalnum() for body in found), found
+    found = extract(
+        "## Key Decisions\n"
+        "- Fixed the parser.\n"
+        "fix in a3bf4f1b2c3d; key 0123456789abcdef0123456789abcdef01234567",
+        locators=True,
+    )
+    assert len(found) == 1
+    body = found[0]["body"]
+    assert "a3bf4f1b2c3d" in body
+    assert "0123456789abcdef0123456789abcdef01234567" not in body
 
 
 # ---- R2 ---------------------------------------------------------------------------------

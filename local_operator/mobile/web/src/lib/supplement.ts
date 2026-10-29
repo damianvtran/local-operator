@@ -108,6 +108,21 @@ export type SupplementComponent = {
 };
 
 /**
+ * One generated sound on the wire (`SupplementSound` in the core contract:
+ * `{attachment, mime, title, duration_s}`). The digest is the one routing key —
+ * bytes and peaks are both addressed by it — so a malformed entry is dropped at
+ * read time rather than listed as a player that could never fill.
+ */
+export type SupplementSound = {
+	attachment: string;
+	mime: string;
+	/** The sound's display title, from the producer; never chrome. */
+	title: string;
+	/** Seconds, from the record that wrote it; `0` when it stated none. */
+	durationS: number;
+};
+
+/**
  * One anchor's newest beat, as the relay's projection carries it (the live
  * `SupplementProgressEvent` fields and, on a cold open, the durable row —
  * the same keys, plus fields this surface does not read).
@@ -123,6 +138,12 @@ export type SupplementBeat = {
 	filesMore: number;
 	more: string[];
 	components: SupplementComponent[];
+	/**
+	 * Every sound the turn generated, in generation order. `[]` on a projection
+	 * from an older runtime (the field is additive), which renders nothing —
+	 * never an empty player row.
+	 */
+	sounds: SupplementSound[];
 	error: string;
 	/**
 	 * The typed cause of a provider-terminal failure (`provider_<kind>`, the
@@ -186,6 +207,38 @@ export function componentsFrom(value: unknown): SupplementComponent[] {
 		.filter((component): component is SupplementComponent => component !== null);
 }
 
+/** One sound, read field-by-field; a malformed entry is dropped, never guessed. */
+function soundFrom(value: unknown): SupplementSound | null {
+	if (!value || typeof value !== "object") return null;
+	const sound = value as Record<string, unknown>;
+	const attachment = typeof sound.attachment === "string" ? sound.attachment : "";
+	/* The digest addresses BOTH the bytes and the peaks, so a sound without a
+	   valid one could be listed but never played: drop it rather than paint a
+	   control that cannot fill (the same rule `componentFrom` states). */
+	if (!isDigest(attachment)) return null;
+	return {
+		attachment,
+		mime: typeof sound.mime === "string" ? sound.mime : "audio/mpeg",
+		title: typeof sound.title === "string" ? sound.title : "",
+		durationS: finiteNumber(sound.duration_s) ?? 0,
+	};
+}
+
+/**
+ * The `sounds[]` array, tolerated malformed as a whole (absent = empty).
+ *
+ * THERE IS NO CAP HERE and none may be added: a batch tops out at 50 items and
+ * every sound the turn generated is an artifact in its own right. A three-item
+ * head slice is what made a 14-item batch read as three sounds, so this reader
+ * returns the whole list the row carries (the relay's own `SOUNDS_MAX` bound).
+ */
+export function soundsFrom(value: unknown): SupplementSound[] {
+	if (!Array.isArray(value)) return [];
+	return value
+		.map(soundFrom)
+		.filter((sound): sound is SupplementSound => sound !== null);
+}
+
 /** The contract's digest shape: 32 lowercase hex characters. */
 export const DIGEST_RE = /^[a-f0-9]{32}$/;
 
@@ -228,6 +281,7 @@ export function beatFromWire(value: unknown): SupplementBeat | null {
 		filesMore,
 		more,
 		components: componentsFrom(raw.components),
+		sounds: soundsFrom(raw.sounds),
 		error: typeof raw.error === "string" ? raw.error.slice(0, ERROR_MSG_MAX_CHARS) : "",
 		cause: typeof raw.cause === "string" ? raw.cause.slice(0, CAUSE_MAX_CHARS) : "",
 		dismissed: raw.dismissed === true,
@@ -352,7 +406,9 @@ export function supplementDisposition(
 		return "nothing";
 	}
 	if (state === "done") {
-		return beat.files.length || beat.components.length ? "block" : "nothing";
+		return beat.files.length || beat.components.length || beat.sounds.length
+			? "block"
+			: "nothing";
 	}
 	let line: SupplementDisposition;
 	if (state === "failed") line = "failed_retry";

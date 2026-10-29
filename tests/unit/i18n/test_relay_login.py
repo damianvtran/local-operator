@@ -193,15 +193,21 @@ def test_incomplete_namespace_falls_back_as_whole_login(monkeypatch, tmp_path, s
     assert daemon.resolve_language() == "fr"
 
 
-def test_held_namespace_file_cannot_override_backend_eligibility(monkeypatch, tmp_path) -> None:
+def test_namespace_file_cannot_override_backend_eligibility(monkeypatch, tmp_path) -> None:
+    # The security invariant outlives the zh-CN disposition: a catalogue file
+    # on disk never makes a locale eligible. Every supported locale now ships,
+    # so the unshipped backend state is produced by narrowing the generated set
+    # in isolation; the fixture copy then proves the file is ignored rather
+    # than rendered under the zh-CN tag.
     root = tmp_path / "catalogues"
     (root / "en").mkdir(parents=True)
     (root / "zh-CN").mkdir()
     source = (ROOT / "local_operator/i18n/catalogues/en/relay.login.json").read_text()
     (root / "en/relay.login.json").write_text(source)
-    held = {key: "Held catalogue fixture" for key in json.loads(source)}
-    (root / "zh-CN/relay.login.json").write_text(json.dumps(held))
+    fixture = {key: "Held catalogue fixture" for key in json.loads(source)}
+    (root / "zh-CN/relay.login.json").write_text(json.dumps(fixture))
     monkeypatch.setattr(catalogues, "catalogue_root", lambda: root)
+    monkeypatch.setattr(resolve, "shipped_locales", lambda: ("en",))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "config.yml").write_text("values:\n  language: zh-CN\n")
     assert daemon.resolve_language() == "en"

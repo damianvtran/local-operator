@@ -1,0 +1,11 @@
+cli.exec_remote_help.budget_usd | Spending cap for this run in US dollars (default: the server's admission default) | اس رن کے لیے امریکی ڈالر میں اخراجات کی حد (ڈیفالٹ: سرور کی طے شدہ حد)
+cli.exec_remote_help.cancel | Cancel a remote run and exit | ریموٹ رن منسوخ کر کے باہر نکلیں
+cli.exec_remote_help.detach | Print the run id and idempotency key, then exit instead of watching the run | رن id اور idempotency key پرنٹ کریں، پھر نگرانی کے بجائے باہر نکلیں
+cli.exec_remote_help.idempotency_key | Idempotency key to reuse instead of minting a fresh one, so a retry of a submitted run cannot run twice | نئی key بنانے کے بجائے استعمال کرنے کے لیے idempotency key، تاکہ جمع شدہ رن کو retry کرنے پر وہ دوبارہ نہ چلے
+cli.exec_remote_help.max_hours | Hours the remote run may execute before the server stops it (default: 2; the server caps the maximum) | سرور کے روکنے سے پہلے ریموٹ رن کے چلنے کے گھنٹے (ڈیفالٹ: 2؛ سرور زیادہ سے زیادہ حد مقرر کرتا ہے)
+cli.exec_remote_help.network | Network to submit the run through, by name or id. Required when this device is in more than one network | رن جمع کرانے کا نیٹ ورک، نام یا id سے۔ اس ڈیوائس کے ایک سے زیادہ نیٹ ورکس میں ہونے پر درکار
+cli.exec_remote_help.remote | Run this task on Radient remote compute (tier 1: short-lived runs) instead of this machine | اس کام کو اس مشین کے بجائے Radient ریموٹ کمپیوٹ پر چلائیں (tier 1: قلیل مدتی رنز)
+cli.exec_remote_help.repo | Git URL the remote run checks out. Required with --remote: local files are never uploaded | Git URL جسے ریموٹ رن checkout کرے گا۔ --remote کے ساتھ درکار: مقامی فائلیں کبھی upload نہیں ہوتیں
+cli.exec_remote_help.sha | Commit to check out in --repo. Required with --remote | --repo میں checkout کرنے والا commit۔ --remote کے ساتھ درکار
+cli.exec_remote_help.size | Compute size for the remote run: s, m or l (default: m) | ریموٹ رن کا compute size: s، m یا l (ڈیفالٹ: m)
+cli.exec_remote_help.status | Print one remote run as JSON and exit | ایک ریموٹ رن JSON میں پرنٹ کر کے باہر نکلیں

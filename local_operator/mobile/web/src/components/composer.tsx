@@ -9,6 +9,7 @@
  * command) and a stop button appears beside it.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useFootFit } from "../lib/use-foot-fit";
 import { getCommands, HttpError, sendCommand, transcribeAudio } from "../api";
 import {
 	getPendingContinuation,
@@ -34,8 +35,10 @@ import {
 } from "../pending-echo";
 import { Sheet } from "./ui/sheet";
 import { UsageSheet } from "./usage-sheet";
+import { SessionStatus, meterFacts } from "./session-status";
 import { WorkingDirectoryChip } from "./directory-sheet";
 import { cn } from "../lib/cn";
+import { textDirection } from "../lib/bidi";
 import { messageRuntime, useCapabilities, useDraft } from "../store";
 import type { PromptImage, SessionProjection, SlashCommand } from "../types";
 
@@ -243,7 +246,7 @@ function SlashSheet({
 					spellCheck={false}
 					autoCapitalize="off"
 					autoCorrect="off"
-					className="mb-1 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
+					className="mb-1 min-h-11 rounded-sm bg-canvas px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
 				{filtered.map((c) => (
 					<button
@@ -259,9 +262,9 @@ function SlashSheet({
 							}
 							onClose();
 						}}
-						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-start active:bg-surface"
 					>
-						<span className="shrink-0 font-mono text-mono-sm text-ink">
+						<span dir="ltr" className="shrink-0 font-mono text-mono-sm text-ink">
 							/{c.name}
 							{c.arguments === "required" ? (
 								<span className="text-ink-dim"> …</span>
@@ -289,11 +292,18 @@ function SlashSheet({
 function EffortSheet({
 	open,
 	onClose,
+	onBack,
 	pid,
 	projection,
 }: {
 	open: boolean;
 	onClose: () => void;
+	/** Back to the model list this view was opened FROM (UX review round 1, U2).
+	    The effort rungs replace the model rows in the same sheet slot, so without
+	    this the only way back to the model list was to close the sheet and press
+	    the meta button again. Named for its DESTINATION, the drawer's own
+	    convention, using the model sheet's existing title copy. */
+	onBack: () => void;
 	pid: string;
 	projection: SessionProjection;
 }) {
@@ -308,12 +318,20 @@ function EffortSheet({
 	return (
 		<Sheet open={open} onClose={onClose} title="effort">
 			<div className="flex flex-col p-2">
+				<button
+					type="button"
+					onClick={onBack}
+					aria-label={messageRuntime.t("relay.session.model.sheet_title")}
+					className="flex min-h-11 w-11 items-center rounded-sm px-2 text-start text-ink-dim active:bg-surface"
+				>
+					<span aria-hidden>‹</span>
+				</button>
 				{projection.effort_ladder.map((rung) => (
 					<button
 						key={rung}
 						type="button"
 						onClick={() => set(rung)}
-						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-start active:bg-surface"
 					>
 						<span
 							className={cn(
@@ -336,19 +354,6 @@ function EffortSheet({
 
 const MAX_TEXTAREA_PX = 6 * 22; /* six lines at body line-height */
 const CONTINUATION_ERROR = "Couldn’t continue this conversation. Try again.";
-/* U15's other half (UX round 1, U20; reworded for issue #1875): on an ENDED
-   session the generic line's `Try again.` is not the whole story — the runtime
-   is gone — and the old sentence ("tap resume to continue") was WRONG about the
-   mechanism: a send to an ended session is itself resume-then-send (the daemon
-   wakes a host for a prompt with no live entry and the continuation carries the
-   text into it), so resume is never a prerequisite. A send that FAILED here means
-   that wake failed, and the honest remedies are the two that exist: send again
-   (the retained draft goes under the same envelope), or resume, which is the one
-   thing a send cannot do — reopen the session without composing. (The composer
-   is NOT disabled for an ended session: a disabled composer would change the
-   draft, attachment and retained-envelope flows, and sending is a real way back.) */
-const ENDED_CONTINUATION_ERROR =
-	"This session has ended and couldn’t be woken just now. Tap “Retry earlier instruction” to send it again, or reopen it from the sessions list.";
 const SLASH_ERROR = "Couldn’t run that command. Try again.";
 const STEER_ERROR = "Couldn’t send this instruction. Try again.";
 /* U5: one vocabulary for the retained instruction across the alert, the retry
@@ -379,14 +384,41 @@ const CONNECTING_STATUS = "Connecting…";
    ways of saying one thing). It appears only when there IS a draft that cannot
    go, which is the moment the question is asked. */
 const SENDING_HINT = `${CONNECTING_STATUS} — send again when this one lands.`;
-/* D1: the placeholder must FIT the textarea's narrowest resting width (184px
+/* THE EMPTY FIELD SAYS WHAT THE READER CAN DO, mirroring the desktop UI's
+   composer (`ui.chat.composer.placeholder.idle` / `.waiting`): ask while the
+   session is idle, steer while a turn is running. "In progress" is
+   `projection.streaming` — the same flag the header's subtitle reads for its
+   "Working" rung (`components/session-subtitle.tsx`) and the send button reads
+   to switch to the `steer` op, so the field, the button and the header cannot
+   disagree. An ENDED session reads as idle: a send there does wake it (in the
+   home folder), but that is behaviour, not field copy — the operator found
+   "Send to reopen in your home folder…" described plumbing, not the reader's
+   next step, and the header's `Ended` + Resume already carry the state.
+
+   D1: the placeholder must FIT the textarea's narrowest resting width (184px
    beside the mic at 390×844) or the empty box wraps to two lines and the
    first keystroke collapses it 45→24 with a visible reflow above the
-   composer (design round 1, D1). The old string measured 188.5px at 16px
-   system-ui — 4.5px over — this one measures 77.8px, which survives narrower
-   viewports and font fallbacks too. The product name is carried by the app
-   shell (document title, header mark). */
-const COMPOSER_PLACEHOLDER = "Message…";
+   composer (design round 1, D1). The desktop strings ("Ask anything. @ adds
+   files, / runs commands") are ~300px and cannot fit, so the relay carries
+   its own first-clause variants. Measured at 16px with the macOS system UI
+   font (CoreText; the widest of each locale's idle/steer pair): en 124.4
+   "Steer the agent…", es 156.4, fr 164.5, hi 107.6, ru 172.8, ur 139.4,
+   vi 162.7, zh-CN 120.4 — all under 184 (the old "Message…" was 77.8). es
+   was shortened to "Pregunta lo que sea…" because "…lo que quieras…"
+   measured 184.3. The margin is thinner than "Message…" had, so a new
+   locale or a longer rewording must be re-measured against 184. The
+   product name is carried by the app shell (document title, header mark).
+
+   The field's DIRECTION follows the placeholder's own script while the draft
+   is empty (`textDirection`), so an RTL placeholder keeps its trailing
+   ellipsis at its visual end and an LTR one cannot have it moved to the
+   visual start by the RTL document ("…Message", QA Q-6); once the reader
+   types, the field follows the draft's first strong character. */
+function composerPlaceholder(streaming: boolean): string {
+	return streaming
+		? messageRuntime.t("relay.chrome.composer.placeholder.steer")
+		: messageRuntime.t("relay.chrome.composer.placeholder.idle");
+}
 
 /* THE CLUSTER'S BOX, IN ONE PLACE. The composer is the biggest thing on this
    screen that arrives with the projection, and the conversation's first frame
@@ -396,22 +428,84 @@ const COMPOSER_PLACEHOLDER = "Message…";
    Sharing the class strings is what makes the match structural rather than a
    pair of numbers someone keeps in step by hand — the frame and the composer
    cannot disagree about the shell, the input row, the field or the control size. */
+/* ONE OPTICAL INSET, ALL FOUR SIDES (operator finding, round 2 verbatim: "too
+   much below and not enough above … how close the Message… placeholder is to the
+   top and left vs how everything else feels"). Measured on the 390 frame before
+   this change: placeholder 13.5 px from the top and left, the paperclip's glyph
+   21.5 px from the left, the meta text 23-25 px above the bottom and its folder
+   glyph 13 px from the left — four different numbers for one edge.
+
+   Now every one of them is 15 px, and the numbers are structural rather than
+   four hand-kept values:
+   - LEFT/top: `px-2` +`pt-1.5` on the shell (8 + 6 px) plus the field box's own
+     `px-1.5`/`py-1` put the placeholder at 15-15.5 px.
+   - BOTTOM: `pb-0.5` (2 px) plus the meta row's own centring of a 17.4 px line
+     inside its 44 px band (13.3 px) = 15.3 px under the meta text. The band stays
+     44 px tall, which is why the bottom padding is 2 px and not 8: an 8 px foot
+     under a full-height row read as 23 px of dead space.
+   - LEADING GLYPHS: the paperclip is centred in a 44 px circle, so its glyph sat
+     6 px right of the text column; `-ms-1.5` shifts the BOX by 6 px (the band
+     still starts inside the composer's own padding box, never outside it). The
+     folder glyph gets `ps-1.5` in `WorkingDirectoryChip` for the same reason.
+   Total height fits: 6 + 52 + 44 + 44 + 2 = 148 px, against 152 before. */
 const COMPOSER_SHELL =
-	"flex flex-col gap-1.5 px-3 pt-1.5 pb-[max(env(safe-area-inset-bottom),0.5rem)]";
-const COMPOSER_CWD_ROW = "flex min-w-0 flex-1 items-center px-0.5";
-const COMPOSER_INPUT_ROW = "flex items-end gap-2";
+	"lo-composer mx-2 mb-[max(env(safe-area-inset-bottom),0.5rem)] flex flex-col rounded-frame bg-elevated px-2 pt-2 pb-0.5";
+/* THE RIGHT-SIDE CONTROL CLUSTER, one shared constant for the real composer and
+   the first-paint frame (operator finding A). The stop and send discs are 44 px
+   `shrink-0` controls and the row carried no gap: the two circles touched, and
+   the send disc sat flush against the shell's foot, reading as one clipped blob
+   instead of two controls. 2 px is the measured separation required (>= 1-2 px)
+   and it is a `gap`, so it cannot double with any other spacing. `ms-auto` holds
+   the cluster at the inline end of its line now that the meta facts have a line
+   of their own. The shell's `pb-2` gives the controls the same clearance below
+   as `px-2` gives at the sides; neither value shrinks a 44 px target. */
+const COMPOSER_ACTION_CLUSTER = "ms-auto flex shrink-0 items-center gap-0.5";
+/* A fixed 44 px glyph slot. It was `flex-1 min-w-0`, which let the meta line
+   squeeze it to 2 px at 320 while the 44 px chip inside kept its width — the
+   chip then painted over the model button (measured, review round 1b). */
+const COMPOSER_CWD_ROW = "flex shrink-0 items-center";
+/* 2 px between every control in the row (operator finding A): the right-side
+   discs are grouped by `COMPOSER_ACTION_CLUSTER`, and this covers the left pair
+   (attach + workspace glyph) so no two 44 px targets sit flush anywhere in the
+   composer. Column gap only — the field keeps `basis-full`. */
+const COMPOSER_INPUT_ROW = "flex flex-wrap items-center gap-x-0.5";
 const COMPOSER_FIELD_BOX =
-	"flex min-w-0 flex-1 items-end rounded-md border bg-elevated px-3 py-2";
+	"order-first flex min-h-11 w-full min-w-0 basis-full items-end px-1.5 py-1.5";
 const COMPOSER_FIELD =
-	"lo-scroll max-h-33 min-h-6 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none placeholder:text-ink-muted";
+	"lo-scroll max-h-33 min-h-11 w-full resize-none bg-transparent text-[16px] leading-[1.4] text-ink outline-none placeholder:text-ink-muted";
 const COMPOSER_ROUND = "flex size-11 shrink-0 items-center justify-center rounded-full";
+/* The attach control opens the row, so its GLYPH is the row's first pixel of ink:
+   44 px round box, 18 px glyph → 13 px of centring. `-ms-1.5` (6 px) moves the box
+   so that glyph lands on the text column at 15 px. The band still starts 2 px
+   inside the composer's padding box (x = 8 - 6 = 2), never outside the composer. */
+const COMPOSER_LEADING = "-ms-1.5";
 /* The model/effort chips row, which is BELOW the field. It is easy to miss as
    part of the box and it is 44 px of it: a reserve without it left the field
    59 px lower than the real one, which is exactly the shift this whole frame
    exists to prevent (measured before it was added: field rect
    [64, 812, 262, 24] against the settled [77, 753, 236, 24]). */
-const COMPOSER_CHIP_ROW = "flex items-center gap-2 px-0.5";
-const COMPOSER_CHIP = "flex min-h-11 min-w-11 items-center font-mono text-mono-sm text-ink-dim";
+/* THE META FACTS GET THEIR OWN LINE (operator finding B, design D1). Measured
+   in the streaming state, the action line holds attach + stop + steer + the
+   workspace glyph, leaving 98 px at 320 and 168 px at 390 for the model and the
+   spend reading together; spend alone needs 96 px and "Claude Opus 5.5 · high"
+   129 px, so on one line the model could never show its version. On its own
+   full-width line it gets the row minus the glyph and the 96 px spend slot. The
+   structure is FIXED (not a width- or content-dependent wrap), so the
+   first-paint frame reserves exactly these lines and a stop button appearing
+   cannot reflow the composer. */
+/* SHORT VIEWPORTS put the meta facts INLINE,
+   between attach and the stop/send pair, so the footer is one 44 px line
+   instead of two. `basis-0`, not `basis-auto` (QA round 3, O1): an auto basis
+   is the facts' max-content width (cwd 44 + model label + the 96 px reading =
+   248 px at 320), so the line breaker sent the 90 px action pair to a SECOND
+   line, and that third composer row took 44 px from the above-composer slot
+   (20.6 px left at 320x440, Approve/Deny 20.5 px visible). A zero basis lets
+   the facts take only the leftover width; the model label is the elastic
+   element and truncates, and the reading compacts itself below 359 px wide
+   (`SessionStatus` compact), so nothing on the line needs to wrap. */
+const COMPOSER_CHIP_ROW =
+	"order-last flex min-w-0 basis-full items-center gap-1 overflow-x-clip short-column:order-none short-column:basis-0 short-column:flex-1";
+const COMPOSER_CHIP = "flex min-h-11 min-w-11 items-center text-meta tabular-nums text-ink-dim";
 
 /** The composer's box, empty, for the frames before a session's projection.
 
@@ -453,53 +547,22 @@ function PaperclipGlyph() {
 }
 
 export function ComposerFrame() {
-	return (
-		<div className={COMPOSER_SHELL} aria-hidden>
-			<div className={COMPOSER_CWD_ROW}>
-				<div className="min-h-11" />
-			</div>
-			<div className={COMPOSER_INPUT_ROW}>
-				{/* The settled empty composer's own three glyphs and placeholder, in
-				   their DISABLED styling: the attach disc at `opacity-50`, the field
-				   empty with `Message…`, the send disc `bg-sunken`
-				   /`text-ink-disabled`. Design review round 1 (D1) measured the gap
-				   this closes: the reserve read as "ring + outline" with the
-				   right-hand control invisible (the sunken disc sits at 1.05:1
-				   against the canvas) and then three glyphs and a placeholder
-				   popped in at the reveal. */}
-				<span
-					className={cn(
-						COMPOSER_ROUND,
-						"border border-control text-ink-muted opacity-50",
-					)}
-				>
-					<PaperclipGlyph />
-				</span>
-				<div className={cn(COMPOSER_FIELD_BOX, "border-control")}>
-					<textarea
-						disabled
-						rows={1}
-						aria-hidden
-						tabIndex={-1}
-						placeholder={COMPOSER_PLACEHOLDER}
-						className={COMPOSER_FIELD}
-					/>
-				</div>
-				<span
-					className={cn(
-						COMPOSER_ROUND,
-						"bg-sunken text-ink-disabled",
-					)}
-				>
-					<span aria-hidden>↑</span>
-				</span>
-			</div>
-			<div className={COMPOSER_CHIP_ROW}>
-				<span className={cn(COMPOSER_CHIP, "flex-1")} />
-				<span className={COMPOSER_CHIP} />
+	/* The frame is drawn BEFORE the projection arrives, so it cannot know
+	   whether a turn is running; it carries the idle copy, which is what the
+	   live composer shows for every state except a running turn (ended
+	   included). A frame that matches the live field for the common case is
+	   the no-pop contract `session-view.first-frame.test.tsx` pins. */
+	const placeholder = composerPlaceholder(false);
+	return <div className={COMPOSER_SHELL} aria-hidden>
+		<div className={COMPOSER_INPUT_ROW}>
+			<div className={COMPOSER_FIELD_BOX}><textarea disabled aria-hidden rows={1} tabIndex={-1} placeholder={placeholder} dir={textDirection(placeholder)} className={COMPOSER_FIELD} /></div>
+			<span className={cn(COMPOSER_ROUND, COMPOSER_LEADING, "text-ink-disabled")}><PaperclipGlyph /></span>
+			<div className={COMPOSER_CHIP_ROW}><span className={COMPOSER_CHIP} /></div>
+			<div className={COMPOSER_ACTION_CLUSTER}>
+				<span className={cn(COMPOSER_ROUND, "bg-sunken text-ink-disabled")}>↑</span>
 			</div>
 		</div>
-	);
+	</div>;
 }
 
 /* The dictation outcome lines (U2/U3/D2), rendered in the same polite status
@@ -518,15 +581,22 @@ export function Composer({
 	pid,
 	projection,
 	onOpenModels,
-	onOpenEffort,
+	onReturnToModels,
 	effortOpen,
 	onCloseEffort,
 	autoFocus = false,
+	ended,
+	short = false,
+	onFitLevel,
 }: {
 	/** Route pid — the discovery record's, not the fold's (which stamps 0). */
 	pid: string;
 	projection: SessionProjection;
 	onOpenModels: () => void;
+	/** The effort view's back control (UX round 2, U5): the same sheet, one step
+	    back inside it — NOT a fresh opening, so the caller must not clear the
+	    search text the way `onOpenModels` does. */
+	onReturnToModels: () => void;
 	onOpenEffort: () => void;
 	effortOpen: boolean;
 	onCloseEffort: () => void;
@@ -546,6 +616,16 @@ export function Composer({
 	    alternative — forcing a keyboard open from script — fights the platform
 	    and is worse than a focused field with a closed keyboard. */
 	autoFocus?: boolean;
+	/** Whether the session is ENDED as the header's status dot reads it — the
+	    screen passes `sessionHealth(...) === "ended"` (review round 2, R2-2 =
+	    U7). Not `projection.ended` alone: a conversation opened from history is
+	    a disk rebuild with no running owner (`pid: 0`, `ended: false`), the dot
+	    calls it Ended, and a send to it is the same wake, so the failure copy
+	    must say the same thing the header does. Defaults
+	    to the projection's own flag for callers without the screen's health. */
+	ended: boolean;
+	short?: boolean;
+	onFitLevel?: (level: number) => void;
 }) {
 	const [text, setText] = useDraft(pid);
 	/* U5/U8 (mobile UX batch 1): the sheet follows the draft only while the draft
@@ -629,6 +709,18 @@ export function Composer({
 		typeof navigator !== "undefined" &&
 		!!navigator.mediaDevices?.getUserMedia &&
 		typeof MediaRecorder !== "undefined";
+	/* EVERY INPUT THAT MOVES THE FACTS ROW'S GEOMETRY WITHOUT RESIZING THE ROW
+	   (QA Q2 = review R3-6): the model label, the reading's own rendered text
+	   (it spans spend, subagent spend and context, not just `usage`), and the
+	   mic, which takes 46 px from the line. Missing one let a cold load commit a
+	   stale level until the row's observer happened to fire. The count is passed
+	   on its own because the hook must know it even when it is not in the row. */
+	const queuedLabel = projection.queued_count > 0
+		? messageRuntime.t("relay.transcript.composer.queued", { count: projection.queued_count })
+		: "";
+	const readingKey = [projection.model_label, projection.effort, meterFacts(projection).label, micAvailable ? "mic" : ""].join("|");
+	const foot = useFootFit(short, readingKey, queuedLabel);
+	useEffect(() => { onFitLevel?.(foot.level); }, [foot.level, onFitLevel]);
 	const [dictation, setDictation] = useState<DictationState>("idle");
 	/* The transient outcome line (added / empty / discarded); lives in the same
 	   status row as the live states so nothing moves between them (D3). */
@@ -680,15 +772,17 @@ export function Composer({
 	   inference from the streaming flag: a turn that completes also flips
 	   streaming off, and only an aborted turn should offer "resume".
 
-	   AN ENDED SESSION YIELDS TO THE STRIP'S RESUME (UX round 1, U15). `ended`
+	   AN ENDED SESSION YIELDS TO THE HEADER'S RESUME (UX round 1, U15). `ended`
 	   and `stop_reason="aborted"` coexist on the shape the daemon serves after
 	   a mid-turn death (the terminal repaint fills the end from the durable
 	   record), and this button was the SECOND resume path — the prominent one,
 	   in the thumb zone — sending `continue` to a runtime that is gone, over
-	   and over. On an ended session the strip's `resume` is the one action: it
+	   and over. On an ended session the health sheet's `Resume` (also in the ⋮
+	   menu) is the one action: it
 	   is the path that respawns the session, and one act must not read as two
 	   different controls. */
-	const showResume = projection.stop_reason === "aborted" && !projection.ended;
+	const showResume = projection.stop_reason === "aborted" && !ended;
+	const placeholder = composerPlaceholder(projection.streaming);
 
 	/* WHICH word, when it does, follows the verdict the notice above it states.
 	   `aborted` covers a deliberate stop and a harness cut-off alike, and the
@@ -1157,8 +1251,18 @@ export function Composer({
 			}
 			setRetryEnvelope(getPendingContinuation(pid));
 			setError(
-				projection.ended
-					? ENDED_CONTINUATION_ERROR
+				ended
+					/* U15's other half (UX round 1, U20; issue #1875): on an ENDED
+					   session `Try again.` is not the whole story. A send to an ended
+					   session is itself resume-then-send (the daemon wakes a host for
+					   a prompt with no live entry), so a send that FAILED here means
+					   that wake failed, and the honest remedies are the two that
+					   exist: send again under the same envelope, or Resume. #3008
+					   review U5: Resume now lives behind the header's "Ended" control
+					   (and the ⋮ menu) — the sessions list never offered it. Keyed,
+					   unlike its neighbours, because it is new copy. (The composer is
+					   NOT disabled for an ended session: sending is a real way back.) */
+					? messageRuntime.t("relay.health.ended_send_failed")
 					: projection.streaming
 						? STEER_ERROR
 						: CONTINUATION_ERROR,
@@ -1239,7 +1343,7 @@ export function Composer({
 				<button
 					type="button"
 					onClick={() => void send("continue", "prompt")}
-					className="flex min-h-11 items-center justify-center rounded-sm border border-control bg-surface text-body-sm text-ink active:bg-elevated"
+					className="flex min-h-11 items-center justify-center rounded-sm bg-surface text-body-sm text-ink active:bg-elevated"
 				>
 					{resumeLabel}
 				</button>
@@ -1261,10 +1365,10 @@ export function Composer({
 				   than by colour alone. */
 				<div
 					className={cn(
-						"rounded-sm border px-3 py-2 text-body-sm",
+						"rounded-sm px-3 py-2 text-body-sm",
 						noticeTone === "success"
-							? "border-success-border bg-success-wash text-success"
-							: "border-control bg-elevated text-ink",
+							? "bg-success-wash text-success"
+							: "bg-elevated text-ink",
 					)}
 				>
 					<p role="status" aria-live="polite">{notice}</p>
@@ -1272,7 +1376,7 @@ export function Composer({
 			) : null}
 
 			{error ? (
-				<div className="rounded-sm border border-danger-border bg-danger-wash px-3 py-2 text-body-sm text-danger">
+				<div className="rounded-sm bg-danger-wash px-3 py-2 text-body-sm text-danger">
 					<p role="alert" aria-live="assertive">{error}</p>
 					{retryPending ? (
 						<>
@@ -1282,7 +1386,7 @@ export function Composer({
 							<button
 								type="button"
 								onClick={() => void send(text)}
-								className="mt-2 min-h-11 rounded-sm border border-danger-border px-3"
+								className="mt-2 min-h-11 rounded-sm px-3"
 							>
 								{RETRY_BUTTON_LABEL}
 							</button>
@@ -1302,7 +1406,7 @@ export function Composer({
 							type="button"
 							onClick={() => removeImage(img.preview)}
 							aria-label="remove attachment"
-							className="relative size-14 overflow-hidden rounded-sm border border-control"
+							className="relative size-14 overflow-hidden rounded-sm border-control"
 						>
 							<img
 								src={img.preview}
@@ -1370,18 +1474,6 @@ export function Composer({
 				</div>
 			) : null}
 
-			{/* THE WORKING-DIRECTORY CHIP. It sits directly above the input cluster
-			    (rather than beside the send controls) so it never competes with them
-			    for width on a narrow phone, and so the row it opens is where a reader
-			    already looks when asking "where is this session working?". */}
-			<div className={COMPOSER_CWD_ROW}>
-				<WorkingDirectoryChip
-					sessionId={pid}
-					cwd={shownCwd}
-					onMoved={requestMove}
-				/>
-			</div>
-
 			<div
 				className={COMPOSER_INPUT_ROW}
 				onDragOver={(e) => {
@@ -1410,7 +1502,8 @@ export function Composer({
 					aria-label="attach image"
 					className={cn(
 						COMPOSER_ROUND,
-						"border border-control text-ink-muted active:bg-elevated disabled:opacity-50",
+						COMPOSER_LEADING,
+						"text-ink-muted active:bg-elevated disabled:opacity-50",
 					)}
 				>
 					<PaperclipGlyph />
@@ -1435,10 +1528,10 @@ export function Composer({
 									: "start voice input"
 						}
 						className={cn(
-							"flex size-11 shrink-0 items-center justify-center rounded-full border active:bg-elevated disabled:opacity-50",
+							"flex size-11 shrink-0 items-center justify-center rounded-full active:bg-elevated disabled:opacity-50",
 							dictation === "recording"
-								? "border-danger-border bg-danger-wash text-danger"
-								: "border-control text-ink-muted",
+								? "bg-danger-wash text-danger"
+								: "text-ink-muted",
 						)}
 					>
 						{dictation === "transcribing" ? (
@@ -1455,7 +1548,7 @@ export function Composer({
 				<div
 					className={cn(
 						COMPOSER_FIELD_BOX,
-						dragOver ? "border-accent" : "border-control",
+						dragOver ? "outline-2 outline-accent" : "",
 					)}
 				>
 					<textarea
@@ -1469,7 +1562,9 @@ export function Composer({
 								void addFiles(files);
 							}
 						}}
-						placeholder={COMPOSER_PLACEHOLDER}
+						placeholder={placeholder}
+						aria-label={messageRuntime.t("relay.chrome.composer.label")}
+						dir={textDirection(text || placeholder)}
 						disabled={disabled}
 						rows={1}
 						enterKeyHint="send"
@@ -1485,58 +1580,60 @@ export function Composer({
 					/>
 				</div>
 
-				{projection.streaming ? (
+				{/* A single meta cluster replaces two 44 px bands. Each reading keeps
+				    its real picker; only the presentation changes, never send/retry
+				    routing or the pending-envelope lifetime. */}
+				<div ref={foot.rowRef} data-foot-level={foot.level} data-short={short ? "" : undefined} className={COMPOSER_CHIP_ROW}>
+					{/* THE COUNT IS WHOLE OR ELSEWHERE, never a fragment (design D8):
+					    `shrink-0 whitespace-nowrap`, so its box is its intrinsic width
+					    and the fit counts it as pressure. When even the last level cannot
+					    seat it beside the folder and the model's floor (L4: 320 + mic),
+					    it moves whole to the ⋮ menu and stays here as screen-reader text,
+					    so the count is still announced with the composer. */}
+					{queuedLabel && foot.level < 4 ? (
+						<span data-foot="queued" className="flex min-h-11 shrink-0 items-center whitespace-nowrap text-meta tabular-nums text-ink-dim">
+							{queuedLabel}
+						</span>
+					) : queuedLabel ? <span data-queued-moved className="sr-only">{queuedLabel}</span> : null}
+					<div data-foot="cwd" className={COMPOSER_CWD_ROW}><WorkingDirectoryChip sessionId={pid} cwd={shownCwd} onMoved={requestMove} /></div>
+					{/* The model chip is the model sheet's only door, so it never
+					   yields, and it never shows a bare glyph either: a lone ◇ did not
+					   say "model" (design D10), the label's first characters (`Cl…`)
+					   do. L3 pins it at its 44 px floor (`w-11 shrink-0`; without the
+					   width a `shrink-0` chip would take the whole label's width); every
+					   other level lets it grow into what is left. The mic is an action
+					   and keeps its full touch target at every level. */}
+					<button data-foot="model" type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, foot.level === 3 ? "w-11 shrink-0" : "min-w-0 flex-1 truncate", "active:text-ink")}
+						aria-label={messageRuntime.t("relay.chrome.composer.model_label", { label: [projection.model_label, projection.effort].filter(Boolean).join(" · ") })}>
+						<span className="truncate">{projection.model_label || "model"}{projection.effort ? ` · ${projection.effort}` : ""}</span>
+					</button>
+					<SessionStatus projection={projection} compact short={short} mode={foot.level >= 2 ? "hidden" : foot.level === 1 ? "short" : "full"} />
+				</div>
+
+				<div className={COMPOSER_ACTION_CLUSTER}>
+					{projection.streaming ? (
+						<button
+							type="button"
+							onClick={abort}
+							aria-label="stop"
+							className="flex size-11 shrink-0 items-center justify-center rounded-full bg-danger-wash text-danger active:bg-danger-wash"
+						>
+							■
+						</button>
+					) : null}
+
 					<button
 						type="button"
-						onClick={abort}
-						aria-label="stop"
-						className="flex size-11 shrink-0 items-center justify-center rounded-full border border-danger-border text-danger active:bg-danger-wash"
+						onClick={() => void send(text)}
+						disabled={retryPending || (!text.trim() && images.length === 0) || sending || disabled}
+						aria-label={sending ? "Connecting" : projection.streaming ? "steer" : "send"}
+						className="flex size-11 shrink-0 items-center justify-center rounded-full bg-accent text-on-accent active:bg-accent-active disabled:bg-sunken disabled:text-ink-disabled"
 					>
-						■
+						<span aria-hidden>{sending ? "…" : "↑"}</span>
 					</button>
-				) : null}
-
-				<button
-					type="button"
-					onClick={() => void send(text)}
-					disabled={retryPending || (!text.trim() && images.length === 0) || sending || disabled}
-					aria-label={sending ? "Connecting" : projection.streaming ? "steer" : "send"}
-					className="flex size-11 shrink-0 items-center justify-center rounded-full bg-accent text-on-accent active:bg-accent-active disabled:bg-sunken disabled:text-ink-disabled"
-				>
-					<span aria-hidden>{sending ? "…" : "↑"}</span>
-				</button>
+				</div>
 			</div>
 
-			<div className={COMPOSER_CHIP_ROW}>
-				{projection.queued_count > 0 ? (
-					<span className="font-mono text-mono-sm text-ink-dim">
-						{projection.queued_count} queued
-					</span>
-				) : null}
-				<span className="flex-1" />
-				{/* D5 (mobile UX batch): the model chip is ONE line with an ellipsis —
-				    under a long model label it used to wrap to two full-width lines
-				    and push the row's second chip off-screen. The chip shrinks under
-				    its content down to the 44px floor, and the truncating span
-				    supplies the ellipsis (the row itself stays on one line — flex
-				    rows never wrap). */}
-				<button
-					type="button"
-					onClick={onOpenModels}
-					className={cn(COMPOSER_CHIP, "active:text-ink-muted")}
-				>
-					<span className="truncate">{projection.model_label || "model"}</span>
-				</button>
-				{projection.effort_ladder.length > 0 ? (
-					<button
-						type="button"
-						onClick={onOpenEffort}
-						className={cn(COMPOSER_CHIP, "active:text-ink-muted")}
-					>
-						{projection.effort || "effort"}
-					</button>
-				) : null}
-			</div>
 
 			<SlashSheet
 				open={slashOpen && !disabled}
@@ -1549,6 +1646,7 @@ export function Composer({
 			<EffortSheet
 				open={effortOpen}
 				onClose={onCloseEffort}
+				onBack={() => { onCloseEffort(); onReturnToModels(); }}
 				pid={pid}
 				projection={projection}
 			/>

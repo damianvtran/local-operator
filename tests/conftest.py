@@ -47,6 +47,28 @@ import pytest
 #: variable names a session, window, socket, directory or credential.
 _AMBIENT_VARS = (
     "LOCAL_OPERATOR_CONFIG_DIR",
+    # The remote-compute API override names the host that receives the
+    # operator's Radient bearer. Inheriting a developer's staging value would
+    # point the suite's remote-compute client at a real host; tests that cover
+    # the override set their own loopback value.
+    "LOP_REMOTE_COMPUTE_API_URL",
+    # The per-build runtime image root (``procname.runtime_root``) is resolved
+    # against the PASSWD home, not ``$HOME``, so redirecting HOME above cannot
+    # keep a plant out of the operator's real ``~/.local/share/lop/runtime``.
+    # Any test that reaches a spawn path plants one image there — measured, not
+    # hypothetical: individual runs of ``test_daemon_plist_refresh.py``,
+    # ``secrets/test_broker_sweep.py`` and ``test_update.py`` each published a
+    # directory into the operator's real runtime root. The venv half of the same
+    # plant is gated by ``refuse_real_venv_plant`` below. Inherited from a developer's shell
+    # it steers where a test writes, so it is scrubbed like the rest and then
+    # REPLACED with a per-test scratch root in ``isolate_environment`` (a
+    # subprocess only sees an environment variable, not a monkeypatched
+    # function).
+    "LOCAL_OPERATOR_RUNTIME_ROOT",
+    # The memory admission floor's escape hatch (``memory_guard.admission_check``):
+    # an operator's inherited ``=0`` would waive the refusal the admission cells
+    # assert, so it is scrubbed; a cell that needs a floor sets its own.
+    "LOCAL_OPERATOR_ADMISSION_FLOOR_MB",
     # The open-frame trace names a real output file, read once at import.
     # Inheriting it could append test timings to the operator's trace; tests
     # that exercise tracing must opt in with their own isolated output path.
@@ -67,6 +89,13 @@ _AMBIENT_VARS = (
     # rather than by each test remembering.
     "LOCAL_OPERATOR_NO_DESKTOP_LAUNCH",
     "LOCAL_OPERATOR_DESKTOP_TOKEN",
+    # The DESCRIPTOR channel for the same bearer (``server/desktop.TOKEN_FD_ENV``,
+    # #3039): a number naming an inherited pipe the daemon reads its bearer from at
+    # serve start-up. Scrubbed, not explained as harmless: an inherited value names a
+    # real descriptor of the parent process (a desktop-launched shell carries one), so
+    # a test calling ``adopt_spawn_bearer`` would read -- and close or ``dup2`` over --
+    # whatever that fd is in pytest, and open the plane on a token no test chose.
+    "LOCAL_OPERATOR_DESKTOP_TOKEN_FD",
     "LOCAL_OPERATOR_DESKTOP_ORIGINS",
     # The static-route root allowlist (``server/utils/static_roots.ROOTS_ENV``),
     # a directory list that WIDENS what the server will serve. An inherited value
@@ -116,6 +145,9 @@ _AMBIENT_VARS = (
     # paths untested. The kill-switch cell sets the resolved constant through
     # ``monkeypatch`` explicitly, which is where that reason is written down.
     "LOP_NO_REPLY",
+    # Inbox kill switch is sampled at import; inherited off must not disable
+    # every test of the shipped tool. Explicit tests patch the resolved flag.
+    "LOP_NOTIFY",
     # The turn-supplement kill switch (``supplements/policy.SUPPLEMENTS``, read from
     # ``LOP_SUPPLEMENTS``). The same ESCAPE-HATCH class as the ask gate: the feature is the
     # shipped default, and an inherited kill value would silently move every cell that
@@ -135,6 +167,10 @@ _AMBIENT_VARS = (
     # deliberately, per test, which is the visible opt-in). Scrub it for every test
     # at once rather than trusting each cell to remember.
     "LOCAL_OPERATOR_SUBAGENT_LANE_BOUND_S",
+    # An inherited cadence override makes checkpoint timing depend on the
+    # developer's shell and can slow or starve tests. Tests needing a different
+    # cadence set their own value explicitly.
+    "LOCAL_OPERATOR_SUBAGENT_WIP_INTERVAL_S",
     # The episode boot's secret-resolution bound override
     # (``evaluation/runner/host_secrets.RESOLUTION_TIMEOUT_ENV``, read by the
     # evaluation host resolvers). The same ESCAPE-HATCH class as the lane bound
@@ -144,6 +180,13 @@ _AMBIENT_VARS = (
     # a bound nobody runs (CI round 1 on PR #2575, 2026-10-17). Cells that mean
     # to exercise a bound set it through ``monkeypatch`` explicitly.
     "LOCAL_OPERATOR_SECRET_RESOLUTION_TIMEOUT_MS",
+    # The Radient publish-preview budget (``clients/radient.PREVIEW_TIMEOUT_ENV``). The
+    # same ESCAPE-HATCH class as the bound above: the value MOVES how long a preview may
+    # take, so an inherited export would silently rewrite what every preview cell
+    # measures -- and the resolver reads it per call, which is exactly why nothing but a
+    # scrub can keep an operator's shell out of the reading. Cells that exercise a budget
+    # set it through ``monkeypatch`` explicitly, as ``test_radient_preview.py`` does.
+    "LOCAL_OPERATOR_RADIENT_PREVIEW_TIMEOUT_SECONDS",
     # The org destination guard's escape hatch (``providers/radient_credentials``
     # ``ORG_ALLOW_NONCANONICAL_ENV``): the explicit, OFF-by-default opt-in that
     # lets the CLI send a signed-in account's bearer to a NON-canonical hub. An
@@ -154,6 +197,13 @@ _AMBIENT_VARS = (
     # plausibly carries it. Cells that want it on set it through ``monkeypatch``
     # explicitly.
     "RADIENT_ORG_ALLOW_NONCANONICAL_BASE",
+    # Radient Saver's process override (``saver/gate.py`` ``ENV_OVERRIDE``) beats
+    # ``radient.saver.mode``: ``auto`` would turn the gate ON and route
+    # conversation history to Radient's prepare route from any test that builds
+    # a stream, and ``off`` would make every gate-on cell pass the gate-off
+    # path. Either way an inherited value decides what a cell measures, the
+    # escape-hatch class above. Cells set it through ``monkeypatch`` explicitly.
+    "LOP_RADIENT_SAVER",
     "LOCAL_OPERATOR_HOME",
     "LOCAL_OPERATOR_DEBUG",
     # Names the session a `lop secret` retrieval is attributed to in the audit
@@ -253,10 +303,36 @@ _AMBIENT_VARS = (
     # the suite observes. Tests that need it set it through
     # `tests/notification_opt_in.notification_path_opt_in`.
     "LOCAL_OPERATOR_NOTIFY_TEST_HOSTING",
+    # The escape hatch over the session store's LIVE-STORE guard
+    # (``session/cleanup.py::ALLOW_TEST_STORE_DELETIONS_ENV``): a test process may
+    # not delete a session directory, a pad's content or the handoff quarantine
+    # from the operator's own ``~/.local-operator``, and this variable waives
+    # that. An inherited value is the ALLOW_NESTED_SESSION failure exactly —
+    # every refusal cell in ``test_cleanup_live_store_guard.py`` (and every
+    # future one) would take the allow path while looking like it tested the
+    # refusal, and the guard that exists because a lane's pytest run deleted a
+    # real session would be proven by nothing. Scrubbed for the whole run; a
+    # cell that means to exercise the opt-in sets it through ``monkeypatch``,
+    # which is also where the reason is written down.
+    "LOCAL_OPERATOR_ALLOW_TEST_STORE_DELETIONS",
     # Tests launched from a detached operator inherit these runtime-only flags.
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",
     "LOP_RUNTIME_DEFER_MATERIALISE",
+    # The wake supervisor's per-invocation ownership stamp (#3028,
+    # ``wakes/owned_runtimes.OWNER_ENV``) and the flag that lets ``launch``
+    # propagate it. serve() sets both in its own environment, so a suite run
+    # from a shell (or an agent session) descended from a live supervisor
+    # inherits them, and every runtime a test then spawns would carry the LIVE
+    # supervisor's token: the cells that assert "only this invocation's
+    # children are marked" would pass on inherited state, and a live supervisor's
+    # stop sweep could match a test's child in a shared store.
+    "LOP_WAKE_SUPERVISOR_ACTIVE",
+    "LOP_WAKE_SUPERVISOR_OWNER",
+    # The supervisor's own pid, the stamp gate (#3028 review r4). Inherited from
+    # a live supervisor it is harmless on its own (no test process shares that
+    # pid), but it belongs to the same live-machine state as the token.
+    "LOP_WAKE_SUPERVISOR_PID",
     # The engage claim (``session/runtime/types.ENGAGED_ENV``), written by
     # ``launch._spawn_runtime`` for a warm and read at boot by
     # ``RuntimeServer``, which stamps ``SessionRecord.engaged_at`` from it. This
@@ -294,6 +370,15 @@ _AMBIENT_VARS = (
     # ``session/runtime/process.py``; the ambient-env test is what holds this
     # entry to that (QA round 1 of #1110).
     "LOP_MOBILE_CHILD_EFFORT",
+    # The SPEED dial the desktop plane pins for a draft born on a chosen model
+    # (ui#1265), read beside the level above and for the same reason: every
+    # child the test process spawns would otherwise construct its spec at a
+    # stranger's tier, so a provider-call or journal assertion measures the
+    # operator's shell rather than the fixture -- and fails nothing by itself,
+    # the same silent shape as RESUME and EFFORT (the fix for ui#1266 is what
+    # gave this name a reader; the ambient-env test is what caught it missing
+    # here). It is read by ``session/runtime/process.py``.
+    "LOP_MOBILE_CHILD_FAST",
     "LOP_MODEL_SELECTION_OVERRIDE",
     # The eval worker's scrub-channel transport (R1). The parent sets it per
     # spawn, but a worker that inherited a STALE value from the operator's own
@@ -405,6 +490,12 @@ _AMBIENT_VARS = (
     # feature, and the zero-footprint cells would pass for the wrong reason.
     # The aida conftest clears it for its own package; this scrubs it everywhere.
     "LOCAL_OPERATOR_NO_AIDA",
+    # The Librarian's kill switch (``librarian.state.ENV_DISABLE``) — the same
+    # escape-hatch class as Aida's above, with the same failure mode: every cell
+    # asserting her state, pause or organized count would silently drive a
+    # disabled install and pass for the wrong reason. Tests that exercise the
+    # disabled path set it deliberately with ``monkeypatch.setenv``.
+    "LOCAL_OPERATOR_NO_LIBRARIAN",
     # The startup shortcut's inheritance marker (``helpers.PATH_PRIMED_ENV``,
     # the bulk-resume lane's C1 cut): set by
     # ``setup_cross_platform_environment`` once a lineage has captured the
@@ -523,6 +614,217 @@ def scrub_import_time_environment() -> None:
 # is that no child can be spawned before it is in the environment.
 arm_process_desktop_gates()
 scrub_import_time_environment()
+
+
+#: The venv this suite runs from, resolved before any test can patch
+#: ``sys.prefix``. See :func:`refuse_real_venv_plant`.
+_SUITE_PREFIX = os.path.realpath(sys.prefix)
+#: The wrapper :func:`refuse_real_venv_plant` installed, so a second call is a no-op.
+_GUARDED_LINK_PATH: Callable[[], Path | None] | None = None
+
+
+def refuse_real_venv_plant() -> None:
+    """Never re-point the suite's own ``<venv>/bin/Local Operator``.
+
+    The per-test runtime root keeps the IMAGE out of the operator's tree, but
+    the link that names it lives in ``sys.prefix``: a test reaching a spawn or
+    plant path (``test_daemon_plist_refresh.py``, and the nested pytest in
+    ``secrets/test_broker_sweep.py``, both reproduced it) re-pointed the
+    worktree's real link at the per-test runtime root, and
+    ``tmp_path_retention_policy = "failed"`` then deleted that root and left
+    the link dangling. ``branded_link_path`` is where ``ensure_branded_interpreter``
+    and ``should_reexec`` both learn where to plant, so for the suite's own
+    prefix it answers ``None`` (rung 2).
+
+    Keyed on the PATH rather than opt-in by marker: the cells that exercise the
+    plant (``test_procname.py``'s ``branded`` fixture, the cross-tree cells)
+    patch ``sys.prefix`` to a fake venv under ``tmp_path`` and pass through.
+    Installed at IMPORT, not in a function-scoped fixture, because the nested
+    run plants from a MODULE-scoped teardown, after every function-scoped patch
+    has been undone. A test that monkeypatches ``branded_link_path`` gets this
+    wrapper back on undo. A child that does not load this conftest is not
+    covered.
+    """
+    global _GUARDED_LINK_PATH
+    from local_operator import procname
+
+    current = procname.branded_link_path
+    if current is _GUARDED_LINK_PATH:
+        return
+
+    def guarded() -> Path | None:
+        if os.path.realpath(sys.prefix) == _SUITE_PREFIX:
+            return None
+        return current()
+
+    _GUARDED_LINK_PATH = guarded
+    procname.branded_link_path = guarded
+
+
+refuse_real_venv_plant()
+
+
+class RuntimeRootEscape(RuntimeError):
+    """A test could resolve a runtime root outside its own scratch tree."""
+
+
+def _passwd_runtime_root() -> Path | None:
+    """The operator's REAL runtime root, as ``procname.runtime_root`` derives it."""
+    try:
+        import pwd
+
+        from local_operator.install_defaults import STABLE_ROOT_RELATIVE
+
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except Exception:  # noqa: BLE001 — no passwd entry: there is no real root to reach
+        return None
+    return home / STABLE_ROOT_RELATIVE / "runtime"
+
+
+#: The operator's real runtime root, read ONCE at import — before any test can
+#: monkeypatch ``pwd`` — so the guard below compares against the machine's root
+#: and never against a fixture's fake passwd home.
+_REAL_RUNTIME_ROOT = _passwd_runtime_root()
+#: Every real-root answer the guard refused, in order. Production callers of
+#: ``runtime_root`` swallow exceptions by design (a brand is decoration), so the
+#: raise alone would be silent; this list is what makes the refusal LOUD — the
+#: per-test check in ``isolate_environment`` and ``pytest_sessionfinish`` fail
+#: the run on any entry. See :func:`drain_runtime_root_escapes`.
+_RUNTIME_ROOT_ESCAPES: list[str] = []
+#: The wrapper :func:`refuse_real_runtime_root` installed, so a second call is a no-op.
+_GUARDED_RUNTIME_ROOT: Callable[[], Path | None] | None = None
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    resolved = Path(os.path.realpath(path))
+    bound = Path(os.path.realpath(root))
+    return resolved == bound or bound in resolved.parents
+
+
+def drain_runtime_root_escapes() -> list[str]:
+    """Return and clear the recorded escapes (for the cells that provoke one)."""
+    drained = list(_RUNTIME_ROOT_ESCAPES)
+    _RUNTIME_ROOT_ESCAPES.clear()
+    return drained
+
+
+def refuse_real_runtime_root() -> None:
+    """Make ``procname.runtime_root()`` refuse the operator's real root, process-wide.
+
+    The per-test override in ``isolate_environment`` covers a test BODY. It does
+    not cover code that runs while no function-scoped fixture is active —
+    collection-time imports, a module- or session-scoped fixture's teardown
+    (after every function-scoped ``monkeypatch`` has been undone), a hook. There
+    the variable is back to whatever the process had, and an unset variable
+    makes ``runtime_root()`` fall back to the passwd home — the operator's real
+    ``~/.local/share/lop/runtime`` — with nothing failing: every production
+    caller treats a missing brand as decoration and swallows the error.
+
+    So the answer is checked at the one function every plant, sweep and repair
+    asks. A real-root answer is recorded AND raised: the raise stops the write
+    on every path that does not catch it, and the record fails the run on the
+    paths that do. Installed at IMPORT for the same reason as
+    :func:`refuse_real_venv_plant`. A test that monkeypatches ``runtime_root``
+    gets this wrapper back on undo. A child process that does not load this
+    conftest is covered by the import-time default root instead (see
+    ``_SUITE_RUNTIME_ROOT``), not by this wrapper.
+    """
+    global _GUARDED_RUNTIME_ROOT
+    from local_operator import procname
+
+    current = procname.runtime_root
+    if current is _GUARDED_RUNTIME_ROOT:
+        return
+
+    def guarded() -> Path | None:
+        answer = current()
+        if (
+            answer is not None
+            and _REAL_RUNTIME_ROOT is not None
+            and _is_within(answer, _REAL_RUNTIME_ROOT)
+        ):
+            message = (
+                f"procname.runtime_root() answered {answer}, inside the operator's REAL "
+                f"runtime root {_REAL_RUNTIME_ROOT}; refused so nothing is planted, "
+                "swept or replaced there. LOCAL_OPERATOR_RUNTIME_ROOT was "
+                f"{os.environ.get('LOCAL_OPERATOR_RUNTIME_ROOT')!r}."
+            )
+            _RUNTIME_ROOT_ESCAPES.append(message)
+            raise RuntimeRootEscape(message)
+        return answer
+
+    _GUARDED_RUNTIME_ROOT = guarded
+    procname.runtime_root = guarded
+
+
+def _make_suite_runtime_root() -> str:
+    """A process-lifetime runtime root outside the operator's tree.
+
+    Removed at interpreter exit rather than in ``pytest_sessionfinish``: every
+    process that imports this module makes one — xdist workers, and nested runs
+    that import a fixture from here without its hooks — and only ``atexit``
+    reaches all of them.
+    """
+    import atexit
+    import tempfile
+
+    root = tempfile.mkdtemp(prefix="lop-test-runtime-")
+    atexit.register(shutil.rmtree, root, True)
+    return root
+
+
+#: The runtime root this process (and every child it spawns) uses OUTSIDE a test
+#: body. Set in the environment at import, replacing any inherited value, so a
+#: child that never loads this conftest — and code that runs after a test's
+#: ``monkeypatch`` is undone — still resolves a scratch root instead of falling
+#: back to the passwd home. ``isolate_environment`` still gives each test its
+#: own root on top of this; monkeypatch's undo restores THIS value, not "unset".
+#: Removed at interpreter exit (see :func:`_make_suite_runtime_root`).
+_SUITE_RUNTIME_ROOT = _make_suite_runtime_root()
+os.environ["LOCAL_OPERATOR_RUNTIME_ROOT"] = _SUITE_RUNTIME_ROOT
+refuse_real_runtime_root()
+
+
+def assert_runtime_root_isolated(scratch: Path) -> Path:
+    """Fail unless ``procname.runtime_root()`` resolves under ``scratch``.
+
+    Checking that ``LOCAL_OPERATOR_RUNTIME_ROOT`` is SET is not enough: the
+    failure this exists for was the code IGNORING it. A reviewer mutation that
+    made ``runtime_root()`` skip the variable let ``test_procname.py`` fixtures
+    delete and republish the operator's real ``~/.local/share/lop/runtime/<key>``
+    — the image every venv on the machine executes. So this asks the function
+    itself, compares its answer with the passwd-home root it would fall back
+    to, and raises naming both paths before the test body can plant anything.
+    """
+    value = os.environ.get("LOCAL_OPERATOR_RUNTIME_ROOT", "")
+    if not value:
+        raise RuntimeRootEscape(
+            "LOCAL_OPERATOR_RUNTIME_ROOT is unset or empty at fixture time; "
+            "procname.runtime_root() would fall back to the operator's real root "
+            f"{_passwd_runtime_root()}"
+        )
+    from local_operator import procname
+
+    resolved = procname.runtime_root()
+    if resolved is None:
+        raise RuntimeRootEscape("procname.runtime_root() answered None under the suite's override")
+    answer = Path(os.path.realpath(resolved))
+    real = _passwd_runtime_root()
+    if real is not None:
+        real_resolved = Path(os.path.realpath(real))
+        if answer == real_resolved or real_resolved in answer.parents:
+            raise RuntimeRootEscape(
+                f"procname.runtime_root() resolved to {answer}, the operator's REAL "
+                f"runtime root ({real_resolved}); refusing to run a test that could "
+                "plant or delete there"
+            )
+    bound = Path(os.path.realpath(scratch))
+    if answer != bound and bound not in answer.parents:
+        raise RuntimeRootEscape(
+            f"procname.runtime_root() resolved to {answer}, outside this test's "
+            f"scratch tree {bound}"
+        )
+    return resolved
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -667,6 +969,15 @@ def isolate_environment(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(home))  # Windows equivalent
     for name in _AMBIENT_VARS:
         monkeypatch.delenv(name, raising=False)
+    # ...and give every test a runtime root under its OWN scratch tree. The
+    # scrub above removes an inherited value; this is the positive half, and it
+    # must come after the loop. See the entry's comment in ``_AMBIENT_VARS``
+    # for what went wrong without it.
+    runtime = tmp_path_factory.mktemp("runtime")
+    monkeypatch.setenv("LOCAL_OPERATOR_RUNTIME_ROOT", str(runtime))
+    # ...and prove the code HONOURS it before any test body runs: the variable
+    # being set is not the guarantee, ``runtime_root()`` reading it is.
+    assert_runtime_root_isolated(runtime)
     # The suite must never reach the operator's DESKTOP either. A runtime with
     # no attached client announces a parked gate through `detached_notify`,
     # which on darwin spawns a real `osascript display notification` — so six
@@ -704,7 +1015,14 @@ def isolate_environment(tmp_path_factory, monkeypatch):
     # worker un-gated.
     for name, value in _PROCESS_DESKTOP_GATES:
         monkeypatch.setenv(name, value)
+    escapes_before = len(_RUNTIME_ROOT_ESCAPES)
     yield home
+    # LOUD, not silent: a production caller swallowed the guard's raise, so the
+    # record is the only trace. Fail THIS test rather than let it pass.
+    escaped = _RUNTIME_ROOT_ESCAPES[escapes_before:]
+    if escaped:
+        del _RUNTIME_ROOT_ESCAPES[escapes_before:]
+        pytest.fail("test reached the operator's real runtime root:\n" + "\n".join(escaped))
 
 
 @pytest.fixture(autouse=True)
@@ -783,6 +1101,42 @@ def refuse_real_notifier_spawn(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def refuse_real_secret_broker_spawn(request, monkeypatch):
+    """Refuse to START the secret broker from a unit test, unless the cell says so.
+
+    WHY A GUARD AT THE SEAM, ON TOP OF THE PER-TEST CONFIG DIR. A store READ calls
+    ``secrets.access.master_key_for`` -> ``secrets.client.ensure_broker``; on Linux
+    and macOS that SPAWNS a detached ``python -m local_operator.secrets.brokerd``
+    rooted at the config dir. In a unit test the config dir is ``tmp_path``, so the
+    daemon outlives the test and keeps creating ``secrets/broker.sock`` and
+    ``secrets/broker.lock`` while pytest's ``TemporaryDirectory`` is walking that
+    directory. Measured 2026-10-20: ``OSError: [Errno 39] Directory not empty:
+    '/tmp/tmp…/secrets'`` in the teardown of
+    ``test_key_prompt.py::test_prompt_reads_from_piped_stdin_without_getpass`` (run
+    39383034418, job 118496365150), and reproduced here as a live
+    ``Local Operator [secret broker]`` pid (50373) after the cell had passed. The
+    daemon also leaked for the rest of the worker's life, holding a store that no
+    longer existed.
+
+    THE FALLBACK IS THE DOCUMENTED ONE: ``ensure_broker`` returning False sends the
+    caller to the key file in keyfile mode, which is exactly what a test with a
+    fresh config root wants. Broker behaviour itself is still covered by the cells
+    that opt in with ``@pytest.mark.allow_secret_broker``; those own their daemon's
+    teardown. Same shape as ``refuse_real_notifier_spawn`` above: the production
+    path stays intact, and a test must say when it means to exercise it.
+    """
+    if request.node.get_closest_marker("allow_secret_broker"):
+        return
+    from local_operator.secrets import client as secrets_client
+
+    monkeypatch.setattr(
+        secrets_client,
+        "ensure_broker",
+        lambda base=None, *, timeout=None: False,
+    )
+
+
+@pytest.fixture(autouse=True)
 def isolate_implicit_local_discovery(monkeypatch):
     """Keyless discovery must not read a developer's default-port runtimes.
 
@@ -827,6 +1181,24 @@ def reset_store_maintenance() -> Iterator[None]:
         yield
     finally:
         reset_store_maintenance_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def reset_desktop_launch_capture() -> Iterator[None]:
+    """Give every test a process whose desktop bearer has not been adopted.
+
+    ``desktop.adopt_spawn_bearer`` latches the spawner's bearer in
+    ``_SPAWN_BEARER`` once per process, and ``tests/unit/test_cli_serve.py`` and
+    friends reach it in-process through ``cli.main()``, so without this reset a
+    later test's ``monkeypatch.setenv`` of the token would be answered from an
+    earlier test's latched value (or its absence).
+    """
+
+    from local_operator.server import desktop
+
+    desktop._SPAWN_BEARER = None
+    yield
+    desktop._SPAWN_BEARER = None
 
 
 @pytest.fixture(autouse=True)
@@ -1268,6 +1640,50 @@ def _broker_is_still_up(candidate: Path) -> bool:
         return True
 
 
+#: Escapes the CONTROLLER learned of from xdist workers (see
+#: :func:`pytest_testnodedown`), reported and failed in its own session finish.
+_WORKER_RUNTIME_ROOT_ESCAPES: list[str] = []
+#: The ``workeroutput`` key a worker ships its escape records under.
+_RUNTIME_ROOT_ESCAPES_KEY = "lop_runtime_root_escapes"
+
+
+def _fail_session_on_runtime_root_escapes(session: pytest.Session) -> None:
+    """Fail the run for escapes recorded OUTSIDE any test body.
+
+    Collection-time imports and wider-scoped teardowns have no test to fail, so
+    the session fails instead. Under xdist this runs in each WORKER, and xdist
+    reads a worker's exit status only to detect an interrupt, so a worker that
+    sets it changes nothing (agent review round 5, MAJOR). A worker therefore
+    ships its records to the controller in ``workeroutput``, and the controller
+    — which also runs this hook — fails the run on them.
+    """
+    workeroutput = getattr(session.config, "workeroutput", None)
+    if workeroutput is not None:
+        workeroutput[_RUNTIME_ROOT_ESCAPES_KEY] = list(_RUNTIME_ROOT_ESCAPES)
+        return
+    escapes = _RUNTIME_ROOT_ESCAPES + _WORKER_RUNTIME_ROOT_ESCAPES
+    if escapes:
+        print(
+            "[runtime-root] the suite reached the operator's real runtime root "
+            "outside a test body:\n" + "\n".join(escapes),
+            file=sys.stderr,
+        )
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node: object, error: object | None) -> None:
+    """Collect a finished worker's escape records on the controller.
+
+    ``optionalhook`` because xdist defines this hook, not pytest. A worker that
+    died before its session finished sends no ``workeroutput``; the root
+    conftest's own ``pytest_testnodedown`` already fails that run.
+    """
+    del error
+    output = getattr(node, "workeroutput", None) or {}
+    _WORKER_RUNTIME_ROOT_ESCAPES.extend(output.get(_RUNTIME_ROOT_ESCAPES_KEY, ()))
+
+
 def pytest_sessionfinish(session: pytest.Session) -> None:
     """Run the session-end broker net and say what it reclaimed.
 
@@ -1277,7 +1693,7 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     orphaned-process report is actually read. Silent at zero — the expected
     outcome must not add a line to every run.
     """
-    del session
+    _fail_session_on_runtime_root_escapes(session)
     with suppress(Exception):
         reclaimed = _sweep_session_leftovers(_SESSION_BASETEMP)
         if reclaimed:

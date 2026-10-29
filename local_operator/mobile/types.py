@@ -346,6 +346,15 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
             raise ValueError("ask_id must be a non-empty string")
         if "by" in frame and not isinstance(frame.get("by"), str):
             raise ValueError("by must be a string")
+        if op == "ask_dismiss" and "reason" in frame:
+            # The operator's word for why (design docs/design/ask-nonblocking.md
+            # §15): the same two words ``ask_withdraw`` takes. Refused at the wire
+            # so an unknown one is never half-applied; absent reads as ``moot``.
+            from local_operator.asks.render import DISMISS_BAD_REASON
+            from local_operator.asks.store import DISMISS_REASONS
+
+            if frame.get("reason") not in DISMISS_REASONS:
+                raise ValueError(DISMISS_BAD_REASON)
         if op in ("ask_respond", "ask_revise"):
             answers = frame.get("answers")
             if not isinstance(answers, dict):
@@ -551,7 +560,7 @@ ControlOp = Literal[
     # separate op is also what makes it fail closed on an old runtime.
     "ask_revise",  # {ask_id, answers: {qid: [str]}, by?}
     "ask_decline",  # {ask_id, by?}
-    "ask_dismiss",  # {ask_id, by?}
+    "ask_dismiss",  # {ask_id, by?, reason?}
     "snapshot",  # {} — ask for a fresh welcome-equivalent projection
     "ping",  # {} — liveness probe; answered with {"op": "ack", ...}
     # v2 (attach + reaping): phone SSE subscriber transitions, daemon ->
@@ -728,9 +737,66 @@ class TranscriptEntry:
     # Settled streaming is not the same as complete representation: transport
     # caps can replace this row with a prefix while preserving its message ID.
     text_complete: bool = True
+    # --- CONDENSATION FACTS (sparse; see ``to_json``) ---------------------
+    #
+    # These four are what the CLIENT's condensation model reads and this wire
+    # could not answer (docs/design/relay-condensation.md, gaps G2/G3/G5/G6):
+    #
+    # ``stop_reason`` - the provider's own declaration on an assistant row
+    # (``toolUse`` / ``stop`` / ``refusal``). The plan's "a turn is settled"
+    # rules read it: without it the lead-in frame - prose that settles a moment
+    # before its own tool row paints - reads as a CLOSE, so a cycle condenses and
+    # then un-condenses when the call arrives. That flip is what the desktop's
+    # ``settledCloseOf`` exists to prevent.
+    #
+    # ``calls_tools`` - the assistant row carries its own tool calls. It cannot
+    # be derived client-side: live tool ids are ``tc-<call>`` while durable ids
+    # are ``<msg>:<call>``, so prefix matching fails on exactly the rows a
+    # reconnect re-keys, and the fold legitimately drops some call rows (quiet,
+    # hidden ``send``, diverted asks), so "a tool row follows" is wrong too.
+    #
+    # ``custom_type`` - the verbatim ``custom_type`` of the ``CustomMessage`` a
+    # notice row was folded from (``job_result``, ``monitor_prompt``,
+    # ``hub_message``, ``wake_prompt``, ``session_incident``, ...). It is the
+    # receipt family: without it a wall of job results never folds and cannot
+    # open a cycle.
+    #
+    # ``terminal`` - this notice ENDS the turn (the ``:stop`` notice, an
+    # ``AgentEndEvent.error`` notice, a session incident). An explicit flag, not
+    # a severity heuristic: ``compaction_refused`` is error-level and is not
+    # terminal.
+    #
+    # TOP LEVEL, not in ``details``, because ``details`` is what the frame cap
+    # drops first (tier 3 sets it to ``{}``) and a fact the client needs on every
+    # repaint must survive that. SPARSE on the wire (``to_json``), because a
+    # capped frame is 700 KB and these are absent on most rows.
+    #
+    # BACK-COMPAT, both directions. An older client ignores keys it does not
+    # know (``_projection_from_json`` keeps only declared fields), so a new
+    # daemon talking to an old bundle degrades to today's behaviour. A new client
+    # reading an older daemon sees the defaults below, which is the desktop's own
+    # "unknown is absent" rule.
+    stop_reason: str = ""
+    calls_tools: bool = False
+    custom_type: str = ""
+    terminal: bool = False
 
     def to_json(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        # SPARSE: each condensation fact goes out only when it differs from its
+        # default. The fields are defaulted-and-omitted rather than
+        # ``None``-valued because every reader's rule is "unknown is absent",
+        # and a key that is always present but empty is the same absence with
+        # 75 bytes of wire cost per row on every repaint.
+        if not self.stop_reason:
+            data.pop("stop_reason", None)
+        if not self.calls_tools:
+            data.pop("calls_tools", None)
+        if not self.custom_type:
+            data.pop("custom_type", None)
+        if not self.terminal:
+            data.pop("terminal", None)
+        return data
 
 
 @dataclass
@@ -861,6 +927,16 @@ class PendingAskWire:
     answers: dict[str, list[str]] | None = None
     answered_by: dict[str, Any] | None = None
     answered_at: int | None = None
+    #: WHY and WHEN an ask was dismissed (SA-D8, design §17), carried on the ROW
+    #: because the desktop and the phone read rows, not sessions. ``dismissed_at``
+    #: is the stamp the shared visibility rule reads (``asks.store.dismissed_hidden``:
+    #: before the deadline keeps a settled receipt, at or after it leaves), and
+    #: ``dismissed_reason`` is the operator's own word (``moot`` |
+    #: ``answered_in_chat``). Absent on every other status, and ``to_json`` drops
+    #: ``None``, so a non-dismissed row is byte-identical to what every build
+    #: before these fields sent.
+    dismissed_at: int | None = None
+    dismissed_reason: str | None = None
     #: Refs to the images attached to the answer (``{qid: [{"attachment",
     #: "mime_type", "bytes"}]}``); never bytes. Absent for a text-only ask --
     #: ``to_json`` drops ``None`` -- so the phone wire is unchanged for them.
@@ -871,6 +947,15 @@ class PendingAskWire:
     #: they exist so the mirrored card advances to the next question between an
     #: old client's taps. Absent on every ask answered the atomic way.
     draft_question_ids: list[str] | None = None
+    #: THE ASK CARD'S CONTEXT LINE (SA-D7, design §15): operator messages admitted
+    #: since this ask was raised, and the latest one's time (ms). ``None`` when the
+    #: writing runtime could not count them (an older runtime, an ask older than
+    #: its window, a session with no operator message yet), and ``to_json`` drops
+    #: ``None`` — so an uncountable ask's wire row is byte-identical to what every
+    #: build before this field sent. A zero IS sent: it states that the ask is
+    #: newer than every message, and the card draws no line for it either way.
+    user_messages_since: int | None = None
+    last_user_message_at: int | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {key: value for key, value in asdict(self).items() if value is not None}
@@ -920,6 +1005,21 @@ class PendingRequest:
     # memory. The flag rides; the credential VALUE never does, same rule as
     # ``secret``. Defaulted for the same version-skew reason as ``recommended``.
     persist: bool = False
+    # The approval rule in force when this gate was raised, and where it came
+    # from (``session`` = the conversation's own record, ``global`` = the file,
+    # ``pin`` = a --yolo start). The phone and desktop need BOTH halves to show
+    # "Ask — session override; global Auto": the mode alone cannot say which
+    # precedence rung won, and a surface that re-derives it from config.yml is
+    # wrong exactly when the operator set a per-conversation mode. Empty on an
+    # ask card, and on a payload from an older runtime — defaulted for the same
+    # version-skew reason as ``recommended``.
+    approval_mode: str = ""
+    approval_provenance: str = ""
+    #: The machine default the mode outranks (``ask``/``auto``), or ``""`` when
+    #: the publisher cannot state it. Kept separate from ``approval_mode``
+    #: because a session override and the file can hold the same word, and a
+    #: viewer that derives "the other one" is wrong exactly then (U4).
+    approval_global_mode: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -1071,7 +1171,37 @@ class SessionProjection:
     queued_count: int = 0  # user messages waiting for the turn boundary
     ended: bool = False  # process gone; history still resumable
     degraded: bool = False  # record fresh but socket unreachable
+    #: THE RELAY'S "IS THE OWNER STILL ANSWERING" VERDICT, for the phone's header
+    #: status dot. ``True`` when the runtime's record has not been re-stamped
+    #: (``heartbeat_at``) inside ``SESSION_HEALTH_WINDOW_S`` AND no projection
+    #: frame has arrived from it inside the same window; ``False`` when either
+    #: is fresh. Written only by the relay daemon (``daemon._sync_heartbeat_stale``,
+    #: from its registry scan); a runtime never knows its own staleness.
+    #:
+    #: WHY A VERDICT AND NOT AN AGE. A ``heartbeat_age_s`` would be frozen at
+    #: the instant the frame was serialised, and a phone holding that frame
+    #: while the runtime goes quiet would keep painting the old, fresh number —
+    #: the frame stops arriving exactly when the age would need to grow. The
+    #: daemon re-evaluates the verdict on every scan and pushes a repaint on
+    #: each transition, so the one window lives in ONE server constant.
+    #:
+    #: ``None`` IS "NOT REPORTED": an older daemon omits the key, and a durable
+    #: rebuild has no live owner to measure. A client must read ``None`` as "no
+    #: heartbeat evidence either way" and paint nothing from it — never as
+    #: stale, which would turn every older relay's sessions yellow.
+    heartbeat_stale: bool | None = None
     transcript: list[TranscriptEntry] = field(default_factory=list)
+    #: Whether ``transcript[0]`` is the conversation's OPENING user message
+    #: pinned ahead of a disjoint tail (see ``ProjectionFold._cap_tail`` and
+    #: ``cap_projection_frame``'s tail tier), rather than the tail's own oldest
+    #: row. The client's first history cursor is the oldest TAIL row: paging
+    #: from the pinned opener asks for history older than the conversation's
+    #: first message and gets nothing, which is the "gap then the very start"
+    #: field report. Length is not a usable proxy — the frame cap can publish a
+    #: pinned tail of ``FRAME_CAP_TRANSCRIPT_FLOOR`` rows — so the pin is
+    #: stated here. SPARSE: absent means false, which is what an older daemon
+    #: and an uncapped projection both mean.
+    transcript_head_pinned: bool = False
     # Optional DISPLAY capability, never inferred from raw entry details. Old
     # owners omit it; only the updated owner source binding sets version 1.
     peer_cycles: int | None = None
@@ -1164,6 +1294,19 @@ class SessionProjection:
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
+        # THE ROWS SERIALISE THROUGH THEIR OWN ``to_json``, not through
+        # ``asdict``'s walk of them. Every dataclass field survives ``asdict``
+        # with its DEFAULT, so the condensation facts came out on every row of
+        # every frame as ``stop_reason: ""``, ``calls_tools: false``,
+        # ``custom_type: ""``, ``terminal: false`` — four keys times up to 120
+        # rows that say nothing, which is exactly the cost ``TranscriptEntry``'s
+        # sparse ``to_json`` exists to avoid, and it moved the frame digest the
+        # offloop cost pin records. Sparse-on-the-wire has to hold on the FRAME
+        # path or it does not hold at all: the frame is the only push form.
+        if self.transcript:
+            data["transcript"] = [row.to_json() for row in self.transcript]
+        if not self.transcript_head_pinned:
+            data.pop("transcript_head_pinned", None)
         if self.peer_cycles is None:
             data.pop("peer_cycles", None)
         data["pending"] = self.pending.to_json() if self.pending else None
@@ -1177,6 +1320,12 @@ class SessionProjection:
             data.pop("asks", None)
         if self.asks_open is None:
             data.pop("asks_open", None)
+        # Same absence rule for the health verdict: ``None`` ("not reported" —
+        # a durable rebuild, a relay that never measured) is POPPED, so a
+        # durable frame stays byte-identical to what it was before the field
+        # existed and only a live frame the daemon measured carries the key.
+        if self.heartbeat_stale is None:
+            data.pop("heartbeat_stale", None)
         # The per-channel spend object follows the same absence rule as
         # ``asks`` above: a None field is POPPED rather than sent as null, so
         # the key's presence is the capability proxy — an old runtime never

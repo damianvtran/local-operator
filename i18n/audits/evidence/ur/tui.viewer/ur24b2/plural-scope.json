@@ -1,0 +1,15 @@
+[
+  {
+    "namespace": "relay.session.tags",
+    "key": "relay.session.tags.more",
+    "en": "{count, plural, one {# more tag} other {# more tags}}",
+    "ur": "{count, plural, one {# مزید ٹیگ} other {# مزید ٹیگز}}",
+    "context": {
+      "role": "accessible name of the row's +N mark",
+      "tone": "ICU plural on count; lowercase.",
+      "note": "Owned relay SPA session copy. The visible mark is only +N, so this is the whole sentence assistive tech gets."
+    },
+    "changed": false,
+    "flags": []
+  }
+]

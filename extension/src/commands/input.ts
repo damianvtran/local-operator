@@ -1,13 +1,16 @@
+import { locatorSuggestions, parseLocator, resolveLocator } from "../driver/ax-locator";
 import { BridgeCommandError, cdp, requireSurface } from "../cdp";
 import { withOriginGate } from "../origins";
 import { CHROME_API_DEADLINE_MS, deadline, settle } from "../settle";
 import { getRefs, surfaceToken, type StoredSurface } from "../state";
+import { readAXTree } from "./ax-tree";
 
 interface QueryResult { nodeId?: number }
 interface PushResult { nodeIds: number[] }
 interface DocumentResult { root: { nodeId: number } }
 interface ResolvedNode { object: { objectId: string } }
 interface CallResult { result: { value?: unknown } }
+interface DescribedNode { node: { backendNodeId?: number } }
 
 async function objectIdFor(tabId: number, nodeId: number): Promise<string> {
   const resolved = await cdp<ResolvedNode>(tabId, "DOM.resolveNode", { nodeId });
@@ -32,9 +35,76 @@ async function callOnNode<T>(
 /* Exported because `upload` resolves its file input through it: a second copy of
  * the ref/selector resolution would be a second place for the
  * `pushNodesByBackendIdsToFrontend` document-request fixup to be forgotten. */
-export async function nodeIdFor(surface: StoredSurface, selector: unknown): Promise<number> {
+/** The closest real elements for a selector that matched nothing.
+ *
+ * The measured loop: nine CSS guesses, each a whole tool call, each answering
+ * only "element not found". Reading the a11y tree on the FAILURE path (never a
+ * success) lets the miss name the elements that DO exist with the locator that
+ * targets each — one correction instead of the next guess.
+ *
+ * Best-effort by construction: a tree read that fails here must not replace the
+ * caller's own error, so an empty list is the fallback.
+ */
+async function missCandidates(surface: StoredSurface, selector: string) {
+  const nodes = await readAXTree(surface).catch(() => []);
+  return locatorSuggestions(nodes, selector);
+}
+
+/** What resolved a click/type target, and which node it resolved to. */
+export interface ResolvedTarget {
+  nodeId: number;
+  by: "ref" | "css" | "locator";
+  role?: string;
+  name?: string;
+  /** How many AX nodes matched a locator; the first is the one returned. */
+  matched?: number;
+}
+
+/* An accessibility locator resolved against the page's real a11y tree.
+ *
+ * The tree is read through `readAXTree`, i.e. under the SAME per-tab queue a
+ * snapshot uses: the resolution is a second reader of one debuggee's a11y
+ * engine, and interleaving it with a snapshot's enable/disable window is how a
+ * page's tree comes back degraded for the other caller.
+ *
+ * A miss throws with the locator, the count, and up to five CANDIDATES (slice
+ * 4's diagnostics live in `locatorSuggestions`): in the measured incident each
+ * wrong guess cost a whole tool call and taught the agent nothing, so nine
+ * guesses happened. Naming the nearest real elements turns the same failure
+ * into one correction.
+ */
+async function resolveLocatorTarget(
+  surface: StoredSurface,
+  locator: NonNullable<ReturnType<typeof parseLocator>>,
+  source: string,
+): Promise<ResolvedTarget> {
+  const nodes = await readAXTree(surface);
+  const hit = resolveLocator(nodes, locator);
+  if (!hit) {
+    throw new BridgeCommandError("element_not_found", `no element matches ${source}`, {
+      candidates: locatorSuggestions(nodes, source),
+      matched: 0,
+    });
+  }
+  await cdp<DocumentResult>(surface.tabId, "DOM.getDocument", { depth: 0 });
+  const pushed = await cdp<PushResult>(surface.tabId, "DOM.pushNodesByBackendIdsToFrontend", {
+    backendNodeIds: [hit.backendNodeId],
+  });
+  const nodeId = pushed.nodeIds[0];
+  if (!nodeId) {
+    throw new BridgeCommandError("element_not_found", `${source} is no longer in the document`);
+  }
+  return { nodeId, by: "locator", role: hit.role, name: hit.name, matched: hit.matched };
+}
+
+export async function resolveTarget(surface: StoredSurface, selector: unknown): Promise<ResolvedTarget> {
   const tabId = surface.tabId;
   if (typeof selector !== "string" || !selector) throw new BridgeCommandError("element_not_found", "selector is required");
+  // A locator is tried BEFORE CSS: `role=…`/`label=…`/`text=…` are not valid
+  // CSS, so parsing first cannot shadow a selector, and it keeps the
+  // framework-generated-id case out of DOM.querySelector entirely.
+  const locator = parseLocator(selector);
+  if (locator) return resolveLocatorTarget(surface, locator, selector);
   // Refs are read from THIS surface's own map: a snapshot taken on another
   // concurrently-driven tab must never supply the click target here.
   const refs = await getRefs(surfaceToken(surface));
@@ -52,12 +122,57 @@ export async function nodeIdFor(surface: StoredSurface, selector: unknown): Prom
     const pushed = await cdp<PushResult>(tabId, "DOM.pushNodesByBackendIdsToFrontend", { backendNodeIds: [ref.backendNodeId] });
     const node = pushed.nodeIds[0];
     if (!node) throw new BridgeCommandError("element_not_found", "snapshot ref is stale");
-    return node;
+    return { nodeId: node, by: "ref" };
   }
   const document = await cdp<DocumentResult>(tabId, "DOM.getDocument", { depth: 0 });
   const queried = await cdp<QueryResult>(tabId, "DOM.querySelector", { nodeId: document.root.nodeId, selector });
-  if (!queried.nodeId) throw new BridgeCommandError("element_not_found", `selector ${selector} matched nothing`);
-  return queried.nodeId;
+  if (!queried.nodeId) {
+    throw new BridgeCommandError("element_not_found", `selector ${selector} matched nothing`, {
+      candidates: await missCandidates(surface, selector),
+      matched: 0,
+    });
+  }
+  return { nodeId: queried.nodeId, by: "css" };
+}
+
+/* `nodeIdFor` is the narrow contract `upload` and the selector hops use; every
+ * caller that wants to REPORT what it resolved (click/type) uses
+ * `resolveTarget` directly. */
+export async function nodeIdFor(surface: StoredSurface, selector: unknown): Promise<number> {
+  return (await resolveTarget(surface, selector)).nodeId;
+}
+
+/* A CSS selector's element, named by the id the ACCESSIBILITY tree uses.
+ *
+ * `snapshot` scoping needs this rather than `nodeIdFor`: the AX tree indexes
+ * nodes by `backendDOMNodeId`, while every other DOM command speaks frontend
+ * node ids that belong to one session's document and change between them.
+ * The describe hop is what translates the queried node into the stable id, and
+ * `depth: 0` keeps it to the element itself. Exported from here (rather than a
+ * second file) so the document-request dance and the typed miss stay in ONE
+ * place; a snapshot that cannot find its scope must fail exactly like a click
+ * that cannot find its target.
+ */
+export async function backendNodeIdForSelector(surface: StoredSurface, selector: string): Promise<number> {
+  const tabId = surface.tabId;
+  if (!selector) throw new BridgeCommandError("element_not_found", "selector is required");
+  const document = await cdp<DocumentResult>(tabId, "DOM.getDocument", { depth: 0 });
+  const queried = await cdp<QueryResult>(tabId, "DOM.querySelector", { nodeId: document.root.nodeId, selector });
+  if (!queried.nodeId) {
+    // Same diagnostics on the snapshot-scope path: `snapshot selector="#nope"`
+    // is a miss the caller has to correct, and it is exactly where a section's
+    // real name is least obvious.
+    throw new BridgeCommandError("element_not_found", `selector ${selector} matched nothing`, {
+      candidates: await missCandidates(surface, selector),
+      matched: 0,
+    });
+  }
+  const described = await cdp<DescribedNode>(tabId, "DOM.describeNode", { nodeId: queried.nodeId, depth: 0 });
+  const backendNodeId = described.node?.backendNodeId;
+  if (backendNodeId === undefined) {
+    throw new BridgeCommandError("element_not_found", `selector ${selector} has no backend node id`);
+  }
+  return backendNodeId;
 }
 
 // The click/type paths drive the resolved node directly rather than computing
@@ -78,7 +193,11 @@ export async function click(
       `chrome.tabs.get(${surface.tabId})`,
     )
   ).url ?? "";
-  const nodeId = await nodeIdFor(surface, params.selector ?? params.ref);
+  // `resolved` is what lets the tool say WHICH element it clicked — a locator
+  // answer that reads back as the locator is verifiable by the caller, while
+  // "clicked e57" sends it back to the snapshot to find out what e57 was.
+  const target = await resolveTarget(surface, params.selector ?? params.ref);
+  const nodeId = target.nodeId;
   await cdp(surface.tabId, "DOM.scrollIntoViewIfNeeded", { nodeId });
   const objectId = await objectIdFor(surface.tabId, nodeId);
   // Race a short grace window for a navigation the click may start. A click is
@@ -135,13 +254,14 @@ export async function click(
     `chrome.tabs.get(${surface.tabId})`,
   );
   const navigated = navigationSeen || (tab.url ?? "") !== before;
-  return { navigated, url: tab.url ?? "", title: tab.title ?? "" };
+  return { navigated, url: tab.url ?? "", title: tab.title ?? "", resolved: target };
 }
 
 export async function typeText(params: Record<string, unknown>): Promise<Record<string, unknown>> {
   const surface = await requireSurface(params.tab);
   const selector = params.selector ?? params.ref;
-  const nodeId = await nodeIdFor(surface, selector);
+  const target = await resolveTarget(surface, selector);
+  const nodeId = target.nodeId;
   await cdp(surface.tabId, "DOM.scrollIntoViewIfNeeded", { nodeId });
   const objectId = await objectIdFor(surface.tabId, nodeId);
   // Replace-not-append (the cmux fill-vs-type lesson): focus, set the value on
@@ -177,5 +297,5 @@ export async function typeText(params: Record<string, unknown>): Promise<Record<
     CHROME_API_DEADLINE_MS,
     `chrome.tabs.get(${surface.tabId})`,
   );
-  return { value: value ?? "", url: tab.url ?? "", title: tab.title ?? "" };
+  return { value: value ?? "", url: tab.url ?? "", title: tab.title ?? "", resolved: target };
 }

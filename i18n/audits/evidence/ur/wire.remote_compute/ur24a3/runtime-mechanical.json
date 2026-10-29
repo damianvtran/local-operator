@@ -1,0 +1,29 @@
+{
+  "scoped_key_count": 19,
+  "counts_by_namespace": {
+    "wire.errors.settings": 1,
+    "wire.remote_compute": 1,
+    "wire.settings": 16,
+    "wire.slash": 1
+  },
+  "errors": {
+    "key_parity": [],
+    "arguments": [],
+    "selectors": [],
+    "non_nfc": [],
+    "bidi_controls": [],
+    "non_latin_digits": []
+  },
+  "technical_token_candidates": [],
+  "plural_message_count": 0,
+  "plural_samples": [],
+  "plural_render_errors": [],
+  "maxCells": [],
+  "credential_artifact_check": {
+    "literal_redaction_artifact_absent": true,
+    "unicode_replacement_character_absent": true,
+    "english_credentials_absent": true,
+    "native_plural_matches_existing_catalogue": true,
+    "safety_predicates_present": true
+  }
+}

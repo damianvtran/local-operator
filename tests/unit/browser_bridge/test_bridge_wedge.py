@@ -328,7 +328,15 @@ def test_awaiting_origin_wait_is_not_torn_down_by_the_detector(
     and watch it tear the link down mid-prompt.
     """
     monkeypatch.setattr(daemon_module, "PING_INTERVAL_S", 0.05)
-    monkeypatch.setattr(daemon_module, "LINK_SILENCE_TIMEOUT_S", 0.2)
+    # A FULL SECOND, not 0.2 s. The test drives a REAL clock from the test
+    # thread, so the margin is the only thing standing between it and the
+    # detector: on a loaded CI runner one `time.sleep(0.04)` stretched past a
+    # 0.2 s deadline, `daemon.py` logged `dropped an unresponsive extension:
+    # no frame for 0s`, and the assertion below read as a false positive in the
+    # code under test. One second still exercises "waiting on a human much
+    # longer than the detector's window" (the loop below spends ~1.5 s there)
+    # with a 10x margin on each confirmed frame.
+    monkeypatch.setattr(daemon_module, "LINK_SILENCE_TIMEOUT_S", 1.0)
     app = create_app(root=tmp_path)
     with TestClient(app) as client:
         service = app.state.bridge
@@ -347,15 +355,23 @@ def test_awaiting_origin_wait_is_not_torn_down_by_the_detector(
                 {"event": "awaiting_origin", "id": "r-prompt", "origin": "https://slow.example"}
             )
             first_socket = service.link.websocket
-            # Keep ponging for several times the silence deadline: the command is
-            # "waiting on a human" for far longer than the detector's window. The
-            # cadence must be comfortably INSIDE the deadline (0.04 s against
-            # 0.2 s) or the test measures its own scheduling jitter rather than
-            # the detector — a pong that lands late tears the link down and the
-            # failure reads as a false positive in the code under test.
+            # Keep ponging for LONGER than the silence deadline, and confirm
+            # each pong against the daemon's own liveness stamp before sending
+            # the next. A bare `sleep(0.04)` measured the TEST THREAD's
+            # scheduler, not the daemon's health: a stalled sleep of >0.2 s let
+            # the detector drop a perfectly live link, and the failure landed
+            # between the two asserts as the recorded `{}` against the marker.
+            # Waiting for the stamp bounds the gap the detector can observe.
+            last = service.link.last_frame_at
             for _ in range(15):
                 socket.send_json({"event": "pong"})
-                time.sleep(0.04)
+                wait_until = time.monotonic() + 1.0
+                while service.link.last_frame_at == last and time.monotonic() < wait_until:
+                    time.sleep(0.002)
+                assert service.link.last_frame_at != last, "the daemon never read a pong"
+                last = service.link.last_frame_at
+                assert service.link.awaiting_origin == {"r-prompt": "https://slow.example"}
+                time.sleep(0.1)
             assert service.link.websocket is first_socket
             assert service.link.awaiting_origin == {"r-prompt": "https://slow.example"}
 

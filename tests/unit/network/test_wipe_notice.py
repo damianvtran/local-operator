@@ -475,7 +475,21 @@ def test_a_wipe_spares_rows_another_owner_or_key_wrote(request: pytest.FixtureRe
 
     assert _lop_network("credential", "revoke", KEY, "--from", mesh.b.identity.name) == 0
     assert sync.credentials_sync_step(mesh.a, mesh.member) in ("scheduled", "in_sync")
-    assert net_fixtures.wait_for(lambda: not _member_has(mesh.b.root, SECRET_NAME))
+    assert net_fixtures.wait_for(
+        lambda: not _member_has(mesh.b.root, SECRET_NAME)
+    ), "the member's copy was not wiped"
+    # THE LEDGER ROW IS THE WIPE'S OWN SEQUEL, so it is awaited before the
+    # rows below are read (the sibling revoke test above already waits on it).
+    # ``_member_has`` false means the member DELETED the value; it does not mean
+    # the member answered. The absent ack is sent by ``member_announce`` AFTER
+    # that delete, the owner records it on the announce's reply
+    # (``_record_wipe_reply``), and this module's subject -- the wipe notice --
+    # is composed FROM that row (``ack_for(...)["wiped"]``). Reading the
+    # survivor rows in that gap is correct on any single-thread schedule and a
+    # race on CI, where the two sides run on different loops and workers.
+    assert net_fixtures.wait_for(
+        lambda: _ledger_wiped(mesh)
+    ), "the ending was not confirmed to the owner"
 
     assert _member_has(mesh.b.root, "LOCAL_TOKEN"), "a local row is not this owner's to delete"
     assert _member_has(mesh.b.root, "OTHER_OWNERS_ROW"), "another owner's row must survive"

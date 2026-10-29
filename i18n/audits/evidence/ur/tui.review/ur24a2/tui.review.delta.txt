@@ -1,0 +1,8 @@
+tui.review.lane_stale_head
+EN stale — reviewed {reviewed}, head {head}
+OLD پرانا — جائزہ {reviewed}، head {head}
+NEW پرانا — {reviewed} پر جائزہ، head {head}
+tui.review.lane_stale_reviewed
+EN stale — reviewed {reviewed}
+OLD پرانا — جائزہ {reviewed}
+NEW پرانا — {reviewed} پر جائزہ

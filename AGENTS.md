@@ -8,6 +8,50 @@ each round see `docs/VERIFICATION.md`.
 For bounded allocation, costly-evidence preflight and review convergence, read
 `guide://delivery` (packaged at `local_operator/guides/delivery/GUIDE.md`).
 
+## Internationalization is mandatory — read this before adding copy
+
+**All user-facing copy is keyed.** Never hardcode user-facing English in
+code. Technical identifiers, commands, flags, paths, developer log lines, and
+model-facing prompts stay English by design — those are the only legitimate
+exceptions. The string ratchet records file-level categories in
+`i18n/allowlist.toml`, and one-off sites carry an inline
+`# i18n: ignore <reason>`; an unreasoned exemption is not an exemption.
+
+**Every new or changed key must be translated into every language in
+[`i18n/languages.json`](i18n/languages.json)** — the machine-readable manifest
+of supported languages, including languages added later. A feature is not done
+until it is localized; "English first, translate later" is a missing feature,
+not a follow-up. Adding a language means adding it to the manifest, its
+`i18n/style-guides/<locale>.md`, and its audited `i18n/ledger.json` rows.
+Removing one is a product decision, never a code cleanup.
+
+**Translations are idiomatic, never literal.** An LLM translator produces them
+from `i18n/glossary.md` and the locale's style guide, then an **independent**
+auditor (never the same agent) passes them before the ledger row ships.
+Placeholders, ICU syntax and plural arms are preserved exactly; RTL locales
+follow the direction rules in their style guide.
+
+The coverage gate (`tests/unit/i18n/test_language_manifest.py`) checks the
+exact missing key IDs per `(locale, namespace)` recorded in
+`i18n/coverage-allowance.json`. A newly missing key — including one added to a
+namespace that was already incomplete — fails until it is translated. A listed
+key that is no longer missing fails until its entry is removed, so the
+allowance only shrinks.
+
+Adding an allowance entry is a **reviewed decision**, never a way to ship
+untranslated copy. Every entry must name an `owner` (a session/lane or person)
+and a `payoff` (a ticket reference or ISO date by which it must be gone), and
+the PR must say why the copy cannot be translated now. The gate makes new
+untranslated copy fail by default, and `python scripts/i18n/check.py` also
+fails when the allowance grows relative to the pull request base, naming each
+added key. A file edit can still add an entry, but it becomes a red check that
+must be consciously overridden; reviewers must reject allowance growth that is
+not tied to a real plan.
+
+HOWTO: [`docs/I18N.md`](docs/I18N.md). Contract:
+[`docs/design/i18n.md`](docs/design/i18n.md). `local_operator/i18n/data/shipped.json`
+is GENERATED from ledger completeness — **never hand-edit it**.
+
 ## Environment
 
 ```sh
@@ -357,8 +401,8 @@ dev host). `--run` prints each exclusion
 with its reason, so a local green is not evidence about those seven — the audit in
 particular, since a dependency-touching PR is exactly where a local green and a
 red audit can coexist. Use the four commands above by hand when you want the
-whole-tree form regardless — a release PR, or a diff that touches `.github/**`,
-both of which set every flag true.
+whole-tree form regardless. A diff that touches `.github/**` sets every flag
+true; a release bump (a version-line-only `pyproject.toml` diff) sets none.
 
 Do **not** invoke `.venv/bin/black`, `.venv/bin/flake8`, `.venv/bin/isort`, or
 `.venv/bin/pyright` directly. Those console scripts carry a shebang baked in
@@ -988,6 +1032,19 @@ the two therefore agreed, which is precisely why nothing caught it. When you
 isolate a run, verify where its writes actually go, not merely that its reads
 are redirected.
 
+**And a rig's own fixture path must never come from an environment fallback.**
+An agent shell inherits `LOCAL_OPERATOR_CONFIG_DIR=/Users/<user>/.local-operator`,
+so a setup step that writes to
+`os.environ.get("LOCAL_OPERATOR_CONFIG_DIR") or <isolated-dir>/config.yml` writes
+the OPERATOR'S LIVE config — `env -i` is on the command that launches the app,
+not on the harness process that prepares its fixture — and the test still passes,
+because the app it launches gets the correct isolated value and creates the
+isolated file the assertions then read. That happened on 2026-10-23: a QA rig's
+setup wrote a 34-byte `values: {tool_approval_mode: ask}` over the operator's
+26-key live config at 04:21:42, and the nested loss was only found by hand
+afterwards. Set the fixture path explicitly, never with an environment fallback,
+and print or verify the absolute path written before launching the app.
+
 **A standby runtime is a CHILD of the host that warmed it, so an isolated run
 cannot leave one behind — but a run that fails to exit can.** Every interface
 host (a TUI, `lop serve`) may fork one pre-imported spare runtime per config
@@ -1207,11 +1264,19 @@ the job is the reviewer's missing memory, not a lock.
 
 **A release PR's green is narrow.** Change-scope gating classifies a diff
 that is nothing but the `version =` line as a release bump, and a release
-bump runs *only* `changes` and `version-bump-guard` — two checks, not a
-matrix. That is the intended disposition (the classifier's `release_bump`
-rule is asserted in `tests/unit/test_ci_hygiene.py`), but it means "CI is
-green" on a release PR is evidence about the version line and nothing else.
-The code being released was gated on the PR that landed it, not on this one.
+bump runs six checks, not the matrix: `changes` and `version-bump-guard`
+from `ci.yml`, plus `Release invariants` and `Build and start the release
+artifact` on Python 3.12, 3.13 and 3.14 from `release-gate.yml` (among its
+triggers, a push to `release-next`/`release-next-*`, the runbook's bump
+branch). Every other `ci.yml` job reports skipping. The classifier keys on
+the diff but the Release Gate keys on the branch name, so a bump pushed from
+any other branch shows only the two `ci.yml` checks: the artifact gate never
+ran, which is a reason to use the mandated branch, not a green. That is the
+intended disposition (the classifier's `release_bump` rule is asserted in
+`tests/unit/test_ci_hygiene.py`), but it means "CI is green" on a release PR
+is evidence about the version line, the release invariants and the built
+wheel starting at the bump branch's head — not about the code. The code
+being released was gated on the PR that landed it, not on this one.
 
 Note that `gh api repos/<owner>/<repo>/branches/main/protection` answers
 `404 Branch not protected` here. That endpoint reports only **legacy** branch
@@ -1321,6 +1386,51 @@ The owner is a role for one window, not a standing job. Whoever cuts the
 release is also responsible for telling every contributor in the window where
 it landed.
 
+### PyPI storage cap and per-release size
+
+PyPI caps a project at **10 GB total**, every release counts, and this project
+ships several a day. Measured on 0.90.17, one release cost ~59 MB (pure wheel
+19.98 MB, `macosx_11_0_universal2` wheel 20.14 MB, sdist 18.85 MB); the cap was
+hit and v0.90.18/19 failed with `400 Project size too large`. Two changes bring
+a release to ~29 MB:
+
+- **Slim wheels.** `publish.yml` runs `scripts/slim_wheel.py` on the pure wheel
+  (the macOS wheel is retagged from it): `#` comments are stripped, while
+  docstrings, shebang/coding lines, pragma comments (`# type:`, `# noqa`,
+  `# pragma`, `# pyright:`, `# fmt:`) and every line number are kept. Each
+  module must be `ast.dump(..., include_attributes=True)`-identical with an
+  equal line count, or the build fails. `ci.yml` `packaging-smoke-build` and
+  `release-gate.yml` run the same step, so a PR the slimmer cannot verify fails
+  before a release does.
+- **The sdist lives on the GitHub Release** (`sdist-release` job), not on
+  PyPI. Nothing installs it from PyPI: the updater, desktop app and install
+  scripts take wheels, and the Dockerfile builds from the tree.
+
+`scripts/check_dist_size.py` is the guard: a wheel over **18 MiB** fails, over
+16 MiB warns. `--wheels-only` runs on both artifacts `pypi-publish` downloads
+(in `release-build` and `keyagent-macos`); the publisher itself runs no repo
+code and only shell-checks for exactly two wheels. PR CI (`ci.yml`,
+`release-gate.yml`) passes `--budget-mib 17.5`: its wheel lacks the phone
+bundle and key-agent helper (~0.37 MiB), so the plain 18 MiB line would first
+go red in the release's `keyagent-macos` job, after the tag exists.
+
+**Growth, measured.** The pure wheel grew 12.62 MiB (0.65.0, 10-01) to
+19.07 MiB (0.90.18, 10-27) unslimmed: ~0.25 MiB/day, ~0.18 MiB/day slim. The
+0.91.0 slim wheel with the bundle is 14.41 MiB. At that rate the 16 MiB warning
+arrives in ~9 days and the 17.5 MiB PR line in ~3 weeks. **When the warning
+fires:** compare the wheel's member list and sizes against the last release
+(`unzip -l`) to find what grew; a large non-`.py` asset or a vendored file is
+the usual cause and the fix is to drop or move it. If it is genuine code
+growth, plan the next cut before the PR line is reached (docstrings are not a
+candidate: they are runtime help text), and raise the budgets only together
+with a retention change, after re-reading the script's docstring.
+
+**Retention is the operator's decision.** Suggested policy: keep every release
+from the last ~30 days and the last patch of every minor. Deleting a PyPI
+release is a manual, irreversible operator action on pypi.org; agents never
+delete releases or files. Quota-increase requests are pending as
+pypi/support#12738 and pypi/support#12882.
+
 ### What the release owner does
 
 1. **Collect** from each merger in the window: PR number, merge SHA, and
@@ -1352,13 +1462,35 @@ it landed.
    that also carries code is a defect — the code belongs in a reviewed PR
    of its own.
 
-   **Expect two checks on this PR, not a matrix.** A version-only
-   `pyproject.toml` diff classifies as a release bump, so only `changes` and
-   `version-bump-guard` run — the whole job set would be gating code this PR
-   does not touch. Do not read that short check list as a truncated pipeline,
-   and do not "fix" it by adding an always-run job: the narrow green is the
-   design (`scripts/ci_scope.py`, `release_bump`), and the code being released
-   was gated on the PR that landed it.
+   **Expect six checks on this PR, not a matrix.** A version-only
+   `pyproject.toml` diff classifies as a release bump, so from `ci.yml` only
+   `changes` and `version-bump-guard` run and every other job reports
+   skipping — the whole job set would be gating code this PR does not touch.
+   The other four come from `.github/workflows/release-gate.yml`, which fires
+   on the push to `release-next` (its triggers also include `release-next-*`,
+   pushes to `main`, and `workflow_dispatch`): `Release invariants` (the
+   pushed commit is the one checked out, the declared version parses as PEP
+   440, and the i18n `generate.py --check` and `check.py` pass) and `Build and
+   start the release artifact` on Python 3.12, 3.13 and 3.14
+   (`scripts/smoke_wheel.py` against the built wheel). That split is the
+   point: the gate shows the bump branch's head builds, installs and starts
+   on every declared interpreter, which is what a version bump can break,
+   while the suite is skipped because the diff is version-line-only (a
+   dependency or metadata edit to `pyproject.toml` is not a release bump and
+   keeps the whole matrix). Those rows cover the branch head as pushed, not
+   the tag target: the bump's merge commit on `main` is a different SHA. At
+   that SHA the combined-target proof below re-runs the release invariants
+   only (before tagging, and `publish.yml` repeats them at the event SHA);
+   the built wheel there is covered by the push-to-`main` Release Gate run
+   on the merge commit and by `publish.yml`'s `wheel-smoke`, which
+   `pypi-publish` waits on.
+   **Six checks appear only when the bump is pushed from a `release-next*`
+   branch.** A bump PR showing just `changes` and `version-bump-guard` means
+   the artifact gate never ran: push from the mandated branch name rather
+   than reading that as green. Do not read the six-check list as a truncated
+   pipeline, and do not "fix" it by adding an always-run job: the narrow green
+   is the design (`scripts/ci_scope.py`, `release_bump`), and the code being
+   released was gated on the PR that landed it.
    **Before cutting the tag, prove the combined target, not just each PR.** In
    the release owner's clean worktree checked out at the exact bump merge SHA,
    verify `git rev-parse HEAD` equals that intended target. With Python 3.12 and
@@ -1485,7 +1617,13 @@ git -C ~/local-operator update-ref refs/heads/main origin/main
 #    Then tag + GitHub Release on the bump's merge commit. --target creates
 #    the tag on that exact SHA; the publish workflow triggers on the release.
 $EDITOR "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"   # public copy only; no authoring/checklist section
-gh release create vX.Y.Z --target "$(git -C ~/local-operator rev-parse origin/main)" \
+
+# Resolve the target in its OWN command, print it, and check it is the bump's
+# merge commit you expect -- then pass the literal SHA. Do not embed the
+# substitution in the release command: see "Branch-moving commands".
+git -C ~/local-operator fetch --tags origin main
+git -C ~/local-operator rev-parse origin/main          # copy this SHA after checking it
+gh release create vX.Y.Z --target <the SHA you just checked> \
   --title 'X.Y.Z: <theme>' --notes-file "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"
 
 # 5. Install and verify — REQUIRED: the release is not complete until this
@@ -1602,6 +1740,126 @@ in the clone and a re-run put it right in about two minutes. Since the
 downgrade gate that install is refused before it starts (0.64.4 is strictly
 older than the pointer's install), so the mistake is loud — the fix is
 unchanged, advance the clone's own `main` first.
+
+### A green run is a function of the tree it was computed against
+
+**The tag target is the bump's MERGE commit** — which is what "Mechanics, in
+order" step 4 already does: resolve `origin/main` in its own command, check it is
+the bump's merge commit, then pass that literal SHA to `--target`, once the bump
+has merged and `origin/main` has been fetched. **Never the bump
+branch's own head**, which is a different SHA and is not what ships.
+
+**And a green run is a function of the tree it was computed against.** A
+verdict from an earlier head is not evidence about a later one, even when the
+later head differs only in a file the verdict never read. So the pre-tag
+proofs are re-run **at the final bump head, after the re-verification** — not
+reused from an earlier head of the same branch. Two different trees, two
+different proofs, and neither is reusable from the other.
+
+**Re-verifying the bump branch against current `main` is a merge, not a
+rebase.** Fetch `origin/main`, merge it into the bump branch, and let the
+bump PR's own merge produce the SHA that is tagged. A rebase rewrites the
+bump branch's commits, so the SHA the tag would name is no longer the one the
+owner reviewed. The existing rule for a moved base — prove the content is
+unchanged with `git range-diff` plus byte-identical `+`/`-` line sets, then
+run one convergence round over `<old-head>..<new-head>` — applies here too.
+
+**A hint tells you WHEN TO LOOK; the gate tells you WHEN YOU MAY ACT.** A
+merge waiting on CI has two stages, and the first is a cheap proxy: a count
+that reached zero, a file that appeared, a branch tip that moved. Each says
+look now, and each can be satisfied while the gate still fails — a hint
+satisfied by a partial state fires exactly when you must **not** act. The
+authorisation is the gate's own verdict, computed against the tree that will
+be merged. **Never a proxy where a gate is available**: a merge authorised by
+a proxy rather than by the gate is a merge nobody checked.
+
+**And name the slow gate, because the fast gate is not the slow gate.** The
+`i18n` job runs two scripts — `scripts/i18n/generate.py --check` and
+`scripts/i18n/check.py` — and the second of them cannot see a class of debt
+the unit test does see. `check.py` **skips a namespace a locale does not
+carry** and validates only the files that are present, demanding full key
+parity for each one it does find; the unit test in
+`tests/unit/i18n/test_language_manifest.py` compares **key-by-key** and
+treats an absent namespace as all-missing. Measured on `main` at
+`8497001139`: the fast gate **exits 0** and the slow gate **reports 52**
+unlisted entries — 14 of them the `wire.memory.capture.locators` pair across
+seven locales, 38 of them `tui.viewer`. And the three numbers about the same
+debt do not agree: **the allowance** (`i18n/coverage-allowance.json`)
+**records** 105 missing `wire.memory` entries (7 locale pairs x 15); **the
+coverage gate** — the name this file already gives
+`tests/unit/i18n/test_language_manifest.py` — **reports** the ones the
+allowance does not list; and the fast script reports **none** of that
+namespace, because `wire.memory` is absent from every locale and an absent
+namespace is skipped. (That last clause is about `wire.memory` specifically:
+`tui.viewer` is present and complete in five locales and absent from only
+`ur` and `zh-CN`, which is where its 38 unlisted entries come from.)
+**A green fast job is evidence of consistency, not of correctness**, and a
+count from one of those three is not interchangeable with a count from
+another.
+
+So the slow gate is the one that carries the assertion, and it is the one
+that has to be named in the authorisation — and the allowance's own rules,
+stated above, are what that slow gate enforces. **And a skipped job is not
+evidence**: on a change the classifier scopes away from the unit tree, the
+`i18n` job and the unit shards are both skipped, so an authorisation that
+names them has to say which tree actually ran them, or it names a check that
+never happened.
+
+Note what that makes the allowance load-bearing: a catalogue file that is
+**present and partial** is judged by both gates, the fast one demanding every
+key, the slow one only the mismatches. And the slow gate asserts **three
+sets**, which is why an allowance edit is not a single move: a
+key that is missing and **unrecorded** is `unlisted`, and a recorded key that
+is **no longer missing** is `stale`, and a listed pair the gate no longer
+checks at all is `unknown`. So carrying the keys that were unlisted
+clears the pair on its own — one move. But carrying keys that were **listed**
+turns those entries stale, and the pair stays red until the allowance is
+**shrunk** to match, which is the shrink-only rule above. Shrinking on its
+own never helps an unrecorded key, because removing a record does not
+translate anything. A partial translation is therefore not a state either
+gate can be asked about in isolation.
+
+**Read the mechanism before you write the trigger.** A trigger written from
+the shape of a fix you assumed is a trigger that waits on a signal which
+cannot arrive, or fires on a state that is worse than the problem. Read the
+code that implements the fix, then write the trigger against what that code
+actually does.
+
+**And check that the domain you evaluated is the domain you are asserting
+about.** This is the same defect as the two gates above, and it wears several
+costumes. A fast job that evaluates present files, reporting on a debt that
+lives in absent ones. A check run over a narrower set than its name implies,
+reported as green. A suite run only over changed files, quoting a total. A
+status read from every SHA the branch ever had, instead of the head that will
+merge. In each case the evidence is real and the scope is wrong, and a scope
+that is wrong in either direction — too narrow or too broad — turns a green
+into a claim nobody checked. **The scope is the claim.**
+
+**And a bound is only as good as the data it projects from — and a bound
+cannot tell you when that data is stale.** A ceiling derived from a weight
+manifest is exactly as trustworthy as the manifest. Measured in this
+repository on 2026-10-19, the unit tree's heaviest shard projected **7,232 s**
+from `tests/durations.json` at `8497001139`, against roughly **4,470 s** from
+the refreshed manifest in `#2689` applied to the same tree — an overstatement
+of about **62%** — so a shard ceiling and its own guard agreed with each other
+about a number neither had re-derived. (Those figures are quoted to the
+precision that matters; the same quantity measured on three trees the same
+night came out at 7,232 / 7,239 and 4,466 / 4,469 s, so a reader who needs
+the third digit should re-measure on the tree in front of them — which is the
+point of the paragraph.)
+
+**The cause is worth naming, because it is not "stale entries":** there were
+**no orphaned manifest entries at all**, and the inflation came from the
+other direction — **630 of that tree's 1,703 unit test files carried no
+measurement**, and each was charged the **30.786 s** fallback. A manifest
+that is merely incomplete therefore reads as *more* work, not less, and the
+conservatism is invisible: nothing in the failure says which of the 630
+files it was guessing about. **When a derived bound fails, the first question
+is not which constant to raise. It is how much of the data behind that bound
+was measured, and when, and by what.** Raising the constant makes the check
+pass on that data; measuring more of it makes the data right — and the two
+produce different numbers, which is why the failure cannot tell you which
+one you are looking at.
 
 ### Installing over a live fleet
 
@@ -2151,6 +2409,85 @@ available memory — and run in its own process group, because the guard can onl
 a group it owns. Do not hand-roll an unbounded runner when the repo already has a
 bounded one (the pytest worker cap above is the pattern).
 
+## Branch-moving commands: one target, one invocation
+
+Anything that moves a ref — `git push`, `git update-ref`, `git tag -f`,
+`gh pr merge`, `gh release create` — is issued as **one command with one literal
+target**: the PR number, the ref name, the SHA or the tag written out in the
+invocation, and the resulting state read back afterwards.
+
+Never assemble such a command inside a loop, alongside unrelated commands in one
+batch, or from a target another step computed by substitution (`--target
+"$(...)"`, `$PR`, `$SHA`). A batch that is malformed should fail to parse; it
+must not resolve to a plausible-looking target.
+
+**Resolving a value is not the same as deriving it in place.** The release
+procedure needs `~/.local-operator`'s new head, and the release instructions
+above require it. Resolve it in its own command, print it, check it against
+what you expect, and then put the literal value in the merge and release
+commands. Three visible steps — freeze, verify, use — satisfy this rule; one
+embedded `$(...)` does not, because nobody sees the value until it has already
+been acted on.
+
+This rule exists because of a real near-miss. On 2026-10-24 (local; 2026-10-25 UTC) a
+malformed multi-command batch fired `gh pr merge --squash` at an unrelated,
+unreviewed pull request. Nothing merged: the repository's required-review
+control refused it, exactly as designed. But that control was the only thing
+between the mistake and an unreviewed merge — `--admin`, used routinely here for
+PRs that *have* passed review, would have completed it. The rule is about not
+needing that control to catch a typo.
+
+It applies to every automated lane, not just interactive work. The release rules
+above still govern *who* takes a window and *what* the window contains; this
+governs *how* each of those steps is issued.
+
+## Status reads: name the ref you read
+
+Anything that reports **state** — whether a PR is open or merged, what a
+branch contains, which revision is deployed or checked out — reads a **ref**,
+never a working checkout: `git show origin/main:<path>`, a `gh`/API read, or
+a worktree cut from `origin/main`. A working tree is authoritative about
+exactly one thing, the uncommitted work in it. Everything else it says is
+about *that checkout* — the commit it has checked out, plus whatever edits
+sit beside it — not about the repository.
+
+**Name the ref in the answer.** `#2908 merged on origin/main @ 3a3a30ce` cannot
+be quoted into a wrong decision without the reader seeing where it came from;
+`#2908 merged` can, and afterwards nobody can tell which tree produced it. Give
+the commit you read, not the branch you believe you are on.
+
+**Nothing fails when it is wrong.** `git status`, `git log` and `git show
+HEAD:…` describe the checked-out commit; `grep`, `cat` and `ls` never consult
+it, reading instead whatever is on disk — that commit plus any uncommitted
+work, another agent's half-written draft included. Nothing announces that the
+checkout is old: `git status` names the detached state only in its header
+(`HEAD detached at <sha>`, `## HEAD (no branch)` under `-sb`), `git log` prints
+each commit's `Date:`, and `--decorate` shows `(HEAD -> main)` on a branch
+against `(HEAD, main)` detached. What none of them report is **how far behind
+`origin/main` the checkout is**: that takes a fetch and an explicit
+`git rev-list --count HEAD..origin/main`, because `git status` compares only
+against the local tracking ref — the stale-tracking-ref hazard "Read the
+committed ref, not the working tree" already covers — and a detached head has
+no upstream to compare with at all.
+
+**Measured, not hypothetical.** A lane working on the i18n strings read a
+`~/local-operator-ui` checkout detached since 2026-10-22 and 472 commits behind
+`origin/main`, clean, and reported an issue as open that had already merged. The
+same checkout corrupted a programme census twice. The cost is not a crash; it is
+a confident wrong answer, indistinguishable from a correct one until someone
+checks.
+
+**When you catch it, re-derive rather than quietly correct the number.** Read
+the claim again from the ref, report the corrected value with the ref and commit
+you read it from, and say the earlier figure came from a checkout. A quiet fix
+leaves the next reader unable to tell which of the two numbers was measured.
+
+This is the read-side sibling of "Branch-moving commands: one target, one
+invocation" above: that rule makes the target a command acts on visible, this
+one makes the ref a claim came from visible. The content question — does the
+repository contain this? — is the same hazard, covered by "Read the committed
+ref, not the working tree" under *Environment*.
+
 ## Who may merge: two tiers
 
 `main` is governed by a ruleset that requires **one approving review**, plus the
@@ -2315,10 +2652,25 @@ round conclusive rather than merely narrow:
 Two further corollaries. Do not re-open dimensions the delta cannot have
 touched — a backend-only remediation keeps a design round valid, and
 re-running it spends a reviewer on unchanged pixels. And when a rebase moves
-the base, prove the content is unchanged (`git range-diff` plus byte-identical
-`+`/`-` line sets) and then run **one** convergence round over
-`<old-head>..<new-head>`, checking semantic conflicts only in files the
-upstream also touched.
+the base, run `python scripts/rebase_proof.py <old-head> <new-head> --base
+origin/main` (fetch the old head by SHA if the force-push dropped it) and post
+its `### Rebase proof` block on the PR. It checks `git range-diff` (all `=`),
+byte-identical `+`/`-` line sets of the PR's own patch, and the overlap between
+the files upstream moved and the PR's files. **MECHANICAL** (exit 0) keeps the
+last clean code review AND QA round fresh — no new agent round; measured, 85%
+of resolvable convergence rounds over the last 120 merged PRs had zero overlap
+and re-read an unchanged patch. **CONVERGENCE REVIEW NEEDED** (exit 1) means
+**one** convergence round over `<old-head>..<new-head>`, checking semantic
+conflicts in the files it names; if the proof fails, review and test the
+affected content. **The proof is file-level: it does NOT detect a cross-file
+semantic break** — upstream renames a function in a file the PR never touches
+while the PR calls it from another, and the verdict is still MECHANICAL (QA
+reproduced exactly that). Green CI on the rebased head is the guard for that
+class, which is why merge-time CI stays required. Likewise, a test-only or
+docs-only commit after a clean round needs only a delta review scoped to
+`<prev-head>..<head>` by any independent reviewer, and no QA re-run unless the
+change touches a QA'd surface. A real BLOCKER/MAJOR found anywhere is still
+fixed.
 
 **Finally, a terminal approval is a property of a SHA, not of a PR.** Commits
 landing after a clean round — including ones driven by a *different* stream,
@@ -2326,7 +2678,8 @@ such as a design fix after a terminal code round — make it stale, and the
 merge gate needs a fresh round on the current head. "Everything else is green"
 is exactly when that lapses. The one narrow exception: changes since the
 review that are exclusively non-conflicting fixes from parallel approved
-streams — a docs or nit commit from another round — leave it fresh.
+streams — a docs or nit commit from another round — leave it fresh, as does a
+rebase whose posted `### Rebase proof` is MECHANICAL.
 
 ## Security advisories
 
@@ -2383,6 +2736,8 @@ trivially corrected by the next release, while an over-called minor permanently
 misreports how much changed.
 
 ## Visual validation: how to actually look at a UI change
+
+Mobile relay UI: [docs/design/mobile-relay-guidelines.md](docs/design/mobile-relay-guidelines.md).
 
 This is a terminal UI. **A passing test is not evidence that a visual change
 looks right**, and every spacing, layout, or animation change in this repo has
@@ -3510,14 +3865,6 @@ against a hang rather than a stall, that is the file to read.
   a comment that restates the code is noise, and a change with a non-obvious
   reason needs the reason recorded.
 
-## Localized product copy
-
-For message extraction, generated key functions, locale/audit eligibility and
-backend-owned language settings, read [the i18n contributor HOWTO](docs/I18N.md)
-and `guide://i18n` before editing. The contract remains
-[docs/design/i18n.md](docs/design/i18n.md); its rollout plan is not completion.
-Keep technical/model-facing docs English and key rendered product copy.
-
 ## Adding a configuration key
 
 **Every new configuration key must also be added to the `/settings` registry
@@ -3586,8 +3933,12 @@ they produce.
 
 Full agent-facing guidance is `guide://credentials` (packaged at
 `local_operator/guides/credentials/GUIDE.md`); the design is
-`docs/design/secret-store.md`. This section is what someone CHANGING this code
-needs to know.
+`docs/design/secret-store.md`. **The redaction policy — what the guard treats as
+a secret, what it must never mask, and the sanctioned read path for public
+copy — is `docs/security/redaction-policy.md` (owner: @damianvtran).** Read it
+before changing a shape rule or adding a masking surface; a rule change without
+a policy change is not a policy change. This section is what someone CHANGING
+this code needs to know.
 
 **Four things are called credentials and they must stay distinct.** Provider API
 keys (now rows in the encrypted store under the reserved provider namespace, read

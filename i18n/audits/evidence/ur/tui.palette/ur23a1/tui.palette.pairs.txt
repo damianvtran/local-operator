@@ -1,0 +1,28 @@
+tui.palette.kind_agent
+EN "agent"
+UR "ایجنٹ"
+CX {"role": "type tag beside a command-palette hit", "tone": "plain, lowercase fragment", "maxCells": 12, "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments."}
+tui.palette.kind_command
+EN "command"
+UR "کمانڈ"
+CX {"role": "type tag beside a command-palette hit", "tone": "plain, lowercase fragment", "maxCells": 12, "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments."}
+tui.palette.kind_session
+EN "session"
+UR "سیشن"
+CX {"role": "type tag beside a command-palette hit", "tone": "plain, lowercase fragment", "maxCells": 12, "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments."}
+tui.palette.kind_setting
+EN "setting"
+UR "ترتیب"
+CX {"role": "type tag beside a command-palette hit", "tone": "plain, lowercase fragment", "maxCells": 12, "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments."}
+tui.palette.kind_team
+EN "team"
+UR "ٹیم"
+CX {"role": "type tag beside a command-palette hit", "tone": "plain, lowercase fragment", "maxCells": 12, "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments. If 'command' and 'team' would share one word, qualify the team tag rather than the command tag."}
+tui.palette.no_matches
+EN "No matches found"
+UR "کوئی مماثلت نہیں ملی"
+CX {"role": "empty state in the command palette", "tone": "plain, factual", "maxCells": 24, "note": "Shown centred in the palette's list when the typed query matches nothing. A complete standalone sentence fragment in the framework's own phrasing, not an instruction: it states the result, it does not tell the user to retry. Zero ICU arguments."}
+tui.palette.placeholder
+EN "Search commands, settings, sessions, agents…"
+UR "کمانڈز، ترتیبات، سیشنز، ایجنٹس تلاش کریں…"
+CX {"role": "command-palette input placeholder", "tone": "plain, instructional", "maxCells": 48, "note": "Grey placeholder inside the palette's search field, naming what a query can reach: slash commands, settings sections, past conversations, and the names of agents and teams. The ellipsis is a single character, not three dots. Must fit the field at a 60-column terminal, so keep it as one short clause; do not add the key that opens the palette. Zero ICU arguments."}

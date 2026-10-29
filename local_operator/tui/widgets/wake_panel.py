@@ -340,8 +340,16 @@ class WakePanel(Container):
             "tool": getattr(spec, "tool", ""),
             "created_at": getattr(spec, "created_at", 0) or 0,
             "every_ms": getattr(spec, "every_ms", None),
+            "until_at": getattr(spec, "until_at", None),
         }
         disabled = bool(counters.get("disabled"))
+        until = counters.get("until_at", getattr(spec, "until_at", None))
+        expired = isinstance(until, int) and not isinstance(until, bool) and until <= now_ms
+        # EXPIRED outranks blind (review round 1, F5): a watch past ``until_at``
+        # will not tick again, so the blind state describes a failure that can
+        # no longer cost a missed change. Same rule as the CLI state word,
+        # ``store.health_hint`` and the desktop/mobile rows.
+        blind = bool(counters.get("blind")) and not expired
         since = counters.get("unavailable_since")
         unavailable = isinstance(since, int) and not isinstance(since, bool) and since > 0
         failures = counters.get("consecutive_failures")
@@ -360,6 +368,12 @@ class WakePanel(Container):
         due = counters.get("next_due_at")
         if disabled:
             label = "disabled"
+        elif blind:
+            # A watch that cannot compare still RUNS: it is not stalled, not
+            # idle and not due. Without its own word the row read as a healthy
+            # clock while every change went unreported (the 2026-10-20 blind
+            # monitor), so the state word outranks the clock here.
+            label = "blind"
         elif unavailable:
             label = "stalled"
         elif never_checked:
@@ -381,25 +395,40 @@ class WakePanel(Container):
             # stays available in the expansions.
             health = monitor_store.disabled_clause(row)
             ink, rank = "warning", 0
+        elif blind:
+            # The clause keeps the state word and drops the consequence; the
+            # rest of the sentence (reason, "changes are not being reported")
+            # is the CLI's and the notice's. Worse than stalled: the call still
+            # answers, so nothing else on the row hints at the failure.
+            health = _band_health_clause(hint or "BLIND: cannot compare its result")
+            ink, rank = "warning", 1
         elif unavailable:
             # AN UNAVAILABLE EPISODE OUTRANKS A STALE FAILURE COUNT (D3): the
             # count froze when the tool went out of reach, because unavailable
             # ticks charge no strike — and "3 failed" where the CLI says
             # "retrying" is the cross-surface disagreement §D6 exists to stop.
             health = _band_health_clause(hint or "tool unavailable — retrying")
-            ink, rank = "warning", 1
+            ink, rank = "warning", 2
         elif never_checked:
             # The state word carries it; the clause would be the third spelling
             # of one fact in a two-row band.
             health = ""
-            ink, rank = "warning", 2
+            ink, rank = "warning", 3
         elif idle:
             # The state word is the whole message here; the CLI carries the
             # "overdue by 3h" tail for readers who go looking.
             health = ""
-            ink, rank = "warning", 3
+            ink, rank = "warning", 4
         elif failing:
             health = f"{fail_count} failed"
+            ink, rank = "warning", 6
+        elif hint and "suppressed as non-material" in hint:
+            # A SUPPRESSED change is not a quiet watch (design review round 1,
+            # D1): the gate filed real deltas as bookkeeping, so the row is
+            # warning ink and counts toward "needs attention" — the fact now
+            # leads the shared sentence, so the band's first-clause extraction
+            # keeps it.
+            health = _band_health_clause(hint)
             ink, rank = "warning", 5
         elif hint:
             # NEUTRAL by design — a quiet watch may be watching something quiet
@@ -407,7 +436,7 @@ class WakePanel(Container):
             # 4.18:1 on the band panel, below the AA floor, which made the new
             # hint the least legible text in the frame (D8).
             health = _band_health_clause(hint)
-            ink, rank = "muted", 4
+            ink, rank = "muted", 7
 
         every_ms = getattr(spec, "every_ms", None)
         every = f"every {format_duration(every_ms)}" if every_ms else "once"

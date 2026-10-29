@@ -1,0 +1,8 @@
+{
+  "wire.slash.notifications_page.help": {
+    "role": "command description line in /help, the completion picker and the desktop command palette",
+    "tone": "terse",
+    "maxCells": 50,
+    "note": "The /notifications command: opens the Notifications page (open asks waiting on the operator plus updates agents posted with notify). `read` is a typed word the command reads, keep it verbatim. Never call the page an 'Inbox' in product copy. English-only child namespace, kept out of the audited wire.slash catalogue so its locale hashes do not move."
+  }
+}

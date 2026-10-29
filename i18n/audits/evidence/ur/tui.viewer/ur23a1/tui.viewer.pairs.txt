@@ -1,0 +1,76 @@
+tui.viewer.title
+EN "file viewer"
+UR "فائل ویور"
+CX {"role": "status text", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}
+tui.viewer.description
+EN "View a local text file"
+UR "مقامی ٹیکسٹ فائل دیکھیں"
+CX {"role": "status text", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}
+tui.viewer.usage
+EN "Usage: /view <path>"
+UR "استعمال: /view <path>"
+CX {"role": "status text", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}
+tui.viewer.loading
+EN "reading…"
+UR "پڑھا جا رہا ہے…"
+CX {"role": "status text", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}
+tui.viewer.legend
+EN "↑↓←→ · PgUp/PgDn · Home/End\nw wrap · r reload · y copy path · o open externally · esc close"
+UR "↑↓←→ · PgUp/PgDn · Home/End\nw سطریں لپیٹیں · r دوبارہ لوڈ کریں · y پاتھ کاپی کریں · o بیرونی ایپ میں کھولیں · esc بند کریں"
+CX {"role": "keyboard hint", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}
+tui.viewer.truncated
+EN "Preview truncated — limit: 1 MiB / 20,000 lines"
+UR "پیش نظارہ مختصر کر دیا گیا — حد: 1 MiB / 20,000 سطریں"
+CX {"role": "status text", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}
+tui.viewer.unreadable
+EN "Cannot read this file — missing, unreadable, or outside permitted roots"
+UR "یہ فائل پڑھی نہیں جا سکتی — موجود نہیں، ناقابلِ قرأت ہے، یا اجازت شدہ روٹ ڈائریکٹریوں سے باہر ہے"
+CX {"role": "status text", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}
+tui.viewer.unsupported
+EN "This file type has no inline preview — open it externally"
+UR "اس قسم کی فائل کے لیے یہاں کوئی پیش نظارہ دستیاب نہیں — اسے بیرونی ایپ میں کھولیں"
+CX {"role": "status text", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}
+tui.viewer.binary
+EN "Cannot preview a binary file"
+UR "بائنری فائل کا پیش نظارہ نہیں کیا جا سکتا"
+CX {"role": "status text", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}
+tui.viewer.changed
+EN "This file changed since it was listed — list it again before opening"
+UR "یہ فائل فہرست میں دکھائے جانے کے بعد بدل گئی ہے — کھولنے سے پہلے فائلوں کی فہرست دوبارہ دیکھیں"
+CX {"role": "status text", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}
+tui.viewer.copied
+EN "Path copied"
+UR "پاتھ کاپی ہو گیا"
+CX {"role": "status text", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}
+tui.viewer.copy_failed
+EN "Clipboard unavailable — path: {path}"
+UR "کلپ بورڈ دستیاب نہیں — پاتھ: {path}"
+CX {"role": "status text", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}
+tui.viewer.open_failed
+EN "Could not open this file externally"
+UR "یہ فائل بیرونی ایپ میں نہیں کھل سکی"
+CX {"role": "status text", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}
+tui.viewer.kind_code
+EN "code"
+UR "کوڈ"
+CX {"role": "status text", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}
+tui.viewer.kind_markdown
+EN "markdown"
+UR "Markdown"
+CX {"role": "status text", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}
+tui.viewer.kind_text
+EN "text"
+UR "ٹیکسٹ"
+CX {"role": "status text", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}
+tui.viewer.header
+EN "{path} · {kind} · {size} B"
+UR "{path} · {kind} · {size} B"
+CX {"role": "status text", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}
+tui.viewer.wrap_on
+EN "Wrapping on"
+UR "سطریں لپیٹنا چالو"
+CX {"role": "status text", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}
+tui.viewer.wrap_off
+EN "Wrapping off"
+UR "سطریں لپیٹنا بند"
+CX {"role": "status text", "tone": "plain", "note": "Read-only local file preview. File paths are opaque; preserve placeholders. Keyboard letters are literal bindings and must not be translated."}

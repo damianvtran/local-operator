@@ -1,0 +1,13 @@
+COMMAND: node $LOCAL_OPERATOR_SCRATCHPAD/audit-es.mjs
+Auditor: translation-auditor / 37d9c9f0df44 / openai/gpt-6.1-sol (provider fallback, session model-switch notice)
+Namespace: wire.errors.notifications
+Revision: 27763f663df0da7c849186f1e62e01eb98e3df96
+en_sha256=f02bf1bc28f9c9e549a3ad8c34ead880315f4b39d25c36a869a1b3c5110f362c
+target_sha256=eb2607c0a54c97cf4de12ddb1f695f77694c15904a126e24adfdbac520d9b0ff
+context_sha256=07ad1e5da403a5fccde5648f04cd10bf1263cabc50f5e1804644630c7ce13106
+Frozen source hash PASS
+keys en=4 es=4 context=4
+Negative control: dropped {where} detected PASS
+ICU parse PASS 8 messages; argument/type/tag parity PASS; Spanish plural nodes=0
+unknown_item page-name constraint=true; Inbox/Bandeja absent=true
+FAILURES=[]

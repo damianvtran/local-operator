@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -58,6 +59,87 @@ DEFAULT_MODEL = ""
 
 #: The pinnable values, used by the settings registry and by our own parsing.
 VENDOR_CHOICES: tuple[str, ...] = (DEFAULT_VENDOR, *VENDOR_ORDER)
+
+#: Why a leg was skipped, in the vocabulary the decision and spend rows speak.
+#:
+#: ``borrow_unavailable`` is the one this slice exists to surface: a placement row
+#: says another device owns this credential and lends it to us, yet the borrow did
+#: not produce one — so the operator is being served by a later leg they did not
+#: choose. The word is deliberately CAUSE-NEUTRAL: the borrow helper collapses
+#: every broker refusal (owner asleep, unreachable, quota-blocked, not-holder)
+#: into ``None``, so the trace cannot honestly claim the credential is unshared.
+#: ``borrow_failed`` carries a broker code in ``detail`` when a refusal reaches the
+#: trace as a raised exception; ``resolution_failed`` is a leg whose probe raised
+#: anything else. Plain absence is not a defect.
+#: another device owns this credential and lends it to us, yet the borrow produced
+#: nothing — so the operator is being served by a later leg they did not choose.
+#: ``borrow_failed`` carries the broker's own code in ``detail``; ``resolution_failed``
+#: is a leg whose credential probe raised. ``no_credential_here`` is absence, which
+#: is not a defect.
+SKIP_NO_CREDENTIAL = "no_credential_here"
+SKIP_BORROW_UNAVAILABLE = "borrow_unavailable"
+SKIP_BORROW_FAILED = "borrow_failed"
+SKIP_RESOLUTION_FAILED = "resolution_failed"
+
+
+@dataclass(frozen=True)
+class VendorResolution:
+    """The leg that resolved, plus every preferred leg skipped to reach it.
+
+    Frozen: this is evidence for a decision already made, not working state. The
+    skipped rows are plain dicts rather than a dataclass because they travel
+    straight into ``Recommendation`` fields and the channel-ledger ``detail``,
+    where a second serialisation step would only add a place to drift.
+    """
+
+    vendor: Any | None
+    skipped: tuple[dict[str, str], ...]
+
+
+def _raised_skip(name: str, error: BaseException) -> dict[str, str]:
+    """The skipped row for a leg whose credential probe RAISED.
+
+    A refusal carries the broker vocabulary's ``code`` attribute (``MeshRefusal``
+    is the raiseable shape; ``BrokerError`` is the same vocabulary on a borrow's
+    RETURN path, which the borrow helper collapses into ``None`` before this layer
+    sees it). When an exception names a code, the row keeps it in ``detail`` and
+    the reason is ``borrow_failed``; anything else is ``resolution_failed`` — a leg
+    that could not answer, not a provider absence.
+    """
+    code = getattr(error, "code", "")
+    if isinstance(code, str) and code:
+        return {"vendor": name, "reason": SKIP_BORROW_FAILED, "detail": code}
+    return {"vendor": name, "reason": SKIP_RESOLUTION_FAILED}
+
+
+def _skip_row(config_dir: "Path | None", name: str) -> dict[str, str]:
+    """Why a leg with NO credential was skipped, WITHOUT dialing anyone.
+
+    The placement document and the client's own holder predicate answer the
+    question locally: a row this device is a holder for and does not own means a
+    borrow was (or should have been) attempted, which is ``borrow_unavailable``;
+    anything else is plain absence. Deliberately no grant request here — the trace must not
+    turn a diagnostic into a second borrow, and the resolved leg never reaches this
+    helper at all (see :func:`resolve_vendor_with_trace`).
+
+    Every failure inside the probe reads as absence: an unreadable document must
+    not present itself as a credential problem the operator can act on.
+    """
+    try:
+        from local_operator.network.credentials.client import (
+            MeshCredentialClient,
+            key_for,
+        )
+        from local_operator.network.credentials.placement import placement_for_store
+
+        if placement_for_store(config_dir) is None:
+            return {"vendor": name, "reason": SKIP_NO_CREDENTIAL}
+        mesh = MeshCredentialClient.for_this_device(config_dir)
+        if mesh is not None and mesh.should_borrow(key_for(provider=name)):
+            return {"vendor": name, "reason": SKIP_BORROW_UNAVAILABLE}
+    except Exception:  # noqa: BLE001 — a diagnostic read is never worth a failure
+        logger.debug("classification: placement probe failed for %s", name, exc_info=True)
+    return {"vendor": name, "reason": SKIP_NO_CREDENTIAL}
 
 
 def classification_section(settings: Mapping[str, Any] | None) -> Mapping[str, Any]:
@@ -109,6 +191,45 @@ def leg_order(settings: Mapping[str, Any] | None) -> tuple[str, ...]:
     return (pin,) if pin in VENDOR_ORDER else VENDOR_ORDER
 
 
+async def resolve_vendor_with_trace(
+    config_dir: "Path | None",
+    settings: Mapping[str, Any] | None = None,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> VendorResolution:
+    """Resolve the first usable leg AND record every preferred leg skipped before it.
+
+    :func:`resolve_vendor`'s walk, unchanged: same order, same pin, same instance
+    kept for its credential memo, and a leg whose resolution raises is still
+    skipped rather than propagated.
+
+    The trace exists because a fall-through used to be INVISIBLE. When the Radient
+    login lives on a mesh owner and this device could not borrow it, the cascade
+    silently used OpenRouter: the operator was billed on a different vendor and the
+    ledger attributed the spend to a path they did not choose. Naming the skipped
+    leg and the reason turns that into an observation.
+
+    COST IS PAID ONLY FOR SKIPPED LEGS. A leg that resolves returns immediately and
+    is never probed further; only a leg with no credential is classified, and that
+    classification reads local placement (never the network).
+    """
+    model = model_override(settings)
+    skipped: list[dict[str, str]] = []
+    for name in leg_order(settings):
+        vendor = build_vendor(name, config_dir, model=model, client=client)
+        try:
+            credential = await vendor.credential(config_dir)
+        except Exception as exc:  # noqa: BLE001 — a leg that cannot resolve is not this leg
+            logger.warning("classification: %s credential resolution failed", name, exc_info=True)
+            skipped.append(_raised_skip(name, exc))
+            continue
+        if credential:
+            return VendorResolution(vendor=vendor, skipped=tuple(skipped))
+        skipped.append(_skip_row(config_dir, name))
+        logger.debug("classification: %s has no credential here (%s)", name, skipped[-1]["reason"])
+    return VendorResolution(vendor=None, skipped=tuple(skipped))
+
+
 async def resolve_vendor(
     config_dir: "Path | None",
     settings: Mapping[str, Any] | None = None,
@@ -130,18 +251,12 @@ async def resolve_vendor(
     A leg whose resolution *raises* is skipped, not propagated: the credential
     resolution of one leg cannot be allowed to decide whether the operator's
     turn fails.
+
+    Kept as a thin wrapper over :func:`resolve_vendor_with_trace` so every existing
+    caller sees the same value and the two walks cannot drift.
     """
-    model = model_override(settings)
-    for name in leg_order(settings):
-        vendor = build_vendor(name, config_dir, model=model, client=client)
-        try:
-            credential = await vendor.credential(config_dir)
-        except Exception:  # noqa: BLE001 — a leg that cannot resolve is not this leg
-            logger.warning("classification: %s credential resolution failed", name, exc_info=True)
-            continue
-        if credential:
-            return vendor
-    return None
+    resolution = await resolve_vendor_with_trace(config_dir, settings, client=client)
+    return resolution.vendor
 
 
 def vendor_status(

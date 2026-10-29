@@ -137,12 +137,17 @@ def test_a_read_only_role_changes_nothing_but_can_still_reach_the_web() -> None:
     network access in this session" and fell back to grepping the local disk
     for facts it had been asked to find on the web. Retrieval mutates no more
     than reading a file does, so it belongs in a surface that is defined by
-    making no local change — while ``bash``, ``eval``, ``browser``, ``write``
-    and ``edit`` stay out by name, tier check or not."""
+    making no local change — while ``eval``, ``browser``, ``write`` and
+    ``edit`` stay out by name, tier check or not. (``bash`` is in, but only
+    ever write-confined by the kernel sandbox — see the comment below.)"""
     names = {tool.name for tool in filter_tools(ALL_TOOLS, seed("scout"))}
-    assert names <= {"read", "glob", "grep", "web_search", "web_fetch"}
+    assert names <= {"read", "glob", "grep", "bash", "web_search", "web_fetch"}
     assert {"web_search", "web_fetch"} <= names
-    assert not names & {"bash", "eval", "browser", "write", "edit"}
+    # ``bash`` IS in the scout seed (1.3.0), and is safe there only because
+    # child construction write-confines it in a kernel sandbox or strips it
+    # (``harness.subagent._with_readonly_shell_floor``) -- pinned in
+    # ``tests/unit/session/test_launch_subagent.py``.
+    assert not names & {"eval", "browser", "write", "edit"}
 
 
 def test_every_allowlisted_seed_carries_the_read_only_network_tools() -> None:
@@ -154,7 +159,20 @@ def test_every_allowlisted_seed_carries_the_read_only_network_tools() -> None:
         profile = seed(name)
         if not profile.tools:
             continue  # no allowlist: the role already has the full inventory
+        if name in OFFLINE_BY_DESIGN:
+            assert not set(READ_ONLY_NETWORK_TOOLS) & set(profile.tools), name
+            continue
         assert set(READ_ONLY_NETWORK_TOOLS) <= set(profile.tools), name
+
+
+#: Seeds whose allowlist omits the network tools ON PURPOSE, each with its reason.
+#: ``librarian`` (1.1.0, #3028): an unattended local-metadata curator — she names,
+#: describes and tags the operator's own Library assets — has no web duty (her
+#: seed's pass never fetches or searches the web), and keeping her off the network
+#: shrinks what a pass nobody can answer can reach. The exemption is asserted
+#: both ways: such a seed must NOT carry the tools, so the reason cannot go stale
+#: silently.
+OFFLINE_BY_DESIGN = frozenset({"librarian"})
 
 
 def test_the_scout_fallback_allowlist_matches_the_read_only_surface() -> None:
@@ -297,6 +315,21 @@ def test_aidas_seed_reaches_the_loader_whole() -> None:
     assert len(profile.instructions) == len(body), "the loader must not truncate her seed"
 
 
+def test_aidas_seed_body_stays_within_the_desktop_app_save_cap() -> None:
+    """The app refuses profile saves above 8,000 characters, so its bound is
+    stricter than the runtime constant (``MAX_INSTRUCTIONS_CHARS`` is 10,000).
+    The body measures 7,969 through the loader (7,970 in the file, which keeps
+    a trailing newline), so the next addition would pass every other gate and
+    still fail to save in the app. The harness has no 8,000 rule of its own,
+    so the policy lives here as a test rather than in library code."""
+    text = (SEEDS_DIR / "aida.md").read_text(encoding="utf-8")
+    _meta, body = _split_frontmatter(text)
+    assert len(body) <= 8_000, (
+        f"Aida's seed body is {len(body)} characters; the desktop app refuses "
+        "profile saves above 8,000."
+    )
+
+
 def test_an_allowlist_naming_absent_tools_matches_nothing_rather_than_raising() -> None:
     """A profile written on another machine (or naming an MCP tool this
     session never loaded) must still run, with the tools it does have."""
@@ -349,7 +382,7 @@ class TestResolution:
         """Once an operator has a reviewer of their own, theirs is the one that
         runs — otherwise editing the guidance would have no effect."""
         registry = AgentRegistry(tmp_path)
-        installed = install_seed("reviewer", registry=registry)
+        installed = install_seed("reviewer", registry=registry, scope="global")
         assert installed is not None
         installed = installed[0]
         registry.set_agent_system_prompt(str(installed.agent_id), "MY HOUSE RULES")
@@ -374,7 +407,7 @@ class TestResolution:
 class TestInstall:
     def test_installing_makes_an_ordinary_editable_registry_row(self, tmp_path) -> None:
         registry = AgentRegistry(tmp_path)
-        result = install_seed("reviewer", registry=registry)
+        result = install_seed("reviewer", registry=registry, scope="global")
         assert result is not None
         profile, already_installed = result
         assert profile.agent_id and not already_installed
@@ -387,13 +420,13 @@ class TestInstall:
         """Two launches of the same role can race; the second must not undo an
         edit the operator made to the first."""
         registry = AgentRegistry(tmp_path)
-        first_result = install_seed("reviewer", registry=registry)
+        first_result = install_seed("reviewer", registry=registry, scope="global")
         assert first_result is not None
         first, first_already_installed = first_result
         assert not first_already_installed
         registry.set_agent_system_prompt(str(first.agent_id), "EDITED")
 
-        second_result = install_seed("reviewer", registry=registry)
+        second_result = install_seed("reviewer", registry=registry, scope="global")
         assert second_result is not None
         second, second_already_installed = second_result
         assert second_already_installed, "a second install is a deliberate no-op and must say so"
@@ -402,14 +435,14 @@ class TestInstall:
         assert len([a for a in registry.list_agents() if a.name == "reviewer"]) == 1
 
     def test_an_unknown_starter_installs_nothing(self, tmp_path) -> None:
-        assert install_seed("nope", registry=AgentRegistry(tmp_path)) is None
+        assert install_seed("nope", registry=AgentRegistry(tmp_path), scope="global") is None
 
     def test_the_role_fields_survive_a_round_trip(self, tmp_path) -> None:
         """Tools/effort/delegate are encoded in tags because AgentData is a
         persisted, API-exposed model; this is the guard that the encoding and
         the decoding still agree."""
         registry = AgentRegistry(tmp_path)
-        install_seed("manager", registry=registry)
+        install_seed("manager", registry=registry, scope="global")
         packaged = seed("manager")
         profile = resolve_profile("manager", registry=registry)
         assert profile is not None
@@ -491,7 +524,7 @@ def test_installing_over_a_non_role_name_refuses_rather_than_lying(tmp_path) -> 
     registry = AgentRegistry(tmp_path)
     registry.create_agent(_edit_fields(name="reviewer", description="chat"))
     with _pytest.raises(NameTakenError):
-        install_seed("reviewer", registry=registry)
+        install_seed("reviewer", registry=registry, scope="global")
 
 
 def test_role_lookup_folds_case_like_the_seed_lookup_does(tmp_path) -> None:
@@ -577,7 +610,7 @@ def move_seed(seeds_dir: Path, name: str, *, version: str, body: str | None = No
 
 
 def _install(registry: AgentRegistry, name: str = "reviewer"):
-    installed = install_seed(name, registry=registry)
+    installed = install_seed(name, registry=registry, scope="global")
     assert installed is not None
     row = registry.get_agent_by_name(name)
     assert row is not None
@@ -617,7 +650,7 @@ def test_an_untouched_copy_updates_in_place_when_the_starter_moves(scratch_seeds
     assert verdict.verdict == "outdated-clean"
     assert verdict.applied is True
     # Stamped from the packaged reviewer at install, before the simulated move.
-    assert verdict.installed_version == "1.3.1"
+    assert verdict.installed_version == "1.3.7"
     assert verdict.packaged_version == "2.0.0"
     assert verdict.diverged_fields == ("instructions",)
     # The echo: recoverable by copy-paste, the same guarantee reset gives.
@@ -755,7 +788,7 @@ def test_an_unbumped_body_change_is_still_an_update(scratch_seeds, tmp_path) -> 
     assert verdict.verdict == "outdated-clean"
     assert verdict.applied is True
     # Both sides read the seed's version, untouched by the body-only move.
-    assert verdict.installed_version == verdict.packaged_version == "1.3.1"
+    assert verdict.installed_version == verdict.packaged_version == "1.3.7"
     assert verdict.replaced_instructions == before_prompt
     assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER, SAME VERSION, NEW TEXT"
 
@@ -885,7 +918,7 @@ def test_install_does_not_mint_a_case_duplicate(scratch_seeds, tmp_path) -> None
     role = registry.create_agent(_edit_fields(name="Reviewer", description="house", tags=["role"]))
     registry.set_agent_system_prompt(role.id, "HOUSE RULES")
 
-    installed = install_seed("reviewer", registry=registry)
+    installed = install_seed("reviewer", registry=registry, scope="global")
 
     assert installed is not None
     names = sorted(agent.name for agent in registry.list_agents())
@@ -1304,7 +1337,7 @@ def test_a_switched_class_survives_an_update_and_reset_restores_it(scratch_seeds
     assert f"class:{PROACTIVE}" in after.tags
     assert registry.get_agent_system_prompt(after.id).strip() == "REVIEWER v2 GUIDANCE"
 
-    install_seed("reviewer", registry=registry, overwrite=True)
+    install_seed("reviewer", registry=registry, overwrite=True, scope="global")
     reset = registry.get_agent_by_name("reviewer")
     assert reset is not None
     assert f"class:{REACTIVE}" in reset.tags
@@ -2286,7 +2319,7 @@ def test_aida_first_contact_offers_a_previewed_harness_import() -> None:
     """First-run is the agent path: she may offer migration, but never imports
     without an explicit preview and selection."""
     flat = " ".join(seed("aida").instructions.split())
-    assert load_seed_version("aida") == "1.5.4"
+    assert load_seed_version("aida") == "1.5.6"
     assert "harness_import" in flat
     assert "list, preview, require explicit selection" in flat
     assert "read-only on the other harness" in flat

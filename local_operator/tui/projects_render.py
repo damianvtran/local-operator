@@ -59,6 +59,20 @@ _t = tr("tui.projects")
 #: make a keystroke path paint unbounded text (the settings list's discipline).
 PROJECTS_MAX = 200
 
+
+def not_shown_count(views: list[dict[str, Any]], hidden: int) -> int:
+    """Rows a canvas leaves out: the render cap's cut plus the registry PAGE's.
+
+    ONE expression for all three canvases. A reader needs the total not shown,
+    and two rows saying "+N" would each carry a number neither knows — while
+    three hand-copied sums are three chances to drift. ``hidden`` is
+    ``PageCounts.beyond_page``: rows the store's recency page never loaded, which
+    the canvas cannot paint at all (the page is a page, not a visibility
+    boundary — a row past the page is still addressable).
+    """
+    return max(0, len(views) - PROJECTS_MAX) + max(0, int(hidden))
+
+
 #: One list row stays scannable, the same budget the project tool's own listing
 #: uses — THE value lives in the store module (``projects.PROJECT_ROW_CAP``) and
 #: every surface imports it, so no two surfaces can truncate the same row at two
@@ -543,6 +557,7 @@ def render_project_list(
     cursor: int | None = None,
     associated: frozenset[str] | None = None,
     now: float | None = None,
+    hidden: int = 0,
     style_for: StyleFor | None = None,
 ) -> RenderResult:
     """One line per project; the selected row carries the cursor marker.
@@ -553,6 +568,12 @@ def render_project_list(
     marker set the board and the timeline read. With teams present the rows
     group under painted section headers (S6d parity); without them this is
     byte-identical to the shipped flat canvas.
+
+    ``hidden`` is how many stored rows the registry PAGE left out of ``views``
+    entirely (the store is capped by recency, ``projects._MAX_ROWS``). It is
+    added to this renderer's own ``PROJECTS_MAX`` cut in ONE overflow row: a
+    reader needs the total not shown, and two rows saying "+N" would invite
+    the reader to add them up for a number neither line knows.
     """
     resolver = _styles(style_for)
     mine = associated or frozenset()
@@ -581,10 +602,15 @@ def render_project_list(
             lines.append(_section_header_text(label, len(indexes), fill_width, resolver))
             lines.extend(rows[index] for index in indexes)
             bands.append((start, len(lines), label))
-    if len(views) > PROJECTS_MAX:
+    not_shown = not_shown_count(views, hidden)
+    if not_shown and views:
+        # Guarded on ``views``: an EMPTY page paints the empty-store sentence,
+        # and "+N more not shown" beside "no projects yet" would claim rows the
+        # canvas is not hiding (that pairing is an unreadable store, not a
+        # truncated one — the app's own load failure reaches here as []).
         lines.append(
             Text(
-                _t(_x.render_more_not_shown_indent(count=str(len(views) - PROJECTS_MAX))),
+                _t(_x.render_more_not_shown_indent(count=str(not_shown))),
                 style=resolver("dim"),
             )
         )
@@ -860,6 +886,7 @@ def render_project_board(
     associated: frozenset[str] | None = None,
     now: float | None = None,
     style_for: StyleFor | None = None,
+    hidden: int = 0,
 ) -> RenderResult:
     """Status columns painted side by side; cards of three lines, fixed width.
 
@@ -874,6 +901,7 @@ def render_project_board(
     resolver = _styles(style_for)
     mine = associated or frozenset()
     rendered = views[:PROJECTS_MAX]
+    not_shown = not_shown_count(views, hidden)
     selected_id: str | None = None
     if cursor is not None and 0 <= cursor < len(rendered):
         selected_id = str(_row(rendered[cursor]).get("id") or "")
@@ -891,20 +919,15 @@ def render_project_board(
             now=now,
             resolver=resolver,
         )
-        if len(views) > PROJECTS_MAX:
+        if not_shown:
             blocks[0].append(Text(""))
             blocks[0].append(
-                Text(
-                    _t(_x.render_more_not_shown(count=str(len(views) - PROJECTS_MAX))),
-                    style=resolver("dim"),
-                )
+                Text(_t(_x.render_more_not_shown(count=str(not_shown))), style=resolver("dim"))
             )
         lines = _stack_board_blocks(blocks)
         width = max(cell_len(line.plain) for line in lines)
         return RenderResult(text=Text("\n").join(lines), width=width, height=len(lines))
-    overflow = (
-        f"… +{len(views) - PROJECTS_MAX} more not shown" if len(views) > PROJECTS_MAX else None
-    )
+    overflow = f"… +{not_shown} more not shown" if not_shown else None
     lines: list[Text] = []
     bands: list[tuple[int, int, str]] = []
     for label, indexes in groups:
@@ -1161,6 +1184,7 @@ def render_project_timeline(
     today: date | None = None,
     now: float | None = None,
     style_for: StyleFor | None = None,
+    hidden: int = 0,
 ) -> RenderResult:
     """The time-scaled cell chart: bars, milestone glyphs, a today marker.
 
@@ -1279,6 +1303,18 @@ def render_project_timeline(
                 tail.append_text(entries)
                 lines.append(tail)
                 bands.append((start, len(lines), label))
+    # The chart caps its rows too (``PROJECTS_MAX``) and the registry page may
+    # have left rows out before the chart ever saw them; the trailing line is
+    # the same declaration the list and board carry, in the same dim ink the
+    # timeline's own ``no dates`` tail uses.
+    not_shown = not_shown_count(views, hidden)
+    if not_shown and views:
+        lines.append(
+            Text(
+                _t(_x.render_more_not_shown(count=str(not_shown))),
+                style=resolver("dim"),
+            )
+        )
     if not lines:
         from local_operator.slash_commands import project_empty_text
 

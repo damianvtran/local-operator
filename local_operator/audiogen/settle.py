@@ -206,7 +206,8 @@ async def settle_cancelled_audio(
     # The artifact is a bonus on top of the money: a settled clip registers
     # only when the observation returned sha256-verified bytes, and the ONE
     # registration path (``cache_media``) is used either way.
-    digest = _register_asset(outcome)
+    prompt = str(payload.get("prompt") or "") or None
+    digest, artifact_name = _register_asset(outcome, prompt)
 
     if journal is not None:
         row = {
@@ -234,6 +235,7 @@ async def settle_cancelled_audio(
                 {
                     "digest": digest,
                     "kind": "audio",
+                    "name": artifact_name,
                     "content_type": outcome.content_type or None,
                     "duration_s": outcome.duration_s,
                 }
@@ -244,23 +246,42 @@ async def settle_cancelled_audio(
             logger.debug("audio settlement journal row failed", exc_info=True)
 
 
-def _register_asset(outcome: SettleOutcome) -> str | None:
+def _register_asset(
+    outcome: SettleOutcome, prompt: str | None = None
+) -> tuple[str | None, str | None]:
     """Download/verify already happened; this is the ONE registration path.
+
+    Returns ``(digest, display name)``. The name comes from the REQUEST (the
+    prompt carried in the settle payload), exactly like a first-class
+    generation: this task runs after the turn that asked for the audio is
+    gone, so it carries what the asset IS rather than reading turn state.
 
     Kept separate from the observation so a registration failure cannot make a
     settled charge look unobserved (the money is recorded regardless).
     """
     asset = outcome.asset
     if asset is None:
-        return None
+        return None, None
     try:
+        from local_operator.artifacts.naming import media_filename
         from local_operator.session.attachments import cache_media
 
-        block = cache_media(asset.data, asset.content_type, kind="audio")
-        return block.attachment if block is not None else None
+        block = cache_media(
+            asset.data,
+            asset.content_type,
+            kind="audio",
+            name=media_filename(
+                prompt,
+                getattr(asset, "content_type", None) or outcome.content_type,
+                kind="audio",
+            ),
+        )
+        if block is None:
+            return None, None
+        return block.attachment, block.name
     except Exception:  # noqa: BLE001 - registration is best-effort
         logger.debug("audio settlement registration failed", exc_info=True)
-        return None
+        return None, None
 
 
 def _settled_record(payload: dict[str, Any], outcome: SettleOutcome) -> Any:

@@ -50,6 +50,14 @@ from local_operator.tui.widgets.tool_card import truncate_cells
 TOAST_DEFAULT_MS = 5000
 TOAST_FAILURE_MS = 10000
 
+#: A queued-ask RECEIPT is neither: it is the only trace of an irreversible act
+#: (a dismissal leaves no row behind — the projection drops it, and there is no
+#: undo), so it holds longer than a courtesy card while staying short of a
+#: failure's 10 s (UX round 2, U7). Moving the card next to the list would be the
+#: better answer, but the slot is one overlay positioned by the app's own layer,
+#: not per-notice; the duration is the cheap half and is what this change takes.
+TOAST_RECEIPT_MS = 8000
+
 #: Width cap, from the reference's ``maxWidth = min(60, width - 6)``. 60 cells
 #: is a comfortable measure for two lines of prose; the reserve keeps the card
 #: from growing to the full terminal on a wide screen, where a 200-cell toast

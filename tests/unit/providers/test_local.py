@@ -863,7 +863,7 @@ async def test_local_model_activation_and_forwarded_selection_refresh_off_loop(
                 else "test/model"
             )
 
-        def set_model(self, model, *, explicit=False):
+        def set_model(self, model, *, explicit=False, effort_choice=None):
             self.selected = model
             changed.set()
 
@@ -952,7 +952,7 @@ async def test_slow_local_model_choice_cannot_replace_a_newer_choice(routed):
             return FakeModel(provider, model_id)
 
     class Session(FakeSession):
-        def set_model(self, model, *, explicit=False):
+        def set_model(self, model, *, explicit=False, effort_choice=None):
             applied.append(model.model_id)
 
     session = Session()

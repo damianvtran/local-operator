@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "record_kind": "audit_evidence_validation",
+  "all_passed": true,
+  "checks": {
+    "review_scope_676": true,
+    "delta_scope_657_plus_19": true,
+    "twelve_namespaces": true,
+    "all_current_examples_match_catalogue": true,
+    "all_proposals_native_without_redaction": true,
+    "severity_and_core_count": true,
+    "unique_round2_ids": true,
+    "verdict_counts": true,
+    "only_settings_error_namespace_failed": true,
+    "all_prior_dispositions_covered": true,
+    "only_ur2_009_unresolved": true,
+    "all_namespace_hashes_fresh": true,
+    "mechanical_only_redaction_failure": true,
+    "fit_plural_evidence": true,
+    "help_risks_explicit": true,
+    "pair_workbook_complete": true,
+    "human_report_covers_findings": true,
+    "repository_log_green": true,
+    "hash_provenance_clean": true,
+    "redaction_proposal_uses_established_plural": true,
+    "all_receipt_proposals_match_findings_file": true,
+    "human_report_matches_final_proposal": true
+  }
+}

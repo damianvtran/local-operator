@@ -16,6 +16,8 @@ from local_operator.evaluation.adapters.api import (
     ExecuteParams,
     InspectRequirementsParams,
     ObserveParams,
+    ScoreParams,
+    ScoreResult,
 )
 from local_operator.evaluation.adapters.rpc import (
     MAX_RPC_BYTES,
@@ -29,7 +31,7 @@ from local_operator.evaluation.adapters.rpc import (
     canonical_line,
     parse_canonical_line,
 )
-from local_operator.evaluation.evidence.models import canonical_digest
+from local_operator.evaluation.evidence.models import ScoreArtifact, canonical_digest
 from local_operator.evaluation.protocol import (
     MAX_TEXT_LENGTH,
     ActionBatch,
@@ -1250,3 +1252,106 @@ def test_a_secret_straddling_the_truncation_boundary_is_still_withheld() -> None
         assert not any(
             secret[:length] in result for length in range(8, len(secret) + 1)
         ), "a prefix of the secret survived truncation"
+
+
+@pytest.mark.asyncio
+async def test_a_score_within_its_budget_returns_even_after_the_old_budget_would_have_fired() -> (
+    None
+):
+    """A slow score is answered, not cut off, when it fits the new budget.
+
+    The compressed numbers stand in for the production ones (the retired
+    operator-script budget was 300 s, the new one is 1800 s): the deadline
+    under test is the same ``wait_for`` on whatever constant the caller
+    passes, and the constants themselves are chosen in
+    ``EpisodeConfig.score_timeout``/``scripts/run_episode.py``. What this test
+    holds is the ordering the incident turned on -- a reply that arrives after
+    the old 0.2 s analogue still completes, so raising the constant is not
+    shadowed by a second, smaller deadline somewhere in ``call``.
+    """
+
+    requests_read, requests_write = os.pipe()
+    responses_read, responses_write = os.pipe()
+    terminated = asyncio.Event()
+    slow_s = 0.4
+
+    async def terminate() -> None:
+        terminated.set()
+
+    client = RpcClient(requests_write, responses_read, terminate=terminate)
+    params = ScoreParams(operation_id="score-ep-d4b7228e819e", episode_id="ep-d4b7228e819e")
+
+    async def peer() -> None:
+        request = parse_canonical_line(
+            await asyncio.to_thread(IncrementalReader(requests_read).read_line), RpcRequest
+        )
+        assert isinstance(request, RpcRequest)
+        await asyncio.sleep(slow_s)
+        result = ScoreResult(score=ScoreArtifact(status="scored", binary=1))
+        IncrementalWriter(responses_write).write(
+            canonical_line(
+                RpcResponse(
+                    jsonrpc="2.0",
+                    id=request.id,
+                    method=request.method,
+                    result=result.model_dump(mode="json"),
+                )
+            )
+        )
+
+    task = asyncio.create_task(peer())
+    try:
+        payload = await client.call("score", params, timeout=2.0)
+    finally:
+        await task
+        for fd in (requests_read, requests_write, responses_read, responses_write):
+            os.close(fd)
+    assert ScoreResult.model_validate(payload, strict=True).score.status == "scored"
+    assert not terminated.is_set()
+
+
+@pytest.mark.asyncio
+async def test_a_score_timeout_names_the_episode_steps_before_the_correlation_ids() -> None:
+    """The fatal has to say how far the episode got, not only which budget.
+
+    Measured incident (2026-10-19, ``osworld-task_005``): a 453-step, 2.4 h
+    episode was discarded by ``TimeoutError: score exceeded its 300s budget
+    after 300.0s (request 478; operation_id score-...)``. Nothing in that line
+    said the episode was long or legitimate, so diagnosing it meant digging in
+    the run root. The step count now rides the caller's ``timeout_context``
+    and is placed directly after the budget, ahead of the correlation ids,
+    because the readouts truncate this diagnostic at 110-160 characters.
+    """
+
+    requests_read, requests_write = os.pipe()
+    responses_read, responses_write = os.pipe()
+    terminated = asyncio.Event()
+
+    async def terminate() -> None:
+        terminated.set()
+
+    client = RpcClient(requests_write, responses_read, terminate=terminate)
+    params = ScoreParams(operation_id="score-ep-d4b7228e819e", episode_id="ep-d4b7228e819e")
+    peer = asyncio.create_task(_silent_peer(requests_read))
+    try:
+        with pytest.raises(TimeoutError) as excinfo:
+            await client.call(
+                "score",
+                params,
+                timeout=0.2,
+                timeout_context="episode ran 453 of 500 steps",
+            )
+        message = str(excinfo.value)
+    finally:
+        peer.cancel()
+        await asyncio.gather(peer, return_exceptions=True)
+        for fd in (requests_read, requests_write, responses_read, responses_write):
+            os.close(fd)
+    assert type(excinfo.value) is TimeoutError
+    assert "score exceeded its 0.2s budget after" in message
+    assert "episode ran 453 of 500 steps; request 1; operation_id score-ep-d4b7228e819e" in message
+    # Position, not merely presence: these readouts cut the line before the
+    # correlation ids, and a step count behind the cut is no diagnosis at all.
+    assert message.index("episode ran 453 of 500 steps") < message.index("request 1")
+    assert message.index("episode ran 453 of 500 steps") < 110
+    assert terminated.is_set()

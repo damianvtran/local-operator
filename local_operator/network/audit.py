@@ -127,6 +127,11 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # newcomer as having always been a member.
         "membership_learned",
         "device_rotated",
+        # A device renaming ITSELF (identity set-name). Cosmetic, never authority —
+        # which is why it is registered here and NOT added to DURABLE_EVENTS: a lost
+        # rename costs a label, while the durable list is the events whose loss would
+        # hide who could do what.
+        "device_renamed",
         "epoch_rotated",
         "epoch_conflict",
         "handshake_refused",
@@ -184,6 +189,14 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # filed, and the permission recorded. Ids and the provider key only.
         "credential.inherit_requested",
         "credential.inherit_applied",
+        # A credential card signed, refused before signing, or applied FROM THE DESKTOP
+        # (credentials/desktop_approval.py). The signature row names its ASSURANCE --
+        # `presence` (an OS prompt proved a person) or `file_only` (the operator's 0600 key
+        # signed; no person is proven) -- so an incident review can tell the two apart.
+        "credential.desktop_signed",
+        "credential.desktop_sign_refused",
+        "credential.desktop_applied",
+        "credential.desktop_apply_refused",
         # A refusal: which device asked, for which key, and the machine code. The
         # person-facing sentence is rendered where the operator is, never stored here.
         "credential.grant_refused",
@@ -202,6 +215,11 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # revoke batch the owner's lender performed — the scheduled window-end DELETE,
         # the operator's immediate revoke, and the retry after a failed call.
         "credential.revoke",
+        # A member removal pruned every placement row the removed device held
+        # (mesh-mcp-credentials.md §4): key NAMES only, plus whether the prune
+        # itself failed (a removal must proceed regardless, so the failure has to
+        # be visible somewhere).
+        "credential.revoke_all",
         # THE SYNC ENGINE (mesh-consent-provisioning.md §5): a copy served,
         # refused or applied is the same delegation life the grant rows record,
         # one lifecycle further on. `gen` names the per-key generation the row
@@ -274,6 +292,20 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # able to tell it apart from a deny (the operator said no) and from an
         # expiry (the window lapsed on its own).
         "onboard_withdrawn",
+        # THE PHONE PAIRING APPROVAL (S4a-pair-op, ``operator/pair_op.py``). One row per
+        # semantic step of ONE ``operator_device_pair`` record, and the reason the family
+        # exists at all: a pairing is the one approval that issues a STANDING signer, so an
+        # incident review asks of it in particular "which phone, under which key, and was a
+        # PERSON proven". `desktop_signed` names the assurance (``presence`` -- an OS prompt
+        # per signature -- or ``file_only``, a 0600 file signed with no person proven), which
+        # is the disclosure the operator accepted (a-2a8b); `desktop_ack` names the typed code
+        # check and how many strikes it has taken (a wrong code costs one, and the third
+        # closes the card as a deny); `desktop_applied` is the certificate landing in the
+        # device store, and `desktop_apply_refused` is why it did not.
+        "device_pair.desktop_ack",
+        "device_pair.desktop_signed",
+        "device_pair.desktop_applied",
+        "device_pair.desktop_apply_refused",
         # MESH ROLLING UPDATES, member side (mesh-update-propagation.md §6). One
         # row per semantic change of one update request: the request was admitted
         # by the authoriser, a rule refused it, or the install began/ended. A
@@ -331,6 +363,12 @@ CAUSES: frozenset[str] = frozenset(
         # deliberately-bounded relay as a relay with an internal fault.
         "handshake_cap",
         "policy",
+        # A memory handler refused a batch itself (`bad_memory`): a move whose
+        # source tombstone would erase an unseen local revision, or an invalid
+        # payload. Registered so the refusal reads as itself rather than as
+        # "internal" — that substitution is what made the round-2 silent stall
+        # invisible in the audit file too.
+        "bad_memory",
         "timeout",
         "internal",
         # A member answered ``busy`` and the pass parked it (S3a): a deferral is
@@ -401,6 +439,7 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "member_capabilities_changed": frozenset({"added", "removed", "capabilities", "initiated_by"}),
     "member_left": frozenset({"epoch"}),
     "device_rotated": frozenset({"old_device", "new_device"}),
+    "device_renamed": frozenset({"previous", "name", "networks", "failed"}),
     "epoch_rotated": frozenset({"epoch_before", "epoch_after", "rotation_id", "removed"}),
     "epoch_conflict": frozenset({"epoch", "rotation_id", "winner"}),
     "handshake_refused": frozenset(
@@ -418,6 +457,9 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
             "declared_device",
             "expected_device",
             "unidentified",
+            # How many identical refusals the relay folded into this row since the
+            # last one it wrote (``network.redial.RefusalCoalescer``). Absent = 0.
+            "repeats",
         }
     ),
     "authorisation_refused": frozenset({"op", "capability", "phase", "link_epoch"}),
@@ -470,6 +512,13 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
             "scope",
             "refreshed",
             "latency_ms",
+            # Which OWNER row was lent (an int id, never an email), whether the
+            # borrower's affinity anchor chose it, and the selection policy the
+            # lend ran under: the per-turn record that remote load-balancing
+            # matches a local session's (first pick, stickiness, failover).
+            "credential_id",
+            "anchored",
+            "policy",
         }
     ),
     "credential.finite_requested": frozenset(
@@ -480,6 +529,14 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     ),
     "credential.inherit_requested": frozenset({"credential_key", "act", "sub", "approval_id"}),
     "credential.inherit_applied": frozenset({"credential_key", "act", "sub", "approval_id"}),
+    "credential.desktop_signed": frozenset(
+        {"surface", "assurance", "operation", "key_id", "disclosure_digest"}
+    ),
+    "credential.desktop_sign_refused": frozenset(
+        {"surface", "operation", "code", "authority_level"}
+    ),
+    "credential.desktop_applied": frozenset({"surface", "operation"}),
+    "credential.desktop_apply_refused": frozenset({"surface", "operation", "code"}),
     "credential.grant_refused": frozenset({"credential_key", "act", "sub", "code", "capability"}),
     "credential.refresh": frozenset({"credential_key", "act", "sub", "cause"}),
     "credential.report": frozenset({"credential_key", "act", "sub", "failure"}),
@@ -494,6 +551,10 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "credential.revoke": frozenset(
         {"credential_key", "act", "sub", "cause", "revoked", "deferred"}
     ),
+    # The member-removal prune: `keys` is the list of placement keys stripped of
+    # the removed device (names, never values), and `failed`/`reason` record a
+    # prune that could not run without blocking the removal itself.
+    "credential.revoke_all": frozenset({"keys", "failed", "reason"}),
     # The copy path's rows (mesh-consent-provisioning.md §5): what the owner
     # SERVED (`credential.copy`), why it refused to serve (`copy_refused`, with
     # the machine reason — the digest pin's mismatch is the one that matters),
@@ -547,6 +608,18 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # withdrew (the store only ever accepts the filer), so the row is
     # self-explaining without reading the record.
     "onboard_withdrawn": frozenset({"kind", "surface", "session_id"}),
+    # The phone pairing approval (``operator/pair_op.py``). `device_id` is DERIVED from the
+    # phone's public key (public data, the same string the certificate and the revocation
+    # list carry). `strikes`/`ok` are the typed-code check's own outcome, `assurance` the
+    # level the signature actually reached, `operation` the record's ``what`` key, and
+    # `code` a refusal token -- never a sentence, never key material, and never the six
+    # digits themselves (they are compared in constant time and are never stored).
+    "device_pair.desktop_ack": frozenset({"surface", "ok", "strikes", "device_id"}),
+    "device_pair.desktop_signed": frozenset(
+        {"surface", "operation", "device_id", "key_id", "assurance"}
+    ),
+    "device_pair.desktop_applied": frozenset({"surface", "device_id", "run_id", "lifetime_days"}),
+    "device_pair.desktop_apply_refused": frozenset({"surface", "device_id", "code"}),
     # Mesh rolling updates, member side. `rollout` is the origin's record id when
     # one exists (empty for the single-peer verb — S1 carries it through so the
     # S3 driver's rows need no schema change). `target` is the VERSION asked for,
@@ -558,7 +631,25 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "update_requested": frozenset({"rollout", "target", "capability"}),
     "update_refused": frozenset({"rollout", "target", "code"}),
     "update_started": frozenset({"rollout", "target", "method"}),
-    "update_completed": frozenset({"rollout", "target", "method", "from", "version"}),
+    # ``serve``/``serve_stale``/``serve_remedy`` (2026-10-28): whether this
+    # device's `lop serve` came along with the install — the state token, the
+    # still-stale daemons as short ``pid@version`` strings, the alive-but-not-
+    # serving ones as ``pid@verdict`` (#3093 QA Q1), and the command that moves
+    # them. Flat, because this log's values are bounded scalars and lists
+    # (``_clean_value`` stringifies a dict). Built by ``meshupdate.serve_audit``.
+    "update_completed": frozenset(
+        {
+            "rollout",
+            "target",
+            "method",
+            "from",
+            "version",
+            "serve",
+            "serve_stale",
+            "serve_stuck",
+            "serve_remedy",
+        }
+    ),
     "update_failed": frozenset({"rollout", "target", "method"}),
     # The origin's side (S3a): the opening row carries WHO decided (a closed
     # token, never a sentence), under which policy and front end; the member
@@ -569,7 +660,25 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "update_rollout_started": frozenset(
         {"rollout", "authority", "policy", "via", "target", "from", "members"}
     ),
-    "update_member_state": frozenset({"rollout", "state", "code", "reason", "method", "version"}),
+    # ``left_busy`` (#3028, QA round 2 Q8): the ids a generation-layout member
+    # deliberately left on its old build — the receipt's sentence is capped, so
+    # the names it carries can be lost. A list of short ids, bounded by count at
+    # the emitter (``rollouts.LEFT_BUSY_CAP``) and here by ``_clean_value``.
+    "update_member_state": frozenset(
+        {
+            "rollout",
+            "state",
+            "code",
+            "reason",
+            "method",
+            "version",
+            "left_busy",
+            "serve",
+            "serve_stale",
+            "serve_stuck",
+            "serve_remedy",
+        }
+    ),
     "update_rollout_done": frozenset({"rollout", "counts"}),
     # The suppression row (S3b): which front end moved (``via``), what the key
     # said (``policy``) and the per-run override when it was the flag that
@@ -657,6 +766,9 @@ DURABLE_EVENTS: frozenset[str] = frozenset(
         "onboard_approved",
         "onboard_denied",
         "onboard_connected",
+        # A desktop credential signature is the same authority decision as
+        # `onboard_approved`, plus the assurance it was made at.
+        "credential.desktop_signed",
         # The mesh update request and its by-rule refusals are AUTHORITY
         # decisions ("may this peer move my install"): a widened standing grant
         # whose request landed with no record would leave a device explaining an
@@ -708,7 +820,36 @@ STREAM_LIFECYCLE_EVENTS: frozenset[str] = frozenset(
 )
 
 OUTCOMES = ("ok", "refused", "failed", "partial")
-ACTOR_KINDS = ("human", "agent", "relay", "unknown")
+#: Who an event's actor IS, as far as this log can say. A CLOSED set, because an
+#: unlisted value is rewritten to "unknown" on the way in — the field is for reading,
+#: and a free-form one would make every consumer guess.
+#:
+#: ``device`` IS HERE BECAUSE TEN CALL SITES ACROSS SEVEN MODULES PASS IT, and the
+#: list is enumerated rather than counted because a numeral hid an omission once
+#: already: the five credential modules' emitters (``credentials/`` github,
+#: lifecycle, owner, reconcile, sync), the relay's ``credential.placement`` record,
+#: the CLI's ``credential.placement`` audit, ``device_renamed``, ``device_rotated``
+#: and the PEER-APPLIED ``epoch_rotated`` (``relay.py``, the emitter whose
+#: ``actor=link.device_id``). Before this value existed, every one of those rows
+#: silently rendered ``actor_kind: "unknown"`` — the audit recorded that SOMETHING
+#: happened and lost the fact that a DEVICE did it. The alternative fix (stop passing
+#: it, let those rows say ``human`` or ``unknown``) would erase a distinction every
+#: emitter clearly intends, so the set was widened instead. Do not "clean up" the
+#: emitters back to three values: "device" is a peer acting under its own key, which
+#: is neither a person at this keyboard nor an agent process here.
+#:
+#: NOT every device-shaped row carries it, and the rule matters more than a list:
+#: this value answers WHO ACTED, not who is NAMED. It is passed where the audited
+#: action is a device acting under its own key (the credential emitters, a rename, a
+#: rotation — the list above), and withheld where the actor id names a device but the
+#: initiator was the operator at this keyboard (the LOCAL ``epoch_rotated`` refusal
+#: after ``member rm``; ``member_removed``, ``invite_minted``, ``trust_changed``) or
+#: where the event audits THIS device's own act described from a peer's row
+#: (``membership_learned``, ``member_admitted``, ``panic_received``, and the link,
+#: pairing, reconcile, session-stream, authorisation and definitions families). Those
+#: keep the default deliberately; reclassifying them is a per-event decision and not
+#: a sweep, which is why the review's three examples are examples and not the tail.
+ACTOR_KINDS = ("human", "agent", "relay", "device", "unknown")
 
 
 def _resolve(name: str, explicit: Any, default: Any, cast: Any, root: Path | None = None) -> Any:
@@ -751,7 +892,8 @@ class AuditEvent:
     network_name: str = ""
     actor_name: str = ""
     #: A HINT, not an attestation: from ``LOP_ACTOR`` when a harness sets it, else
-    #: ``unknown``. Never presented as proof of who typed a command.
+    #: ``unknown``. Never presented as proof of who typed a command. The closed set is
+    #: :data:`ACTOR_KINDS`; a value outside it is stored as ``unknown``.
     actor_kind: str = "unknown"
     ts: float = field(default_factory=time.time)
 

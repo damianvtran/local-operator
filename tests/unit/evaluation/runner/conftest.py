@@ -10,6 +10,7 @@ case; everything the runner is responsible for stays under test.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import sys
 import uuid
@@ -73,7 +74,7 @@ def selector(tmp_path: Path) -> AdapterSelector:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
     return AdapterSelector(
-        schema_version="1.6",
+        schema_version="1.7",
         adapter_id="tiny",
         distribution="tiny-adapter",
         version="1.0",
@@ -97,7 +98,7 @@ def handshake(tmp_path: Path) -> Handshake:
             entry_point="tiny_adapter:create",
             package_digest="a" * 64,
             release_digest="b" * 64,
-            schema_version="1.6",
+            schema_version="1.7",
             capabilities=AdapterCapabilities(routes=("computer",), ask_user=True, scoring=True),
         ),
         python=PythonRuntime.current(),
@@ -228,6 +229,7 @@ class FakeAdapter:
         failures: dict[str, BaseException] | None = None,
         fail_after: dict[str, int] | None = None,
         declared_requirements: tuple[Requirement, ...] = (),
+        score_delay: float = 0.0,
     ) -> None:
         self.tmp_path = tmp_path
         self.episode_id = episode_id
@@ -241,6 +243,16 @@ class FakeAdapter:
         self.fail_after = fail_after or {}
         self.calls: list[str] = []
         self.timeouts: dict[str, list[float]] = {}
+        #: The ``timeout_context`` each call carried, so a test can prove the
+        #: runner supplied the score timeout's step count (the message itself
+        #: is built one layer below, in ``RpcClient``, which this fake
+        #: replaces).
+        self.timeout_contexts: dict[str, list[str | None]] = {}
+        #: Wall time a ``score`` answers in, for the "a slow score within the
+        #: budget still seals" case. The real deadline is ``RpcClient``'s and
+        #: is covered by the RPC tests; this fake only lets the runner
+        #: complete a score that takes measurable time.
+        self.score_delay = score_delay
         self.terminated = False
         # The supervisor surface the failure path inspects for the worker's
         # drained stderr (``EpisodeRunner._adapter_stderr``). ``None`` models a
@@ -277,11 +289,13 @@ class FakeAdapter:
         *,
         timeout: float,
         execution_overhead_seconds_per_action: float = 0.0,
+        timeout_context: str | None = None,
     ) -> Any:
         from local_operator.evaluation.deadlines import funded_timeout
 
         del result_type
         self.calls.append(method)
+        self.timeout_contexts.setdefault(method, []).append(timeout_context)
         effective_timeout = funded_timeout(
             timeout,
             params,
@@ -314,6 +328,8 @@ class FakeAdapter:
                 ask_id=params.ask_id, request_digest=params.request_digest, accepted=True
             )
         if method == "score":
+            if self.score_delay:
+                await asyncio.sleep(self.score_delay)
             return ScoreResult(score=self.score)
         if method == "cleanup":
             return CleanupResult(

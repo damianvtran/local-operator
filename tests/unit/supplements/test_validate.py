@@ -381,6 +381,36 @@ def test_the_scan_refuses_the_named_escapes(body: str) -> None:
     assert not result.components and result.rejected
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        '<style>@keyframes pulse{from{opacity:.4}to{opacity:1}}</style><div id="c"></div>',
+        '<style>.x{animation:pulse 1s infinite}</style><div class="x">x</div>',
+        '<style>.x{-webkit-animation:pulse 1s infinite}</style><div class="x">x</div>',
+        '<style>.x{transition:opacity 1s}</style><div class="x">x</div>',
+        '<div id="c" style="animation:pulse 1s infinite"></div>',
+        '<script>document.getElementById("c").style.animation="pulse 1s"</script>',
+    ],
+)
+def test_the_scan_refuses_component_motion(body: str) -> None:
+    """v5's reduced-motion universal selector was the only enforcement for component-authored
+    CSS; v6 removed it to pay for the chart shape. The memo still requires motion off, and
+    the validator is where that costs no prelude bytes (review M-2)."""
+    result = validate_output(component("{}", body), EVIDENCE)
+    assert not result.components, body
+    assert any("motion" in error for error in result.rejected[0].errors), result.rejected[0].errors
+
+
+@pytest.mark.parametrize("tag", ["h1", "h2", "h3", "h4", "h5", "h6"])
+def test_the_scan_refuses_a_drawn_heading(tag: str) -> None:
+    """QA Q-5: v5's heading rule normalized a component-authored h1 to 13 px; removing it
+    would render the UA's 2em. A heading is chrome the body-only contract forbids, so it is
+    refused at the validator (0 prelude bytes) instead of styled back."""
+    result = validate_output(component("{}", f'<{tag}>Title</{tag}><div id="c"></div>'), EVIDENCE)
+    assert not result.components, tag
+    assert result.rejected
+
+
 def test_an_oversized_component_is_refused() -> None:
     big = component("{}", "<div>" + "x" * MAX_COMPONENT_BYTES + "</div>")
     result = validate_output(big, EVIDENCE)
@@ -480,8 +510,8 @@ def test_the_prompt_is_the_memos_appendix_a_fence_character_for_character() -> N
 def test_the_prompt_is_within_five_percent_of_the_measured_token_count() -> None:
     tiktoken = pytest.importorskip("tiktoken", reason="the token budget is measured with tiktoken")
     counted = len(tiktoken.get_encoding("o200k_base").encode(GENERATOR_SYSTEM_PROMPT))
-    # The memo's figure (re-measured for the body-only amendment, 2026-10-10).
-    assert abs(counted - 1140) <= 0.05 * 1140, counted
+    # The memo's figure (re-measured for the numeric-format amendment, 2026-10-19).
+    assert abs(counted - 1250) <= 0.05 * 1250, counted
 
 
 def test_a_steer_instruction_is_flat_and_bounded() -> None:
@@ -789,3 +819,29 @@ def test_an_unprovable_tag_parse_leaves_the_swallowed_number_scannable() -> None
     result = validate_output(unterminated, EVIDENCE)
     assert not result.components, "an unterminated quote was accepted"
     assert any("7000" in error for error in result.repair_errors), result.repair_errors
+
+
+@pytest.mark.parametrize("evidence_value", ["$0.15", "0.15"])
+@pytest.mark.parametrize("component_value", ["$0.15", "0.15", 0.15])
+def test_formatted_and_plain_prices_share_numeric_provenance(evidence_value, component_value):
+    """Neither direction may lose provenance when the prompt emits plain numbers."""
+    evidence = (
+        Dataset(
+            title="Prices",
+            source="prices.csv",
+            columns=("name", "price"),
+            rows=(("Input", evidence_value),),
+            n_rows=1,
+            numeric_columns=("price",),
+        ),
+    )
+    output = component(
+        json.dumps({"d1": {"columns": ["name", "price"], "rows": [["Input", component_value]]}}),
+        '<div id="c"></div><script>LO.bar(document.getElementById("c"),"d1",'
+        '{x:"name",y:"price"})</script>',
+        source="prices.csv",
+    )
+    result = validate_output(output, evidence)
+    assert len(result.components) == 1, result.rejected
+    invented = output.replace("0.15", "0.16")
+    assert not validate_output(invented, evidence).components

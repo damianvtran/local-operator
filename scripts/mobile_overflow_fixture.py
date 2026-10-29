@@ -791,6 +791,9 @@ class QueuedAskHarness:
         self.answers: dict[str, dict[str, list[str]]] = {}
         self.declined: list[str] = []
         self.dismissed: list[str] = []
+        #: The reason each dismissal carried, by ask id — ``None`` for the lapsed
+        #: door's one-key tap, which names none.
+        self.dismiss_reasons: dict[str, str | None] = {}
         #: Called after every settlement, so the runtime repaints its attached
         #: readers. A REAL handle has its own event stream driving that push
         #: (``subscribe_events``); this one has no events, so the fixture wires
@@ -874,8 +877,22 @@ class QueuedAskHarness:
         self._settle(str(ask_id), "declined", None)
         return "declined"
 
-    async def ask_dismiss(self, ask_id: str, by: str = "") -> str:
+    async def ask_dismiss(self, ask_id: str, by: str = "", *, reason: str | None = None) -> str:
+        """The dismissal door, WITH the operator's reason.
+
+        ``reason`` used to be missing from this signature, so a reasoned dismissal
+        through the repo's own phone rig died inside the fixture and the daemon
+        relayed the raw ``TypeError`` to the card (UX round 1's rig note).
+
+        A NAMED reason is the OPEN-ask door (§15): the row settles and KEEPS the
+        stamp a settled receipt is judged by (SA-D8, §17). NO reason is the lapsed
+        door: that dismissal removes the row everywhere, and leaving
+        ``dismissed_at`` unset is how this fixture reproduces "it leaves" without
+        running a clock.
+        """
         self.dismissed.append(str(ask_id))
+        self.dismiss_reasons[str(ask_id)] = reason
+        self._settle(str(ask_id), "dismissed", None, reason=reason)
         return "dismissed"
 
     def _publish_index(self) -> None:
@@ -900,7 +917,14 @@ class QueuedAskHarness:
             asks=[row.to_json() for row in (self.projection.asks or [])],
         )
 
-    def _settle(self, ask_id: str, status: str, answers: dict[str, list[str]] | None) -> None:
+    def _settle(
+        self,
+        ask_id: str,
+        status: str,
+        answers: dict[str, list[str]] | None,
+        *,
+        reason: str | None = None,
+    ) -> None:
         """Flip the row the way the queue's fold does, so the pushed projection
         is the state a real runtime would publish (a settled row, and the open
         count falling with it)."""
@@ -911,6 +935,12 @@ class QueuedAskHarness:
             row.delivered = True
             row.answers = answers
             row.answered_by = {"surface": "phone"}
+            if status == store.STATUS_DISMISSED and reason:
+                # The pair a settled receipt is judged and worded by (§17). Only a
+                # NAMED reason stamps it: the lapsed door's tap names none and must
+                # leave the row, which an unstamped dismissal already does.
+                row.dismissed_at = int(time.time() * 1000)
+                row.dismissed_reason = reason
         open_rows = [row for row in (self.projection.asks or []) if row.status == store.STATUS_OPEN]
         # The tallies the phone renders come from the OUTSTANDING set (open
         # asks; a timed-out one is settled, #2388), the rule the real wire publishes —
@@ -1356,6 +1386,154 @@ def _spend_unknown_projection() -> SessionProjection:
     )
 
 
+def _operator_spend_projection() -> SessionProjection:
+    """The operator's reported screen, as closely as the wire can reproduce it.
+
+    The phone showed `image $–  image $0.080  image $0.080  search $0.0000
+    channels not tracked · +9 more` on a second, wrapping line: one session on a
+    33.3%/1M context, a floor total of $447.70, three image rows (two different
+    provider/model pairs, one amount unstated), a zero search row and the
+    untracked notice. `+N more` comes from the SAME cap the phone applies: the
+    four NAMED rows win the budget, so the large inference row and a read row
+    are the remainder. The rows sum exactly to ``total_micro`` so a reviewer
+    cannot mistake this for an arithmetic fixture.
+    """
+    projection = _spend_projection(
+        "operator-spend",
+        900021,
+        tracked=False,
+        knowledge="partial",
+        total_micro=447_700_000,
+        by_basis={
+            "billed": 447_539_880,
+            "estimated": 160_120,
+        },
+        rows=[
+            # The bulk of the money is inference and loses the chip budget to the
+            # named channels — deliberately, so `· +N more` hides a real row.
+            {
+                "channel": "inference",
+                "provider": "anthropic",
+                "model": "claude-opus-4-1",
+                "label": "anthropic/claude-opus-4-1",
+                "amount_micro": 447_539_880,
+                "knowledge": "exact",
+                "basis": ["billed"],
+                "price_versions": [],
+            },
+            # Three `image` rows: two provider/model pairs, one unpriceable call.
+            {
+                "channel": "image",
+                "provider": "openai",
+                "model": "gpt-image-1",
+                "amount_micro": 80_000,
+                "knowledge": "exact",
+                "basis": ["estimated"],
+                "price_versions": [],
+            },
+            {
+                "channel": "image",
+                "provider": "openai",
+                "model": "gpt-image-1",
+                "amount_micro": None,
+                "knowledge": "unknown",
+                "basis": [],
+                "price_versions": [],
+            },
+            {
+                "channel": "image",
+                "provider": "radient",
+                "model": "gpt-image-2",
+                "amount_micro": 80_000,
+                "knowledge": "exact",
+                "basis": ["estimated"],
+                "price_versions": [],
+            },
+            {
+                "channel": "search",
+                "provider": "brave",
+                "amount_micro": 0,
+                "knowledge": "exact",
+                "basis": [],
+                "price_versions": [],
+            },
+            {
+                "channel": "read",
+                "provider": "browser",
+                "amount_micro": 120,
+                "knowledge": "exact",
+                "basis": ["estimated"],
+                "price_versions": [],
+            },
+        ],
+    )
+    projection.context_tokens = 333_000
+    projection.context_window = 1_000_000
+    projection.context_is_estimate = False
+    return projection
+
+
+def _operator_spend_long_projection() -> SessionProjection:
+    """The operator's published object on a transcript long enough to tail-follow.
+
+    R1-1/U3/Q1 is a scroll-position defect: at the bottom of a long transcript
+    the spend panel's 61px insertion changes the scroll extent, the browser
+    anchors/tail-follows, and the old catch-all `scroll` listener closed the
+    panel in 20-100ms. Sixty entries give the screen somewhere to be "at the
+    bottom"; the spend object is the operator's own, so the frame also shows
+    the qualified chips once the panel survives.
+    """
+    projection = _operator_spend_projection()
+    projection.session_id = "operator-spend-long"
+    projection.pid = 900022
+    projection.conversation_name = "Operator spend long"
+    projection.transcript = [
+        TranscriptEntry(
+            id=f"osl-{index:02d}",
+            kind="user" if index % 2 == 0 else "assistant",
+            text=(
+                f"Transcript line {index:02d}: the panel must survive the "
+                "browser's own tail-follow at the bottom of this conversation, "
+                "because a layout-driven scroll is not the reader scrolling away."
+            ),
+        )
+        for index in range(60)
+    ]
+    return projection
+
+
+def _operator_spend_zero_projection() -> SessionProjection:
+    """A published breakdown with NO spend figure to print (R1-2/U1).
+
+    A zero total with one zero-amount image row, and no context reading either:
+    the status row's only content is the `cost detail` disclosure, and the
+    panel must be absent until that control is pressed.
+    """
+    projection = _spend_projection(
+        "operator-spend-zero",
+        900023,
+        tracked=True,
+        knowledge="exact",
+        total_micro=0,
+        rows=[
+            {
+                "channel": "image",
+                "provider": "openai",
+                "model": "gpt-image-1",
+                "amount_micro": 0,
+                "knowledge": "exact",
+                "basis": ["estimated"],
+                "price_versions": [],
+            }
+        ],
+    )
+    projection.conversation_name = "Operator spend zero"
+    projection.context_tokens = None
+    projection.context_window = 200_000
+    projection.context_is_estimate = False
+    return projection
+
+
 def _asks_stacked_projection() -> SessionProjection:
     """Queued asks in the BUSIEST column: todos, a running subagent roster, a
     pending approval card AND the minimized ask chip in one stack.
@@ -1527,7 +1705,7 @@ async def main() -> None:
         # chip shares its slot with todos, a roster and an approval card.
         _foreign_ask_projection(),
         _asks_stacked_projection(),
-        # The ENDED conversation (D6/D8): its own sheet carries the ended strip.
+        # The ENDED conversation (D6/D8): its header health sheet carries Resume.
         _ended_ask_projection(),
         # A stopped conversation whose index row is a stale `open` past its
         # deadline (review round 1, R1 / QA Q1): the relay re-derives it.
@@ -1545,6 +1723,15 @@ async def main() -> None:
         _spend_capped_projection(),
         _spend_untracked_exact_projection(),
         _spend_recovered_projection(),
+        # THE OPERATOR'S OWN SCREEN (the status-row defect): three duplicate
+        # `image` rows, a zero search row, the untracked notice and a real
+        # `· +N more` — so the collapse is photographed against the shape that
+        # caused it rather than a tidy invented one.
+        _operator_spend_projection(),
+        # THE LONG-TAIL REPRO (R1-1/U3/Q1) and the no-figure `cost detail`
+        # state (R1-2/U1), both from the operator's own published object.
+        _operator_spend_long_projection(),
+        _operator_spend_zero_projection(),
     ]
     # The ANSWERABLE queued-ask session is not in that list: it is served by a
     # real runtime below, so its projection arrives over the relay's own dial

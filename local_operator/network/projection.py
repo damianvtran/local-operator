@@ -223,6 +223,23 @@ class PeerFacts:
     age_s: float = 0.0
 
 
+def _binding_name(binding: Any, key: str) -> str:
+    """One name out of a peer row's ``binding`` block, or ``""`` (no claim).
+
+    The block is a PEER's claim and is read defensively, the way every other
+    federated field is: an absent block (a build older than the key), a block
+    that is not an object, or a name that is not a non-empty string all land on
+    ``""``. Bounded at 256 characters because a name is display text and a peer
+    is not trusted to keep it short (team and profile names are far shorter).
+    """
+    if not isinstance(binding, dict):
+        return ""
+    value = binding.get(key)
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:256]
+
+
 @dataclass(frozen=True)
 class PeerRow:
     """One of a peer's session rows, RE-ADDRESSED at our relay.
@@ -244,6 +261,12 @@ class PeerRow:
     pid: int = 0
     kind: str = "daemon"
     state: str = ""
+    # Additive claims from mixed-version peers: wait defaults to not parked;
+    # nullable work counts stay unknown, never an invented measured zero.
+    waiting_on: int = 0
+    jobs_running: int | None = None
+    subagents_running: int | None = None
+    subagents_queued: int | None = None
     busy: bool = False
     #: WHAT a person is being waited on (``"approval"``/``"ask"``), the same
     #: ``str | None`` the LOCAL row publishes (``SessionRecord.pending``, carried
@@ -275,6 +298,14 @@ class PeerRow:
     placement: SessionPlacement = field(default_factory=local_placement)
     origin: dict[str, Any] = field(default_factory=dict)
     archived: bool | None = None
+    #: The team / agent the session is attached to ON THE PEER (its own
+    #: ``attachment.json``, stamped by ``relay._row_binding``). ``""`` is NO
+    #: CLAIM: a peer whose build predates the ``binding`` key omits it, and that
+    #: must read as "unknown" — the same null a local unattached row publishes —
+    #: never as a guessed team. Carried so the origin's sidebar can draw the
+    #: team badge on a remote row exactly as on a local one.
+    team: str = ""
+    agent: str = ""
 
     @property
     def peer_block(self) -> dict[str, Any]:
@@ -311,6 +342,10 @@ class PeerRow:
             # on #2044). Zero here is the facade's own "no time" answer.
             started_at=self.started,
             capabilities=list(self.capabilities),
+            waiting_on=self.waiting_on,
+            jobs_running=self.jobs_running,
+            subagents_running=self.subagents_running,
+            subagents_queued=self.subagents_queued,
             busy=self.busy,
             pending=self.pending,
             detached=self.detached,
@@ -321,6 +356,11 @@ class PeerRow:
         def _bool(key: str) -> bool:
             return bool(data.get(key))
 
+        # An older relay may forward a stale record on its first reaping scan.
+        # The pid is gone: old counts must not resurrect waiting/delegating even
+        # after the state mapper correctly makes this row cold. A genuinely
+        # wedged live pid keeps its diagnostic snapshot unchanged.
+        stale = str(data.get("state") or "") == "stale"
         return PeerRow(
             session_id=str(data.get("session_id") or ""),
             device_id=device_id,
@@ -350,7 +390,23 @@ class PeerRow:
             pid=peer_whole_int(data.get("pid"), default=0),
             kind=str(data.get("kind") or "daemon"),
             state=str(data.get("state") or ""),
-            busy=_bool("busy"),
+            waiting_on=0 if stale else peer_whole_int(data.get("waiting_on"), default=0),
+            jobs_running=(
+                peer_whole_int(data["jobs_running"], default=0)
+                if not stale and data.get("jobs_running") is not None
+                else None
+            ),
+            subagents_running=(
+                peer_whole_int(data["subagents_running"], default=0)
+                if not stale and data.get("subagents_running") is not None
+                else None
+            ),
+            subagents_queued=(
+                peer_whole_int(data["subagents_queued"], default=0)
+                if not stale and data.get("subagents_queued") is not None
+                else None
+            ),
+            busy=False if stale else _bool("busy"),
             pending=row_needs_claim(state=data.get("state"), pending=data.get("pending")),
             detached=_bool("detached"),
             capabilities=tuple(str(item) for item in (data.get("capabilities") or ())),
@@ -361,6 +417,8 @@ class PeerRow:
             placement=SessionPlacement.from_json(data.get("placement")),
             origin=dict(data["origin"]) if isinstance(data.get("origin"), dict) else {},
             archived=(bool(data["archived"]) if isinstance(data.get("archived"), bool) else None),
+            team=_binding_name(data.get("binding"), "team"),
+            agent=_binding_name(data.get("binding"), "agent"),
         )
 
     def to_row_json(self) -> dict[str, Any]:
@@ -378,6 +436,10 @@ class PeerRow:
             "pid": self.pid,
             "kind": self.kind,
             "state": self.state,
+            "waiting_on": self.waiting_on,
+            "jobs_running": self.jobs_running,
+            "subagents_running": self.subagents_running,
+            "subagents_queued": self.subagents_queued,
             "busy": self.busy,
             "pending": self.pending,
             "detached": self.detached,
@@ -390,6 +452,7 @@ class PeerRow:
             "placement": self.placement.to_json(),
             "origin": dict(self.origin) or None,
             "last_synced_at": None,
+            "binding": {"agent": self.agent or None, "team": self.team or None},
         }
 
 

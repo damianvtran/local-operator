@@ -1,0 +1,11 @@
+relay.ask.context.messages | {count, plural, one {# message from you since this was asked (last {time})} other {# messages from you since this was asked (last {time})}} | {count, plural, one {اس سوال کے بعد آپ کا # پیغام (آخری {time})} other {اس سوال کے بعد آپ کے # پیغامات (آخری {time})}}
+relay.ask.dismiss.answered_in_chat | Answered in chat | گفتگو میں جواب دے دیا
+relay.ask.dismiss.answered_in_chat_note | you already replied in the conversation | آپ گفتگو میں پہلے ہی جواب دے چکے ہیں
+relay.ask.dismiss.cancel | cancel | منسوخ کریں
+relay.ask.dismiss.moot | No longer needed | اب ضرورت نہیں
+relay.ask.dismiss.moot_note | stop waiting on it | اب جواب کا انتظار نہیں ہوگا
+relay.ask.dismiss.open | dismiss… | ختم کریں…
+relay.ask.dismiss.receipt | Dismissed — no reply sent | ختم کر دیا گیا — کوئی جواب نہیں بھیجا
+relay.ask.dismiss.receipt_answered_in_chat | Dismissed — answered in chat | ختم کر دیا گیا — گفتگو میں جواب دے دیا گیا
+relay.ask.dismiss.receipt_moot | Dismissed — no longer needed | ختم کر دیا گیا — اب ضرورت نہیں
+relay.ask.dismiss.title | Dismiss this ask | یہ سوال ختم کریں

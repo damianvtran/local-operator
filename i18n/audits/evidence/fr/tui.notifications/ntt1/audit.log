@@ -1,0 +1,236 @@
+COMMAND: .venv/bin/python -B audit.py   (PYTHONDONTWRITEBYTECODE=1)
+Auditor: translation-auditor / session 429b867caa2e / ACTUAL MODEL radient/auto (provider-quota fallback chain from anthropic/claude-opus-5-5 -> anthropic/claude-sonnet-5-5 -> openai/gpt-6.1-sol -> radient/auto)
+Namespace: tui.notifications  locale: fr  audit_id: ntt1
+en_sha256=b415bc703840afabc1c3ecaeecdad24a84d9a6ab3367833cad4f17f0e0e70b68
+context_sha256=0a9ee26060dcc5a5dc44c784fcdff2d3b64c6457899d7b3c382c0c7e32d85907
+target_sha256=87866da0d850589f04c12d28599bfc9235c0facf9aa5cc37b39ac20cbea29905
+PASS en sha256 matches the delegation pin
+PASS ctx sha256 matches the delegation pin
+PASS target sha256 matches the delegation pin
+keys en=72 fr=72 context=72
+PASS key parity 72/72, no unknown or missing key
+fr CLDR categories: ['many', 'one', 'other']
+PASS ICU parse 144 messages; argument contract + fr plural categories hold
+PASS check_catalogues() on the isolated root: 0 problems
+PASS CLDR renders: 7 plural keys x 9 counts x 2 locales
+CELL ok   ago                      en=  7 fr= 10 max= 12  fr_worst@{'age': '59m'}='il y a 59m'
+CELL ok   arg_read                 en= 35 fr= 43 max= 44  fr_worst@{}='Marquer toutes les notifications comme lues'
+CELL ok   ask_expires              en= 14 fr= 15 max= 18  fr_worst@{'time': '38m'}='expire dans 38m'
+CELL ok   ask_kind                 en=  3 fr=  7 max=  8  fr_worst@{}='demande'
+CELL ok   back                     en= 15 fr= 15 max= 24  fr_worst@{}='← Notifications'
+CELL ok   banner_digest_body       en= 32 fr= 43 max= 60  fr_worst@{}='Saisissez /notifications pour les afficher.'
+CELL ok   banner_digest_title      en= 35 fr= 41 max= 60  fr_worst@{'count': 99}='99 autres notifications de priorité haute'
+CELL ok   chip_high                en=  4 fr=  5 max=  6  fr_worst@{}='haute'
+CELL ok   empty_caught_up_title    en= 13 fr= 16 max= 30  fr_worst@{}='Vous êtes à jour'
+CELL ok   empty_filtered_title     en= 29 fr= 32 max= 40  fr_worst@{}='Rien ne correspond à ces filtres'
+CELL ok   empty_none_title         en= 20 fr= 26 max= 30  fr_worst@{}='Pas encore de notification'
+CELL ok   filter_all               en=  3 fr=  6 max=  8  fr_worst@{}='toutes'
+CELL ok   filter_unread            en=  6 fr=  8 max=  8  fr_worst@{}='non lues'
+CELL ok   group_conversation       en= 12 fr= 12 max= 12  fr_worst@{}='conversation'
+CELL ok   group_older              en=  5 fr= 14 max= 30  fr_worst@{}='Plus anciennes'
+CELL ok   group_time               en=  4 fr=  4 max= 12  fr_worst@{}='date'
+CELL ok   group_today              en=  5 fr= 11 max= 30  fr_worst@{}='Aujourd’hui'
+CELL ok   group_waiting            en= 14 fr= 27 max= 30  fr_worst@{}='En attente de votre réponse'
+CELL ok   group_week               en= 17 fr= 22 max= 30  fr_worst@{}='Plus tôt cette semaine'
+CELL ok   group_yesterday          en=  9 fr=  4 max= 30  fr_worst@{}='Hier'
+CELL OVER header_counts            en= 43 fr= 44 max= 40 (en also over)  fr_worst@{'unread': 1000000, 'waiting': 1000000}='1\u202f000\u202f000 de non-lues · 1\u202f000\u202f000 en attente'
+CELL ok   header_partial           en=  9 fr= 12 max= 12  fr_worst@{'count': '100'}='100 visibles'
+CELL ok   hint_answer              en=  6 fr=  8 max=  8  fr_worst@{}='répondre'
+CELL ok   hint_back                en=  4 fr=  6 max=  8  fr_worst@{}='retour'
+CELL ok   hint_clear               en=  5 fr=  7 max=  8  fr_worst@{}='effacer'
+CELL ok   hint_conversation        en= 12 fr= 12 max= 14  fr_worst@{}='conversation'
+CELL ok   hint_dismiss             en=  7 fr=  7 max= 10  fr_worst@{}='ignorer'
+CELL ok   hint_dismiss_all         en= 11 fr= 12 max= 12  fr_worst@{}='tout ignorer'
+CELL ok   hint_filter              en=  6 fr=  7 max=  8  fr_worst@{}='filtrer'
+CELL ok   hint_open                en=  4 fr=  6 max= 10  fr_worst@{}='ouvrir'
+CELL ok   hint_read                en=  4 fr=  2 max=  8  fr_worst@{}='lu'
+CELL ok   hint_select              en=  6 fr=  6 max=  8  fr_worst@{}='cocher'
+CELL ok   hint_undo                en=  4 fr=  7 max=  8  fr_worst@{}='annuler'
+CELL ok   hint_unread              en=  6 fr=  6 max=  8  fr_worst@{}='non lu'
+CELL ok   just_now                 en=  8 fr= 11 max= 12  fr_worst@{}='à l’instant'
+CELL ok   kind_asks                en=  4 fr=  8 max=  8  fr_worst@{}='demandes'
+CELL ok   kind_updates             en=  7 fr=  5 max=  8  fr_worst@{}='infos'
+CELL ok   no_body                  en= 25 fr= 19 max= 40  fr_worst@{}='Aucun détail joint.'
+CELL ok   position                 en= 10 fr= 11 max= 12  fr_worst@{'index': '100', 'total': '100'}='100 sur 100'
+CELL ok   priority_high            en=  4 fr=  5 max=  8  fr_worst@{}='haute'
+CELL ok   priority_normal_up       en=  7 fr=  8 max=  8  fr_worst@{}='normale+'
+CELL ok   row_now                  en=  3 fr=  3 max=  5  fr_worst@{}='<1m'
+CELL ok   section_history          en= 15 fr= 24 max= 30  fr_worst@{}='Mises à jour précédentes'
+CELL ok   section_links            en=  5 fr=  5 max= 20  fr_worst@{}='Liens'
+CELL ok   section_projects         en= 16 fr= 12 max= 30  fr_worst@{}='Projets liés'
+CELL ok   section_waiting_here     en= 35 fr= 40 max= 40  fr_worst@{}='Demandes en attente dans la conversation'
+CELL ok   seen_in_chat             en= 12 fr= 12 max= 12  fr_worst@{}='vue en conv.'
+CELL ok   seen_live                en=  9 fr= 12 max= 12  fr_worst@{}='vue aussitôt'
+CELL ok   selected                 en= 11 fr= 14 max= 16  fr_worst@{'count': '12'}='Sélection\u202f: 12'
+CELL ok   sidebar_note             en= 16 fr= 16 max= 18  fr_worst@{'count': '12'}='notifications 12'
+CELL ok   title                    en= 13 fr= 13 max= 20  fr_worst@{}='Notifications'
+CELL ok   update_kind              en=  6 fr=  4 max=  8  fr_worst@{}='info'
+CELL OVER updates_since            en= 29 fr= 38 max= 30 (fr only)  fr_worst@{'count': 1000000, 'time': '14:05'}='1\u202f000\u202f000 de mises à jour depuis 14:05'
+CELL summary: fr-only over=1 both-over=1 within-budget=51/53
+PASS literal tokens (/notifications, /unread, `/unread read`, read, y/n, a, f) present byte-exact
+PASS NFC holds; no manual bidi controls; no straight apostrophes
+PASS fr typography: U+202F before : ; ! ? and inside « … »
+PASS no double spaces, no stray whitespace
+HINT width=80: en kept 7/8 cost 69 ['↵', 'e', 'u2', 'space', 'f', 'z', 'esc'] | fr kept 7/8 cost 75 ['↵', 'e', 'u2', 'space', 'f', 'z', 'esc']
+HINT width=100: en kept 8/8 cost 85 ['↵', 'e', 'u2', 'space', 'o', 'f', 'z', 'esc'] | fr kept 8/8 cost 91 ['↵', 'e', 'u2', 'space', 'o', 'f', 'z', 'esc']
+HINT width=120: en kept 8/8 cost 85 ['↵', 'e', 'u2', 'space', 'o', 'f', 'z', 'esc'] | fr kept 8/8 cost 91 ['↵', 'e', 'u2', 'space', 'o', 'f', 'z', 'esc']
+-- fit thresholds: first count where the render exceeds maxCells --
+THRESH tui.notifications.header_counts en max=40 over_at=(1000000, 43) samples 99:29 999:31 1000:35 9999:35 100000:39 1000000:43
+THRESH tui.notifications.header_counts fr max=40 over_at=(1000000, 44) samples 99:27 999:29 1000:33 9999:33 100000:37 1000000:44
+THRESH tui.notifications.updates_since en max=30 over_at=None samples 99:22 999:23 1000:25 9999:25 100000:27 1000000:29
+THRESH tui.notifications.updates_since fr max=30 over_at=(1000, 31) samples 99:28 999:29 1000:31 9999:31 100000:33 1000000:38
+-- pinned local_operator/notifications/store.py: count bounds --
+QUOTE NEW_ITEMS_PER_HOUR = 30
+QUOTE HISTORY_CAP = 20
+QUOTE ROW_CAP = 10_000
+QUOTE repeat = int(current["repeat_count"]) + 1
+QUOTE high; unread rows are never deleted by age or by the cap.
+-- candidate phrasings, same cell_len measure --
+CAND arg_read         args=- en= 35 current_fr= 43 proposed_fr= 45 max=44 | current='Marquer toutes les notifications comme lues' | proposed='Marquer les notifications non lues comme lues'
+CAND arg_read         args=- en= 35 current_fr= 43 proposed_fr= 43 max=44 | current='Marquer toutes les notifications comme lues' | proposed='Marquer les notifications non lues comme lu'
+CAND header_partial   args={'count': '100'} en=  9 current_fr= 12 proposed_fr= 13 max=12 | current='100 visibles' | proposed='100 premières'
+CAND header_partial   args={'count': '100'} en=  9 current_fr= 12 proposed_fr= 12 max=12 | current='100 visibles' | proposed='100 premiers'
+CAND empty_none_title args=- en= 20 current_fr= 26 proposed_fr= 34 max=30 | current='Pas encore de notification' | proposed='Aucune notification pour l’instant'
+CAND seen_live        args=- en=  9 current_fr= 12 proposed_fr= 13 max=12 | current='vue aussitôt' | proposed='vue en direct'
+CAND kind_updates     args=- en=  7 current_fr=  5 proposed_fr=  4 max=8 | current='infos' | proposed='majs'
+CAND update_kind      args=- en=  6 current_fr=  4 proposed_fr= 11 max=8 | current='info' | proposed='mise à jour'
+NOTE desktop empty.none.title='Aucune notification pour l’instant' = 34 cells vs max 30; desktop seen.live='Vue en direct' = 13 cells vs max 12
+PASS register: vous throughout; no tu/ton/ta/tes/veuillez anywhere in the 72 values
+PASS sentence case: every sentence-initial word capitalised, lower-case only for compact fragments (filters/chips/hints) per the fr guide
+-- plural renders, fr (actual) --
+PLURAL tui.notifications.asks_stay
+   0='0 demande reste jusqu’à votre réponse.'
+   1='1 demande reste jusqu’à votre réponse.'
+   2='2 demandes restent jusqu’à votre réponse.'
+   5='5 demandes restent jusqu’à votre réponse.'
+   21='21 demandes restent jusqu’à votre réponse.'
+   1000='1 000 demandes restent jusqu’à votre réponse.'
+   1000000='1 000 000 de demandes restent jusqu’à votre réponse.'
+   1500000='1 500 000 demandes restent jusqu’à votre réponse.'
+PLURAL tui.notifications.banner_digest_title
+   0='0 autre notification de priorité haute'
+   1='1 autre notification de priorité haute'
+   2='2 autres notifications de priorité haute'
+   5='5 autres notifications de priorité haute'
+   21='21 autres notifications de priorité haute'
+   1000='1 000 autres notifications de priorité haute'
+   1000000='1 000 000 d’autres notifications de priorité haute'
+   1500000='1 500 000 autres notifications de priorité haute'
+PLURAL tui.notifications.confirm_dismiss_session
+   0='Ignorer 0 mise à jour de « Refonte du catalogue » ? y/n'
+   1='Ignorer 1 mise à jour de « Refonte du catalogue » ? y/n'
+   2='Ignorer 2 mises à jour de « Refonte du catalogue » ? y/n'
+   5='Ignorer 5 mises à jour de « Refonte du catalogue » ? y/n'
+   21='Ignorer 21 mises à jour de « Refonte du catalogue » ? y/n'
+   1000='Ignorer 1 000 mises à jour de « Refonte du catalogue » ? y/n'
+   1000000='Ignorer 1 000 000 de mises à jour de « Refonte du catalogue » ? y/n'
+   1500000='Ignorer 1 500 000 mises à jour de « Refonte du catalogue » ? y/n'
+PLURAL tui.notifications.dismissed
+   0='0 mise à jour ignorée.'
+   1='1 mise à jour ignorée.'
+   2='2 mises à jour ignorées.'
+   5='5 mises à jour ignorées.'
+   21='21 mises à jour ignorées.'
+   1000='1 000 mises à jour ignorées.'
+   1000000='1 000 000 de mises à jour ignorées.'
+   1500000='1 500 000 mises à jour ignorées.'
+PLURAL tui.notifications.header_counts
+   0='0 non lue · 0 en attente'
+   1='1 non lue · 1 en attente'
+   2='2 non lues · 2 en attente'
+   5='5 non lues · 5 en attente'
+   21='21 non lues · 21 en attente'
+   1000='1 000 non lues · 1 000 en attente'
+   1000000='1 000 000 de non-lues · 1 000 000 en attente'
+   1500000='1 500 000 non lues · 1 500 000 en attente'
+PLURAL tui.notifications.stale_skipped
+   0='0 notification modifiée entre-temps, laissée intacte.'
+   1='1 notification modifiée entre-temps, laissée intacte.'
+   2='2 notifications modifiées entre-temps, laissées intactes.'
+   5='5 notifications modifiées entre-temps, laissées intactes.'
+   21='21 notifications modifiées entre-temps, laissées intactes.'
+   1000='1 000 notifications modifiées entre-temps, laissées intactes.'
+   1000000='1 000 000 de notifications modifiées entre-temps, laissées intactes.'
+   1500000='1 500 000 notifications modifiées entre-temps, laissées intactes.'
+PLURAL tui.notifications.updates_since
+   0='0 mise à jour depuis 14:05'
+   1='1 mise à jour depuis 14:05'
+   2='2 mises à jour depuis 14:05'
+   5='5 mises à jour depuis 14:05'
+   21='21 mises à jour depuis 14:05'
+   1000='1 000 mises à jour depuis 14:05'
+   1000000='1 000 000 de mises à jour depuis 14:05'
+   1500000='1 500 000 mises à jour depuis 14:05'
+-- sibling copy: desktop ui.notifications (fr) and core wire.* (fr) --
+SIB desktop fr/ui.notifications.json sha256=c9176eb1f3a692cda0ce73c511862e729b039b38bf111277f8d56c6ebfc6e50c
+SIB ui.notifications.filter.kind_asks
+    en='Asks'
+    fr='Demandes'
+SIB ui.notifications.filter.kind_updates
+    en='Updates'
+    fr='Mises à jour'
+SIB ui.notifications.filter.unread
+    en='Unread'
+    fr='Non lues'
+SIB ui.notifications.filter.all
+    en='All'
+    fr='Toutes'
+SIB ui.notifications.seen.live
+    en='Seen live'
+    fr='Vue en direct'
+SIB ui.notifications.seen.in_view
+    en='Seen in conversation'
+    fr='Vue dans la conversation'
+SIB ui.notifications.time.now
+    en='now'
+    fr='à l’instant'
+SIB ui.notifications.row.chip.high
+    en='High'
+    fr='Haute'
+SIB ui.notifications.group.waiting
+    en='Waiting on you'
+    fr='En attente de votre réponse'
+SIB ui.notifications.empty.none.title
+    en='No notifications yet'
+    fr='Aucune notification pour l’instant'
+SIB ui.notifications.select.count
+    en='{count} selected'
+    fr='Sélection : {count}'
+SIB ui.notifications.action.mark_all_read
+    en='Mark all read'
+    fr='Tout marquer comme lu'
+SIB ui.notifications.toast.undo
+    en='Undo'
+    fr='Annuler'
+SIB ui.notifications.detail.kind.update
+    en='Update'
+    fr='Mise à jour'
+SIB ui.notifications.detail.kind.ask
+    en='Ask'
+    fr='Demande'
+SIB ui.notifications.toast.marked_read
+    en='Marked {count} read'
+    fr='Marquées comme lues : {count}'
+SIB ui.notifications.nav.unread
+    en='Notifications, {count, plural, one {{countText} unread} other {{countText} unread}}'
+    fr='Notifications, {count, plural, one {{countText} non lue} many {{countText} de non-lues} other {{countText} non lues}}'
+SIB ui.notifications.detail.meta.updates_since
+    en='{count, plural, one {# update since {time}} other {# updates since {time}}}'
+    fr='{count, plural, one {# mise à jour depuis {time}} many {# de mises à jour depuis {time}} other {# mises à jour depuis {time}}}'
+SIB core fr/wire.slash.json sha256=361f316d7bb03d1596e8dc1b02f124303859dfdd61b6f06d91b709630282dab9
+SIB core fr/wire.errors.notifications.json sha256=a8b19b6cd569d4525bc84eb2e08e206b0d80523b9c760fa9bc8e5a719b672122
+SIB core fr/wire.slash.notifications_page.json sha256=b7e183e9efbd5a40c1819556433bca46ed5c98029fefd152e6a1352dca4b3952
+SIB core fr wire.slash.notifications='Tours terminés non lus ; read les marque comme lus'
+SIB core fr wire.slash.notifications_page.help='Questions et infos des agents ; read : tout lu'
+-- negative controls (each MUST fail closed) --
+PASS negative control: renamed argument {unread}->{unreads} -> argument 1 is 'unreads', en's is 'unread' (renamed or reordered)
+PASS negative control: dropped {time} placeholder -> contract: en has 2 argument(s), translation has 1; value leaked=False
+PASS negative control: wrong plural category `few` -> ["fr/tui.notifications: dismissed: plural category 'few' not in ['many', 'one', 'other']"]
+PASS negative control: missing `many` category -> selectors ['one', 'other']; missing ['many']
+PASS negative control: non-NFC value -> decomposed è detected
+PASS negative control: manual bidi control -> U+202E detected
+PASS negative control: typed command literal lost -> typed command no longer byte-exact
+PASS negative control: overflow past maxCells -> 11 > 6
+PASS negative control: plain space before a colon -> plain space before colon no longer matches the rule
+FAILURES=[]
+RESULT=PASS failures=0

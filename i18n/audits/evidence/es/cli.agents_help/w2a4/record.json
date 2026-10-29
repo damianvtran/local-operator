@@ -1,0 +1,262 @@
+{
+  "schema": 1,
+  "audit_id": "w2a4",
+  "audit_round": 2,
+  "supersedes": "w2a1",
+  "supersedes_scope": "delta only: cli.agents_help.sync, cli.agents_help.sync_all",
+  "locale": "es",
+  "namespace": "cli.agents_help",
+  "audit_date": "2026-10-29",
+  "audited_revision": "088699bfea0fc33d6b2f0748037dd7e89d85627d",
+  "audited_revision_note": "Worktree /Users/damian/lo-i18n-es on feat/i18n-es-wire-runtime at 088699bfea0fc33d6b2f0748037dd7e89d85627d. The es target is UNTRACKED (git status ??), so HEAD does not bind its bytes; this record binds final on-disk target sha256 449a16f0337c6de0b2f394c54cff7183f06236d5f972fcded053c2e49cad6529. English and context hashes match round 1.",
+  "key_count": {
+    "en": 21,
+    "target": 21,
+    "context": 21
+  },
+  "verdict": "passed",
+  "result": "passed — 1 round-1 finding(s) closed; 0 blocker, 0 major, 0 minor, 0 nit open",
+  "verdict_reason": "PASSED delta audit. All 21 final English, Spanish and context entries were mechanically compared; 2 remediated delta key(s) were semantically re-read against English/context and relevant implementation. A01 closed: starter consistently uses the shipped product rendering “plantilla incluida” (plural inflected), with correct installed-starter meaning. No blocker, major, minor or nit remains open. VERIFIED by direct SHA-256 comparison against each round-1 record’s input_hashes.target.sha256: 21/21 match — cli.aida_help, cli.browser_help, cli.config_help, cli.credential_help, cli.exec_help, cli.exec_runtime, cli.exec_worker_help, cli.hub_shared_help, cli.login_help, cli.login_status_help, cli.logout_help, cli.mcp_help, cli.memory_help, cli.model_help, cli.monitor_help, cli.qwencloud_help, cli.refresh_help, cli.resume_click_help, cli.send_help, cli.stop_help, cli.wake_help. cli.exec_remote_help is not part of W2.",
+  "unresolved_blocker_major": 0,
+  "auditor": {
+    "agent": "translation-auditor (lopdev team), round-2 delta delegation es-w2-auditor-r2",
+    "session_or_instance": "session e3c36d649364",
+    "model": "kimi/k3.1-pro (self-reported from the current session model-switch notice)",
+    "fallback_notice": "The session opened on anthropic/claude-sonnet-5-5; provider-failure quota notices switched through openai/gpt-6-astra to current kimi/k3.1-pro. This round-2 audit was performed under the disclosed fallback; no primary-model completion is claimed.",
+    "date": "2026-10-29",
+    "independence": "Independent of the translators: I authored and remediated none of this copy. I read final on-disk English/Spanish/context, measured hashes and parser behaviour, and edited no catalogue, sidecar, ledger, allowance or generated file. Only the requested w2a4 evidence was written; no git writes or PR posts were made."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.agents_help.json",
+      "revision": "088699bfea0fc33d6b2f0748037dd7e89d85627d",
+      "sha256": "d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/cli.agents_help.json",
+      "sha256": "449a16f0337c6de0b2f394c54cff7183f06236d5f972fcded053c2e49cad6529"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.agents_help.context.json",
+      "sha256": "ab38c7dc51bcdc238f4911998e722b9bca65d1addea7c26dd27004e358f5c742"
+    }
+  },
+  "prior_rounds": [
+    {
+      "audit_id": "w2a1",
+      "audit_round": 1,
+      "target_sha256": "ffe93eb7d0bc050572fcf3296213fc96cfe775f02ba8f8c2d1a7f590678fd122",
+      "finding_ids": [
+        "es-w2-A01"
+      ]
+    }
+  ],
+  "findings": [],
+  "check_output": {
+    "command": "cd /Users/damian/lo-i18n-es; ISO=$(mktemp -d \"$LOCAL_OPERATOR_SCRATCHPAD/es-w2a4-home.XXXXXX\"); env -i HOME=\"$ISO\" LOCAL_OPERATOR_CONFIG_DIR=\"$ISO/.local-operator\" PATH=\"$PATH\" TERM=xterm-256color PYTHONPATH=\"$PWD\" python3 \"$LOCAL_OPERATOR_SCRATCHPAD/es_w2a4_checks.py\"",
+    "exit_code": 0,
+    "keys_mechanically_checked": 21,
+    "delta_keys_semantically_reviewed": [
+      "cli.agents_help.sync",
+      "cli.agents_help.sync_all"
+    ],
+    "cross_namespace_keys_bound_here": [],
+    "round_1_closures": [
+      {
+        "id": "es-w2-A01",
+        "severity": "major",
+        "status": "closed",
+        "keys": [
+          "cli.agents_help.sync",
+          "cli.agents_help.sync_all"
+        ],
+        "current_text": {
+          "cli.agents_help.sync": "Actualizar las plantillas incluidas instaladas y los agentes descargados del hub a su texto más reciente",
+          "cli.agents_help.sync_all": "Sincronizar todas las plantillas incluidas instaladas y los agentes descargados del hub (predeterminado si no se indica --name)"
+        },
+        "closure_measurement": "Both strings use “plantillas incluidas instaladas”, preserving “installed starters” and matching shipped es tui.authoring.seed_not_installed’s “plantilla incluida”; “perfiles iniciales” is absent.",
+        "open_defect": null
+      }
+    ],
+    "ordered_key_parity": true,
+    "english_context_hash_freshness": true,
+    "target_changed_from_round_1": true,
+    "target_git_status": "?? local_operator/i18n/catalogues/es/cli.agents_help.json",
+    "parser_and_machine_syntax": "PASS — real local_operator.i18n.runtime parse_message/message_arguments/plural_selectors; argument kinds, plural selectors, select labels, %(default)s/printf, flags, source code spans, angle tokens, ANSI/Rich tokens and newline counts preserved. Added target-only backtick formatting is not source-token loss.",
+    "mechanical_failures": [],
+    "maxCells": {},
+    "length_review": [
+      {
+        "key": "cli.agents_help.list",
+        "en_chars": 15,
+        "es_chars": 24,
+        "ratio": 1.6
+      },
+      {
+        "key": "cli.agents_help.list_page",
+        "en_chars": 35,
+        "es_chars": 48,
+        "ratio": 1.37
+      },
+      {
+        "key": "cli.agents_help.pull_org",
+        "en_chars": 119,
+        "es_chars": 163,
+        "ratio": 1.37
+      },
+      {
+        "key": "cli.agents_help.sync",
+        "en_chars": 68,
+        "es_chars": 104,
+        "ratio": 1.53
+      },
+      {
+        "key": "cli.agents_help.sync_all",
+        "en_chars": 81,
+        "es_chars": 127,
+        "ratio": 1.57
+      }
+    ],
+    "unchanged_hash_check": "VERIFIED by direct SHA-256 comparison against each round-1 record’s input_hashes.target.sha256: 21/21 match — cli.aida_help, cli.browser_help, cli.config_help, cli.credential_help, cli.exec_help, cli.exec_runtime, cli.exec_worker_help, cli.hub_shared_help, cli.login_help, cli.login_status_help, cli.logout_help, cli.mcp_help, cli.memory_help, cli.model_help, cli.monitor_help, cli.qwencloud_help, cli.refresh_help, cli.resume_click_help, cli.send_help, cli.stop_help, cli.wake_help. cli.exec_remote_help is not part of W2.",
+    "unchanged_hashes": {
+      "cli.aida_help": {
+        "prior_audit": "w2a3",
+        "expected": "01485a1a9a0ab61af257e2e499af73e812810bb6c127d2e98b190d51a83e658f",
+        "actual": "01485a1a9a0ab61af257e2e499af73e812810bb6c127d2e98b190d51a83e658f",
+        "match": true
+      },
+      "cli.browser_help": {
+        "prior_audit": "w2a2",
+        "expected": "23b8945bc337c04d4a2f698c014ce53ef53f730484093c39cf0dc8914a6b557b",
+        "actual": "23b8945bc337c04d4a2f698c014ce53ef53f730484093c39cf0dc8914a6b557b",
+        "match": true
+      },
+      "cli.config_help": {
+        "prior_audit": "w2a3",
+        "expected": "9fea13bbe605b62a0cb0e7c400a1ef0f3e4a891dc2f8f931b140a61181f0f5ed",
+        "actual": "9fea13bbe605b62a0cb0e7c400a1ef0f3e4a891dc2f8f931b140a61181f0f5ed",
+        "match": true
+      },
+      "cli.credential_help": {
+        "prior_audit": "w2a3",
+        "expected": "e447a882aadb47b43e9e32acb81e4fdda4c967c061da3b2c4b88baceacf4036f",
+        "actual": "e447a882aadb47b43e9e32acb81e4fdda4c967c061da3b2c4b88baceacf4036f",
+        "match": true
+      },
+      "cli.exec_help": {
+        "prior_audit": "w2a2",
+        "expected": "870c96f52bab91cbf5be083ed3e8bdc5b28d285febea4ffb3fcd060913b8b987",
+        "actual": "870c96f52bab91cbf5be083ed3e8bdc5b28d285febea4ffb3fcd060913b8b987",
+        "match": true
+      },
+      "cli.exec_runtime": {
+        "prior_audit": "w2a2",
+        "expected": "d9fecc90be9764a8b608162d0e1c42bd1096b6bfbd8f26deb711a7c9f310f35a",
+        "actual": "d9fecc90be9764a8b608162d0e1c42bd1096b6bfbd8f26deb711a7c9f310f35a",
+        "match": true
+      },
+      "cli.exec_worker_help": {
+        "prior_audit": "w2a2",
+        "expected": "80d1760634b765a160d5e9f12978866cb575ed300f39aefbb17d19d9a5f366ec",
+        "actual": "80d1760634b765a160d5e9f12978866cb575ed300f39aefbb17d19d9a5f366ec",
+        "match": true
+      },
+      "cli.hub_shared_help": {
+        "prior_audit": "w2a3",
+        "expected": "3c58b69e84425b2fcc95bcf141d9008a5d5a94a6bd0a4b8e1f15557b643750a9",
+        "actual": "3c58b69e84425b2fcc95bcf141d9008a5d5a94a6bd0a4b8e1f15557b643750a9",
+        "match": true
+      },
+      "cli.login_help": {
+        "prior_audit": "w2a3",
+        "expected": "c1b6b301968272653d7789d05d47332e05d3783ab0211ac8555b7b332d00cd57",
+        "actual": "c1b6b301968272653d7789d05d47332e05d3783ab0211ac8555b7b332d00cd57",
+        "match": true
+      },
+      "cli.login_status_help": {
+        "prior_audit": "w2a3",
+        "expected": "3fdb5fa84b7c2bb6672c7a5c185e41563d21e055bce2a40f097afde481f6724d",
+        "actual": "3fdb5fa84b7c2bb6672c7a5c185e41563d21e055bce2a40f097afde481f6724d",
+        "match": true
+      },
+      "cli.logout_help": {
+        "prior_audit": "w2a3",
+        "expected": "33a0695662fc5bb1a0d3e836d2fd002da77c23a591f9c84c1a08ddf77aba23a9",
+        "actual": "33a0695662fc5bb1a0d3e836d2fd002da77c23a591f9c84c1a08ddf77aba23a9",
+        "match": true
+      },
+      "cli.mcp_help": {
+        "prior_audit": "w2a1",
+        "expected": "df7cc79adcf68a2e6f02154680b8cfeacf6ff767166fda73d71cacc7a0f93396",
+        "actual": "df7cc79adcf68a2e6f02154680b8cfeacf6ff767166fda73d71cacc7a0f93396",
+        "match": true
+      },
+      "cli.memory_help": {
+        "prior_audit": "w2a3",
+        "expected": "960c7b4d0bcf09293a67ecefda892bde07ea4659c513ea28eed95251fc536cf7",
+        "actual": "960c7b4d0bcf09293a67ecefda892bde07ea4659c513ea28eed95251fc536cf7",
+        "match": true
+      },
+      "cli.model_help": {
+        "prior_audit": "w2a3",
+        "expected": "3a8b4d9959cb5bd45aa2587c53cb6d15f6a04c17d3ba66ccd0135419a94be440",
+        "actual": "3a8b4d9959cb5bd45aa2587c53cb6d15f6a04c17d3ba66ccd0135419a94be440",
+        "match": true
+      },
+      "cli.monitor_help": {
+        "prior_audit": "w2a3",
+        "expected": "9f525f7997e1ebc0bc13dc860ab51f386f52f7a4d11666536136be5efb89dcc5",
+        "actual": "9f525f7997e1ebc0bc13dc860ab51f386f52f7a4d11666536136be5efb89dcc5",
+        "match": true
+      },
+      "cli.qwencloud_help": {
+        "prior_audit": "w2a3",
+        "expected": "04b18b24bcb7b77e66a15e5ba5ac76caceb2b702e858f9ecedfcd70853d2c984",
+        "actual": "04b18b24bcb7b77e66a15e5ba5ac76caceb2b702e858f9ecedfcd70853d2c984",
+        "match": true
+      },
+      "cli.refresh_help": {
+        "prior_audit": "w2a3",
+        "expected": "a2f33655e34395ebb3327989fb51f3c9689d9969e0ce7d06068a2d9a4d996e1e",
+        "actual": "a2f33655e34395ebb3327989fb51f3c9689d9969e0ce7d06068a2d9a4d996e1e",
+        "match": true
+      },
+      "cli.resume_click_help": {
+        "prior_audit": "w2a3",
+        "expected": "fb99c08e2c9de25b3dd3a647050c64356b3db48247b3cd08f714a22d7f267ce3",
+        "actual": "fb99c08e2c9de25b3dd3a647050c64356b3db48247b3cd08f714a22d7f267ce3",
+        "match": true
+      },
+      "cli.send_help": {
+        "prior_audit": "w2a3",
+        "expected": "f1278f1a52c76ab0614b91f703d4e7c617b2a594b3b322f834b610bf0cdaabee",
+        "actual": "f1278f1a52c76ab0614b91f703d4e7c617b2a594b3b322f834b610bf0cdaabee",
+        "match": true
+      },
+      "cli.stop_help": {
+        "prior_audit": "w2a3",
+        "expected": "5007e8644710979b686f02e3ef1dddb03766c2aab7c5a78b66be88e34e3ab3b2",
+        "actual": "5007e8644710979b686f02e3ef1dddb03766c2aab7c5a78b66be88e34e3ab3b2",
+        "match": true
+      },
+      "cli.wake_help": {
+        "prior_audit": "w2a1",
+        "expected": "63ab3617615587d40be899aa854ff812958b2f9e5c0546cdf36c80ec04e0813c",
+        "actual": "63ab3617615587d40be899aa854ff812958b2f9e5c0546cdf36c80ec04e0813c",
+        "match": true
+      }
+    },
+    "select_probe": "Not applicable: no select message in this namespace; global 11-namespace select-label parity passed.",
+    "browser_alignment": "Not applicable.",
+    "daemon_terminology": "No daemon remediation assigned to this namespace; no demonio/demonios/sin interfaz/perfiles iniciales occurs anywhere in the W2 es cli catalogues.",
+    "shipped_terminology": {
+      "starter": "Instala esta plantilla incluida antes de editarla.",
+      "headless": "Solo en los arranques headless del REPL; el runtime de la TUI no lo lee."
+    },
+    "limitations": [
+      "Delta semantic review only: unchanged prose already approved in round 1 was not re-judged. All 235 changed-namespace keys still received final-byte mechanical checks.",
+      "No repo-wide tests, generator commands or PR review were run, per delegation. No maxCells is declared in these sidecars; the two requested status rows were measured by rendered column, not inferred from source spacing.",
+      "Initial probe setup failed when launched outside the worktree (ModuleNotFoundError); rerunning from the worktree exposed the cross-namespace finding loader, which was corrected. A strict multiset probe also separated one added target code span from source-token preservation; the final read-only probe exits 0 with no mechanical failures. These are audit-script corrections, not catalogue changes."
+    ]
+  }
+}

@@ -795,6 +795,16 @@ def _compose_index_rows(
                 # added to one belongs in the other in the same change.
                 "unavailable_since": counters.get("unavailable_since", 0),
                 "last_error": counters.get("last_error", ""),
+                # The suppression counts and blind state ride the row because
+                # ``store.health_hint`` is rendered from the index by readers
+                # with no counters file open.
+                "suppressed": (
+                    dict(counters["suppressed"])
+                    if isinstance(counters.get("suppressed"), Mapping)
+                    else {}
+                ),
+                "blind": bool(counters.get("blind")),
+                "blind_reason": str(counters.get("blind_reason") or ""),
             }
         )
     return rows

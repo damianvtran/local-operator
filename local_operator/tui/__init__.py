@@ -191,6 +191,31 @@ def _schedule_aida_boot_ensure(app: Any) -> "asyncio.Task[None]":
     return task
 
 
+def _schedule_librarian_boot_ensure(app: Any) -> "asyncio.Task[None]":
+    """Schedule the Librarian's first-run ensure, beside Aida's.
+
+    The TUI is itself the human surface Aida's server-side gate asks about, so
+    no activation predicate is repeated here: ``ensure_session``'s own enable
+    gate (``librarian.enabled`` plus ``LOCAL_OPERATOR_NO_LIBRARIAN``) is the
+    only switch. SCHEDULED, NEVER AWAITED for the same measured reason as
+    ``_schedule_aida_boot_ensure`` — a first run builds a session and installs
+    the wake supervisor. Kept on the app so it cannot be collected mid-flight,
+    and best-effort: her bootstrap is worth a log line, never a failed boot.
+    """
+
+    async def _librarian_boot_ensure() -> None:
+        try:
+            from local_operator.librarian import ensure_session
+
+            await ensure_session()
+        except Exception:  # noqa: BLE001 — never the boot's failure
+            logger.warning("librarian: boot ensure failed", exc_info=True)
+
+    task = asyncio.create_task(_librarian_boot_ensure())
+    app._librarian_boot_task = task
+    return task
+
+
 def _schedule_click_preparation(app: Any) -> "asyncio.Task[None]":
     """Prepare the notification click path off the event loop (see
     ``resume_click.prepare_for_clicks``).
@@ -366,6 +391,7 @@ async def run_tui(
         # (§13).
         registration = _register_secret_session(app)
         _schedule_aida_boot_ensure(app)
+        _schedule_librarian_boot_ensure(app)
         _schedule_click_preparation(app)
         _schedule_seed_update_notices(app)
         try:

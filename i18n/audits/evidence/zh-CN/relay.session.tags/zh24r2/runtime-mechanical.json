@@ -1,0 +1,292 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "relay.session.tags",
+  "revision": "d9f70f622d9f0f1600c667cfe918571a408e3cb6",
+  "generated_utc": "2026-10-25T00:45:56Z",
+  "renderer": "local_operator.i18n.runtime.render_message (in-house ICU subset)",
+  "plural_categories": {
+    "zh-CN": [
+      "other"
+    ],
+    "en": [
+      "one",
+      "other"
+    ]
+  },
+  "arguments": {
+    "keys_checked": 19,
+    "mismatches": []
+  },
+  "plural_selector_parity": {
+    "rows": [
+      {
+        "key": "relay.session.tags.more",
+        "en_selectors": [
+          [
+            "one",
+            "other"
+          ]
+        ],
+        "zh_selectors": [
+          [
+            "other"
+          ]
+        ]
+      }
+    ],
+    "errors": []
+  },
+  "plural_render_samples": [
+    {
+      "key": "relay.session.tags.more",
+      "count": 0,
+      "zh_category": "other",
+      "en_category": "other",
+      "zh_render": "另有0个标签",
+      "en_render": "0 more tags",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.more",
+      "count": 1,
+      "zh_category": "other",
+      "en_category": "one",
+      "zh_render": "另有1个标签",
+      "en_render": "1 more tag",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.more",
+      "count": 2,
+      "zh_category": "other",
+      "en_category": "other",
+      "zh_render": "另有2个标签",
+      "en_render": "2 more tags",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.more",
+      "count": 5,
+      "zh_category": "other",
+      "en_category": "other",
+      "zh_render": "另有5个标签",
+      "en_render": "5 more tags",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.more",
+      "count": 11,
+      "zh_category": "other",
+      "en_category": "other",
+      "zh_render": "另有11个标签",
+      "en_render": "11 more tags",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.more",
+      "count": 21,
+      "zh_category": "other",
+      "en_category": "other",
+      "zh_render": "另有21个标签",
+      "en_render": "21 more tags",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.more",
+      "count": 100,
+      "zh_category": "other",
+      "en_category": "other",
+      "zh_render": "另有100个标签",
+      "en_render": "100 more tags",
+      "zh_error": null,
+      "en_error": null
+    }
+  ],
+  "plural_render_failures": [],
+  "static_render_samples": [
+    {
+      "key": "relay.session.tags.action",
+      "zh_render": "标签……",
+      "en_render": "Tags…",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.sheet_title",
+      "zh_render": "标签",
+      "en_render": "tags",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.loading",
+      "zh_render": "正在加载……",
+      "en_render": "loading…",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.empty",
+      "zh_render": "尚无标签分类",
+      "en_render": "no tag categories yet",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.empty_hint",
+      "zh_render": "在桌面应用或终端中创建一个",
+      "en_render": "create one in the desktop app or the terminal",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.load_error",
+      "zh_render": "无法加载标签目录。",
+      "en_render": "Could not load the tag catalogue.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.retry",
+      "zh_render": "重试",
+      "en_render": "try again",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.limit_hint",
+      "zh_render": "每段对话最多可有3个标签 — 移除一个才能再添加。",
+      "en_render": "3 tags is the most a conversation can carry — remove one to add another.",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.primary",
+      "zh_render": "主标签",
+      "en_render": "primary",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.make_primary",
+      "zh_render": "将release-notes设为主标签",
+      "en_render": "make release-notes the primary tag",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.missing",
+      "zh_render": "不在目录中",
+      "en_render": "not in the catalogue",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.saving",
+      "zh_render": "正在保存……",
+      "en_render": "saving…",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.save_error",
+      "zh_render": "无法保存标签",
+      "en_render": "Could not save the tags",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.remove_all",
+      "zh_render": "移除所有标签",
+      "en_render": "remove all tags",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.remove_all_confirm",
+      "zh_render": "移除所有标签？",
+      "en_render": "remove all tags?",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.cancel",
+      "zh_render": "取消",
+      "en_render": "cancel",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.done",
+      "zh_render": "完成",
+      "en_render": "done",
+      "zh_error": null,
+      "en_error": null
+    },
+    {
+      "key": "relay.session.tags.pin_and_tags_hint",
+      "zh_render": "长按一行即可固定或添加标签",
+      "en_render": "touch and hold a row to pin or tag it",
+      "zh_error": null,
+      "en_error": null
+    }
+  ],
+  "select_render_samples": [],
+  "direction_punctuation": {
+    "locale_dir": "ltr",
+    "rtl_controls": 0,
+    "checks": [
+      "full-width punctuation inventory (，。：；！？、；“”（）)",
+      "ellipsis form (…… vs three dots)",
+      "ASCII punctuation adjacent to CJK prose",
+      "quote form (mainland “ ”; no 「」)",
+      "embedded Latin/digit runs adjacent to CJK without a space"
+    ],
+    "note": "zh-CN is LTR: the ur bundle's RTL-specific punctuation-placement, direction-token and embedded-Latin-isolation checks have no counterpart. The punctuation inventory was still scanned and is recorded in mechanical-raw.json (bidi_controls, cjk_latin_space, fullwidth_latin_or_digits)."
+  },
+  "technical_tokens": {
+    "patterns": {
+      "backtick_span": "`[^`\\n]+`",
+      "long_flag": "(?<![\\w/])--[a-zA-Z][a-zA-Z0-9_-]*",
+      "slash_command": "(?<![\\w/])/[a-zA-Z][a-zA-Z0-9_-]*",
+      "env_or_constant": "(?<![A-Za-z0-9_])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?![A-Za-z0-9_])",
+      "url_scheme": "(?:https?|ssh)://[^\\s，。；：]+",
+      "ipv4": "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b",
+      "ipv6_loopback": "::1(?![\\w:])",
+      "hostname": "\\blocalhost\\b",
+      "home_path": "~/[\\w./-]+",
+      "abs_path": "/(?:bin|Users|Volumes|tmp|var|etc)/[\\w./-]*[\\w/-]",
+      "percent_token": "%[sdif]"
+    },
+    "literals": [
+      "lop",
+      "lop-update",
+      "Radient",
+      "Local Operator",
+      "Git",
+      "JSON",
+      "ASCII",
+      "MiB",
+      "SHA",
+      "API",
+      "URL",
+      "TUI"
+    ],
+    "missing": []
+  },
+  "width": {
+    "over_budget": [],
+    "checked_keys_with_budget": 0
+  },
+  "review_disposition": {
+    "mechanical_status": "passed",
+    "note": "Mechanical only: no native terminal, relay SPA or rendered-frame pass is claimed by this document. Semantic findings are in report.md."
+  }
+}

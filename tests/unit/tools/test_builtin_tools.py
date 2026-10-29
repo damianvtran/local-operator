@@ -1602,6 +1602,107 @@ async def test_scratchpad_refuses_a_pad_over_its_total_through_write(tmp_path, m
 
 
 @pytest.mark.asyncio
+async def test_scratchpad_write_appends_the_soft_crossing_advisory(tmp_path, monkeypatch) -> None:
+    """The real write receipt carries exactly one advisory line on the crossing."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", 4096)
+    content = "x" * 3072
+
+    result = await tools["write"].execute(
+        "c", {"path": "scratchpad://notes.md", "content": content}, None, None, context
+    )
+
+    assert result.is_error is False
+    assert result.text == (
+        f"Created scratchpad://notes.md -> {pad / 'notes.md'} ({len(content)} chars)"
+        " — kept for this session (survives restarts).\n"
+        "[scratch] The pad is 75% full (1,024 bytes left) — remove the biggest file "
+        "first; build/dependency trees belong in a git worktree, not the pad."
+    )
+    assert result.text.count("[scratch] ") == 1
+    assert (pad / "notes.md").read_text(encoding="utf-8") == content
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_overwrites_above_the_soft_threshold_do_not_nag_again(
+    tmp_path, monkeypatch
+) -> None:
+    """An existing large file is already IN the pad-before total.
+
+    The first write really crosses (0% to 80%) and advises once. A same-size
+    edit and an identical-content rewrite then stay silent: excluding the old
+    file for the hard cap must not make either look like a fresh 0% to 80% cross.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+    monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", 10240)
+    content = "x" * 8191 + "z"
+
+    crossed = await tools["write"].execute(
+        "c", {"path": "scratchpad://large.md", "content": content}, None, None, context
+    )
+
+    target = pad / "large.md"
+    assert crossed.is_error is False
+    assert crossed.text.count("[scratch] ") == 1
+    assert "The pad is 80% full (2,048 bytes left)" in crossed.text
+    assert target.stat().st_blocks * 512 >= 8192
+
+    updated = "x" * 8191 + "y"
+    edited = await tools["edit"].execute(
+        "c",
+        {"path": "scratchpad://large.md", "old_text": "z", "new_text": "y"},
+        None,
+        None,
+        context,
+    )
+
+    assert edited.is_error is False
+    assert "[scratch] " not in edited.text
+    assert target.read_text(encoding="utf-8") == updated
+
+    rewritten = await tools["write"].execute(
+        "c", {"path": "scratchpad://large.md", "content": updated}, None, None, context
+    )
+
+    assert rewritten.is_error is False
+    assert "[scratch] " not in rewritten.text
+    assert target.read_text(encoding="utf-8") == updated
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_edit_appends_the_measured_soft_crossing_advisory(
+    tmp_path, monkeypatch
+) -> None:
+    """The edit receipt uses the FINAL payload's crossing, not its size-less preflight."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    target = pad / "notes.md"
+    target.write_text("seed\n", encoding="utf-8")
+    # The existing file's allocated block is part of pad-before: 4,096 / 8,192
+    # starts at 50%, so the final 6,144-byte payload still tests the 75% crossing.
+    monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", 8192)
+    replacement = "x" * 6144
+
+    result = await tools["edit"].execute(
+        "c",
+        {"path": "scratchpad://notes.md", "old_text": "seed\n", "new_text": replacement},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False
+    assert result.text == (
+        f"Edited scratchpad://notes.md -> {target}: 1 hunk(s), 1 replacement(s) applied.\n"
+        "[scratch] The pad is 75% full (2,048 bytes left) — remove the biggest file "
+        "first; build/dependency trees belong in a git worktree, not the pad."
+    )
+    assert result.text.count("[scratch] ") == 1
+    assert result.details is not None and "_scratchpad_advisory" not in result.details
+    assert target.read_text(encoding="utf-8") == replacement
+
+
+@pytest.mark.asyncio
 async def test_scratchpad_refuses_a_payload_over_the_write_ceiling(tmp_path) -> None:
     """The SIZE arm, end to end, because it is the one arm that depends on a
     value computed at the call site rather than on the name. A ceiling that is
@@ -1816,8 +1917,10 @@ async def test_globs_refusal_prescribes_a_route_glob_can_take(tmp_path) -> None:
         "c", {"pattern": "scratchpad://*.md"}, None, None, context
     )
     assert refused.is_error is True
-    assert "glob searches the working directory with a relative pattern" in refused.text
-    assert "or search inside it with grep(" in refused.text
+    # glob DOES take an absolute base now, so the remedy offers it as a directory
+    # (QA round 1, Q3) instead of claiming glob cannot reach the scratch area.
+    assert "list the scratch area with glob(path=" in refused.text
+    assert "or search inside the file with grep(" in refused.text
 
     # The route this tool CAN honour, end to end: read it (which prints the path),
     # then grep that path.
@@ -1842,6 +1945,33 @@ async def test_glob_refuses_a_scheme_pattern_instead_of_matching_nothing(tmp_pat
     assert result.is_error is True
     assert "glob takes only filesystem paths" in result.text
     assert "No paths matched" not in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["glob", "grep"])
+@pytest.mark.parametrize(
+    ("url", "expected", "scratch_remedy"),
+    [
+        ("skill://foo/*", 'read(path="skill://foo")', False),
+        ("spill://abc123", 'read(path="spill://abc123?q=<regex>")', False),
+        ("scratchpad://*.md", 'read(path="scratchpad://<name>")', True),
+    ],
+    ids=["skill", "spill", "scratchpad"],
+)
+async def test_the_scheme_refusal_remedy_fits_the_scheme(
+    tmp_path, tool, url, expected, scratch_remedy
+) -> None:
+    """The redirect names the call that serves THAT scheme (QA round 2 N1 on
+    #2982): ``glob skill://foo/*`` used to be told to read a scratchpad file, a
+    route that cannot lead to a skill. Scratchpad keeps the existing remedy."""
+    context, _pad, tools = _scratchpad_context(tmp_path)
+    args = {"pattern": url} if tool == "glob" else {"pattern": "x", "path": url}
+
+    result = await tools[tool].execute("c", args, None, None, context)
+    assert result.is_error is True
+    assert f"{tool} takes only filesystem paths" in result.text
+    assert expected in result.text, result.text
+    assert ("scratchpad://<name>" in result.text) is scratch_remedy, result.text
 
 
 @pytest.mark.asyncio
@@ -3366,10 +3496,10 @@ async def test_a_bash_creation_inside_the_pad_is_never_nudged(tmp_path, monkeypa
 # refused after the fact. These rows pin the after arm: ONE [scratch] line on
 # the real tool result when a pad-naming command left the pad over budget, past
 # its entry cap, or holding a refused name — and silence, with no filesystem
-# walk at all, for a command that never names the pad. The budget/cap fixtures
-# patch BOTH bindings of the constants (the walk reads them off
-# ``local_operator.scratchpad``, the sentence off this module's import of them)
-# so the arm under test is the one that fires, not a neighbour.
+# walk at all, for a command that never names the pad. The budget fixtures patch
+# the constant on ``local_operator.scratchpad``, which is where both the walk
+# and the sentence now read it: ``scratchpad_budget_bytes`` falls back to that
+# module global when no config value is set, so ONE patch steers every arm.
 
 
 def _pad_over_budget(tmp_path, monkeypatch, size: int = 8192):
@@ -3385,7 +3515,6 @@ def _pad_over_budget(tmp_path, monkeypatch, size: int = 8192):
     filled.write_bytes(b"x" * size)
     held = filled.stat().st_blocks * 512
     monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", held - 1)
-    monkeypatch.setattr(builtin, "SCRATCHPAD_TOTAL_BUDGET_BYTES", held - 1)
     return context, pad, held
 
 
@@ -3395,19 +3524,24 @@ async def test_a_pad_over_budget_is_flagged_on_the_real_result(
     tmp_path, monkeypatch, spelling
 ) -> None:
     """The channel the guide used to call unpoliced, driven through the REAL
-    bash tool: the command took the pad over budget, and the result says so —
-    in the head window (line 2, under the exit code), one line, naming the size
-    held and the budget in the unit a reader parses (MiB once it is one,
-    design review round 1, D2) and claiming exactly what the write path refuses
-    — writes that add (F3: the earlier "refuse further writes" overstated a
-    shrinking overwrite's fate).
+    bash tool: the pad is over budget, and the result says so — in the head
+    window (line 2, under the exit code), one line, naming the size held and
+    the budget in the unit a reader parses (MiB once it is one, design review
+    round 1, D2) and claiming exactly what the write path refuses — writes that
+    add (F3: the earlier "refuse further writes" overstated a shrinking
+    overwrite's fate).
+
+    A READ-ONLY command drives this arm on purpose: a command that would CREATE
+    under the over-cap pad is now refused before it runs
+    (``_bash_pad_precheck``), which is a different sentence. ``ls`` names the pad
+    and leaves it alone, so the post-hoc state line is what the result carries.
 
     Both variable spellings, because either is how a session writes the pad and
     a gate that missed one would be silent exactly half the time.
     """
     context, pad, held = _pad_over_budget(tmp_path, monkeypatch)
 
-    text = await _run_bash(context, f'mkdir -p "{spelling}/logs"')
+    text = await _run_bash(context, f'ls "{spelling}"')
 
     expected = (
         f"[scratch] The pad now holds ≥{held:,} bytes, over its {held - 1:,}-byte budget — "
@@ -3481,8 +3615,21 @@ async def test_the_shape_line_wins_over_the_budget_line_and_there_is_only_one(
     """At most one line per result, and the shape line is the one — it
     attributes the change to THIS command while the budget line reports state
     the pad already had. Pinned because the alternative (a second line, or the
-    budget line first) is what a later "improvement" reaches for."""
-    context, pad, held = _pad_over_budget(tmp_path, monkeypatch)
+    budget line first) is what a later "improvement" reaches for.
+
+    The pad is over its ENTRY cap rather than its byte cap: a byte-over pad
+    refuses the creating command before it runs, so the two lines cannot meet
+    there any more. Over the entry cap the command still runs (the pre-check
+    judges bytes, as specified), and both arms are live on one result.
+    """
+    from local_operator import scratchpad as scratchpad_module
+
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    for index in range(3):
+        (pad / f"f{index}.md").write_text("x")
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_BUDGET_SCAN_ENTRIES", 2)
+    monkeypatch.setattr(builtin, "SCRATCHPAD_BUDGET_SCAN_ENTRIES", 2)
 
     text = await _run_bash(
         context,
@@ -3500,7 +3647,7 @@ async def test_the_literal_pad_path_is_named_too(tmp_path, monkeypatch) -> None:
     session copies from one — names the pad exactly as the variable does."""
     context, pad, held = _pad_over_budget(tmp_path, monkeypatch)
 
-    text = await _run_bash(context, f'mkdir -p "{pad}/logs"')
+    text = await _run_bash(context, f'ls "{pad}"')
 
     assert text.splitlines()[1].startswith("[scratch] The pad now holds ≥"), text
 
@@ -4371,9 +4518,11 @@ async def test_glob_sorts_before_slicing(tools, context, tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_glob_rejects_absolute_and_parent_patterns(tools, context) -> None:
-    # RT-14: clean is_error results, never a ValueError escape.
-    for pattern in ("/etc/passwd", "../secrets/*", ".."):
+async def test_glob_rejects_parent_patterns(tools, context) -> None:
+    # RT-14: clean is_error results, never a ValueError escape. An ABSOLUTE
+    # pattern is no longer refused (it becomes a base directory — see the
+    # absolute-pattern tests below), but '..' inside a pattern still is.
+    for pattern in ("../secrets/*", "..", "/etc/../etc/passwd"):
         result = await _call(tools, "glob", {"pattern": pattern}, context)
         assert result.is_error is True
         assert "relative" in result.text.lower()
@@ -4390,8 +4539,10 @@ async def test_glob_redirects_absolute_skill_search_to_protocol(tools, context) 
     )
 
     assert result.is_error is True
-    assert "relative" in result.text.lower()
-    assert "Do not scan the filesystem for SKILL.md" in result.text
+    # The redirect leads; the generic "no '..'" sentence described a rule this
+    # pattern never broke and offered path= as a way to keep scanning (QA Q4).
+    assert result.text.find("Do not scan the filesystem for SKILL.md") >= 0
+    assert "no '..'" not in result.text and "path=" not in result.text
     assert "`skill://minerva-support-workspace`" in result.text
 
 
@@ -4404,8 +4555,10 @@ async def test_glob_does_not_redirect_skill_md_suffix(tools, context) -> None:
         context,
     )
 
+    # A non-SKILL.md absolute pattern is served now (its parent is the base), so
+    # this one fails only because the directory is absent — and, above all, never
+    # grows the skill:// redirect.
     assert result.is_error is True
-    assert "relative" in result.text.lower()
     assert "skill://" not in result.text
     assert "Do not scan" not in result.text
 
@@ -4475,8 +4628,11 @@ async def test_grep_skips_oversized_files_with_footer(tools, context, tmp_path) 
     (tmp_path / "big.py").write_text("needle\n" * 200000)  # > 1MB
     result = await _call(tools, "grep", {"pattern": "needle"}, context)
     assert "small.py:1:needle" in result.text
-    assert "big.py" not in result.text.split(":\n", 1)[1]
+    # Never SEARCHED (no match line for it) but NAMED, with the way to reach it.
+    assert "big.py:" not in result.text
     assert "1 file(s) skipped" in result.text
+    assert "not searched (largest first): big.py (" in result.text
+    assert "max_filesize_mb=2" in result.text
 
 
 @pytest.mark.asyncio
@@ -5534,6 +5690,98 @@ async def test_read_summary_falls_back_on_syntax_error(tools, context, tmp_path)
     assert "def broken(:" in result.text
 
 
+def _oversized_guidance(head: str = "Head section") -> str:
+    filler = "\n".join(f"padding line {i}" for i in range(900))
+    body = f"# Project\n\n## {head}\n\n{filler}\n"
+    for index in range(3):
+        body += f"\n## Late section {index}\n\nrule {index} lives here.\n"
+    return body
+
+
+def _injected_session(tmp_path: Path) -> tuple[dict[str, AgentTool], ToolContext]:
+    """Tools whose context carries the record a real session would build:
+    the same ``load_repo_guidance_with_record`` call session_factory makes."""
+    from local_operator.context_files import load_repo_guidance_with_record
+
+    _, record = load_repo_guidance_with_record(tmp_path)
+    ctx = ToolContext(cwd=str(tmp_path), session_id="unit-test", injected_guidance=record)
+    return {tool.name: tool for tool in create_tools(ctx)}, ctx
+
+
+@pytest.mark.asyncio
+async def test_read_whole_injected_guidance_returns_section_index(tmp_path) -> None:
+    """A whole-file read of the AGENTS.md this session's prompt carries returns
+    the section index, not the 8 KiB clamp that mostly repeats the head."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text(_oversized_guidance())
+    tools, ctx = _injected_session(tmp_path)
+    result = await _call(tools, "read", {"path": "AGENTS.md"}, ctx)
+    assert result.is_error is False
+    assert "already in your system prompt" in result.text
+    assert re.search(r"- L\d+-\d+: Late section 2", result.text)
+    # No body lines: neither the duplicated head nor the tail ships inline.
+    assert "padding line 5" not in result.text
+    assert "rule 2 lives here." not in result.text
+    assert (result.details or {}).get("guidance_index") is True
+
+
+@pytest.mark.asyncio
+async def test_read_guidance_edited_after_start_is_a_plain_read(tmp_path) -> None:
+    # R1-1: the prompt was built from the OLD head; claiming the new head is
+    # "already in your system prompt" would hide the edit from its author.
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text(_oversized_guidance())
+    tools, ctx = _injected_session(tmp_path)
+    (tmp_path / "AGENTS.md").write_text(_oversized_guidance(head="Edited head"))
+    result = await _call(tools, "read", {"path": "AGENTS.md"}, ctx)
+    assert "already in your system prompt" not in result.text
+    assert "Edited head" in result.text
+    assert "truncated at" in result.text
+
+
+@pytest.mark.asyncio
+async def test_read_guidance_created_after_start_is_a_plain_read(tmp_path) -> None:
+    (tmp_path / ".git").mkdir()
+    tools, ctx = _injected_session(tmp_path)  # nothing injected
+    (tmp_path / "AGENTS.md").write_text(_oversized_guidance())
+    result = await _call(tools, "read", {"path": "AGENTS.md"}, ctx)
+    assert "already in your system prompt" not in result.text
+    assert "padding line 5" in result.text
+
+
+@pytest.mark.asyncio
+async def test_read_guidance_range_raw_and_foreign_files_stay_exact(tmp_path) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text(_oversized_guidance())
+    tools, ctx = _injected_session(tmp_path)
+    ranged = await _call(tools, "read", {"path": "AGENTS.md", "range": "3-3"}, ctx)
+    assert ranged.text == "3| ## Head section"
+    raw = await _call(tools, "read", {"path": "AGENTS.md", "raw": True}, ctx)
+    assert "padding line 5" in raw.text and "already in your system prompt" not in raw.text
+    # An AGENTS.md this prompt did NOT carry (a sibling repo) is never shaped.
+    other = tmp_path.parent / f"{tmp_path.name}-other"
+    (other / ".git").mkdir(parents=True)
+    (other / "AGENTS.md").write_text(_oversized_guidance())
+    foreign = await _call(tools, "read", {"path": str(other / "AGENTS.md")}, ctx)
+    assert "already in your system prompt" not in foreign.text
+    assert "padding line 5" in foreign.text
+
+
+@pytest.mark.asyncio
+async def test_read_guidance_under_the_read_clamp_stays_whole(tmp_path) -> None:
+    # R1-4 / Q1: larger than the 4 KiB injected head but under the 8 KiB read
+    # clamp: one plain read returns the whole file, an index would cost two.
+    (tmp_path / ".git").mkdir()
+    body = "# Project\n\n" + "\n".join(f"rule line {i}" for i in range(400)) + "\n## Tail\n\nend\n"
+    assert 4096 < len(body) < 8 * 1024
+    (tmp_path / "AGENTS.md").write_text(body)
+    tools, ctx = _injected_session(tmp_path)
+    assert ctx.injected_guidance, "fixture must be injected for this to test the gate"
+    result = await _call(tools, "read", {"path": "AGENTS.md"}, ctx)
+    assert "already in your system prompt" not in result.text
+    assert "rule line 399" in result.text and "end" in result.text
+
+
 @pytest.mark.asyncio
 async def test_read_short_python_file_stays_raw(tools, context, tmp_path) -> None:
     (tmp_path / "small.py").write_text("def a():\n    return 1\n")
@@ -5715,17 +5963,18 @@ class _StubbornProc:
     ``kill()`` records that it was asked and changes nothing, and ``wait()``
     returns without ever setting ``returncode`` — the state the guard must treat
     as "a stop we performed, keep the records" rather than "rg failed, walk the
-    tree in Python". ``stdout.readline`` is a coroutine because the scanner awaits
-    it, and returns EOF once its scripted lines run out.
+    tree in Python". ``stdout.read`` is a coroutine because the scanner awaits
+    it, and returns EOF once its scripted lines run out. The scanner reads the
+    pipe in chunks (``_RgLineReader``), so each scripted line is one ``read``.
     """
 
     def __init__(self, lines: list[bytes]) -> None:
         self._lines = list(lines)
         self.returncode: int | None = None
         self.killed = 0
-        self.stdout = SimpleNamespace(readline=self._readline)
+        self.stdout = SimpleNamespace(read=self._read)
 
-    async def _readline(self) -> bytes:
+    async def _read(self, _n: int = -1) -> bytes:
         return self._lines.pop(0) if self._lines else b""
 
     def kill(self) -> None:
@@ -5828,8 +6077,10 @@ def test_count_oversized_files_walks_the_tree_exactly_once(tmp_path, monkeypatch
         ),
     )
 
-    # ``(skipped, incomplete)``: one oversized file, and the count is complete.
-    assert builtin._count_oversized_files(tmp_path) == (1, False)
+    # ``(skipped, incomplete, largest)``: one oversized file, count complete.
+    counted = builtin._count_oversized_files(tmp_path)
+    assert counted[:2] == (1, False)
+    assert [path for _size, path in counted.largest] == ["big.py"]
     assert len(calls) == 1
 
 
@@ -5850,7 +6101,7 @@ def test_a_file_whose_size_cannot_be_read_makes_the_count_incomplete(tmp_path, m
     assert walked.unsized == 1
     # The count itself has nothing over the cap — but "nothing" here is only
     # known-so-far, so it is reported as incomplete rather than as zero.
-    assert builtin._count_oversized_files(tmp_path) == (0, True)
+    assert builtin._count_oversized_files(tmp_path)[:2] == (0, True)
 
 
 def test_python_grep_scan_stops_when_the_caller_aborts(tmp_path) -> None:
@@ -5982,7 +6233,11 @@ async def test_grep_keeps_a_non_zero_lower_bound_visible(
 
     monkeypatch.setattr(builtin, "_use_ripgrep", lambda: True)
     monkeypatch.setattr(builtin, "_ripgrep_scan", _scan)
-    monkeypatch.setattr(builtin, "_count_oversized_files", lambda target, **kwargs: (12, True))
+    monkeypatch.setattr(
+        builtin,
+        "_count_oversized_files",
+        lambda target, **kwargs: builtin._OversizedCount(12, True),
+    )
 
     result = await _call(tools, "grep", {"pattern": "needle"}, context)
 
@@ -6016,7 +6271,11 @@ async def test_the_floor_count_survives_a_real_ripgrep_scan(
     if not builtin._use_ripgrep():
         pytest.skip("ripgrep not on PATH; the real-engine arm cannot run")
     (tmp_path / "hit.py").write_text("needle\n")
-    monkeypatch.setattr(builtin, "_count_oversized_files", lambda target, **kwargs: (12, True))
+    monkeypatch.setattr(
+        builtin,
+        "_count_oversized_files",
+        lambda target, **kwargs: builtin._OversizedCount(12, True),
+    )
 
     result = await _call(tools, "grep", {"pattern": "needle"}, context)
 
@@ -6026,7 +6285,11 @@ async def test_the_floor_count_survives_a_real_ripgrep_scan(
     # And the floor is CONDITIONAL: a count that finished prints its exact number
     # with no `at least`, so the wording tracks the count's completeness and not
     # the engine.
-    monkeypatch.setattr(builtin, "_count_oversized_files", lambda target, **kwargs: (12, False))
+    monkeypatch.setattr(
+        builtin,
+        "_count_oversized_files",
+        lambda target, **kwargs: builtin._OversizedCount(12, False),
+    )
     complete = await _call(tools, "grep", {"pattern": "needle"}, context)
 
     assert "(12 file(s) skipped over the 1MB cap)" in complete.text
@@ -6058,7 +6321,11 @@ async def test_the_no_match_count_clause_rides_with_the_stop(
 
     monkeypatch.setattr(builtin, "_use_ripgrep", lambda: True)
     monkeypatch.setattr(builtin, "_ripgrep_scan", _scan)
-    monkeypatch.setattr(builtin, "_count_oversized_files", lambda target, **kwargs: (12, True))
+    monkeypatch.setattr(
+        builtin,
+        "_count_oversized_files",
+        lambda target, **kwargs: builtin._OversizedCount(12, True),
+    )
 
     result = await _call(tools, "grep", {"pattern": "needle"}, context)
 
@@ -6163,7 +6430,7 @@ def test_ripgrep_keeps_the_records_a_stop_produced_even_with_no_returncode(
     bug reopened through a narrower door, so the guard is now the stop itself. The
     process below never reports a returncode at all.
     """
-    proc = _StubbornProc([b"src/a.py:1:needle\n"])
+    proc = _StubbornProc([b"src/a.py\x001:1:needle\n"])
     monkeypatch.setattr(builtin, "_rg_binary", lambda: "/fake/rg")
 
     async def _spawn(*args, **kwargs):
@@ -8214,3 +8481,1230 @@ async def test_scratchpad_edit_checks_projected_utf8_bytes_before_mutation(
     )
     assert f"over the {budget:,}-byte ceiling" in result.text
     assert after == before, "a refused quota-changing edit must not mutate the file"
+
+
+# ---------------------------------------------------------------------------
+# The pad cap BEFORE the child exists: a shell cannot be refused after the fact
+# ---------------------------------------------------------------------------
+
+
+def _pad_cap_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: int) -> None:
+    """Point the config root at a fresh file carrying only the pad cap.
+
+    The floor is patched to 1 KiB so the fixture can measure a kilobyte pad
+    instead of the shipped 16 MiB; the clamp itself is exercised in
+    ``test_scratchpad.py``.
+    """
+    from local_operator import scratchpad as scratchpad_module
+
+    config = tmp_path / "cap-config"
+    config.mkdir()
+    (config / "config.yml").write_text(
+        f"values:\n  session:\n    scratchpad:\n      max_bytes: {value}\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_MAX_BYTES_FLOOR", 1024)
+
+
+@pytest.mark.asyncio
+async def test_a_creating_command_is_refused_before_it_runs_on_an_over_cap_pad(
+    tmp_path, monkeypatch
+) -> None:
+    """The requirement: a command that would CREATE under an over-cap pad must
+    not run. The sentence names the held bytes, the cap and all three remedies,
+    because a refusal that only says no sends the work to the user's directory.
+    """
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    held = (pad / "bulk.dat").stat().st_blocks * 512
+    cap = held - 1
+    _pad_cap_config(tmp_path, monkeypatch, cap)
+    (pad / "build").mkdir()
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-pad-refused",
+        {"command": f'mkdir -p "{pad}/build/sub"'},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is True
+    assert "Scratchpad over cap" in result.text
+    assert f"holds ≥{held:,} bytes, cap {cap:,} bytes" in result.text
+    assert "session.scratchpad.max_bytes" in result.text
+    assert "git worktree" in result.text
+    assert result.text.rstrip().endswith("The command did not run.")
+    # UX U3: the cause leads; the destination follows it.
+    assert result.text.index("Scratchpad over cap") < result.text.index(str(pad))
+    assert not (pad / "build" / "sub").exists(), "the command must not have run"
+
+
+@pytest.mark.asyncio
+async def test_reads_and_shrinks_still_run_on_an_over_cap_pad(tmp_path, monkeypatch) -> None:
+    """``ls`` and ``rm`` are the recovery path. A gate that refused them would
+    strand the pad's owner with an unusable pad and no way back under the cap.
+    """
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    held = (pad / "bulk.dat").stat().st_blocks * 512
+    _pad_cap_config(tmp_path, monkeypatch, held - 1)
+    (pad / "build").mkdir()
+    (pad / "build" / "out.o").write_bytes(b"x" * 128)
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    listed = await tools["bash"].execute(
+        "bash-pad-ls", {"command": f'ls "{pad}"'}, None, None, context
+    )
+    assert listed.is_error is False, listed.text
+    assert "bulk.dat" in listed.text
+
+    removed = await tools["bash"].execute(
+        "bash-pad-rm", {"command": f'rm -rf "{pad}/build"'}, None, None, context
+    )
+    assert removed.is_error is False, removed.text
+    assert not (pad / "build").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_running_command_is_killed_when_the_pad_crosses_the_cap(
+    tmp_path, monkeypatch
+) -> None:
+    """The incident this bounds: a build that STARTED under the cap grew the pad
+    to multiple GB in one command, and the after-the-fact line reported it only
+    once the bytes were on disk. The watchdog must stop the process group during
+    the run, leave the pad bounded near the cap, and never let the command's
+    completion marker look like success.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True, exist_ok=True)
+    _pad_cap_config(tmp_path, monkeypatch, 1024)
+
+    result = await tools["bash"].execute(
+        "bash-pad-watchdog",
+        {
+            # 20 x 1 KiB at 0.2 s intervals: unmodified this leaves ~20 KiB, so
+            # the kill at the 1 s tick is what keeps the pad near the 1 KiB cap.
+            "command": (
+                "i=0; while [ $i -lt 20 ]; do "
+                'head -c 1024 /dev/zero >> "$LOCAL_OPERATOR_SCRATCHPAD/grow.dat"; '
+                "i=$((i+1)); sleep 0.2; done; echo LOOP-DONE"
+            ),
+            "timeout": 30,
+        },
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is True
+    assert "SCRATCHPAD CAP EXCEEDED" in result.text
+    assert "LOOP-DONE" not in result.text, "the process group must be stopped mid-run"
+    held = sum(p.stat().st_blocks * 512 for p in pad.rglob("*") if p.is_file())
+    # The 1 s tick plus one 1 KiB write per 0.2 s allocates at most 8 KiB before
+    # the kill; the unmodified command would finish around 20 KiB.
+    assert 1024 <= held < 16 * 1024, held
+    assert result.details is not None
+    assert result.details["scratchpad_cap_exceeded"] is True
+    assert result.details["scratchpad_cap_bytes"] == 1024
+    assert result.details["scratchpad_held_bytes"] >= 1024
+
+
+@pytest.mark.asyncio
+async def test_a_background_command_is_stopped_at_the_pad_cap(tmp_path, monkeypatch) -> None:
+    """The detached loop bounds the same way, and its job row carries the same
+    head and structured details instead of looking like a normal completion.
+    ``_detached`` owns the process after a ``background=True`` handoff (or a
+    steering interruption), so a guard only on the foreground loop would leave
+    the exact long build this fixes free to fill the pad.
+    """
+    from local_operator.harness.jobs import AsyncJobManager
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir(exist_ok=True)
+    pad = tmp_path / "sessions" / "sess-pad" / "scratchpad"
+    pad.mkdir(parents=True, exist_ok=True)
+    _pad_cap_config(tmp_path, monkeypatch, 1024)
+    recorder = RecordingApproval(True)
+    manager = AsyncJobManager()
+    context = _RecordingContext(
+        cwd=str(workspace),
+        session_id="scratchpad-bg-test",
+        scratchpad_dir=str(pad),
+        request_approval=recorder,
+        recorder=recorder,
+        jobs=manager,
+    )
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    result = await tools["bash"].execute(
+        "bash-pad-watchdog-bg",
+        {
+            "command": (
+                "i=0; while [ $i -lt 20 ]; do "
+                'head -c 1024 /dev/zero >> "$LOCAL_OPERATOR_SCRATCHPAD/grow.dat"; '
+                "i=$((i+1)); sleep 0.2; done; echo LOOP-DONE"
+            ),
+            "background": True,
+            "timeout": 30,
+        },
+        None,
+        None,
+        context,
+    )
+    assert result.is_error is False, result.text
+    job_id = str((result.details or {})["job_id"])
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 20
+    job = manager.get(job_id)
+    while job is not None and job.status == "running" and loop.time() < deadline:
+        await asyncio.sleep(0.1)
+        job = manager.get(job_id)
+    try:
+        assert job is not None and job.status != "running", "background job never settled"
+        assert "SCRATCHPAD CAP EXCEEDED" in (job.result_text or "")
+        assert "LOOP-DONE" not in (job.result_text or "")
+        assert "continues in the background" not in (job.result_text or "")
+        details = job.latest_details or {}
+        assert details["scratchpad_cap_exceeded"] is True
+        assert details["scratchpad_cap_bytes"] == 1024
+        assert details["scratchpad_held_bytes"] >= 1024
+        # Bounded, not merely stopped: without the kill the loop's 20 x 1 KiB
+        # writes allocate ~20 KiB, so 16 KiB separates the two outcomes.
+        held = sum(p.stat().st_blocks * 512 for p in pad.rglob("*") if p.is_file())
+        assert 1024 <= held < 16 * 1024, held
+    finally:
+        await manager.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_command_that_never_touches_the_pad_pays_no_walk(tmp_path, monkeypatch) -> None:
+    """The arming gate: a command that neither names the pad nor runs with cwd
+    inside it must not pay the spawn walk or any later tick, so a long pytest or
+    git run is untouched. The probe records and raises, so an armed call would
+    also be visible in the failure across `_pad_tick`.
+    """
+    from local_operator.tools import builtin as builtin_module
+
+    context, _pad, tools = _scratchpad_context(tmp_path)
+    calls: list[object] = []
+
+    def _probe(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("the pad must not be walked for an unrelated command")
+
+    monkeypatch.setattr(builtin_module, "scratchpad_footprint", _probe)
+    # Longer than PAD_TICK_S: the test covers BOTH the spawn walk and every
+    # tick, not just the spawn.
+    result = await tools["bash"].execute(
+        "bash-no-pad-walk", {"command": "sleep 1.5", "timeout": 30}, None, None, context
+    )
+
+    assert result.is_error is False, result.text
+    assert calls == []
+
+
+def test_the_watchdog_arms_on_a_pad_naming_command_or_a_pad_cwd(tmp_path) -> None:
+    """The other half of the gate: both reachable shapes arm it. A command that
+    spells the pad (any accepted spelling) and a command whose cwd is inside the
+    pad are the two ways relative writes reach the pad, and both must be watched.
+    """
+    from local_operator.tools import builtin as builtin_module
+
+    pad = tmp_path / "pad"
+    pad.mkdir()
+    assert builtin_module._pad_watch_armed("true", str(tmp_path), pad) is False
+    assert (
+        builtin_module._pad_watch_armed(
+            'echo x > "$LOCAL_OPERATOR_SCRATCHPAD/grow.dat"', str(tmp_path), pad
+        )
+        is True
+    )
+    assert builtin_module._pad_watch_armed("pwd", str(pad / "sub"), pad) is True
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_pad_disarms_the_watchdog_and_the_command_runs(
+    tmp_path, monkeypatch
+) -> None:
+    """A start-walk failure is "unknown", never a tool failure: the watchdog is
+    disarmed and the command runs normally. The second probe call is the
+    post-hoc line's, which returns a normal reading.
+    """
+    from local_operator.tools import builtin as builtin_module
+
+    context, _pad, tools = _scratchpad_context(tmp_path)
+    calls: list[object] = []
+
+    def _probe(*args, **kwargs):
+        calls.append((args, kwargs))
+        if len(calls) == 1:
+            raise OSError("pad unreadable right now")
+        return 0, False, False
+
+    monkeypatch.setattr(builtin_module, "scratchpad_footprint", _probe)
+    result = await tools["bash"].execute(
+        "bash-pad-unreadable",
+        {"command": 'echo ran "$LOCAL_OPERATOR_SCRATCHPAD"', "timeout": 30},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False, result.text
+    assert "ran " in result.text
+    assert len(calls) == 2, "spawn probe (raised) + post-hoc probe only"
+
+
+@pytest.mark.asyncio
+async def test_a_cwd_relative_command_gets_the_post_hoc_line(tmp_path, monkeypatch) -> None:
+    """The widened mention gate: a command running INSIDE the pad can grow it
+    through a relative path without naming it. It must still get the
+    after-the-fact line when the result is over cap.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    pad = tmp_path / "pad"
+    pad.mkdir()
+    _pad_cap_config(tmp_path, monkeypatch, 1024)
+    recorder = RecordingApproval(True)
+    context = _RecordingContext(
+        cwd=str(pad),
+        session_id="scratchpad-cwd-posthoc",
+        scratchpad_dir=str(pad),
+        request_approval=recorder,
+        recorder=recorder,
+    )
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    result = await tools["bash"].execute(
+        "bash-pad-cwd-posthoc",
+        {"command": "head -c 4096 /dev/zero > grow.dat", "timeout": 30},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False, result.text
+    assert (pad / "grow.dat").exists()
+    assert "[scratch]" in result.text
+    assert "over its" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_live_cap_change_applies_to_a_running_command(tmp_path, monkeypatch) -> None:
+    """``session.scratchpad.max_bytes`` is LIVE: a command that started under a
+    generous cap must be judged against the value in the config at the tick, not
+    the one snapshotted at spawn. The config file is rewritten mid-run; the kill
+    line and details must carry the new cap.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    _pad_cap_config(tmp_path, monkeypatch, 1_000_000)
+    config_file = tmp_path / "cap-config" / "config.yml"
+
+    task = asyncio.ensure_future(
+        tools["bash"].execute(
+            "bash-pad-live-cap",
+            {
+                "command": (
+                    "i=0; while [ $i -lt 20 ]; do "
+                    'head -c 1024 /dev/zero >> "$LOCAL_OPERATOR_SCRATCHPAD/grow.dat"; '
+                    "i=$((i+1)); sleep 0.5; done; echo LOOP-DONE"
+                ),
+                "timeout": 30,
+            },
+            None,
+            None,
+            context,
+        )
+    )
+    await asyncio.sleep(1.2)
+    config_file.write_text(
+        "values:\n  session:\n    scratchpad:\n      max_bytes: 1024\n", encoding="utf-8"
+    )
+    result = await task
+
+    assert result.is_error is True
+    assert "SCRATCHPAD CAP EXCEEDED" in result.text
+    assert "LOOP-DONE" not in result.text
+    assert result.details is not None
+    assert result.details["scratchpad_cap_bytes"] == 1024
+
+
+@pytest.mark.asyncio
+async def test_a_cleanup_command_on_an_over_cap_pad_is_not_killed(tmp_path, monkeypatch) -> None:
+    """The recovery path, in the counterexample shape: removing ONE entry while
+    a smaller large entry remains leaves the cap-truncated walk reading a HIGHER
+    lower bound than at spawn even though the pad shrank. An over-cap pad is
+    disarmed at spawn, so the command sleeps past the first tick untouched and
+    the remaining bytes stay put.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk-small.dat").write_bytes(b"x" * 4096)
+    (pad / "bulk-large.dat").write_bytes(b"x" * 16384)
+    # Cap under the large entry but over neither: the pad is over cap both at
+    # spawn (small + large) and after the small one is removed (large alone).
+    large_held = (pad / "bulk-large.dat").stat().st_blocks * 512
+    cap = large_held - 1
+    _pad_cap_config(tmp_path, monkeypatch, cap)
+
+    result = await tools["bash"].execute(
+        "bash-pad-cleanup",
+        {
+            "command": f'rm -f "{pad}/bulk-small.dat"; sleep 1.5; echo cleaned',
+            "timeout": 30,
+        },
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False, result.text
+    assert "cleaned" in result.text
+    assert not (pad / "bulk-small.dat").exists()
+    assert (pad / "bulk-large.dat").exists(), "the untouched entry must remain"
+    from local_operator import scratchpad as scratchpad_module
+
+    _held, still_over, _ = scratchpad_module.scratchpad_footprint(pad, cap)
+    assert still_over is True, "the pad must remain over cap for the counterexample shape"
+
+
+@pytest.mark.asyncio
+async def test_an_over_cap_pad_disarms_the_watchdog_before_the_first_tick(
+    tmp_path, monkeypatch
+) -> None:
+    """Start-over disarms: the spawn measurement is the ONLY live sample. The
+    command names the pad and sleeps past a tick, so an armed watchdog would
+    add a third probe call; the two recorded are the spawn walk and the
+    post-hoc line every pad-naming result carries.
+    """
+    from local_operator.tools import builtin as builtin_module
+
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    calls: list[object] = []
+
+    def _over_cap_probe(*args, **kwargs):
+        calls.append((args, kwargs))
+        return 4096, True, False
+
+    monkeypatch.setattr(builtin_module, "scratchpad_footprint", _over_cap_probe)
+    result = await tools["bash"].execute(
+        "bash-pad-overcap-disarm",
+        {
+            "command": 'rm -f "$LOCAL_OPERATOR_SCRATCHPAD/none"; sleep 1.5; echo cleaned',
+            "timeout": 30,
+        },
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False, result.text
+    assert "SCRATCHPAD CAP EXCEEDED" not in result.text
+    assert "cleaned" in result.text
+    assert len(calls) == 2, f"expected spawn + post-hoc only, got {len(calls)} probes"
+
+
+def test_a_browser_screenshot_destination_under_the_pad_is_checked(tmp_path, monkeypatch) -> None:
+    """The screenshot path takes an ordinary filesystem path, so the pad policy
+    must run on it explicitly — an absolute destination into ``scratchpad/``
+    otherwise wrote a PNG the next ``write`` would have refused."""
+    from local_operator.tools import builtin as builtin_module
+
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    held = (pad / "bulk.dat").stat().st_blocks * 512
+    _pad_cap_config(tmp_path, monkeypatch, held - 1)
+
+    refused = builtin_module._pad_destination_refusal(
+        "shot-under-pad", "browser", str(pad / "shot.png"), context, 16
+    )
+    assert refused is not None and refused.is_error is True
+    assert "byte ceiling" in refused.text or "bytes, so this write" in refused.text
+
+    outside = builtin_module._pad_destination_refusal(
+        "shot-outside-pad", "browser", str(tmp_path / "shot.png"), context, 16
+    )
+    assert outside is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "created"),
+    [
+        ('cd "{pad}" && mkdir cddir', "cddir"),
+        ('cd "{pad}" && cp bulk.dat copy.dat', "copy.dat"),
+        ('cd "{pad}" && touch newfile.txt', "newfile.txt"),
+        ('cd "$LOCAL_OPERATOR_SCRATCHPAD" && touch relvar.txt', "relvar.txt"),
+    ],
+)
+async def test_a_cd_into_the_pad_does_not_hide_a_creating_command(
+    tmp_path, monkeypatch, command, created
+) -> None:
+    """Review M1: ``cd "<pad>" && mkdir d`` was the ordinary idiom and the
+    pre-execution gate judged only absolute targets, so it ran on an over-cap
+    pad. The walk now carries a pad base and expands the two known spellings
+    before it runs.
+    """
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    held = (pad / "bulk.dat").stat().st_blocks * 512
+    _pad_cap_config(tmp_path, monkeypatch, held - 1)
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-pad-cd-refused", {"command": command.format(pad=pad)}, None, None, context
+    )
+
+    assert result.is_error is True, result.text
+    assert "Scratchpad over cap" in result.text
+    assert not (pad / created).exists(), "the command must not have run"
+
+
+@pytest.mark.asyncio
+async def test_a_cd_shrink_and_no_growth_operations_still_run(tmp_path, monkeypatch) -> None:
+    """The recovery path after ``cd``, plus the two no-growth exemptions from
+    review m4: a rename wholly inside the pad and a ``mkdir -p`` whose target
+    already exists add no bytes, so refusing them was a false positive.
+    """
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    held = (pad / "bulk.dat").stat().st_blocks * 512
+    _pad_cap_config(tmp_path, monkeypatch, held - 1)
+    build = pad / "build"
+    build.mkdir()
+    (build / "out.o").write_bytes(b"x" * 128)
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    def run(name: str, command: str):
+        return tools["bash"].execute(name, {"command": command}, None, None, context)
+
+    removed = await run("bash-pad-cd-rm", f'cd "{pad}" && rm -rf build')
+    assert removed.is_error is False, removed.text
+    assert not build.exists()
+
+    renamed = await run("bash-pad-mv", f'mv "{pad}/bulk.dat" "{pad}/bulk2.dat"')
+    assert renamed.is_error is False, renamed.text
+    assert (pad / "bulk2.dat").exists() and not (pad / "bulk.dat").exists()
+
+    noop_pad = await run("bash-pad-mkdir-self", f'mkdir -p "{pad}"')
+    assert noop_pad.is_error is False, noop_pad.text
+
+    (pad / "build").mkdir()
+    noop_child = await run("bash-pad-mkdir-existing", f'mkdir -p "{pad}/build"')
+    assert noop_child.is_error is False, noop_child.text
+
+    (pad / "notes.md").write_text("keep\n")
+    touched = await run("bash-pad-touch-existing", f'touch "{pad}/notes.md"')
+    assert touched.is_error is False, touched.text  # Minor 2: an existing FILE adds no bytes
+
+
+@pytest.mark.asyncio
+async def test_the_post_hoc_shape_audit_still_names_a_build_tree_the_precheck_exempts(
+    tmp_path, monkeypatch
+) -> None:
+    """R2-1: the no-growth exemptions are PRECHECK-ONLY. ``mkdir -p`` of an
+    existing build tree adds no bytes, so the precheck lets it run — but the
+    tree is still there, and the post-hoc audit must keep naming it."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "build" / "sub").mkdir(parents=True)
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-pad-shape-after-exempt",
+        {"command": 'mkdir -p "$LOCAL_OPERATOR_SCRATCHPAD/build/sub"'},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False, result.text
+    assert "'build' is a build or dependency directory" in result.text
+
+
+@pytest.mark.asyncio
+async def test_no_growth_forms_are_allowed_on_a_pad_under_cap(tmp_path) -> None:
+    """The same exemptions on the ordinary side, so they are not accidentally
+    tied to the over-cap branch: touch an existing file, mkdir the pad itself
+    and rename a file, all on a healthy pad."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "notes.md").write_text("keep\n")
+    (pad / "build").mkdir()
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    def run(name: str, command: str):
+        return tools["bash"].execute(name, {"command": command}, None, None, context)
+
+    touched = await run("bash-pad-touch", f'touch "{pad}/notes.md"')
+    assert touched.is_error is False, touched.text
+
+    mkdir_self = await run("bash-pad-mkdir-self", f'mkdir -p "{pad}"')
+    assert mkdir_self.is_error is False, mkdir_self.text
+
+    renamed = await run("bash-pad-rename", f'mv "{pad}/notes.md" "{pad}/notes2.md"')
+    assert renamed.is_error is False, renamed.text
+    assert (pad / "notes2.md").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "needle"),
+    [
+        (
+            'cd "$LOCAL_OPERATOR_SCRATCHPAD" && mv a.dat b.tar.gz',
+            "'.tar.gz' is a compiled, archived or model artefact",
+        ),
+        (
+            'cd "$LOCAL_OPERATOR_SCRATCHPAD" && mv notes.md build/notes.md',
+            "'build' is a build or dependency directory",
+        ),
+    ],
+)
+async def test_an_in_pad_rename_still_reports_the_refused_shape_post_hoc(
+    tmp_path, command, needle
+) -> None:
+    """R3-1: the rename exemption belongs to the PRECHECK only. The post-hoc
+    audit must still see where an in-pad rename PUT the name, or a rename is a
+    free way to leave a build tree/archive in the pad with no line."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "a.dat").write_bytes(b"x")
+    (pad / "notes.md").write_text("keep\n")
+    (pad / "build").mkdir()
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-pad-rename-shape", {"command": command}, None, None, context
+    )
+
+    assert result.is_error is False, result.text
+    assert "[scratch]" in result.text and needle in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "needle", "created"),
+    [
+        (
+            'cd "$LOCAL_OPERATOR_SCRATCHPAD" && mv a.dat b.tar.gz',
+            "'.tar.gz' is a compiled, archived or model artefact",
+            "b.tar.gz",
+        ),
+        (
+            'cd "$LOCAL_OPERATOR_SCRATCHPAD" && mv notes.md build/notes.md',
+            "'build' is a build or dependency directory",
+            "build/notes.md",
+        ),
+    ],
+)
+async def test_an_in_pad_rename_on_an_over_cap_pad_runs_and_still_reports(
+    tmp_path, monkeypatch, command, needle, created
+) -> None:
+    """The precheck exempts the rename (it adds no bytes); the command therefore
+    runs, and the post-hoc line must still name the refused shape it left."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "a.dat").write_bytes(b"x" * 4096)
+    (pad / "notes.md").write_text("keep\n")
+    (pad / "build").mkdir()
+    held = sum(
+        entry.lstat().st_blocks * 512
+        for entry in pad.rglob("*")
+        if not entry.is_dir() and not entry.is_symlink()
+    )
+    _pad_cap_config(tmp_path, monkeypatch, max(1024, held - 1))
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-pad-rename-over-cap", {"command": command}, None, None, context
+    )
+
+    assert result.is_error is False, result.text
+    assert needle in result.text
+    assert (pad / created).exists(), "the rename itself is a no-growth command"
+
+
+@pytest.mark.asyncio
+async def test_touch_through_an_in_pad_symlink_is_refused(tmp_path, monkeypatch) -> None:
+    """R3-2: the symlink guard must run BEFORE ``_pad_target`` resolves the
+    link, or it is dead and ``touch`` through it is exempted as a no-op."""
+    context, pad, _ = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    (pad / "real.md").write_bytes(b"x" * 4096)
+    (pad / "link.md").symlink_to("real.md")
+    held = (pad / "real.md").stat().st_blocks * 512
+    _pad_cap_config(tmp_path, monkeypatch, max(1024, held - 1))
+
+    tools = {tool.name: tool for tool in create_tools(context)}
+    result = await tools["bash"].execute(
+        "bash-pad-touch-link",
+        {"command": 'touch "$LOCAL_OPERATOR_SCRATCHPAD/link.md"'},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is True, result.text
+    assert "Scratchpad over cap" in result.text
+
+
+# ---------------------------------------------------------------------------
+# grep: long lines, skipped-file disclosure, max_filesize_mb (scout friction)
+# ---------------------------------------------------------------------------
+#
+# The scout subagent greping Claude.app's Resources hit three tool failures in
+# one session: (1) a minified one-line bundle crashed the ripgrep engine with
+# ``LimitOverrunError`` (asyncio's 64 KiB StreamReader default) so the whole call
+# died as "failed unexpectedly"; (2) ``No matches (28 file(s) skipped over the
+# 1MB cap)`` read as a negative answer though 28 files were never read; (3) glob
+# refused an absolute path. These pin the fixes, under BOTH engines where the
+# behaviour is shared.
+
+_MINIFIED_LINE_BYTES = 200_000  # > 64 KiB (the StreamReader default that crashed)
+
+
+def _write_minified(path: Path, needle: str = "cache_control") -> None:
+    path.write_text("var a=1;" + "x" * 100_000 + needle + "y" * 100_000 + "\n")
+
+
+def _grep_body(result: ToolResult) -> str:
+    """The result minus its header line. The header echoes the pattern
+    (``1 match(es) for 'NEEDLE'``), so a needle assertion on the WHOLE text passes
+    even when the clipped window lost the match (review round 1, R4)."""
+    return result.text.split("\n", 1)[1] if "\n" in result.text else ""
+
+
+async def _grep_on_engine(tools, context, monkeypatch, engine: str, args: dict[str, Any]):
+    """Run grep pinned to ``engine`` ('rg' skips when ripgrep is absent)."""
+    if engine == "rg":
+        monkeypatch.delenv("LOCAL_OPERATOR_GREP_ENGINE", raising=False)
+        if not builtin._use_ripgrep():
+            pytest.skip("ripgrep not on PATH")
+    else:
+        monkeypatch.setenv("LOCAL_OPERATOR_GREP_ENGINE", "python")
+    return await _call(tools, "grep", args, context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_survives_and_clips_a_line_over_the_pipe_limit(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    """A >64 KiB single line neither crashes the call nor floods the result, and
+    the clipped window still CONTAINS the match (a head-only preview would show
+    the first N bytes of the minified line and usually miss it)."""
+    _write_minified(tmp_path / "min.js")
+    result = await _grep_on_engine(
+        tools, context, monkeypatch, engine, {"pattern": "cache_control"}
+    )
+
+    assert result.is_error is False, result.text
+    assert "failed unexpectedly" not in result.text
+    body = _grep_body(result)
+    assert "min.js:1:" in body
+    assert "cache_control" in body, "the clipped window lost the match"
+    # Bounded: nowhere near the 200 KB line (window + spill footer + header).
+    assert len(result.text) < 3_000, len(result.text)
+    # And it says how much it dropped, so the model knows the line continues.
+    assert "chars]" in result.text and "[\u2026" in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_clips_a_multibyte_line_around_the_match(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    """rg's column is a BYTE offset and the window is cut in characters: a line of
+    multi-byte text before the match must still land the match in the window."""
+    (tmp_path / "u.txt").write_text("é" * 5_000 + "NEEDLE" + "é" * 5_000 + "\n")
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, {"pattern": "NEEDLE"})
+    assert result.is_error is False, result.text
+    assert "NEEDLE" in _grep_body(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+@pytest.mark.parametrize("junk", [b"\xe9", b"\xc3\x28", b"\x80"], ids=["latin1", "bad-seq", "cont"])
+async def test_grep_clips_around_the_match_after_invalid_utf8(
+    tools, context, tmp_path, monkeypatch, engine, junk
+) -> None:
+    """rg's byte column must become a character offset from the RAW byte prefix:
+    re-encoding the replaced text turned each invalid byte into three and put the
+    window ~3x short of the match (review R3, QA Q1). Valid UTF-8 never showed it."""
+    (tmp_path / "lat.js").write_bytes(junk * 3_000 + b" NEEDLE_XYZ " + junk * 3_000 + b"\n")
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, {"pattern": "NEEDLE_XYZ"})
+    assert result.is_error is False, result.text
+    body = _grep_body(result)
+    assert body.startswith("lat.js:1:[\u2026"), body[:80]
+    assert "NEEDLE_XYZ" in body, "the clipped window lost the match"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+@pytest.mark.parametrize("context_lines", [0, 1])
+async def test_grep_elision_range_points_at_the_hidden_matches_in_the_spill(
+    tools, context, tmp_path, monkeypatch, engine, context_lines
+) -> None:
+    """The footer's ``range=`` is followed verbatim and must return exactly the
+    matches the body elided (QA Q7 on #2982). The body carries ``--`` separators
+    and context rows the one-match-per-line spill does not, so a span counted on
+    the body returned the wrong matches — or, with context, nothing at all."""
+    (tmp_path / "many").mkdir()
+    for i in range(18):
+        (tmp_path / "many" / f"f{i:02d}.txt").write_text(
+            f"pre\nHIT_QA_{i:02d} " + "z" * 600 + "\npost\n"
+        )
+    args: dict[str, Any] = {"pattern": "HIT_QA", "path": "many"}
+    if context_lines:
+        args["context_lines"] = context_lines
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, args)
+
+    shown = set(re.findall(r"HIT_QA_(\d\d)", result.text))
+    hidden = {f"{i:02d}" for i in range(18)} - shown
+    assert hidden, "the fixture must overflow the budget for this test to mean anything"
+    hint = re.search(r'read\(path="(spill://[^"]+)", range="(\d+-\d+)"\)', result.text)
+    assert hint, result.text[-600:]
+    assert "body lines elided — their matches are lines " + hint.group(2) in result.text
+    page = await _call(tools, "read", {"path": hint.group(1), "range": hint.group(2)}, context)
+    assert set(re.findall(r"HIT_QA_(\d\d)", page.text)) == hidden, page.text[:400]
+
+
+async def _follow_grep_footer(tools, context, result) -> tuple[str, ToolResult]:
+    """Run the footer's printed ``read`` call verbatim; returns ``(range, page)``."""
+    hint = re.search(r'read\(path="(spill://[^"]+)", range="(\d+-\d+)"\)', result.text)
+    assert hint, result.text[-600:]
+    page = await _call(tools, "read", {"path": hint.group(1), "range": hint.group(2)}, context)
+    assert page.is_error is False, page.text
+    return hint.group(2), page
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+@pytest.mark.parametrize(("skip", "context_lines"), [(10, 0), (50, 0), (10, 2)])
+async def test_grep_a_page_past_the_end_is_a_clean_empty_result(
+    tools, context, tmp_path, monkeypatch, engine, skip, context_lines
+) -> None:
+    """``skip`` at or past the match count is a page a model reaches by obeying
+    the previous page's own ``use skip=N`` — it must answer ``0 match(es)``, not
+    crash. The empty body has no match row to map the spill pointer onto, and
+    that IndexError'd in ``_grep_spill_remap`` (QA Q1 on #2997)."""
+    (tmp_path / "t.txt").write_text("".join(f"NEEDLE row {i}\nfiller\n" for i in range(10)))
+    args = {"pattern": "NEEDLE", "skip": skip, "context_lines": context_lines}
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, args)
+
+    assert result.is_error is False, result.text
+    assert result.text.startswith("0 match(es) for 'NEEDLE' of 10 "), result.text
+    # Every stored match is one this page did not show; the pointer serves them.
+    span, page = await _follow_grep_footer(tools, context, result)
+    assert span == "1-10"
+    assert len(re.findall(r"NEEDLE row \d", page.text)) == 10, page.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+@pytest.mark.parametrize("context_lines", [0, 1])
+async def test_grep_the_last_page_points_back_at_the_skipped_matches(
+    tools, context, tmp_path, monkeypatch, engine, context_lines
+) -> None:
+    """On the final page nothing follows it, so ``shown + 1`` printed
+    ``range="252-251"``, which ``read`` rejects (QA Q2 on #2997). What the page
+    hides is the matches before it; the printed range must be followable and
+    return only those."""
+    (tmp_path / "t.txt").write_text("".join(f"N{i:03d}\nfiller\n" for i in range(251)))
+    args = {"pattern": "^N", "skip": 200, "context_lines": context_lines}
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, args)
+
+    assert result.is_error is False, result.text
+    assert result.text.startswith("51 match(es) for '^N' of 251 "), result.text
+    shown = set(re.findall(r":N(\d{3})", _grep_body(result).split("\n[Full output", 1)[0]))
+    assert shown == {f"{i:03d}" for i in range(200, 251)}
+    span, page = await _follow_grep_footer(tools, context, result)
+    assert span == "1-200", span
+    assert set(re.findall(r":N(\d{3})", page.text)) == {f"{i:03d}" for i in range(200)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_a_line_separator_in_match_text_keeps_one_spill_line_per_match(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    """rg splits lines only on ``\\n``, so its text could carry ``\\r``, form
+    feed, U+2028 … — and the spill store counts lines with ``splitlines``, so one
+    record became 2+ spill lines and the elision pointer drifted onto shown and
+    missed hidden matches (review R1 on #2997). A CR-rewritten progress log is
+    the realistic case. The Python engine splits with ``splitlines`` already, so
+    it is the parity control."""
+    seps = ["\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+    rows = [f"step {i}{seps[i % len(seps)]}HIT_{i:02d} " + "q" * 600 for i in range(18)]
+    (tmp_path / "build.log").write_text("\n".join(rows) + "\n", newline="")
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, {"pattern": "HIT_"})
+
+    body = _grep_body(result).split("\n[Full output", 1)[0]
+    shown = set(re.findall(r"HIT_(\d\d)", body))
+    hidden = {f"{i:02d}" for i in range(18)} - shown
+    assert hidden, "the fixture must overflow the budget for this test to mean anything"
+    _span, page = await _follow_grep_footer(tools, context, result)
+    assert set(re.findall(r"HIT_(\d\d)", page.text)) == hidden, page.text[:600]
+    # One body row per match: no raw separator survives into the rendered text.
+    assert not any(sep in body for sep in seps), repr(body[:300])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_a_context_only_gap_does_not_claim_a_hidden_match(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    """When the elided body span holds only context rows, the pointer collapses
+    onto the nearest match — which the body already shows here. The marker must
+    say no match was hidden rather than "their matches are lines k-k" (review R3
+    on #2997), and the printed range must still resolve."""
+    rows = ["HIT_FIRST"] + [f"ctx {i} " + "c" * 480 for i in range(20)] + ["HIT_LAST"]
+    (tmp_path / "t.txt").write_text("\n".join(rows) + "\n")
+    args = {"pattern": "HIT_", "context_lines": 10}
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, args)
+
+    body = _grep_body(result)
+    assert "t.txt:1:HIT_FIRST" in body and "t.txt:22:HIT_LAST" in body, body[-800:]
+    assert "body lines elided — context rows only, no match hidden; the nearest match is " in body
+    assert "their matches are" not in body
+    span, page = await _follow_grep_footer(tools, context, result)
+    assert "HIT_" in page.text, page.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_context_survives_a_path_with_a_dash_digits_dash_segment(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    """``dash-3-dir/a.txt-1-before`` is ambiguous in rg's default context grammar;
+    the old parse split inside the path and dropped the row, so rg showed no
+    context where the Python engine did. ``--null`` ends the path at a NUL."""
+    (tmp_path / "dash-3-dir").mkdir()
+    (tmp_path / "dash-3-dir" / "a.txt").write_text("before\nNEEDLE here\nafter\n")
+    result = await _grep_on_engine(
+        tools, context, monkeypatch, engine, {"pattern": "NEEDLE", "context_lines": 1}
+    )
+    assert "dash-3-dir/a.txt:1-before" in result.text, result.text
+    assert "dash-3-dir/a.txt:2:NEEDLE here" in result.text, result.text
+    assert "dash-3-dir/a.txt:3-after" in result.text, result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_short_lines_are_untouched_by_clipping(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    (tmp_path / "s.txt").write_text("a" * 400 + "needle\n")  # 406 chars: under the clip
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, {"pattern": "needle"})
+    assert f"s.txt:1:{'a' * 400}needle" in result.text
+    assert "chars]" not in result.text
+
+
+def test_clip_grep_line_keeps_the_hit_whatever_its_offset() -> None:
+    line = "p" * 3_000 + "HIT" + "q" * 3_000
+    clipped = builtin._clip_grep_line(line, 3_000)
+    assert "HIT" in clipped
+    assert clipped.startswith("[\u2026") and clipped.endswith("chars\u2026]")
+    # A hit at the very start has nothing to drop before it.
+    assert not builtin._clip_grep_line("HIT" + "q" * 3_000, 0).startswith("[")
+    assert builtin._clip_grep_line("short", 0) == "short"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_names_the_skipped_files_and_calls_a_no_match_inconclusive(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    (tmp_path / "small.txt").write_text("nothing here\n")
+    (tmp_path / "bundle.js").write_text("z" * (2 * 1024 * 1024) + "\n")
+    (tmp_path / "huge.js").write_text("z" * (3 * 1024 * 1024) + "\n")
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, {"pattern": "absent"})
+
+    assert result.is_error is False
+    assert "INCONCLUSIVE" in result.text
+    assert "2 file(s) skipped over the 1MB cap" in result.text
+    # Largest first, with sizes, and the parameter that reaches them.
+    assert result.text.index("huge.js") < result.text.index("bundle.js")
+    assert "huge.js (3.0MB)" in result.text
+    # 3 MiB + the newline is just over 3 MB, so the suggested cap rounds UP to 4:
+    # a suggestion of 3 would still skip the file it names.
+    assert "max_filesize_mb=4" in result.text
+    # Not marked ``useless``: the unread-file list is worth keeping through compaction.
+    assert result.useless is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_max_filesize_mb_searches_the_big_file_and_drops_the_caveat(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    big = tmp_path / "bundle.js"
+    big.write_text("z" * (2 * 1024 * 1024) + "TOKEN" + "z" * 1000 + "\n")
+    default = await _grep_on_engine(tools, context, monkeypatch, engine, {"pattern": "TOKEN"})
+    assert "INCONCLUSIVE" in default.text and "bundle.js" in default.text
+
+    raised = await _grep_on_engine(
+        tools, context, monkeypatch, engine, {"pattern": "TOKEN", "max_filesize_mb": 4}
+    )
+    assert raised.is_error is False, raised.text
+    assert "bundle.js:1:" in raised.text and "TOKEN" in raised.text
+    assert "skipped" not in raised.text and "INCONCLUSIVE" not in raised.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_skipped_list_is_bounded_but_the_count_is_complete(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    total = builtin.GREP_SKIPPED_LIST_LIMIT + 4
+    for i in range(total):
+        (tmp_path / f"f{i:02d}.js").write_bytes(b"z" * (1024 * 1024 + 1 + i))
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, {"pattern": "absent"})
+    assert f"{total} file(s) skipped" in result.text
+    assert "and 4 more" in result.text
+    # The largest file is f<total-1>; the smallest four are the ones left unnamed.
+    assert f"f{total - 1:02d}.js" in result.text and "f00.js" not in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_does_not_name_a_big_file_its_own_include_filter_excluded(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    (tmp_path / "a.py").write_text("needle\n")
+    (tmp_path / "huge.json").write_text("z" * (2 * 1024 * 1024))
+    result = await _grep_on_engine(
+        tools, context, monkeypatch, engine, {"pattern": "needle", "include": "*.py"}
+    )
+    assert "a.py:1:needle" in result.text
+    assert "huge.json" not in result.text and "skipped" not in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_a_named_oversized_file_is_disclosed_too(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    """Grepping ONE file over the cap used to fall back to the Python engine and
+    skip it with a count of 1 and no name; it is the same inconclusive answer."""
+    big = tmp_path / "big.js"
+    big.write_text("z" * (2 * 1024 * 1024))
+    result = await _grep_on_engine(
+        tools, context, monkeypatch, engine, {"pattern": "absent", "path": "big.js"}
+    )
+    assert "INCONCLUSIVE" in result.text and "big.js (2.0MB)" in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("engine", ["rg", "python"])
+async def test_grep_a_just_over_cap_file_does_not_read_as_the_cap(
+    tools, context, tmp_path, monkeypatch, engine
+) -> None:
+    """1,048,577 B rendered as "1.0MB" beside "skipped over the 1MB cap" (QA Q5)."""
+    (tmp_path / "just_over.js").write_bytes(b"z" * (1024 * 1024 + 1))
+    result = await _grep_on_engine(tools, context, monkeypatch, engine, {"pattern": "absent"})
+    assert "just_over.js (1,048,577 B)" in result.text
+    assert "1.0MB)" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_grep_rejects_a_max_filesize_above_the_ceiling(tools, context) -> None:
+    result = await _call(tools, "grep", {"pattern": "x", "max_filesize_mb": 65}, context)
+    assert result.is_error is True
+
+
+@pytest.mark.asyncio
+async def test_grep_survives_a_transcoded_line_longer_than_its_file(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """rg transcodes a BOM'd UTF-16 file to UTF-8, so a ~1 MB file of CJK text
+    prints a ~1.5 MB line: a pipe limit sized from ``max_filesize`` overran and
+    the whole call died with ``LimitOverrunError`` (review R2). The file is UTF-16
+    on purpose and UNDER the default cap, which is what made the old bound false."""
+    blob = ("\u4e2d" * 520_000 + "NEEDLE" + "\n").encode("utf-16-le")
+    target = tmp_path / "Localizable.strings"
+    target.write_bytes(b"\xff\xfe" + blob)
+    assert target.stat().st_size < builtin.GREP_FILE_LIMIT_BYTES
+    result = await _grep_on_engine(tools, context, monkeypatch, "rg", {"pattern": "NEEDLE"})
+    assert result.is_error is False, result.text
+    assert "failed unexpectedly" not in result.text
+    body = _grep_body(result)
+    assert body.startswith("Localizable.strings:1:[\u2026"), body[:80]
+    assert "NEEDLE" in body
+
+
+class _FakeStream:
+    """A StreamReader stand-in that hands out fixed chunks, then EOF."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+
+    async def read(self, _n: int) -> bytes:
+        return self._chunks.pop(0) if self._chunks else b""
+
+
+@pytest.mark.asyncio
+async def test_rg_line_reader_cuts_and_counts_instead_of_raising() -> None:
+    """The reader behind the crash fix: a line longer than its cap keeps the head,
+    counts what it dropped, and the NEXT line is intact — no length can raise,
+    whatever the chunk boundaries (the newline lands mid-chunk here)."""
+    reader = builtin._RgLineReader(
+        _FakeStream([b"a" * 7, b"aaa\nshort\n", b"tail-without-newline"]),  # type: ignore[arg-type]
+        cap=4,
+    )
+    assert await reader.readline() == (b"aaaa", 6)
+    assert await reader.readline() == (b"shor", 1)
+    assert await reader.readline() == (b"tail", 16)
+    assert await reader.readline() is None
+
+
+def test_rg_match_text_owns_up_to_a_match_past_the_cut() -> None:
+    """A line over the reader cap whose match sits in the dropped tail says so,
+    rather than showing a window that does not contain the hit."""
+    text = builtin._rg_match_text(b"x" * 600, col=9_000, dropped=10_000, cap=600)
+    assert "10000 more bytes not read" in text and "match is past the cut" in text
+
+
+# ---------------------------------------------------------------------------
+# glob: `path` and absolute patterns
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_glob_path_lists_an_absolute_directory_outside_the_workspace(tmp_path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "app" / "Resources"
+    (outside / "sub").mkdir(parents=True)
+    (outside / "a.js").write_text("x")
+    (outside / "sub" / "b.js").write_text("x")
+    (outside / "c.txt").write_text("x")
+
+    approved = _context_with_approval(workspace, approve=True)
+    tools = {t.name: t for t in create_tools(approved)}
+    result = await tools["glob"].execute(
+        "c", {"pattern": "**/*.js", "path": str(outside)}, None, None, approved
+    )
+    assert result.is_error is False, result.text
+    # Relative to the base, with the base named so the reader can rebuild a path.
+    assert "a.js" in result.text and "sub/b.js" in result.text and "c.txt" not in result.text
+    assert str(outside.resolve()) in result.text
+    # Outside the workspace: the same escalation grep takes.
+    tier, description = approved.recorder.requests[0]
+    assert tier == "read" and description.startswith("[outside workspace] glob:")
+
+    denied = _context_with_approval(workspace, approve=False)
+    tools = {t.name: t for t in create_tools(denied)}
+    blocked = await tools["glob"].execute(
+        "c", {"pattern": "*.js", "path": str(outside)}, None, None, denied
+    )
+    assert blocked.is_error is True and "declined" in blocked.text
+
+
+@pytest.mark.asyncio
+async def test_glob_path_inside_the_workspace_never_prompts(tmp_path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "m.py").write_text("x")
+    context = _context_with_approval(tmp_path, approve=True)
+    tools = {t.name: t for t in create_tools(context)}
+    result = await tools["glob"].execute(
+        "c", {"pattern": "*.py", "path": "src"}, None, None, context
+    )
+    assert result.is_error is False and "m.py" in result.text
+    assert context.recorder.requests == []
+
+
+@pytest.mark.asyncio
+async def test_glob_absolute_pattern_splits_at_its_static_prefix(tmp_path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "res"
+    (outside / "assets").mkdir(parents=True)
+    (outside / "assets" / "one.js").write_text("x")
+    (outside / "assets" / "two.css").write_text("x")
+    context = _context_with_approval(workspace, approve=True)
+    tools = {t.name: t for t in create_tools(context)}
+
+    result = await tools["glob"].execute(
+        "c", {"pattern": f"{outside}/assets/*.js"}, None, None, context
+    )
+    assert result.is_error is False, result.text
+    assert "one.js" in result.text and "two.css" not in result.text
+
+    # A wildcard-free absolute pattern names one entry: its parent is the base.
+    exact = await tools["glob"].execute(
+        "c", {"pattern": f"{outside}/assets/two.css"}, None, None, context
+    )
+    assert exact.is_error is False and "two.css" in exact.text
+
+
+def test_split_absolute_glob_splits_on_component_boundaries() -> None:
+    assert builtin._split_absolute_glob("/a/b/*.js") == ("/a/b", "*.js")
+    assert builtin._split_absolute_glob("/a/b*/c") == ("/a", "b*/c")
+    assert builtin._split_absolute_glob("/a/**/x.js") == ("/a", "**/x.js")
+    assert builtin._split_absolute_glob("/a/b/c.txt") == ("/a/b", "c.txt")
+    assert builtin._split_absolute_glob("/*") == ("/", "*")
+
+
+@pytest.mark.asyncio
+async def test_glob_path_errors_are_clean(tools, context, tmp_path) -> None:
+    (tmp_path / "f.txt").write_text("x")
+    missing = await _call(tools, "glob", {"pattern": "*", "path": "nope"}, context)
+    assert missing.is_error is True and "does not exist" in missing.text
+    a_file = await _call(tools, "glob", {"pattern": "*", "path": "f.txt"}, context)
+    assert a_file.is_error is True and "must be a directory" in a_file.text
+    both = await _call(tools, "glob", {"pattern": f"{tmp_path}/*", "path": str(tmp_path)}, context)
+    assert both.is_error is True and "not both" in both.text
+    # '..' in the PATTERN stays refused even with a legitimate explicit base.
+    escape = await _call(tools, "glob", {"pattern": "../*", "path": str(tmp_path)}, context)
+    assert escape.is_error is True and "relative" in escape.text.lower()
+    # A scheme in either argument is still refused, never walked as a relative path.
+    scheme = await _call(tools, "glob", {"pattern": "scratchpad://*.md"}, context)
+    assert scheme.is_error is True
+    # ...including in ``path``, which used to resolve to ``<cwd>/spill:/abc`` and
+    # answer "Path does not exist" (QA round 1, Q3).
+    for url in ("spill://abc", "scratchpad://notes"):
+        in_path = await _call(tools, "glob", {"pattern": "*", "path": url}, context)
+        assert in_path.is_error is True
+        assert "is a URL" in in_path.text and "does not exist" not in in_path.text
+    assert not list(tmp_path.glob("*:"))
+
+
+@pytest.mark.asyncio
+async def test_glob_absolute_skill_md_is_still_redirected(tools, context) -> None:
+    """The virtual-resource hint survives absolute patterns now being served: a
+    SKILL.md search is the filesystem scan skill:// exists to replace."""
+    result = await _call(tools, "glob", {"pattern": "/Users/x/**/some-skill/SKILL.md"}, context)
+    assert result.is_error is True
+    assert "`skill://some-skill`" in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("python_engine")
+async def test_grep_with_every_match_on_screen_writes_no_spill_footer(
+    tools, context, tmp_path
+) -> None:
+    """Two matches in two files render with a ``--`` separator, which made the body
+    differ from the match-only spill, so a spill was written and its footer named
+    the impossible range ``4-2``. Everything fits, so nothing is spilled."""
+    (tmp_path / "a.txt").write_text("needle one\n")
+    (tmp_path / "b.txt").write_text("needle two\n")
+    result = await _call(tools, "grep", {"pattern": "needle"}, context)
+    assert "a.txt:1:needle one" in result.text and "b.txt:1:needle two" in result.text
+    assert "SAVED at" not in result.text and "range=" not in result.text
+    assert not (result.details or {}).get("spill")

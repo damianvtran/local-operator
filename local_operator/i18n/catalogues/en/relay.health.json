@@ -1,0 +1,10 @@
+{
+  "relay.health.live": "Live",
+  "relay.health.live_detail": "Running on your computer — messages reach it right away",
+  "relay.health.reconnecting": "Reconnecting",
+  "relay.health.reconnecting_detail": "This phone lost its connection to your computer and keeps trying. The session may still be running there; sending may fail until the connection is back.",
+  "relay.health.dropped_detail": "Your computer can't reach this session right now and keeps trying. Until it does, a send fails straight away and your text stays in the message box.",
+  "relay.health.quiet_detail": "This session on your computer has stopped responding — it may be busy or stuck. A send can show a failure and still arrive once it catches up. Retrying won't send it twice.",
+  "relay.health.ended_detail": "History is kept. Send a message or tap Resume to reopen it in your home folder.",
+  "relay.health.ended_send_failed": "This session has ended and couldn't be reopened just now. Try again, or tap “Ended” at the top and choose Resume."
+}

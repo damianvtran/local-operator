@@ -77,13 +77,17 @@ decodes. What stays true from before: this reader never starts an owner.
 
 from __future__ import annotations
 
+import copy
 import os
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from local_operator.session.attachments import store_for_transcript_dir
 from local_operator.session.history_window import DISPLAY_HISTORY_MESSAGES
+from local_operator.session.page_cache import retained_bytes
 from local_operator.session.transcript import (
     ENTRY_COMPACTION,
     ENTRY_MESSAGE,
@@ -115,6 +119,30 @@ PREVIEW_SCAN_BYTES = 32 * 1024 * 1024
 #: unbounded decode loop on the sidebar's first-paint path.
 PREVIEW_SCAN_ROWS = 40_000
 
+# A small process-wide LRU matches the sidebar's retained-presentation working
+# set without letting cached previews grow with the whole catalog. The key is a
+# filesystem witness, not writer notifications: the TUI, desktop and mobile can
+# all write a journal owned by this process's cache.
+#
+# WHAT ONE ENTRY CAN HOLD, because an entry count does not bound bytes.
+# ``replay_entries`` inlines image and document base64 (one upload reaches
+# 32 MiB), so a preview may carry 120 messages' worth of media on top of the
+# ``PREVIEW_SCAN_BYTES`` it walked. Eight of those at the worst case is far more
+# than a sidebar question is worth, so admission is bounded in BYTES with the
+# same ``retained_bytes`` instrument the page cache uses: an entry over the
+# per-entry budget is not admitted (the next visit re-reads, which is cheap next
+# to holding it) and the LRU evicts until the total fits.
+_PREVIEW_CACHE_ENTRIES = 8
+_PREVIEW_CACHE_BYTES = 48 * 1024 * 1024
+_PREVIEW_CACHE_ENTRY_BYTES = 32 * 1024 * 1024
+#: Fixed allowance for the LRU nodes and the keys themselves, as the page cache
+#: charges: accounted bytes over-estimate, so the effective ceiling sits under
+#: the nominal one — the safe direction.
+_PREVIEW_CACHE_ALLOWANCE = 256 * 1024
+_PREVIEW_CACHE: OrderedDict[tuple[object, ...], tuple[SavedPreview, int]] = OrderedDict()
+_PREVIEW_CACHE_ACCOUNTED = 0
+_PREVIEW_CACHE_LOCK = threading.Lock()
+
 
 @dataclass(frozen=True)
 class SavedPreview:
@@ -124,7 +152,82 @@ class SavedPreview:
 
 
 def read_saved_preview(directory: Path) -> SavedPreview:
-    path = directory / "transcript.jsonl"
+    """Read a preview, reusing it only while the journal identity is unchanged.
+
+    ``ctime_ns`` is deliberate alongside size and mtime: rewind/import can rewrite
+    bytes in place and restore mtime, while compaction replaces the inode. The
+    witness is read before the replay and once more after it, and that second read
+    only KEEPS A DEAD KEY OUT OF THE LRU — it does not make a racing read fresh.
+    A write that lands during the replay always advances ``st_ctime_ns``, which
+    userspace cannot set back, so the key this read was made under never recurs
+    and the next caller misses regardless; admitting the mixed read would just
+    evict this directory's live entry to hold an answer nobody can ask for again.
+    Returned messages are deep-copied because history consumers annotate their
+    Pydantic models; a cache hit must not share that mutable state.
+    """
+    global _PREVIEW_CACHE_ACCOUNTED
+    from local_operator.session import compression
+
+    path = compression.transcript_for_read(directory)
+    if path is None:
+        raise FileNotFoundError(f"{directory} holds no transcript")
+    key = _preview_cache_key(directory, path)
+    with _PREVIEW_CACHE_LOCK:
+        cached = _PREVIEW_CACHE.get(key)
+        if cached is not None:
+            _PREVIEW_CACHE.move_to_end(key)
+    if cached is not None:
+        return _copy_preview(cached[0])
+
+    preview = _read_saved_preview(directory, path)
+    try:
+        # A dead key, not a stale answer: see this function's docstring.
+        if _preview_cache_key(directory, path) != key:
+            return preview
+    except OSError:
+        return preview
+    size = retained_bytes((key, preview), _PREVIEW_CACHE_ENTRY_BYTES)
+    if size is None:
+        # Too large to hold: this visit's answer is still returned, and the next
+        # visit re-reads rather than making this entry the whole working set.
+        return preview
+    with _PREVIEW_CACHE_LOCK:
+        # One live identity per session: an append or rewind retires its old key
+        # immediately instead of leaving stale generations resident in the LRU.
+        for old_key in [item for item in _PREVIEW_CACHE if item[0] == str(directory)]:
+            _, removed = _PREVIEW_CACHE.pop(old_key, (preview, 0))
+            _PREVIEW_CACHE_ACCOUNTED -= removed
+        _PREVIEW_CACHE[key] = (_copy_preview(preview), size)
+        _PREVIEW_CACHE_ACCOUNTED += size
+        while _PREVIEW_CACHE and (
+            len(_PREVIEW_CACHE) > _PREVIEW_CACHE_ENTRIES
+            or _PREVIEW_CACHE_ACCOUNTED > _PREVIEW_CACHE_BYTES - _PREVIEW_CACHE_ALLOWANCE
+        ):
+            _, (_, removed) = _PREVIEW_CACHE.popitem(last=False)
+            _PREVIEW_CACHE_ACCOUNTED -= removed
+    return preview
+
+
+def _preview_cache_key(directory: Path, path: Path) -> tuple[object, ...]:
+    stat = path.stat()
+    return (
+        str(directory),
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+    )
+
+
+def _copy_preview(preview: SavedPreview) -> SavedPreview:
+    return SavedPreview(copy.deepcopy(preview.messages), preview.partial, preview.cwd)
+
+
+def _read_saved_preview(directory: Path, path: Path) -> SavedPreview:
+    # ``path`` is the ALREADY-RESOLVED journal, archive included
+    # (``compression.transcript_for_read``): resolving it a second time here made
+    # the resolved value optional again and paid the lookup on every cache miss.
     # A missing journal is not evidence of an empty conversation. The caller
     # may separately prove an unmaterialised live owner exists; this reader
     # never invents that authority from an absent path.

@@ -1,4 +1,4 @@
-"""``/notifications``: the unread completions this terminal is painting.
+"""``/unread`` (formerly ``/notifications``, D2): the unread completions this terminal paints.
 
 The command exists because the pile of checkmarks a sidebar can show is cleared
 one conversation at a time today, and the report it answers is "clear the pile I
@@ -151,7 +151,7 @@ async def test_the_listing_names_the_count_and_stops_at_ten_rows(config_root: Pa
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
-        await _run(pilot, app, "/notifications")
+        await _run(pilot, app, "/unread")
         text = _notices(app)[-1]
 
     lines = text.splitlines()
@@ -162,7 +162,7 @@ async def test_the_listing_names_the_count_and_stops_at_ten_rows(config_root: Pa
     # rows on screen while the write covered every one of them (design round 1,
     # D2). The short form is what the unbounded case prints, where "these" is
     # literally the whole set.
-    assert lines[-1] == "/notifications read marks all 13 read"
+    assert lines[-1] == "/unread read marks all 13 read"
     # A row carries the row's own name, kind and age — the same three facts the
     # picker's row shows, in the order a reader scans them.
     assert any("conversation 12" in line and "— complete ·" in line for line in lines)
@@ -184,7 +184,7 @@ async def test_the_listing_names_the_v2_kinds_in_english(config_root: Path) -> N
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
-        await _run(pilot, app, "/notifications")
+        await _run(pilot, app, "/unread")
         text = _notices(app)[-1]
 
     assert "— completed ·" in text, text
@@ -199,7 +199,7 @@ async def test_a_zero_state_says_so_and_names_no_gesture(config_root: Path) -> N
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
-        await _run(pilot, app, "/notifications")
+        await _run(pilot, app, "/unread")
         assert _notices(app)[-1] == "No unread completions."
 
 
@@ -218,7 +218,7 @@ async def test_read_clears_exactly_the_listed_set(config_root: Path) -> None:
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
-        await _run(pilot, app, "/notifications read")
+        await _run(pilot, app, "/unread read")
         assert _notices(app)[-1] == "Marked 3 completions read."
 
     assert [store.state(f"session/{session_id}")["unseen"] for session_id in ids] == [
@@ -255,7 +255,7 @@ async def test_the_clearing_receipt_names_what_stayed_unread(
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
-        await _run(pilot, app, "/notifications read")
+        await _run(pilot, app, "/unread read")
         assert _notices(app)[-1] == (
             "Marked 1 completion read. 1 has a newer result and stays unread."
         )
@@ -281,7 +281,7 @@ async def test_read_with_nothing_unread_writes_nothing_at_all(config_root: Path)
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
-        await _run(pilot, app, "/notifications read")
+        await _run(pilot, app, "/unread read")
         assert _notices(app)[-1] == "Nothing unread."
 
     assert store.revision() == before
@@ -301,11 +301,11 @@ async def test_an_unknown_argument_is_refused_by_name(config_root: Path) -> None
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
-        await _run(pilot, app, "/notifications all")
+        await _run(pilot, app, "/unread all")
         refusal = _notices(app)[-1]
 
     assert "no such argument" in refusal and "'all'" in refusal
-    assert "/notifications read" in refusal, "the refusal must name the form that works"
+    assert "/unread read" in refusal, "the refusal must name the form that works"
     assert store.revision() == before, "a refused argument must not clear anything"
 
 
@@ -317,7 +317,7 @@ async def test_one_enter_on_the_offered_row_fills_the_command_instead_of_clearin
 
     Pressing space after the command opens the list with ``read`` as its only
     row. Without the row's ``alert`` flag the editor treats a single unambiguous
-    match as chosen and RUNS it, so ``/notifications `` + Enter — what a user
+    match as chosen and RUNS it, so ``/unread `` + Enter — what a user
     presses when they want to SEE the pile — would clear it, permanently. The
     first Enter fills the buffer; the second runs the word the user can now read.
     """
@@ -334,7 +334,7 @@ async def test_one_enter_on_the_offered_row_fills_the_command_instead_of_clearin
         # caret at the end and re-sync, THEN type the character under test, so
         # the argument list opens from a real keystroke rather than from a
         # hand-posted message.
-        editor.text = "/notifications"
+        editor.text = "/unread"
         editor.move_cursor(editor._end_of_buffer())
         editor._sync_picker()
         await _settle(pilot, 6)
@@ -346,12 +346,12 @@ async def test_one_enter_on_the_offered_row_fills_the_command_instead_of_clearin
 
         await pilot.press("enter")
         await _settle(pilot)
-        assert editor.text.strip() == "/notifications read"
+        assert editor.text.strip() == "/unread read"
         assert (
             store.state("session/00000000000a")["unseen"] is True
         ), "one Enter on the offered row cleared the pile"
         # ...and the second Enter, on the word the user can now read, clears it.
-        await _run(pilot, app, "/notifications read")
+        await _run(pilot, app, "/unread read")
         assert store.state("session/00000000000a")["unseen"] is False
 
 
@@ -384,8 +384,8 @@ async def test_the_command_answers_where_a_source_has_no_authority(
         monkeypatch.setattr(app, "_cmd_notifications", lambda arg, notice: reached.append(arg))
         # The gate and the dispatch both consult the set, and both used to refuse
         # a command whose whole answer is local.
-        assert app.composer_submission_blocked("/notifications") is False
-        app._run_slash_command("/notifications")
+        assert app.composer_submission_blocked("/unread") is False
+        app._run_slash_command("/unread")
         assert reached == [""]
         # Still refused where a refusal is the truth: a command that needs an
         # owner is not a saved-local one.
@@ -438,7 +438,7 @@ async def test_the_clearing_form_paints_the_set_it_writes(
     """U1 and U4: the batch is a render the user can see, in the SAME call.
 
     The clearing form used to be a second, independent catalogue scan. A fourth
-    completion published between ``/notifications`` and ``/notifications read``
+    completion published between ``/unread`` and ``/unread read``
     was therefore acknowledged having never been painted, and a user who typed
     the space and two Enters cleared a whole pile that was never on screen. Both
     are one defect seen from two sides, and the property that closes them is one
@@ -478,7 +478,7 @@ async def test_the_clearing_form_paints_the_set_it_writes(
     app = OperatorApp(lambda: _factory(FakeSession()))
     holder["app"] = app
     async with app.run_test(size=(120, 40)) as pilot:
-        await _run(pilot, app, "/notifications read")
+        await _run(pilot, app, "/unread read")
         receipt = _notices(app)[-1]
 
     assert len(at_write) == 1, "the clearing form must write exactly once"
@@ -511,9 +511,9 @@ async def test_an_unreadable_store_is_not_an_empty_pile(config_root: Path) -> No
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
-        await _run(pilot, app, "/notifications")
+        await _run(pilot, app, "/unread")
         listing = _notices(app)[-1]
-        await _run(pilot, app, "/notifications read")
+        await _run(pilot, app, "/unread read")
         clearing = _notices(app)[-1]
 
     for text, did in ((listing, "listed"), (clearing, "cleared")):
@@ -555,13 +555,13 @@ async def test_the_write_names_the_condition_it_met(
     monkeypatch.setattr(AttentionStore, "acknowledge_many", busy)
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
-        await _run(pilot, app, "/notifications read")
+        await _run(pilot, app, "/unread read")
         notices = _notices(app)
 
     assert "Read state is busy right now" in notices[-1]
     # The remedy, in the sentence, because this surface has no code to carry it
     # (UX round 2, U8).
-    assert "Try again in a moment — run /notifications read again." in notices[-1]
+    assert "Try again in a moment — run /unread read again." in notices[-1]
     assert "catch up on its own" not in notices[-1], "a user-initiated clear is not self-healing"
     assert "nothing was cleared" in notices[-1]
     assert "not a verdict about what is unread" in notices[-1]
@@ -575,7 +575,7 @@ async def test_the_write_names_the_condition_it_met(
     monkeypatch.setattr(AttentionStore, "acknowledge_many", unopenable)
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
-        await _run(pilot, app, "/notifications read")
+        await _run(pilot, app, "/unread read")
         text = _notices(app)[-1]
 
     assert "Retrying will not help" in text, text
@@ -608,7 +608,7 @@ async def test_a_store_failure_never_echoes_the_exception_text(
     monkeypatch.setattr(AttentionStore, "acknowledge_many", explode)
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
-        await _run(pilot, app, "/notifications read")
+        await _run(pilot, app, "/unread read")
         text = _notices(app)[-1]
 
     assert "attention.db" not in text, text
@@ -643,7 +643,7 @@ async def test_a_receipt_that_is_not_here_is_named_without_store_vocabulary(
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
-        await _run(pilot, app, "/notifications read")
+        await _run(pilot, app, "/unread read")
         text = _notices(app)[-1]
 
     assert "could not be found on this machine and stays unread." in text, text
@@ -671,7 +671,7 @@ async def test_the_rows_are_ordered_by_the_age_they_print(
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
-        await _run(pilot, app, "/notifications")
+        await _run(pilot, app, "/unread")
         text = _notices(app)[-1]
 
     rows = [line for line in text.splitlines() if line.startswith("  ✓")]
@@ -712,7 +712,7 @@ async def test_a_pending_line_precedes_the_scan(config_root: Path) -> None:
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
-        await _run(pilot, app, "/notifications")
+        await _run(pilot, app, "/unread")
         notices = _notices(app)
 
     assert notices[0] == "reading receipts…", notices
@@ -765,7 +765,7 @@ def test_the_copy_is_composed_per_surface_not_borrowed_from_the_send_path() -> N
             if code == STORE_BUSY:
                 assert "Try again in a moment" in text, text
                 assert "catch up on its own" not in text, text
-                assert f"run /notifications{' read' if clearing else ''} again" in text, text
+                assert f"run /unread{' read' if clearing else ''} again" in text, text
             else:
                 assert "Retrying will not help" in text or "Free some space" in text, (code, text)
                 assert "Try again in a moment" not in text, (code, text)
@@ -797,12 +797,12 @@ async def test_a_full_volume_names_the_disk_and_the_remedy(
     monkeypatch.setattr(AttentionStore, "acknowledge_many", full)
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
-        await _run(pilot, app, "/notifications read")
+        await _run(pilot, app, "/unread read")
         text = _notices(app)[-1]
 
     assert "out of disk space" in text, text
     assert "nothing was cleared" in text, text
-    assert "run /notifications read again" in text, text
+    assert "run /unread read again" in text, text
     assert "message" not in text and "send it again" not in text, text
     assert _store(config_root).state("session/00000000000a")["unseen"] is True
 
@@ -827,9 +827,9 @@ async def test_a_catalogue_that_cannot_be_walked_is_not_an_empty_pile(
     monkeypatch.setattr(session_catalog, "load_catalog", unavailable)
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
-        await _run(pilot, app, "/notifications read")
+        await _run(pilot, app, "/unread read")
         clearing = _notices(app)[-1]
-        await _run(pilot, app, "/notifications")
+        await _run(pilot, app, "/unread")
         listing = _notices(app)[-1]
 
     for text in (clearing, listing):
@@ -861,18 +861,18 @@ async def test_the_clearing_form_does_not_instruct_the_user_who_just_ran_it(
     async with app.run_test(size=(120, 40)) as pilot:
         # The LISTING form keeps the instruction and the pointer — that is what
         # the flag switches off, so both arms are read from one app.
-        await _run(pilot, app, "/notifications")
+        await _run(pilot, app, "/unread")
         listed = _notices(app)[-1]
-        await _run(pilot, app, "/notifications read")
+        await _run(pilot, app, "/unread read")
         block = _notices(app)[-2]
         receipt = _notices(app)[-1]
 
     assert "ctrl+b shows or hides the sidebar" in listed, listed
-    assert "/notifications read marks all 13 read" in listed, listed
+    assert "/unread read marks all 13 read" in listed, listed
     assert block.splitlines()[0] == "13 unread completions:", block
     assert "  …3 more" in block, block
     assert "ctrl+b" not in block, block
-    assert "/notifications read marks" not in block, block
+    assert "/unread read marks" not in block, block
     assert receipt == "Marked 13 completions read."
     assert set(block.splitlines()[1:-1]) == set(
         listed.splitlines()[1:-2]

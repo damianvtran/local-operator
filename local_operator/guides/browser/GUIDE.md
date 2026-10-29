@@ -411,7 +411,49 @@ Same `browser` tool. Actions:
 - `request_access` / `await_access` / `cancel_access` (queued site approval — see above)
 - `download` (save what the page offers; see below)
 - `upload` (attach local files to a file input; see below)
+- `network_start` / `network_stop` / `network_read` / `network_clear` (record
+  and inspect the tab's own requests — desktop app host only; see below)
 - `close` (drop the surface and its tab)
+
+### Network capture: what the tab actually sent and received
+
+The desktop app's browser host can record the requests the session's own tab
+makes, which is how an agent CHECKS that a page called the endpoint it claims to
+(an OAuth callback, a sign-in POST) instead of inferring it from the page text.
+The extension and cmux hosts refuse these actions with a typed message: the
+extension opens a browser profile but keeps no network channel of its own.
+
+- `network_start` begins a capture on your tab. Metadata is the default and is
+  all most checks need: method, URL with query values removed, status, duration,
+  resource type, cache state, failure text, and the links between a redirect and
+  its destination.
+- Request bodies are opt-in and narrow: pass `url` with the exact origin and a
+  NON-ROOT path, plus `include_request_body=true` and `approved=true`. The body
+  goes to a private file whose path comes back in the result; it never enters the
+  conversation. Everything else keeps no body, and headers and cookies are never
+  captured.
+- `network_read` returns the buffer, newest last, with optional filters;
+  `network_stop` stops collecting but keeps what was read until the tab closes;
+  `network_clear` empties it. The buffer is a ring with entry and byte ceilings
+  and is discarded when the tab closes.
+- A capture belongs to the session that started it: another session reading the
+  same tab is refused rather than shown your traffic.
+
+Working example for a sign-in POST whose body you must inspect without printing
+it:
+
+```text
+open url="https://sso.example.com/login"        # reach the form page first
+network_start url="https://sso.example.com/auth/saml/acs" \
+  include_request_body=true approved=true      # scope = the EXACT POST path
+click selector="button[type=submit]"           # the POST happens here
+network_read url="https://sso.example.com/auth/saml/acs" \
+  include_request_body=true approved=true      # returns request_body_file
+```
+
+Start the capture BEFORE the click, and poll `network_read` for a moment: the
+body is pulled from the browser asynchronously, so a read issued the same
+millisecond as the response can legitimately arrive before the body does.
 
 ### Typing a credential: use `secret_ref`, never `text`
 
@@ -471,10 +513,22 @@ upload selector=e7 paths=["/Users/me/Deck.pptx", "/Users/me/notes.pdf"]
 ```
 
 - `paths` takes one or more **local** files. Relative paths resolve against the
-  session's working directory; a file inside the harness's own config directory,
+  session's working directory; a file inside the harness's own config directory
+  (EXCEPT this session's own scratchpad folder, which is where you put files you
+  made — pass its **absolute filesystem path**, never a `scratchpad://` URL, which
+  `upload` does not resolve and refuses; a hidden `display:none` file input works too),
   a credential file (`~/.ssh/id_rsa`, `*.pem`, `.env`, `secrets/…`), a symlink to
   one, a directory, or anything over 256 MB is refused, and a refusal attaches
   **nothing at all**. Say which rule fired to the user rather than retrying.
+- Direct uploads from the shared `attachments/`, `uploads/`, and
+  `browser/downloads/` stores remain **unsupported and denied**. A digest, UUID,
+  or shortened session ID in a path does not establish authorization. Broader
+  artifact/attachment support requires separate provenance design; the own-scratchpad
+  exception does not implement it. Only for a non-sensitive file already authorized
+  for this session, use existing verified materialization or copy it to this session's
+  own scratchpad/workspace, then upload its filesystem path. Never relocate credentials,
+  config files, keychains, or another session's files to bypass a refusal. A mention
+  in a file listing alone is not ownership evidence.
 - The result names each attached file with its byte count and sha256, and reports
   the input's `accept=` attribute — which is deliberately NOT applied as a filter.
 - An `upload` call asks for `exec` approval: the file leaves the machine, and the
@@ -698,7 +752,11 @@ Every failure is one actionable string; act on it rather than retrying blindly:
   then ON in `chrome://extensions` (pairing is preserved).
 - **"refused: nothing was attached — …"** — the upload gate fired. The sentence
   names the rule (config directory, credential deny-list, not a regular file, over
-  the size cap). Report it to the user rather than retrying with the same path.
+  the size cap) or the cause (`does not exist: <full path>`, or `could not be
+  opened: <path> (<reason>)`). A `does not exist` for a file a call in the SAME
+  turn is still creating (a `cp`, a screenshot) is a race, not a bug: calls in one
+  turn run at the same time, so issue the upload in the next turn. Otherwise
+  report it to the user rather than retrying with the same path.
 - **"The extensions gallery cannot be scripted"** — Chrome forbids the debugger
   API on the Chrome Web Store domains (`chrome.google.com/webstore`,
   `chromewebstore.google.com`) as a platform security rule, and once the

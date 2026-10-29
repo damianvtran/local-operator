@@ -1,6 +1,6 @@
 """The desktop's approval routes (``features.approvals``).
 
-THREE ROUTES, each a thin HTTP skin over one function in
+THE DECISION ROUTES remain thin HTTP skins over one function in
 ``server.utils.desktop_approvals``: the STORE does the deciding (the write-once
 decision, the signature gate, the anchor provenance), and this module maps
 answers onto the contract the desktop app consumes.
@@ -22,8 +22,9 @@ naming the setup action.
 
 THE REFUSAL SHAPE is the plane's ``{code, message}``: 404 for a record this
 device does not hold, 409 for everything the caller can act on (a state that
-refuses a decision, a missing signing surface) — never 503, because nothing on
-this surface waits on a peer.
+refuses a decision, a missing signing surface). The additive mesh_onboard surface
+also owns bounded SSH work, but never changes the decision gate or signs through
+HTTP alone.
 """
 
 from __future__ import annotations
@@ -40,6 +41,10 @@ from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_approvals import (
     ApprovalDecision,
     ApprovalList,
+    CredentialApprovalAcknowledgment,
+    NetworkEnrollmentAcknowledgment,
+    OnboardProbe,
+    OnboardRequest,
 )
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import errors, reply
@@ -66,8 +71,18 @@ def _http_refusal(error: MeshRefusal) -> Exception:
     connected, already decided, no signing surface — is 409, because the
     operator (or their next action) can act on all of them.
     """
-    status = 404 if error.code == "unknown_approval" else 409
-    return HTTPException(status, _wd.desktop_refusal(error=str(error)).envelope(code=error.code))
+    status = 404 if error.code in {"unknown_approval", "approval_missing"} else 409
+    if error.code in {"ssh_port_conflict", "invalid_ssh_port", "unexpected_run_body"}:
+        status = 422
+    body = _wd.desktop_refusal(error=str(error)).envelope(code=error.code)
+    outcome = getattr(error, "apply_outcome", None)
+    if isinstance(outcome, dict):
+        # An APPLY-phase refusal says, in this same response, whether a retry can succeed
+        # (UX #3002 r2, U8b): ``{code, retryable, reason, remedy}``, the block the row's
+        # ``typed_approval.apply_outcome`` and the detail read carry. Absent on every other
+        # refusal, so existing clients see the body they always did.
+        body["apply_outcome"] = outcome
+    return HTTPException(status, body)
 
 
 async def _local(request: Request, work: Any) -> Any:
@@ -104,3 +119,269 @@ async def approve_approval(request: Request, approval_id: str):
 async def deny_approval(request: Request, approval_id: str):
     """The operator's no — ordinary, write-once, the safe direction (§2.4)."""
     return reply(await _local(request, lambda: deny(_root(request), approval_id)))
+
+
+@router.post("/v1/desktop/approvals/probe", response_model=CRUDResponse[Any])
+async def onboard_probe(request: Request, body: OnboardProbe):
+    """Observe a public SSH host key, never authenticate or resolve a credential.
+
+    Existing 6s banner/8s keyscan bounds and host:port parser are unchanged.
+    The answer is explicitly TOFU observation, NOT verified target identity.
+    """
+    from local_operator.network import onboard
+    from local_operator.server.utils.desktop_onboard import bound_root
+
+    await _local(request, lambda: bound_root(_root(request)))
+    embedded = onboard._port_from(body.host)
+    if body.port and embedded and body.port != embedded:
+        raise _http_refusal(MeshRefusal("ssh_port_conflict", "The supplied SSH ports disagree"))
+    port = body.port or embedded or 22
+    if not 1 <= port <= 65535:
+        raise _http_refusal(
+            MeshRefusal("invalid_ssh_port", "Choose an SSH port between 1 and 65535")
+        )
+    host = body.host.partition(":")[0] if ":" in body.host else body.host
+    # Bind the observed port into the exact host field the request/run consumes;
+    # otherwise a frontend could accidentally file its default port instead.
+    target = f"{host}:{port}"
+
+    def work():
+        observed = onboard.probe(host, user=body.user, port=port)
+        return {
+            "host": target,
+            "user": body.user,
+            "port": port,
+            "host_key_fp": observed.host_key_fp,
+            "banner": observed.banner[:256],
+            "reachable": observed.ok,
+            "detail": observed.detail[:1000],
+            "identity": "observed_tofu",
+        }
+
+    return reply(await _local(request, work))
+
+
+@router.post("/v1/desktop/approvals/request", response_model=CRUDResponse[Any])
+async def request_onboard(request: Request, body: OnboardRequest):
+    """File the SAME CLI card. No signing, login, secret lookup or implicit grant."""
+    from local_operator.network.onboard_approvals import request_device
+    from local_operator.server.utils.desktop_onboard import bound_root
+
+    def work():
+        root = bound_root(_root(request))
+        record = request_device(
+            host=body.host,
+            user=body.user,
+            name=body.name,
+            network=body.network_id,
+            credential_ref=body.credential_ref,
+            host_key_fp=body.host_key_fp,
+            advertise_host=body.advertise_host,
+            request_id=body.request_id,
+            unattended=body.unattended,
+            grants=tuple(body.grant),
+            network_only=True,
+            role="drive",
+            root=root,
+            session_id="desktop",
+            surface="desktop",
+        )
+        return {
+            "approval_id": record["approval_id"],
+            "state": record["state"],
+            "device": record.get("device"),
+            "what": record.get("what"),
+            "expires_at": record["expires_at"],
+        }
+
+    return reply(await _local(request, work))
+
+
+@router.get("/v1/desktop/approvals/{approval_id}", response_model=CRUDResponse[Any])
+async def onboard_detail(request: Request, approval_id: str):
+    """Durable local receipts; the request closing never cancels their writer."""
+    from local_operator.network.credentials import desktop_approval
+    from local_operator.server.utils.desktop_onboard import detail
+
+    def work():
+        answer = detail(_root(request), approval_id)
+        # Re-reading a card is the "review it again" a cancelled credential prompt asks for.
+        desktop_approval.refetched([approval_id])
+        return answer
+
+    return reply(await _local(request, work))
+
+
+@router.post(
+    "/v1/desktop/approvals/{approval_id}/run", status_code=202, response_model=CRUDResponse[Any]
+)
+async def run_onboard(request: Request, approval_id: str):
+    """Verify signature AND acquire admission before 202; own work beyond HTTP.
+
+    No request-body commands or second job journal: the existing approval lease
+    and its receipts are durable authority. Repeating an active run gets 409.
+    Only process death uses the existing stale-lease rule; shutdown drains SSH.
+    """
+    from local_operator.network import onboard, onboard_approvals
+    from local_operator.owned_tasks import join_owned
+    from local_operator.server.utils.desktop_onboard import bound_root, detail
+
+    if await request.body():
+        raise _http_refusal(
+            MeshRefusal(
+                "unexpected_run_body", "Run takes no body; the signed card supplies every scope"
+            )
+        )
+
+    async def start():
+        def admit():
+            root = bound_root(_root(request))
+            claim = onboard.approval_run(approval_id, root=root)
+            view = claim.__enter__()
+            return root, claim, view
+
+        root, claim, view = await asyncio.to_thread(admit)
+        tasks = getattr(request.app.state, "mesh_onboard_tasks", None)
+        if tasks is None:
+            tasks = request.app.state.mesh_onboard_tasks = {}
+
+        async def worker():
+            try:
+                operation = asyncio.create_task(
+                    asyncio.to_thread(
+                        onboard._execute_admitted_approval, approval_id, view=view, root=root
+                    )
+                )
+                await join_owned(operation)
+            except Exception:
+                # Never publish raw SSH/secret-store exception text. A crash is
+                # recorded as failed (same card may retry), not left live forever.
+                await asyncio.to_thread(
+                    onboard_approvals.finish,
+                    approval_id,
+                    "failed",
+                    view.run_id,
+                    step="worker",
+                    detail="Setup worker did not finish; check the receipts before retrying",
+                    root=root,
+                )
+            finally:
+                claim.__exit__(None, None, None)
+                tasks.pop(approval_id, None)
+
+        tasks[approval_id] = asyncio.create_task(worker(), name="desktop-mesh-onboard")
+        return await asyncio.to_thread(detail, root, approval_id)
+
+    async with errors(request):
+        try:
+            # A canceled response still finishes admission/registration. The
+            # backend registry, NOT this HTTP waiter, then owns the worker.
+            return reply(await join_owned(asyncio.create_task(start())))
+        except MeshRefusal as error:
+            raise _http_refusal(error) from None
+
+
+async def drain(app: Any) -> None:
+    """Join all owned runs before event-loop teardown can strand a worker lease."""
+    from local_operator.owned_tasks import join_owned
+
+    tasks = list(getattr(app.state, "mesh_onboard_tasks", {}).values())
+    for task in tasks:
+        await join_owned(task)
+
+
+@router.post(
+    "/v1/desktop/approvals/{approval_id}/approve-network-enrollment",
+    response_model=CRUDResponse[ApprovalDecision],
+)
+async def approve_network_enrollment(
+    request: Request, approval_id: str, body: NetworkEnrollmentAcknowledgment
+):
+    """Same human presence, but ONLY after a validated displayed new snapshot."""
+    from local_operator.network import approvals as store
+    from local_operator.server.utils.desktop_approvals import _decision
+    from local_operator.server.utils.desktop_onboard import bound_root
+
+    def work():
+        root = bound_root(_root(request))
+        record = store.approve_network_enrollment(
+            approval_id,
+            authority_version=body.authority_version,
+            scope=body.scope,
+            digest=body.request_digest,
+            root=root,
+        )
+        return _decision(record)
+
+    return reply(await _local(request, work))
+
+
+async def _approve_operation(request: Request, approval_id: str, body: Any) -> Any:
+    """THE ONE typed sign-then-apply handler behind ``/approve-operation`` and its alias.
+
+    Every refusal before the signature is a 409 with its code (nothing happened). Once
+    signed, an apply refusal is reported as ``applied: {ok: false, code}`` beside
+    ``signed: {ok: true}`` -- the decision stands and ``apply-operation`` retries it. Both
+    paths call this so their responses cannot drift (pinned by the parity tests).
+    """
+    from local_operator.network.credentials import desktop_approval
+
+    def work():
+        return desktop_approval.approve_and_apply(
+            _root(request),
+            approval_id,
+            op=body.operation,
+            request_digest=body.request_digest,
+            disclosure_digest_=body.disclosure_digest,
+        )
+
+    return reply(await _local(request, work))
+
+
+async def _apply_operation(request: Request, approval_id: str, body: Any) -> Any:
+    """THE ONE typed apply (the "signed, not applied" retry) behind both apply paths."""
+    from local_operator.network.credentials import desktop_approval
+
+    def work():
+        return desktop_approval.apply(
+            _root(request),
+            approval_id,
+            op=body.operation,
+            request_digest=body.request_digest,
+            disclosure_digest_=body.disclosure_digest,
+        )
+
+    return reply(await _local(request, work))
+
+
+@router.post(
+    "/v1/desktop/approvals/{approval_id}/approve-credential", response_model=CRUDResponse[Any]
+)
+async def approve_credential(
+    request: Request, approval_id: str, body: CredentialApprovalAcknowledgment
+):
+    """ALIAS of ``/approve-operation`` (``server.routes.desktop_credentials``) for shipped
+    desktop builds (``credential_approvals``).
+
+    Kept with its ``Literal`` body model, so an op that is not a credential op is a 422 here
+    exactly as before; the handler is the same function. THE ONE INTENDED DIFFERENCE from
+    ``/approve-operation`` (QA round 1, Q1): an unregistered ``operation`` is rejected by
+    validation here (422), but passes the open ``OperationApprovalAcknowledgment`` there and
+    the engine refuses it (409 ``credential_operation_mismatch``). Either way nothing signs;
+    every registered op answers identically on both families.
+    """
+    return await _approve_operation(request, approval_id, body)
+
+
+@router.post(
+    "/v1/desktop/approvals/{approval_id}/apply-credential", response_model=CRUDResponse[Any]
+)
+async def apply_credential(
+    request: Request, approval_id: str, body: CredentialApprovalAcknowledgment
+):
+    """ALIAS of ``/apply-operation`` for shipped desktop builds.
+
+    Same 422-here / 409-there difference for an unregistered ``operation`` as
+    :func:`approve_credential`.
+    """
+    return await _apply_operation(request, approval_id, body)

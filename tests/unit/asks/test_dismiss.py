@@ -114,16 +114,81 @@ def _kinds(directory: Path) -> list[str]:
     return [str(event.get("kind")) for event in store.read_events(directory)]
 
 
-def test_a_cold_dismiss_refuses_an_open_ask_with_the_queues_own_words(tmp_path: Path):
-    """A dismissal of a still-open ask is refused in the SAME sentence the queue
-    uses, so the phone's card reads identically whichever door answered it."""
+def test_a_cold_dismiss_accepts_an_open_ask_and_records_the_reason(tmp_path: Path):
+    """D6 (design §15): a session with no runtime is "no agent work running", so an
+    OPEN ask is dismissible there. The event carries who and why."""
     directory = _session(tmp_path, queued_at=NOW, timeout_s=3600)
-    outcome = _run(dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone", now_ms=NOW))
-    assert outcome == {
-        "ok": False,
-        "error": "only a timed-out ask can be dismissed; it is still open.",
-    }
+    # The entry a RUNNING session had written at enqueue: the cold door rewrites
+    # the row it finds, and seeds nothing of its own (best-effort, the log heals).
+    store.write_entry(
+        tmp_path,
+        SESSION,
+        cwd="/tmp/colddismiss",
+        asks=[store.pending_row(store.fold(store.read_events(directory), NOW)[0])],
+    )
+    outcome = _run(
+        dismiss_cold(
+            tmp_path, SESSION, ASK_ID, by="phone", reason="answered_in_chat", now_ms=NOW + 1_000
+        )
+    )
+    assert outcome == {"ok": True}
+    assert _kinds(directory) == [store.EVENT_QUEUED, store.EVENT_DISMISSED]
+    event = store.read_events(directory)[-1]
+    assert event["by"] == {"surface": "phone"}
+    assert event["reason"] == "answered_in_chat"
+    # SA-D8: a dismissal BEFORE the deadline is a settled receipt, and the index
+    # this door writes carries both facts the readers need to say so.
+    entry = store.read_entry(tmp_path, SESSION)
+    assert entry is not None
+    (row,) = entry["asks"]
+    assert row["dismissed_at"] == NOW + 1_000
+    assert row["dismissed_reason"] == "answered_in_chat"
+    (shown,) = store.session_asks(tmp_path, SESSION, now=NOW + 2_000)
+    assert shown["status"] == store.STATUS_DISMISSED
+    assert shown["dismissed_reason"] == "answered_in_chat"
+
+
+def test_a_cold_dismiss_without_a_reason_records_moot(tmp_path: Path):
+    directory = _session(tmp_path, queued_at=NOW, timeout_s=3600)
+    assert _run(dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone", now_ms=NOW + 1))["ok"]
+    assert store.read_events(directory)[-1]["reason"] == "moot"
+
+
+def test_a_cold_dismiss_refuses_an_unknown_reason_and_writes_nothing(tmp_path: Path):
+    directory = _session(tmp_path, queued_at=NOW, timeout_s=3600)
+    outcome = _run(
+        dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone", reason="because", now_ms=NOW)
+    )
+    assert outcome == {"ok": False, "error": render.DISMISS_BAD_REASON}
     assert _kinds(directory) == [store.EVENT_QUEUED]
+
+
+def test_a_cold_open_dismiss_removes_the_deadline_wake_row(tmp_path: Path):
+    """D3: the row goes because a pre-deadline dismissal owes a RESPONSE row that any
+    boot delivers, not because a deadline notice is owed."""
+    directory = _session(tmp_path, queued_at=NOW, timeout_s=3600)
+    _seed_wakes(
+        directory,
+        [
+            _wake_row(store.timeout_row_id(ASK_ID), kind="ask_timeout", hidden=True),
+            _wake_row("w-user"),
+        ],
+    )
+    assert _run(dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone", now_ms=NOW + 5))["ok"]
+    assert _wake_ids(directory) == ["w-user"]
+
+
+def test_the_next_boot_delivers_a_cold_open_dismissal_as_a_response_row(tmp_path: Path):
+    """The cold dismissal boots nothing; the row is owed through the fold."""
+    directory = _session(tmp_path, queued_at=NOW, timeout_s=3600)
+    assert _run(
+        dismiss_cold(
+            tmp_path, SESSION, ASK_ID, by="phone", reason="answered_in_chat", now_ms=NOW + 5
+        )
+    )["ok"]
+    (record,) = store.fold(store.read_events(directory), NOW + 10)
+    assert record["response_owed"] is True and record["delivered"] is False
+    assert store.expected_row_ids(record) == [store.response_row_id(ASK_ID)]
 
 
 def test_a_cold_dismiss_refuses_an_ask_this_session_never_queued(tmp_path: Path):
@@ -133,6 +198,27 @@ def test_a_cold_dismiss_refuses_an_ask_this_session_never_queued(tmp_path: Path)
     outcome = _run(dismiss_cold(tmp_path, SESSION, "a-nowhere", by="phone", now_ms=NOW))
     assert outcome == {"ok": False, "error": render.refusal_copy(None)}
     assert _kinds(directory) == [store.EVENT_QUEUED]
+
+
+def test_every_cold_refusal_carries_the_sentence_a_surface_renders(tmp_path: Path):
+    """The route's last-resort string is never what a user reads (agent review
+    round 1, R1-5): every refusal this door can produce already IS a sentence, so
+    the desktop's fallback is a contract-break guard rather than user copy.
+
+    Pinned here rather than in the route because the door is the producer: if a
+    refusal ever grew an empty ``error``, the desktop would say "the dismissal was
+    refused" in an untranslated English string instead of the ask's own words.
+    """
+    unknown_reason = _run(dismiss_cold(tmp_path, SESSION, ASK_ID, reason="because", now_ms=NOW))
+    directory = _session(tmp_path)
+    unknown_ask = _run(dismiss_cold(tmp_path, SESSION, "a-nowhere", by="phone", now_ms=NOW))
+    already = _run(dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone", now_ms=NOW))
+    assert already.get("ok") is True, already
+    twice = _run(dismiss_cold(tmp_path, SESSION, ASK_ID, by="phone", now_ms=NOW))
+    for outcome in (unknown_reason, unknown_ask, twice):
+        assert outcome.get("ok") is False, outcome
+        assert str(outcome.get("error") or "").strip(), outcome
+    assert _kinds(directory)[-1] == store.EVENT_DISMISSED
 
 
 def test_a_cold_dismiss_drops_the_deadline_wake_row(tmp_path: Path):
@@ -196,6 +282,18 @@ def test_a_cold_dismiss_records_the_event_and_the_index_and_starts_nothing(tmp_p
     (row,) = entry["asks"]
     assert row["ask_id"] == ASK_ID
     assert row["status"] == store.STATUS_DISMISSED
+    # SA-D8: the cold door has no runtime to reconcile the entry from the log, so
+    # this write is the row's only chance to state WHEN and WHY. Both ride the
+    # index because the shared visibility rule reads ``dismissed_at`` (a receipt
+    # before the deadline, none after it) and a surface names the reason under
+    # the chip.
+    assert row["dismissed_at"] == NOW
+    assert row["dismissed_reason"] == store.DISMISS_REASON_DEFAULT
+    # Case 2 of §17, and the regression this PR must not break: an ask dismissed
+    # AT/AFTER its deadline still leaves every list. This fixture's ask lapsed an
+    # hour before the dismissal, so the reader shows nothing — "put it away"
+    # keeps its original effect.
+    assert store.session_asks(tmp_path, SESSION, now=NOW + 1) == []
 
     # The fold's own half of the contract: dismissed, and the notice is still owed
     # to the model (the queue's reconcile is what delivers it).

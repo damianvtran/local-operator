@@ -4,7 +4,7 @@ The class decision for help text was ruled once and applies per site (never by
 scanner heuristics): **help prose is copy -> keys, with flag and command tokens
 staying IN SITU inside the values; deprecated/hidden flags may take
 ignore-with-reason.** In this block there are no deprecated or hidden flags, so
-there are no ignores: **50 literals across 44 flagged calls -> 46 keys** (44
+there are no ignores: **51 literals across 45 flagged calls -> 47 keys** (45
 help= + 6 description=; the five `--json` sites share one key because the text
 is identical). The block's `argparse.SUPPRESS` positional carries no literal.
 
@@ -59,7 +59,7 @@ def _live_cli_count(i18n_check) -> int:
 
 
 def test_every_key_renders_the_byte_its_base_call_carried() -> None:
-    """46/46 against values taken from the base file's AST (the table below)."""
+    """47/47 against values taken from the base file's AST (the table below)."""
     for rendered, expected in CASES:
         assert rendered == expected, rendered
 
@@ -72,14 +72,14 @@ def test_the_catalogue_is_the_golden_fixture() -> None:
         )
     )
     assert live == golden, "the shipped catalogue and the fixture golden drifted"
-    assert len(golden) == 46, len(golden)
+    assert len(golden) == 47, len(golden)
     sidecar = catalogues.context("en", "cli.sessions_help")
     for key, entry in sidecar.items():
         assert all(entry.get(field) for field in ("role", "tone", "note")), key
 
 
 def test_the_sessions_block_renders_through_the_help_bootstrap() -> None:
-    """The block's 44 calls + 6 descriptions all use the envelope pattern; and
+    """The block's 45 calls + 6 descriptions all use the envelope pattern; and
     no site inside the block carries an ignore (there is none to carry)."""
     source = (REPO / CLI).read_text(encoding="utf-8")
     start = source.index("sessions_parser = subparsers.add_parser(")
@@ -91,8 +91,8 @@ def test_the_sessions_block_renders_through_the_help_bootstrap() -> None:
     nxt = after + source[after:].index(" = subparsers.add_parser(")
     block = source[start:nxt]
     calls = block.count("_sh.")
-    assert calls == 50, calls
-    assert block.count('.envelope(locale=help_locale)["text"]') == 50
+    assert calls == 51, calls
+    assert block.count('.envelope(locale=help_locale)["text"]') == 51
     assert "# i18n: ignore" not in block
     assert "_sh." in block
 
@@ -204,6 +204,13 @@ CASES = [
             "sessions/.cleanup-log.jsonl."
         ),
     ),  # cleanup_description
+    (
+        _sh.cleanup_scratchpads_only().envelope(locale="en")["text"],
+        (
+            "Audit pads with --dry-run; otherwise reclaim only scratchpad build/cache "
+            "content (never transcripts, never your conversations)."
+        ),
+    ),  # cleanup_scratchpads_only
     (
         _sh.cleanup_dry_run().envelope(locale="en")["text"],
         "list what would be removed and why, without removing anything",

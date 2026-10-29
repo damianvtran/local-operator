@@ -25,6 +25,25 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol, Sequence, TypeVar, runtime_checkable
 
+from local_operator.sigils import SlashContext, at_token
+
+
+def file_completion_token(text: str, cursor: int | None = None) -> SlashContext | None:
+    """Share the existing path list with /view, without inserting an @ sigil.
+
+    The command owns its whole path (including spaces); this is completion
+    only, never reference expansion or a second filesystem authority.
+    """
+    caret = len(text) if cursor is None else cursor
+    if text.startswith("/view ") and caret >= 6 and "\n" not in text:
+        query = text[6:caret]
+        if query.startswith('"'):
+            query = query[1:]
+        if query.endswith('"'):
+            query = query[:-1]
+        return SlashContext(6, query, len(text))
+    return at_token(text, cursor)
+
 
 class ArgumentMode(Enum):
     """What a command's ARGUMENT is, from the completion's point of view.

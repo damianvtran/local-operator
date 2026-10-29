@@ -33,8 +33,10 @@ WHAT MAKES IT SAFE, and the property most likely to be broken by a later edit:
   guard and the store's no-flood bootstrap already apply.
 
 COST. One poller per process, started with the first subscriber and stopped with
-the last. Each tick is FIVE ``os.stat`` calls — the store, the two journal
-sidecars it commits through, ``run/mobile``, where the discovery records are
+the last. Each tick is EIGHT ``os.stat`` calls — the store, the two journal
+sidecars it commits through, ``notifications.db`` and the same two sidecars (the
+inbox doorbell, ``docs/design/notifications-inbox.md`` §5.3, through the one
+shared ``_db_fingerprint``), ``run/mobile``, where the discovery records are
 written (the status channel's doorbell) — both doorbells borrowed from
 ``config_watch.py``'s treatment of ``config.yml`` — and that same ``config.yml``
 itself, whose movement publishes the ``config`` frame: the settings doorbell,
@@ -46,19 +48,19 @@ them actually moved, plus one bounded authoritative read every
 read. That is what makes detection p50 ~60 ms where the per-session poll's floor
 was 1 s.
 
-COST, CONTINUED — the FOUR 1 s probes are NOT in that five-stat figure: the
-catalogue's, the authoring one (O(profiles)), the voice slot's (one ``os.stat`` of
-``voice/active.json``, a read only when it moved), and the code-request one
-(one ``readdir`` of the derived code-request index plus one ``os.stat`` per session
-WITH rows — usually zero, since most sessions never touch a pull request, and one
-small file read per CHANGED index). The catalogue probe is a readdir
-and two stats. The authoring probe cannot be, because the rows it watches are
-FILES whose CONTENT is what changes: its price is one ``readdir`` of each
-registry plus one ``os.stat`` per row (a few dozen stats on a machine with a few
-dozen profiles), and a row's file is READ only when that stat moved — an
-unchanged row costs a stat and no read at all. Both run on
+COST, CONTINUED — the FIVE 1 s invalidation probes are NOT in that eight-stat figure:
+the catalogue's, the authoring one (O(profiles)), the voice slot's (one ``os.stat`` of ``voice/active.json``, a read only when it moved), the code-request one (one ``readdir``
+of the derived code-request index plus one ``os.stat`` per session WITH rows — usually
+zero, since most sessions never touch a pull request, and one small file read per
+CHANGED index), and the inbox's asks-index one (one ``readdir`` of ``asks/`` plus one
+``os.stat`` per session with asks, the same shape). The catalogue probe is a readdir and
+two stats. The authoring probe cannot be, because the rows it watches are FILES whose
+CONTENT is what changes: its price is one ``readdir`` of each registry plus one
+``os.stat`` per row (a few dozen stats on a machine with a few dozen profiles), and a
+row's file is READ only when that stat moved — an unchanged row costs a stat and no read
+at all. Both run on
 ``CATALOGUE_PROBE_INTERVAL_S``, one second, NOT on the 100 ms tick, so a quiet
-tick still pays exactly the four stats above. The budget is deliberate and
+tick still pays exactly the eight stats above. The budget is deliberate and
 measured (34 ``agent.yml`` read + filter + ``crc32`` = 1.16 ms against 56.95 ms
 for a ``yaml.safe_load`` + re-dump of the same rows, both measured on this fleet;
 a probe whose stat memory is warm costs 0.31 ms and ZERO file reads — 36
@@ -124,6 +126,7 @@ import logging
 import os
 import re
 import secrets
+import sqlite3
 import time
 import zlib
 from collections import deque
@@ -139,6 +142,7 @@ from local_operator.i18n.resolve import resolve_language
 from local_operator.monitors.store import read_index as read_monitor_index
 from local_operator.notifications import notification_payload
 from local_operator.notifications.compose import NotificationKind
+from local_operator.notifications.store import NotificationStore
 from local_operator.resume import SessionRow
 from local_operator.server.utils.desktop_presence import DesktopDeliveryPublisher
 from local_operator.server.utils.desktop_sessions import (
@@ -195,6 +199,11 @@ CATALOGUE_PROBE_INTERVAL_S = 1.0
 #: the index is the answer, and the writer's order is cache first, index second, so a
 #: frame published on the cache would announce a change before the answer existed.
 CODE_REQUESTS_DIRNAME = "code_requests"
+
+#: The ask queue's derived index directory (``asks/store.py``'s
+#: ``ASKS_DIRNAME``), spelled here for the code-requests reason: this module
+#: must not import the store just for a directory name on its hot path.
+ASKS_DIRNAME = "asks"
 
 #: The two AUTHORING registries under the config dir, and the file each row's
 #: metadata lives in. Spelled here rather than imported: ``AgentRegistry`` and
@@ -284,6 +293,11 @@ AUTHORITATIVE_RECOVERY_INTERVAL_S = 30.0
 #: it persists, so a persistent failure is visible without a traceback per tick.
 TICK_FAILURE_WARNING_INTERVAL_S = 60.0
 
+#: How often an unreadable inbox store may be reported. The condition repeats on
+#: every poll tick until a writer quarantines the file, and one line per minute
+#: is what makes it diagnosable without burying the log in it.
+INBOX_WARNING_INTERVAL_S = 60.0
+
 #: The shortest gap between two DOORBELL-fallback probes (review NIT 1). The
 #: fallback exists for a session's FIRST record, which has no cached file to
 #: compare against; a stream of ticks where the directory moved and no cached
@@ -309,6 +323,31 @@ UNATTRIBUTED_PROBE_MIN_INTERVAL_S = STATUS_PROBE_INTERVAL_S
 #: than by convention: the two are the same promise on two transports, and two
 #: hand-maintained 3s are one edit away from disagreeing about it.
 BURST_LIMIT = 3
+
+#: Items one item-leg pass may claim. Generous on purpose (round-1 R4/Q2): the
+#: digest must stand for the WHOLE remainder of a burst, so the pass claims
+#: everything owed up to this bound and raises at most the window's remaining
+#: singles plus ONE digest. The bound only keeps a pathological backlog from
+#: becoming one unbounded transaction; a larger backlog drains as further
+#: digests, one per window.
+ITEM_CLAIM_BOUND = 200
+
+#: The item leg's burst WINDOW (round-1 R4/Q2). The cap is per window, not per
+#: 100 ms tick: a per-tick cap re-armed every tick, so ten items became ten
+#: banners in a third of a second. The design names a cap (3) and "one digest"
+#: but no window; 10 s is long enough that a burst written by one agent turn
+#: (or several sessions' wakes firing together) lands inside it, and short
+#: enough that an unrelated item a minute later is a fresh single, not a "more".
+ITEM_BURST_WINDOW_S = 10.0
+
+#: How long the item leg leaves a row alone after a raise produced NOTHING (R5-1).
+#: `release_delivery` rolls the cooldown stamp back so a transient spawn failure
+#: does not silence the item for thirty minutes — which leaves the feed as the
+#: only thing standing between that rollback and a claim/release pair every
+#: 100 ms tick on a host with no notifier backend (the M2 shape). One retry per
+#: this window is the bound; it is shorter than the burst window on purpose,
+#: because a released row is owed NOW and should not wait for the next burst.
+ITEM_RETRY_BACKOFF_S = 30.0
 
 
 def _authoring_projection(text: str, volatile: frozenset[str]) -> str:
@@ -669,6 +708,54 @@ class DesktopFeed:
         #: another window learns that voice moved.
         self._voice_token: tuple[int, int, int] | None = None
         self._voice_probed_at = 0.0
+        # -- the inbox channel (docs/design/notifications-inbox.md §5.3) -------
+        #: The operator's inbox store. Three more stats per tick on the doorbell
+        #: (the file, ``-wal`` and ``-journal`` through the shared
+        #: ``_db_fingerprint``), the attention store's treatment: a writer's
+        #: commit lands in ``-wal`` before the main file moves.
+        self.notifications = NotificationStore(root)
+        #: The asks index directory. The badge counts OPEN asks too, and nothing
+        #: else watches this directory, so it joins the 1 s probe as a readdir
+        #: plus one stat per entry (the ``_code_requests_probe`` shape).
+        self.asks_dir = root / ASKS_DIRNAME
+        self._notifications_fingerprint: tuple[tuple[int, int, int] | None, ...] | None = None
+        self._asks_token: int | None = None
+        self._asks_probed_at = 0.0
+        #: The last ``(revision, unread_count, waiting_count)`` published, so a
+        #: doorbell that moved without changing the counts or the high-water
+        #: mark (a WAL checkpoint, a no-op connect) publishes nothing.
+        self._notifications_seen: tuple[int, int, int, int] | None = None
+        #: When the inbox read last warned, so a corrupt store reports once a
+        #: minute instead of once per 100 ms tick.
+        self._inbox_warned_at = 0.0
+        self._asks_pending = False
+        #: This tick's presence reading, shared by the completion and item
+        #: banner legs. The read is a mkdir + chmod + readdir + one read per
+        #: record, so a tick takes ONE (review round 2, R14) and both legs ask
+        #: the same answer -- a second ask in one tick is the multiplier that
+        #: review removed.
+        self._presence_this_tick: DesktopPresence | None = None
+        #: Whether the inbox doorbell moved in this tick (set by the badge pass).
+        self._notifications_moved = False
+        self._notifications_pending = False
+        #: The item banner leg's OWED bit (round-1 R3/Q3). Set at construction
+        #: so the first tick with an advertising subscriber examines rows owed
+        #: from before this process started (a feed that died between the
+        #: runtime's handoff and its own tick); set again whenever the set of
+        #: subscriptions advertising ``update`` changes; set while a row is held
+        #: in its grace. Cleared only by a pass that ran the candidate query.
+        self._items_owed = True
+        self._update_subscribers: frozenset[str] = frozenset()
+        #: The current burst window: when it opened and how many singles it has
+        #: spent. A digest closes it for the rest of its span (R4/Q2).
+        self._item_window_started = 0.0
+        self._item_window_singles = 0
+        self._item_window_digested = False
+        #: ``id -> monotonic deadline`` for rows whose raise produced nothing
+        #: (R5-1). The cooldown stamp is rolled back on release, so this is what
+        #: keeps a failing producer to one attempt per ITEM_RETRY_BACKOFF_S
+        #: instead of one per tick.
+        self._item_retry_after: dict[str, float] = {}
 
         # -- the per-session status channel ------------------------------------
         #: The discovery-record directory (``run/mobile``). Resolved HERE as a
@@ -933,6 +1020,7 @@ class DesktopFeed:
         *,
         session_id: str | None = None,
         since_sequence: int | None = None,
+        only: frozenset[str] | None = None,
     ) -> None:
         """Fan a frame out to every subscriber that should see it.
 
@@ -945,6 +1033,11 @@ class DesktopFeed:
         frame = self._frame(frame_type, payload, session_id=session_id)
         size = len(json.dumps(frame))
         for subscription in list(self.subscribers.values()):
+            # ``only`` scopes a frame to the subscriptions that advertised the
+            # capability it needs (contract §5.3: an ``update`` frame goes ONLY
+            # to a subscription whose presence advertised ``update``).
+            if only is not None and subscription.id not in only:
+                continue
             if (
                 since_sequence is not None
                 and subscription.baseline_completion_sequence >= since_sequence
@@ -1152,6 +1245,13 @@ class DesktopFeed:
         # The VOICE baseline, same no-replay rule: the slot as it stood at
         # connect is what the client's own `GET /v1/desktop/voice` returns.
         self._voice_token = voice_slot.slot_token(self.root)
+        # The INBOX baseline, on the same no-replay rule: the counts as they
+        # stand at connect are what the client's own first list read shows.
+        self._notifications_fingerprint = _db_fingerprint(self.notifications.path)
+        self._asks_token = self._asks_probe()
+        # An unreadable store leaves this ``None`` (unknown), which is what
+        # stops a failed read being announced as "0 unread" on connect.
+        self._notifications_seen = self._notifications_state_or_none()
         candidates = [*records, *self._wake_index, *self._monitor_index, *names]
         states = self.store.state_many([f"session/{session_id}" for session_id in candidates])
         for identity, state in states.items():
@@ -1174,6 +1274,11 @@ class DesktopFeed:
                 self._position_seen[session_id] = position
 
     async def _tick(self) -> None:
+        # A fresh presence answer per tick: both banner legs share this one
+        # (``_tick_presence``), and a stale one from the previous pass would
+        # decide a banner about a window that has already moved.
+        self._presence_this_tick = None
+        self._notifications_moved = False
         # The tick's own number, so a frame that may only be published once per
         # tick can say which tick it is in (the catalogue invalidation, finding 8).
         self._tick_index += 1
@@ -1344,7 +1449,16 @@ class DesktopFeed:
         # written by a scan that may be running in a different process entirely (the
         # desktop backend and a session runtime share the config root).
         await self._maybe_emit_code_requests()
-        # 8. THE VOICE SLOT. Outside the doorbell branch for the authoring
+        # 8. THE INBOX INVALIDATION (docs/design/notifications-inbox.md §5.3):
+        # three stats per tick on ``notifications.db`` and its two sidecars —
+        # the documented eight-stat tick — and the asks index on the 1 s probe.
+        await self._maybe_emit_notifications()
+        # 9. THE ITEM BANNER LEG (docs/design/notifications-inbox.md §5.3/rung 2):
+        # only while a live desktop lease advertises the `update` kind, and only
+        # for revisions nothing has claimed yet.
+        await self._emit_item_notifications()
+
+        # 10. THE VOICE SLOT. Outside the doorbell branch for the authoring
         # channel's reason: the slot lives under the config root, which the
         # five-stat doorbell never looks at.
         await self._maybe_emit_voice()
@@ -1367,6 +1481,230 @@ class DesktopFeed:
         self._voice_token = token
         slot = await asyncio.to_thread(voice_slot.read_slot, self.root)
         self._publish("voice", {"active": slot.public() if slot is not None else None})
+
+    # -- the item banner leg (contract §3.5, rung 2) -------------------------
+
+    def _item_banner_payload(self, row: dict[str, Any]) -> dict[str, Any]:
+        """One ``notification`` frame body for an item revision (kind ``update``).
+
+        The type stays ``notification`` and ``notification_contract`` stays 1:
+        ``kind`` is the additive half, and the contract already promises that an
+        unknown kind renders as text (``ui:desktop-session-contract.ts``), so an
+        older renderer shows the words instead of a banner it cannot focus.
+
+        PRIVACY (round-1 R2): ``title``/``body`` pass through the same
+        ``delivery.banner_text`` the runtime rung uses, so with
+        ``display.notification_session_name`` off the frame carries only the
+        brand and the house sentence — never ``body_md``.
+
+        ``focus_policy`` is ``always`` (round-1 N1): a member of the UI's wire
+        union (``"when_unfocused" | "always"``). An item is raised because the
+        operator is away from it; a focused app is no reason to drop it.
+        """
+        from local_operator.notifications.delivery import banner_text
+
+        session_id = str(row.get("session_id") or "")
+        title, body = banner_text(str(row.get("title") or ""), str(row.get("body_md") or ""))
+        return {
+            "kind": "update",
+            "notification_id": str(row.get("id") or ""),
+            "item_revision": int(row.get("revision") or 0),
+            "priority": str(row.get("priority") or ""),
+            "title": title,
+            "body": body,
+            "session_id": session_id,
+            "focus_policy": "always",
+            "dedupe_key": f"item:{row.get('id')}:{row.get('revision')}",
+        }
+
+    def _tick_presence(self) -> DesktopPresence:
+        """This tick's presence answer, read once and shared across both legs.
+
+        Completions and inbox items decide from the same machine state, and the
+        reading is a directory walk, so one pass takes it and both ask the same
+        object. UNCACHED, because a banner must not be decided by a lease that
+        moved inside the 2 s cache window; ``_tick`` clears it at the start of
+        every pass so a tick cannot inherit the previous one's answer.
+        """
+        if self._presence_this_tick is None:
+            self._presence_this_tick = desktop_presence(self.root, cached=False)
+        return self._presence_this_tick
+
+    def _update_subscriptions(self) -> frozenset[str]:
+        """THIS feed's live subscriptions whose presence advertised ``update``.
+
+        Round-1 R3: the gate and the target are per subscription, never the
+        machine-wide aggregate. Another serve process's lease advertising
+        ``update`` says nothing about whether THIS process's subscribers can
+        raise a frame it publishes, so this feed claims only for its own.
+        """
+        return frozenset(
+            subscription_id
+            for subscription_id, claim in self.presence.claims.items()
+            if claim.can_notify and "update" in claim.kinds and subscription_id in self.subscribers
+        )
+
+    async def _emit_item_notifications(self) -> None:
+        """RUNG 2: raise unread ``high`` items to the subscriptions that advertise ``update``.
+
+        The desktop half of the banner ladder. Round-1 remediation:
+        - GATES (R2/Q1): the completion leg's two refusals apply before any
+          claim — the operator's switch and the rig guard. A gated row is NOT
+          claimed, so it stays owed for a process allowed to raise it.
+        - TARGET (R3): frames go ONLY to this feed's advertising subscriptions,
+          and this feed claims only while it has one.
+        - OWED (R3/Q3): examined at the first advertising tick after start,
+          whenever the advertising set changes, while a row is held in its
+          grace, and on every store doorbell — not only on the doorbell, which
+          a restarted feed baselines past.
+        - GRACE (N2/Q4): a revision younger than ``BANNER_GRACE_MS`` is not
+          claimed yet, so an in-view receipt can cancel it.
+        - BURST (R4/Q2): per WINDOW, not per tick: at most ``BURST_LIMIT``
+          singles per ``ITEM_BURST_WINDOW_S``, then ONE digest that claims the
+          whole remainder in that pass.
+        - STRAND-FREE (R5): a claim that raises mid-pass releases every row
+          this pass already claimed and did not publish.
+        """
+        from local_operator.notifications.delivery import (
+            BANNER_GRACE_MS,
+            gates_refuse,
+            grace_remaining_ms,
+        )
+        from local_operator.notifications.store import NotificationStore
+
+        advertising = self._update_subscriptions()
+        if advertising != self._update_subscribers:
+            self._update_subscribers = advertising
+            self._items_owed = True
+        # A quiet tick stays SQL-free: nothing moved, nothing newly owed.
+        if not (self._notifications_moved or self._items_owed):
+            return
+        if not advertising:
+            return  # owed stays set: the first advertising tick examines it
+        if gates_refuse():
+            return
+        store = NotificationStore(self.root)
+        try:
+            pending = await asyncio.to_thread(
+                lambda: [
+                    dict(row) for row in store.undelivered(priority="high", limit=ITEM_CLAIM_BOUND)
+                ]
+            )
+        except Exception:  # noqa: BLE001 - a banner never breaks the feed
+            return
+        held = [row for row in pending if grace_remaining_ms(row) > 0]
+        now_retry = time.monotonic()
+        cooling = [
+            row
+            for row in pending
+            if self._item_retry_after.get(str(row.get("id")), 0.0) > now_retry
+        ]
+        ready = [
+            row
+            for row in pending
+            if grace_remaining_ms(row) <= 0
+            and self._item_retry_after.get(str(row.get("id")), 0.0) <= now_retry
+        ]
+        # Re-examine next tick while anything is held (or a bounded read was
+        # full); otherwise this pass covered everything owed.
+        self._items_owed = bool(held) or bool(cooling) or len(pending) >= ITEM_CLAIM_BOUND
+        if not ready:
+            return
+        now = time.monotonic()
+        if now - self._item_window_started >= ITEM_BURST_WINDOW_S:
+            self._item_window_started = now
+            self._item_window_singles = 0
+            self._item_window_digested = False
+        if self._item_window_digested:
+            # The window already told them "N more"; anything later waits for
+            # the next window rather than re-arming the interruption.
+            self._items_owed = True
+            return
+        room = max(0, BURST_LIMIT - self._item_window_singles)
+        single_rows, rest = ready[:room], ready[room:]
+        # ONE DIGEST FOR THE WHOLE BURST: a burst written over a few hundred
+        # milliseconds matures over the same span, so a digest issued while
+        # its tail is still held would leave that tail to become fresh singles
+        # in the next window. Wait for the held rows — bounded by one grace
+        # past the window's start, so a steady stream cannot postpone it.
+        settle_s = BANNER_GRACE_MS / 1000
+        digest_now = bool(rest) and (not held or now - self._item_window_started >= settle_s)
+        if rest and not digest_now:
+            self._items_owed = True
+        singles = await self._claim_item_rows(store, single_rows)
+        if singles is None:
+            return
+        overflow: list[dict[str, Any]] = []
+        if digest_now:
+            claimed_rest = await self._claim_item_rows(store, rest, already=singles)
+            if claimed_rest is None:
+                return
+            overflow = claimed_rest
+        for row in singles:
+            self._publish("notification", self._item_banner_payload(row), only=advertising)
+        self._item_window_singles += len(singles)
+        if overflow:
+            self._publish("notification", self._item_banner_digest(overflow), only=advertising)
+            self._item_window_digested = True
+
+    async def _claim_item_rows(
+        self,
+        store: Any,
+        rows: list[dict[str, Any]],
+        *,
+        already: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]] | None:
+        """Claim ``rows`` for this feed; ``None`` when a claim raised (R5).
+
+        On a raise, every claim this pass holds and has not published —
+        ``already`` plus what this call won — is released before returning,
+        so a store hiccup mid-pass strands nothing: the rows stay owed and the
+        next tick retries them.
+        """
+        won: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                got = await asyncio.to_thread(store.claim_delivery, str(row["id"]), "feed")
+            except Exception:  # noqa: BLE001 - released below, retried next tick
+                await self._release_item_claims(store, list(already or []) + won)
+                self._items_owed = True
+                return None
+            if got:
+                won.append(row)
+        return won
+
+    async def _release_item_claims(self, store: Any, rows: list[dict[str, Any]]) -> None:
+        """Give back this pass's unpublished claims (round-1 R5), best-effort.
+
+        Each released row also gets a retry deadline (R5-1): the release rolls the
+        cooldown stamp back, so without this the next 100 ms tick would claim and
+        release it again, forever.
+        """
+        for row in rows:
+            self._item_retry_after[str(row.get("id"))] = time.monotonic() + ITEM_RETRY_BACKOFF_S
+            try:
+                await asyncio.to_thread(
+                    store.release_delivery, str(row["id"]), int(row["revision"]), "feed"
+                )
+            except Exception:  # noqa: BLE001 - an unreleased claim is logged, not raised
+                logger.warning("feed: could not release item claim %s", row.get("id"))
+
+    def _item_banner_digest(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """One frame standing in for the rest of a burst window (R4/Q2).
+
+        Deliberately copy-free: it names no sentence, only the count and the
+        ids, so the surface that advertises ``update`` words it (that renderer
+        owns the copy, and a second English string here would be a second thing
+        to translate).
+        """
+        return {
+            "kind": "update",
+            "overflow": True,
+            "count": len(rows),
+            "notification_ids": [str(row.get("id") or "") for row in rows],
+            "priority": "high",
+            "dedupe_key": "item:digest:" + ";".join(str(row.get("id") or "") for row in rows),
+        }
 
     async def _maybe_probe_unattributed(self) -> None:
         """The doorbell's unattributed-move fallback, RATE-LIMITED (NIT 1).
@@ -1547,7 +1885,7 @@ class DesktopFeed:
             # per candidate made a fleet burst — the scenario this channel
             # exists for — pay N of them inside one tick against 1 before.
             if presence is None:
-                presence = desktop_presence(self.root, cached=False)
+                presence = self._tick_presence()
             policy = self._focus_policy_for(self._session_id(identity), presence)
             if policy is None:
                 continue
@@ -1953,6 +2291,127 @@ class DesktopFeed:
             )
         self._code_requests_invalidated.clear()
 
+    async def _maybe_emit_notifications(self) -> None:
+        """The inbox invalidation: the item list or the open-ask set moved.
+
+        TWO DOORBELLS, ONE FRAME (``docs/design/notifications-inbox.md`` §5.3).
+        ``notifications.db`` (+ ``-wal``) is stat'd every 100 ms tick, so an
+        item write reaches the client within one tick; the asks index directory
+        rides the 1 s probe, because the badge also counts open asks and no
+        other channel watches that directory. Either moving re-reads the counts
+        (two indexed SQL reads and one index walk), and a frame is published
+        when counts/revision changed OR the asks-index identity token moved.
+        Same-count replacement is not deduplicated away.
+
+        INVALIDATION ONLY: the payload carries the counts a badge draws and the
+        ``revision`` (the store's ``high_water``) a list compares against, never
+        items — the client refetches ``GET /v1/desktop/notifications``. At most
+        one frame per tick, because this runs once per tick.
+        """
+        fingerprint = await asyncio.to_thread(_db_fingerprint, self.notifications.path)
+        moved = fingerprint != self._notifications_fingerprint or self._notifications_pending
+        # Ask identity/content can change without changing either count. Keep
+        # its dirty bit through a failed read; clearing it would lose the only
+        # invalidation for a same-cardinality replacement.
+        asks_moved = getattr(self, "_asks_pending", False)
+        now = time.monotonic()
+        if now - self._asks_probed_at >= CATALOGUE_PROBE_INTERVAL_S:
+            self._asks_probed_at = now
+            token = await asyncio.to_thread(self._asks_probe)
+            if token != self._asks_token:
+                self._asks_token = token
+                self._asks_pending = asks_moved = True
+                moved = True
+        # The badge pass publishes this so the BANNER leg can decide without a
+        # second fingerprint: a quiet tick must stay stat-free and SQL-free,
+        # and every write, claim and release moves this store's fingerprint.
+        self._notifications_moved = moved
+        if not moved:
+            return
+        state = await asyncio.to_thread(self._notifications_state_or_none)
+        if state is None:
+            # A contended or damaged store is retried on the next tick rather
+            # than dropped: the fingerprint is not advanced, and the tick
+            # RETURNS instead of raising — a raise here would end the poll loop
+            # and take every other frame family down with it (CD1).
+            self._notifications_pending = True
+            return
+        self._notifications_pending = False
+        self._notifications_fingerprint = fingerprint
+        if state == self._notifications_seen and not asks_moved:
+            return
+        self._asks_pending = False
+        self._notifications_seen = state
+        revision, unread, waiting, waiting_unread = state
+        self._publish(
+            "notifications",
+            {
+                "revision": revision,
+                "unread_count": unread,
+                "waiting_count": waiting,
+                "waiting_unread_count": waiting_unread,
+            },
+        )
+
+    def _notifications_state_or_none(self) -> tuple[int, int, int, int] | None:
+        """The inbox counts, or ``None`` when the store cannot be read (CD1).
+
+        AN OPTIONAL STORE MUST NOT KILL THE FEED. ``_take_baseline`` runs inside
+        the poll loop, and an exception there fails ``baseline_ready`` for every
+        subscriber: attention, completion, catalogue and status frames would all
+        die because ``notifications.db`` is a damaged file. Measured: one garbage
+        byte sequence in that store turned ``GET /v1/desktop/events`` into an
+        empty 200 with ``DatabaseError: file is not a database`` in the log.
+
+        ``None`` means UNKNOWN, not zero: the caller keeps the previous state and
+        publishes nothing, so a badge never drops to 0 because a read failed. The
+        warning is rate-limited because the condition repeats every tick until a
+        writer quarantines the file (``NotificationStore._connect`` does).
+        """
+        try:
+            return self._notifications_state()
+        except (sqlite3.DatabaseError, sqlite3.OperationalError, OSError) as error:
+            now = time.monotonic()
+            if now - self._inbox_warned_at >= INBOX_WARNING_INTERVAL_S:
+                self._inbox_warned_at = now
+                logger.warning(
+                    "desktop feed: notifications store could not be read (%s); "
+                    "inbox state is unknown until a write repairs or replaces it",
+                    error,
+                )
+            return None
+
+    def _notifications_state(self) -> tuple[int, int, int, int]:
+        """Total pending and unread pending asks stay distinct on the wire."""
+        from local_operator.notifications.items import counts
+
+        state = counts(self.root, self.notifications)
+        return (
+            state["high_water"],
+            state["unread_count"],
+            state["waiting_count"],
+            state["waiting_unread_count"],
+        )
+
+    def _asks_probe(self) -> int:
+        """One token over the asks index: a readdir plus one stat per entry.
+
+        The index is one small file per session with anything to show, so the
+        cost is O(sessions with asks), and nothing is READ unless the token
+        moved (``_notifications_state`` then walks it once).
+        """
+        parts: list[str] = []
+        try:
+            with os.scandir(self.asks_dir) as entries:
+                for entry in entries:
+                    if not entry.name.endswith(".json") or entry.name.startswith("."):
+                        continue
+                    stat = entry.stat()
+                    parts.append(f"{entry.name}:{stat.st_mtime_ns}:{stat.st_size}")
+        except OSError:
+            return 0
+        return zlib.crc32("|".join(sorted(parts)).encode()) & 0x7FFFFFFF
+
     def _code_requests_probe(self) -> dict[str, tuple[int, int]]:
         """``{session_id: (fingerprint, revision)}`` for sessions with an index.
 
@@ -2195,15 +2654,13 @@ class DesktopFeed:
         # feed's copy reads ``idle`` is precisely the divergence the parity test
         # exists to catch. ``None`` when there is no record — never ``0``, which
         # would be a count nobody reported (see ``SessionRow.delegating``).
+        waiting_on = 0
+        jobs_running: int | None = None
         subagents_running: int | None = None
         subagents_queued: int | None = None
         if cached is not None and cached[1] != "stale":
-            # ``stale`` IS TREATED AS NO RECORD, and that is not a shortcut: the
-            # pid is gone, so nothing the record says about work in progress is
-            # true any more. ``decorate_rows`` takes the same rule (review round
-            # 1, MINOR 1), so the list and the frame agree even in the poll that
-            # performs the sweep that moves the record aside — and this feed must
-            # never be that sweep (``reap=False``).
+            # Match the list: a vanished pid is cold, not the live-but-silent
+            # wedged diagnostic. This reader never performs the sweep itself.
             record, state = cached
             if state == "wedged":
                 live_state = "wedged"
@@ -2213,9 +2670,11 @@ class DesktopFeed:
                 live_state = "attached"
             else:
                 live_state = "idle"
-            pending = record.pending or None
+            pending = (record.pending or None) if state == "live" else None
             kind = str(record.kind or "")
             leaving = str(record.leaving or "")
+            waiting_on = getattr(record, "waiting_on", 0)
+            jobs_running = getattr(record, "jobs_running", None)
             subagents_running = getattr(record, "subagents_running", None)
             subagents_queued = getattr(record, "subagents_queued", None)
             # The age from the same owner the list asks, and without the zombie
@@ -2239,6 +2698,8 @@ class DesktopFeed:
             live_state=live_state,
             pending=pending,
             leaving=leaving,
+            waiting_on=waiting_on,
+            jobs_running=jobs_running,
             subagents_running=subagents_running,
             subagents_queued=subagents_queued,
             wakes=len(scheduled_wake_rows(schedules)),

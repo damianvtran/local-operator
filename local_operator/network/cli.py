@@ -89,6 +89,7 @@ _ACTIONS = (
     # `--resume`) is S3's and is absent here on purpose.
     "update",
     "identity",
+    "install",
     "uninstall",
     # The credential broker's surfaces (mesh-credentials.md; build plan §2.2).
     # ``credentials`` (plural) is the READ: what this device owns and what it
@@ -337,7 +338,20 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     approval_request.add_argument(
         "--host-key-fp", default="", help="the observed host key fingerprint"
     )
+    approval_request.add_argument(
+        "--advertise-host",
+        default="",
+        help=(
+            "host:port peers should use to reach the onboarded device "
+            "(for example its public or NAT address)"
+        ),
+    )
     approval_request.add_argument("--network", default="", help="the network to join (name or id)")
+    approval_request.add_argument(
+        "--network-only",
+        action="store_true",
+        help="New signed network enrollment only; do not provision logins, tools or account access",
+    )
     approval_request.add_argument(
         "--role",
         default="drive",
@@ -378,6 +392,13 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     )
     approval_approve.add_argument("approval")
     approval_approve.add_argument("--json", action="store_true")
+    enrollment_approve = approval_actions.add_parser(
+        "approve-network-enrollment",
+        help="Review and sign the exact restricted enrollment snapshot (no account sharing)",
+    )
+    enrollment_approve.add_argument("approval")
+    enrollment_approve.add_argument("--request-digest", required=True)
+    enrollment_approve.add_argument("--json", action="store_true")
     approval_deny = approval_actions.add_parser(
         "deny", help="Answer no (settles in the safe direction)"
     )
@@ -657,6 +678,31 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         "state", help="What this device holds, and which values a mirror still needs"
     )
     mcp_state.add_argument("--json", action="store_true")
+    # ``credentials``: the owner-side repair surface for the half the definitions
+    # channel cannot carry (values). ``--adopt`` turns literal env/header values
+    # into store rows + ``${NAME}`` references; ``--repair`` also re-grants those
+    # names to the members that already hold the server. No value is ever
+    # printed: names and counts only.
+    mcp_credentials = mcp_actions.add_parser(
+        "credentials",
+        help="Adopt literal MCP credentials and repair the shares behind references",
+        description=(
+            "A literal env/header value in the user-scope mcp.json never travels over "
+            "the mesh: only ${NAME} references do. `--adopt` moves each literal into "
+            "the encrypted store and rewrites the config to an exact reference. "
+            "`--repair` does that, then grants every referenced secret to the members "
+            "that already hold the server (HTTP/SSE) or that the provisioning step "
+            "would provision (stdio). OAuth logins stay brokered and are never "
+            "copied. Names and counts only; values never appear in output."
+        ),
+    )
+    mcp_credentials.add_argument(
+        "--adopt", action="store_true", help="Adopt literal values; write nothing else"
+    )
+    mcp_credentials.add_argument(
+        "--repair", action="store_true", help="Adopt, then re-grant the referenced secrets"
+    )
+    mcp_credentials.add_argument("--json", action="store_true")
 
     serve = actions.add_parser("serve", help="Run the relay in the foreground")
     serve.add_argument("--port", type=int, default=0)
@@ -664,9 +710,29 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     serve.add_argument("--no-launchd", action="store_true", help="Never touch a plist")
     serve.add_argument("--json", action="store_true")
 
-    for action in ("start", "stop", "restart"):
+    for action in ("start", "stop"):
         child = actions.add_parser(action, help=f"{action.capitalize()} the relay")
         child.add_argument("--json", action="store_true")
+
+    restart_parser = actions.add_parser(
+        "restart",
+        help="Restart this relay, or ask a peer to recover its wedged relay",
+        description=(
+            "Without --peer, restart THIS device's relay exactly as before. With --peer, "
+            "ask one paired device to restart only its own relay: the recovery path for "
+            "a wedged remote node, which otherwise cannot be recovered from the origin. "
+            "The other device decides under your device's `update` grant (`lop network "
+            "member grant <network> <device-id> update` on THAT device), a turn in flight "
+            "answers `busy` and names the running work, and there is no --force. The "
+            "receipt reports a restart only after reconnecting to a new relay instance "
+            "with new pid or uptime evidence; accepted, busy, refused, unsupported and "
+            "unconfirmed outcomes are never printed as success."
+        ),
+    )
+    restart_parser.add_argument(
+        "--peer", default="", help="ask this device (a name or id) to restart its own relay"
+    )
+    restart_parser.add_argument("--json", action="store_true")
 
     status = actions.add_parser("status", help="Install state, links, log paths")
     status.add_argument("--json", action="store_true")
@@ -786,6 +852,22 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     identity_rotate.add_argument("--json", action="store_true")
     identity_show = identity_actions.add_parser("show", help="This device's id and fingerprint")
     identity_show.add_argument("--json", action="store_true")
+    identity_set_name = identity_actions.add_parser(
+        "set-name",
+        help="Rename this device; peers pick the name up on their next membership pull",
+    )
+    identity_set_name.add_argument(
+        "name",
+        metavar="NAME",
+        # The limit and the rejected characters are ``identity.validate_member_name``'s
+        # (``MEMBER_NAME_MAX`` = 64); restated here because the parser must answer
+        # ``--help`` without importing the key module.
+        help=(
+            "The new display name (1-64 characters; no '#', no control characters, "
+            "not a device id)"
+        ),
+    )
+    identity_set_name.add_argument("--json", action="store_true")
 
     actions.add_parser(
         "credentials",
@@ -934,6 +1016,9 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     )
     cred_mark.add_argument("--json", action="store_true")
 
+    install = actions.add_parser("install", help="Install the relay's restart-on-boot service")
+    install.add_argument("--json", action="store_true")
+
     uninstall = actions.add_parser(
         "uninstall", help="Remove the LaunchAgent (and --purge the store)"
     )
@@ -993,8 +1078,11 @@ def main(args: argparse.Namespace) -> int:
                 block = getattr(exc, "join_block", None)
                 if isinstance(block, dict):
                     body["join"] = block
+                commands = getattr(exc, "commands", None)
+                if isinstance(commands, list):
+                    body["commands"] = commands
                 print(json.dumps(body))
-            print(f"\033[1;31m{exc.sentence}\033[0m", file=sys.stderr)
+            _print_refusal(exc)
             # 3 IS ITS OWN EXIT CODE (the design's "a human decision is required"), and
             # it is checked BEFORE the generic 1 so a caller can tell "nobody answered
             # in time" from "the network said no" without matching on English.
@@ -1261,6 +1349,45 @@ def _cmd_init(args: argparse.Namespace) -> int:
     settings = imported.NetworkSettings.from_config()
     listen_address = args.listen_address or settings.listen_address
     port = args.port or settings.port
+    if args.port and args.port != settings.port:
+        # THE PORT THE RECORD ADVERTISES MUST BE THE PORT THE RELAY BINDS. The
+        # record's listen block and our member row (below) publish ``port`` to
+        # every joiner, but ``serve``/autostart read ``network.port`` from the
+        # config — so a port given only here was advertised and never bound:
+        # measured, init advertised :47811 and the relay tried the default :4097
+        # ("address in use") until ``network.port`` was set by hand. Persisted
+        # through the registry writer (range-validated, watcher-notified) BEFORE
+        # the record exists, so a refused value creates no network either.
+        from local_operator import settings_io
+        from local_operator.config import ConfigManager
+        from local_operator.network.types import MeshRefusal
+        from local_operator.paths import config_dir
+
+        setting = settings_io.BY_KEY.get("network.port")
+        if setting is None:  # pragma: no cover - registry guarantee
+            raise RuntimeError("network.port is not registered in settings_io")
+        # A refused value is the CLI's normal refusal (a sentence, and a JSON body
+        # for --json), not a traceback (review round 1, m3; QA round 1, Q1).
+        problem = settings_io.validate(setting, port)
+        if problem is not None:
+            raise MeshRefusal("bad_request", f"--port {port}: {problem}")
+        # ONE RELAY, ONE PORT, PER DEVICE (review round 1, m2). ``network.port`` is
+        # device-wide; every existing network's record and member row still
+        # publish the old port, so moving it here would strand their peers on a
+        # closed port after the next relay restart. Refusing is the safe choice:
+        # nothing changes, and the operator can still move the port deliberately
+        # (`lop config` / settings), which is where a device-wide change belongs.
+        existing = [record.name for record in store.list_networks()]
+        if existing:
+            raise MeshRefusal(
+                "bad_request",
+                f"--port {port} would move this device's relay off port {settings.port}, "
+                f"which network {', '.join(repr(name) for name in existing)} already "
+                "advertises to its members; create the network without --port, or move "
+                f"the relay deliberately with 'lop config edit network.port {port}' — which "
+                "also changes the port the existing networks' peers dial",
+            )
+        settings_io.write_setting(ConfigManager(config_dir=Path(config_dir())), setting, port)
     identity = load_or_mint()
 
     # ONE ANSWER TO "WHERE CAN PEERS REACH US", used for BOTH the record's listen
@@ -1432,7 +1559,14 @@ def _cmd_show(args: argparse.Namespace) -> int:
     payload["rotations"] = dict(record.rotations)
     payload["members_digest"] = members_digest_of(record)
     payload["invites"] = [
-        {"invite_id": invite.invite_id, "state": invite.state, "role": invite.role}
+        {
+            "invite_id": invite.invite_id,
+            # Same split as the relay's ``net_show``: stored ``state``, display
+            # ``listed_state``.
+            "state": invite.state,
+            "listed_state": invite.listed_state(time.time()),
+            "role": invite.role,
+        }
         for invite in record.invites
     ]
     return _emit(args, {"ok": True, **payload}, _show_lines(payload))
@@ -1440,6 +1574,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
 def _show_lines(payload: dict[str, Any]) -> list[str]:
     from local_operator.network.relay import membership_lines
+    from local_operator.resume import UNNAMED_DEVICE
 
     lines = [
         f"{payload.get('name')}  {payload.get('network_id')}  epoch {payload.get('epoch')}  "
@@ -1460,12 +1595,26 @@ def _show_lines(payload: dict[str, Any]) -> list[str]:
     for member in payload.get("members_detail") or []:
         mark = "active" if member["active"] else "REMOVED"
         suspect = "  [suspect: key may be copied]" if member.get("suspect") else ""
+        # Names are unauthenticated labels, so the full device id stays in its own
+        # leading column; putting the variable-length name after it keeps duplicate
+        # or crafted names from hiding the only field that distinguishes members.
+        # JSON-quoting every present name reserves the unquoted fallback for absent
+        # metadata: no literal stored spelling can impersonate that fallback.
+        stored_name = str(member.get("name") or "")
+        name = (
+            json.dumps(stored_name, ensure_ascii=False)
+            if stored_name.strip()
+            else f"({UNNAMED_DEVICE})"
+        )
         lines.append(
-            f"  {mark:7} {member['device_id']}  {member['role']:5}  "
+            f"  {mark:7} {member['device_id']}  {name}  {member['role']:5}  "
             f"{', '.join(member['capabilities'])}{suspect}"
         )
     for invite in payload.get("invites") or []:
-        lines.append(f"  invite {invite['invite_id']}  {invite['role']}  {invite['state']}")
+        # ``listed_state`` when the payload carries it; a relay on an older build
+        # sends only ``state``.
+        shown = invite.get("listed_state") or invite["state"]
+        lines.append(f"  invite {invite['invite_id']}  {invite['role']}  {shown}")
     return lines
 
 
@@ -1599,6 +1748,496 @@ def _apply_capability_change(
     return change, "locally (relay not running)"
 
 
+def _peer_label(text: str) -> str:
+    """A peer-authored name or account label made safe for ONE terminal line.
+
+    Owner names, identity labels and a rest's account label are written by another
+    device (the placement document's owner, the grant's identity), so they go through
+    the product's one terminal stripper and collapse whitespace: a label must not
+    repaint the listing or forge a second row.
+    """
+    from local_operator.ansi import strip_control_sequences
+
+    return " ".join(strip_control_sequences(str(text)).split())
+
+
+#: Live observations that do NOT outrank a recorded rest (review round 1, M2). A rest
+#: is only the right thing to say when waiting is the remedy: over a grant that
+#: worked, over the owner's own ``quota_blocked``, or over nothing at all. Every other
+#: live refusal (``revoked``, ``not_a_holder``, ``epoch_stale``, a dead login…) still
+#: fails after the rest ends, so the rest is IGNORED for display while one stands.
+_REST_OUTRANKS: frozenset[str] = frozenset({"", "active", "quota_blocked"})
+
+#: The longest account label a rate-limited line shows, and how many it names before
+#: ``+N more`` (review round 1, m1): one rest is kept per owner row, so a long-lived
+#: owner with many logins would otherwise print one unbounded line. ``--json`` keeps
+#: every label.
+_REST_LABEL_MAX_CHARS = 40
+_REST_LABELS_SHOWN = 3
+
+#: Durable failure records whose word is "NOT NOW" rather than "NOT ANY MORE" (QA
+#: round 2, R2-Q1). ``owner_offline`` is a liveness claim: it is written when an ask
+#: found the owner down and is replaced only by a later success, so read as durable it
+#: outlived the owner coming back, told the operator to reconnect a connected device
+#: and hid a live rest. These never outrank a rest, never outrank a local copy, expire
+#: once the owner is seen again (``last_seen_at`` newer than the record) and are
+#: believed for at most :data:`_TRANSIENT_RECORD_MAX_S`.
+_TRANSIENT_RECORD_CODES: frozenset[str] = frozenset(
+    {"owner_offline", "owner_unreachable", "unavailable", "refresh_failed", "epoch_stale"}
+)
+
+#: How long a transient record is believed with no newer sighting. The longest refusal
+#: TTL a borrower caches (``types.MAX_PEER_RETRY_AFTER_MS``, 300 s): past that, the
+#: client itself would have asked again, so the listing has no fresher word to give.
+_TRANSIENT_RECORD_MAX_S = 300.0
+
+#: Codes that can only mean an EXPLICIT withdrawal by the owner: ``revoked`` (the
+#: broker's own word) and ``copy_revoked`` (the owner's wipe of a copy). After one, the
+#: owner keeps a consent tombstone and refuses a bare re-share (``supersede_required``),
+#: so the only remedy that works is the signed recovery request (QA round 2, R2-Q2),
+#: live or durable alike (design round 3, D13).
+#:
+#: ``not_a_holder`` IS DELIBERATELY NOT HERE, and has ONE meaning everywhere (review
+#: round 3, m2): "this device is no longer a holder", remedy "ask the owner to share it
+#: again". The owner answers it after an explicit revoke AND reconcile writes it when a
+#: share simply ended, and the borrower cannot tell the two apart; when the bare share
+#: is refused, that refusal spells the exact ``--request-approval`` command itself.
+_REVOKED_CODES: frozenset[str] = frozenset({"revoked", "copy_revoked"})
+
+#: Durable codes that still say something about a key this device no longer holds:
+#: the withdrawal codes, the plain "no longer shared", an ended approval, and a lost
+#: membership (whose remedy is NOT a re-share, review round 3, m2).
+_NON_HOLDER_CODES: frozenset[str] = _REVOKED_CODES | frozenset(
+    {"not_a_holder", "consent_withdrawn", "member_not_active"}
+)
+
+#: Durable codes that mean "sign in again on the owner". ``http_401`` is written only by
+#: ``mcp_bearer`` when the MCP server refuses the lent bearer, so the key is always
+#: ``mcp:<url>`` and the remedy is the same ``/mcp login`` (design round 3, D14).
+_SIGN_IN_CODES: frozenset[str] = frozenset({"interactive_required", "http_401"})
+
+#: The longest refusal token ``--json`` carries back. The token is the OWNER's string
+#: (``BrokerError.code`` off the wire, persisted by the borrower), so it is bounded
+#: like any other peer field.
+_REFUSAL_MAX_CHARS = 64
+
+
+def _borrow_view(
+    state: Any,
+    key: str,
+    *,
+    owner_device: str,
+    holder: bool,
+    copy_class: bool = False,
+    applied: Mapping[str, Any] | None = None,
+    evidence: Mapping[str, Any] | None = None,
+    granted_at: float | None = None,
+    owner_seen_at: float | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """This device's borrow state for one key it does not own, as ``--json`` carries it.
+
+    WHY THIS IS DERIVED HERE AND NOT READ FROM ``observation``: ``active`` is stored
+    with a 30 s TTL (``state.DEFAULT_OBSERVATION_TTL_MS``) and an expired row reads as
+    nothing, so a key borrowed a minute ago listed exactly like one never borrowed
+    and like one this device may not borrow at all (mesh-lane report item 6). The
+    persisted ``last_grant_at`` and the borrower's own cooldowns (#3066) outlive that
+    TTL and are the facts the operator was missing; both come from the state file
+    the listing already loaded, so the listing still never dials and never reads a
+    store. No value is in reach here: the state file has no field for one.
+
+    PRECEDENCE, first match wins. A live observation is fresher than any file; a HARD
+    durable record ("not any more") outranks a rest because waiting cannot fix it; a
+    TRANSIENT one ("not now") never does (review/QA rounds 1-2):
+
+    ====  =======================================================  ====================
+    rank  fact                                                     ``state``
+    ====  =======================================================  ====================
+    1     not a holder, durable revoke recorded for this owner     ``revoked``
+    2     not a holder                                             ``not_shared``
+    3     live ``interactive_required``                            ``sign_in_needed``
+    4     live refusal other than ``quota_blocked``                ``refused``
+    5     durable HARD record (see :func:`_durable_record`), no    ``sign_in_needed`` /
+          live observation                                         ``revoked`` /
+                                                                   ``refused``
+    6     live rest; ``partly_`` when a grant followed every rest  ``resting`` /
+                                                                   ``partly_resting``
+    7     live ``quota_blocked`` with no rest of our own           ``refused``
+    8     live grant                                               ``active``
+    9     durable TRANSIENT record, no live observation, owner     ``refused``
+          not seen since, young
+    10    copy-class key: copy present / absent                    ``copied`` /
+                                                                   ``not_copied``
+    11    a grant that is no longer live / nothing                 ``idle`` /
+                                                                   ``never_borrowed``
+    ====  =======================================================  ====================
+
+    Notes on the ranks:
+
+    * EVERY LIVE OBSERVATION (3, 4, 6-8) OUTRANKS EVERY DURABLE RECORD (5, 9): the
+      observation is the freshest fact there is, and a live grant also clears the
+      record through ``last_grant_at`` (review round 3, m1).
+    * A live ``revoked``/``copy_revoked`` is rank 4 with state ``revoked``, the same
+      words as a durable one (design round 3, D13).
+
+    * ``refusal`` is the owner's token, control-stripped and bounded; one not shaped
+      like a refusal code (``approval_copy.is_refusal_code``) is
+      ``refusal_recognised: false`` and never reaches the terminal (review r1, M1).
+    * Durable records are ``mcp_auth.json`` (``credentials/mcp_state.py``), kept
+      until a success replaces them with ``synced``; ``last_asked_at`` is their
+      time. A record is IGNORED when it names another owner (the key moved, #3066
+      M2's class), when a revoke is older than this device's holder row
+      ``granted_at`` (re-shared since), or when it is older than the last grant or
+      copy (review r2, Rm1).
+    * Rests (#3066 Q6) are display-only reads, owner-scoped.
+    * A copy-class key (``sync.COPY_KINDS``: api keys, store secrets) is never
+      granted — a session reads the local copy — so its evidence of use is
+      ``sync.json`` ``applied``: ``gen`` and ``synced_at`` (QA r1, Q3). A local copy
+      keeps working while its owner is away, so no transient record outranks it.
+
+    Additive to the row: ``observation`` is unchanged for scripts that read it. Field
+    names avoid the tool digest's scrub markers (``network/tool.py``
+    ``_SECRET_KEY_MARKERS``) so the digest cannot eat them.
+    """
+    from local_operator.network.credentials.approval_copy import is_refusal_code
+
+    stamp = time.time() if now is None else now
+    record = _durable_record(evidence, owner_device=owner_device, granted_at=granted_at)
+    view: dict[str, Any] = {"state": "not_shared", "last_grant_at": None}
+    if not holder:
+        # A former holder with a revoke on record was WITHDRAWN, not "never shared":
+        # the bare share the not-shared line offers is refused after an explicit
+        # revoke (``supersede_required``), so say revoked and give the remedy that
+        # works (QA round 2, R2-Q2).
+        if record is not None and str(record.get("code") or "") in _NON_HOLDER_CODES:
+            _apply_record(view, record)
+        return view
+    status = state.status(key, now=stamp)
+    last = state.last_grant_at(key)
+    view = {"state": "never_borrowed", "last_grant_at": last}
+    copied_at = float((applied or {}).get("at") or 0.0) if copy_class else 0.0
+    # Only a record newer than the last success says anything about now.
+    if record is not None and float(record.get("at") or 0.0) <= max(float(last or 0.0), copied_at):
+        record = None
+    transient = record is not None and _is_transient(record)
+    if status not in _REST_OUTRANKS:
+        if status == "interactive_required":
+            view["state"] = "sign_in_needed"
+            return view
+        view["state"] = "revoked" if status in _REVOKED_CODES else "refused"
+        view["refusal"] = _peer_label(status)[:_REFUSAL_MAX_CHARS]
+        view["refusal_recognised"] = is_refusal_code(status)
+        return view
+    # The durable failure outranks a rest for the same reason a live one does (M2):
+    # the refusal observation expires in minutes while a rest lasts up to an hour, so
+    # without this a revoked key decayed back to "rate-limited — tries again at".
+    if not status and record is not None and not transient:
+        _apply_record(view, record)
+        return view
+    # Display-only and owner-scoped (#3066 M2): a rest recorded against a previous
+    # owner names a row id in THAT owner's store and means nothing here.
+    rests = state.resting_any_scope(key, owner_device=owner_device, now=stamp)
+    if rests:
+        began = [float(rest.get("rested_at") or 0.0) for rest in rests]
+        # An unknown start (a rest an older build wrote) never counts as "before":
+        # the cautious reading of a rest is that it applies.
+        partly = bool(last) and all(0.0 < at < float(last) for at in began)
+        view["state"] = "partly_resting" if partly else "resting"
+        # The earliest end: that is when this device next asks the owner for that row.
+        view["resting_until"] = float(rests[0]["until"])
+        view["resting_labels"] = [str(r["label"]) for r in rests if r.get("label")]
+    elif status == "quota_blocked":
+        view["state"] = "refused"
+        view["refusal"] = status
+        view["refusal_recognised"] = True
+    elif status == "active":
+        view["state"] = "active"
+    elif (
+        record is not None
+        and transient
+        and not copied_at
+        and _transient_still_true(record, owner_seen_at=owner_seen_at, now=stamp)
+    ):
+        _apply_record(view, record)
+    else:
+        _settled_view(view, copy_class=copy_class, applied=applied)
+    return view
+
+
+def _durable_record(
+    evidence: Mapping[str, Any] | None, *, owner_device: str, granted_at: float | None
+) -> Mapping[str, Any] | None:
+    """The durable failure record for this key, or ``None`` when it no longer applies.
+
+    ``mcp_auth.json`` is cleared only by a success, and the listing never dials, so a
+    record can describe a world that has since changed (review round 2, Rm1):
+
+    * it names ANOTHER OWNER: the key moved, and the old owner's verdict says nothing
+      about the new one (#3066 M2's class, the reason rests are owner-scoped);
+    * it is a REVOKE older than this device's holder row ``granted_at``: the owner
+      shared it again. ``granted_at`` is the owner's clock, so a few seconds of skew
+      is the residual; the record carries no ``doc_rev`` to compare instead.
+    """
+    if not evidence or str(evidence.get("state") or "") == "synced":
+        return None
+    recorded_owner = str(evidence.get("owner_device") or "")
+    if recorded_owner and owner_device and recorded_owner != owner_device:
+        return None
+    at = float(evidence.get("at") or 0.0)
+    if not at:
+        return None
+    revoke = str(evidence.get("state") or "") == "revoked"
+    if revoke and granted_at and float(granted_at) > at:
+        return None
+    return evidence
+
+
+def _is_transient(record: Mapping[str, Any]) -> bool:
+    """Whether a durable record says "not now" rather than "not any more".
+
+    BY CODE ONLY, never by the record's ``state`` (review round 3, R3-1): both
+    copy-pull writers (``sync.py``'s pull and ``client.pull_copy_sync``) store
+    ``state_for_code(code) or "unavailable"``, so ``unavailable`` is also the catch-all
+    for owner refusals they do not map (``local_only``, ``not_copyable``, ``no_value``).
+    Those persist until the owner changes something; reading them as transient let
+    "not copied here yet" promise a copy the owner will never send.
+    """
+    return str(record.get("code") or "") in _TRANSIENT_RECORD_CODES
+
+
+def _transient_still_true(
+    record: Mapping[str, Any], *, owner_seen_at: float | None, now: float
+) -> bool:
+    """Whether a "not now" record may still be shown (QA round 2, R2-Q1).
+
+    False once the owner has been seen since (the relay persists a live link's last
+    frame onto the member row every ``relay.LAST_SEEN_PERSIST_S``), and false past
+    :data:`_TRANSIENT_RECORD_MAX_S` whatever the sighting.
+    """
+    at = float(record.get("at") or 0.0)
+    if owner_seen_at and float(owner_seen_at) > at:
+        return False
+    return now - at < _TRANSIENT_RECORD_MAX_S
+
+
+def _apply_record(view: dict[str, Any], record: Mapping[str, Any]) -> None:
+    """Set ``view`` from a durable record that applies (see :func:`_durable_record`)."""
+    from local_operator.network.credentials.approval_copy import is_refusal_code
+
+    code = str(record.get("code") or record.get("state") or "")
+    view["last_asked_at"] = float(record.get("at") or 0.0)
+    if code in _SIGN_IN_CODES:
+        view["state"] = "sign_in_needed"
+        if code != "interactive_required":
+            view["refusal"] = code
+        return
+    view["state"] = "revoked" if code in _REVOKED_CODES else "refused"
+    view["refusal"] = _peer_label(code)[:_REFUSAL_MAX_CHARS]
+    view["refusal_recognised"] = is_refusal_code(code)
+
+
+def _settled_view(
+    view: dict[str, Any], *, copy_class: bool, applied: Mapping[str, Any] | None
+) -> None:
+    """Fill ``view`` once nothing live and no newer failure is recorded.
+
+    A COPY-CLASS key is never granted — a session reads the local copy — so its
+    evidence of use is the copy itself (``sync.json`` ``applied``), not a grant
+    (QA round 1, Q3).
+    """
+    if copy_class:
+        if applied:
+            view["state"] = "copied"
+            view["gen"] = int(applied.get("gen") or 0)
+            view["synced_at"] = float(applied.get("at") or 0.0) or None
+        else:
+            view["state"] = "not_copied"
+        return
+    if view.get("last_grant_at"):
+        view["state"] = "idle"
+
+
+def _rest_accounts(labels: Sequence[str]) -> str:
+    """At most :data:`_REST_LABELS_SHOWN` sanitised, clipped labels, then ``+N more``."""
+    unique = list(dict.fromkeys(_peer_label(text) for text in labels if _peer_label(text)))
+    shown = [
+        text if len(text) <= _REST_LABEL_MAX_CHARS else text[: _REST_LABEL_MAX_CHARS - 1] + "…"
+        for text in unique[:_REST_LABELS_SHOWN]
+    ]
+    more = len(unique) - len(shown)
+    return ", ".join(shown) + (f" +{more} more" if more > 0 else "")
+
+
+def _refusal_words(code: str, owner: str) -> str:
+    """A live refusal said in plain words with its remedy (design round 1, D5).
+
+    Short forms of the sentences ``credentials/messages.py`` composes for the same
+    codes, sized for one listing line; the raw token stays in ``--json``
+    ``refusal``. An unmapped but well-shaped code is shown in parentheses after
+    "refused by <owner>", the one place a token is still worth printing.
+    """
+    if code in ("owner_offline", "owner_unreachable", "unavailable"):
+        return f"{owner} is offline — reconnect it"
+    if code == "not_a_member":
+        return f"access was revoked — ask {owner} for a new share"
+    if code == "consent_withdrawn":
+        # An ended APPROVAL (withdrawn, expired or changed; ``reconcile``), not a revoked
+        # share: the remedy ``messages.py`` gives is a re-approval on the owner, and the
+        # signed finite recovery is refused when no deny exists (design round 3, D13).
+        return f"{owner}'s approval for this device ended — re-approve this device on {owner}"
+    if code == "member_not_active":
+        # Written by reconcile when THIS device's own membership does not read as active,
+        # which fails closed (an unreadable store counts too). A removed id cannot be
+        # re-admitted at all, so no remedy is guessed here: ``lop network status`` is the
+        # surface that tells removed, refused and unreadable apart (design round 3, D11).
+        return "this device is not an active member of this network — see: lop network status"
+    if code in ("not_a_holder", "not_owner"):
+        # Parallel to ``not shared with this device`` (design round 2, D9); "no longer"
+        # keeps "withdrawn" apart from "never shared".
+        return f"no longer shared with this device — ask {owner} to share it again"
+    if code in ("scope_mismatch", "scope_unknown"):
+        return f"sharing changed on {owner} — ask {owner} for a new share"
+    if code == "epoch_stale":
+        return f"out of sync with {owner} — reconnect and try again"
+    if code == "grant_invalid":
+        return f"the provider refused {owner}'s login — sign in again on {owner}"
+    if code == "no_local_credential":
+        return f"{owner} has no login for this — sign in on {owner}"
+    if code == "refresh_failed":
+        return f"{owner} could not refresh the login — try again shortly"
+    if code == "rate_limited":
+        return f"{owner} is busy — try again shortly"
+    if code == "quota_blocked":
+        return f"rate-limited on {owner} — try again later"
+    if code == "device_bound":
+        return f"this login cannot leave {owner}"
+    if code == "not_authorised":
+        return f"{owner} does not let this device ask for it"
+    return f"refused by {owner} ({code})"
+
+
+def _borrow_words(
+    view: Mapping[str, Any],
+    owner: str,
+    *,
+    key: str,
+    self_name: str,
+    now: float | None = None,
+) -> str:
+    """The human register of :func:`_borrow_view` — one segment after ``borrow:``.
+
+    THE ORDER RULE (design round 1, D7): every line LEADS WITH USABILITY — what
+    the reader can do with the key from this device, or the one thing that stops
+    them — and the remedy follows after an em dash. A new state must keep that
+    order; a line that opens with a reason or an internal word makes the reader
+    decode it before they know whether anything is wrong.
+
+    The text never says ``active``/``idle`` (D3): the split is the 30 s observation
+    TTL, nothing the reader cares about, and ``--json`` keeps it. "last worked" is a
+    fact about the last grant, not a live probe. Ages are the CLI's single-unit
+    ``45s/12m/3h/2d`` ladder, never "just now". A rest's clock reads ``HH:MM`` local
+    (``sync_segment``'s convention; a rest is capped at an hour, so a date never adds
+    anything) plus the remainder, because the node's clock may not be the reader's.
+
+    ``owner``, ``key`` and every label are peer-authored: the caller passes ``owner``
+    and ``key`` already through :func:`_peer_label`, labels are stripped here, and an
+    unrecognised refusal token is never printed (review round 1, M1).
+    """
+    from local_operator.network.credentials.messages import repair_command
+    from local_operator.wakes.display import format_age
+
+    stamp = time.time() if now is None else now
+    last = view.get("last_grant_at")
+    worked = f"last worked {format_age(max(0.0, stamp - float(last)))} ago" if last else ""
+    state = view.get("state")
+    if state == "not_shared":
+        me = self_name or "<this device>"
+        return (
+            f"not shared with this device — on {owner} run: "
+            f"lop network credential share {key} --with {me}"
+        )
+    # When the last word on a key is a durable failure rather than a live one, its age
+    # says how old that word is (QA round 1, Q4). "last tried", not "last asked"
+    # (design round 2, D10): right after an instruction, "asked" read as "you were
+    # asked"; "tried" pairs with "last worked".
+    asked = view.get("last_asked_at")
+    asked_tail = f"last tried {format_age(max(0.0, stamp - float(asked)))} ago" if asked else ""
+    if state == "revoked":
+        # After an EXPLICIT withdrawal the owner keeps a consent tombstone and refuses a
+        # bare re-share (``supersede_required``); the signed recovery request is the
+        # one command that works (QA round 2, R2-Q2).
+        me = self_name or "<this device>"
+        # Says WHERE to run it, like D1/D2 (design round 3, D12): run on this device,
+        # ``--with <me>`` resolves to itself and is refused.
+        text = (
+            f"access was revoked — on {owner} run: "
+            f"lop network credential share {key} --with {me} --request-approval"
+        )
+        tail = asked_tail or worked
+        return f"{text}; {tail}" if tail else text
+    if state == "sign_in_needed":
+        text = f"sign in again on {owner} (there: {repair_command(key)})"
+        return f"{text}; {asked_tail}" if asked_tail else text
+    if state == "copied":
+        # Usability first (design round 2, D8): a local copy is the MOST usable state,
+        # since it works with the owner away. The age is when THIS generation arrived
+        # (``record_applied`` runs only on a new generation, never on an in-sync pull),
+        # so it says "copy received", never "synced", which would read as stale.
+        received = view.get("synced_at")
+        if received:
+            return (
+                f"usable here (copy received {format_age(max(0.0, stamp - float(received)))} ago)"
+            )
+        return "usable here (local copy)"
+    if state == "not_copied":
+        return "shared, not copied here yet"
+    if state in ("resting", "partly_resting"):
+        accounts = _rest_accounts(view.get("resting_labels") or [])
+        who = f" ({accounts})" if accounts else ""
+        if state == "partly_resting":
+            head = f"partly rate-limited{who} — other accounts serving"
+        else:
+            until = float(view["resting_until"])
+            clock = time.strftime("%H:%M", time.localtime(until))
+            left = format_age(max(0.0, until - stamp))
+            head = f"rate-limited{who} — tries again at {clock} (in {left})"
+        return f"{head}; {worked}" if worked else head
+    if state == "refused":
+        if view.get("refusal_recognised"):
+            text = _refusal_words(str(view.get("refusal") or ""), owner)
+        else:
+            text = "refused (unrecognised code)"
+        # One parenthetical at most, and one tail shape on every arm (review round 3,
+        # n1; design round 3, D15): "; last tried" / "; last worked".
+        tail = asked_tail or worked
+        return f"{text}; {tail}" if tail else text
+    if worked:
+        return worked
+    return "shared, not borrowed yet"
+
+
+def _holder_granted_at(entry: Any, device: str) -> float | None:
+    """When ``device``'s holder row on ``entry`` was (re)granted, or ``None``."""
+    for holder in entry.holders:
+        if holder.device == device:
+            return float(holder.granted_at or 0.0) or None
+    return None
+
+
+def _owner_seen_at(record: Any, owner_device: str) -> float | None:
+    """When this device last heard from ``owner_device`` (its member row), or ``None``.
+
+    The relay persists a live link's last frame onto the member row
+    (``relay.LAST_SEEN_PERSIST_S``), so a sighting newer than a transient failure
+    record means the owner is back (QA round 2, R2-Q1).
+    """
+    if record is None:
+        return None
+    member = record.member(owner_device)
+    seen = getattr(member, "last_seen_at", None) if member is not None else None
+    return float(seen) if seen else None
+
+
 def _cmd_credentials(args: argparse.Namespace) -> int:
     """``lop network credentials [--json]``: who owns what, and what this device borrows.
 
@@ -1615,8 +2254,13 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
     shared — the up-front answer to "which of my logins can travel", which the share
     verb's refusal used to be the first word of. Read-only, like everything else here.
     """
+    from local_operator.network.credentials import mcp_state
     from local_operator.network.credentials.state import PlacementState
-    from local_operator.network.credentials.sync import SyncState, sync_segment
+    from local_operator.network.credentials.sync import (
+        COPY_KINDS,
+        SyncState,
+        sync_segment,
+    )
     from local_operator.network.identity import load as load_identity
 
     pulled = _relay_call("credential_placement", timeout=_listing_timeout(), allow_no_answer=True)
@@ -1636,6 +2280,9 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
         network_name = record.name if record is not None else document.network_id
         state = PlacementState.load(document.network_id)
         sync_state = SyncState.load(document.network_id)
+        # The durable failure record (QA round 1, Q4); one small read per network, and
+        # ``load`` answers ``{}`` for anything it cannot read.
+        evidence = mcp_state.load(document.network_id)
         keys: list[dict[str, Any]] = []
         if not document.entries:
             continue
@@ -1667,8 +2314,21 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                     for h in entry.holders
                 ],
             }
-            if not row["owned_here"] and entry.is_holder(self_device):
-                row["observation"] = state.status(key) or "not_asked"
+            if not row["owned_here"]:
+                holder = entry.is_holder(self_device)
+                if holder:
+                    row["observation"] = state.status(key) or "not_asked"
+                row["borrow"] = _borrow_view(
+                    state,
+                    key,
+                    owner_device=entry.owner_device,
+                    holder=holder,
+                    copy_class=entry.kind in COPY_KINDS,
+                    applied=sync_state.applied_for(key),
+                    evidence=evidence.get(key),
+                    granted_at=_holder_granted_at(entry, self_device),
+                    owner_seen_at=_owner_seen_at(record, entry.owner_device),
+                )
             if row["owned_here"]:
                 # THE OWNER'S OWN VIEW OF EACH HOLDER'S COPY (S3; design §5.2): one
                 # segment per member row — ``synced (gen 7)`` / ``stale (gen 6 of
@@ -1699,9 +2359,10 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 owner = (
                     "this device"
                     if row["owned_here"]
-                    else (row["owner_device_name"] or row["owner_device"])
+                    else _peer_label(row["owner_device_name"] or row["owner_device"])
                 )
-                who = f" ({row['identity_label']})" if row["identity_label"] else ""
+                label = _peer_label(row["identity_label"] or "")
+                who = f" ({label})" if label else ""
                 lines.append(
                     f"  {row['credential_name']:<14} {row['kind']:<15} owner: {owner}{who}"
                 )
@@ -1718,8 +2379,14 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                         f"      shared with {holder['name'] or holder['device']} "
                         f"({holder['scope']}){sync_tail}"
                     )
-                if row.get("observation") and row["observation"] not in ("active", "not_asked"):
-                    lines.append(f"      borrowed: {row['observation']}")
+                if row.get("borrow"):
+                    words = _borrow_words(
+                        row["borrow"],
+                        owner,
+                        key=_peer_label(row["credential_name"]),
+                        self_name=_peer_label(self_name),
+                    )
+                    lines.append(f"      borrow: {words}")
         networks.append(
             {
                 "network_id": document.network_id,
@@ -1791,12 +2458,20 @@ def _shareable_servers(self_device: str) -> list[dict[str, Any]]:
 
     Every user-scope HTTP/SSE server declared in this device's ``mcp.json`` (stdio
     servers have no login to share and are excluded), joined with (a) whether a login
-    row exists HERE — the same read the share verb's refusal makes, reused so the
-    ledger and the refusal cannot disagree — and (b) any placement entry this device
+    the runtime would USE is held here (``readiness.mcp_server_login_here``) and
+    (b) any placement entry this device
     holds for ``mcp:<url>``, so an already-shared login says where. READ-ONLY: no
     declare, no placement write, no broker semantics change; ``remedy`` is the
     command the operator would run next, with ``<device>`` standing where a target
     device goes (the ledger cannot know which one).
+
+    THE SHARE VERB'S READ IS WIDER BY ONE SHAPE, ON PURPOSE (review round 2, m1). Its
+    ``credential_here`` counts any ISSUED grant, so a TOMBSTONED login still shares:
+    the holder's borrow then says "sign in again on <this device>", the one remedy
+    that works. The ledger cannot call that row "login held" (nothing would serve)
+    nor "sign in here first" (one exists); it marks ``login_dead`` and prints
+    ``readiness.MCP_DEAD_LOGIN_REMEDY`` — the sentence the readiness viewer row and
+    the share receipt print too, so the three surfaces say one thing.
     """
     from local_operator.network import readiness as readiness_mod
     from local_operator.network.credentials import placement as placement_mod
@@ -1811,9 +2486,19 @@ def _shareable_servers(self_device: str) -> list[dict[str, Any]]:
             # No URL, no login to hold and nothing to share: a row here would render
             # a remedy naming an empty command.
             continue
-        login_here = server.get("has_row")  # True | False | None (store unreadable)
+        # True | False | None (store unreadable). A registration-only or tombstoned
+        # row is NOT a login here: the runtime would borrow, so offering
+        # "login held — share" would promise a share this device cannot serve.
+        login_here = readiness_mod.mcp_server_login_here(server)
         shared_with: list[dict[str, str]] = []
         found = placement_mod.placement_entries_for(mcp_url=url, root=_config_dir())
+        if readiness_mod.mcp_header_ref_server(
+            server, shared=found is not None or bool(server.get("auth_evidence"))
+        ):
+            # Not a login: its credential is a ``${REF}`` secret, shared through
+            # the secret placement, so "sign in here first" was a dead end even
+            # with the secret set (QA round 1, Q2). Same rule readiness uses.
+            continue
         if found is not None:
             network_id, entry = found
             record = _record_for(network_id)
@@ -1830,14 +2515,19 @@ def _shareable_servers(self_device: str) -> list[dict[str, Any]]:
                     }
                 )
         key = f"mcp:{url}"
+        dead = login_here is False and readiness_mod.mcp_login_dead(server)
         if login_here is True:
             remedy = f"lop network credential share {key} --with <device>"
+        elif dead:
+            remedy = readiness_mod.MCP_DEAD_LOGIN_REMEDY
         elif login_here is False:
             remedy = readiness_mod.mcp_login_remedy(url)
         else:
             remedy = ""
         rows.append(
             {
+                # Only on a tombstoned row, so every other row's shape is unchanged.
+                **({"login_dead": True} if dead else {}),
                 "server": str(server.get("name") or ""),
                 "url": url,
                 "transport": str(server.get("transport") or ""),
@@ -1872,7 +2562,7 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
     """
     from local_operator.network.credentials import offers
     from local_operator.network.credentials import placement as placement_mod
-    from local_operator.network.credentials.types import DEVICE_BOUND_PROVIDERS
+    from local_operator.network.credentials.types import is_device_bound_provider
 
     rows: list[dict[str, Any]] = []
     from local_operator.network.credentials import github as github_mod
@@ -1900,7 +2590,7 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
     by_provider: dict[str, list[Any]] = {}
     for credential in credentials:
         provider = str(getattr(credential, "provider", "") or "")
-        if not provider or provider == "mcp-oauth" or provider in DEVICE_BOUND_PROVIDERS:
+        if not provider or provider == "mcp-oauth" or is_device_bound_provider(provider):
             continue
         by_provider.setdefault(provider, []).append(credential)
 
@@ -2182,6 +2872,7 @@ def _cmd_credential_inherit(args: argparse.Namespace) -> int:
                 *inheritance.details(requested),
                 "Request only; nothing is permitted yet.",
                 f"Approve: lop network approvals approve {requested['approval_id']}",
+                *inheritance.next_lines(requested),
             ],
         )
     result = inheritance.apply(
@@ -2412,6 +3103,32 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         f"borrowers now: {', '.join(holders) or 'none'}",
         f"broker_credential on {name}: {capability or 'unchanged'}",
     ]
+    from local_operator.network.credentials.types import is_mcp_key
+
+    if verb == "share" and is_mcp_key(key):
+        from local_operator.mcp.auth import server_has_stored_grant
+        from local_operator.network.credentials.offers import close_quietly, open_store
+        from local_operator.network.credentials.types import mcp_url_from_key
+
+        # A TOMBSTONED login shares on purpose (``holds_grant``), so the receipt says
+        # what the holder will see instead of implying a working borrow (review round
+        # 2, m1). Same sentence as the ledger and the readiness viewer row.
+        auth_store = open_store(_config_dir())
+        try:
+            usable = auth_store is not None and server_has_stored_grant(
+                mcp_url_from_key(key), auth_store
+            )
+        finally:
+            if auth_store is not None:
+                close_quietly(auth_store)
+        if not usable:
+            from local_operator.network import readiness as readiness_mod
+
+            payload["login_dead"] = True
+            lines.append(
+                "note: this device's login is no longer valid — "
+                f"{readiness_mod.MCP_DEAD_LOGIN_REMEDY}"
+            )
     if verb == "share" and github_mod.is_github_key(key):
         # The disclosure names the ARM that will serve (§3.4): only the App is
         # narrowed server-side, and the share receipt must not promise narrowing
@@ -2792,6 +3509,13 @@ def _resolve_device(record: Any, name: str) -> str | None:
     (and refusing an ambiguous tail) is what stops a share from silently landing on
     the wrong device — a mistargeted share spends the wrong machine's quota.
 
+    AN AMBIGUOUS NAME IS REFUSED, NOT FIRST-MATCHED (P0 naming design): names are
+    cosmetic and unauthenticated, so two members may carry one spelling, and a
+    silent pick would hand `member rm` or `credential share --with` the wrong
+    device. The refusal names every candidate's short id and says to use the id.
+    An exact id still resolves, and so does a query where the same member matches
+    by both its id and its name.
+
     THE THREE VERBS THAT TAKE A DEVICE ALL COME THROUGH HERE: ``credential share
     --with``, ``member grant|revoke`` and ``member rm`` (review round 1, R3 added the
     last two). A verb that hands its raw argument to the row writer answers a valid
@@ -2801,10 +3525,39 @@ def _resolve_device(record: Any, name: str) -> str | None:
     wanted = str(name or "").strip()
     if not wanted:
         return None
-    for member in record.active_members():
-        if member.device_id == wanted or member.name == wanted:
-            return str(member.device_id)
-    matches = [m for m in record.active_members() if m.device_id.endswith(wanted)]
+    # NAMES ARE COSMETIC AND UNAUTHENTICATED (mesh-transport-identity §3.1): any
+    # member may claim any spelling, so a first-match over names is a MISTARGET
+    # — the write lands on whichever device happened to be listed first. Collect
+    # the exact hits and only answer when the query names exactly one device.
+    members = record.active_members()
+    by_id = [m for m in members if str(m.device_id) == wanted]
+    by_name = [m for m in members if str(m.name or "") == wanted]
+    if len(by_name) > 1:
+        from local_operator.network.types import MeshRefusal
+
+        listed = ", ".join(str(m.device_id)[:8] for m in by_name)
+        raise MeshRefusal(
+            "ambiguous_member",
+            f"{wanted!r} is the name of {len(by_name)} devices in {record.name} "
+            f"({listed}); use the device id",
+        )
+    if by_name:
+        # A name that equals ANOTHER device's id is the same collision from the
+        # other side: the query identifies one device and names a different one,
+        # so neither reading may win silently.
+        if by_id and str(by_id[0].device_id) != str(by_name[0].device_id):
+            from local_operator.network.types import MeshRefusal
+
+            raise MeshRefusal(
+                "ambiguous_member",
+                f"{wanted!r} is one device's id ({str(by_id[0].device_id)[:8]}) and "
+                f"another device's name ({str(by_name[0].device_id)[:8]}) in "
+                f"{record.name}; use the device id",
+            )
+        return str(by_name[0].device_id)
+    if by_id:
+        return str(by_id[0].device_id)
+    matches = [m for m in members if m.device_id.endswith(wanted)]
     return str(matches[0].device_id) if len(matches) == 1 else None
 
 
@@ -2863,6 +3616,80 @@ def _member_name(record: Any, device_id: str) -> str:
     return str(member.name) if member is not None else ""
 
 
+def _member_rm_already_revoked(args: argparse.Namespace, record: Any) -> int | None:
+    """``member rm`` on an EXACT id that is already removed: say so, and repair.
+
+    WHY. ``lop network show`` lists a removed member (``active:false``) with its id,
+    so an operator cleaning up copies that id into ``member rm`` — and used to be
+    told ``unknown_member``, while credential metadata still named the device as a
+    holder and nothing would ever prune it. The removal already happened; what is
+    left is its idempotent local repair (``relay.repair_removed_member``: no epoch
+    rotation, tombstone and burned id kept, nothing remote claimed erased).
+
+    THE RECOGNITION LIVES HERE, NOT IN ``_resolve_device``. That resolver is shared
+    with ``credential share --with`` and ``member grant|revoke``, which must stay
+    ACTIVE-ONLY — a share or a grant resolving to a removed device would be a write
+    about a device that can no longer authenticate. Removal is the one operation
+    for which "already removed" is a meaningful answer, so only this verb asks.
+
+    EXACT ID ONLY: names are cosmetic and may be reused by an active member, and a
+    tail is a convenience for live devices — the burned id is the identity. Returns
+    ``None`` when the argument is not an already-removed id, so the caller's
+    ``unknown_member`` refusal stands unchanged.
+    """
+    from local_operator.network.credentials import messages as messages_mod
+
+    wanted = str(args.device or "").strip()
+    tombstone = next((row for row in record.members if str(row.device_id) == wanted), None)
+    if not wanted or not (record.is_burned(wanted) or (tombstone and not tombstone.active)):
+        return None
+    imported = _import_relay()
+    outcome = imported.repair_removed_member(record, device_id=wanted, by=record.self_device_id)
+    pruned = outcome.repaired
+    # R3: with the tombstone row gone only the burned id is left, and "<id> (<id[:8]>)"
+    # would print one identity twice. The short id alone is the readable spelling.
+    who = (
+        f"{tombstone.name} ({wanted[:8]})"
+        if tombstone is not None and tombstone.name
+        else wanted[:8]
+    )
+    repaired = (
+        f"removed {len(pruned)} stale credential reference(s) to it: {', '.join(pruned)}"
+        if pruned
+        else "no credential references to it remained on this device"
+    )
+    # R1: a row another device owns is that owner's to revise, so it is named, not
+    # rewritten — and not counted as repaired.
+    foreign = [
+        f"{key} is still listed by {owner_name or owner[:8]}, which owns it; "
+        "that device must revoke it (this device does not rewrite another owner's share)"
+        for key, owner, owner_name in outcome.owner_must_revoke
+    ]
+    return _emit(
+        args,
+        {
+            "ok": True,
+            "code": "already_revoked",
+            "network_id": record.network_id,
+            "removed": wanted,
+            "epoch": record.epoch,
+            "rotated": False,
+            "repaired": pruned,
+            "owner_must_revoke": [
+                {"key": key, "owner_device": owner, "owner_name": owner_name}
+                for key, owner, owner_name in outcome.owner_must_revoke
+            ],
+        },
+        [
+            f"{who} was already removed from {record.name}; "
+            f"the epoch was not rotated again (it is {record.epoch})",
+            repaired,
+            *foreign,
+            *messages_mod.COPY_CEILING_LINES,
+        ],
+    )
+
+
 def _cmd_member_rm(args: argparse.Namespace) -> int:
     """Revoke a member: tombstone, rotate, bump the epoch, fan out (R5)."""
     # THE ARGUMENT IS A DEVICE, AND EVERY OTHER SURFACE PRINTS ITS NAME — the same rule
@@ -2885,6 +3712,9 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
         # that could inform them — it is the one that matches what the write needs.)
         # Safe here because ``require_secrets`` only reads.
         store.require_secrets(record.network_id)
+        already = _member_rm_already_revoked(args, record)
+        if already is not None:
+            return already
         raise MeshRefusal(
             "unknown_member",
             f"{args.device!r} is not a device in {record.name}; run 'lop network show' "
@@ -3012,6 +3842,19 @@ def _cmd_invite(args: argparse.Namespace) -> int:
         )
         return 2
     hosts = [host for host in (args.hosts or "").split(",") if host]
+    # ADOPT BEFORE MINTING (mesh-mcp-credentials §3): the offer built at admission
+    # reads the needs-list, and a literal in ``mcp.json`` is invisible to it until
+    # it becomes a ``${NAME}`` reference. Best-effort by design — a mint must not
+    # fail because the owner's config could not be rewritten — and completely
+    # silent about values: only counts leave this block.
+    adoption: dict[str, Any] = {}
+    try:
+        from local_operator.mcp.credential_sources import adopt_literal_credentials
+        from local_operator.paths import config_dir
+
+        adoption = adopt_literal_credentials(config_dir())
+    except Exception:  # noqa: BLE001 — an invite is not blocked by adoption
+        adoption = {}
     live = _relay_call(
         "net_invite",
         network=args.network,
@@ -3059,18 +3902,37 @@ def _cmd_invite(args: argparse.Namespace) -> int:
     )
     if not payload.get("hosts"):
         command += " --host <this device's address:port>"
-    return _emit(
-        args,
-        payload,
-        [
-            f"invite {payload['invite_id']} for role {payload['role']}, "
-            f"expires in {int(float(payload.get('expires_in_s') or 0))}s",
-            f"token written to {path}",
-            "it is single use and is not printed: read that file, or run this with a TTY "
-            "and --print",
-            command,
-        ],
-    )
+    adopted = len(adoption.get("adopted") or [])
+    reused = len(adoption.get("reused") or [])
+    conflicts = len(adoption.get("conflicts") or [])
+    if adopted or reused or conflicts:
+        # COUNTS ONLY, and only when there is a count to report: the names are in
+        # the store, and ``--json`` carries the same counts rather than a per-name
+        # list so an invite body stays free of store inventory.
+        payload["mcp_credentials"] = {
+            "adopted": adopted,
+            "reused": reused,
+            "conflicts": conflicts,
+        }
+    lines = [
+        f"invite {payload['invite_id']} for role {payload['role']}, "
+        f"expires in {int(float(payload.get('expires_in_s') or 0))}s",
+        f"token written to {path}",
+        "it is single use and is not printed: read that file, or run this with a TTY "
+        "and --print",
+        command,
+    ]
+    if adopted or reused or conflicts:
+        # ONE bounded line when anything needs saying — a reuse rewrote the
+        # config to references, and a conflict is the case where the value will
+        # NOT travel, so a silent mint in either state hides what happened. A
+        # clean config says nothing.
+        detail = f"{adopted} MCP credentials adopted into the encrypted store"
+        if reused:
+            detail += f", {reused} reused"
+        noun = "conflict" if conflicts == 1 else "conflicts"
+        lines.append(f"{detail}; {conflicts} {noun}")
+    return _emit(args, payload, lines)
 
 
 def _invite_locally(args: argparse.Namespace, hosts: list[str]) -> tuple[dict[str, Any], str]:
@@ -3094,8 +3956,11 @@ def _invite_locally(args: argparse.Namespace, hosts: list[str]) -> tuple[dict[st
         or None,
         device_id=args.device,
     )
+    # Same rule as the relay's mint: dead entries go with the write that adds one.
+    expired = store.prune_invites(record)
     record.invites.append(minted.record)
     store.save(record)
+    store.forget_invite_tokens(expired)
     path = store.save_invite_token(minted.record.invite_id, minted.token)
     _audit(
         "invite_minted",
@@ -5182,12 +6047,43 @@ def _autostart() -> str:
     return f"the relay did not start: {result.get('error')}"
 
 
+def _cmd_install(args: argparse.Namespace) -> int:
+    """Expose the explicit boot-durability repair without a new wire operation."""
+    result = _import_relay().install()
+    ok = bool(result.get("ok"))
+    payload = {
+        **result,
+        "ok": ok,
+        "steps": list(result.get("steps") or []),
+        "code": "installed" if ok else str(result.get("reason") or "install_failed"),
+        "message": (
+            "relay service installed"
+            if ok
+            else str(result.get("error") or "relay installation failed")
+        ),
+    }
+    lines = [*payload["steps"], payload["message"]]
+    if ok and result.get("persistent") is False:
+        lines.append("durability: restart-on-boot is not configured; enable linger on this device")
+    return _emit(args, payload, lines)
+
+
 def _cmd_service(action: str) -> Callable[[argparse.Namespace], int]:
     def _run(args: argparse.Namespace) -> int:
         relay_mod = _import_relay()
         result = relay_mod.service_action(action)
         ok = bool(result.get("ok"))
         payload: dict[str, Any] = {"ok": ok, "action": action}
+        for field in ("linger", "persistent"):
+            if field in result:
+                payload[field] = result[field]
+        lines = [
+            f"relay {action} ok" if ok else f"relay {action} failed: {result.get('error', '')}"
+        ]
+        if ok and action in ("start", "restart") and result.get("persistent") is False:
+            lines.append(
+                "durability: restart-on-boot is not configured; enable linger on this device"
+            )
         if not ok:
             # THE FAMILY'S SHAPE, even here: `code` + `message`, because a consumer
             # that reads `code` (which GUIDE.md tells it to) saw nothing at all on
@@ -5203,7 +6099,7 @@ def _cmd_service(action: str) -> Callable[[argparse.Namespace], int]:
         return _emit(
             args,
             payload,
-            [f"relay {action} ok" if ok else f"relay {action} failed: {payload.get('message')}"],
+            lines,
         )
 
     return _run
@@ -6482,6 +7378,16 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             model_choice = {"provider": provider, "model_id": model_id}
         else:
             model_choice = None
+        if model_choice is not None and effort:
+            # THE LEVEL RIDES THE MODEL CHOICE (QA round 1, Q1 on #2754). The
+            # frame-level ``effort`` below is applied only through
+            # ``resolve_create_identity`` into ``identity.birth``, which a
+            # ``--team``-only create never reaches, so ``--effort max`` was dropped
+            # and the runtime ran its seed. The choice is what every create path
+            # applies (``relay._set_model_on``), under both spellings: an owner on
+            # 0.84.7 or earlier reads only ``effort``. The frame-level key stays,
+            # because the identity path still reads it when no model is named.
+            model_choice = {**model_choice, "reasoning_effort": effort, "effort": effort}
         # THE SAVED MODE SUPPLIES THE IMPLIED REQUEST (remote-onboarding §6
         # defect 2, the create half): a device whose ``tool_approval_mode``
         # resolves ``auto`` asks for an unattended session when it asks a peer
@@ -6850,6 +7756,11 @@ def _cmd_status(args: argparse.Namespace) -> int:
         f"identity:   {'present' if payload['identity_present'] else 'missing'}",
         f"relay:      {relay_line}",
     ]
+    if payload.get("relay_running") and payload.get("relay_persistent") is False:
+        lines.append(
+            "durability: not supervised — this relay will not come back after a reboot; "
+            "run 'lop network start'"
+        )
     # THE RUNNING RELAY'S BUILD (drill 2026-10-04, F6): the row the three stale
     # relays were invisible without. Derived from the payload's ``relay_build``/
     # ``relay_generation*`` facts, so this block and ``--json`` cannot disagree;
@@ -7542,12 +8453,9 @@ def _has_terminal() -> bool:
 def _cmd_doctor(args: argparse.Namespace) -> int:
     """Diagnose the mesh. Reports; never asserts reachability it has not proven.
 
-    ``ok`` ANSWERS "IS THE MESH HEALTHY", derived from the check rows rather than
-    asserted. It used to be hardcoded ``true`` while a row in the same payload
-    said ``ok: false``, so a consumer that read the summary line and not the array
-    read a failing mesh as a passing one — and ``ok`` is exactly the key an agent
-    path checks first (QA round 1). The failing rows are also named in ``code`` /
-    ``message``, so the refusal family keeps one shape.
+    ``ok`` answers link health. Credential payload repairs and supervisor
+    durability remain red, visible rows but degrade an otherwise healthy link;
+    conflating them with transport failures sends operators to the wrong repair.
 
     The relay is given the LISTING budget, not the 5 s default, because this op
     DIALS every endpoint it reports on: with the default it timed out on its own
@@ -7558,7 +8466,52 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         "net_doctor", peer=args.peer, timeout=_listing_timeout(), allow_no_answer=True
     )
     payload = live if live is not None else _doctor_locally(args)
-    checks = list(payload.get("checks") or [])
+    checks = [dict(check) for check in payload.get("checks") or []]
+    from local_operator.network import relay as relay_mod
+
+    supervision = relay_mod.supervision_state()
+    # A redirected or unreadable HOME cannot ask this host's manager anything.
+    # The row is OMITTED rather than reported as "not configured": a sandbox is
+    # not evidence that the real home's relay will fail to return after boot,
+    # and a degraded verdict there would send the operator to a repair that has
+    # nothing to repair.
+    if supervision["platform"] != "none" and supervision.get("addressable", False):
+        persistent = bool(supervision["persistent"])
+        checks.append(
+            {
+                "check": "supervision",
+                "class": "supervision",
+                "observed": {"addressable": supervision.get("addressable", False)},
+                "ok": persistent,
+                "detail": (
+                    "relay restart-on-boot is configured"
+                    if persistent
+                    else "relay restart-on-boot is not configured; run `lop network start` "
+                    "on this device"
+                ),
+                "remedies": ["run `lop network start` on this device"],
+            }
+        )
+    # SUPERVISION CONFLICTS (2026-10-21): a second relay unit, a foreign port holder,
+    # or a unit pinned to one build — each made the node "running" and unreachable
+    # or stale at once, and nothing here named it. Supervision-class rows: they
+    # degrade the verdict without claiming the link itself failed.
+    for conflict in relay_mod.foreign_supervision():
+        checks.append(
+            {
+                "check": "supervision",
+                "code": conflict["code"],
+                "ok": False,
+                "detail": conflict["detail"],
+                "remedies": list(conflict["remedies"]),
+            }
+        )
+    for check in checks:
+        check["class"] = (
+            "payload"
+            if check.get("check") in {"credential_repair", "credential_sync"}
+            else "supervision" if check.get("check") == "supervision" else "link"
+        )
     # THE ROW'S OWN WORDS, NOT ITS FIELD (round 24, Q-R24-2). This used to render
     # ``detail`` verbatim, which put a stage word, a Python class name AND — on the
     # state the listing's own round-10 fix exists for — the endpoint address on a
@@ -7599,16 +8552,75 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         lines.append("nothing to check: no networks, or no other members yet")
     if not payload.get("identity_present", True):
         lines.append(readiness_mod.NO_IDENTITY_LINE)
-    failures = [
-        f"{check.get('check', '')}: {doctor_detail_words(str(check.get('detail', ''))) or 'failed'}"
-        for check in checks
-        if not check.get("ok")
+
+    def failure_words(check: Mapping[str, Any]) -> str:
+        return (
+            f"{check.get('check', '')}: "
+            f"{doctor_detail_words(str(check.get('detail', ''))) or 'failed'}"
+        )
+
+    link_failures = [
+        failure_words(check) for check in checks if not check.get("ok") and check["class"] == "link"
     ]
-    healthy = not failures and bool(payload.get("identity_present", True))
-    answer: dict[str, Any] = {**payload, "ok": healthy}
+    payload_failures = [
+        failure_words(check)
+        for check in checks
+        if not check.get("ok") and check["class"] == "payload"
+    ]
+    supervision_failures = [
+        failure_words(check)
+        for check in checks
+        if not check.get("ok") and check["class"] == "supervision"
+    ]
+    degraded = bool(payload_failures or supervision_failures)
+    link_ok = not link_failures
+    healthy = link_ok and bool(payload.get("identity_present", True))
+    answer: dict[str, Any] = {
+        **payload,
+        "checks": checks,
+        "ok": healthy,
+        "link_ok": link_ok,
+        "degraded": degraded,
+        "payload_failures": payload_failures,
+        "supervision_failures": supervision_failures,
+    }
     if not healthy:
         answer["code"] = "unhealthy"
-        answer["message"] = "; ".join(failures) or "the device has no identity"
+        failures = link_failures or ["the device has no identity"]
+        answer["message"] = "; ".join(failures + payload_failures + supervision_failures)
+    elif degraded:
+        answer["code"] = "degraded"
+        message = "link healthy"
+        if payload_failures:
+            message += "; credential checks need attention: " + "; ".join(payload_failures)
+        if supervision_failures:
+            message += "; " + "; ".join(supervision_failures)
+        answer["message"] = message
+    if degraded:
+        # Only call the link healthy when the link fold proved it; a simultaneous
+        # transport failure must not be contradicted by the repair reminder.
+        if payload_failures:
+            link_words = "the link is healthy" if healthy else "the link also needs repair"
+            lines.append(
+                f"note: {len(payload_failures)} credential repair(s) open; {link_words} "
+                "— run the named login on this device"
+            )
+        elif supervision_failures:
+            conflict_remedies = [
+                str(remedy)
+                for check in checks
+                if check.get("check") == "supervision" and check.get("code") and not check["ok"]
+                for remedy in check.get("remedies") or []
+            ]
+            if conflict_remedies:
+                # A conflict's remedy is not `lop network start` (that is what the
+                # node ran while its system unit crash-looped); say the real one.
+                lines.append("note: relay supervision conflict — " + "; ".join(conflict_remedies))
+            else:
+                lines.append(
+                    "note: relay restart-on-boot needs repair — run `lop network start` on "
+                    "this device"
+                )
     return _emit(args, answer, lines)
 
 
@@ -7962,6 +8974,16 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 }
             )
+            # Restart authority belongs to the receiver and is unknowable while
+            # it is offline. Keep an honest unknown plus a conditional remedy.
+            checks.append(
+                readiness_mod.peer_restart_row(
+                    member,
+                    {},
+                    record=record,
+                    peer_label=member.name or member.device_id,
+                )
+            )
             checks.extend(
                 readiness_mod.not_asked_rows(
                     member,
@@ -7983,6 +9005,14 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
                         source=readiness_mod.SOURCE_UNKNOWN,
                     )
                 )
+    if not wanted:
+        # THIS DEVICE'S SERVE DAEMON NEEDS NO RELAY (2026-10-28): it is read from
+        # this root's own records, so the fallback reports it exactly as the
+        # relay's composer does — a node whose relay is down still says that its
+        # `lop serve` is stale or held only by a login session.
+        from local_operator.paths import config_dir
+
+        checks.extend(readiness_mod.local_serve_daemon_rows(config_dir()))
     return {
         "checks": checks,
         "identity_present": identity_file.exists(),
@@ -7990,6 +9020,35 @@ def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
         "relay": relay_line,
         "probed": False,
     }
+
+
+def _cmd_restart(args: argparse.Namespace) -> int:
+    """Keep bare restart local; make ``--peer`` an evidenced member-side request."""
+    peer = str(getattr(args, "peer", "") or "")
+    if not peer:
+        return _cmd_service("restart")(args)
+
+    from local_operator.network import meshrestart
+
+    payload = _relay_answer(
+        "peer_restart", peer=peer, timeout=meshrestart.RESTART_CONTROL_TIMEOUT_S
+    )
+    label = str(payload.get("name") or peer)
+    state = str(payload.get("state") or "")
+    message = str(payload.get("message") or "")
+    if state == "restarted":
+        lines = [message]
+    elif state == "busy":
+        lines = [
+            f"{label}: {message or 'restart refused while work is running'}",
+            f"re-run `lop network restart --peer {peer}` when the work finishes",
+        ]
+    else:
+        text = message or str(payload.get("code") or "no answer")
+        # Origin-produced outcomes already name the peer; member-produced busy
+        # and refusal sentences do not. Add the label exactly once.
+        lines = [text if text.startswith((f"{label} ", f"{label}:")) else f"{label}: {text}"]
+    return _emit(args, payload, lines)
 
 
 def _cmd_update(args: argparse.Namespace) -> int:
@@ -8032,6 +9091,23 @@ def _cmd_update(args: argparse.Namespace) -> int:
     if state == "done":
         lines.append(f"{label} updated to {version}" + (f" (via {method})" if method else ""))
         lines.append("the device installs it in its own tree and switches over atomically")
+        left_busy = [item for item in payload.get("left_busy") or [] if isinstance(item, dict)]
+        if left_busy:
+            # The operator who ASKED must see what the update did not wait for
+            # (QA round 1 on #3028, Q2/Q3): a generation-layout member moves on
+            # while a busy or approval-parked session keeps its old build, and
+            # the member's own sentence was not printed on this path at all.
+            named = "; ".join(
+                f"{item.get('name') or 'unnamed session'} ({item.get('session_id', '')}"
+                + (f", waiting for {item['pending']}" if item.get("pending") else "")
+                + ")"
+                for item in left_busy[:3]
+            )
+            more = f" and {len(left_busy) - 3} more" if len(left_busy) > 3 else ""
+            lines.append(
+                f"{len(left_busy)} busy session(s) there stay on their old build until "
+                f"they settle: {named}{more}"
+            )
     elif state == "already_on_target":
         lines.append(f"{label} is already on {version or 'the target build'}; nothing to do")
     elif state == "ahead_of_target":
@@ -8221,6 +9297,64 @@ def _cmd_identity_rotate(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _cmd_identity_set_name(args: argparse.Namespace) -> int:
+    """``lop network identity set-name <name>``: this device's own human name.
+
+    WHY A SELF-RENAME AND NOT A PEER RELABEL. A member row's name is the DEVICE's
+    own statement about itself (`docs/design/mesh-member-display-name.md` §3.1): it
+    is seeded at join from the ``joiner_name`` inside the signed transcript, and
+    after that only the device it names may move it (Rule N1,
+    ``relay.adopt_members``). A verb that relabelled a peer would therefore either
+    lie until the next pull or need a second field that silently disagrees with
+    what the peer says about itself — so the supported verb is the one that can be
+    true.
+
+    TWO PATHS, ONE PRIMITIVE — the ``member grant`` shape. When a relay answers,
+    the rename runs inside it so every surface THAT PROCESS serves agrees without a
+    restart (it reads ``self.identity``, not the file); when none answers, this
+    process runs the same ``relay.rename_self`` under the same store locks. Both
+    paths share validation, the collision guard and the audit record, because those
+    live in the primitive.
+
+    ``--json`` shape: ``{ok, device_id, name, previous, networks, converged}`` —
+    ``networks`` lists the records whose own row was rewritten, and ``converged``
+    says which path did the write (``relay`` or ``locally (relay not running)``).
+    """
+    name = str(getattr(args, "name", "") or "")
+    live = _relay_call("net_identity_name", name=name, allow_no_answer=True)
+    if live is not None:
+        document: dict[str, Any] = {
+            "ok": True,
+            "device_id": str(live.get("device_id") or ""),
+            "name": str(live.get("name") or ""),
+            "previous": str(live.get("previous") or ""),
+            "networks": list(live.get("networks") or []),
+            "converged": "relay",
+        }
+    else:
+        receipt = _import_relay().rename_self(name)
+        document = {
+            "ok": True,
+            "device_id": receipt.device_id,
+            "name": receipt.name,
+            "previous": receipt.previous,
+            "networks": list(receipt.networks),
+            "converged": "locally (relay not running)",
+        }
+    return _emit(
+        args,
+        document,
+        [
+            f"this device is now called {document['name']!r} (was {document['previous']!r})",
+            f"written to the identity file and to {len(document['networks'])} member row(s)",
+            "peers pick it up on their next membership pull — about 20 s on a live link; "
+            "a device the mesh cannot reach keeps the name it was admitted under",
+            "a name is cosmetic: nothing authenticates on it, and every verb that takes a "
+            "device accepts the id",
+        ],
+    )
+
+
 def _import_relay() -> Any:
     from local_operator.network import relay
 
@@ -8352,6 +9486,9 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
         return [
             *finite_share.details(dict(record)),
             f"Approval {record.get('approval_id', '')}: {record.get('state', '')}",
+            # The reason and the next step for THIS state (UX U1, U5): a failed card says
+            # why it stopped and what to do; an approved one says how to apply it.
+            *finite_share.next_lines(dict(record)),
             "This operation restores only the signed finite share; nothing is installed or joined.",
         ]
     from local_operator.network.credentials import inheritance
@@ -8366,11 +9503,33 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
             described = [
                 "A credential-permission request this build cannot describe; do not approve it."
             ]
+        try:
+            following = inheritance.next_lines(dict(record))
+        except MeshRefusal:
+            following = []
         return [
             *described,
             f"Approval {record.get('approval_id', '')}: {record.get('state', '')}",
+            *following,
             "This records a credential permission only; nothing is installed, joined or "
             "connected.",
+        ]
+    from local_operator.operator import pair_op
+
+    if pair_op.intent(dict(record)) is not None:
+        # Same reason as the credential branches above: the fallthrough is the ONBOARDING
+        # card, which would call a phone pairing an anchor install and list "definitions,
+        # MCP servers, git identity and logins" as what approving it does. The card also
+        # names no approve command: this kind is refused on the terminal by design (the six
+        # digits have to be typed on the computer), so a command would be an instruction
+        # that cannot work.
+        try:
+            described = pair_op.card_lines(dict(record))
+        except MeshRefusal:
+            described = ["A phone pairing request this build cannot describe; do not approve it."]
+        return [
+            *described,
+            f"Approval {record.get('approval_id', '')}: {record.get('state', '')}",
         ]
     block = record.get("device") or record.get("machine") or {}
     what = record.get("what") or {}
@@ -8435,6 +9594,20 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
             f"  {'provision':<{_CARD_LABEL_WIDTH}}: definitions, MCP servers, "
             "git identity, and this device's logins"
         )
+    if record.get("kind") == "device_onboard_network_only":
+        lines.append("  network enrollment only; account logins are not shared")
+        lines.append("  observed SSH key (TOFU), not independently verified identity")
+        anchor = what.get("anchor") or {}
+        for label, field in (
+            ("anchor key", "key_id"),
+            ("anchor fp", "spki_fp"),
+            ("anchor digest", "statement_digest"),
+        ):
+            lines.append(f"  {label:<{_CARD_LABEL_WIDTH}}: {anchor.get(field, '')}")
+        lines.append("  control grants: " + (", ".join(what.get("grant") or []) or "none"))
+        lines.append(
+            "  unattended sessions: " + ("trusted" if what.get("unattended") else "not trusted")
+        )
     expires = record.get("expires_at")
     decided = record.get("decided_at")
     if state == "withdrawn" and isinstance(decided, (int, float)) and decided:
@@ -8488,6 +9661,137 @@ def _approval_lines(record: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+def _approved_credential_lines(record: Mapping[str, Any]) -> list[str]:
+    """After a CLI approve of a credential card: its state and how to apply it (UX U5)."""
+    from local_operator.network.credentials import finite_share, inheritance
+
+    approval_id = record.get("approval_id", "")
+    lines = [f"Approval {approval_id}: {record.get('state', '')}"]
+    if finite_share.intent(dict(record)) is not None:
+        return lines + finite_share.next_lines(dict(record))
+    return lines + inheritance.next_lines(dict(record))
+
+
+def _print_file_only_notice() -> None:
+    """Before a credential card is signed here with a FILE-ONLY key, say so (UX U3).
+
+    COPY, NOT A GATE: the approval proceeds exactly as before (operator a-4ba6 keeps the
+    terminal path allowed; a-b492 attached "with the warning" to file-only approval). The
+    words are the desktop sheet's own (:data:`approval_copy.FILE_ONLY_DISCLOSURE`), so the
+    two surfaces warn about the same key the same way. Read failures print nothing: an
+    unreadable level is not evidence of a file-only key, and the signer decides anyway.
+    """
+    from local_operator.network.credentials import approval_copy, desktop_approval
+
+    try:
+        level, _ = desktop_approval.assurance()
+    except Exception:  # noqa: BLE001 - a notice must never block or break the approval
+        return
+    if level == desktop_approval.ASSURANCE_FILE_ONLY:
+        _print_wrapped(["Note: " + approval_copy.FILE_ONLY_DISCLOSURE], sys.stderr)
+
+
+def _emit_wrapped(args: argparse.Namespace, payload: dict[str, Any], lines: list[str]) -> int:
+    """:func:`_emit` for the credential-approval card verbs, word-wrapped (design D3).
+
+    SCOPED to `approvals show/list/approve`: those are the cards whose long disclosure
+    lines the terminal used to cut mid-word. Every other `lop network` printer keeps its
+    exact bytes (their tests pin single-line receipts, and a wrap there is a separate
+    design decision, not this PR's).
+    """
+    if _json_mode(args):
+        return _emit(args, payload, lines)
+    return _emit(args, payload, _wrap_lines(lines, stream=sys.stdout))
+
+
+def _print_refusal(exc: Any) -> None:
+    """A refusal on stderr: its sentence, then any commands it carries, one per line.
+
+    The finite apply refusal carries its recipe as ``.commands`` (design #3002 r2, D9; UX
+    U8a) rather than inside the sentence, so each command prints whole on its own line and
+    the sentence wraps to the terminal like the card does. Colour honours ``NO_COLOR``
+    (design N4); every other refusal keeps its exact bytes.
+    """
+    import os
+
+    red = not os.environ.get("NO_COLOR")
+    commands = getattr(exc, "commands", None)
+    sentence = [exc.sentence]
+    if isinstance(commands, list):
+        sentence = _wrap_lines(sentence, stream=sys.stderr)
+    for line in sentence:
+        print(f"\033[1;31m{line}\033[0m" if red else line, file=sys.stderr)
+    if isinstance(commands, list) and commands:
+        for line in _wrap_lines([str(getattr(exc, "commands_label", ""))], stream=sys.stderr):
+            print(line, file=sys.stderr)
+        for command in commands:
+            print(command, file=sys.stderr)
+
+
+def _is_command(line: str) -> bool:
+    """Whether a printed line IS a runnable command, which is never wrapped.
+
+    The line must START with ``lop `` (after an optional ``Label: `` prefix such as
+    ``Approve: ``), never merely contain it (design #3002 r3, D10; UX U13): a recipient named
+    "Studio develop Mac" put ``lop `` inside a prose line and switched its wrapping off.
+    """
+    import re
+
+    return re.match(r"\s*(?:[A-Z][\w ]{0,40}: )?lop ", line) is not None
+
+
+def _wrap_lines(lines: list[str], width: int | None = None, *, stream: Any = None) -> list[str]:
+    """Wrap logical lines to the terminal on WORDS, with a hanging indent (design D3).
+
+    A long line used to be left to the terminal, which cuts mid-word (``Th|at``,
+    ``ma|chine``) and drops the continuation to column 0, where it reads as a new fact.
+    ``Label: value`` lines keep the label on the first row and indent the value under it;
+    a single token longer than the row (a fingerprint, a JSON tuple) gets its own indented
+    row and is never broken, so it can still be selected and compared whole.
+
+    TWO THINGS ARE NEVER WRAPPED (design #3002 r2, D6; UX U7; QA Q6/Q7):
+
+    * a line that carries a COMMAND. A hard break inside one turned a pasted command into
+      several broken ones (``argument --with: expected one argument``, then ``command not
+      found`` per row). The renderers print each command on its own line, so the terminal
+      soft-wraps it and copies it back as one line.
+    * anything not written to a TTY. A pipe or a log gets the logical lines, so ``grep``
+      finds a whole command and a script reads what the card says. ``stream`` names the
+      stream the lines go to; without one (a caller that measures the wrap) the width rules.
+    """
+    import shutil
+    import textwrap
+
+    if stream is not None and width is None:
+        isatty = getattr(stream, "isatty", None)
+        if not (callable(isatty) and isatty()):
+            return list(lines)
+    width = width or shutil.get_terminal_size((100, 24)).columns
+    width = max(40, width)
+    out: list[str] = []
+    for line in lines:
+        if len(line) <= width or _is_command(line):
+            out.append(line)
+            continue
+        lead = len(line) - len(line.lstrip(" "))
+        indent = " " * (lead + 2)
+        wrapped = textwrap.wrap(
+            line,
+            width=width,
+            initial_indent="",
+            subsequent_indent=indent,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        out.extend(wrapped or [line])
+    return out
+
+
+def _print_wrapped(lines: list[str], stream: Any) -> None:
+    for line in _wrap_lines(lines, stream=stream):
+        print(line, file=stream)
+
+
 def _approval_signature_payload(record: Mapping[str, Any]) -> dict[str, Any]:
     """The frozen ``{key_id}`` half of the approve/deny payload (§3.5)."""
     signature = record.get("signature") or {}
@@ -8528,66 +9832,26 @@ def _host_key_for_request(host: str, user: str, given: str) -> str:
 
 def _cmd_approvals_request(args: argparse.Namespace) -> int:
     """File the onboarding request: the card an operator will be asked to sign."""
-    from local_operator.network import approvals as approval_store
-    from local_operator.network.identity import load_or_mint
-    from local_operator.network.types import MeshRefusal
+    from local_operator.network.onboard_approvals import request_device
 
-    trio = approval_store.local_anchor_trio()
-    if trio is None:
-        raise MeshRefusal(
-            "approval_anchor_unavailable",
-            "operator authority is not set up on this machine yet, and the card has to "
-            "name the key it will install: ask Local Operator to set up operator authority "
-            "for this machine (one approval and one admin password prompt), then file the "
-            "request",
-        )
-    network_id = ""
-    if args.network:
-        network_id = _resolve(args.network).network_id
-    try:
-        asked_by_device = load_or_mint().device_id
-    except (OSError, ValueError):
-        asked_by_device = ""
-    created_at = time.time()
-    what: dict[str, Any] = {
-        "connect": True,
-        "install": True,
-        "anchor": {key: trio[key] for key in ("key_id", "spki_fp", "statement_digest")},
-        "unattended": not args.no_unattended,
-        "grant": list(args.grant) or ["approve"],
-    }
-    if network_id:
-        what["network_id"] = network_id
-        what["role"] = args.role
-    # THE KEY IS OBSERVED HERE WHEN NOT SUPPLIED (drill finding, 2026-10-03): the
-    # card the operator is asked to sign must be a card that can run — see the
-    # helper for why filing without it reproduced a failure instead of fixing it.
-    host_key_fp = _host_key_for_request(
-        args.host, str(args.user or ""), str(args.host_key_fp or "")
-    )
-    record = approval_store.create_request(
-        kind=approval_store.KIND_DEVICE_ONBOARD,
-        request_id=args.request_id or approval_store.new_request_id(),
-        requested_by={
-            "session_id": args.session,
-            "device_id": asked_by_device,
-            "surface": "cli",
-        },
-        device={
-            "device_id": args.device,
-            "name": args.name or args.host,
-            "fingerprint": args.fingerprint,
-            "host": args.host,
-            "user": args.user,
-            "transport": "ssh",
-            "host_key_fp": host_key_fp,
-        },
-        what=what,
-        credential_ref=(
-            {"kind": "ssh", "ref": args.credential_ref} if args.credential_ref else None
-        ),
-        created_at=created_at,
-        expires_at=created_at + float(args.expires),
+    record = request_device(
+        host=args.host,
+        user=args.user,
+        name=args.name,
+        device_id=args.device,
+        fingerprint=args.fingerprint,
+        host_key_fp=args.host_key_fp,
+        advertise_host=args.advertise_host,
+        network=args.network,
+        role=args.role,
+        credential_ref=args.credential_ref,
+        request_id=args.request_id,
+        session_id=args.session,
+        surface="cli",
+        unattended=not args.no_unattended,
+        grants=(tuple(args.grant) if args.grant else None),
+        network_only=bool(getattr(args, "network_only", False)),
+        expires=args.expires,
     )
     payload = {
         "ok": True,
@@ -8603,15 +9867,29 @@ def _cmd_approvals_request(args: argparse.Namespace) -> int:
 def _cmd_approvals_approve(args: argparse.Namespace) -> int:
     """Answer yes: sign the decision over the record's canonical payload."""
     from local_operator.network import approvals as approval_store
+    from local_operator.network.types import MeshRefusal
 
+    if str(args.approval).startswith("apn_"):
+        from local_operator.network import enrollment
+
+        raise MeshRefusal(enrollment.CONFIRMATION, enrollment.REMEDY)
     record = approval_store.load_record(args.approval)
+    if record.get("kind") not in approval_store.KINDS:
+        raise MeshRefusal("approval_invalid", "This build cannot approve this authority kind")
+    from local_operator.network import approval_ops
+
+    # THE ONE TYPED-OP CHECK, BEFORE THE SIGNER (S4a-core), shared with the desktop's bodiless
+    # approve. An op this verb cannot disclose refuses here; the credential ops opt in
+    # (``cli_approvable``) because the lines below print their full disclosure first.
+    approval_ops.require_generic_approvable(
+        record, str(args.approval), surface=approval_ops.SURFACE_CLI
+    )
     from local_operator.network.credentials import finite_share
 
     finite_summary = finite_share.summary(record)
+    disclosed: list[str] = []
     if finite_summary is not None:
-        # Presign intent is stderr; JSON stdout remains one complete object.
-        for disclosure_line in finite_share.details(record):
-            print(disclosure_line, file=sys.stderr)
+        disclosed = finite_share.details(record)
     from local_operator.network.credentials import inheritance
 
     # A credential PERMISSION is described from its own signed record, in full, BEFORE the
@@ -8619,8 +9897,11 @@ def _cmd_approvals_approve(args: argparse.Namespace) -> int:
     # be disclosed is never signed; the generic "onboard/anchor install" card text is not
     # what a person is approving here.
     if inheritance.intent(record) is not None:
-        for disclosure_line in inheritance.details(record):
-            print(disclosure_line, file=sys.stderr)
+        disclosed = inheritance.details(record)
+    if disclosed:
+        # Presign intent is stderr; JSON stdout remains one complete object.
+        _print_wrapped(disclosed, sys.stderr)
+        _print_file_only_notice()
     decided_at = time.time()
     # ONE signing implementation for every surface: the store's ``sign_decision``
     # (the `lop operator sign` path), so "who may approve" cannot drift between
@@ -8640,6 +9921,10 @@ def _cmd_approvals_approve(args: argparse.Namespace) -> int:
         "state": decided["state"],
         "signature": _approval_signature_payload(decided),
     }
+    if disclosed:
+        # The disclosure was printed ONCE, above, before signing (UX U5). After it: the state
+        # and the next step only -- printing the whole block again doubled the output.
+        return _emit_wrapped(args, payload, _approved_credential_lines(decided))
     return _emit(args, payload, _approval_lines(decided))
 
 
@@ -8687,6 +9972,31 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
     from local_operator.network.types import MeshRefusal
 
     verb = getattr(args, "approvals_command", None)
+    if verb == "approve-network-enrollment":
+        # Printing JSON is not disclosure/presence: validate the snapshot first,
+        # show the same scope/card, then let the existing signer ask the human.
+        record = approval_store.enrollment_snapshot(
+            args.approval, authority_version=1, scope="network_only", digest=args.request_digest
+        )
+        for line in [
+            "Network enrollment only; account logins are not shared",
+            *_approval_lines(record),
+        ]:
+            print(line, file=sys.stderr)
+        decided = approval_store.approve_network_enrollment(
+            args.approval, authority_version=1, scope="network_only", digest=args.request_digest
+        )
+        return _emit(
+            args,
+            {
+                "ok": True,
+                "approval_id": decided["approval_id"],
+                "state": decided["state"],
+                "signature": _approval_signature_payload(decided),
+            },
+            _approval_lines(decided),
+        )
+
     if verb == "list":
         rows = approval_store.list_records()
         payload = {"ok": True, "approvals": [approval_store.badge_row(row) for row in rows]}
@@ -8701,15 +10011,20 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
             if lines:
                 lines.append("")
             # A credential permission is one summary line here; its full disclosure is `show`.
-            lines.extend(
-                inheritance.list_lines(row)
-                if inheritance.intent(row) is not None
-                else _approval_lines(row)
-            )
-        return _emit(args, payload, lines or ["no approvals on this device"])
+            from local_operator.network.credentials import finite_share
+
+            if inheritance.intent(row) is not None:
+                lines.extend(inheritance.list_lines(row))
+            elif finite_share.intent(row) is not None:
+                # The same compact card as inheritance (UX U6, design D4), not the full
+                # disclosure: `show` keeps every fact.
+                lines.extend(finite_share.list_lines(row))
+            else:
+                lines.extend(_approval_lines(row))
+        return _emit_wrapped(args, payload, lines or ["no approvals on this device"])
     if verb == "show":
         record = approval_store.load_record(args.approval)
-        return _emit(args, {"ok": True, "approval": record}, _approval_lines(record))
+        return _emit_wrapped(args, {"ok": True, "approval": record}, _approval_lines(record))
     if verb == "request":
         return _cmd_approvals_request(args)
     if verb == "approve":
@@ -8795,7 +10110,16 @@ def _guard_approvals_subcommand(args: argparse.Namespace) -> int:
     act in this family.
     """
     verb = getattr(args, "approvals_command", None)
-    if verb in ("list", "show", "request", "approve", "deny", "withdraw", "run"):
+    if verb in (
+        "list",
+        "show",
+        "request",
+        "approve",
+        "approve-network-enrollment",
+        "deny",
+        "withdraw",
+        "run",
+    ):
         return _cmd_approvals(args)
     print(
         "usage: lop network approvals request --host <host> [--user U] [--json]\n"
@@ -8837,6 +10161,8 @@ def _guard_identity_subcommand(args: argparse.Namespace) -> int:
         return _cmd_identity_show(args)
     if getattr(args, "identity_command", None) == "rotate":
         return _cmd_identity_rotate(args)
+    if getattr(args, "identity_command", None) == "set-name":
+        return _cmd_identity_set_name(args)
     return _cmd_identity_show(args)
 
 
@@ -8952,6 +10278,8 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
 
     verb = str(getattr(args, "mcp_command", None) or "state")
     root = config_dir()
+    if verb == "credentials":
+        return _cmd_mcp_credentials(args, root)
     if verb == "push":
         peer = str(getattr(args, "peer", "") or "")
         # One request, two spellings: an absent `--peer` with `--all-peers` and an
@@ -9035,6 +10363,736 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
     return _emit(args, {"ok": True, "servers": rows}, lines)
 
 
+def _mcp_server_shape(server: Mapping[str, Any]) -> str:
+    """The design's per-server credential shape: oauth | header-ref | env-ref | none.
+
+    OAuth wins because its material is brokered and must never be copied; for a
+    server that ALSO declares references the grant loop still runs (a server can
+    need a client id in ``env`` beside its OAuth token), so the label orders the
+    display, it does not suppress work. Header ahead of env: a remote server's
+    header is the credential that gates the connection, while its env is usually
+    supporting configuration.
+    """
+    refs = [ref for ref in server.get("refs") or [] if isinstance(ref, Mapping)]
+    fields = {
+        str(binding.get("field") or "")
+        for ref in refs
+        for binding in ref.get("bindings") or []
+        if isinstance(binding, Mapping)
+    }
+    transport = str(server.get("transport") or "")
+    if transport in ("http", "sse") and server.get("auth_declared"):
+        return "oauth"
+    if "headers" in fields:
+        return "header-ref"
+    if "env" in fields:
+        return "env-ref"
+    return "none"
+
+
+def _repair_targets(document: Any, record: Any, server: Mapping[str, Any]) -> list[str]:
+    """The active device members a server's reference names are granted to.
+
+    HTTP/SSE: the devices that ALREADY hold that server's ``mcp:<url>`` key, so a
+    grant here WIDENS an existing authorisation rather than inventing one. Stdio:
+    every active device member. In BOTH cases the §1.3 credential-eligibility gate
+    still applies (``kind != pool`` and role drive/admin, the population
+    ``step_provision`` provisions): a ``read`` holder was approved to BORROW a
+    brokered access token, not to receive a class-2 value copy, and a pool member
+    declares no credentials at all. The owner itself is included when it passes
+    the same gate; a grant to self is the document's normal shape.
+    """
+    from local_operator.network.credentials.types import credential_key_for_mcp
+
+    transport = str(server.get("transport") or "")
+    url = str(server.get("url") or "")
+    candidates: list[str]
+    if transport in ("http", "sse") and url:
+        entry = document.entry(credential_key_for_mcp(url))
+        if entry is not None:
+            candidates = [holder.device for holder in entry.holders]
+        else:
+            # NO BROKERED KEY EXISTS for this server (a header/env-only server
+            # such as slack): there is no holder population to widen, so the
+            # reference copies go to the population provisioning would use.
+            candidates = [str(member.device_id) for member in record.active_members()]
+    else:
+        candidates = [str(member.device_id) for member in record.active_members()]
+    targets: list[str] = []
+    for device in candidates:
+        member = record.member(device)
+        if member is None or not member.active or str(member.kind) != "device":
+            continue
+        if str(member.role) not in ("drive", "admin"):
+            continue
+        if device not in targets:
+            targets.append(device)
+    return targets
+
+
+def _cmd_mcp_credentials(args: argparse.Namespace, root: Path) -> int:
+    """``lop network mcp credentials [--adopt] [--repair]`` — the owner-side half.
+
+    WHY A SEPARATE VERB. The definitions channel carries names, never values, and
+    the placement/copy machinery only follows names that exist as references. A
+    literal in ``mcp.json`` is therefore invisible end to end: no needs row, no
+    grant, no copy. ``--adopt`` makes it visible at the source; ``--repair`` then
+    fixes the shares for members that were approved BEFORE the reference existed.
+    Nothing here dials a member — the copies ride the existing sync announce.
+
+    Output is names and counts only; a value never reaches a line or ``--json``.
+    """
+    from local_operator.mcp.credential_sources import (
+        CredentialAdoptionError,
+        adopt_literal_credentials,
+    )
+
+    receipt: dict[str, Any] = {
+        "adopted": [],
+        "reused": [],
+        "conflicts": [],
+        "skipped": [],
+    }
+    error = ""
+    adopt = bool(getattr(args, "adopt", False)) or bool(getattr(args, "repair", False))
+    if adopt:
+        try:
+            receipt = adopt_literal_credentials(root)
+        except CredentialAdoptionError as exc:
+            # The message is bounded and value-free by construction.
+            error = str(exc)
+    adopted = len(receipt.get("adopted") or [])
+    conflicts = len(receipt.get("conflicts") or [])
+    lines: list[str] = []
+    if adopted or conflicts:
+        lines.append(
+            f"{adopted} MCP credentials adopted into the encrypted store; {conflicts} conflicts"
+        )
+    payload: dict[str, Any] = {"ok": not error, **receipt}
+    if error:
+        payload["error"] = error
+
+    if not bool(getattr(args, "repair", False)):
+        if not lines:
+            lines = ["no literal MCP credentials to adopt"]
+        return _emit(args, payload, lines)
+
+    from local_operator.network import identity as identity_mod
+    from local_operator.network import readiness as readiness_mod
+    from local_operator.network import store as network_store
+    from local_operator.network.credentials import placement as placement_mod
+    from local_operator.network.credentials import sync as sync_mod
+    from local_operator.network.credentials.types import credential_key_for_secret
+
+    fact = readiness_mod.mcp_servers_fact(root)
+    servers = [row for row in fact.get("servers") or [] if isinstance(row, Mapping)]
+    identity = identity_mod.load()
+    records = network_store.list_networks(root)
+    grants: dict[tuple[str, str], set[str]] = {}
+    skipped_rows: list[dict[str, str]] = []
+    names_by_server: dict[str, list[str]] = {}
+    shapes: dict[str, str] = {}
+    for server in servers:
+        name = str(server.get("name") or "")
+        if not name:
+            continue
+        shapes[name] = _mcp_server_shape(server)
+        names_by_server[name] = [
+            str(ref.get("id")) for ref in server.get("refs") or [] if isinstance(ref, Mapping)
+        ]
+    # THE OAUTH KEYS (real-node QA): a device approved before a login has no
+    # ``mcp:<url>`` row, so it cannot borrow even though the owner's grant is
+    # healthy. ``--repair`` grants the brokered key alongside the references, to
+    # the same eligible population. A DEAD owner grant is still granted on
+    # purpose: the holder's borrow returns ``interactive_required`` and the
+    # status renders "sign in again on <owner>", which is the honest remedy —
+    # refusing to share would leave the holder with no diagnosis at all.
+    oauth_keys: dict[str, str] = {}
+    try:
+        from local_operator.mcp.auth import McpTokenStorage, server_has_stored_grant
+        from local_operator.network.credentials.types import credential_key_for_mcp
+        from local_operator.providers.auth_store import AuthStore
+
+        database = root / "auth.db"
+        auth_store = AuthStore(db_path=database, config_dir=root) if database.exists() else None
+        for server in servers:
+            name = str(server.get("name") or "")
+            url = str(server.get("url") or "")
+            if not name or not url or shapes.get(name) != "oauth":
+                continue
+            if auth_store is None:
+                continue
+            # HEALTHY OR DEAD, NOT "USABLE". A tombstoned grant is still a grant
+            # this owner holds and can be asked to re-login for: the holder's
+            # borrow then answers ``interactive_required`` and the status says
+            # "sign in again on <owner>", which is the remedy. The usable test
+            # (``server_has_stored_grant``) would silently withhold the share and
+            # leave the holder with no diagnosis. A registration-only or emptied
+            # row is neither, so it still produces no share.
+            if (
+                server_has_stored_grant(url, auth_store)
+                or McpTokenStorage(url, auth_store).grant_is_dead()
+            ):
+                oauth_keys[name] = credential_key_for_mcp(url)
+    except Exception:  # noqa: BLE001 — no grant check means no oauth keys this run
+        oauth_keys = {}
+
+    all_keys_by_server: dict[str, list[str]] = {
+        name: [credential_key_for_secret(ref) for ref in ref_names]
+        + ([oauth_keys[name]] if name in oauth_keys else [])
+        for name, ref_names in names_by_server.items()
+    }
+    # WHICH SERVERS THIS DEVICE OWNS AT LEAST ONE KEY OF. That — not "has a local
+    # copy" — is what separates an owner row from a member row: a member holds
+    # copies of a peer's keys and must still be described by the status pass.
+    owned_here: set[str] = set()
+    # Keys whose placement row names a PEER as owner: the presence of at least
+    # one of these is what makes the row a MEMBER row. Without it, "owns nothing"
+    # is also true of an owner that has not signed in yet, and that row must keep
+    # the owner-side note.
+    peer_shared_here: set[str] = set()
+    for record in sorted(records, key=lambda item: item.network_id):
+        self_device = str(getattr(identity, "device_id", "") or record.self_device_id or "")
+        if not self_device:
+            skipped_rows.append({"server": "", "key": "", "device": "", "reason": "no_identity"})
+            continue
+        state = sync_mod.SyncState.load(record.network_id, root)
+        with placement_mod.mutate(
+            record.network_id, root=root, self_device=self_device
+        ) as document:
+            for name, keys_here in all_keys_by_server.items():
+                for key in keys_here:
+                    entry_here = document.entry(key)
+                    if entry_here is None:
+                        continue
+                    if str(entry_here.owner_device) == self_device:
+                        owned_here.add(name)
+                    else:
+                        peer_shared_here.add(name)
+            for server in servers:
+                name = str(server.get("name") or "")
+                ref_names = names_by_server.get(name) or []
+                oauth_key = oauth_keys.get(name, "")
+                if not name or not (ref_names or oauth_key):
+                    continue
+                keys = [credential_key_for_secret(ref_name) for ref_name in ref_names]
+                if oauth_key:
+                    keys.append(oauth_key)
+                allowed: list[str] = []
+                for key in keys:
+                    if state.mark_for(key) == sync_mod.MARK_LOCAL_ONLY:
+                        skipped_rows.append(
+                            {"server": name, "key": key, "device": "", "reason": "local_only"}
+                        )
+                        continue
+                    allowed.append(key)
+                if not allowed:
+                    continue
+                for device in _repair_targets(document, record, server):
+                    granted, skipped = placement_mod.grant_key_set(
+                        document,
+                        device=device,
+                        keys=allowed,
+                        config=root,
+                        self_device=self_device,
+                        owner_name=str(getattr(identity, "name", "") or ""),
+                    )
+                    for key in granted:
+                        grants.setdefault((name, key), set()).add(device)
+                    for row in skipped:
+                        skipped_rows.append(
+                            {
+                                "server": name,
+                                "key": str(row.get("key") or ""),
+                                "device": device,
+                                "reason": str(row.get("reason") or "refused"),
+                            }
+                        )
+
+    # THE MEMBER HALF (design §4). Run in addition to the owner pass: a device
+    # can hold shares from a peer and share its own keys at the same time, and
+    # each server is decided per KEY by ``_held_by_peer`` — a server this device
+    # owns never enters the member path.
+    member = _member_repair_receipt(root, servers) if bool(getattr(args, "repair", False)) else {}
+    states = _credential_states(root)
+    rows: list[dict[str, Any]] = []
+    for server in servers:
+        name = str(server.get("name") or "")
+        if not name:
+            continue
+        shape = shapes.get(name, "none")
+        key_rows = [
+            {"key": key, "devices": sorted(devices), "count": len(devices)}
+            for (server_name, key), devices in sorted(grants.items())
+            if server_name == name
+        ]
+        ref_names = names_by_server.get(name) or []
+        status = states.get(name) or {}
+        # A CONFIGURED SERVER WITH NO STATUS ROW AT ALL still gets an answer: a
+        # row absent from the pass means it did not describe this name (a
+        # config/name mismatch, or an unreadable store), and a bare "unknown"
+        # with an empty reason told the operator nothing. ONLY ABSENCE is
+        # replaced — an honest "unknown" the pass actually produced (an
+        # unreadable secret store) is a fact and stays.
+        state = str(status.get("state") or "")
+        reason = str(status.get("reason") or "")
+        if not status:
+            if shape == "oauth":
+                state = "needs_operator_login"
+                reason = "no sign-in found here or on a shared device"
+            elif ref_names:
+                state, reason = "missing_source", f"missing {', '.join(ref_names[:4])}"
+            else:
+                state, reason = "synced", ""
+        # A MEMBER ROW IS ONE THIS DEVICE OWNS NOTHING OF. Its answer comes from
+        # the credential-status pass (which refs resolve, whose sign-in it
+        # borrows, why it is down); the owner-side notes below describe SHARES
+        # and would say "no eligible member holds this server yet" about a server
+        # this device in fact holds a share of.
+        # Not owned here is necessary but not sufficient: an OWNER row for a
+        # server it has no grant for yet reads ``needs_operator_login``, and
+        # turning that into a member row would suppress the owner-side note that
+        # explains it. A member row is one the status attributes to a PEER.
+        member_row = name not in owned_here and (
+            name in peer_shared_here or bool(str(status.get("owner") or ""))
+        )
+        status_refs = [item for item in status.get("refs") or [] if isinstance(item, Mapping)]
+        row: dict[str, Any] = {
+            "server": name,
+            "transport": str(server.get("transport") or ""),
+            "shape": shape,
+            # On a member, the STATUS read is the authority for which references
+            # the server declares (it reads the same user-scope config); the
+            # readiness fact can legitimately be empty for a server that arrived
+            # through the definitions mirror mid-run.
+            "refs": (
+                [str(item.get("id") or "") for item in status_refs]
+                if member_row and status_refs
+                else ref_names
+            ),
+            "grants": key_rows,
+            "skipped": _dedupe_skip_rows(
+                [row for row in skipped_rows if row.get("server") == name]
+            ),
+            # The SAME status the page renders (design §5), OVERRIDDEN by what
+            # this run's validation actually proved. Names and states only.
+            "state": state,
+            "reason": reason,
+        }
+        if member_row:
+            # The machine surface gets the presence flags too: "set" is the fact
+            # the operator needs and the names alone cannot carry it.
+            row["ref_states"] = [dict(item) for item in status_refs]
+        if name in member:
+            row["member"] = member[name]
+            verdict = _validation_state(member[name])
+            if verdict is not None:
+                proved_state, proved_reason = verdict
+                if proved_state == "not_yet_synced" and state == "needs_operator_login":
+                    # A tokenless grant on a server nothing has ever signed in
+                    # to: "never signed in" is the precise answer, and the grant
+                    # attempt adds nothing a person can act on.
+                    pass
+                else:
+                    row["state"] = proved_state
+                    # On success the status reason ("borrows from <owner>") is
+                    # still the useful sentence; a failure's own sentence wins.
+                    row["reason"] = proved_reason or row["reason"]
+        if member_row:
+            row["note"] = ""
+        elif shape == "oauth" and not key_rows and not row["skipped"]:
+            # The note describes the mcp:<url> path only. An OAuth-shaped server
+            # that ALSO declares env/header refs received real copies — or had
+            # them refused — and saying "no copy" over a granted/skipped row would
+            # hide it (the human line returns early on any note).
+            row["note"] = "brokered; no copy"
+        elif not row["refs"]:
+            row["note"] = "no referenced credentials"
+        elif not key_rows and not row["skipped"]:
+            # Nothing was granted because there is nobody to grant to. WITH a
+            # network that is a holder/eligibility gap; WITHOUT one it is not a
+            # member question at all, and "yet" would send the operator looking
+            # for a share that cannot exist.
+            row["note"] = (
+                "no eligible member holds this server yet"
+                if records
+                else "not in a network; nothing to repair"
+            )
+        else:
+            row["note"] = ""
+        rows.append(row)
+        lines.append(_render_mcp_credential_row(row))
+    if error:
+        lines.append(f"adoption did not complete: {error}")
+    if not rows:
+        lines.append("no user-scope MCP servers on this device")
+    payload["servers"] = rows
+    # Rows that belong to no server (the device has no identity to declare keys
+    # with) would otherwise disappear; expose them once, names only.
+    unmatched = [row for row in skipped_rows if not row.get("server")]
+    if unmatched:
+        payload["unmatched"] = unmatched
+    return _emit(args, payload, lines)
+
+
+def _credential_states(root: Path) -> dict[str, dict[str, Any]]:
+    """The per-server status rows for this device, from ONE read-only pass.
+
+    The same function ``/mcp`` and the catalog use, so the CLI cannot describe a
+    server differently from the page the operator is looking at. Merely printing
+    status must never be the reason a repair fails, hence the swallow.
+    """
+    try:
+        from local_operator.mcp.credential_status import server_states
+
+        # ``root`` as the cwd: this verb repairs the USER-SCOPE document
+        # (``readiness.mcp_servers_fact`` reads exactly that file), and the rows
+        # it prints must describe the same servers. A project-scope server is
+        # cwd-dependent and is not what this command shares or repairs.
+        return server_states(str(root), base=root)
+    except Exception:  # noqa: BLE001 — a status read is not part of the repair
+        return {}
+
+
+def _direct_copy_pull(root: Path, key: str) -> dict[str, Any]:
+    """Pull one copy WITHOUT the relay's new local op — the downgrade path.
+
+    WHY: a branch CLI can meet a relay that predates ``credential_sync_pull`` (the
+    live 0.82.3 node is exactly that). Refusing the repair there would mean an
+    operator cannot fix a member without first replacing the relay, which is not
+    the deployment the branch is meant to work against. So the CLI builds a
+    relay object that is NEVER STARTED (no listener, no control socket) purely as
+    a dialer, asks the owner itself, and applies through the same engine.
+
+    BOUNDED AND LOCAL: ``pull_copy_sync`` refuses without a dial when this device
+    is not a holder or owns the key, so a zero-peer device and an own key never
+    open a socket. The one link this may open is closed before returning.
+    """
+    from local_operator.network import relay as relay_mod
+    from local_operator.network.credentials import client as client_mod
+
+    server = None
+    try:
+        # ``RelayServer`` binds nothing until ``start()``; constructing it is how
+        # this process gets the mesh's ONE handshake/dial implementation instead
+        # of a second one written here (``_ask_owner_directly`` states the same
+        # rule on the client side).
+        server = relay_mod.RelayServer(root=root)
+        client = client_mod.MeshCredentialClient.for_this_device(root, relay=server)
+        if client is None:
+            return {"ok": False, "state": "unknown", "code": "no_placement"}
+        return client.pull_copy_sync(key)
+    except Exception as exc:  # noqa: BLE001 — reported per key, never fatal
+        return {"ok": False, "state": "unknown", "code": exc.__class__.__name__}
+    finally:
+        if server is not None:
+            for link in list(getattr(server, "links", {}).values()):
+                try:
+                    link.close("cli-pull-done")
+                except Exception:  # noqa: BLE001 — teardown must not mask the result
+                    pass
+
+
+def _member_repair_receipt(
+    root: Path, servers: Sequence[Mapping[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """The MEMBER half of ``--repair``: pull placement, copies, and one grant.
+
+    Why this is not the owner loop: on a member the missing thing is not a share
+    to grant but a share that has not ARRIVED (design §4). Each step is bounded
+    and run ONCE per key; a revoked or missing placement is reported, never
+    retried, because the only remedy is on the owner's side.
+
+    No value is stored, printed or carried in a receipt. ``credential_sync_pull``
+    writes the copy inside the relay process and answers ``{ok, state, code}``;
+    ``credential_grant`` answers a grant detail (or a refusal), of which this
+    function reads only ``kind`` and whether ``access_token`` is non-empty — the
+    token itself is never kept, printed or logged.
+    """
+    from local_operator.mcp.credentials import credential_source
+    from local_operator.network.credentials import mcp_state
+    from local_operator.network.credentials.placement import PlacementDocument
+    from local_operator.network.credentials.types import (
+        credential_key_for_mcp,
+        credential_key_for_secret,
+    )
+    from local_operator.network.types import MeshRefusal
+
+    out: dict[str, dict[str, Any]] = {}
+
+    def _refusal_code(exc: BaseException) -> str:
+        return str(getattr(exc, "code", "") or exc.__class__.__name__)
+
+    # 1. PLACEMENT FIRST. Without this the rest reads a document from whenever the
+    #    device last pulled, so a share that just landed would be invisible.
+    placement_error = ""
+    try:
+        _relay_answer("credential_placement", timeout=_listing_timeout())
+    except Exception as exc:  # noqa: BLE001 — reported per server, never fatal
+        placement_error = _refusal_code(exc)
+
+    # Read the merged documents back LOCALLY: the pull wrote files, and the CLI is
+    # a different process from the relay that wrote them.
+    entries: dict[str, tuple[str, Any]] = {}
+    try:
+        from local_operator.network import identity as identity_mod
+        from local_operator.network import store as network_store
+
+        identity = identity_mod.load()
+        for record in network_store.list_networks(root):
+            document = PlacementDocument.load(
+                record.network_id, root, self_device=str(record.self_device_id or "")
+            )
+            for key, entry in document.entries.items():
+                entries.setdefault(key, (record.network_id, entry))
+        self_device = str(getattr(identity, "device_id", "") or "")
+    except Exception:  # noqa: BLE001 — no placement means "nothing to pull"
+        self_device = ""
+
+    def _held_by_peer(key: str) -> tuple[str, Any] | None:
+        found = entries.get(key)
+        if found is None:
+            return None
+        _network_id, entry = found
+        owner = str(getattr(entry, "owner_device", "") or "")
+        if not owner or owner == self_device:
+            return None
+        try:
+            if not entry.is_holder(self_device):
+                return None
+        except Exception:  # noqa: BLE001 — a malformed entry is not permission
+            return None
+        return found
+
+    for server in servers:
+        name = str(server.get("name") or "")
+        if not name:
+            continue
+        receipt: dict[str, Any] = {"pulled": [], "grant": {}, "error": placement_error}
+        url = str(server.get("url") or "")
+        oauth_key = credential_key_for_mcp(url) if url else ""
+        # A server this device OWNS has nothing to pull; the owner path above
+        # already handled it. The entry check below is what decides that.
+
+        # 2. REFERENCE COPIES, only for a key the local store does NOT hold and a
+        #    PEER owns. ``credential_source`` is the same read-only answer the
+        #    status rows use.
+        for ref in server.get("refs") or []:
+            if not isinstance(ref, Mapping):
+                continue
+            ref_id = str(ref.get("id") or "")
+            if not ref_id or credential_source(ref_id, root) == "encrypted":
+                continue
+            key = credential_key_for_secret(ref_id)
+            if _held_by_peer(key) is None:
+                continue
+            try:
+                detail = _relay_answer("credential_sync_pull", timeout=30.0, credential_key=key)
+            except MeshRefusal as exc:
+                if exc.code in ("relay_unavailable", "unknown_op"):
+                    # AN OLD RELAY IS NOT A DEAD END (see ``_direct_copy_pull``).
+                    result = _direct_copy_pull(root, key)
+                    receipt["pulled"].append({"key": key, **result})
+                    receipt["fallback"] = True
+                    continue
+                receipt["pulled"].append({"key": key, "ok": False, "code": exc.code})
+                continue
+            except Exception as exc:  # noqa: BLE001 — one key never aborts the rest
+                receipt["pulled"].append({"key": key, "ok": False, "code": _refusal_code(exc)})
+                continue
+            receipt["pulled"].append(
+                {
+                    "key": key,
+                    "ok": bool(detail.get("ok")),
+                    "state": str(detail.get("state") or ""),
+                    "code": str(detail.get("code") or ""),
+                }
+            )
+
+        # 3. ONE GRANT, to validate an OAuth share and (on success) clear the
+        #    refusal evidence the failure had recorded. ``serve_grant`` records
+        #    its own refusal/success evidence in the relay process; this call
+        #    exists so a member can prove the borrow works without an agent turn.
+        if oauth_key:
+            found = _held_by_peer(oauth_key)
+            if found is not None:
+                network_id, _entry = found
+                try:
+                    detail = _relay_answer(
+                        "credential_grant",
+                        timeout=60.0,
+                        credential_key=oauth_key,
+                        provider="mcp-oauth",
+                    )
+                except MeshRefusal as exc:
+                    receipt["grant"] = {
+                        "ok": False,
+                        "code": exc.code,
+                        "owner": str(getattr(_entry, "owner_device", "") or ""),
+                        "owner_name": str(getattr(_entry, "owner_device_name", "") or ""),
+                    }
+                except Exception as exc:  # noqa: BLE001 — reported, not raised
+                    receipt["grant"] = {
+                        "ok": False,
+                        "code": _refusal_code(exc),
+                        "owner": str(getattr(_entry, "owner_device", "") or ""),
+                        "owner_name": str(getattr(_entry, "owner_device_name", "") or ""),
+                    }
+                else:
+                    # A GRANT WITH NO TOKEN IS NOT A SUCCESS (measured: gitlab
+                    # rendered "synced" beside a status pass that said no sign-in
+                    # existed). The broker answered the shape but handed over
+                    # nothing that could open a connection, so the validation
+                    # proved the borrow does NOT work; the code says why.
+                    ok = str(detail.get("kind") or "") == "grant" and bool(
+                        str(detail.get("access_token") or "").strip()
+                    )
+                    code = "" if ok else str(detail.get("code") or "")
+                    if not ok and not code:
+                        code = "no_token"
+                    receipt["grant"] = {
+                        "ok": ok,
+                        "code": code,
+                        # The owner the borrow went to. The status reason has to
+                        # NAME the device a person must sign in on, and the relay
+                        # answer carries no such field.
+                        "owner": str(getattr(_entry, "owner_device", "") or ""),
+                        "owner_name": str(getattr(_entry, "owner_device_name", "") or ""),
+                    }
+                    if ok:
+                        mcp_state.record(
+                            network_id,
+                            oauth_key,
+                            state="synced",
+                            owner_device=str(getattr(_entry, "owner_device", "") or ""),
+                            owner_name=str(getattr(_entry, "owner_device_name", "") or ""),
+                            root=root,
+                        )
+                # THE FAILURE IS PERSISTED, not only printed. ``/mcp`` and the
+                # catalog read ``credential_status``, not this row, so without
+                # this write they would keep saying "synced — borrows from X"
+                # for a share the broker just refused (design §5: one function,
+                # every surface).
+                _persist_failed_validation(root, network_id, oauth_key, receipt["grant"])
+        out[name] = receipt
+    return out
+
+
+def _dedupe_skip_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """One row per (key, device, reason): the same server may be repaired in more
+    than one network, and a duplicated line would read as two separate refusals."""
+    seen: set[tuple[str, str, str]] = set()
+    out: list[dict[str, str]] = []
+    for row in rows:
+        identity = (
+            str(row.get("key") or ""),
+            str(row.get("device") or ""),
+            str(row.get("reason") or ""),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        out.append(row)
+    return out
+
+
+def _persist_failed_validation(
+    root: Path, network_id: str, key: str, grant: Mapping[str, Any]
+) -> None:
+    """Write a failed validation into the durable, value-free evidence document.
+
+    The status vocabulary differs from the CLI's: an unreachable owner is stored
+    as ``unavailable`` (the evidence word set) and rendered as ``not_yet_synced``.
+    An unclassified code writes nothing — a vague newer answer must not replace a
+    precise older one (the same rule ``client._remember_evidence`` follows).
+    ``mcp_state.record`` never raises: a bookkeeping failure must not fail a repair.
+    """
+    from local_operator.network.credentials import mcp_state
+
+    if not grant or grant.get("ok"):
+        return
+    code = str(grant.get("code") or "")
+    state = mcp_state.state_for_code(code)
+    if not state and code in ("unavailable", "owner_unreachable"):
+        state = "unavailable"
+    if not state:
+        return
+    mcp_state.record(
+        network_id,
+        key,
+        state=state,
+        code=code,
+        owner_device=str(grant.get("owner") or ""),
+        owner_name=str(grant.get("owner_name") or ""),
+        root=root,
+    )
+
+
+def _validation_state(receipt: Mapping[str, Any]) -> tuple[str, str] | None:
+    """The row state the member VALIDATION proved, or ``None`` when it ran not.
+
+    WHY THIS OUTRANKS THE STATUS PASS: the status pass answers from stores and a
+    holder row — it can say "synced, borrows from X" for a share whose owner just
+    refused the refresh (verified on cloud-node-1: cloudflare and minerva-qa
+    rendered ``synced`` while ``member.grant`` said ``interactive_required``).
+    A validation that actually asked the broker is the newer, stronger fact, so
+    a failed one may NEVER render ``synced``.
+    """
+    grant = receipt.get("grant") if isinstance(receipt, Mapping) else None
+    if not isinstance(grant, Mapping) or not grant:
+        return None
+    owner = str(grant.get("owner_name") or grant.get("owner") or "")
+    who = owner or "the owner"
+    code = str(grant.get("code") or "")
+    if grant.get("ok"):
+        # A validation that succeeded is a BORROW, and saying whose sign-in it
+        # used is the useful sentence; the status pass may still be answering
+        # "no sign-in found" from before the borrow (gitlab did exactly that).
+        return ("synced", f"borrows from {owner}" if owner else "")
+    if code == "no_token":
+        return ("not_yet_synced", "the broker returned a grant with no token")
+    if code in ("interactive_required", "refresh_failed"):
+        return ("expired", f"{who}: sign in again")
+    if code in ("not_a_holder", "not_a_member", "revoked", "member_not_active"):
+        return ("revoked", f"{who}: access was revoked; ask its owner for a new share")
+    if code in ("unavailable", "owner_offline", "owner_unreachable"):
+        return (
+            "not_yet_synced",
+            f"the owner is unreachable{' (' + owner + ')' if owner else ''}; try again later",
+        )
+    # AN UNCLASSIFIED FAILURE IS NEVER "synced". It is also not a verdict about
+    # the credential: say the share has not been proved to work, with the code.
+    return ("not_yet_synced", f"not yet synced ({code})" if code else "not yet synced")
+
+
+def _render_mcp_credential_row(row: Mapping[str, Any]) -> str:
+    """One bounded human line per server; names and counts only.
+
+    The status tail is the SAME state/reason the page shows. ``synced`` with no
+    reason is the ordinary case and prints nothing, so an owner-side row reads
+    exactly as it did before this half existed.
+    """
+    name = str(row.get("server") or "")
+    transport = str(row.get("transport") or "")
+    shape = str(row.get("shape") or "none")
+    note = str(row.get("note") or "")
+    grants = [item for item in row.get("grants") or [] if isinstance(item, Mapping)]
+    state = str(row.get("state") or "")
+    reason = str(row.get("reason") or "")
+    tail = ""
+    if reason:
+        tail = f"; {state}: {reason}" if state and state != "synced" else f"; {reason}"
+    elif state and state != "synced":
+        tail = f"; {state}"
+    if note:
+        return f"{name} ({transport}, {shape}): {note}{tail}"
+    skipped = len([item for item in row.get("skipped") or [] if isinstance(item, Mapping)])
+    if not grants:
+        return f"{name} ({transport}, {shape}): no grant; {skipped} skipped{tail}"
+    granted = ", ".join(f"{item.get('key')} to {item.get('count')}" for item in grants)
+    return f"{name} ({transport}, {shape}): granted {granted}; {skipped} skipped{tail}"
+
+
 _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "init": _cmd_init,
     "invite": _cmd_invite,
@@ -9054,7 +11112,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "serve": _cmd_serve,
     "start": _cmd_service("start"),
     "stop": _cmd_service("stop"),
-    "restart": _cmd_service("restart"),
+    "restart": _cmd_restart,
     "status": _cmd_status,
     "disconnect": _cmd_disconnect,
     "panic": _cmd_panic,
@@ -9067,6 +11125,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     # The single-peer update: the asking half only (meshupdate.py).
     "update": _cmd_update,
     "identity": _guard_identity_subcommand,
+    "install": _cmd_install,
     "uninstall": _cmd_uninstall,
     # ``credential`` has a sub-verb, so it needs the same "tell me what you meant"
     # guard ``member`` and ``identity`` have: running bare `lop network credential`

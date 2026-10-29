@@ -43,7 +43,9 @@ class FastSession(FakeSession):
     def model(self) -> Any:
         return self._spec
 
-    def set_model(self, model: Any, *, explicit: bool = False) -> None:
+    def set_model(
+        self, model: Any, *, explicit: bool = False, effort_choice: object = None
+    ) -> None:
         self._spec = model
 
 
@@ -314,7 +316,9 @@ class PublishingFastSession(FastSession):
     def subscribe_frontend(self, handler: Any) -> Any:
         return self._store.subscribe(handler)
 
-    def set_model(self, model: Any, *, explicit: bool = False) -> None:
+    def set_model(
+        self, model: Any, *, explicit: bool = False, effort_choice: object = None
+    ) -> None:
         self._spec = model
         self._store.mutate(selected_model=model, effective_model=model)
 

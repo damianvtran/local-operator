@@ -143,49 +143,30 @@ def usage_prices_known(usage: Any) -> bool:
     return _usage_cost(usage) is not None
 
 
-def inference_billing_labels(provider: str, usd_cost: float | None) -> tuple[str, str]:
-    """``(billing_basis, cost_source)`` for ONE inference call (PR-3, §3.4).
+def inference_billing_labels(
+    provider: str, usd_cost: float | None, *, credential_kind: str | None = None
+) -> tuple[str, str]:
+    """Payment relationship for one call, using its dispatched credential.
 
-    Called at RECORD time, with the provider id BEFORE
-    ``credential_provider_id`` collapses login flavours (``openai-device`` into
-    ``openai``): the raw id is the only place the two billing worlds are
-    distinguishable, and collapsing first is how a ChatGPT-plan call would
-    have been labelled as a metered OpenAI bill.
-
-    The three rules, in order:
-
-    - a SUBSCRIPTION-flavoured provider id (``openai``, ``openai-device``,
-      ``xai-oauth``, ``zai``, ``zai-oauth``, ``alibaba-token-plan``,
-      ``alibaba-token-plan-oauth`` — ``providers.registry``
-      ``SUBSCRIPTION_LOGIN_FLAVOURS`` is the ONE list) spends quota, not
-      dollars, so the figure is the client rate table's API-EQUIVALENT: basis
-      ``subscription_api_equivalent``, source ``catalogue``;
-    - a provider-reported receipt (``usd_cost``) IS the provider's own
-      statement: basis ``billed``, source ``provider_reported``;
-    - otherwise the figure is derived from the client's published rate table,
-      which the contract's own vocabulary calls ``billed`` (a figure derived
-      from a published rate), source ``catalogue``.
-
-    A caller with no price at all still records the call — pricing decides
-    knowledge later — so these labels describe the BILLING RELATIONSHIP and
-    never claim an amount. Rows from before the columns existed read
-    ``not_tracked``/``none`` from the schema default; they are not relabelled
-    here.
-
-    KNOWN LIMIT, said out loud rather than guessed around: ``anthropic`` and
-    ``kimi`` serve both a subscription sign-in and a plain API key under ONE
-    provider id, and a call records no credential kind, so their calls take
-    the metered reading. Threading the credential kind to the recorder is a
-    follow-up; labelling every Claude call ``subscription_api_equivalent``
-    would be the worse error.
+    Plan keys remain plan-funded; explicit API keys override the dual-mode
+    OpenAI legacy default. Unstamped callers retain historical defaults, but
+    calls carrying a credential kind close the Anthropic/Kimi ambiguity.
+    A subscription amount is a catalogue equivalent, never a cash receipt.
     """
-    from local_operator.providers.registry import subscription_login_flavour
+    from local_operator.providers.registry import (
+        PLAN_ONLY_PROVIDER_IDS,
+        subscription_login_flavour,
+    )
 
-    if subscription_login_flavour(provider):
+    provider = str(provider or "").strip().lower()
+    plan = (
+        credential_kind == "oauth"
+        or (credential_kind == "api_key" and provider in PLAN_ONLY_PROVIDER_IDS)
+        or (credential_kind is None and subscription_login_flavour(provider))
+    )
+    if plan:
         return BASIS_SUBSCRIPTION, "catalogue"
-    if usd_cost is not None:
-        return BASIS_BILLED, "provider_reported"
-    return BASIS_BILLED, "catalogue"
+    return BASIS_BILLED, "provider_reported" if usd_cost is not None else "catalogue"
 
 
 def price_call(provider: str, model_id: str, usage: Any) -> tuple[int, bool]:

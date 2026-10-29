@@ -90,14 +90,19 @@ from local_operator import keymap as keymap_mod
 from local_operator import terminals
 from local_operator.i18n.keys import tui_status, tui_welcome
 from local_operator.i18n.messages import Msg
-from local_operator.i18n.text import register_refresh, tr
+from local_operator.i18n.text import register_refresh, tr_record
 from local_operator.providers.login_catalog import RECOMMENDED_LOGIN
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import animation_focused, motion_enabled
+from local_operator.tui.i18n_status import (
+    display_tr,
+    localized_display,
+    technical_display,
+)
 from local_operator.tui.link_targets import _URL_START_RE, _body_end, _trim
 from local_operator.tui.quota_notice import QuotaNoticeLine, quota_notice_line
 from local_operator.tui.widgets.status_line import format_model_label
-from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
+from local_operator.tui.widgets.transcript import NOTICE_GLYPHS, wrap_cells
 
 # ---------------------------------------------------------------------------
 # Catalogued copy: resolved through the i18n runtime (RFC §2.2/§3.1)
@@ -123,11 +128,43 @@ from local_operator.tui.widgets.transcript import NOTICE_GLYPHS
 # from the resolved strings, so every cell-length claim in this file is
 # measured on exactly the text a user reads; the en-only context sidecar
 # (`tui.welcome.context.json`) carries the per-entry maxCells contract.
-_t = tr("tui.welcome")
+#: Commands authored INSIDE translated welcome prose. Each is an LTR island in
+#: its sentence; the real `ur` catalogue embeds them (`/network new <name>`,
+#: `/login {provider}`, `/model <provider>/<id>`), and without the declaration an
+#: RTL paragraph re-orders the command into gibberish (QA round 2, Q-6).
+_WELCOME_COMMANDS = (
+    "/update",
+    "/approvals <ask|auto>",
+    "/network new <name>",
+    "/model <provider>/<id>",
+    "/team <name> <message>",
+    "/fork <message>",
+    "/fork",
+    "/resume",
+    "/settings",
+    "lop login <radient|typesafe|openrouter>",
+    "lop config edit classification.auto false",
+)
+
+_t = display_tr(
+    "tui.welcome",
+    # `version` is the update release. The login remedy is a COMMAND TEMPLATE:
+    # `/login {provider}` must be one island, never two neighbours (RTL prose
+    # orders neighbouring LTR runs right-to-left, rendering `radient /login`).
+    technical_params=("version",),
+    technical_literals=_WELCOME_COMMANDS,
+    technical_commands=("/login {provider}",),
+)
+#: Raw counterpart for rows that WRAP: an isolate must not straddle a fold,
+#: so the sentence is wrapped first and each final line is projected once.
+_record = tr_record("tui.welcome")
+
+
 #: The status namespace (T2): the model row's state words are catalogued with the
 #: band's, because the two surfaces MUST agree on them (D1) — a single key
 #: resolved here and by ``status_line`` is how they cannot drift.
-_s = tr("tui.status")
+_s = display_tr("tui.status")
+
 
 #: The real local-operator mark, downsampled from the shipped raster asset
 #: (``static/local-operator-icon-2-light-clear.png``, also the app icon in
@@ -1209,16 +1246,38 @@ def _status_rows(info: WelcomeInfo, width: int) -> list[tuple[int, Text]]:
     rows.append((_PRIORITY_MODEL, Text(label, style=muted, no_wrap=True)))
     if info.cwd:
         shown = _fit_tail(_shorten_home(info.cwd), width)
-        rows.append((_PRIORITY_CWD, Text(shown, style=dim, no_wrap=True)))
+        rows.append((_PRIORITY_CWD, Text(technical_display(shown).plain, style=dim, no_wrap=True)))
     if info.update_available:
-        # Same glyph/tint as the other ``!`` rows. The command is dropped
-        # WHOLE when it does not fit — a half-printed ``/upd…`` is an
-        # instruction nobody can follow, same rule as the login warning.
+        # Same glyph/tint as the other ``!`` rows. The command is never
+        # HALF-printed — a ``/upd…`` is an instruction nobody can follow — but
+        # it is also never silently dropped for one locale when the other keeps
+        # it at the same width (design round 1, D2). The sentence WRAPS instead:
+        # every row is whole, and ``/update`` survives in both languages.
         glyph = NOTICE_GLYPHS["warning"]
-        body = f"{glyph} {_t(tui_welcome.status_update(version=info.update_available))}"
-        if cell_len(body) > width:
-            body = f"{glyph} {_t(tui_welcome.status_update_short(version=info.update_available))}"
-        rows.append((_PRIORITY_UPDATE, Text(body, style=warn, no_wrap=True)))
+        record = _record(tui_welcome.status_update(version=info.update_available))
+        # The glyph stays OUTSIDE the projection, exactly as the notice row
+        # prefixes its own: inside an RLI it resolves to the RIGHT edge (the
+        # M-2 class of defect), where a status marker belongs at the left.
+        wrapped = wrap_cells(record.text, max(1, width))
+        if cell_len(wrapped[0]) + cell_len(glyph) + 1 > width:
+            # Only the FIRST line pays for the glyph; the tail keeps the row.
+            head = wrap_cells(record.text, max(1, width - (cell_len(glyph) + 1)))
+            wrapped = (
+                [head[0], *wrap_cells(" ".join(head[1:]), max(1, width))] if len(head) > 1 else head
+            )
+        islands = tuple(literal for literal in (info.update_available, "/update") if literal)
+        for index, line in enumerate(wrapped):
+            # Project AFTER the fold: a line that ends mid-isolate paints an
+            # unmatched delimiter and lets the terminal re-order the rest of
+            # the screen (design round 1, D2 + review R1-2).
+            painted = localized_display(
+                line,
+                source_locale=record.source_locale,
+                technical_literals=islands,
+            ).plain
+            if index == 0:
+                painted = f"{glyph} {painted}"
+            rows.append((_PRIORITY_UPDATE, Text(painted, style=warn, no_wrap=True)))
     if info.notice:
         # KIND-AWARE GLYPH AND INK (design round 2, M2). This row used to paint
         # EVERY notice in the warning treatment — amber, `!` — so the login
@@ -1329,12 +1388,14 @@ def _hint_lines(width: int, *, setup: bool = False, aida_name: str | None = None
     # the same ragged-edge effect that was removed from inside the status stack,
     # surviving one level up.
     if not key_column:
-        return steps + [Text(key, style=key_style, no_wrap=True) for key, _ in hints]
+        return steps + [
+            Text(technical_display(key).plain, style=key_style, no_wrap=True) for key, _ in hints
+        ]
 
     lines: list[Text] = list(steps)
     for key, desc in hints:
         line = Text(no_wrap=True)
-        line.append(key.ljust(key_column), style=key_style)
+        line.append(technical_display(key.ljust(key_column)).plain, style=key_style)
         line.append(desc, style=desc_style)
         lines.append(line)
     return lines
@@ -1579,8 +1640,21 @@ def build_welcome_lines(
     # Therefore a taller terminal can only add a section; it can never trade two
     # useful rows for a larger decoration. This is intentionally boring — no
     # "refund" special case whose truth changes when the mark crosses its tier.
-    while len(status) > 1 and total() > height:
-        status.pop(min(range(len(status)), key=lambda index: status[index][0]))
+    while status and total() > height:
+        victim = min(range(len(status)), key=lambda index: status[index][0])
+        if status[victim][0] == _PRIORITY_UPDATE:
+            # The update sentence can WRAP into several rows. They are one fact,
+            # and shedding one line left a contextless tail ("/update" without
+            # the sentence) at tiny heights — the half-drawn defect this ladder
+            # exists to prevent. The group is kept whole or dropped whole.
+            remaining = [row for row in status if row[0] != _PRIORITY_UPDATE]
+            if len(remaining) == len(status):
+                break
+            status = remaining
+            continue
+        if len(status) <= 1:
+            break
+        status.pop(victim)
 
     show_hints = bool(hints)
     if total() > height:

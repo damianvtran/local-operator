@@ -59,6 +59,8 @@ ECHO_POLICY = {
     # landed there, or nothing at all when the user cancels — and both are
     # strictly more informative than echoing the typed word. `/approvals`' rule.
     "copy": False,
+    # The local read-only page is the receipt; no path reaches the model.
+    "view": False,
     # Same shape as `/copy` above and the same rule: the receipt is the browser
     # opening or a warning naming why it did not, and nothing here reaches the
     # model.
@@ -126,6 +128,17 @@ ECHO_POLICY = {
     # replaces the transcript region and takes no argument, so a user row
     # printed behind it would only be readable after leaving.
     "schedule": False,
+    # The PAGE is the receipt (same rule as `/settings` and `/review`): it
+    # replaces the transcript region, and its rows are the answer.
+    "library": False,
+    # A control command (`status` is the default), never words for the model:
+    # the receipt names the Librarian's state, and `open` switches sessions.
+    "librarian": False,
+    # Toggles one label and opens a list; neither is words for the model, and
+    # both handlers print their own receipt (`Added “…”`, the list itself).
+    "tag": False,
+    # A presentation preference plus its receipt; nothing reaches the model.
+    "tags": False,
     "sidebar": False,
     "search": False,
     "accounts": False,
@@ -179,6 +192,8 @@ ECHO_POLICY = {
     # word above them would only restate the row underneath it — and the word
     # `read` is an ACTION, not something the model is ever told.
     "notifications": False,
+    # The receipt listing's new name (decision D2): the same handler and receipt.
+    "unread": False,
     # The same rule as `/team` and `/usage`: the listing or the receipt IS the
     # answer, and nothing here is words the model is told — the project TOOL is
     # how the model writes project rows, while `/project` is the operator's own
@@ -215,6 +230,8 @@ PROMPT_POLICY = {
     # (`/copy me` and `/copy <n>` are deliberately not built — the picker is the
     # answer to "which message", and a typed selector would be a second one.)
     "copy": False,
+    # The local read-only page is the receipt; no path reaches the model.
+    "view": False,
     # Takes no argument at all, for `/copy`'s reason: WHICH url is chosen in the
     # picker the command opens, so there is nothing typed for an inline engage
     # to consume.
@@ -252,6 +269,16 @@ PROMPT_POLICY = {
     # replaces the transcript region and takes no argument, so a user row
     # printed behind it would only be readable after leaving.
     "schedule": False,
+    # Takes no argument at all, so an inline engage has nothing to consume.
+    "library": False,
+    # The verbs are a selection, and a bare `/librarian` reports status; none
+    # of them is a prompt.
+    "librarian": False,
+    # Toggles one label and opens a list; neither is words for the model, and
+    # both handlers print their own receipt (`Added “…”`, the list itself).
+    "tag": False,
+    # A presentation preference plus its receipt; nothing reaches the model.
+    "tags": False,
     "sidebar": False,
     "search": False,
     "accounts": False,
@@ -294,6 +321,7 @@ PROMPT_POLICY = {
     # like `/usage` rather than reassembling to the front and handing the model
     # the rest of the draft.
     "notifications": False,
+    "unread": False,
     # FALSE, all three, for `/notifications`' reason and one more of their own:
     # the trailing text these own is a WORD the handler reads (`yes`), never free
     # text a model is given. `/delete yes` is a confirmation, and a confirmation
@@ -884,7 +912,8 @@ async def test_session_adoption_catches_up_agent_picker_without_geometry_change(
                 # ``aida`` is new here and is CORRECT: her packaged seed is an
                 # agent profile like any other (design §2.1), so `/agent aida`
                 # attaches her instructions to a session — the completion
-                # vocabulary is the registry, and she is in it.
+                # vocabulary is the registry, and she is in it. ``librarian``
+                # joins for the same reason when the Library ships its seed.
                 "aida",
                 "architect",
                 "auditor",
@@ -893,6 +922,7 @@ async def test_session_adoption_catches_up_agent_picker_without_geometry_change(
                 "dashboard-sme",
                 "designer",
                 "hollow-role",
+                "librarian",
                 "manager",
                 # Packaged QA is now addressable just like the other starters.
                 "qa-tester",
@@ -1212,10 +1242,13 @@ async def test_bare_agent_lists_without_a_user_row() -> None:
     session = FakeSession()
     session.agent_registry = _agent_registry(tempfile.mkdtemp())
     app = OperatorApp(lambda: _factory(session))
-    # Tall on purpose: the listing carries the six packaged starters too, and
-    # the transcript keeps scrolled to the bottom, so a short frame would have
-    # scrolled the registered rows out of the paint this test reads.
-    async with app.run_test(size=(100, 74)) as pilot:
+    # Tall on purpose: the listing carries the packaged starters too (twelve
+    # seeds since the Librarian's, plus the two registry rows), and the
+    # transcript keeps scrolled to the bottom, so a short frame would have
+    # scrolled the registered rows out of the paint this test reads. The height
+    # is a frame bound rather than an exact fit; the asserts below name the
+    # first and last content the 110-row frame must hold.
+    async with app.run_test(size=(100, 110)) as pilot:
         await _boot(pilot, app)
         await _submit(pilot, app, "/agent")
         rows = _user_rows(app)
@@ -2708,3 +2741,37 @@ async def test_the_agent_listing_does_not_end_on_a_dangling_spacer(tmp_path) -> 
         assert blanks == 0, f"{session_cls.__name__} listing ends on {blanks} blank row(s): {lines}"
         # The spacer is only correct when it is actually spacing something.
         assert ("Send: /agent <name> <message>" in "\n".join(lines)) is expects_footer, lines
+
+
+@pytest.mark.asyncio
+async def test_the_team_picker_dedupes_a_raced_name_like_the_agent_picker(tmp_path) -> None:
+    """Q-5: a conversation team racing an account team of the same name is ONE
+    row in the picker. The listing puts session rows first, so the row in force
+    — the one a launch would use — is the one offered."""
+    from local_operator.profile_scope import scope_team_registry
+    from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+
+    global_registry = TeamRegistry(tmp_path / "global")
+    global_registry.create_team(
+        TeamEditFields(name="dup", manager="manager", members=[TeamMember(role="coder")])
+    )
+    registry = scope_team_registry(global_registry, tmp_path / "session")
+    # WRITTEN THROUGH THE SESSION STORE, not the composite: the composite's
+    # shadow refusal correctly blocks a NEW session create over an account name,
+    # so the duplicate this watch is for can only be a pre-existing one (a race
+    # with another writer, a store moved between scopes).
+    registry.session_registry.create_team(
+        TeamEditFields(name="dup", manager="manager", members=[TeamMember(role="reviewer")])
+    )
+
+    session = FakeSession()
+    session.team_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        choices = app._team_choices()
+
+    assert [choice.name for choice in choices].count("dup") == 1, choices

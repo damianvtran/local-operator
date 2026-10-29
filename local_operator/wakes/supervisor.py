@@ -75,7 +75,9 @@ import argparse
 import asyncio
 import logging
 import os
+import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -182,6 +184,13 @@ RESIDENCY_SWEEP_INTERVAL_S = 300.0
 #: sleep (see :class:`_TriggerSweep`): the possibility of a future trigger must
 #: never keep the supervisor resident.
 TRIGGER_EVAL_INTERVAL_S = 300.0
+
+#: How often the supervisor reads the memory maintenance gate (see
+#: :class:`_MemoryMaintenanceSeat`). The pass itself runs at most every 6 h
+#: (``memory_maintenance.PASS_INTERVAL_S``); between runs a tick is one stamp
+#: read, so an hour keeps that negligible while a store that crossed a
+#: threshold is compacted within the hour once its interval has passed.
+MEMORY_MAINTENANCE_INTERVAL_S = 3600.0
 
 #: How often the machine memory pass runs (see :class:`_MachineMemorySweep`).
 #:
@@ -673,12 +682,14 @@ def _session_exists(config_dir: Path, session_id: str) -> bool:
 
     The transcript rather than the directory, matching
     ``multiplexer/broadcast.py``: a directory with no transcript is not a
-    session anything can resume.
+    session anything can resume. ``has_transcript`` rather than a stat of the
+    plain name, because a compressed session's conversation is in the archive
+    beside it — a plain stat would read it as a ghost and drop its wake.
     """
-    from local_operator.resume import TRANSCRIPT_NAME
+    from local_operator.session import compression
 
     try:
-        return (Path(config_dir) / "sessions" / session_id / TRANSCRIPT_NAME).is_file()
+        return compression.has_transcript(Path(config_dir) / "sessions" / session_id)
     except OSError:
         # Unreadable is not proof of absence, and the cost of the two errors
         # is asymmetric: skipping a real session loses its wake, while trying
@@ -740,7 +751,7 @@ def _reconcile_spooled(config_dir: Path, spooled: dict[str, dict[str, Any]]) -> 
     Mutates the caller's freshly read copy, so the pass that read it decides on
     what is left rather than on what was found.
     """
-    from local_operator.wakes.spooled import clear_spooled_turn, spool_owes_turn
+    from local_operator.wakes.spooled import clear_if_no_owed_turn, spool_owes_turn
 
     sessions = Path(config_dir) / "sessions"
     for session_id, record in list(spooled.items()):
@@ -753,10 +764,11 @@ def _reconcile_spooled(config_dir: Path, spooled: dict[str, dict[str, Any]]) -> 
         # narrows the window to the unlink itself; the drain-side half of the same
         # finding is closed in ``inbox.settle_owed_turn``, which re-notes an
         # obligation its own spool still owes.
-        clear_spooled_turn(
+        clear_if_no_owed_turn(
             config_dir,
             session_id,
-            expected_updated_at_ms=record.get("updated_at_ms"),
+            sessions / session_id,
+            expected_generation=record.get("generation"),
         )
         del spooled[session_id]
 
@@ -1757,14 +1769,39 @@ class _Sweeper:
         #: The loop has nothing to return any more, so the count lives here
         #: for tests and for `--once`.
         self.started = 0
+        self._failure: BaseException | None = None
+
+    def _record_failure(self, failure: BaseException) -> None:
+        if self._failure is None:
+            self._failure = failure
+        elif self._failure is not failure:
+            self._failure = BaseExceptionGroup(
+                "spool bookkeeping failures", [self._failure, failure]
+            )
+
+    def raise_if_failed(self) -> None:
+        """Failure is separate from running ownership and forbids new dispatch."""
+        if self._failure is not None:
+            raise self._failure
+
+    def _observe(self, task: asyncio.Task[bool]) -> None:
+        if not task.cancelled():
+            failure = task.exception()
+            if failure is not None and failure is not self._failure:
+                self._record_failure(failure)
 
     def engage(self, config_dir: Path, session_id: str, cwd: str, due_ms: int, moment: int) -> bool:
         """Start one engagement in the background. False when already running."""
+        self.raise_if_failed()
         key = (session_id, due_ms)
         if key in self._in_flight:
             return False
 
         async def _run() -> bool:
+            from local_operator.wakes.spooled import await_spool_write
+
+            outcomes: list[str] = []
+
             def _outcome(reason: str) -> None:
                 """Report one engagement's outcome to the spooled-turn walk.
 
@@ -1783,7 +1820,7 @@ class _Sweeper:
                 it too: an unanticipated raise out of ``_engage_one`` is a raise
                 that did not happen, which is exactly what ``failed`` means.
                 """
-                _note_spooled_attempt(config_dir, session_id, reason=reason)
+                outcomes.append(reason)
                 _note_trigger_attempt(config_dir, session_id, reason=reason)
 
             try:
@@ -1829,12 +1866,35 @@ class _Sweeper:
                 # Popped in the task itself rather than in a done-callback so
                 # the key is gone the moment the work is, with no window where
                 # a finished engagement still blocks its own retry.
-                self._in_flight.pop(key, None)
+                pending_error = sys.exception()
+                try:
+                    # Persist backoff before releasing retry ownership, even on
+                    # cancellation. Failed bookkeeping latches this engagement
+                    # against a hot retry; task error stays observable to owner.
+                    for reason in outcomes:
+                        await await_spool_write(
+                            _note_spooled_attempt, config_dir, session_id, reason=reason
+                        )
+                except BaseException as persistence_error:
+                    # sys.exception here is the caught persistence error; the
+                    # pending body/cancellation is captured before the await.
+                    failure = (
+                        BaseExceptionGroup(
+                            "engagement and backoff failed", [pending_error, persistence_error]
+                        )
+                        if pending_error is not None
+                        else persistence_error
+                    )
+                    self._record_failure(failure)
+                    raise failure
+                finally:
+                    self._in_flight.pop(key, None)
             if started:
                 self.started += 1
             return started
 
         self._in_flight[key] = asyncio.create_task(_run())
+        self._in_flight[key].add_done_callback(self._observe)
         return True
 
     @property
@@ -1847,7 +1907,11 @@ class _Sweeper:
     async def drain(self) -> int:
         """Await every in-flight engagement. For ``--once`` and for shutdown."""
         while self._in_flight:
-            await asyncio.gather(*list(self._in_flight.values()), return_exceptions=True)
+            if self._failure is not None:
+                await self.shutdown()
+                break
+            await asyncio.wait(list(self._in_flight.values()), return_when=asyncio.FIRST_COMPLETED)
+        self.raise_if_failed()
         return self.started
 
     async def shutdown(self) -> None:
@@ -1866,6 +1930,7 @@ class _Sweeper:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._in_flight.clear()
+        self.raise_if_failed()
 
     def sweep(
         self,
@@ -1878,6 +1943,7 @@ class _Sweeper:
         triggers: Mapping[str, dict[str, Any]] | None = None,
     ) -> int:
         """Start an engagement for every due session. Returns how many started."""
+        self.raise_if_failed()
         launched = 0
         for session_id, cwd, due_ms in _due_sessions(
             index,
@@ -1890,6 +1956,83 @@ class _Sweeper:
             if self.engage(config_dir, session_id, cwd, due_ms, moment):
                 launched += 1
         return launched
+
+
+class _MemoryMaintenanceSeat:
+    """The memory store's maintenance pass's seat: cadence and detached task only.
+
+    The pass lives in :mod:`local_operator.memory_maintenance` (journal
+    compaction plus capture expiry). It is seated HERE beside
+    :class:`_MachineMemorySweep` because this is the one long-lived process
+    beside every runtime: a ``journal_plan`` loads every op (measured +212 MB
+    RSS), which is fine once per machine and not fine once per session.
+
+    **IT DOES NOT BOUND THE SLEEP**, for :class:`_TriggerSweep`'s reason: the possibility of a
+    compaction must never keep the supervisor resident. Each session runtime offers the same pass
+    once at boot for the hours this process is retired (one-shot commands deliberately do not). The
+    pass gates itself (6 h interval, cross-process lock), so this cadence only decides how often the
+    cheap gate is read.
+
+    **THE PASS IS DETACHED, ON A WORKER THREAD**, and bounded by its own 60 s
+    timeout; a pass already in flight is left alone and a failing one is a
+    warning, never a crash path for the wake loop.
+    """
+
+    def __init__(self, config_dir: Path) -> None:
+        self.config_dir = config_dir
+        #: ``None`` until the first pass, so a fresh supervisor reads the gate at once.
+        self.next_at: float | None = None
+        self._task: "asyncio.Task[Any] | None" = None
+
+    def seconds_until(self, now: float | None = None) -> float:
+        moment = time.monotonic() if now is None else now
+        if self.next_at is None:
+            return 0.0
+        return max(0.0, self.next_at - moment)
+
+    def due(self, now: float | None = None) -> bool:
+        return self.seconds_until(now) <= 0.0
+
+    def kick(self) -> None:
+        """Start a pass if one is due, WITHOUT holding this loop for it."""
+        if self._task is not None and not self._task.done():
+            return
+        if not self.due():
+            return
+        self.next_at = time.monotonic() + MEMORY_MAINTENANCE_INTERVAL_S
+        self._task = asyncio.ensure_future(asyncio.to_thread(self.sweep))
+        self._task.add_done_callback(self._finished)
+
+    def sweep(self) -> dict[str, Any]:
+        """One gated pass. Blocking; the import is deferred like the other seats'."""
+        from local_operator.memory_maintenance import run_pass
+
+        return run_pass(self.config_dir)
+
+    def _finished(self, task: "asyncio.Task[Any]") -> None:
+        """Log a finished pass. Never raises out of a done-callback."""
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.warning("the memory maintenance pass failed", exc_info=error)
+            return
+        report = task.result()
+        status = report.get("status") if isinstance(report, dict) else None
+        (logger.info if status in ("ran", "timeout", "failed") else logger.debug)(
+            "memory maintenance: %s", report
+        )
+
+    async def shutdown(self) -> None:
+        """Drop an in-flight pass on the way out.
+
+        Cancelling stops the LOOP waiting; it does not stop the worker thread,
+        which runs to completion and commits (Python cannot interrupt a thread
+        inside SQLite) while holding the pass's lock. Only if the process exits
+        first does SQLite roll back its open transaction.
+        """
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
 
 
 class _TriggerSweep:
@@ -2015,15 +2158,31 @@ async def fire_due_wakes(config_dir: Path, *, now_ms: int | None = None) -> int:
         _load_and_reconcile_state, config_dir
     )
     sweeper = _Sweeper()
-    sweeper.sweep(
-        config_dir,
-        index,
-        moment,
-        deliveries=deliveries,
-        spooled=spooled,
-        triggers=pending_triggers,
-    )
-    return await sweeper.drain()
+    try:
+        sweeper.sweep(
+            config_dir,
+            index,
+            moment,
+            deliveries=deliveries,
+            spooled=spooled,
+            triggers=pending_triggers,
+        )
+        return await sweeper.drain()
+    finally:
+        # This function owns its own sweeper, so nothing downstream re-raises a
+        # failure latched by this shutdown. Cancellation still outranks it (the
+        # caller's own reason for leaving); any other in-flight failure is
+        # grouped with the cleanup's rather than replaced or discarded.
+        in_flight = sys.exc_info()[1]
+        try:
+            await sweeper.shutdown()
+        except BaseException as cleanup:
+            if in_flight is None:
+                raise
+            if cleanup is not in_flight and not isinstance(in_flight, asyncio.CancelledError):
+                raise BaseExceptionGroup(
+                    "wake firing and shutdown both failed", [in_flight, cleanup]
+                ) from None
 
 
 def _has_fireable_wakes(
@@ -2197,27 +2356,9 @@ def _note_spooled_attempt(config_dir: Path, session_id: str, *, reason: str) -> 
     """
     if reason not in _SPOOLED_ATTEMPT_REASONS:
         return
-    # ON THE LOOP, DELIBERATELY (review round 3, R3-4; premises corrected in
-    # R4-1, which was right to check them). The sibling ledger write beside this
-    # one goes through ``asyncio.to_thread`` and this does not, on the only
-    # argument that survives reading both: this is ONE small atomic write — one
-    # ~200-byte JSON file, flushed and fsynced by ``spooled._write`` — and it
-    # happens at most once per attempted raise for a session, never closer than
-    # ``spooled.RETRY_BASE_S`` apart, against a process whose slice is ten
-    # seconds. The earlier version of this comment argued from a contrast with
-    # the ledger that does not exist (that write reads one record too); the
-    # decision does not need it. Threading this would also make the callback
-    # awaitable, which the engage's own call sites are not.
-    try:
-        from local_operator.wakes.spooled import note_attempt, read_spooled_turn
+    from local_operator.wakes.spooled import note_attempt
 
-        if read_spooled_turn(config_dir, session_id) is None:
-            return
-        note_attempt(config_dir, session_id, error=reason)
-    except Exception:  # noqa: BLE001 — bookkeeping must never stop an engagement
-        logger.warning(
-            "could not record the spooled-turn attempt for %s", session_id, exc_info=True
-        )
+    note_attempt(config_dir, session_id, error=reason)
 
 
 def _note_trigger_attempt(config_dir: Path, session_id: str, *, reason: str) -> None:
@@ -2351,13 +2492,63 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
     pass or the next one (≤ ``SLICE_S``). ``--once`` awaits the pass inline for
     the same reason.
     """
+    from local_operator.wakes.owned_runtimes import (
+        OWNER_ENV,
+        SUPERVISOR_PID_ENV,
+        spawn_token,
+        sweep,
+    )
+
+    # This token belongs to THIS supervisor invocation, not to the store. It is
+    # propagated only to candidates launch actually forks for this process;
+    # adoption or another root's runtime cannot be claimed. The stop handler
+    # installed just below turns a unit SIGTERM into cancellation, and ONLY that
+    # path runs the ownership sweep in serve()'s finally (see ``stop_requested``).
+    owner_token = spawn_token()
+    os.environ[OWNER_ENV] = owner_token
+    # The stamp gate: ``launch`` stamps only where os.getpid() equals this, so
+    # the token cannot travel past the runtimes this process forks itself.
+    os.environ[SUPERVISOR_PID_ENV] = str(os.getpid())
+    # A UNIT STOP MUST REACH THE SWEEP. Under KillMode=process systemd signals
+    # only this process, and SIGTERM's default action terminates without running
+    # any cleanup: measured on a real store, `systemctl stop` exited -15 and the
+    # supervisor's owned runtime outlived it. Installing a stop handler turns a
+    # signal into task cancellation, so serve()'s finally block runs the
+    # ownership sweep and the runtimes drain (#3028 Q-S1).
+    #
+    # THE SWEEP IS FOR A STOP, NEVER FOR A RETIREMENT. The supervisor's whole
+    # contract is to START a runtime and leave the wake to it: a session fires its
+    # own overdue wakes on load, seconds after the engage returns. A sweep on
+    # every exit therefore SIGTERMed the runtime a `--once` pass (or a loop that
+    # just ran out of fireable wakes) had started, before its wake fired —
+    # tests/e2e/test_cold_wake_e2e.py failed on both CI platforms with "the
+    # supervised cold wake never ran its turn" and passed with the sweep removed.
+    # An idle runtime outliving its supervisor is the normal, pre-existing shape:
+    # its own residency rules end it. Only a SIGNAL means "this unit is going
+    # away, take your work with you", so only a signal sets ``stop_requested``.
+    stop_requested = False
+    running = asyncio.current_task()
+    loop = asyncio.get_running_loop()
+
+    def _on_stop() -> None:
+        nonlocal stop_requested
+        stop_requested = True
+        if running is not None:
+            running.cancel()
+
+    stop_signals: list[signal.Signals] = []
+    if running is not None and threading.current_thread() is threading.main_thread():
+        stop_signals = _install_stop_handlers(loop, _on_stop)
     sweeper = _Sweeper()
     triggers_seat = _TriggerSweep(config_dir)
     residency = _ResidencySweep(config_dir)
     memory_sweep = _MachineMemorySweep(config_dir)
+    store_maintenance = _MemoryMaintenanceSeat(config_dir)
     rescue_seat = _RescueSweep(config_dir)
+    primary_error: BaseException | None = None
     try:
         while True:
+            sweeper.raise_if_failed()
             if once:
                 await triggers_seat.run_once()
             else:
@@ -2382,12 +2573,15 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                     logger.info(
                         "nothing fireable in this store (%s)", _retirement_reason(config_dir)
                     )
+                    sweeper.raise_if_failed()
                     return 0
                 # In-flight work outlives a momentarily-empty index: retiring
                 # under a running engagement would kill the runtime it is
                 # constructing. Slice instead and re-decide next pass.
                 if sweeper.in_flight or rescue_seat.in_flight:
-                    await _sleep_in_slices(config_dir, SLICE_S, None)
+                    await _sleep_in_slices(
+                        config_dir, SLICE_S, None, failure_check=sweeper.raise_if_failed
+                    )
                     continue
                 if await _should_retire(config_dir):
                     # LOGGED WITH THE REASON, because this is the transition
@@ -2406,6 +2600,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                         SLICE_S,
                         _retirement_reason(config_dir),
                     )
+                    sweeper.raise_if_failed()
                     return 0
                 logger.info("a wake was armed during the retirement grace; staying up")
                 continue
@@ -2420,6 +2615,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             )
             if once:
                 await sweeper.drain()
+                sweeper.raise_if_failed()
                 return 0
 
             # Recomputed from the index AFTER the sweep started, so a schedule
@@ -2480,6 +2676,12 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             # operator — so it is rate-limited by its own cooldown and silent
             # while the machine is healthy.
             memory_sweep.kick()
+            # THE MEMORY STORE'S MAINTENANCE PASS RIDES HERE TOO: it compacts the
+            # memory journal and expires captured candidates (see
+            # :class:`_MemoryMaintenanceSeat`). Unattended and gated by its own
+            # 6 h interval and lock, so nothing here waits on it, and it does not
+            # bound the sleep below.
+            store_maintenance.kick()
             # THE RESCUE PASS RIDES THE SAME POSITION, for a third reason: it
             # SPAWNS a runtime for a session whose last one died involuntarily,
             # and spawning is not wake work — nothing this iteration read is
@@ -2504,21 +2706,91 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                 ),
             )
             logger.debug("sleeping %.1fs until the next wake (in %.0fs slices)", delay, SLICE_S)
-            await _sleep_in_slices(config_dir, delay, upcoming)
+            await _sleep_in_slices(
+                config_dir, delay, upcoming, failure_check=sweeper.raise_if_failed
+            )
+    except BaseException as exc:
+        primary_error = exc
+        raise
     finally:
-        # A cancelled or retiring supervisor must not leave engage tasks
-        # pending: they hold a semaphore slot and an event loop reference, and
-        # an un-awaited task destroyed at loop close logs a spurious error. The
-        # residency, machine-memory and trigger passes are the same shape of
-        # background work and are dropped the same way.
-        await residency.shutdown()
-        await memory_sweep.shutdown()
-        await rescue_seat.shutdown()
-        await triggers_seat.shutdown()
-        await sweeper.shutdown()
+        cleanup_errors: list[BaseException] = []
+        # Every seat is joined even when a sibling cleanup fails. Keep both the
+        # actual primary and cleanup errors; never convert fail-stop to success.
+        for seat in (
+            residency,
+            memory_sweep,
+            store_maintenance,
+            rescue_seat,
+            triggers_seat,
+            sweeper,
+        ):
+            try:
+                await seat.shutdown()
+            except BaseException as cleanup_error:
+                if cleanup_error is not primary_error and not any(
+                    cleanup_error is old for old in cleanup_errors
+                ):
+                    cleanup_errors.append(cleanup_error)
+        # KillMode=process means systemd signalled only this process. Forward
+        # SIGTERM to the runtimes this invocation owns so a working turn drains
+        # and a parked approval is denied instead of surviving the unit stop.
+        # Do this after engagement seats have shut down, so no new candidate is
+        # spawned behind the sweep. Gated on a real stop signal: see the
+        # ``stop_requested`` comment above for why a retirement must not sweep.
+        #
+        # ANY INVOCATION'S MARKER, NOT JUST THIS ONE'S (#3028 review r3, MAJOR-1).
+        # Since a retirement stopped sweeping, a runtime outlives the invocation
+        # that spawned it, and the next invocation carries a NEW token — so the
+        # long-lived parked runtime a stop exists for is exactly one this token
+        # never matched. The sweep is keyed on the wake-supervisor marker being
+        # PRESENT (``sweep(any_owner=True)`` skips a process without one) and on
+        # this config root: the `lop serve` daemon's runtimes and interactive or
+        # mesh-created sessions carry no marker and are never signalled, and
+        # another root's runtimes are out of reach. Consequence, deliberate: a
+        # stop also reaches runtimes a CONCURRENT supervisor in the same store
+        # spawned (nothing makes one store's supervisor a singleton). That is the
+        # stop's meaning — "wake delivery for this store is going away" — and
+        # each such runtime drains its turn and denies its parked gate exactly as
+        # on a stop; the surviving supervisor re-engages any wake still due.
+        if stop_requested:
+            sweep(config_dir, any_owner=True, why="supervisor stop")
+        for stop_signal in stop_signals:
+            try:
+                loop.remove_signal_handler(stop_signal)
+            except (RuntimeError, ValueError):
+                pass
+        if cleanup_errors:
+            if primary_error is not None:
+                cleanup_errors.insert(0, primary_error)
+            raise BaseExceptionGroup("supervisor cleanup failures", cleanup_errors)
 
 
-async def _sleep_in_slices(config_dir: Path, delay: float, upcoming: int | None) -> None:
+def _install_stop_handlers(
+    loop: asyncio.AbstractEventLoop, on_stop: Callable[[], None]
+) -> list[signal.Signals]:
+    """Route SIGTERM/SIGINT to ``on_stop``; return the signals actually installed.
+
+    A seam so a test can fire the stop the event loop would, without sending a
+    real signal to the test process. Platforms without loop signal support
+    (Windows, a non-main thread) install nothing, and serve() then never sweeps.
+    """
+    installed: list[signal.Signals] = []
+    for stop_signal in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(stop_signal, on_stop)
+            installed.append(stop_signal)
+        except (NotImplementedError, RuntimeError, ValueError):
+            pass
+    return installed
+
+
+async def _sleep_in_slices(
+    config_dir: Path,
+    delay: float,
+    upcoming: int | None,
+    *,
+    failure_check: Callable[[], None] | None = None,
+) -> None:
     """Sleep up to ``delay`` seconds, returning early if the index changes.
 
     Re-reads the index once per :data:`SLICE_S` and returns as soon as a wake
@@ -2532,6 +2804,8 @@ async def _sleep_in_slices(config_dir: Path, delay: float, upcoming: int | None)
     remaining = delay
     while remaining > 0:
         await asyncio.sleep(min(SLICE_S, remaining))
+        if failure_check is not None:
+            failure_check()
         remaining -= SLICE_S
         if remaining <= 0:
             return
@@ -2606,6 +2880,12 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(serve(config_dir(), once=args.once))
     except KeyboardInterrupt:
         return 130
+    except asyncio.CancelledError:
+        # A unit stop (SIGTERM/SIGINT) cancels the loop so serve()'s finally
+        # block runs the ownership sweep. That is a REQUESTED stop, not a crash:
+        # 0 keeps `Restart=on-failure` from restarting a supervisor a person
+        # just stopped.
+        return 0
 
 
 if __name__ == "__main__":

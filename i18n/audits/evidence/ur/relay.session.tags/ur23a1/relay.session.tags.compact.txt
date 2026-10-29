@@ -1,0 +1,19 @@
+relay.session.tags.action | Tags… | ٹیگز…
+relay.session.tags.sheet_title | tags | ٹیگز
+relay.session.tags.loading | loading… | لوڈ ہو رہا ہے…
+relay.session.tags.empty | no tag categories yet | ابھی کوئی ٹیگ زمرہ نہیں
+relay.session.tags.empty_hint | create one in the desktop app or the terminal | ڈیسک ٹاپ ایپ یا ٹرمینل میں ایک بنائیں
+relay.session.tags.load_error | Could not load the tag catalogue. | ٹیگ کیٹلاگ لوڈ نہیں ہو سکا۔
+relay.session.tags.retry | try again | دوبارہ کوشش کریں
+relay.session.tags.limit_hint | {count} tags is the most a conversation can carry — remove one to add another. | {count} ٹیگز ایک گفتگو کے لیے زیادہ سے زیادہ حد ہے — دوسرا شامل کرنے کے لیے ایک ہٹائیں۔
+relay.session.tags.primary | primary | بنیادی
+relay.session.tags.make_primary | make {name} the primary tag | {name} کو بنیادی ٹیگ بنائیں
+relay.session.tags.more | {count, plural, one {# more tag} other {# more tags}} | {count, plural, one {# مزید ٹیگ} other {# مزید ٹیگز}}
+relay.session.tags.missing | not in the catalogue | کیٹلاگ میں نہیں
+relay.session.tags.saving | saving… | محفوظ ہو رہا ہے…
+relay.session.tags.save_error | Could not save the tags | ٹیگز محفوظ نہیں ہو سکے
+relay.session.tags.remove_all | remove all tags | تمام ٹیگز ہٹائیں
+relay.session.tags.remove_all_confirm | remove all tags? | تمام ٹیگز ہٹائیں؟
+relay.session.tags.cancel | cancel | منسوخ کریں
+relay.session.tags.done | done | ہو گیا
+relay.session.tags.pin_and_tags_hint | touch and hold a row to pin or tag it | پن یا ٹیگ کرنے کے لیے قطار کو دبا کر رکھیں

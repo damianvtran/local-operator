@@ -1,0 +1,282 @@
+[
+  {
+    "finding_id": "UR-R1-001",
+    "severity": "major",
+    "key": "relay.ask.dismiss.open",
+    "round1_current": "ختم کریں…",
+    "round1_proposed": "خارج کریں…",
+    "round2_current": "خارج کریں…",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-001",
+    "severity": "major",
+    "key": "relay.ask.dismiss.title",
+    "round1_current": "یہ سوال ختم کریں",
+    "round1_proposed": "یہ سوال خارج کریں",
+    "round2_current": "یہ سوال خارج کریں",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-001",
+    "severity": "major",
+    "key": "relay.ask.dismiss.receipt",
+    "round1_current": "ختم کر دیا گیا — کوئی جواب نہیں بھیجا",
+    "round1_proposed": "خارج کیا گیا — کوئی جواب نہیں بھیجا گیا",
+    "round2_current": "خارج کیا گیا — کوئی جواب نہیں بھیجا گیا",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-001",
+    "severity": "major",
+    "key": "relay.ask.dismiss.receipt_answered_in_chat",
+    "round1_current": "ختم کر دیا گیا — گفتگو میں جواب دے دیا گیا",
+    "round1_proposed": "خارج کیا گیا — گفتگو میں جواب موجود ہے",
+    "round2_current": "خارج کیا گیا — گفتگو میں جواب موجود ہے",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-001",
+    "severity": "major",
+    "key": "relay.ask.dismiss.receipt_moot",
+    "round1_current": "ختم کر دیا گیا — اب ضرورت نہیں",
+    "round1_proposed": "خارج کیا گیا — اب ضرورت نہیں",
+    "round2_current": "خارج کیا گیا — اب ضرورت نہیں",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-002",
+    "severity": "major",
+    "key": "wire.settings.speech_transcription_cleanup.label",
+    "round1_current": "ٹرانسکرپٹion cleanup",
+    "round1_proposed": "ٹرانسکرپٹ کی صفائی",
+    "round2_current": "ٹرانسکرپٹ کی صفائی",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-003",
+    "severity": "major",
+    "key": "wire.settings.proactive.title",
+    "round1_current": "Proactive class",
+    "round1_proposed": "پیش قدم قسم",
+    "round2_current": "پیش قدم قسم",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-003",
+    "severity": "major",
+    "key": "wire.settings.remote_compute.title",
+    "round1_current": "Remote compute",
+    "round1_proposed": "ریموٹ کمپیوٹ",
+    "round2_current": "ریموٹ کمپیوٹ",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-003",
+    "severity": "major",
+    "key": "wire.settings.remote_compute_enabled.label",
+    "round1_current": "Remote compute",
+    "round1_proposed": "ریموٹ کمپیوٹ",
+    "round2_current": "ریموٹ کمپیوٹ",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-003",
+    "severity": "major",
+    "key": "wire.settings.monitor_runtimeoutms.label",
+    "round1_current": "Run timeout (ms)",
+    "round1_proposed": "رن کی مہلت (ms)",
+    "round2_current": "رن کی مہلت (ms)",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-003",
+    "severity": "major",
+    "key": "wire.settings.runtime_background_on_resume.choice.false.description",
+    "round1_current": "سیشن چھوڑنے پر turn روک دیں",
+    "round1_proposed": "سیشن چھوڑنے پر ٹرن روک دیں",
+    "round2_current": "سیشن چھوڑنے پر ٹرن روک دیں",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-003",
+    "severity": "major",
+    "key": "wire.settings.runtime_background_on_resume.choice.true.description",
+    "round1_current": "Turn background میں چلتا رہے",
+    "round1_proposed": "ٹرن پس منظر میں چلتا رہے",
+    "round2_current": "ٹرن پس منظر میں چلتا رہے",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-003",
+    "severity": "major",
+    "key": "wire.settings.display_terminal_title.help",
+    "round1_current": "سیشن نام اور run state رکھنے والا OSC 0 window title۔",
+    "round1_proposed": "سیشن نام اور رن کی حالت رکھنے والا OSC 0 window title۔",
+    "round2_current": "سیشن نام اور رن کی حالت رکھنے والا OSC 0 ونڈو عنوان۔",
+    "exact_proposed_match": false,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-003",
+    "severity": "major",
+    "key": "wire.settings.supplements_maxturns.label",
+    "round1_current": "↳ زیادہ سے زیادہ turns",
+    "round1_proposed": "↳ زیادہ سے زیادہ ٹرن",
+    "round2_current": "↳ زیادہ سے زیادہ ٹرن",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-003",
+    "severity": "major",
+    "key": "wire.settings.hosting.label",
+    "round1_current": "Default provider",
+    "round1_proposed": "ڈیفالٹ پرووائیڈر",
+    "round2_current": "ڈیفالٹ پرووائیڈر",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-004",
+    "severity": "major",
+    "key": "wire.settings.monitor.description",
+    "round1_current": "Delta دیکھنے والے نگرانی: کتنی بار check کریں، کتنا رکھیں، اور کب ہار مانیں۔",
+    "round1_proposed": "تبدیلیوں کی نگرانی: کتنی بار جانچ ہو، کتنا مواد رکھا جائے، اور کب کوشش ختم ہو۔",
+    "round2_current": "تبدیلیوں کی نگرانی: کتنی بار جانچ ہو، کتنا مواد رکھا جائے، اور کب کوشش ختم ہو۔",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-005",
+    "severity": "major",
+    "key": "wire.slash.login",
+    "round1_current": "provider میں لاگ اِن کریں",
+    "round1_proposed": "پرووائیڈر میں لاگ اِن کریں",
+    "round2_current": "پرووائیڈر میں لاگ اِن کریں",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-005",
+    "severity": "major",
+    "key": "wire.slash.logout",
+    "round1_current": "محفوظ provider کریڈینشلز ہٹائیں",
+    "round1_proposed": "محفوظ پرووائیڈر کریڈینشلز ہٹائیں",
+    "round2_current": "محفوظ پرووائیڈر کریڈینشلز ہٹائیں",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-005",
+    "severity": "major",
+    "key": "wire.slash.provider",
+    "round1_current": "providers اور ان کی لاگ اِن/استعمال کی حالت کی فہرست",
+    "round1_proposed": "پرووائیڈرز اور ان کی لاگ اِن/استعمال کی حالت کی فہرست",
+    "round2_current": "پرووائیڈرز اور ان کے لاگ اِن/استعمال کی حالت کی فہرست",
+    "exact_proposed_match": false,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-005",
+    "severity": "major",
+    "key": "wire.slash.usage",
+    "round1_current": "provider کا usage quota دکھائیں",
+    "round1_proposed": "پرووائیڈر کا استعمالی کوٹہ دکھائیں",
+    "round2_current": "پرووائیڈر کا استعمالی کوٹہ دکھائیں",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-005",
+    "severity": "major",
+    "key": "wire.slash.team",
+    "round1_current": "ٹیمیں اور تنظیمی خاکہ دیکھیں؛ manager کو درخواست بھیجیں",
+    "round1_proposed": "ٹیمیں اور تنظیمی خاکہ دیکھیں؛ مینیجر کو درخواست بھیجیں",
+    "round2_current": "ٹیمیں اور تنظیمی خاکہ دیکھیں؛ مینیجر کو درخواست بھیجیں",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-006",
+    "severity": "minor",
+    "key": "wire.slash.highlights",
+    "round1_current": "جواب کے نمایاں حصے منسوخ، دوبارہ آزمائیں یا رخ بدلیں",
+    "round1_proposed": "جواب کے نمایاں حصے منسوخ کریں، دوبارہ کوشش کریں یا رخ بدلیں",
+    "round2_current": "جواب کے نمایاں حصے منسوخ کریں، دوبارہ کوشش کریں یا رخ بدلیں",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-007",
+    "severity": "minor",
+    "key": "wire.settings.display_dock.choice.full.description",
+    "round1_current": "ہر child کی row، نیا پہلے",
+    "round1_proposed": "ہر ذیلی ایجنٹ کی قطار، نیا پہلے",
+    "round2_current": "ہر ذیلی ایجنٹ کی قطار، نیا پہلے",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-008",
+    "severity": "minor",
+    "key": "relay.session.tags.limit_hint",
+    "round1_current": "{count} ٹیگز ایک گفتگو کے لیے زیادہ سے زیادہ حد ہے — دوسرا شامل کرنے کے لیے ایک ہٹائیں۔",
+    "round1_proposed": "{count} ٹیگز ایک گفتگو کے لیے زیادہ سے زیادہ حد ہے — دوسری شامل کرنے کے لیے ایک ہٹائیں۔",
+    "round2_current": "{count} ٹیگز ایک گفتگو کے لیے زیادہ سے زیادہ حد ہے — دوسرا شامل کرنے کے لیے ایک ہٹائیں۔",
+    "exact_proposed_match": false,
+    "changed": false
+  },
+  {
+    "finding_id": "UR-R1-008",
+    "severity": "minor",
+    "key": "relay.session.tags.save_error",
+    "round1_current": "ٹیگز محفوظ نہیں ہو سکے",
+    "round1_proposed": "ٹیگز محفوظ نہیں ہو سکیں",
+    "round2_current": "ٹیگز محفوظ نہیں ہو سکے",
+    "exact_proposed_match": false,
+    "changed": false
+  },
+  {
+    "finding_id": "UR-R1-009",
+    "severity": "minor",
+    "key": "tui.review.lane_stale_head",
+    "round1_current": "پرانا — جائزہ {reviewed}، head {head}",
+    "round1_proposed": "پرانا — {reviewed} پر جائزہ، head {head}",
+    "round2_current": "پرانا — {reviewed} پر جائزہ، head {head}",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-009",
+    "severity": "minor",
+    "key": "tui.review.lane_stale_reviewed",
+    "round1_current": "پرانا — جائزہ {reviewed}",
+    "round1_proposed": "پرانا — {reviewed} پر جائزہ",
+    "round2_current": "پرانا — {reviewed} پر جائزہ",
+    "exact_proposed_match": true,
+    "changed": true
+  },
+  {
+    "finding_id": "UR-R1-010",
+    "severity": "minor",
+    "key": "wire.settings.bash_memory_limit_mb.help",
+    "round1_current": "اوپر 'manual' منتخب ہونے کی حد۔ 0 کا مطلب auto حد استعمال کریں، اس لیے 0 رہنے سے guard بند نہیں ہوتا۔",
+    "round1_proposed": "اوپر 'manual' منتخب ہونے پر لاگو حد۔ 0 کا مطلب auto حد استعمال کریں، اس لیے 0 رہنے سے guard بند نہیں ہوتا۔",
+    "round2_current": "اوپر 'manual' منتخب ہونے پر لاگو حد۔ 0 کا مطلب auto حد استعمال کریں، اس لیے 0 رہنے سے گارڈ بند نہیں ہوتا۔",
+    "exact_proposed_match": false,
+    "changed": true
+  }
+]

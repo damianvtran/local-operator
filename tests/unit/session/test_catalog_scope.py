@@ -689,16 +689,19 @@ class TestARunningRowRidesTheFirstPage:
         (``src/renderer/src/features/chat/chat-list-sections.ts``), which reads
         the same wire field this does (``status.code``). The UI is another
         repository, so the parity cannot be an import: it is a comparison, and
-        this is where the comparison happens. The negative half matters as much
-        as the positive one -- the decision record rejects ``idle``/``attached``
-        (live, but not work in progress) and the stored outcomes, and a set that
-        grew them back would move rows the renderer still files under Today.
+        this is where the comparison happens. The UI set gained ``waiting`` with
+        the sidebar's waiting state; this literal tracks it. The negative half
+        matters as much as the positive one -- the decision record rejects
+        ``idle``/``attached`` (live, but not work in progress) and the stored
+        outcomes, and a set that grew them back would move rows the renderer
+        still files under Today.
         """
         assert catalog.RUNNING_STATUS_CODES == {
             "approval",
             "answer",
             "busy",
             "wedged",
+            "waiting",
             "delegating",
         }
         assert catalog.RUNNING_STATUS_CODES.isdisjoint(

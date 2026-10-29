@@ -134,8 +134,10 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "peer-readiness-v1",
     "mcp-defs-v1",
     "memory-sync-v1",
+    "memory-item-512",
     "pair-offer-v1",
     "mesh-update-v1",
+    "mesh-restart-v1",
     "zlib-records-v1",
     # THE COMPLETE PEER-SOURCE CONTRACT'S STORED-READ HALF. Advertised by every
     # build that can serve typed source purposes (metadata/payload/availability)
@@ -166,6 +168,14 @@ PEER_READINESS_V1 = "peer-readiness-v1"
 #: and the tests read ONE spelling of the string.
 MCP_DEFS_V1 = "mcp-defs-v1"
 MEMORY_SYNC_V1 = "memory-sync-v1"
+#: The 512-content-token memory item cap (``memory.ITEM_TOKENS``). Advertised by
+#: every build whose ``validate_fact`` accepts it. A peer WITHOUT it still refuses a
+#: fact over 256 wire tokens, and a refused fact fails its whole batch and leaves a
+#: permanent sequence gap, so ``network.memory.batch`` withholds such a fact from
+#: that peer as a content-free skip and everything else keeps flowing. The skip
+#: advances that peer's cursor, so the withheld revision is NOT re-sent after the
+#: peer updates; a later revision of the fact (or a generation reset) carries it.
+MEMORY_ITEM_512 = "memory-item-512"
 #: The mesh rolling-updates capability (``meshupdate.py``; mesh-rolling-
 #: updates.md §5). Advertised by every build that ships ``net_update``; the
 #: origin checks it BEFORE its first request, so a member that predates this
@@ -174,6 +184,10 @@ MEMORY_SYNC_V1 = "memory-sync-v1"
 #: path applies. Named here so the tuple above, the slice's ask condition and
 #: the tests read ONE spelling of the string.
 MESH_UPDATE_V1 = "mesh-update-v1"
+#: Peer-initiated relay recovery (meshrestart.py). Distinct from the update
+#: feature: a peer that can install builds but predates this op must get a clear
+#: local-remedy refusal, never an unknown-op hang or a restart it cannot report.
+MESH_RESTART_V1 = "mesh-restart-v1"
 #: The pair ceremony's share list (``handshake.pair_offer_frame``). Advertised by
 #: every build that SENDS or READS ``net_pair_offer``; the owner checks it against
 #: the joiner's hello before sending, and the joiner's bounded drain checks it

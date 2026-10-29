@@ -47,6 +47,18 @@ async def test_radient_oauth_flow_generate_auth_url():
 @pytest.mark.asyncio
 async def test_radient_oauth_exchange_code():
     async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            assert str(request.url) == "https://api.radienthq.com/v1/me"
+            assert request.headers["authorization"].startswith("Bearer ")
+            return httpx.Response(
+                200,
+                json={
+                    "result": {
+                        "identity": {"account_id": "verified-account"},
+                        "account": {"id": "verified-account"},
+                    }
+                },
+            )
         assert request.url == "https://api.radienthq.com/v1/auth/oauth/token"
         assert request.headers["content-type"] == "application/json"
         return httpx.Response(
@@ -72,6 +84,8 @@ async def test_radient_oauth_exchange_code():
         assert creds["refresh_token"] == "rad-refresh-token-12345"
         assert creds["expires"] > 0
         assert creds["authorized_at"] > 0
+        assert creds["account_id"] == "verified-account"
+        assert creds["api_endpoint"] == "https://api.radienthq.com/v1"
 
 
 @pytest.mark.asyncio
@@ -148,13 +162,24 @@ def _jwt(claims: dict[str, Any]) -> str:
 
 
 @pytest.mark.asyncio
-async def test_the_login_keeps_the_identity_its_id_token_carries():
+async def test_login_keeps_display_labels_but_profile_controls_account():
     """agent-server mints ``id_token`` with sub/email/name on the code grant;
     the stored credential now carries them (audit A5/A6) — the label the
     profile writer and the desktop's ``operator`` field read."""
     id_token = _jwt({"sub": "acct_123", "email": "jane@x.com", "name": "Jane Doe"})
 
     async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            assert request.headers["authorization"] == "Bearer a"
+            return httpx.Response(
+                200,
+                json={
+                    "result": {
+                        "identity": {"account_id": "server-account"},
+                        "account": {"id": "server-account"},
+                    }
+                },
+            )
         return httpx.Response(
             200,
             json={
@@ -171,7 +196,7 @@ async def test_the_login_keeps_the_identity_its_id_token_carries():
         creds = await flow.exchange_token("c", "s", "http://localhost:54549/callback")
     assert creds["email"] == "jane@x.com"
     assert creds["name"] == "Jane Doe"
-    assert creds["account_id"] == "acct_123"
+    assert creds["account_id"] == "server-account"
 
 
 def test_a_missing_or_malformed_id_token_changes_nothing():
@@ -201,17 +226,19 @@ async def test_the_refresh_grant_updates_the_identity_label():
             http_client=client,
         )
     assert refreshed["name"] == "Jane Q"
+    assert "account_id" not in refreshed  # Refresh labels cannot newly admit an account.
 
 
-def test_a_pre_identity_radient_row_is_upgraded_in_place(tmp_path):
-    """The first login after the upgrade must not leave two Radient rows.
+def test_a_pre_identity_radient_row_is_not_rebound_without_account_proof(tmp_path, monkeypatch):
+    """A pre-identity row might belong to another account; preserve its pin.
 
-    The row written before id_token decoding is keyed ``oauth:radient``; the
-    new login is keyed by the account id. Adopting the constant-keyed row is
-    what the constant key did before, so one account stays one row.
+    A newly identified login cannot prove ownership of an old constant-keyed
+    row. Only matching account and nonempty stored hub permit adoption;
+    the account-retention regressions exercise that separate upgrade path.
     """
     from local_operator.providers.auth_store import AuthStore
 
+    monkeypatch.setattr(AuthStore, "_rearm_parked_tunnel_login", lambda *args: None)
     store = AuthStore(tmp_path / "auth.db")
     old = store.upsert_credential(
         "radient", {"type": "oauth", "access": "a", "refresh": "r", "expires": 1}
@@ -222,11 +249,13 @@ def test_a_pre_identity_radient_row_is_upgraded_in_place(tmp_path):
         {"type": "oauth", "access": "a2", "refresh": "r2", "expires": 2, "account_id": "acct_1"},
     )
     rows = store.list_credentials("radient")
-    assert len(rows) == 1 and rows[0].id == old.id == new.id
-    assert rows[0].identity_key == "acct_1"
+    assert len(rows) == 2 and old.id != new.id
+    assert rows[0].identity_key == "oauth:radient"
+    assert new.data["account_id"] == "acct_1"
     # A SECOND account is still its own row.
     store.upsert_credential(
         "radient",
         {"type": "oauth", "access": "b", "refresh": "rb", "expires": 3, "account_id": "acct_2"},
     )
-    assert len(store.list_credentials("radient")) == 2
+    assert len(store.list_credentials("radient")) == 3
+    store.close()

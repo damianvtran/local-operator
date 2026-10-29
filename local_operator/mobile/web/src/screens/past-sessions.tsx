@@ -16,13 +16,16 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { resumeSession, searchSessions } from "../api";
+import { SessionTagLine } from "../components/session-tag-line";
 import { formatRelative } from "../lib/format";
 import { resumeRefusalText } from "../lib/refusal";
 import { navigate } from "../router";
-import { messageRuntime } from "../store";
+import { messageRuntime, useLocaleSnapshot } from "../store";
 import type { PastSession } from "../types";
 
 export function PastSessionsScreen() {
+	/* Repaint on a live language write (QA Q-1): `t()` alone never re-renders. */
+	useLocaleSnapshot();
 	const [query, setQuery] = useState("");
 	const [sessions, setSessions] = useState<PastSession[] | null>(null);
 	const [error, setError] = useState("");
@@ -62,7 +65,7 @@ export function PastSessionsScreen() {
 			const r = await resumeSession(id);
 			navigate(`/s/${encodeURIComponent(r.session_id)}`);
 		} catch (e) {
-			/* The same refusal voice the ended strip paints (design round 1, D5). */
+			/* The same refusal voice the health sheet's Resume paints (design round 1, D5). */
 			setResumeError(resumeRefusalText(e));
 			setResumingId("");
 		}
@@ -77,7 +80,7 @@ export function PastSessionsScreen() {
 					aria-label={messageRuntime.t("relay.session.past.back")}
 					className="flex min-h-11 min-w-11 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
 				>
-					‹
+					<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 				</button>
 				<h1 className="text-heading">{messageRuntime.t("relay.session.past.heading")}</h1>
 			</header>
@@ -90,7 +93,7 @@ export function PastSessionsScreen() {
 					spellCheck={false}
 					autoCapitalize="off"
 					autoCorrect="off"
-					className="min-h-11 w-full rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
+					className="min-h-11 w-full rounded-sm bg-canvas px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
 			</div>
 
@@ -130,20 +133,29 @@ export function PastSessionsScreen() {
 									   title is kept beside it because it is the only
 									   thing saying what this branched from. */}
 									{s.forked ? (
-										<span className="mr-1.5 text-meta text-ink-dim">
+										<span className="me-1.5 text-meta text-ink-dim">
 											[fork]
 										</span>
 									) : null}
 									{s.name || "untitled"}
 									{s.body_match ? (
-										<span className="ml-1.5 text-meta text-info">
+										<span className="ms-1.5 text-meta text-info">
 											in conversation
 										</span>
 									) : null}
 								</span>
-								<span className="block truncate font-mono text-mono-sm text-ink-dim">
+								<span dir="ltr" className="block truncate font-mono text-mono-sm text-ink-dim">
 									{s.id}
 								</span>
+								{/* The same static tag line the live list carries, and
+								    READ ONLY: a past conversation has no live row to
+								    long-press, and assignment lives with the conversation
+								    in the list. Rendering nothing when untagged keeps this
+								    history row's height independent of its tags. */}
+								<SessionTagLine
+									tags={s.tags ?? []}
+									primary={s.primary ?? null}
+								/>
 							</div>
 							{/* The timestamp gets its OWN shrink-0 slot: appended to the
 							   truncating id it was always the part clipped away, and
@@ -155,7 +167,7 @@ export function PastSessionsScreen() {
 								type="button"
 								onClick={() => void resume(s.id)}
 								disabled={resumingId !== ""}
-								className="min-h-11 shrink-0 rounded-sm border border-control bg-surface px-3 text-body-sm text-ink active:bg-accent-wash disabled:opacity-50"
+								className="min-h-11 shrink-0 rounded-sm bg-surface px-3 text-body-sm text-ink active:bg-accent-wash disabled:opacity-50"
 							>
 								{resumingId === s.id ? "opening…" : "resume"}
 							</button>

@@ -58,7 +58,7 @@ class _ClassSession(FakeSession):
 async def routed(tmp_path: Path) -> AsyncIterator[tuple[ServingSessionHandle, _ClassSession]]:
     """A handle over a session with a real registry and a REAL installed role."""
     registry = AgentRegistry(tmp_path)
-    installed = install_seed("reviewer", registry=registry)
+    installed = install_seed("reviewer", registry=registry, scope="global")
     assert installed is not None
     session = _ClassSession(registry)
     handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))

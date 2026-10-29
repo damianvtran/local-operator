@@ -48,11 +48,12 @@ def test_the_tool_is_absent_without_the_withdraw_door():
 def test_the_tool_is_present_with_the_door_and_appended_last():
     """With the door bound, the tool exists and sits AFTER everything that
     existed when it landed — appending never shifts a provider-visible prefix,
-    which is what the prompt cache keys on. Only NEWER appends may follow it,
-    and wave 4 slice A's ``setting`` is the current last (the host-gated
-    entries listed after ``ask_withdraw`` are absent in this environment)."""
+    which is what the prompt cache keys on. Only NEWER appends may follow it:
+    wave 4 slice A's ``setting`` and V2-4's ``tags`` are the unconditional
+    appends since, and ``tags`` is the current last (the host-gated entries
+    listed after ``ask_withdraw`` are absent in this environment)."""
     tools = create_tools(_context(withdraw=lambda *_a, **_k: {"ok": True}))
-    assert [tool.name for tool in tools][-2:] == ["ask_withdraw", "setting"]
+    assert [tool.name for tool in tools][-3:] == ["ask_withdraw", "setting", "tags"]
 
 
 def test_the_advertised_schema_is_the_two_reasons_and_the_cells_map():
@@ -65,6 +66,23 @@ def test_the_advertised_schema_is_the_two_reasons_and_the_cells_map():
     # ``message_id`` is deliberately NOT advertised (the model cannot see chat
     # message ids); the queue and session still accept it for callers that can.
     assert "message_id" not in props
+
+
+def test_the_description_reconciles_earlier_answers_with_verbatim_words():
+    """Review round 1 m3: the settle case is often a message several turns back,
+    and "even a paraphrase" sat beside "VERBATIM" as if the model should
+    paraphrase the user. The description names both readings once: the message
+    that answered it (latest or earlier), and the user's own words rather than
+    the options — still recorded verbatim."""
+    tool = _tools(_context(withdraw=lambda *_a, **_k: {"ok": True}))["ask_withdraw"]
+    text = " ".join(tool.description.split())
+    assert "the user's chat message that answered it (latest or earlier)" in text
+    assert "even if they used their own words rather than the options" in text
+    assert "VERBATIM" in text
+    assert "paraphrase" not in text
+    # The all-empty refusal (m2) is stated here so the model does not learn it
+    # from an error: the recipe this release teaches makes it reachable.
+    assert "Every cell empty is refused" in text
 
 
 @pytest.mark.asyncio

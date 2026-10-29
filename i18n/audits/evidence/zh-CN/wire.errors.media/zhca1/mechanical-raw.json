@@ -1,0 +1,131 @@
+{
+ "namespace": "wire.errors.media",
+ "prior_status": "passed",
+ "prior_auditor": {
+  "agent": "i18n-auditor",
+  "model": "openai/gpt-6.1-sol",
+  "date": "2026-10-19",
+  "result": "passed",
+  "findings": 0
+ },
+ "prior_translator": {
+  "agent": "i18n-translator",
+  "model": "openai/gpt-6.1-sol",
+  "date": "2026-10-19"
+ },
+ "prior_note": "zh-CN core held-candidate wave 2026-10-19. 20 new keys translated from the en catalogue and its context sidecar; no preserved values. Translator i18n-translator openai/gpt-6.1-sol (launched anthropic/claude-sonnet-5-5; provider quota fallback). Independent audit i18n-auditor openai/gpt-6.1-sol: key parity, placeholders/ICU, zh other-only plurals, 你 register, glossary terms, markup and declared maxCells clean; 0 remaining findings after the batched remediation round.",
+ "hash_equality": {
+  "source_sha256_prior_row": "1c109f63b8d3ce00657a47836199ce8ff924bb8e4bd999fda9f1d64f760a823b",
+  "source_sha256_held_candidate": "1c109f63b8d3ce00657a47836199ce8ff924bb8e4bd999fda9f1d64f760a823b",
+  "source_sha256_current": "1c109f63b8d3ce00657a47836199ce8ff924bb8e4bd999fda9f1d64f760a823b",
+  "source_equal": true,
+  "target_sha256_prior_row": null,
+  "target_sha256_held_candidate": "1c51112e65771daa0fceacfd53e571ba6d5f8fad7f4f31903b97b2df87791b64",
+  "target_sha256_current": "1c51112e65771daa0fceacfd53e571ba6d5f8fad7f4f31903b97b2df87791b64",
+  "target_equal": true
+ },
+ "key_parity": {
+  "en_count": 20,
+  "zh_count": 20,
+  "missing_in_zh": [],
+  "unknown_in_zh": [],
+  "set_equal": true,
+  "order_equal": true,
+  "first_order_divergence": null,
+  "en_duplicate_keys": [],
+  "zh_duplicate_keys": []
+ },
+ "icu": {
+  "messages_checked": 20,
+  "parse_errors": [],
+  "argument_mismatches": [],
+  "plural_errors": []
+ },
+ "exact_english_values": [
+  "wire.errors.media.media_refusal"
+ ],
+ "width": {
+  "over_max_cells": [],
+  "longer_than_english": []
+ },
+ "whole_file_bytes_equal_held": true,
+ "sample": {
+  "policy": "stratified by English message length (<40, 40-80, 80-120, >120); >=15% of each stratum (min 1), ALL messages >120 chars, ALL plural messages",
+  "buckets": {
+   "short_lt40": 3,
+   "medium_40_80": 14,
+   "long_80_120": 3,
+   "over_120": 0
+  },
+  "sampled_by_bucket": {
+   "short_lt40": 1,
+   "medium_40_80": 3,
+   "long_80_120": 1,
+   "over_120": 0
+  },
+  "all_over_120": [],
+  "all_plurals": [],
+  "keys_sampled": 5,
+  "fraction_of_namespace": 0.25,
+  "selected": [
+   "wire.errors.media.speech_radient_sign_in_failed",
+   "wire.errors.media.speech_upstream_reported_error",
+   "wire.errors.media.speech_upstream_responded",
+   "wire.errors.media.speech_vendor_key_refused",
+   "wire.errors.media.unknown_provider"
+  ]
+ },
+ "src_ok": true,
+ "tgt_ok": true,
+ "old_src": "1c109f63b8d3ce00657a47836199ce8ff924bb8e4bd999fda9f1d64f760a823b",
+ "cur_src": "1c109f63b8d3ce00657a47836199ce8ff924bb8e4bd999fda9f1d64f760a823b",
+ "old_tgt": "1c51112e65771daa0fceacfd53e571ba6d5f8fad7f4f31903b97b2df87791b64",
+ "new_tgt": "1c51112e65771daa0fceacfd53e571ba6d5f8fad7f4f31903b97b2df87791b64",
+ "attest_sample": {
+  "policy": "stratified by English message length (<40, 40-80, 80-120, >120); >=15% of each stratum (min 1), ALL messages >120 chars, ALL plural messages",
+  "buckets": {
+   "short_lt40": 3,
+   "medium_40_80": 14,
+   "long_80_120": 3,
+   "over_120": 0
+  },
+  "sampled_by_bucket": {
+   "short_lt40": 1,
+   "medium_40_80": 3,
+   "long_80_120": 1,
+   "over_120": 0
+  },
+  "all_over_120": [],
+  "all_plurals": [],
+  "keys_sampled": 5,
+  "fraction_of_namespace": 0.25,
+  "selected": [
+   "wire.errors.media.speech_radient_sign_in_failed",
+   "wire.errors.media.speech_upstream_reported_error",
+   "wire.errors.media.speech_upstream_responded",
+   "wire.errors.media.speech_vendor_key_refused",
+   "wire.errors.media.unknown_provider"
+  ]
+ },
+ "attest_verdict": "carried",
+ "technical_tokens": {
+  "patterns": {
+   "backtick_span": "`[^`\\n]+`",
+   "long_flag": "(?<![A-Za-z0-9_/])--[A-Za-z0-9][A-Za-z0-9_-]*",
+   "angle_token": "<[A-Za-z][^>\\n]*>",
+   "url_scheme": "(?:https?|ssh)://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+",
+   "home_or_absolute_path": "(?:~/[A-Za-z0-9_./-]+|/(?:bin|Users|Volumes|tmp|var|etc)/[A-Za-z0-9_./-]+)",
+   "percent_token": "%\\([A-Za-z_]+\\)[sdif]|%[sdif]",
+   "ansi_escape": "\\x1b\\[[0-9;]*m"
+  },
+  "failures": [],
+  "kept_english_missing": [],
+  "emphasis_tokens_rendered_lexically": [],
+  "caps_disposition": "Uppercase tokens outside KEPT_ENGLISH are English emphasis (STALE, ONE, ONLY, NOT, FINAL, APPROVE, WORKSTREAM, ...). Chinese has no case and renders the emphasis lexically; their absence is recorded as emphasis_tokens_rendered_lexically, not as a dropped placeholder."
+ },
+ "icu_number_date_skeletons": {
+  "keys_checked": 0,
+  "failures": []
+ },
+ "width_max_cells": []
+}

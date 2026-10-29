@@ -1,0 +1,37 @@
+# Replayed by the implementation session on 2026-10-25 at 58102b3ae3cd0062e4f2dfee89f4b150bf330b68.
+# NOT the auditor's log: no command output was captured during the audit;
+# see record.json -> audit_log (absent) and mechanical_recheck.
+
+replay of the mechanical checks in the ledger row
+revision:  58102b3ae3
+namespace: relay.approvals
+locale:    fr
+en sha256:      321658288e707b93b94062345bd8bbbdc4301d7fd6865b7378a46efe1d429125
+fr sha256: 832709ecaa3367a2c78094f0393165262fcbc7b7e2edcab447fb30f61bb3d475
+
+keys: en=17 fr=17
+  missing: 0
+  unknown: 0
+ICU: 17 messages compared
+  parse errors: 0
+  argument-tuple mismatches: 0
+plurals: 0 plural message(s) 
+  cldr categories for fr: ['many', 'one', 'other']
+  lossless-branch problems: 0
+controls: bidi/zero-width=0
+  straight quotes: 0
+  double spaces: 0
+  English leakage (value == en): 0
+
+gate copy, side by side:
+  relay.approvals.gate.body_scope: 'Les deux premiers choix ne changent que cette session\u202f; le dernier modifie la valeur par défaut de toutes les sessions suivantes.'
+  relay.approvals.gate.default_auto: 'exécuter sans demander dans toutes les sessions (default auto)'
+  relay.approvals.gate.refused_nothing_changed: 'refusé — rien n’a changé'
+  relay.approvals.gate.unpaired_default_auto: 'Exécuter sans demander dans toutes les sessions exige aussi un téléphone appairé.'
+
+the three approval-gate choices, side by side:
+  relay.asks.gate.keep_asking: 'continuer à demander (ask)'
+  relay.asks.gate.run_without: 'exécuter sans demander (auto)'
+  relay.approvals.gate.default_auto: 'exécuter sans demander dans toutes les sessions (default auto)'
+
+RESULT: PASS — mechanical parity holds at the audited bytes

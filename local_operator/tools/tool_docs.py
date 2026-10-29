@@ -150,6 +150,20 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="create/update",
                 blurb="Author or fix a role, or a specialist profile.",
             ),
+            ToolDocOp(
+                op="promote",
+                blurb=(
+                    "Copy THIS conversation's role into the account, for every "
+                    "conversation; needs the user's own confirmation."
+                ),
+            ),
+            ToolDocOp(
+                op="delete",
+                blurb=(
+                    "Remove a role/specialist created for THIS conversation; an "
+                    "account row is refused (delete it from the user surfaces)."
+                ),
+            ),
         ),
         notes=(
             "Detail moved off the wire in the slimming wave (audit item 2):\n"
@@ -167,7 +181,91 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "and project briefs on top of; a role is launched with "
             "``task(agent='<name>')``.\n"
             "- When a role's guidance proves wrong, fix it with the `agent` "
-            "tool rather than patching one prompt."
+            "tool rather than patching one prompt.\n"
+            "- SCOPE, the reuse → ephemeral → durable ladder: first reuse a role "
+            "that already resolves (list/search; an account role is usable "
+            "everywhere). If nothing fits the task, create it WITH NO ``scope`` — "
+            "where this host has a conversation store it then lives in THIS "
+            "conversation only: usable for the rest of the "
+            "conversation (task, /agent, teams), invisible in every other one, and "
+            "gone with it; a fork starts with a copy of this conversation's roles. "
+            "A DURABLE profile (saved for every conversation) is the "
+            "user's decision: ``scope='global'`` needs their confirmation, and "
+            "this host may not be able to ask — a create/install refusal offers "
+            "the conversation-only retry (omit ``scope`` or use "
+            "``scope='session'``) and, to change the account, names the TUI "
+            "/agent form. ``update``/``reset`` act on an existing row, whose "
+            "store does not move, so those refusals name the TUI /agent form "
+            "alone; ``sync`` is account-only and has no conversation retry "
+            "either (its refusal names ``lop agents sync``). On a host with no "
+            "conversation store the omission "
+            "writes the account (there is no conversation scope to default "
+            "into), so the default means 'this conversation' only where the "
+            "host has one. Never choose durable just because a one-off would "
+            "also work. ``op='delete'`` cleans up a conversation role; it "
+            "cannot delete an account row.\n"
+            "- PROMOTE: when the user later asks for an existing CONVERSATION "
+            "role to be available elsewhere, ``op='promote'`` copies it into "
+            "their account. It needs their own confirmation, and the account "
+            "copy is independent from then on (this conversation keeps its own "
+            "row). Without a grant the refusal names only the TUI "
+            "``/agent promote <name>`` verb, which the user must run "
+            "themselves; there is no retry through this tool. An account name "
+            "collision is refused: pass ``confirm_replace`` only when the user "
+            "asked to overwrite it."
+        ),
+    ),
+    # -- team ---------------------------------------------------------------
+    "team": ToolDocNotes(
+        ops=(
+            ToolDocOp(op="list", blurb="What teams exist."),
+            ToolDocOp(op="show", blurb="A team's roster, briefs and project."),
+            ToolDocOp(
+                op="create/update",
+                blurb="Author a roster, or change its members and briefs.",
+            ),
+            ToolDocOp(
+                op="promote",
+                blurb=(
+                    "Copy THIS conversation's team into the account; its "
+                    "conversation-scoped members are copied in the same call, "
+                    "and the receipt names them."
+                ),
+            ),
+        ),
+        notes=(
+            "SCOPE, the reuse → ephemeral → durable ladder: reuse a registered team "
+            "when one covers the work; otherwise create it WITH NO ``scope`` so, "
+            "where this host has a conversation store, it lives in THIS "
+            "conversation only (usable until the conversation ends, "
+            "invisible elsewhere, gone with it; a fork starts with a copy of this "
+            "conversation's teams). A team saved for every conversation "
+            "is the user's decision: ``scope='global'`` needs their confirmation, and "
+            "this host may not be able to ask — the refusal offers the "
+            "conversation-only retry (omit ``scope`` or use ``scope='session'``) "
+            "and, to change the account, names the TUI /team form. An "
+            "``update`` retry with no ``scope`` changes nothing (the store of an "
+            "existing row does not move), so that refusal names the TUI /team "
+            "form alone. On a host with no conversation store the omission "
+            "writes the account, so the default means 'this conversation' only "
+            "where the host has one. `team_delete` removes a conversation team "
+            "only; an account team must be deleted from a user surface, which "
+            "asks its own confirmation. A conversation team may reference account "
+            "roles: those are not copied, and they resolve from the account in "
+            "every conversation.\n"
+            "- PROMOTE: when the user later asks for an existing CONVERSATION "
+            "team to be available elsewhere, ``op='promote'`` copies it into "
+            "their account; conversation-scoped members are copied in the same "
+            "call and the receipt names them. It needs their own confirmation, "
+            "and the account copy is independent from then on (this conversation "
+            "keeps its own). Without a grant the refusal names only the TUI "
+            "``/team promote <name>`` verb, which the user must run themselves; "
+            "there is no retry through this tool. A promotion collision is "
+            "refused with its own next step: a team member or alias collision "
+            "names the remedy by kind: a member collision names ``/team promote "
+            "<team> replace``; an alias collision names ``/team edit <owner>`` "
+            "(``replace`` does not resolve an alias, and ``as_name`` renames the "
+            "team, not its members)."
         ),
     ),
     # -- ask ----------------------------------------------------------------
@@ -215,9 +313,15 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(op="open", blurb="Start a surface at a URL."),
             ToolDocOp(op="goto", blurb="Navigate the session's existing surface."),
             ToolDocOp(op="read", blurb="The page's text."),
-            ToolDocOp(op="snapshot", blurb="Accessibility tree with click refs."),
+            ToolDocOp(
+                op="snapshot",
+                blurb=(
+                    "Accessibility tree with click refs; selector= scopes it, "
+                    "start=/limit=/search= page or filter it."
+                ),
+            ),
             ToolDocOp(op="screenshot", blurb="Capture the page to a file."),
-            ToolDocOp(op="click", blurb="Click a selector or snapshot ref."),
+            ToolDocOp(op="click", blurb="Click a selector, snapshot ref, or a11y locator."),
             ToolDocOp(
                 op="type",
                 blurb="Type text, or a stored secret via 'secret_ref', into a field.",
@@ -239,6 +343,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="ancestors",
                 blurb="The chain from the element up to <html> (depth <= 16, default 12).",
             ),
+            ToolDocOp(
+                op="query",
+                blurb="Read-only DOM query: CSS in, element descriptors out.",
+            ),
             ToolDocOp(op="tabs", blurb="List agent-driven tabs."),
             ToolDocOp(
                 op="inspect_ownership",
@@ -253,33 +361,50 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ),
             ToolDocOp(op="await_access", blurb="Wait for the user's decision."),
             ToolDocOp(op="cancel_access", blurb="Cancel YOUR pending exact-origin request."),
+            ToolDocOp(
+                op="network_start",
+                blurb=(
+                    "Begin recording THIS tab's requests (method, safe URL, "
+                    "status, timing, size, redirect links). Metadata only; "
+                    "url= + include_request_body= + approved= opt one exact "
+                    "origin+path's request bodies into a private file."
+                ),
+            ),
+            ToolDocOp(op="network_stop", blurb="Stop recording; the buffer stays readable."),
+            ToolDocOp(
+                op="network_read",
+                blurb=(
+                    "The recorded entries (bounded ring), optional filters: "
+                    "after_id=, request_id=, method=, status=, limit=."
+                ),
+            ),
+            ToolDocOp(op="network_clear", blurb="Drop the buffer."),
             ToolDocOp(op="recover", blurb="Recover YOUR tab."),
             ToolDocOp(op="retain", blurb="Hold it."),
             ToolDocOp(op="release", blurb="End that hold."),
             ToolDocOp(op="close", blurb="End YOUR tab."),
         ),
         notes=(
-            "Moved off the wire in the slimming wave (audit item 2):\n"
             "\n"
-            "- 'scroll', 'logs', 'tabs' and the geometry reads "
-            "('styles'/'hit_test'/'ancestors') need a non-cmux host (cmux says "
-            "so).\n"
-            "- On a non-cmux host, 'download' saves what the page offers into "
-            "this session's private download directory, and 'upload' attaches "
-            "local files to a page's file input.\n"
-            "- The geometry reads answer with numbers, not pictures, and are "
-            "bounded at the source: 'styles' reports up to 5 matches of a "
-            "selector (rect + computed styles + the element's inline `--*` "
-            "tokens); 'hit_test' the element stack at viewport (x, y) pixels, "
-            "topmost first; 'ancestors' the chain from an element up to and "
-            "including `<html>`, with the clip/layout style set. A selector "
-            "that matches nothing is the typed element-not-found, never an "
-            "empty success.\n"
+            "- 'scroll', 'logs', 'tabs' and the geometry reads need a non-cmux "
+            "host (cmux says so).\n"
+            "- 'download' saves what the page offers into this session's "
+            "private directory; 'upload' attaches local files to a file input "
+            "(both non-cmux).\n"
+            "- The geometry reads answer numbers, not pictures, bounded at the "
+            "source: 'styles' up to 5 matches (rect + computed styles + inline "
+            "`--*` tokens); 'hit_test' the stack at (x, y), topmost first; "
+            "'ancestors' the chain up to `<html>`. A selector matching nothing "
+            "is the typed element-not-found, never an empty success.\n"
             "- Tab ownership: 'tabs' lists every agent-driven tab including "
             "other sessions' (handles are redacted), and a redacted handle is "
             "not yours to drive.\n"
-            "- The full playbook — hosts, setup, per-site approvals, what each "
-            "error means — is ``guide://browser``."
+            "- Network capture is the desktop app's host only (the extension "
+            "attaches its debugger per action and has no standing session): "
+            "'network_start' then read with 'network_read'. Bodies are opt-in "
+            "per exact origin+path and land in a private session file, never in "
+            "this transcript.\n"
+            "- Hosts, setup, approvals, error meanings: ``guide://browser``."
         ),
     ),
     # -- console ------------------------------------------------------------
@@ -499,16 +624,120 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(
                 op="send",
                 blurb=(
-                    "An outbound note/question/request through the durable "
-                    "outbox: the intent and its client_ref are recorded before "
-                    "dispatch, so a retry replays the same idempotent send."
+                    "The PAIR-INBOX lane only: an outbound note/question/request "
+                    "through the durable outbox (intent and client_ref recorded "
+                    "before dispatch, so a retry replays the same idempotent "
+                    "send). It is NOT a direct message: nothing is posted in any "
+                    "Team Bridge conversation and the recipient does not see it "
+                    "there. Use `dm` for a person or their agent, `channel_post` "
+                    "for a room, and `send` only to answer a delivery that "
+                    "arrived on this lane."
                 ),
             ),
             ToolDocOp(
                 op="reply",
                 blurb=(
-                    "A send on an existing thread: thread_id and to always "
-                    "travel together — a thread_id alone is refused."
+                    "A send on an existing PAIR-INBOX thread: thread_id and to "
+                    "always travel together — a thread_id alone is refused. For "
+                    "a conversation reply use `channel_post` with "
+                    "thread_root_id."
+                ),
+            ),
+            ToolDocOp(
+                op="directory",
+                blurb=(
+                    "Who is on the team: each member's account id, display name "
+                    "and, when they have one, their chief of staff "
+                    "(`chief_of_staff.endpoint_id` and its CURRENT name). "
+                    "Metadata only — no bodies. Rows marked `you: true` are you "
+                    "or your own owner. An agent whose `reachable` is false is "
+                    "not addressable right now (state says why)."
+                ),
+            ),
+            ToolDocOp(
+                op="dm",
+                blurb=(
+                    "A DIRECT MESSAGE to another member's agent "
+                    "(`endpoint_id`, or `account_id` with target=agent) or to a "
+                    "person (`account_id`, target=human). It opens or reuses the "
+                    "same conversation the desktop shows, so both people see it "
+                    "and the recipient's connector delivers it to their chief of "
+                    "staff. The reply arrives in that conversation: read it with "
+                    "`channel_history(channel_id=<the dm's conversation_id>)`. "
+                    "A person asking you to pass something to someone's agent "
+                    "means `dm` — never 'forward this thread'."
+                ),
+            ),
+            ToolDocOp(
+                op="shared_conversations",
+                blurb=(
+                    "Conversations your OWNER explicitly shared with you (the "
+                    "chief-of-staff read grant). Metadata only. A conversation "
+                    "that was not shared never appears; a revoked grant takes "
+                    "effect immediately, and every page you read is audited on "
+                    "the hub."
+                ),
+            ),
+            ToolDocOp(
+                op="channels",
+                blurb=(
+                    "One page of YOUR OWNER's conversations (the human list). It "
+                    "belongs to the chief-of-staff session: a task session gets "
+                    "`not_designated` here. Tenant-visible channels your owner has "
+                    "not joined come back discoverable with a member count."
+                ),
+            ),
+            ToolDocOp(
+                op="channel_create",
+                blurb=(
+                    "Open a group or channel as this agent; the creator agent member "
+                    "is added automatically, and the human owner only if you name "
+                    "them. Members found with `directory` can be added here, so a "
+                    "group of several teammates' agents is one call."
+                ),
+            ),
+            ToolDocOp(
+                op="channel_post",
+                blurb=(
+                    "Post one message into a conversation as this agent, and the "
+                    "result carries `message_id`/`seq` so you can confirm it and "
+                    "thread on it. `thread_root_id` posts as a reply in that "
+                    "message's thread. This is the op for a ROOM, and for answering "
+                    "a DM, not `send`."
+                ),
+            ),
+            ToolDocOp(
+                op="channel_history",
+                blurb=(
+                    "A bounded page of one conversation. Bodies appear only for "
+                    "messages this agent admitted; everything else is metadata with "
+                    "`body: null` (no local body cache). This is also how you read "
+                    "the reply to a DM you opened, using the `conversation_id` the "
+                    "`dm` result gave you."
+                ),
+            ),
+            ToolDocOp(
+                op="channel_thread",
+                blurb=(
+                    "One thread, oldest-first: the root with its reply count and a "
+                    "bounded page of replies. Same screening rule as history."
+                ),
+            ),
+            ToolDocOp(
+                op="react",
+                blurb=(
+                    "Set or clear one emoji on an admitted message. Reactions never "
+                    "wake anyone; `remove` clears your own."
+                ),
+            ),
+            ToolDocOp(
+                op="shared_history",
+                blurb=(
+                    "Read one conversation the owner shared with you "
+                    "(`channel_id`; add `thread_root_id` for a thread). Read "
+                    "only — you can never post as your owner — and `not_shared` "
+                    "means the owner has not shared it, which only they can "
+                    "change in the desktop."
                 ),
             ),
         ),
@@ -530,7 +759,15 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "approved'.\n"
             "- Claims are local leases: a claim releases on ack done (or "
             "expires); a message another session holds is refused here rather "
-            "than duplicate-worked."
+            "than duplicate-worked.\n"
+            "- WHICH LANE: `dm`/`channel_post` are visible in Team Bridge and "
+            "auditable; `send`/`reply` are the legacy pair inbox, invisible in "
+            "the UI. One path per intent — do not answer a DM with `send`.\n"
+            "- WHICH SESSION: any session with this tool may collaborate, but "
+            "`take_up`/`ack`/`send`/`reply`, `channels` and `shared_*` belong to "
+            "the account's chief-of-staff session. Getting `not_designated` "
+            "there is not an account problem and not retryable: hand the work "
+            "to that session instead."
         ),
     ),
     # -- project ------------------------------------------------------------
@@ -607,10 +844,12 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "never overwrites a name/description either writer set.\n"
             "- `locked` protects a row from agent writes; the Librarian skips it.\n"
             "- An asset may carry at most 12 tags; `primary` must be one of them.\n"
-            "- `actor` defaults to `librarian`; pass `user` only for a user-"
-            "initiated action. `confidence` is recorded on the edit row.\n"
+            "- `actor` is derived: the Librarian session records `librarian`, "
+            "every other session `agent`; pass `user` only for a user-initiated "
+            "action, and `librarian` from elsewhere is refused. `confidence` is "
+            "recorded on the edit row.\n"
             "- `update` with a name/description marks the asset organized when "
-            "the actor is the Librarian.\n"
+            "the actor is the Librarian; so does a non-empty tag set.\n"
             "- Content bytes and thumbnails are HTTP surfaces, not tool ops: the "
             "tool is for finding and naming, not shipping files."
         ),
@@ -809,7 +1048,9 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "settles at billing; a BYOK (ElevenLabs / OpenAI) call reports no "
             "per-call figure, so the harness estimates from its central rate "
             "table and the receipt says so — `details.billing_basis` is "
-            "`estimated` and never a charge. The harness prompts for approval "
+            "`estimated` and never a charge. A BYOK voiceover is billed by the "
+            "vendor per character; the estimate here is per 1,000 characters. "
+            "The harness prompts for approval "
             "(write tier) with a pre-spend estimate where one is knowable.\n"
             "\n"
             "The text may be anything from a word to 10,000 characters; "
@@ -818,7 +1059,17 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "(`radient/voiceover-flash`, `eleven_flash_v2_5`); the "
             "multilingual default pronounces whatever it is given and the "
             "receipt's voicing notes say what was ignored. There are no "
-            "pronunciation dictionaries. Output is MP3.\n"
+            "pronunciation dictionaries. Output is MP3: 192 kbps where the "
+            "account's plan allows it, 128 where the plan refuses it — the "
+            "harness asks for the better format and drops to 128 rather than "
+            "failing a generation over audio quality.\n"
+            "\n"
+            "On a stored ElevenLabs key the request reaches the vendor under "
+            "your key, and that vendor's `enable_logging` is ON by default; "
+            "turning it off (zero retention) is Enterprise-only. So a BYOK "
+            "text is logged by the vendor unless your own account is "
+            "Enterprise — Radient's retention terms do not extend to that "
+            "hop, and the harness cannot switch it off for you.\n"
             "\n"
             "Cancelling (Esc / steering) stops the wait and best-effort "
             "cancels the server job: it says what the server said — the "
@@ -840,10 +1091,25 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "each provider said. Setup: `guide://sound-generation`.\n"
             "\n"
             "`duration_s` is REQUIRED (0.5–30 seconds; no auto-duration) and "
-            "is the spend knob: an ElevenLabs estimate is priced per second "
-            "of generated audio, and a Radient call is quoted by the server. "
-            "`prompt_influence` (0–1) steers how literally the prompt is "
-            "followed; `loop` asks for a seamless loop. Output is MP3.\n"
+            "length is the spend lever on BOTH sound-effect meters: Radient "
+            "bills $0.002 per started second, and a stored ElevenLabs key "
+            "bills the vendor's 40 credits per second of requested duration "
+            "(a 30 s clip is about 1,200 credits). `prompt_influence` (0–1) "
+            "steers how literally "
+            "the prompt is followed; `loop` asks for a seamless loop. Output "
+            "is MP3: 192 kbps where the plan allows it, 128 where it refuses "
+            "it — never a failed generation over audio quality.\n"
+            "\n"
+            "Describe what you WANT, not what you don't: this endpoint has no "
+            'negative-prompt parameter, and a prompt like "no music, no '
+            'voices" reads as "keep it quiet" and tends to weaken the '
+            "effect rather than clean it up.\n"
+            "\n"
+            "Vendor logging: on a stored ElevenLabs key `enable_logging` is "
+            "ON by default and turning it off is Enterprise-only, so the "
+            "prompt reaches a vendor that logs it unless your own account is "
+            "Enterprise. Radient's retention terms do not extend to that "
+            "hop.\n"
             "\n"
             "Cost rules and the approval prompt are the same as "
             "`generate_voiceover`: a BYOK figure is an `estimated` figure "
@@ -870,13 +1136,35 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "watcher job) so its completion is delivered normally."
         ),
     ),
+    "glob": ToolDocNotes(
+        notes=(
+            "- `path` is the base directory (absolute or relative to the working "
+            "directory); results print relative to it and the header names it. An "
+            "ABSOLUTE `pattern` is split at its first wildcard component — the "
+            "literal directory prefix becomes the base — so `/abs/dir/**/*.js` works; "
+            "give one or the other, not both.\n"
+            "- `..` is refused inside a pattern; a base outside the workspace asks for "
+            "the same approval `grep` does.\n"
+            "- A `SKILL.md` search is still refused: read `skill://<name>` instead."
+        ),
+    ),
     "grep": ToolDocNotes(
         notes=(
             "Detail moved off the wire in the slimming wave (audit items 2+7):\n"
             "\n"
             "- `context_lines` adds surrounding lines per match (like `grep "
-            "-C`); `skip` pages past the first 200 matches.\n"
+            "-C`); context lines render as `path:line-text` (dash), matches as "
+            "`path:line:text`. `skip` pages past the first 200 matches.\n"
+            "- `pattern` is a Python regex; `path` is a file or directory, absolute "
+            "or relative to the working directory; `include` is a glob on file names "
+            "or basenames (e.g. `*.py`, `**/*.ts`).\n"
             "- `grep` and `glob` both respect the project's ignore files.\n"
+            "- A matched line over 500 chars is shown as a window around the match "
+            "(`[…N chars]` marks what was dropped); read the file by line range for "
+            "the rest.\n"
+            "- Files over `max_filesize_mb` (default 1, ceiling 64) are never read: "
+            "the answer names the largest few. A no-match that names skipped files is "
+            "INCONCLUSIVE — re-run with the `max_filesize_mb` it suggests.\n"
             "- Failure semantics: a scan that hits its wall-clock deadline "
             "returns what it has so far, and the display caps at 200 matches "
             "with the rest written to a `spill://` handle you can search."
@@ -941,6 +1229,117 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "instructions. Prefer this over ad-hoc `gh pr view`/`glab mr "
             "view` when the question is about this session's work, review "
             "rounds or freshness; `guide://code-requests` has the full rules."
+        ),
+    ),
+    # -- artifact_data (claude.ai artifact shared data store) ----------------
+    # Mirrors Claude Code's ArtifactData shape so skills written for it work
+    # unchanged; the wire mapping and the version rules are read-once reference.
+    "artifact_data": ToolDocNotes(
+        ops=(
+            ToolDocOp(op="whoami", blurb="Your user id on this artifact.", fields=("url",)),
+            ToolDocOp(op="get", blurb="One document.", fields=("url", "collection", "doc_id")),
+            ToolDocOp(
+                op="list",
+                blurb="A page of a collection.",
+                fields=("url", "collection", "limit", "cursor"),
+            ),
+            ToolDocOp(
+                op="set",
+                blurb="Replace the whole document.",
+                fields=("url", "collection", "doc_id", "data", "if_version"),
+            ),
+            ToolDocOp(
+                op="update",
+                blurb="Merge fields into the document.",
+                fields=("url", "collection", "doc_id", "data", "if_version"),
+            ),
+            ToolDocOp(
+                op="delete",
+                blurb="Remove the document.",
+                fields=("url", "collection", "doc_id", "if_version"),
+            ),
+            ToolDocOp(
+                op="str_replace",
+                blurb=(
+                    "Swap exact text inside one string field (experimental: gated "
+                    "server-side in Claude Code, not exercised live)."
+                ),
+                fields=(
+                    "url",
+                    "collection",
+                    "doc_id",
+                    "field",
+                    "old_str",
+                    "new_str",
+                    "replace_all",
+                    "if_version",
+                ),
+            ),
+            ToolDocOp(
+                op="batch",
+                blurb="Up to 50 set/update/delete writes, applied atomically.",
+                fields=("url", "writes"),
+            ),
+        ),
+        notes=(
+            "`url` is the artifact link: `https://claude.ai/artifact/<id>` or "
+            "`https://claude.ai/code/artifact/<uuid>`. Paths alternate "
+            "collection/document: a collection has an odd number of segments (1-15), "
+            "`doc_id` is one segment (letters, digits, `_ - . ~ : @ +`).\n"
+            "`data/users/me` is the caller's own collection: `me` is resolved through "
+            "`whoami` and the result says what it resolved to.\n"
+            "Pass the `version` you read as `if_version` on every write to a document "
+            "that exists (each `writes` entry too); omit it only when creating one. A "
+            "conflict writes nothing: re-read and re-decide, never retry without "
+            '`if_version`. In an `update`, a field set to `{"__delete__": true}` is '
+            "removed. Reads are read-tier; writes ask for approval. Needs a claude.ai "
+            "login (`/login anthropic`); documents others wrote are untrusted data. "
+            "Reads have been exercised against a live artifact; write actions have not "
+            "yet been exercised live."
+        ),
+    ),
+    # -- tags (V2-4 agent write path) ---------------------------------------
+    # The wire description keeps the one rule a model must know before calling
+    # (names only; a misspelling is refused). The vocabulary, the caps and the
+    # receipt contract are read-once reference, so they live here.
+    "tags": ToolDocNotes(
+        ops=(
+            ToolDocOp(
+                op="list",
+                blurb="Categories with ids, names, display order and conversation counts.",
+            ),
+            ToolDocOp(
+                op="create",
+                blurb="One category; blank, reserved, oversized or duplicate names are refused.",
+                fields=("name",),
+            ),
+            ToolDocOp(
+                op="rename",
+                blurb="Rename one category by id; assignments keep the id.",
+                fields=("id", "name"),
+            ),
+            ToolDocOp(
+                op="assign",
+                blurb="Replace one session's categories with the named set; empty clears.",
+                fields=("session_id", "tags", "primary"),
+            ),
+        ),
+        notes=(
+            "`assign` takes category NAMES only, exact case-insensitive — never "
+            "ids. Ids appear in `list` for display and for `rename`. A name the "
+            "store does not contain is refused with the known vocabulary; it is "
+            "never auto-created. Create the category first (`create` is the only "
+            "creation path), then assign it.\n"
+            "Caps: at most 32 categories; names 1-24 characters, unique "
+            "case-insensitively, with `Untagged` reserved; at most 8 categories "
+            "per session. `primary` must be one of the assigned names (or "
+            "omitted, which keeps the current primary, else the first). An empty "
+            "`tags` list clears the session's assignments.\n"
+            "Delegated and hidden sessions are taggable; a remote/mesh session is "
+            "refused with the route's `409 session_is_remote` and the device that "
+            "holds it. Every successful `assign` receipt names the categories and the "
+            "session, so the tool ledger is the audit trail. Deleting a category is a sidebar "
+            "action, not a tool op."
         ),
     ),
 }

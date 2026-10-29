@@ -1,0 +1,2356 @@
+wire.settings.agents.description
+EN Whether installed starter roles (reviewer, coder, aida, ...) update themselves to the packaged text at launch when you have not edited them. Off = updates are still reported; apply them with 'lop agents sync'.
+OLD اگر آپ نے انسٹال شدہ ابتدائی کرداروں (reviewer، coder، aida، ...) میں ترمیم نہیں کی تو، launch پر وہ packaged text سے خودکار اپ ڈیٹ ہوں یا نہیں۔ آف پر اپ ڈیٹس کی اطلاع ملتی رہے گی؛ انہیں 'lop agents sync' سے لاگو کریں۔
+NEW اگر آپ نے انسٹال شدہ ابتدائی کرداروں (reviewer، coder، aida، ...) میں ترمیم نہیں کی تو، لانچ پر وہ پیکج شدہ متن سے خودکار اپ ڈیٹ ہوں یا نہیں۔ آف پر اپ ڈیٹس کی اطلاع ملتی رہے گی؛ انہیں 'lop agents sync' سے لاگو کریں۔
+wire.settings.agents_auto_update_seeds.choice.true.description
+EN keep unedited built-ins current
+OLD غیر ترمیم شدہ built-ins کو تازہ رکھیں
+NEW غیر ترمیم شدہ بلٹ اِن کو تازہ رکھیں
+wire.settings.agents_auto_update_seeds.help
+EN At launch, update unedited built-ins; tool changes still ask.
+OLD launch پر غیر ترمیم شدہ built-ins اپ ڈیٹ کریں؛ ٹول کی تبدیلیوں پر پوچھا جائے گا۔
+NEW لانچ پر غیر ترمیم شدہ بلٹ اِن اپ ڈیٹ کریں؛ ٹول کی تبدیلیوں پر پوچھا جائے گا۔
+wire.settings.agents_auto_update_seeds.label
+EN Auto-update built-in roles
+OLD built-in کردار خودکار اپ ڈیٹ کریں
+NEW بلٹ اِن کردار خودکار اپ ڈیٹ کریں
+wire.settings.aida.description
+EN Your chief of staff: her display name, and the proactive cadence — when she checks in, how much she may escalate, and the pause switch. The name applies everywhere at once; edits are read at her next action, and /aida pause|resume act immediately.
+OLD آپ کی chief of staff: اس کا ظاہری نام اور proactive cadence — کب رابطہ کرے، کتنا escalate کر سکے، اور pause کا اختیار۔ نام ہر جگہ ایک ساتھ لاگو ہوتا ہے؛ تبدیلیاں اگلے action پر پڑھی جاتی ہیں، اور /aida pause|resume فوری اثر کرتی ہیں۔
+NEW آپ کی چیف آف اسٹاف: اس کا ظاہری نام اور پیش قدم کیڈنس — کب رابطہ کرے، کتنا ایسکلیٹ کر سکے، اور روکنے کا اختیار۔ نام ہر جگہ ایک ساتھ لاگو ہوتا ہے؛ تبدیلیاں اگلے عمل پر پڑھی جاتی ہیں، اور /aida pause|resume فوری اثر کرتی ہیں۔
+wire.settings.aida_cadence_at.help
+EN Local wall-clock HH:MM. An invalid value falls back to 08:30 at the next arm.
+OLD مقامی HH:MM وقت۔ غلط قیمت اگلی بار arm کرنے پر 08:30 ہو جائے گی۔
+NEW مقامی HH:MM وقت۔ غلط قیمت اگلی بار مقرر کرنے پر 08:30 ہو جائے گی۔
+wire.settings.aida_cadence_max_extra_per_day.help
+EN How many escalation check-ins she may arm per day. 0 disables escalation.
+OLD روزانہ کتنے اضافی escalation رابطے arm کر سکے۔ 0 escalation بند کرتا ہے۔
+NEW روزانہ کتنے اضافی ایسکلیشن رابطے مقرر کر سکے۔ 0 ایسکلیشن بند کرتا ہے۔
+wire.settings.aida_cadence_paused.help
+EN Written by /aida pause|resume, which also hold her wakes; editing it here works the same way at her next tick.
+OLD /aida pause|resume لکھتی ہے اور بیداریاں بھی روکتی ہے؛ یہاں ترمیم اگلے tick پر اسی طرح اثر کرے گی۔
+NEW /aida pause|resume لکھتی ہے اور بیداریاں بھی روکتی ہے؛ یہاں ترمیم اگلے چکر پر اسی طرح اثر کرے گی۔
+wire.settings.aida_cadence_paused.label
+EN Cadence paused
+OLD Cadence روکی ہوئی
+NEW کیڈنس روکی ہوئی
+wire.settings.aida_enabled.help
+EN Read at boot and by /aida; a disabled install never creates her session.
+OLD boot اور /aida پر پڑھی جاتی ہے؛ غیر فعال install اس کا سیشن نہیں بناتی۔
+NEW بوٹ اور /aida پر پڑھی جاتی ہے؛ غیر فعال انسٹال اس کا سیشن نہیں بناتی۔
+wire.settings.aida_enabled.label
+EN Chief of staff enabled
+OLD Chief of staff فعال
+NEW چیف آف اسٹاف فعال
+wire.settings.aida_onboarding_nudge_days.help
+EN How rarely she may nudge about setting up an integration. Read from the onboarding slice.
+OLD integration قائم کرنے کی یاد دہانی کتنے عرصے بعد ہو۔ onboarding slice سے پڑھی جاتی ہے۔
+NEW انضمام قائم کرنے کی یاد دہانی کتنے عرصے بعد ہو۔ آن بورڈنگ کے حصے سے پڑھی جاتی ہے۔
+wire.settings.aida_onboarding_nudge_days.label
+EN Integration nudge interval (days)
+OLD Integration یاد دہانی وقفہ (دن)
+NEW انضمام یاد دہانی وقفہ (دن)
+wire.settings.appearance.description
+EN Theme and the terminal features the TUI is allowed to use.
+OLD Theme اور وہ terminal خصوصیات جو TUI استعمال کر سکے۔
+NEW تھیم اور وہ ٹرمینل خصوصیات جو TUI استعمال کر سکے۔
+wire.settings.approvals.description
+EN Whether write and command tools prompt, in every running session. A config write tightens every running session at once; loosening one needs a write from that session's own process (/approvals auto in it, or a /settings page in that process).
+OLD ہر چلتے سیشن میں لکھنے اور command ٹولز اجازت مانگیں یا نہ مانگیں۔ config میں لکھنے سے تمام چلتے سیشنز ایک ساتھ سخت ہو جاتے ہیں؛ نرم کرنے کے لیے اسی سیشن کے process سے لکھنا ہوگا (/approvals auto یا اسی process کا /settings صفحہ)۔
+NEW ہر چلتے سیشن میں لکھنے اور کمانڈ ٹولز اجازت مانگیں یا نہ مانگیں۔ کنفیگ میں لکھنے سے تمام چلتے سیشنز ایک ساتھ سخت ہو جاتے ہیں؛ نرم کرنے کے لیے اسی سیشن کے پروسیس سے لکھنا ہوگا (/approvals auto یا اسی پروسیس کا /settings صفحہ)۔
+wire.settings.asks.description
+EN Questions an agent queues for you. A change applies at once in the terminal, the desktop app and on your phone.
+OLD ایجنٹ کے آپ کے لیے قطار میں لگائے گئے سوالات۔ تبدیلی terminal، desktop app اور فون میں فوراً لاگو ہوتی ہے۔
+NEW ایجنٹ کے آپ کے لیے قطار میں لگائے گئے سوالات۔ تبدیلی ٹرمینل، ڈیسک ٹاپ ایپ اور فون میں فوراً لاگو ہوتی ہے۔
+wire.settings.asks_lapsed_visible_for.choice.7d.description
+EN hidden 7 days after its deadline (default)
+OLD آخری مہلت کے 7 دن بعد پوشیدہ (default)
+NEW آخری مہلت کے 7 دن بعد پوشیدہ (ڈیفالٹ)
+wire.settings.auto_save_conversation.help
+EN Headless REPL launches only; the TUI's runtime does not read it.
+OLD صرف headless REPL launches؛ TUI runtime اسے نہیں پڑھتا۔
+NEW صرف ہیڈلیس REPL لانچز؛ TUI رن ٹائم اسے نہیں پڑھتا۔
+wire.settings.bash_memory_enabled.choice.true.description
+EN cap command memory
+OLD command میموری محدود کریں
+NEW کمانڈ میموری محدود کریں
+wire.settings.bash_memory_enabled.help
+EN Give every bash command a RAM ceiling. A command whose process group crosses it is killed (its group only, never lop) so it cannot take the device down; the model is told to use less memory.
+OLD ہر bash command کو RAM حد دیں۔ اس حد سے بڑھنے والا process group ختم ہو جاتا ہے (صرف اس کا group، کبھی lop نہیں) تاکہ ڈیوائس بند نہ ہو؛ ماڈل کو کم میموری استعمال کرنے کو کہا جاتا ہے۔
+NEW ہر bash کمانڈ کو RAM حد دیں۔ اس حد سے بڑھنے والا پروسیس گروپ ختم ہو جاتا ہے (صرف اس کا گروپ، کبھی lop نہیں) تاکہ ڈیوائس بند نہ ہو؛ ماڈل کو کم میموری استعمال کرنے کو کہا جاتا ہے۔
+wire.settings.bash_memory_enabled.label
+EN Command memory limit
+OLD Command میموری حد
+NEW کمانڈ میموری حد
+wire.settings.bash_memory_limit_mb.help
+EN The ceiling when 'manual' is selected above. 0 means use the auto ceiling instead, so leaving this at 0 never disables the guard.
+OLD اوپر 'manual' منتخب ہونے کی حد۔ 0 کا مطلب auto حد استعمال کریں، اس لیے 0 رہنے سے guard بند نہیں ہوتا۔
+NEW اوپر 'manual' منتخب ہونے پر لاگو حد۔ 0 کا مطلب auto حد استعمال کریں، اس لیے 0 رہنے سے گارڈ بند نہیں ہوتا۔
+wire.settings.bash_memory_mode.choice.auto.description
+EN derive from available memory (default)
+OLD دستیاب میموری سے حد نکالیں (default)
+NEW دستیاب میموری سے حد نکالیں (ڈیفالٹ)
+wire.settings.bash_memory_mode.help
+EN 'auto' derives the ceiling from the memory this device has free right now, so it tightens on its own when the machine is busy. 'manual' pins it to the number below.
+OLD 'auto' اس وقت ڈیوائس کی خالی میموری سے حد نکالتی ہے، اس لیے مصروف machine پر خود سخت ہو جاتی ہے۔ 'manual' اسے نیچے دیے نمبر پر مقرر کرتی ہے۔
+NEW 'auto' اس وقت ڈیوائس کی خالی میموری سے حد نکالتی ہے، اس لیے مصروف مشین پر خود سخت ہو جاتی ہے۔ 'manual' اسے نیچے دیے نمبر پر مقرر کرتی ہے۔
+wire.settings.bash_memory_soft_fraction.help
+EN Fraction of the ceiling at which one advisory line is emitted. It is only an advisory — userspace cannot slow an allocation — so it warns before the kill, it does not prevent it.
+OLD حد کے کس حصے پر ایک advisory line آئے۔ یہ صرف تنبیہ ہے — userspace allocation سست نہیں کر سکتی — اس لیے ختم ہونے سے پہلے بتاتی ہے، روکتی نہیں۔
+NEW حد کے کس حصے پر ایک انتباہی سطر آئے۔ یہ صرف تنبیہ ہے — یوزر اسپیس الوکیشن سست نہیں کر سکتی — اس لیے ختم ہونے سے پہلے بتاتی ہے، روکتی نہیں۔
+wire.settings.bash_memory_soft_fraction.label
+EN Advisory threshold
+OLD Advisory حد
+NEW انتباہ حد
+wire.settings.bash_query_budget_enabled.choice.false.description
+EN no budget
+OLD کوئی budget نہیں
+NEW کوئی بجٹ نہیں
+wire.settings.bash_query_budget_enabled.choice.true.description
+EN time-box shell queries
+OLD shell queries کو وقت کی حد دیں
+NEW شیل کویریز کو وقت کی حد دیں
+wire.settings.bash_query_budget_enabled.help
+EN Time-box a shell `grep`/`find`/`du` walk that reads the filesystem rather than a scoped file: one advisory at 10 s, then a stop at the budget below. Builds, installs and test runs are never affected.
+OLD مخصوص فائل کے بجائے filesystem پڑھنے والی shell `grep`/`find`/`du` walk کو وقت کی حد دیں: 10 s پر advisory، پھر نیچے دیے budget پر توقف۔ Builds، installs اور tests متاثر نہیں ہوتے۔
+NEW مخصوص فائل کے بجائے فائل سسٹم پڑھنے والی شیل `grep`/`find`/`du` گشت کو وقت کی حد دیں: 10 s پر انتباہ، پھر نیچے دیے بجٹ پر توقف۔ بلڈز، انسٹالز اور ٹیسٹس متاثر نہیں ہوتے۔
+wire.settings.bash_query_budget_enabled.label
+EN Shell query budget
+OLD Shell query budget
+NEW شیل کوئری کا بجٹ
+wire.settings.bash_query_budget_seconds.help
+EN Wall-clock budget for one shell query. The advisory fires at 10 s whatever this says; this is the stop. A per-command prefix of LOCAL_OPERATOR_ALLOW_SLOW_QUERY=1 skips the stop for a justified run.
+OLD ایک shell query کا wall-clock budget۔ 10 s پر advisory ہر صورت آئے گی؛ یہ توقف کا وقت ہے۔ کسی command سے پہلے LOCAL_OPERATOR_ALLOW_SLOW_QUERY=1 لگانے سے جواز والی run کا توقف نہیں ہوتا۔
+NEW ایک شیل کوئری کا حقیقی وقت بجٹ۔ 10 s پر انتباہ ہر صورت آئے گی؛ یہ توقف کا وقت ہے۔ کسی کمانڈ سے پہلے LOCAL_OPERATOR_ALLOW_SLOW_QUERY=1 لگانے سے جواز والی رن کا توقف نہیں ہوتا۔
+wire.settings.bash_query_budget_seconds.label
+EN Budget (seconds)
+OLD Budget (سیکنڈ)
+NEW بجٹ (سیکنڈ)
+wire.settings.bash_query_budget_stop.choice.false.description
+EN advisory only
+OLD صرف advisory
+NEW صرف انتباہ
+wire.settings.bash_query_budget_stop.choice.true.description
+EN stop the query
+OLD query روک دیں
+NEW کوئری روک دیں
+wire.settings.bash_query_budget_stop.help
+EN On: a query that crosses the budget is killed and told why. Off: it runs to completion and only the advisory is shown, so an operator can watch before enforcing.
+OLD آن: budget سے بڑھی query ختم کر کے وجہ بتائی جائے۔ آف: query مکمل چلتی ہے اور صرف advisory دکھائی جاتی ہے تاکہ نفاذ سے پہلے operator دیکھ سکے۔
+NEW آن: بجٹ سے بڑھی کوئری ختم کر کے وجہ بتائی جائے۔ آف: کوئری مکمل چلتی ہے اور صرف انتباہ دکھائی جاتی ہے تاکہ نفاذ سے پہلے آپریٹر دیکھ سکے۔
+wire.settings.bash_shell.help
+EN Interpreter for the bash tool. Empty uses bash on PATH, else /bin/sh.
+OLD bash ٹول کا interpreter۔ خالی ہونے پر PATH میں bash، ورنہ /bin/sh۔
+NEW bash ٹول کا انٹرپریٹر۔ خالی ہونے پر PATH میں bash، ورنہ /bin/sh۔
+wire.settings.bash_shell.help.windows
+EN Interpreter for the bash tool. Empty: bash on PATH, else Git's bash.exe.
+OLD bash ٹول کا interpreter۔ خالی ہونے پر PATH میں bash، ورنہ Git کا bash.exe۔
+NEW bash ٹول کا انٹرپریٹر۔ خالی ہونے پر PATH میں bash، ورنہ Git کا bash.exe۔
+wire.settings.bash_shell.label
+EN Bash interpreter
+OLD Bash interpreter
+NEW Bash انٹرپریٹر
+wire.settings.classification.description
+EN Advisory skills, guides and MCP servers a decision model may suggest per message. Off keeps the prompt unchanged.
+OLD ایک decision ماڈل ہر پیغام پر advisory مہارتیں، guides اور MCP servers تجویز کر سکے۔ آف پر پرامپٹ بالکل نہیں بدلتا۔
+NEW فیصلہ کرنے والا ماڈل ہر پیغام پر مشورتی مہارتیں، گائیڈز اور MCP سرورز تجویز کر سکے۔ آف پر پرامپٹ بالکل نہیں بدلتا۔
+wire.settings.classification.title
+EN Smart hints
+OLD Smart hints
+NEW ذہین اشارے
+wire.settings.classification_auto.choice.true.description
+EN a decision model may add advisory resources
+OLD decision ماڈل advisory وسائل شامل کر سکے
+NEW فیصلہ کرنے والا ماڈل مشورتی وسائل شامل کر سکے
+wire.settings.classification_auto.help
+EN On: a decision model may add advisory resources. Off: the prompt is unchanged.
+OLD آن: decision ماڈل advisory وسائل شامل کر سکے۔ آف: پرامپٹ نہیں بدلتا۔
+NEW آن: فیصلہ کرنے والا ماڈل مشورتی وسائل شامل کر سکے۔ آف: پرامپٹ نہیں بدلتا۔
+wire.settings.classification_auto.label
+EN Smart hints
+OLD Smart hints
+NEW ذہین اشارے
+wire.settings.classification_maxcandidates.help
+EN Needs recommendations on. Candidates per kind; 0 uses 12.
+OLD Recommendations آن ہوں۔ ہر قسم کے candidates؛ 0 پر 12۔
+NEW تجاویز آن ہوں۔ ہر قسم کے امیدوار؛ 0 پر 12۔
+wire.settings.classification_maxcandidates.label
+EN ↳ max candidates
+OLD ↳ زیادہ سے زیادہ candidates
+NEW ↳ زیادہ سے زیادہ امیدوار
+wire.settings.classification_maxrecommendations.help
+EN Needs recommendations on. Per-message resources; 0 uses 3.
+OLD Recommendations آن ہوں۔ فی پیغام وسائل؛ 0 پر 3۔
+NEW تجاویز آن ہوں۔ فی پیغام وسائل؛ 0 پر 3۔
+wire.settings.classification_maxrecommendations.label
+EN ↳ max recommendations
+OLD ↳ زیادہ سے زیادہ recommendations
+NEW ↳ زیادہ سے زیادہ تجاویز
+wire.settings.classification_maxstatechars.help
+EN Needs recommendations on. State cap; 0 uses 6000 chars.
+OLD Recommendations آن ہوں۔ State کی حد؛ 0 پر 6000 chars۔
+NEW تجاویز آن ہوں۔ حالت کی حد؛ 0 پر 6000 حروف۔
+wire.settings.classification_maxstatechars.label
+EN ↳ max state chars
+OLD ↳ زیادہ سے زیادہ state chars
+NEW ↳ حالت کے زیادہ سے زیادہ حروف
+wire.settings.classification_model.help
+EN Needs recommendations on. Vendor model id; empty uses its default.
+OLD Recommendations آن ہوں۔ Vendor model id؛ خالی پر اس کا default۔
+NEW تجاویز آن ہوں۔ وینڈر ماڈل id؛ خالی پر اس کا ڈیفالٹ۔
+wire.settings.classification_notice.help
+EN Deprecated. Smart hints is silent in the chat; the call is in the log.
+OLD فرسودہ۔ Smart hints chat میں خاموش ہیں؛ call log میں آتی ہے۔
+NEW فرسودہ۔ ذہین اشارے چیٹ میں خاموش ہیں؛ کال لاگ میں آتی ہے۔
+wire.settings.classification_notice.label
+EN Smart hints notice
+OLD Smart hints notice
+NEW ذہین اشاروں کا نوٹس
+wire.settings.classification_timeoutms.help
+EN Needs recommendations on. Per-call deadline; 0 uses 1500 ms.
+OLD Recommendations آن ہوں۔ فی call مہلت؛ 0 پر 1500 ms۔
+NEW تجاویز آن ہوں۔ فی کال مہلت؛ 0 پر 1500 ms۔
+wire.settings.classification_vendor.choice.auto.description
+EN first leg with a usable credential
+OLD قابل استعمال credential والی پہلی route
+NEW قابل استعمال کریڈینشل والی پہلی روٹ
+wire.settings.classification_vendor.choice.openrouter.description
+EN OpenRouter's alpha decisions route
+OLD OpenRouter کی alpha decisions route
+NEW OpenRouter کی alpha decisions روٹ
+wire.settings.classification_vendor.choice.radient.description
+EN Radient's decision route
+OLD Radient کی decision route
+NEW Radient کی فیصلہ روٹ
+wire.settings.classification_vendor.choice.typesafe.description
+EN TypeSafe's Jev endpoint
+OLD TypeSafe کا Jevons reasoning route
+NEW TypeSafe کا Jevons استدلال روٹ
+wire.settings.classification_vendor.help
+EN Needs recommendations on. Pin one leg; auto prefers Radient.
+OLD Recommendations آن ہوں۔ ایک route مقرر کریں؛ auto میں Radient اول ہے۔
+NEW تجاویز آن ہوں۔ ایک روٹ مقرر کریں؛ auto میں Radient اول ہے۔
+wire.settings.classification_vendor.label
+EN ↳ vendor
+OLD ↳ vendor
+NEW ↳ وینڈر
+wire.settings.classification_waitms.help
+EN Needs recommendations on. How long a turn waits; 0 uses 50 ms.
+OLD Recommendations آن ہوں۔ Turn کتنا انتظار کرے؛ 0 پر 50 ms۔
+NEW تجاویز آن ہوں۔ ٹرن کتنا انتظار کرے؛ 0 پر 50 ms۔
+wire.settings.classification_waitms.label
+EN ↳ wait budget (ms)
+OLD ↳ انتظار budget (ms)
+NEW ↳ انتظار بجٹ (ms)
+wire.settings.compaction.description
+EN When the conversation is summarised to reclaim context.
+OLD Context خالی کرنے کے لیے گفتگو کا خلاصہ کب بنے۔
+NEW سیاق و سباق خالی کرنے کے لیے گفتگو کا خلاصہ کب بنے۔
+wire.settings.compaction_auto_continue.choice.false.description
+EN stop after the pass
+OLD Pass کے بعد رک جائیں
+NEW پاس کے بعد رک جائیں
+wire.settings.compaction_auto_continue.help
+EN Schedule a continuation prompt after a successful post-turn pass.
+OLD کامیاب post-turn pass کے بعد continuation پرامپٹ شیڈول کریں۔
+NEW ٹرن کے بعد کا پاس کامیاب ہو تو جاری رکھنے کا پرامپٹ شیڈول کریں۔
+wire.settings.compaction_enabled.choice.false.description
+EN never compact
+OLD کبھی compact نہ کریں
+NEW کبھی کمپریس نہ کریں
+wire.settings.compaction_enabled.choice.true.description
+EN compact automatically
+OLD خودکار compact کریں
+NEW خودکار کمپریس کریں
+wire.settings.compaction_enabled.help
+EN Summarise older history when the context fills.
+OLD Context بھرنے پر پرانی history کا خلاصہ بنائیں۔
+NEW سیاق و سباق بھرنے پر پرانی تاریخچہ کا خلاصہ بنائیں۔
+wire.settings.compaction_keep_recent_tokens.help
+EN Recent history kept verbatim across a pass.
+OLD Pass کے دوران حالیہ history حرف بہ حرف رکھی جائے۔
+NEW پاس کے دوران حالیہ تاریخچہ حرف بہ حرف رکھی جائے۔
+wire.settings.compaction_keep_recent_tokens.label
+EN Keep recent tokens
+OLD حالیہ tokens رکھیں
+NEW حالیہ ٹوکنز رکھیں
+wire.settings.compaction_mid_turn_enabled.choice.false.description
+EN only between turns
+OLD صرف turns کے درمیان
+NEW صرف ٹرن کے درمیان
+wire.settings.compaction_mid_turn_enabled.choice.true.description
+EN compact mid-turn
+OLD Turn کے دوران compact کریں
+NEW ٹرن کے دوران کمپریس کریں
+wire.settings.compaction_mid_turn_enabled.help
+EN Allow a pass at safe tool-loop boundaries, not only between turns.
+OLD صرف turns کے درمیان نہیں، محفوظ tool-loop حدود پر بھی pass کی اجازت دیں۔
+NEW صرف ٹرنز کے درمیان نہیں، محفوظ ٹول لوپ حدود پر بھی پاس کی اجازت دیں۔
+wire.settings.compaction_mid_turn_enabled.label
+EN Mid-turn compaction
+OLD Turn کے دوران کمپریشن
+NEW ٹرن کے دوران کمپریشن
+wire.settings.compaction_strategy.choice.auto.description
+EN snapcompact for vision models, else context-full
+OLD Vision ماڈلز کے لیے snapcompact، ورنہ context-full
+NEW ویژن ماڈلز کے لیے snapcompact، ورنہ context-full
+wire.settings.compaction_strategy.choice.context_full.description
+EN summarise the whole context
+OLD پورے context کا خلاصہ بنائیں
+NEW پورے سیاق و سباق کا خلاصہ بنائیں
+wire.settings.compaction_strategy.choice.off.description
+EN disable the pass
+OLD Pass بند کریں
+NEW پاس بند کریں
+wire.settings.compaction_strategy.choice.snapcompact.description
+EN snapshot-based, keeps images out
+OLD snapshot پر مبنی، تصاویر باہر رکھے
+NEW سنیپ شاٹ پر مبنی، تصاویر باہر رکھے
+wire.settings.compaction_strategy.help
+EN Which mechanism compacts. Auto picks per model.
+OLD کون سا mechanism compact کرے۔ Auto ماڈل کے حساب سے منتخب کرتا ہے۔
+NEW کون سا میکانیزم کمپریس کرے۔ auto ماڈل کے حساب سے منتخب کرتا ہے۔
+wire.settings.compaction_threshold_percent.help
+EN Percentage trigger. 0.80 and 80 both mean 80%.
+OLD فیصد trigger۔ 0.80 اور 80 دونوں کا مطلب 80% ہے۔
+NEW فیصد محرک۔ 0.80 اور 80 دونوں کا مطلب 80% ہے۔
+wire.settings.compaction_threshold_percent.label
+EN Threshold (% of window)
+OLD حد (window کا %)
+NEW حد (ونڈو کا %)
+wire.settings.compaction_threshold_tokens.help
+EN Absolute trigger. The smaller of this and the percentage wins.
+OLD مطلق trigger۔ اس اور فیصد میں سے چھوٹی قیمت لاگو ہوگی۔
+NEW مطلق محرک۔ اس اور فیصد میں سے چھوٹی قیمت لاگو ہوگی۔
+wire.settings.compaction_threshold_tokens.label
+EN Threshold (tokens)
+OLD حد (tokens)
+NEW حد (ٹوکنز)
+wire.settings.compaction_wire_bytes_budget.help
+EN Hard ceiling on the request. Older screenshots are dropped from the context (never from the transcript) to stay under it. 0 disables.
+OLD درخواست کی سخت حد۔ اس سے نیچے رہنے کے لیے پرانے screenshots context سے نکالے جاتے ہیں (ٹرانسکرپٹ سے کبھی نہیں)۔ 0 بند کرتا ہے۔
+NEW درخواست کی سخت حد۔ اس سے نیچے رہنے کے لیے پرانے اسکرین شاٹس سیاق و سباق سے نکالے جاتے ہیں (ٹرانسکرپٹ سے کبھی نہیں)۔ 0 بند کرتا ہے۔
+wire.settings.compaction_wire_bytes_trigger.help
+EN Compact once the request passes this size, so a screenshot-heavy session summarises early instead of dropping frames. 0 disables.
+OLD درخواست اس size سے بڑھے تو compact کریں، تاکہ screenshots والے سیشن میں frames نکالنے کے بجائے جلد خلاصہ بنے۔ 0 بند کرتا ہے۔
+NEW درخواست اس سائز سے بڑھے تو کمپریس کریں، تاکہ اسکرین شاٹس والے سیشن میں فریمز نکالنے کے بجائے جلد خلاصہ بنے۔ 0 بند کرتا ہے۔
+wire.settings.compaction_wire_bytes_trigger.label
+EN Request size trigger (bytes)
+OLD درخواست trigger (bytes)
+NEW درخواست محرک (bytes)
+wire.settings.conversation_length.help
+EN Deprecated. Superseded by the compaction engine.
+OLD فرسودہ۔ کمپریشن engine نے بدل دیا ہے۔
+NEW فرسودہ۔ کمپریشن انجن نے بدل دیا ہے۔
+wire.settings.desktop.description
+EN Where a notification click sends you when the desktop app is not running.
+OLD جب desktop app نہ چل رہی ہو تو notification click آپ کو کہاں لے جائے۔
+NEW جب ڈیسک ٹاپ ایپ نہ چل رہی ہو تو اطلاع پر کلک آپ کو کہاں لے جائے۔
+wire.settings.desktop.title
+EN Desktop app
+OLD Desktop app
+NEW ڈیسک ٹاپ ایپ
+wire.settings.desktop_launch_command.help
+EN Empty = discover the app (local-operator-ui, then the macOS app). '{'session'}' is the session id.
+OLD خالی = app تلاش کریں (local-operator-ui، پھر macOS app)۔ '{'session'}' سیشن id ہے۔
+NEW خالی = ایپ تلاش کریں (local-operator-ui، پھر macOS ایپ)۔ '{'session'}' سیشن id ہے۔
+wire.settings.desktop_launch_command.label
+EN launch command
+OLD launch command
+NEW لانچ کمانڈ
+wire.settings.detail_length.help
+EN Deprecated. Superseded by the compaction engine.
+OLD فرسودہ۔ کمپریشن engine نے بدل دیا ہے۔
+NEW فرسودہ۔ کمپریشن انجن نے بدل دیا ہے۔
+wire.settings.display_comfortable_rows.choice.false.description
+EN compact, more history
+OLD Compact، مزید history
+NEW تنگ، مزید تاریخچہ
+wire.settings.display_comfortable_rows.choice.true.description
+EN padded, easier to click
+OLD Padding کے ساتھ، click آسان
+NEW پیڈنگ کے ساتھ، کلک آسان
+wire.settings.display_comfortable_rows.help
+EN Pad tool and prompt rows so they are easier to click.
+OLD ٹول اور پرامپٹ rows میں padding دیں تاکہ click آسان ہو۔
+NEW ٹول اور پرامپٹ قطاروں میں پیڈنگ دیں تاکہ کلک آسان ہو۔
+wire.settings.display_comfortable_rows.label
+EN Comfortable action rows
+OLD آسان action rows
+NEW کلک آسان قطاریں
+wire.settings.display_composer_band.choice.true.description
+EN show the band
+OLD band دکھائیں
+NEW بینڈ دکھائیں
+wire.settings.display_composer_band.help
+EN Also the standing alerts. Model, dir, context, cost, rate, elapsed.
+OLD مستقل alerts بھی۔ ماڈل، dir، context، لاگت، rate، گزرا وقت۔
+NEW مستقل انتباہات بھی۔ ماڈل، ڈائریکٹری، سیاق و سباق، لاگت، رفتار، گزرا وقت۔
+wire.settings.display_composer_band.label
+EN Status band
+OLD Status band
+NEW اسٹیٹس بینڈ
+wire.settings.display_composer_chevron.help
+EN The prompt mark at the left edge of the input row.
+OLD Input row کے بائیں کنارے پرامپٹ کا نشان۔
+NEW ان پٹ قطار کے بائیں کنارے پرامپٹ کا نشان۔
+wire.settings.display_composer_chevron.label
+EN Prompt chevron
+OLD Prompt chevron
+NEW پرامپٹ شیوران
+wire.settings.display_composer_context.choice.true.description
+EN show context usage
+OLD context استعمال دکھائیں
+NEW سیاق و سباق استعمال دکھائیں
+wire.settings.display_composer_context.help
+EN The context-usage segment in the status band.
+OLD Status band میں context استعمال کا حصہ۔
+NEW اسٹیٹس بینڈ میں سیاق و سباق استعمال کا حصہ۔
+wire.settings.display_composer_context.label
+EN Band: context
+OLD Band: context
+NEW بینڈ: سیاق و سباق
+wire.settings.display_composer_cost.help
+EN The session-cost segment in the status band.
+OLD Status band میں سیشن لاگت کا حصہ۔
+NEW اسٹیٹس بینڈ میں سیشن لاگت کا حصہ۔
+wire.settings.display_composer_cost.label
+EN Band: session cost
+OLD Band: سیشن لاگت
+NEW بینڈ: سیشن لاگت
+wire.settings.display_composer_cwd.choice.true.description
+EN show the directory
+OLD directory دکھائیں
+NEW ڈائریکٹری دکھائیں
+wire.settings.display_composer_cwd.help
+EN The working-directory segment in the status band.
+OLD Status band میں working directory کا حصہ۔
+NEW اسٹیٹس بینڈ میں ورکنگ ڈائریکٹری کا حصہ۔
+wire.settings.display_composer_cwd.label
+EN Band: working dir
+OLD Band: working dir
+NEW بینڈ: ورکنگ ڈائریکٹری
+wire.settings.display_composer_duration.help
+EN The elapsed-time segment in the status band.
+OLD Status band میں گزرے وقت کا حصہ۔
+NEW اسٹیٹس بینڈ میں گزرے وقت کا حصہ۔
+wire.settings.display_composer_duration.label
+EN Band: elapsed
+OLD Band: گزرا وقت
+NEW بینڈ: گزرا وقت
+wire.settings.display_composer_model.help
+EN The model-label segment in the status band.
+OLD Status band میں ماڈل label کا حصہ۔
+NEW اسٹیٹس بینڈ میں ماڈل لیبل کا حصہ۔
+wire.settings.display_composer_model.label
+EN Band: model
+OLD Band: ماڈل
+NEW بینڈ: ماڈل
+wire.settings.display_composer_rate.choice.true.description
+EN show the rate
+OLD rate دکھائیں
+NEW رفتار دکھائیں
+wire.settings.display_composer_rate.help
+EN The tok/s segment — the last completed call's throughput.
+OLD tok/s کا حصہ — آخری مکمل call کی throughput۔
+NEW tok/s کا حصہ — آخری مکمل کال کی تھراپٹ۔
+wire.settings.display_composer_rate.label
+EN Band: decode rate
+OLD Band: decode rate
+NEW بینڈ: ڈیکوڈ رفتار
+wire.settings.display_dock.choice.full.description
+EN one row per child, newest first
+OLD ہر child کی row، نیا پہلے
+NEW ہر ذیلی ایجنٹ کی قطار، نیا پہلے
+wire.settings.display_dock.help
+EN How much room the subagent panel takes when a session starts; ctrl+g cycles it.
+OLD سیشن شروع ہونے پر ذیلی ایجنٹ panel کتنی جگہ لے؛ ctrl+g سے بدلیں۔
+NEW سیشن شروع ہونے پر ذیلی ایجنٹ پینل کتنی جگہ لے؛ ctrl+g سے بدلیں۔
+wire.settings.display_dock.label
+EN Subagent dock
+OLD ذیلی ایجنٹ dock
+NEW ذیلی ایجنٹ ڈاک
+wire.settings.display_heading_markers.choice.true.description
+EN show ### markers
+OLD ### markers دکھائیں
+NEW ### نشانات دکھائیں
+wire.settings.display_heading_markers.help
+EN Show the literal ### before a heading, as the markdown source writes it.
+OLD Heading سے پہلے literal ### دکھائیں، جیسا markdown source میں ہوتا ہے۔
+NEW سرخی سے پہلے لفظی ### دکھائیں، جیسا markdown ماخذ میں ہوتا ہے۔
+wire.settings.display_heading_markers.label
+EN Heading markers
+OLD Heading markers
+NEW سرخی کے نشانات
+wire.settings.display_hide_cross_session.help
+EN Hide lop send traffic and inbound peer messages from transcripts.
+OLD ٹرانسکرپٹس سے lop send traffic اور آنے والے peer پیغامات پوشیدہ کریں۔
+NEW ٹرانسکرپٹس سے lop send ٹریفک اور آنے والے پیر پیغامات پوشیدہ کریں۔
+wire.settings.display_hide_cross_session.label
+EN Hide cross-session traffic
+OLD Cross-session traffic پوشیدہ
+NEW سیشنز کے درمیان ٹریفک پوشیدہ
+wire.settings.display_images.choice.false.description
+EN text receipts only
+OLD صرف text receipts
+NEW صرف متن کی رسیدیں
+wire.settings.display_images.help
+EN Screenshots and attachments drawn in the transcript.
+OLD ٹرانسکرپٹ میں screenshots اور attachments دکھائیں۔
+NEW ٹرانسکرپٹ میں اسکرین شاٹس اور منسلکات دکھائیں۔
+wire.settings.display_images.label
+EN Inline images
+OLD Inline تصاویر
+NEW ان لائن تصاویر
+wire.settings.display_narration.choice.false.description
+EN hide narration once tools run
+OLD ٹولز چلنے پر narration پوشیدہ کریں
+NEW ٹولز چلنے پر بیان پوشیدہ کریں
+wire.settings.display_narration.choice.true.description
+EN keep narration
+OLD narration رکھیں
+NEW بیان رکھیں
+wire.settings.display_narration.help
+EN Keep the agent's mid-turn narration in the transcript after its tool calls run.
+OLD ٹول calls کے بعد بھی ایجنٹ کی mid-turn narration ٹرانسکرپٹ میں رکھیں۔
+NEW ٹول کالوں کے بعد بھی ٹرن کے دوران ایجنٹ کا بیان ٹرانسکرپٹ میں رکھیں۔
+wire.settings.display_narration.label
+EN Mid-turn narration
+OLD Mid-turn narration
+NEW ٹرن کے دوران بیان
+wire.settings.display_nerd_icons.choice.false.description
+EN force plain icons
+OLD سادہ icons لازم کریں
+NEW سادہ آئیکنز لازم کریں
+wire.settings.display_nerd_icons.choice.none.description
+EN decide from the terminal emulator
+OLD Terminal emulator سے فیصلہ کریں
+NEW ٹرمینل ایمولیٹر سے فیصلہ کریں
+wire.settings.display_nerd_icons.choice.true.description
+EN force glyphs on
+OLD glyphs لازماً آن کریں
+NEW گلفس لازماً آن کریں
+wire.settings.display_nerd_icons.help
+EN Expanded tool-row icons. Auto reads the terminal emulator's markers.
+OLD Expanded tool-row icons۔ Auto terminal emulator کے markers پڑھتا ہے۔
+NEW وسیع ٹول قطار کے آئیکنز۔ auto ٹرمینل ایمولیٹر کے نشانات پڑھتا ہے۔
+wire.settings.display_nerd_icons.label
+EN Nerd Font glyphs
+OLD Nerd Font glyphs
+NEW Nerd Font گلفس
+wire.settings.display_notification_session_name.choice.false.description
+EN keep names off banners
+OLD Banners پر نام نہ رکھیں
+NEW بینرز پر نام نہ رکھیں
+wire.settings.display_notification_session_name.help
+EN A session's name, last line and error causes appear on banners, including the lock screen.
+OLD Banners پر سیشن کا نام، آخری سطر اور error وجوہ آتی ہیں، lock screen بھی شامل۔
+NEW بینرز پر سیشن کا نام، آخری سطر اور خرابی کی وجوہات آتی ہیں، لاک اسکرین بھی شامل۔
+wire.settings.display_notification_session_name.label
+EN Notification session names
+OLD Notification سیشن نام
+NEW اطلاعات میں سیشن کے نام
+wire.settings.display_notifications.choice.true.description
+EN notify when unfocused
+OLD غیر focused ہونے پر اطلاع دیں
+NEW غیر فوکسڈ ہونے پر اطلاع دیں
+wire.settings.display_notifications.help
+EN Fires only while the terminal is unfocused.
+OLD صرف terminal غیر focused ہو تو اطلاع جائے۔
+NEW صرف ٹرمینل غیر فوکسڈ ہو تو اطلاع جائے۔
+wire.settings.display_notifications.label
+EN Desktop notifications
+OLD Desktop notifications
+NEW ڈیسک ٹاپ اطلاعات
+wire.settings.display_rail.choice.false.description
+EN no rail
+OLD کوئی rail نہیں
+NEW کوئی ریل نہیں
+wire.settings.display_rail.choice.true.description
+EN rail the answer only
+OLD صرف جواب پر rail
+NEW صرف جواب پر ریل
+wire.settings.display_rail.help
+EN A rule marks the ANSWER: the message that ends the turn. Mid-turn narration takes no rail.
+OLD ایک rule ANSWER کو نشان زد کرے: turn ختم کرنے والا پیغام۔ Mid-turn narration پر rail نہیں۔
+NEW ایک لکیر ANSWER کو نشان زد کرے: ٹرن ختم کرنے والا پیغام۔ ٹرن کے دوران کے بیان پر ریل نہیں۔
+wire.settings.display_rail.label
+EN Assistant gutter rail
+OLD Assistant gutter rail
+NEW اسسٹنٹ گٹر ریل
+wire.settings.display_reasoning.choice.false.description
+EN hide reasoning
+OLD reasoning پوشیدہ کریں
+NEW استدلال پوشیدہ کریں
+wire.settings.display_reasoning.choice.true.description
+EN show live reasoning
+OLD live reasoning دکھائیں
+NEW براہ راست استدلال دکھائیں
+wire.settings.display_reasoning.help
+EN Show the model's private thinking while it streams; it vanishes once the thinking ends.
+OLD Stream کے دوران ماڈل کی نجی thinking دکھائیں؛ ختم ہوتے ہی غائب ہو جاتی ہے۔
+NEW سٹریم کے دوران ماڈل کی نجی سوچ دکھائیں؛ ختم ہوتے ہی غائب ہو جاتی ہے۔
+wire.settings.display_reasoning.label
+EN Live model reasoning
+OLD Live ماڈل reasoning
+NEW ماڈل کا براہ راست استدلال
+wire.settings.display_shimmer.choice.false.description
+EN static working line
+OLD ساکن working line
+NEW کام کی ساکن سطر
+wire.settings.display_shimmer.choice.true.description
+EN animate the working line
+OLD working line متحرک کریں
+NEW کام کی سطر متحرک کریں
+wire.settings.display_shimmer.help
+EN The animated sheen on the working line.
+OLD Working line پر متحرک چمک۔
+NEW کام کی سطر پر متحرک چمک۔
+wire.settings.display_shimmer.label
+EN Shimmer animation
+OLD Shimmer animation
+NEW چمک کی اینیمیشن
+wire.settings.display_terminal_title.choice.false.description
+EN leave the title alone
+OLD title نہ بدلیں
+NEW عنوان نہ بدلیں
+wire.settings.display_terminal_title.choice.true.description
+EN set the window title
+OLD window title مقرر کریں
+NEW ونڈو عنوان مقرر کریں
+wire.settings.display_terminal_title.help
+EN OSC 0 window title carrying the session name and run state.
+OLD سیشن نام اور run state رکھنے والا OSC 0 window title۔
+NEW سیشن نام اور رن کی حالت رکھنے والا OSC 0 ونڈو عنوان۔
+wire.settings.display_terminal_title.label
+EN Terminal title
+OLD Terminal title
+NEW ٹرمینل عنوان
+wire.settings.display_time_format.choice.12h.label
+EN 12-hour
+OLD 12-hour
+NEW 12 گھنٹے
+wire.settings.display_time_format.choice.24h.label
+EN 24-hour
+OLD 24-hour
+NEW 24 گھنٹے
+wire.settings.display_time_format.help
+EN Scheduled wake times use your local timezone. Choose a 12- or 24-hour clock.
+OLD شیڈول شدہ بیداری کے اوقات آپ کے local timezone میں ہیں۔ 12 یا 24-hour clock منتخب کریں۔
+NEW شیڈول شدہ بیداری کے اوقات آپ کے مقامی ٹائم زون میں ہیں۔ 12 یا 24 گھنٹے کی گھڑی منتخب کریں۔
+wire.settings.display_turn_answer_rail.choice.false.description
+EN no rule beside the answer
+OLD جواب کے پاس کوئی rule نہیں
+NEW جواب کے پاس کوئی لکیر نہیں
+wire.settings.display_turn_answer_rail.choice.true.description
+EN rule beside the closing answer
+OLD آخری جواب کے پاس rule
+NEW آخری جواب کے پاس لکیر
+wire.settings.display_turn_answer_rail.help
+EN Draw a thin rule beside the answer that closes a turn (desktop app).
+OLD Turn ختم کرنے والے جواب کے پاس پتلی rule بنائیں (desktop app)۔
+NEW ٹرن ختم کرنے والے جواب کے پاس پتلی لکیر بنائیں (ڈیسک ٹاپ ایپ)۔
+wire.settings.display_turn_answer_rail.label
+EN Mark the turn answer
+OLD Turn کے جواب کا نشان
+NEW ٹرن کے جواب کا نشان
+wire.settings.failover.description
+EN What happens when a provider call fails or a quota runs out.
+OLD Provider call ناکام یا quota ختم ہو تو کیا ہو۔
+NEW پرووائیڈر کال ناکام یا کوٹہ ختم ہو تو کیا ہو۔
+wire.settings.failover.title
+EN Failover and retry
+OLD Failover اور retry
+NEW فیل اوور اور دوبارہ کوشش
+wire.settings.fork.title
+EN Fork
+OLD Fork
+NEW فورک
+wire.settings.fork_cmux_placement.choice.surface.description
+EN a tab in the current workspace
+OLD موجودہ ورک اسپیس میں tab
+NEW موجودہ ورک اسپیس میں ٹیب
+wire.settings.fork_cmux_placement.choice.surface.label
+EN new surface
+OLD new surface
+NEW نئی سرفیس
+wire.settings.fork_cmux_placement.choice.workspace.description
+EN a sidebar row of its own
+OLD sidebar میں الگ row
+NEW سائڈبار میں الگ قطار
+wire.settings.fork_cmux_placement.choice.workspace.label
+EN new workspace
+OLD new ورک اسپیس
+NEW نئی ورک اسپیس
+wire.settings.fork_cmux_placement.help
+EN Under cmux, whether a fork gets its own workspace or a surface here.
+OLD cmux میں fork کو الگ ورک اسپیس ملے یا یہیں surface۔
+NEW cmux میں فورک کو الگ ورک اسپیس ملے یا یہیں سرفیس۔
+wire.settings.fork_mode.choice.switch.description
+EN follow the fork here; return with /resume
+OLD fork یہاں کھولیں؛ /resume سے واپس آئیں
+NEW فورک یہاں کھولیں؛ /resume سے واپس آئیں
+wire.settings.fork_mode.choice.switch.label
+EN this terminal
+OLD یہ terminal
+NEW یہ ٹرمینل
+wire.settings.fork_mode.choice.window.description
+EN open the fork elsewhere; this session keeps running
+OLD fork کہیں اور کھولیں؛ یہ سیشن چلتا رہے
+NEW فورک کہیں اور کھولیں؛ یہ سیشن چلتا رہے
+wire.settings.fork_mode.choice.window.label
+EN new window
+OLD new window
+NEW نئی ونڈو
+wire.settings.fork_mode.help
+EN Choose where the fork opens; unfinished work stays in the original.
+OLD Fork کہاں کھلے منتخب کریں؛ نامکمل کام اصل میں رہتا ہے۔
+NEW فورک کہاں کھلے منتخب کریں؛ نامکمل کام اصل میں رہتا ہے۔
+wire.settings.fork_mode.label
+EN Where a fork opens
+OLD Fork کہاں کھلے
+NEW فورک کہاں کھلے
+wire.settings.hooks.description
+EN Run native and forwarded Claude Code / Codex PostToolUse hooks.
+OLD Native اور forwarded Claude Code / Codex PostToolUse hooks چلائیں۔
+NEW مقامی اور فارورڈ شدہ Claude Code / Codex PostToolUse ہکس چلائیں۔
+wire.settings.hooks.title
+EN Hooks
+OLD Hooks
+NEW ہکس
+wire.settings.hooks_forward_claude.help
+EN Run PostToolUse hooks from ~/.claude and plugins after each tool call.
+OLD ہر ٹول call کے بعد ~/.claude اور plugins سے PostToolUse hooks چلائیں۔
+NEW ہر ٹول کال کے بعد ~/.claude اور پلگ اِنز سے PostToolUse ہکس چلائیں۔
+wire.settings.hooks_forward_claude.label
+EN Forward Claude Code hooks
+OLD Claude Code hooks forward کریں
+NEW Claude Code ہکس فارورڈ کریں
+wire.settings.hooks_forward_codex.help
+EN Run PostToolUse hooks from ~/.codex/hooks.json after each tool call.
+OLD ہر ٹول call کے بعد ~/.codex/hooks.json سے PostToolUse hooks چلائیں۔
+NEW ہر ٹول کال کے بعد ~/.codex/hooks.json سے PostToolUse ہکس چلائیں۔
+wire.settings.hooks_forward_codex.label
+EN Forward Codex hooks
+OLD Codex hooks forward کریں
+NEW Codex ہکس فارورڈ کریں
+wire.settings.hooks_native.help
+EN Run hooks from hooks.json in the lop config dir after each tool call.
+OLD ہر ٹول call کے بعد lop config dir میں hooks.json سے hooks چلائیں۔
+NEW ہر ٹول کال کے بعد lop کنفیگ ڈائریکٹری میں hooks.json سے ہکس چلائیں۔
+wire.settings.hooks_native.label
+EN Native hooks
+OLD Native hooks
+NEW مقامی ہکس
+wire.settings.hosting.help
+EN Provider for new conversations. /model saved adopts it here.
+OLD نئی گفتگوؤں کا provider۔ /model saved یہاں اپناتا ہے۔
+NEW نئی گفتگوؤں کا پرووائیڈر۔ /model saved یہاں اپناتا ہے۔
+wire.settings.hosting.label
+EN Default provider
+OLD Default provider
+NEW ڈیفالٹ پرووائیڈر
+wire.settings.hub.description
+EN Keep agents and teams you pulled from the Agent Hub current: whether updates are merged in automatically, how often the hub is checked, and which model resolves a conflict. Your edits and deletions are merged, never overwritten.
+OLD Agent Hub سے حاصل کردہ ایجنٹس اور ٹیمیں تازہ رکھیں: updates خودکار merge ہوں، hub کتنی بار check ہو، اور conflict کون سا ماڈل حل کرے۔ آپ کی تبدیلیاں اور deletions merge ہوتی ہیں، overwrite نہیں۔
+NEW Agent Hub سے حاصل کردہ ایجنٹس اور ٹیمیں تازہ رکھیں: اپ ڈیٹس خودکار merge ہوں، hub کتنی بار جانچ ہو، اور تضاد کون سا ماڈل حل کرے۔ آپ کی تبدیلیاں اور حذف کردہ مواد merge ہوتا ہے، اووررائیٹ نہیں۔
+wire.settings.hub_auto_update_agents.choice.true.description
+EN merge hub updates automatically
+OLD hub updates خودکار merge کریں
+NEW hub اپ ڈیٹس خودکار merge کریں
+wire.settings.hub_auto_update_agents.help
+EN Merge hub updates into pulled agents automatically.
+OLD حاصل کردہ ایجنٹس میں hub updates خودکار merge کریں۔
+NEW حاصل کردہ ایجنٹس میں hub اپ ڈیٹس خودکار merge کریں۔
+wire.settings.hub_auto_update_teams.choice.true.description
+EN merge hub updates automatically
+OLD hub updates خودکار merge کریں
+NEW hub اپ ڈیٹس خودکار merge کریں
+wire.settings.hub_auto_update_teams.help
+EN Merge hub updates into pulled teams automatically.
+OLD حاصل کردہ ٹیموں میں hub updates خودکار merge کریں۔
+NEW حاصل کردہ ٹیموں میں hub اپ ڈیٹس خودکار merge کریں۔
+wire.settings.hub_check_interval_min.help
+EN Minutes between hub update checks (both modes).
+OLD Hub update checks کے درمیان منٹ (دونوں modes)۔
+NEW Hub اپ ڈیٹ کی جانچوں کے درمیان منٹ (دونوں موڈز)۔
+wire.settings.hub_check_interval_min.label
+EN Check interval (minutes)
+OLD Check وقفہ (منٹ)
+NEW جانچ وقفہ (منٹ)
+wire.settings.keymap.description
+EN Keys for starting and resuming conversations. Press enter on a row, then press the key you want.
+OLD گفتگو شروع اور دوبارہ کھولنے کی keys۔ کسی row پر enter دبائیں، پھر مطلوبہ key دبائیں۔
+NEW گفتگو شروع اور دوبارہ کھولنے کی کلیدیں۔ کسی قطار پر enter دبائیں، پھر مطلوبہ کلید دبائیں۔
+wire.settings.keymap.title
+EN Hotkeys
+OLD Hotkeys
+NEW ہاٹ کیز
+wire.settings.language.help
+EN Interface language. auto follows your operating system, falling back to English.
+OLD Interface کی زبان۔ auto آپ کے operating system کی پیروی کرتی ہے، ورنہ English۔
+NEW انٹرفیس کی زبان۔ auto آپ کے آپریٹنگ سسٹم کی پیروی کرتی ہے، ورنہ انگریزی۔
+wire.settings.librarian.description
+EN The Librarian keeps the global Library organised: her display name, the daily pass, and the pause switch. The Library is long-term and shared by every conversation.
+OLD Librarian عالمی Library منظم رکھتی ہے: اس کا ظاہری نام، روزانہ pass، اور pause۔ Library طویل مدت کی ہے اور ہر گفتگو میں مشترک ہے۔
+NEW Librarian عالمی Library منظم رکھتی ہے: اس کا ظاہری نام، روزانہ پاس، اور روکنے کا اختیار۔ Library طویل مدت کی ہے اور ہر گفتگو میں مشترک ہے۔
+wire.settings.librarian_cadence_at.help
+EN Local wall-clock HH:MM. An invalid value falls back to 03:30 at the next arm.
+OLD مقامی HH:MM وقت۔ غلط قیمت اگلی بار arm کرنے پر 03:30 ہو جائے گی۔
+NEW مقامی HH:MM وقت۔ غلط قیمت اگلی بار مقرر کرنے پر 03:30 ہو جائے گی۔
+wire.settings.librarian_cadence_at.label
+EN Daily pass time
+OLD روزانہ pass کا وقت
+NEW روزانہ پاس کا وقت
+wire.settings.librarian_cadence_max_extra_per_day.help
+EN How many extra passes she may request per day. 0 disables extra passes.
+OLD روزانہ کتنے اضافی passes کی درخواست کر سکے۔ 0 اضافی passes بند کرتا ہے۔
+NEW روزانہ کتنے اضافی پاس کی درخواست کر سکے۔ 0 اضافی پاس بند کرتا ہے۔
+wire.settings.librarian_cadence_max_extra_per_day.label
+EN Extra passes / day
+OLD اضافی passes / دن
+NEW اضافی پاس / دن
+wire.settings.librarian_cadence_min_gap_minutes.help
+EN Minimum spacing between her passes; closer requests are refused.
+OLD Passes کے درمیان کم از کم وقفہ؛ اس سے کم وقفے والی درخواستیں مسترد ہوں گی۔
+NEW پاسوں کے درمیان کم از کم وقفہ؛ اس سے کم وقفے والی درخواستیں مسترد ہوں گی۔
+wire.settings.librarian_cadence_paused.help
+EN Pausing removes her scheduled rows; resuming re-arms the next pass. The desktop and /librarian write the same key.
+OLD Pause کرنے سے scheduled rows ہٹتی ہیں؛ resume اگلا pass arm کرتا ہے۔ Desktop اور /librarian ایک ہی key لکھتے ہیں۔
+NEW روکنے پر شیڈول شدہ قطاریں ہٹتی ہیں؛ resume اگلا پاس مقرر کرتا ہے۔ ڈیسک ٹاپ اور /librarian ایک ہی کلید لکھتے ہیں۔
+wire.settings.librarian_cadence_paused.label
+EN Daily pass paused
+OLD روزانہ pass روکا ہوا
+NEW روزانہ پاس روکا ہوا
+wire.settings.librarian_enabled.help
+EN Read at boot and by /v1/desktop/librarian; a disabled install never creates her session.
+OLD boot اور /v1/desktop/librarian پر پڑھی جاتی ہے؛ غیر فعال install اس کا سیشن نہیں بناتی۔
+NEW بوٹ اور /v1/desktop/librarian پر پڑھی جاتی ہے؛ غیر فعال انسٹال اس کا سیشن نہیں بناتی۔
+wire.settings.librarian_name.help
+EN The name her pinned conversation and every receipt use.
+OLD وہ نام جو اس کی pinned گفتگو اور ہر receipt استعمال کرے۔
+NEW وہ نام جو اس کی پن شدہ گفتگو اور ہر رسید استعمال کرے۔
+wire.settings.local_providers.base_url.help
+EN HTTP(S) API root. Changing servers requires a new token through /login; existing tokens are never forwarded to another endpoint.
+OLD HTTP(S) API root۔ Server بدلنے پر /login سے نیا token درکار ہے؛ موجودہ tokens کبھی دوسرے host کو forward نہیں ہوتے۔
+NEW HTTP(S) API روٹ۔ سرور بدلنے پر /login سے نیا ٹوکن درکار ہے؛ موجودہ ٹوکنز کبھی دوسرے ہوسٹ کو فارورڈ نہیں ہوتے۔
+wire.settings.local_providers.base_url.label
+EN {name} endpoint
+OLD {name} base URL
+NEW {name} بیس URL
+wire.settings.local_providers.description
+EN Server endpoints and exact-model metadata. Use /login to connect; reselect with /model saved to apply model changes.
+OLD Server endpoints اور exact-model metadata۔ /login سے connect کریں؛ ماڈل تبدیلیوں کے لیے /model saved سے دوبارہ منتخب کریں۔
+NEW سرور اینڈ پوائنٹس اور عین ماڈل میٹا ڈیٹا۔ /login سے کنیکٹ کریں؛ ماڈل تبدیلیوں کے لیے /model saved سے دوبارہ منتخب کریں۔
+wire.settings.local_providers.models.help
+EN JSON: '{'"model-id":'{'"context_window":8192'}''}'; server limits still apply.
+OLD JSON: '{'"model-id":'{'"context_window":8192'}''}'; server کی حدود لاگو رہتی ہیں۔
+NEW JSON: '{'"model-id":'{'"context_window":8192'}''}'; سرور کی حدود لاگو رہتی ہیں۔
+wire.settings.local_providers.models.label
+EN {name} model overrides
+OLD {name} ماڈل overrides
+NEW {name} ماڈل اووررائیڈس
+wire.settings.local_providers.title
+EN Local servers
+OLD Local servers
+NEW مقامی سرورز
+wire.settings.max_learnings_history.help
+EN Deprecated. Superseded by the compaction engine.
+OLD فرسودہ۔ کمپریشن engine نے بدل دیا ہے۔
+NEW فرسودہ۔ کمپریشن انجن نے بدل دیا ہے۔
+wire.settings.max_learnings_history.label
+EN Max learnings history
+OLD زیادہ سے زیادہ learnings history
+NEW سیکھے ہوئے نکات کی زیادہ سے زیادہ تاریخچہ
+wire.settings.memory_guard.description
+EN A per-command RAM ceiling, so one oversized command is killed instead of taking the whole device down.
+OLD فی command RAM حد، تاکہ ایک بڑی command ختم ہو، پوری ڈیوائس بند نہ ہو۔
+NEW فی کمانڈ RAM حد، تاکہ ایک بڑی کمانڈ ختم ہو، پوری ڈیوائس بند نہ ہو۔
+wire.settings.memory_guard.title
+EN Command memory limit
+OLD Command میموری حد
+NEW کمانڈ میموری حد
+wire.settings.mesh_updates.description
+EN The roll that follows a local update: after `lop update` moves this device to a newer build, every other active member is asked to move to the same build — one at a time, each waiting for that member to go idle, never forced. A member that has not granted this device `update` is skipped, by name, with the remedy. Takes effect at once: the next update uses the new setting, and a roll already running stops before its next member — an install already begun finishes.
+OLD Local update کے بعد roll: `lop update` سے یہ ڈیوائس نئے build پر جائے تو باقی ہر فعال member سے وہی build لینے کو کہا جائے — ایک ایک کر کے، ہر member کے idle ہونے کا انتظار، کبھی جبر نہیں۔ جس member نے اس ڈیوائس کو `update` نہیں دیا وہ نام اور علاج کے ساتھ skip ہوگا۔ فوراً لاگو: اگلا update نئی ترتیب استعمال کرے گا، جاری roll اگلے member سے پہلے رک جائے گا — شروع شدہ install مکمل ہوگا۔
+NEW مقامی اپ ڈیٹ کے بعد رول: `lop update` سے یہ ڈیوائس نئے بلڈ پر جائے تو باقی ہر فعال ممبر سے وہی بلڈ لینے کو کہا جائے — ایک ایک کر کے، ہر ممبر کے بے کار ہونے کا انتظار، کبھی جبر نہیں۔ جس ممبر نے اس ڈیوائس کو `update` کی اجازت نہیں دی اسے نام اور علاج کے ساتھ نظر انداز کیا جائے گا۔ فوراً لاگو: اگلا اپ ڈیٹ نئی ترتیب استعمال کرے گا، جاری رول اگلے ممبر سے پہلے رک جائے گا — شروع شدہ انسٹال مکمل ہوگا۔
+wire.settings.mesh_updates.title
+EN Mesh updates
+OLD Mesh updates
+NEW میش اپ ڈیٹس
+wire.settings.model.description
+EN Provider, model and reasoning effort for new conversations. Existing sessions keep their model; /model saved adopts the default here.
+OLD نئی گفتگوؤں کا provider، ماڈل اور reasoning effort۔ موجودہ سیشنز اپنا ماڈل رکھتے ہیں؛ /model saved یہاں default اپناتا ہے۔
+NEW نئی گفتگوؤں کا پرووائیڈر، ماڈل اور استدلال شدت۔ موجودہ سیشنز اپنا ماڈل رکھتے ہیں؛ /model saved یہاں ڈیفالٹ اپناتا ہے۔
+wire.settings.model_effort.choice.high.description
+EN deep reasoning
+OLD گہری reasoning
+NEW گہرا استدلال
+wire.settings.model_effort.choice.low.description
+EN light reasoning
+OLD ہلکی reasoning
+NEW ہلکا استدلال
+wire.settings.model_effort.choice.max.description
+EN the model's deepest reasoning
+OLD ماڈل کی سب سے گہری reasoning
+NEW ماڈل کا سب سے گہرا استدلال
+wire.settings.model_effort.choice.medium.description
+EN moderate reasoning
+OLD معتدل reasoning
+NEW معتدل استدلال
+wire.settings.model_effort.choice.minimal.description
+EN the least reasoning the model offers
+OLD ماڈل کی کم از کم reasoning
+NEW ماڈل کی کم از کم استدلالی شدت
+wire.settings.model_effort.choice.none.description
+EN reasoning off
+OLD reasoning بند
+NEW استدلال بند
+wire.settings.model_effort.choice.unset.description
+EN the model's own default
+OLD ماڈل کا اپنا default
+NEW ماڈل کا اپنا ڈیفالٹ
+wire.settings.model_effort.choice.xhigh.description
+EN very deep reasoning
+OLD بہت گہری reasoning
+NEW بہت گہرا استدلال
+wire.settings.model_effort.help
+EN Effort for new conversations. Unset: the model's default.
+OLD نئی گفتگوؤں کا effort۔ Unset: ماڈل کا default۔
+NEW نئی گفتگوؤں کے لیے استدلال کی شدت۔ غیر مقرر: ماڈل کا ڈیفالٹ۔
+wire.settings.model_effort.label
+EN Default reasoning effort
+OLD Default reasoning effort
+NEW ڈیفالٹ استدلال کی شدت
+wire.settings.model_name.label
+EN Default model
+OLD Default ماڈل
+NEW ڈیفالٹ ماڈل
+wire.settings.monitor.description
+EN Delta-watching monitors: how often they check, how much they keep, and when they give up.
+OLD Delta دیکھنے والے نگرانی: کتنی بار check کریں، کتنا رکھیں، اور کب ہار مانیں۔
+NEW تبدیلیوں کی نگرانی: کتنی بار جانچ ہو، کتنا مواد رکھا جائے، اور کب کوشش ختم ہو۔
+wire.settings.monitor_classifymaxchars.help
+EN Bound on the changed lines the materiality check receives (the monitor's name and purpose ride along, clipped separately).
+OLD Materiality check کو ملنے والی بدلی lines کی حد (نگرانی کا نام اور مقصد الگ clip ہو کر ساتھ جاتے ہیں)۔
+NEW اہمیت کی جانچ کو بھیجی جانے والی بدلی سطروں کی حد (نگرانی کا نام اور مقصد الگ سے مختصر کر کے ساتھ جاتے ہیں)۔
+wire.settings.monitor_classifymaxchars.label
+EN Classifier state (chars)
+OLD Classifier state (chars)
+NEW کلاسیفائر حالت (حروف)
+wire.settings.monitor_defaultintervals.help
+EN Checks every N seconds when 'every' is omitted; floor 30s.
+OLD 'every' نہ ہو تو ہر N سیکنڈ بعد check؛ کم از کم 30s۔
+NEW 'every' نہ ہو تو ہر N سیکنڈ بعد جانچ؛ کم از کم 30s۔
+wire.settings.monitor_defaultintervals.label
+EN Default interval (s)
+OLD Default وقفہ (s)
+NEW ڈیفالٹ وقفہ (s)
+wire.settings.monitor_deltamaxchars.help
+EN Total delta text per delivery message.
+OLD فی delivery پیغام کل delta text۔
+NEW ہر ڈیلیوری پیغام میں ڈیلٹا متن کی کل مقدار۔
+wire.settings.monitor_deltamaxchars.label
+EN Delta budget (chars)
+OLD Delta budget (chars)
+NEW ڈیلٹا بجٹ (حروف)
+wire.settings.monitor_maxconsecutivefailures.help
+EN Consecutive check failures before a monitor is disabled.
+OLD نگرانی بند ہونے سے پہلے لگاتار ناکام checks۔
+NEW نگرانی بند ہونے سے پہلے لگاتار ناکام جانچیں۔
+wire.settings.monitor_maxdeliveriesperhour.label
+EN Deliveries per hour
+OLD فی گھنٹہ deliveries
+NEW فی گھنٹہ ڈیلیوریز
+wire.settings.monitor_maxdeltalines.help
+EN Changed lines summarised per delivery.
+OLD فی delivery خلاصہ شدہ بدلی lines۔
+NEW فی ڈیلیوری خلاصہ شدہ بدلی سطریں۔
+wire.settings.monitor_maxdeltalines.label
+EN Max delta lines
+OLD زیادہ سے زیادہ delta lines
+NEW زیادہ سے زیادہ ڈیلٹا سطریں
+wire.settings.monitor_maxmonitors.help
+EN Refuses arms past N; cancel one first.
+OLD N سے زیادہ arms مسترد؛ پہلے ایک منسوخ کریں۔
+NEW N سے زیادہ نگرانیاں مقرر نہیں کی جا سکتیں؛ پہلے ایک منسوخ کریں۔
+wire.settings.monitor_normalizetimestamps.choice.false.description
+EN timestamps diff like any text
+OLD Timestamps عام text کی طرح diff ہوں
+NEW ٹائم اسٹیمپس عام متن کی طرح ڈف ہوں
+wire.settings.monitor_normalizetimestamps.choice.true.description
+EN timestamps do not count as changes
+OLD Timestamps تبدیلی نہ شمار ہوں
+NEW ٹائم اسٹیمپس تبدیلی نہ شمار ہوں
+wire.settings.monitor_normalizetimestamps.help
+EN Treat timestamps as noise before diffing, so clock fields do not alarm.
+OLD Diff سے پہلے timestamps کو شور سمجھیں تاکہ clock fields alert نہ دیں۔
+NEW ڈف کرنے سے پہلے ٹائم اسٹیمپس کو شور سمجھیں تاکہ گھڑی کے فیلڈز الرٹ نہ دیں۔
+wire.settings.monitor_normalizetimestamps.label
+EN Ignore timestamp churn
+OLD Timestamp تبدیلیاں نظر انداز
+NEW ٹائم اسٹیمپ تبدیلیاں نظر انداز
+wire.settings.monitor_runtimeoutms.help
+EN Per-check deadline; 0 uses 120000 ms.
+OLD فی check مہلت؛ 0 پر 120000 ms۔
+NEW فی جانچ مہلت؛ 0 پر 120000 ms۔
+wire.settings.monitor_runtimeoutms.label
+EN Run timeout (ms)
+OLD Run timeout (ms)
+NEW رن کی مہلت (ms)
+wire.settings.monitor_snapshotmaxchars.help
+EN Stored normalized output; bounds disk and diff input.
+OLD محفوظ normalized output؛ disk اور diff input محدود رکھے۔
+NEW محفوظ نارملائزڈ آؤٹ پٹ؛ ڈسک اور ڈف ان پٹ محدود رکھے۔
+wire.settings.monitor_snapshotmaxchars.label
+EN Snapshot cap (chars)
+OLD Snapshot حد (chars)
+NEW سنیپ شاٹ حد (حروف)
+wire.settings.network.description
+EN Where this device listens, what it tells peers to dial, and the bounds for `lop network`: audit retention, how many unauthenticated connections the relay will hold at once, session-copy cadence and how long a borrowed login lives. All take effect when the relay restarts.
+OLD یہ ڈیوائس کہاں listen کرے، peers کو کیا dial بتائے، اور `lop network` کی حدود: audit retention، relay ایک وقت میں کتنے غیر authenticated connections رکھے، سیشن copies کا وقفہ اور borrowed login کی مدت۔ سب relay restart پر لاگو ہوتے ہیں۔
+NEW یہ ڈیوائس کہاں کنکشن قبول کرے، پیرز کو کیا ڈائل بتائے، اور `lop network` کی حدود: آڈٹ ریٹینشن، ریلے ایک وقت میں کتنے غیر تصدیق شدہ کنکشنز رکھے، سیشن کاپیوں کا وقفہ اور عارضی لاگ اِن کی مدت۔ یہ سب ریلے کے دوبارہ شروع ہونے پر لاگو ہوتے ہیں۔
+wire.settings.network.title
+EN Mesh network
+OLD Mesh network
+NEW میش نیٹ ورک
+wire.settings.network_advertise_hosts.help
+EN Empty = detected. Others: host:port, e.g. 203.0.113.7:4097
+OLD خالی = detected۔ دیگر: host:port، مثلاً 203.0.113.7:4097
+NEW خالی = خودکار شناخت۔ دیگر: host:port، مثلاً 203.0.113.7:4097
+wire.settings.network_advertise_hosts.label
+EN Advertised endpoints
+OLD Advertised endpoints
+NEW اعلان شدہ اینڈ پوائنٹس
+wire.settings.network_audit_generations.help
+EN Rotated files kept before the oldest is pruned and that pruning is recorded.
+OLD سب سے پرانی prune ہونے اور اس prune کے record سے پہلے کتنی rotated files رکھی جائیں۔
+NEW سب سے پرانی فائل حذف ہونے اور اس حذف کے ریکارڈ سے پہلے کتنی گردش شدہ فائلیں رکھی جائیں۔
+wire.settings.network_audit_generations.label
+EN Audit generations kept
+OLD محفوظ audit generations
+NEW محفوظ آڈٹ جنیریشنز
+wire.settings.network_audit_max_age_days.help
+EN Age and size both rotate, because age binds on a quiet install and size on a busy one. Export with `lop network log --export` before pruning.
+OLD عمر اور size دونوں rotate کرتے ہیں، کیونکہ خاموش install پر عمر اور مصروف پر size لاگو ہوتی ہے۔ Prune سے پہلے `lop network log --export` سے export کریں۔
+NEW عمر اور سائز دونوں گردش کرتے ہیں، کیونکہ خاموش انسٹال پر عمر اور مصروف پر سائز لاگو ہوتی ہے۔ حذف سے پہلے `lop network log --export` سے ایکسپورٹ کریں۔
+wire.settings.network_audit_max_age_days.label
+EN Audit age cap (days)
+OLD Audit عمر حد (دن)
+NEW آڈٹ عمر حد (دن)
+wire.settings.network_audit_max_bytes.help
+EN Bytes per generation, after rotation. 8 MiB of gzipped JSONL is roughly 55k records; the five-generation ceiling is therefore ~40 MiB.
+OLD Rotation کے بعد فی generation bytes۔ 8 MiB gzipped JSONL تقریباً 55k records ہے؛ پانچ generations کی حد اس لیے ~40 MiB۔
+NEW گردش کے بعد فی جنیریشن bytes۔ 8 MiB gzip شدہ JSONL میں تقریباً 55k ریکارڈز ہوتے ہیں؛ پانچ جنیریشنز کی حد اس لیے ~40 MiB ہے۔
+wire.settings.network_audit_max_bytes.label
+EN Audit size per generation
+OLD فی generation audit size
+NEW فی جنیریشن آڈٹ سائز
+wire.settings.network_credentials_github_repositories.help
+EN owner/repo entries a brokered GitHub token may touch (empty: none)
+OLD Brokered GitHub token کن owner/repo entries تک رسائی رکھے (خالی: کوئی نہیں)
+NEW بروکر شدہ GitHub ٹوکن کن owner/repo اندراجات تک رسائی رکھے (خالی: کوئی نہیں)
+wire.settings.network_credentials_github_repositories.label
+EN GitHub repositories
+OLD GitHub repositories
+NEW GitHub ریپوزیٹریز
+wire.settings.network_credentials_grant_ttl_s.help
+EN The longest a device may use a login it borrowed from its owner before asking again, and so how long a revoked or offline owner's login keeps working elsewhere. Never longer than the token itself.
+OLD ڈیوائس owner سے لیا login دوبارہ پوچھنے سے پہلے زیادہ سے زیادہ کتنی دیر استعمال کرے؛ اس سے revoked یا offline owner کا login کہیں اور کتنی دیر چلے۔ Token سے زیادہ کبھی نہیں۔
+NEW ڈیوائس مالک سے لیا لاگ اِن دوبارہ پوچھنے سے پہلے زیادہ سے زیادہ کتنی دیر استعمال کرے؛ اس سے منسوخ یا آف لائن مالک کا لاگ اِن کہیں اور کتنی دیر چلے۔ ٹوکن سے زیادہ کبھی نہیں۔
+wire.settings.network_credentials_grant_ttl_s.label
+EN Borrowed login lifetime (s)
+OLD Borrowed login مدت (s)
+NEW عارضی لاگ اِن مدت (s)
+wire.settings.network_listen_address.help
+EN 127.0.0.1 = dial-only; 0.0.0.0 = all; or one address.
+OLD 127.0.0.1 = صرف dial؛ 0.0.0.0 = سب؛ یا ایک address۔
+NEW 127.0.0.1 = صرف ڈائل؛ 0.0.0.0 = سب؛ یا ایک ایڈریس۔
+wire.settings.network_listen_address.label
+EN Listen address
+OLD Listen address
+NEW کنکشن قبول کرنے کا ایڈریس
+wire.settings.network_max_handshakes.help
+EN Unauthenticated connections this relay will hold at once. A pairing holds one for the seconds until the code is typed; anything past the cap is dropped at accept, with no reply frame.
+OLD غیر authenticated connections جو relay ایک وقت میں رکھے۔ Pairing code لکھنے کے سیکنڈز تک ایک رکھتی ہے؛ حد سے زیادہ accept پر بغیر reply frame کے drop ہوتا ہے۔
+NEW غیر تصدیق شدہ کنکشنز جو ریلے ایک وقت میں رکھے۔ پیئرنگ کوڈ لکھنے کے سیکنڈز تک ایک رکھتی ہے؛ حد سے زیادہ کنکشن قبول کے وقت بغیر جوابی فریم کے حذف ہوتا ہے۔
+wire.settings.network_max_handshakes.label
+EN Concurrent handshakes
+OLD Concurrent handshakes
+NEW ہم وقت ہینڈ شیکس
+wire.settings.network_port.help
+EN The port peers dial; endpoints without one use it.
+OLD وہ port جو peers dial کریں؛ بغیر port والے endpoints یہی استعمال کریں۔
+NEW وہ پورٹ جو پیرز ڈائل کریں؛ بغیر پورٹ والے اینڈ پوائنٹس یہی استعمال کریں۔
+wire.settings.network_port.label
+EN Mesh port
+OLD Mesh port
+NEW میش پورٹ
+wire.settings.network_rollout_on_update.choice.auto.description
+EN roll when an update moves to a newer build
+OLD Update نئے build پر جائے تو roll کریں
+NEW اپ ڈیٹ نئے بلڈ پر جائے تو رول کریں
+wire.settings.network_rollout_on_update.choice.off.description
+EN only `lop network update` rolls
+OLD صرف `lop network update` roll کرے
+NEW صرف `lop network update` رول کرے
+wire.settings.network_rollout_on_update.help
+EN After `lop update` installs a newer build here, ask this device's mesh members to move to it: one at a time, each waiting for idle, never forced. Off: only `lop network update` rolls. A member that has not granted this device `update` is skipped, with the remedy to grant it there.
+OLD `lop update` سے یہاں نیا build آئے تو اس ڈیوائس کے mesh members سے اس پر جانے کو کہیں: ایک ایک کر کے، idle ہونے کا انتظار، کبھی جبر نہیں۔ آف: صرف `lop network update` roll کرے۔ جس member نے `update` نہیں دیا وہ skip ہوگا اور وہیں دینے کا علاج بتایا جائے گا۔
+NEW `lop update` سے یہاں نیا بلڈ آئے تو اس ڈیوائس کے میش ممبرز سے اس پر جانے کو کہیں: ایک ایک کر کے، بے کار ہونے کا انتظار، کبھی جبر نہیں۔ آف: صرف `lop network update` رول کرے۔ جس ممبر نے `update` کی اجازت نہیں دی اسے نظر انداز کر کے وہاں اجازت دینے کا علاج بتایا جائے گا۔
+wire.settings.network_rollout_on_update.label
+EN Roll the mesh after an update
+OLD Update کے بعد mesh roll کریں
+NEW اپ ڈیٹ کے بعد میش رول کریں
+wire.settings.network_sync_debounce_s.help
+EN Seconds a session's transcript must stay unchanged before its owner tells devices holding a copy to pull. A session going idle pushes at once, so its final message is never held back by this.
+OLD Owner، copy رکھنے والی devices کو pull کہنے سے پہلے سیشن ٹرانسکرپٹ کتنے سیکنڈ غیر بدلا رہے۔ Idle ہوتے ہی push فوراً ہوتا ہے، اس لیے آخری پیغام اس سے نہیں رکتا۔
+NEW مالک، نقل رکھنے والی ڈیوائسز کو pull کہنے سے پہلے سیشن ٹرانسکرپٹ کتنے سیکنڈ غیر بدلا رہے۔ بے کار ہوتے ہی push فوراً ہوتا ہے، اس لیے آخری پیغام اس سے نہیں رکتا۔
+wire.settings.network_sync_debounce_s.label
+EN Sync quiet period (s)
+OLD Sync خاموش مدت (s)
+NEW سنک خاموش مدت (s)
+wire.settings.network_sync_tick_s.help
+EN How often the owner checks copied sessions for changes: one file stat each.
+OLD Owner copied سیشنز میں تبدیلی کتنی بار check کرے: ہر بار ایک file stat۔
+NEW مالک نقل شدہ سیشنز میں تبدیلی کتنی بار جانچ کرے: ہر بار ایک فائل stat۔
+wire.settings.network_sync_tick_s.label
+EN Sync check interval (s)
+OLD Sync check وقفہ (s)
+NEW سنک جانچ وقفہ (s)
+wire.settings.openrouter.description
+EN How OpenRouter picks a host; unset = sticky routing.
+OLD OpenRouter host کیسے منتخب کرے؛ unset = sticky routing۔
+NEW OpenRouter ہوسٹ کیسے منتخب کرے؛ unset = اسٹکی روٹنگ۔
+wire.settings.openrouter.title
+EN OpenRouter routing
+OLD OpenRouter routing
+NEW OpenRouter روٹنگ
+wire.settings.proactive.description
+EN Bounds for the proactive agent class: how long a hidden patience wait defaults to, how it backs off across re-attempts, and when a cycle must end. Read at the moment a wait is armed or fires.
+OLD Proactive ایجنٹ class کی حدود: hidden patience wait کا default، دوبارہ کوششوں میں backoff، اور cycle کب ختم ہو۔ Wait arm یا fire ہونے پر پڑھی جاتی ہے۔
+NEW پیش قدم ایجنٹ قسم کی حدود: پوشیدہ انتظار کی ڈیفالٹ مدت، دوبارہ کوششوں میں بیک آف، اور چکر کب ختم ہو۔ یہ انتظار مقرر یا متحرک ہونے پر پڑھی جاتی ہیں۔
+wire.settings.proactive.title
+EN Proactive class
+OLD Proactive class
+NEW پیش قدم قسم
+wire.settings.proactive_patience_backoff.help
+EN Each later wait in a cycle is at least this many times the first — the default 5/15/45-minute progression.
+OLD Cycle میں ہر اگلا wait پہلے کا کم از کم اتنا گنا — default 5/15/45 منٹ کا سلسلہ۔
+NEW چکر میں ہر اگلا انتظار پہلے کا کم از کم اتنا گنا — ڈیفالٹ 5/15/45 منٹ کا سلسلہ۔
+wire.settings.proactive_patience_backoff.label
+EN Patience backoff factor
+OLD Patience backoff factor
+NEW صبر کے بیک آف کا عنصر
+wire.settings.proactive_patience_default_ms.help
+EN How long a hidden wait defaults to when the agent does not size one (milliseconds; 300000 = 5 min). Clamped 60 s..24 h.
+OLD ایجنٹ wait کی مدت نہ بتائے تو hidden wait کتنی دیر ہو (milliseconds؛ 300000 = 5 min)۔ 60 s..24 h تک clamp۔
+NEW ایجنٹ انتظار کی مدت نہ بتائے تو پوشیدہ انتظار کتنی دیر ہو (ملی سیکنڈ؛ 300000 = 5 منٹ)۔ 60 s..24 h تک محدود۔
+wire.settings.proactive_patience_default_ms.label
+EN Default patience wait (ms)
+OLD Default patience wait (ms)
+NEW ڈیفالٹ صبر انتظار (ms)
+wire.settings.proactive_patience_episode_ttl_ms.help
+EN Hard stop for one cycle however the waits were sized (milliseconds; 7200000 = 2 h). A fire past it retires silently.
+OLD Waits کیسے بھی ہوں، ایک cycle کی سخت حد (milliseconds؛ 7200000 = 2 h)۔ اس کے بعد fire خاموشی سے retire ہوتا ہے۔
+NEW انتظار کیسے بھی مقرر ہوں، ایک چکر کی سخت حد (ملی سیکنڈ؛ 7200000 = 2 گھنٹے)۔ اس کے بعد متحرک ہونے والا انتظار خاموشی سے ختم ہو جاتا ہے۔
+wire.settings.proactive_patience_episode_ttl_ms.label
+EN Patience cycle TTL (ms)
+OLD Patience cycle TTL (ms)
+NEW صبر کے چکر کی TTL (ms)
+wire.settings.proactive_patience_max_attempts.help
+EN How many outbound waits one cycle may hold before it must end.
+OLD ختم ہونے سے پہلے ایک cycle میں کتنے outbound waits ہوسکتے ہیں۔
+NEW ختم ہونے سے پہلے ایک چکر میں کتنے بیرونی انتظار ہو سکتے ہیں۔
+wire.settings.proactive_patience_max_attempts.label
+EN Patience max attempts
+OLD Patience زیادہ سے زیادہ attempts
+NEW صبر کی زیادہ سے زیادہ کوششیں
+wire.settings.proactive_patience_max_pending.help
+EN How many hidden waits may be pending at once for one session.
+OLD ایک سیشن کے لیے ایک وقت میں کتنے hidden waits pending ہوسکتے ہیں۔
+NEW ایک سیشن کے لیے ایک وقت میں کتنے پوشیدہ انتظار زیر التوا ہوسکتے ہیں۔
+wire.settings.proactive_patience_max_pending.label
+EN Pending waits per session
+OLD فی سیشن pending waits
+NEW فی سیشن زیر التوا انتظار
+wire.settings.projects.description
+EN Project records: how long a tracked project may go without a progress line before it reads stale and is worth a check-in. Read at the next staleness computation.
+OLD پروجیکٹ records: tracked پروجیکٹ کتنی دیر بغیر progress line رہے تو stale قرار دے اور check-in مفید ہو۔ اگلے staleness حساب پر پڑھی جاتی ہے۔
+NEW پروجیکٹ ریکارڈز: نگرانی شدہ پروجیکٹ کتنی دیر بغیر پیش رفت کی سطر رہے تو پرانا قرار دے اور رابطہ مفید ہو۔ اگلے پرانے پن کے حساب پر پڑھی جاتی ہے۔
+wire.settings.projects_stale_after_hours.help
+EN A project whose progress is older than this reads stale and is worth a check-in. 1–168 hours.
+OLD اس سے پرانی progress والا پروجیکٹ stale ہوگا اور check-in مفید۔ 1–168 گھنٹے۔
+NEW اس سے پرانی پیش رفت والا پروجیکٹ پرانا ہوگا اور رابطہ مفید۔ 1–168 گھنٹے۔
+wire.settings.projects_stale_after_hours.label
+EN Stale after (hours)
+OLD Stale ہونے کا وقت (گھنٹے)
+NEW پرانا ہونے کی حد (گھنٹے)
+wire.settings.providers.description
+EN How direct provider connections are made: API surface and cache TTL.
+OLD Direct provider connections کیسے بنیں: API surface اور cache TTL۔
+NEW براہ راست پرووائیڈر کنکشنز کیسے بنتے ہیں: API سرفیس اور کیشے TTL۔
+wire.settings.providers.title
+EN Wire protocol
+OLD Wire protocol
+NEW Wire پروٹوکول
+wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.help
+EN Context size from which Anthropic requests use the 1-hour prompt-cache TTL (2x write cost, survives idle gaps over 5 minutes). 0 disables.
+OLD کس context size سے Anthropic requests 1-hour prompt-cache TTL استعمال کریں (2x write cost، 5 منٹ سے زیادہ idle وقفے میں بھی برقرار)۔ 0 بند کرتا ہے۔
+NEW کس سیاق و سباق کے سائز سے Anthropic درخواستیں 1 گھنٹے کی پرامپٹ کیشے TTL استعمال کریں (لکھنے کی 2x لاگت، 5 منٹ سے زیادہ بے کار وقفے میں بھی برقرار)۔ 0 بند کرتا ہے۔
+wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label
+EN Anthropic 1h cache above (tokens)
+OLD Anthropic 1h cache حد (tokens)
+NEW Anthropic 1h کیشے حد (ٹوکنز)
+wire.settings.providers_openai_api.choice.chat_completions.description
+EN explicit compatibility opt-out
+OLD Explicit compatibility opt-out
+NEW مطابقت سے واضح اختیاری انحراف
+wire.settings.providers_openai_api.choice.responses.description
+EN the public Responses API (default)
+OLD Public Responses API (default)
+NEW عوامی Responses API (ڈیفالٹ)
+wire.settings.providers_openai_api.help
+EN Direct OpenAI GPT-5 calls use the Responses API unless opted out.
+OLD Direct OpenAI GPT-5 calls، opt-out کے بغیر، Responses API استعمال کرتی ہیں۔
+NEW براہ راست OpenAI GPT-5 کالیں، اختیاری انحراف کے بغیر، Responses API استعمال کرتی ہیں۔
+wire.settings.providers_openai_api.label
+EN OpenAI API surface
+OLD OpenAI API surface
+NEW OpenAI API سرفیس
+wire.settings.providers_openai_use_max_context_window.help
+EN Off: provider default. On: supported max. Applies next request; compaction unchanged.
+OLD آف: provider default۔ آن: supported max۔ اگلی request پر لاگو؛ کمپریشن نہیں بدلتی۔
+NEW آف: پرووائیڈر ڈیفالٹ۔ آن: زیادہ سے زیادہ تعاون یافتہ سیاق و سباق۔ اگلی درخواست پر لاگو؛ کمپریشن نہیں بدلتی۔
+wire.settings.providers_openai_use_max_context_window.label
+EN Use maximum OpenAI context
+OLD زیادہ سے زیادہ OpenAI context استعمال کریں
+NEW زیادہ سے زیادہ OpenAI سیاق و سباق استعمال کریں
+wire.settings.providers_openrouter_allow_fallbacks.choice.unset.description
+EN no preference — OpenRouter's default (fall through)
+OLD کوئی ترجیح نہیں — OpenRouter default (آگے منتقل)
+NEW کوئی ترجیح نہیں — OpenRouter ڈیفالٹ (آگے منتقل)
+wire.settings.providers_openrouter_allow_fallbacks.help
+EN 'default' sends nothing (OpenRouter falls through to another host when the preferred one fails); 'false' fails rather than fall through to a host outside your preferences.
+OLD 'default' کچھ نہیں بھیجتی (preferred host ناکام ہو تو OpenRouter دوسرے host پر منتقل ہوتا ہے)؛ 'false' آپ کی ترجیحات سے باہر host پر جانے کے بجائے ناکام ہوتی ہے۔
+NEW 'default' کچھ نہیں بھیجتی (ترجیحی ہوسٹ ناکام ہو تو OpenRouter دوسرے ہوسٹ پر منتقل ہوتا ہے)؛ 'false' آپ کی ترجیحات سے باہر ہوسٹ پر جانے کے بجائے ناکام ہوتی ہے۔
+wire.settings.providers_openrouter_allow_fallbacks.label
+EN fallbacks
+OLD fallbacks
+NEW فال بیکس
+wire.settings.providers_openrouter_data_collection.choice.allow.description
+EN hosts may collect data
+OLD hosts data جمع کر سکتے ہیں
+NEW ہوسٹس ڈیٹا جمع کر سکتے ہیں
+wire.settings.providers_openrouter_data_collection.choice.deny.description
+EN exclude hosts that collect data
+OLD Data جمع کرنے والے hosts نکالیں
+NEW ڈیٹا جمع کرنے والے ہوسٹس نکالیں
+wire.settings.providers_openrouter_data_collection.help
+EN 'deny' excludes hosts that may train on or retain your prompts. 'default' sends no preference (OpenRouter's default: allow).
+OLD 'deny' ایسے hosts نکالتی ہے جو آپ کے prompts پر train یا انہیں retain کر سکتے ہوں۔ 'default' کوئی ترجیح نہیں بھیجتی (OpenRouter default: allow)۔
+NEW 'deny' ایسے ہوسٹس نکالتی ہے جو آپ کے پرامپٹس پر تربیت یا انہیں محفوظ کر سکتے ہوں۔ 'default' کوئی ترجیح نہیں بھیجتی (OpenRouter ڈیفالٹ: allow)۔
+wire.settings.providers_openrouter_data_collection.label
+EN data collection
+OLD data collection
+NEW ڈیٹا جمع کرنا
+wire.settings.providers_openrouter_enforce_distillable_text.choice.true.description
+EN distillable-text endpoints only
+OLD صرف distillable-text endpoints
+NEW صرف ڈسٹل قابل متن اینڈ پوائنٹس
+wire.settings.providers_openrouter_enforce_distillable_text.help
+EN 'true': restrict to endpoints whose text output may be distilled. 'default': nothing sent.
+OLD 'true': صرف ان endpoints تک محدود جن کے text output کو distill کیا جا سکے۔ 'default': کچھ نہیں بھیجا۔
+NEW 'true': صرف ان اینڈ پوائنٹس تک محدود جن کے متن آؤٹ پٹ کو ڈسٹل کیا جا سکے۔ 'default': کچھ نہیں بھیجا۔
+wire.settings.providers_openrouter_enforce_distillable_text.label
+EN distillable text
+OLD distillable text
+NEW ڈسٹل ہونے والا متن
+wire.settings.providers_openrouter_ignore.help
+EN Empty = no opinion (sticky routing stays). Comma-separated block-list of host slugs to omit (e.g. a host that is failing right now) — may cost you the warm prompt cache.
+OLD خالی = کوئی رائے نہیں (sticky routing برقرار)۔ نظر انداز کرنے والے host slugs کی comma-separated block-list (مثلاً ابھی ناکام host) — warm prompt cache ضائع ہوسکتی ہے۔
+NEW خالی = کوئی رائے نہیں (اسٹکی روٹنگ برقرار)۔ نظر انداز کیے جانے والے ہوسٹ سلگز کی کاما سے الگ بلاک لسٹ (مثلاً ابھی ناکام ہوسٹ) — وارم پرامپٹ کیشے ضائع ہو سکتی ہے۔
+wire.settings.providers_openrouter_ignore.label
+EN ignored hosts
+OLD نظر انداز hosts
+NEW نظر انداز ہوسٹس
+wire.settings.providers_openrouter_max_price.help
+EN '{'"prompt": 1, "completion": 2'}' — USD / million tokens
+OLD '{'"prompt": 1, "completion": 2'}' — USD / ملین tokens
+NEW '{'"prompt": 1, "completion": 2'}' — USD / ملین ٹوکنز
+wire.settings.providers_openrouter_max_price.label
+EN max price
+OLD max price
+NEW زیادہ سے زیادہ قیمت
+wire.settings.providers_openrouter_only.help
+EN Empty = no opinion (sticky routing stays). Comma-separated allow-list of host slugs; every other host is excluded — a forced cold start if the warm host is not on it.
+OLD خالی = کوئی رائے نہیں (sticky routing برقرار)۔ Host slugs کی comma-separated allow-list؛ باقی ہر host مستثنیٰ — warm host قائم میں نہ ہو تو cold start لازم۔
+NEW خالی = کوئی رائے نہیں (اسٹکی روٹنگ برقرار)۔ ہوسٹ سلگز کی کاما سے الگ اجازت کی فہرست؛ باقی ہر ہوسٹ مستثنیٰ — وارم ہوسٹ فہرست میں نہ ہو تو کولڈ آغاز لازم۔
+wire.settings.providers_openrouter_only.label
+EN allowed hosts
+OLD اجازت یافتہ hosts
+NEW اجازت یافتہ ہوسٹس
+wire.settings.providers_openrouter_order.help
+EN Empty = no opinion (sticky routing stays). Comma-separated host slugs tried in this exact order.
+OLD خالی = کوئی رائے نہیں (sticky routing برقرار)۔ Host slugs اسی ترتیب میں آزمائے جائیں۔
+NEW خالی = کوئی رائے نہیں (اسٹکی روٹنگ برقرار)۔ ہوسٹ سلگز اسی ترتیب میں استعمال کیے جائیں۔
+wire.settings.providers_openrouter_order.label
+EN host order
+OLD host ترتیب
+NEW ہوسٹ ترتیب
+wire.settings.providers_openrouter_order.warning
+EN disables sticky routing — prompt cache goes cold
+OLD Sticky routing بند — prompt cache cold ہو جائے گی
+NEW اسٹکی روٹنگ بند — پرامپٹ کیشے کولڈ ہو جائے گی
+wire.settings.providers_openrouter_preferred_max_latency.help
+EN Prefer hosts whose time-to-first-token stays under this many seconds (p50). 0 sends no preference. A host above the bar is deprioritised, which may cost you a warm prompt cache.
+OLD ان hosts کو ترجیح دیں جن کا time-to-first-token اتنے سیکنڈ سے کم ہو (p50)۔ 0 کوئی ترجیح نہیں بھیجتا۔ حد سے اوپر host کم ترجیحی ہوگا، جس سے warm prompt cache ضائع ہوسکتی ہے۔
+NEW ان ہوسٹس کو ترجیح دیں جن کے پہلے ٹوکن کا وقت اتنے سیکنڈ سے کم ہو (p50)۔ 0 کوئی ترجیح نہیں بھیجتا۔ حد سے اوپر ہوسٹ کم ترجیحی ہوگا، جس سے وارم پرامپٹ کیشے ضائع ہو سکتی ہے۔
+wire.settings.providers_openrouter_preferred_max_latency.label
+EN max latency (s)
+OLD max latency (s)
+NEW زیادہ سے زیادہ لیٹنسی (s)
+wire.settings.providers_openrouter_preferred_min_throughput.help
+EN Prefer hosts serving at least this many output tokens/sec (p50). 0 sends no preference. A host below the bar is deprioritised, which may cost you a warm prompt cache.
+OLD کم از کم اتنے output tokens/sec دینے والے hosts کو ترجیح دیں (p50)۔ 0 کوئی ترجیح نہیں بھیجتا۔ حد سے نیچے host کم ترجیحی ہوگا، جس سے warm prompt cache ضائع ہوسکتی ہے۔
+NEW کم از کم اتنے آؤٹ پٹ ٹوکنز/سیکنڈ دینے والے ہوسٹس کو ترجیح دیں (p50)۔ 0 کوئی ترجیح نہیں بھیجتا۔ حد سے نیچے ہوسٹ کم ترجیحی ہوگا، جس سے وارم پرامپٹ کیشے ضائع ہو سکتی ہے۔
+wire.settings.providers_openrouter_preferred_min_throughput.label
+EN min throughput (tok/s)
+OLD min throughput (tok/s)
+NEW کم از کم تھراپٹ (tok/s)
+wire.settings.providers_openrouter_provider_affinity.help
+EN Reuses the host that served the previous turn so the prompt cache stays warm. Off = OpenRouter's price-weighted load balancing.
+OLD پچھلے turn والا host دوبارہ استعمال کریں تاکہ prompt cache warm رہے۔ آف = OpenRouter کا price-weighted load balancing۔
+NEW پچھلے ٹرن والا ہوسٹ دوبارہ استعمال کریں تاکہ پرامپٹ کیشے وارم رہے۔ آف = OpenRouter کی قیمت کے وزن والی لوڈ بیلنسنگ۔
+wire.settings.providers_openrouter_provider_affinity.label
+EN cache affinity
+OLD cache affinity
+NEW کیشے وابستگی
+wire.settings.providers_openrouter_quantizations.help
+EN Empty = no opinion. Comma-separated quantization levels the served model may use (e.g. int8, fp8, mxfp4).
+OLD خالی = کوئی رائے نہیں۔ Served ماڈل کے قابل استعمال quantization levels، comma-separated (مثلاً int8، fp8، mxfp4)۔
+NEW خالی = کوئی رائے نہیں۔ پیش شدہ ماڈل کے قابل استعمال کوانٹائزیشن کی سطحیں، کاما سے الگ (مثلاً int8، fp8، mxfp4)۔
+wire.settings.providers_openrouter_quantizations.label
+EN quantizations
+OLD quantizations
+NEW کوانٹائزیشنز
+wire.settings.providers_openrouter_require_parameters.choice.true.description
+EN only hosts that support every parameter
+OLD صرف وہ hosts جو ہر parameter support کریں
+NEW صرف وہ ہوسٹس جو ہر پیرامیٹر کی حمایت کریں
+wire.settings.providers_openrouter_require_parameters.choice.unset.description
+EN no preference — unsupported parameters may be dropped
+OLD کوئی ترجیح نہیں — unsupported parameters drop ہوسکتے ہیں
+NEW کوئی ترجیح نہیں — غیر معاون پیرامیٹرز حذف ہوسکتے ہیں
+wire.settings.providers_openrouter_require_parameters.help
+EN 'true' restricts to hosts that support every parameter you send (tools, structured output); 'default' lets OpenRouter silently drop unsupported ones.
+OLD 'true' صرف ان hosts تک محدود جو آپ کے بھیجے ہر parameter (tools، structured output) کی حمایت کریں؛ 'default' OpenRouter کو unsupported parameters خاموشی سے drop کرنے دیتی ہے۔
+NEW 'true' صرف ان ہوسٹس تک محدود جو آپ کے بھیجے ہر پیرامیٹر (ٹولز، ساختہ آؤٹ پٹ) کی حمایت کریں؛ 'default' OpenRouter کو غیر معاون پیرامیٹرز خاموشی سے حذف کرنے دیتی ہے۔
+wire.settings.providers_openrouter_require_parameters.label
+EN require parameters
+OLD require parameters
+NEW پیرامیٹرز لازم کریں
+wire.settings.providers_openrouter_sort.choice.latency.description
+EN lowest response latency first
+OLD سب سے کم response latency پہلے
+NEW سب سے کم جوابی لیٹنسی پہلے
+wire.settings.providers_openrouter_sort.choice.latency.label
+EN latency
+OLD latency
+NEW لیٹنسی
+wire.settings.providers_openrouter_sort.choice.price.description
+EN cheapest host first
+OLD سب سے سستا host پہلے
+NEW سب سے سستا ہوسٹ پہلے
+wire.settings.providers_openrouter_sort.choice.price.label
+EN price
+OLD price
+NEW قیمت
+wire.settings.providers_openrouter_sort.choice.throughput.description
+EN highest tokens/sec first
+OLD سب سے زیادہ tokens/sec پہلے
+NEW سب سے زیادہ ٹوکنز/سیکنڈ پہلے
+wire.settings.providers_openrouter_sort.choice.throughput.label
+EN throughput
+OLD throughput
+NEW تھراپٹ
+wire.settings.providers_openrouter_sort.choice.unset.description
+EN no preference — sticky routing stays on (warmest cache)
+OLD کوئی ترجیح نہیں — sticky routing آن رہے (سب سے warm cache)
+NEW کوئی ترجیح نہیں — اسٹکی روٹنگ آن رہے (سب سے وارم کیشے)
+wire.settings.providers_openrouter_sort.help
+EN How OpenRouter ranks hosts for this call. May route away from the host holding your warm prompt cache (a cold start on long conversations); 'default' sends no preference at all.
+OLD OpenRouter اس call کے لیے hosts کی ranking کیسے کرے۔ Warm prompt cache والے host سے ہٹ سکتا ہے (طویل گفتگوؤں میں cold start)؛ 'default' کوئی ترجیح نہیں بھیجتی۔
+NEW OpenRouter اس کال کے لیے ہوسٹس کی درجہ بندی کیسے کرے۔ وارم پرامپٹ کیشے والے ہوسٹ سے ہٹ سکتا ہے (طویل گفتگوؤں میں کولڈ آغاز)؛ 'default' کوئی ترجیح نہیں بھیجتی۔
+wire.settings.providers_openrouter_sort.label
+EN routing policy
+OLD routing policy
+NEW روٹنگ پالیسی
+wire.settings.providers_openrouter_zdr.choice.true.description
+EN zero-data-retention endpoints only
+OLD صرف zero-data-retention endpoints
+NEW صرف صفر ڈیٹا ریٹینشن اینڈ پوائنٹس
+wire.settings.providers_openrouter_zdr.help
+EN 'true': restrict to zero-data-retention endpoints. 'default': nothing sent.
+OLD 'true': صرف zero-data-retention endpoints۔ 'default': کچھ نہیں بھیجا۔
+NEW 'true': صرف صفر ڈیٹا ریٹینشن اینڈ پوائنٹس۔ 'default': کچھ نہیں بھیجا۔
+wire.settings.providers_openrouter_zdr.label
+EN zero data retention
+OLD zero data retention
+NEW صفر ڈیٹا ریٹینشن
+wire.settings.query_budget.description
+EN Time budget for a shell query — a grep/find/du walk rather than a build or an install: an advisory at 10 s, and a stop at the budget so one search cannot spend minutes of a turn.
+OLD Shell query کا وقت budget — build یا install کے بجائے grep/find/du walk: 10 s پر advisory، اور budget پر توقف تاکہ ایک search turn کے کئی منٹ نہ لے۔
+NEW شیل کوئری کا وقت بجٹ — بلڈ یا انسٹال کے بجائے grep/find/du گشت: 10 s پر انتباہ، اور بجٹ پر توقف تاکہ ایک تلاش ٹرن کے کئی منٹ نہ لے۔
+wire.settings.query_budget.title
+EN Shell query budget
+OLD Shell query budget
+NEW شیل کوئری کا بجٹ
+wire.settings.remote_compute.description
+EN Preview: run agent work on Radient-hosted compute, bound to one of your mesh networks.
+OLD Preview: ایجنٹ کا کام Radient-hosted compute پر چلائیں، آپ کے ایک mesh network سے منسلک۔
+NEW پیش نظارہ: ایجنٹ کا کام Radient کے ہوسٹ کیے کمپیوٹ پر چلائیں، آپ کے ایک میش نیٹ ورک سے منسلک۔
+wire.settings.remote_compute.title
+EN Remote compute
+OLD Remote compute
+NEW ریموٹ کمپیوٹ
+wire.settings.remote_compute_enabled.choice.false.description
+EN local only
+OLD صرف local
+NEW صرف مقامی
+wire.settings.remote_compute_enabled.choice.true.description
+EN remote runs allowed
+OLD remote runs کی اجازت
+NEW ریموٹ رنز کی اجازت
+wire.settings.remote_compute_enabled.help
+EN Preview: sends work to Radient compute, bound to one mesh network.
+OLD Preview: کام Radient compute کو بھیجے، ایک mesh network سے منسلک۔
+NEW پیش نظارہ: کام Radient کمپیوٹ کو بھیجے، ایک میش نیٹ ورک سے منسلک۔
+wire.settings.remote_compute_enabled.label
+EN Remote compute
+OLD Remote compute
+NEW ریموٹ کمپیوٹ
+wire.settings.retired.description
+EN Keys that are read but no longer do anything.
+OLD ایسی keys جو پڑھی جاتی ہیں مگر اب کچھ نہیں کرتیں۔
+NEW ایسی کلیدیں جو پڑھی جاتی ہیں مگر اب کچھ نہیں کرتیں۔
+wire.settings.retry_basedelayms.help
+EN First backoff step; later attempts grow from it.
+OLD پہلا backoff step؛ اگلی کوششیں اسی سے بڑھتی ہیں۔
+NEW بیک آف کا پہلا مرحلہ؛ اگلی کوششیں اسی سے بڑھتی ہیں۔
+wire.settings.retry_basedelayms.label
+EN Base delay (ms)
+OLD Base delay (ms)
+NEW بنیادی تاخیر (ms)
+wire.settings.retry_connectivitybackoffcapms.help
+EN Longest wait between connectivity retries.
+OLD Connectivity retries کے درمیان سب سے طویل انتظار۔
+NEW کنیکٹیوٹی دوبارہ کوششیں کے درمیان سب سے طویل انتظار۔
+wire.settings.retry_connectivitybackoffcapms.label
+EN Connectivity backoff cap (ms)
+OLD Connectivity backoff حد (ms)
+NEW کنیکٹیوٹی بیک آف حد (ms)
+wire.settings.retry_connectivitymaxretries.help
+EN Patient budget for a machine that went offline; distinct from max retries.
+OLD Offline machine کے لیے صبر کا budget؛ max retries سے الگ۔
+NEW آف لائن مشین کے لیے صبر کا بجٹ؛ زیادہ سے زیادہ دوبارہ کوششوں سے الگ۔
+wire.settings.retry_connectivitymaxretries.label
+EN Connectivity retries
+OLD Connectivity retries
+NEW کنیکٹیوٹی دوبارہ کوششیں
+wire.settings.retry_enabled.choice.false.description
+EN fail on the first error
+OLD پہلی error پر ناکام ہوں
+NEW پہلی خرابی پر ناکام ہوں
+wire.settings.retry_enabled.choice.true.description
+EN retry with backoff
+OLD Backoff کے ساتھ retry کریں
+NEW بیک آف کے ساتھ دوبارہ کوشش کریں
+wire.settings.retry_enabled.help
+EN Retry a failed provider call before surfacing the error.
+OLD Error دکھانے سے پہلے ناکام provider call retry کریں۔
+NEW خرابی ظاہر کرنے سے پہلے ناکام پرووائیڈر کال پر دوبارہ کوشش کریں۔
+wire.settings.retry_enabled.label
+EN Retry failed calls
+OLD ناکام calls retry کریں
+NEW ناکام کالوں پر دوبارہ کوشش
+wire.settings.retry_fallbackchains.help
+EN Ordered provider/model hops tried when a call keeps failing.
+OLD Call مسلسل ناکام ہو تو ترتیب سے آزمائے جانے والے provider/model hops۔
+NEW کال مسلسل ناکام ہو تو ترتیب سے آزمائے جانے والے پرووائیڈر/ماڈل ہاپس۔
+wire.settings.retry_fallbackchains.label
+EN Failover cascade
+OLD Failover cascade
+NEW فیل اوور کیسکیڈ
+wire.settings.retry_maxretries.help
+EN Fast budget against a reachable provider (5xx, timeout).
+OLD Reachable provider کے لیے تیز budget (5xx، timeout)۔
+NEW قابل رسائی پرووائیڈر کے لیے تیز بجٹ (5xx، ٹائم آؤٹ)۔
+wire.settings.retry_maxretries.label
+EN Max retries
+OLD زیادہ سے زیادہ retries
+NEW زیادہ سے زیادہ دوبارہ کوششیں
+wire.settings.retry_modelfallback.choice.true.description
+EN fall back to the next hop
+OLD اگلے hop پر جائیں
+NEW اگلے ہاپ پر جائیں
+wire.settings.retry_modelfallback.help
+EN Move to the next hop in the cascade when a model keeps failing.
+OLD ماڈل مسلسل ناکام ہو تو cascade کے اگلے hop پر جائیں۔
+NEW ماڈل مسلسل ناکام ہو تو کیسکیڈ کے اگلے ہاپ پر جائیں۔
+wire.settings.retry_modelfallback.label
+EN Model fallback
+OLD Model fallback
+NEW ماڈل فال بیک
+wire.settings.retry_pinnedfallback.choice.cross_family.description
+EN any vendor
+OLD کوئی بھی vendor
+NEW کوئی بھی وینڈر
+wire.settings.retry_pinnedfallback.choice.cross_family.label
+EN allow cross-vendor
+OLD cross-vendor کی اجازت
+NEW مختلف وینڈرز کی اجازت
+wire.settings.retry_pinnedfallback.choice.same_family.description
+EN same vendor only
+OLD صرف ایک ہی vendor
+NEW صرف ایک ہی وینڈر
+wire.settings.retry_pinnedfallback.choice.same_family.label
+EN same family only
+OLD صرف ایک ہی family
+NEW صرف ایک ہی فیملی
+wire.settings.retry_pinnedfallback.help
+EN What a pinned child may fall back to: same-family hops only, or any vendor (announced).
+OLD Pinned child کس پر fallback کرے: صرف same-family hops، یا کوئی بھی vendor (اطلاع کے ساتھ)۔
+NEW پن شدہ ذیلی ایجنٹ کس پر فال بیک کرے: صرف اسی فیملی کے ہاپس، یا کوئی بھی وینڈر (اطلاع کے ساتھ)۔
+wire.settings.retry_pinnedfallback.label
+EN Pinned child fallback
+OLD Pinned child fallback
+NEW پن شدہ ذیلی ایجنٹ فال بیک
+wire.settings.retry_usageawareaccountpick.choice.false.description
+EN spread by session hash only
+OLD صرف session hash سے تقسیم
+NEW صرف سیشن ہیش سے تقسیم
+wire.settings.retry_usageawareaccountpick.choice.true.description
+EN prefer the least-loaded account
+OLD سب سے کم بوجھ والے account کو ترجیح
+NEW سب سے کم بوجھ والے اکاؤنٹ کو ترجیح
+wire.settings.retry_usageawareaccountpick.help
+EN Start new sessions on the same-provider account with the most quota left, read from the cached /usage report. Applies to sessions only.
+OLD نئے سیشنز اسی-provider کے سب سے زیادہ quota باقی رکھنے والے account پر شروع کریں، cached /usage report سے۔ صرف سیشنز پر لاگو۔
+NEW نئے سیشنز اسی-پرووائیڈر کے سب سے زیادہ کوٹہ باقی رکھنے والے اکاؤنٹ پر شروع کریں، کیشے شدہ /usage رپورٹ سے۔ صرف سیشنز پر لاگو۔
+wire.settings.retry_usageawareaccountpick.label
+EN Usage-aware account pick
+OLD Usage-aware account انتخاب
+NEW استعمال کے حساب سے اکاؤنٹ انتخاب
+wire.settings.retry_usageawarefallback.choice.true.description
+EN check quota at message boundaries
+OLD Message boundaries پر quota check کریں
+NEW پیغام حدود پر کوٹہ جانچ کریں
+wire.settings.retry_usageawarefallback.help
+EN Switch before a quota runs out. Costs one quota request per user message.
+OLD Quota ختم ہونے سے پہلے بدلیں۔ ہر user message پر ایک quota request لگتی ہے۔
+NEW کوٹہ ختم ہونے سے پہلے بدلیں۔ ہر صارف پیغام پر ایک کوٹہ درخواست لگتی ہے۔
+wire.settings.retry_usageawarefallback.label
+EN Usage-aware fallback
+OLD Usage-aware fallback
+NEW استعمال کے حساب سے فال بیک
+wire.settings.retry_usagereservepercent.help
+EN Headroom below which an account counts as low; a running session stays on it.
+OLD اس سے نیچے account کم quota شمار ہو؛ چلتا سیشن اسی پر رہتا ہے۔
+NEW اس سے نیچے اکاؤنٹ کم کوٹہ شمار ہو؛ چلتا سیشن اسی پر رہتا ہے۔
+wire.settings.retry_usagereservepercent.label
+EN Usage reserve (%)
+OLD Usage reserve (%)
+NEW استعمال کا ذخیرہ (%)
+wire.settings.runtime.description
+EN How sessions behave when you leave them. The warm-runtime knobs are read when a runtime next draws its window.
+OLD آپ کے چھوڑنے پر سیشنز کا رویہ۔ Warm-runtime knobs runtime اگلی window بنائے تو پڑھی جاتی ہیں۔
+NEW آپ کے چھوڑنے پر سیشنز کا رویہ۔ وارم رن ٹائم کنٹرولز رن ٹائم اگلی ونڈو بنائے تو پڑھے جاتے ہیں۔
+wire.settings.runtime.title
+EN Runtime
+OLD Runtime
+NEW رن ٹائم
+wire.settings.runtime_background_on_resume.choice.false.description
+EN stop the turn when you leave the session
+OLD سیشن چھوڑنے پر turn روک دیں
+NEW سیشن چھوڑنے پر ٹرن روک دیں
+wire.settings.runtime_background_on_resume.choice.true.description
+EN keep the turn running in the background
+OLD Turn background میں چلتا رہے
+NEW ٹرن پس منظر میں چلتا رہے
+wire.settings.runtime_background_on_resume.help
+EN Leave a running turn working when you switch away from its session.
+OLD سیشن سے switch کرنے پر چلتا turn کام جاری رکھے۔
+NEW سیشن سے سوئچ کرنے پر چلتا ٹرن کام جاری رکھے۔
+wire.settings.runtime_keep_alive_max.help
+EN Cap on warm runtimes in this install; the least recently closed exits first.
+OLD اس install میں warm runtimes کی حد؛ سب سے پرانا بند ہوا پہلے exit کرے۔
+NEW اس انسٹال میں وارم رن ٹائمز کی حد؛ سب سے پہلے بند کیا گیا رن ٹائم پہلے ختم ہوگا۔
+wire.settings.runtime_keep_alive_max.label
+EN Max warm conversations
+OLD زیادہ سے زیادہ warm گفتگو
+NEW زیادہ سے زیادہ وارم گفتگوئیں
+wire.settings.runtime_keep_alive_seconds.help
+EN Re-opening inside this window attaches to the live runtime. 0 keeps nothing warm.
+OLD اس window کے اندر دوبارہ کھولنے سے live runtime سے جڑیں۔ 0 کچھ warm نہیں رکھتا۔
+NEW اس ونڈو کے اندر دوبارہ کھولنے سے براہ راست رن ٹائم سے جڑیں۔ 0 کچھ وارم نہیں رکھتا۔
+wire.settings.runtime_keep_alive_seconds.label
+EN Keep closed conversations warm (s)
+OLD بند گفتگو warm رکھیں (s)
+NEW بند گفتگوئیں وارم رکھیں (s)
+wire.settings.runtime_unattended_gate_timeout.help
+EN How long a question waits when you are away. 0 never times out.
+OLD آپ کی غیر موجودگی میں سوال کتنا انتظار کرے۔ 0 کبھی timeout نہیں۔
+NEW آپ کی غیر موجودگی میں سوال کتنا انتظار کرے۔ 0 پر کبھی ٹائم آؤٹ نہیں۔
+wire.settings.runtime_unattended_gate_timeout.label
+EN Unattended question timeout (h)
+OLD Unattended سوال timeout (h)
+NEW بلا نگرانی سوال کی مہلت (h)
+wire.settings.send_journal_unconfirmed.help
+EN Write a transcript notice when a `send` is not acknowledged. The tool result always reports it; this keeps a durable row too.
+OLD `send` کی acknowledgment نہ ملے تو ٹرانسکرپٹ notice لکھیں۔ ٹول result ہمیشہ بتاتا ہے؛ اس سے durable row بھی رہتی ہے۔
+NEW `send` کی تصدیق نہ ملے تو ٹرانسکرپٹ نوٹس لکھیں۔ ٹول نتیجہ ہمیشہ بتاتا ہے؛ اس سے پائیدار قطار بھی رہتی ہے۔
+wire.settings.send_journal_unconfirmed.label
+EN Journal unacknowledged sends
+OLD غیر acknowledged sends journal کریں
+NEW غیر تصدیق شدہ send اندراجات جرنل کریں
+wire.settings.session.description
+EN Autosave. The cleanup policies have their own sections below.
+OLD Autosave۔ Cleanup policies کے الگ sections نیچے ہیں۔
+NEW خودکار محفوظ کاری۔ صفائی کی پالیسیوں کے الگ حصے نیچے ہیں۔
+wire.settings.session.title
+EN Session storage
+OLD سیشن storage
+NEW سیشن اسٹوریج
+wire.settings.session_cleanup.description
+EN Session cleanup for the conversations you started and the workstreams in your sidebar. Off by default; nothing here runs until you switch it on.
+OLD آپ کی شروع کردہ گفتگوؤں اور sidebar workstreams کا cleanup۔ Default آف؛ آپ کے آن کرنے تک کچھ نہیں چلتا۔
+NEW آپ کی شروع کردہ گفتگوؤں اور سائڈبار ورک اسٹریمز کی صفائی۔ ڈیفالٹ آف؛ آپ کے آن کرنے تک کچھ نہیں چلتا۔
+wire.settings.session_cleanup_delegated_enabled.choice.false.description
+EN keep all delegated work
+OLD تمام delegated کام رکھیں
+NEW سونپا گیا تمام کام رکھیں
+wire.settings.session_cleanup_delegated_enabled.choice.true.description
+EN remove delegated work after the age below
+OLD نیچے دی گئی عمر کے بعد delegated کام ہٹائیں
+NEW نیچے دی گئی عمر کے بعد سونپا گیا کام ہٹائیں
+wire.settings.session_cleanup_delegated_enabled.help
+EN Remove subagent and background-session transcripts after the age below; never your conversations or anything in use.
+OLD نیچے دی گئی عمر کے بعد ذیلی ایجنٹ اور background-session ٹرانسکرپٹس ہٹائیں؛ آپ کی گفتگو یا استعمال میں چیز کبھی نہیں۔
+NEW نیچے دی گئی عمر کے بعد ذیلی ایجنٹ اور پس منظر-سیشن ٹرانسکرپٹس ہٹائیں؛ آپ کی گفتگو یا استعمال میں چیز کبھی نہیں۔
+wire.settings.session_cleanup_delegated_enabled.label
+EN Delegated cleanup
+OLD Delegated cleanup
+NEW سونپے گئے کام کی صفائی
+wire.settings.session_cleanup_delegated_max_age_hours.help
+EN Hours idle before removal: 2 to 720 (30 days). Default 48.
+OLD Removal سے پہلے idle گھنٹے: 2 تا 720 (30 دن)۔ Default 48۔
+NEW حذف سے پہلے بے کار گھنٹے: 2 تا 720 (30 دن)۔ ڈیفالٹ 48۔
+wire.settings.session_cleanup_enabled.choice.true.description
+EN limits run at launch; newest 10 + live kept
+OLD Limits launch پر چلیں؛ newest 10 + live محفوظ
+NEW لانچ پر حدود لاگو ہوں؛ تازہ ترین 10 اور فعال محفوظ
+wire.settings.session_cleanup_enabled.help
+EN Off: nothing is ever removed. On: limits below run at launch, sparing the newest 10 + live.
+OLD آف: کبھی کچھ نہیں ہٹتا۔ آن: نیچے کی limits launch پر چلتی ہیں، newest 10 + live محفوظ۔
+NEW آف: کبھی کچھ نہیں ہٹتا۔ آن: لانچ پر نیچے کی حدود لاگو ہوتی ہیں، تازہ ترین 10 اور فعال محفوظ رہتے ہیں۔
+wire.settings.session_cleanup_enabled.label
+EN Session cleanup
+OLD سیشن cleanup
+NEW سیشن صفائی
+wire.settings.session_cleanup_max_inactive_days.help
+EN Needs cleanup on. Remove sessions idle this many days; 0 = never.
+OLD Cleanup آن ہو۔ اتنے دن idle سیشنز ہٹائیں؛ 0 = کبھی نہیں۔
+NEW صفائی آن ہو۔ اتنے دن بے کار سیشنز ہٹائیں؛ 0 = کبھی نہیں۔
+wire.settings.session_cleanup_max_inactive_days.label
+EN ↳ max inactive days
+OLD ↳ زیادہ سے زیادہ inactive دن
+NEW ↳ زیادہ سے زیادہ غیر فعال دن
+wire.settings.session_cleanup_max_sessions.help
+EN Needs cleanup on. Keep N newest /resume sessions; 0 = no cap.
+OLD Cleanup آن ہو۔ N newest /resume سیشنز رکھیں؛ 0 = کوئی حد نہیں۔
+NEW صفائی آن ہو۔ N تازہ ترین /resume سیشنز رکھیں؛ 0 = کوئی حد نہیں۔
+wire.settings.session_cleanup_max_total_bytes.help
+EN Needs cleanup on. Trim oldest past this many bytes; 0 = no cap.
+OLD Cleanup آن ہو۔ اتنے bytes سے بڑھنے پر پرانے ہٹائیں؛ 0 = کوئی حد نہیں۔
+NEW صفائی آن ہو۔ اتنے bytes سے بڑھنے پر پرانے ہٹائیں؛ 0 = کوئی حد نہیں۔
+wire.settings.session_cleanup_remove_empty.choice.true.description
+EN remove transcript-less directories
+OLD بغیر ٹرانسکرپٹ والی directories ہٹائیں
+NEW بغیر ٹرانسکرپٹ والی ڈائریکٹریز ہٹائیں
+wire.settings.session_cleanup_remove_empty.help
+EN Needs cleanup on. Remove dirs that never got a transcript.
+OLD Cleanup آن ہو۔ وہ dirs ہٹائیں جن میں کبھی ٹرانسکرپٹ نہ بنا۔
+NEW صفائی آن ہو۔ وہ ڈائریکٹریز ہٹائیں جن میں کبھی ٹرانسکرپٹ نہ بنا۔
+wire.settings.session_compression.description
+EN History is kept in full; old transcripts are stored compressed and read back automatically. Off: every transcript stays as a plain file.
+OLD History مکمل رہتی ہے؛ پرانے ٹرانسکرپٹس کمپریس محفوظ ہو کر خودکار پڑھے جاتے ہیں۔ آف: ہر ٹرانسکرپٹ سادہ فائل رہتا ہے۔
+NEW تاریخچہ مکمل رہتی ہے؛ پرانے ٹرانسکرپٹس کمپریس کر کے محفوظ ہوتے اور خودکار پڑھے جاتے ہیں۔ آف: ہر ٹرانسکرپٹ سادہ فائل رہتا ہے۔
+wire.settings.session_compression_after_days.help
+EN Needs compression on. Days idle before a transcript is compressed; 1 to 3650. Default 30.
+OLD Compression آن ہو۔ ٹرانسکرپٹ کمپریس ہونے سے پہلے idle دن؛ 1 تا 3650۔ Default 30۔
+NEW کمپریشن آن ہو۔ ٹرانسکرپٹ کمپریس ہونے سے پہلے بے کار دن؛ 1 تا 3650۔ ڈیفالٹ 30۔
+wire.settings.session_compression_enabled.help
+EN Off: transcripts stay plain; compressed sessions stay readable. On: old transcripts compress at launch.
+OLD آف: ٹرانسکرپٹس سادہ رہتے ہیں؛ کمپریس سیشنز پڑھے جاسکتے ہیں۔ آن: پرانے ٹرانسکرپٹس launch پر کمپریس ہوتے ہیں۔
+NEW آف: ٹرانسکرپٹس سادہ رہتے ہیں؛ کمپریس شدہ سیشنز پڑھے جا سکتے ہیں۔ آن: پرانے ٹرانسکرپٹس لانچ پر کمپریس ہوتے ہیں۔
+wire.settings.session_delegated.description
+EN Delegated work: subagent and background-session transcripts and their scratch folders. On by default: they are removed after the age below. Your conversations, sidebar workstreams, anything running, waiting on a wake or monitor, linked to an open project, still in use by an active parent, or holding unpushed or uncommitted git work are kept.
+OLD Delegated کام: ذیلی ایجنٹ اور background-session ٹرانسکرپٹس اور ان کے scratch folders۔ Default آن: نیچے دی گئی عمر کے بعد ہٹتے ہیں۔ آپ کی گفتگو، sidebar workstreams، چلتی، بیداری یا نگرانی کے منتظر، کھلے پروجیکٹ سے منسلک، فعال parent کے استعمال میں، یا unpushed/uncommitted git کام رکھنے والی چیزیں رہتی ہیں۔
+NEW سونپا گیا کام: ذیلی ایجنٹ اور پس منظر سیشنز کے ٹرانسکرپٹس اور ان کے اسکریچ فولڈرز۔ ڈیفالٹ آن: نیچے دی گئی عمر کے بعد ہٹتے ہیں۔ آپ کی گفتگوئیں، سائڈبار ورک اسٹریمز، کوئی چلتی، بیداری یا نگرانی کے منتظر، کھلے پروجیکٹ سے منسلک، فعال پیرنٹ کے استعمال میں، یا push یا commit نہ کیے گئے git کام والی چیزیں محفوظ رہتی ہیں۔
+wire.settings.session_delegated.title
+EN Delegated work
+OLD Delegated کام
+NEW سونپا گیا کام
+wire.settings.session_scratchpad.description
+EN What one session's own scratch area may hold. The cap is checked on every write and applies immediately.
+OLD ایک سیشن کا اپنا scratch area کتنا رکھ سکے۔ ہر write پر حد check ہو کر فوراً لاگو ہوتی ہے۔
+NEW ایک سیشن کا اپنا اسکریچ علاقہ کتنا رکھ سکے۔ ہر تحریر پر حد جانچ کر فوراً لاگو ہوتی ہے۔
+wire.settings.session_scratchpad_max_bytes.help
+EN Bytes a session's scratchpad may hold: 16 MiB to 8 GiB. Default 256 MiB.
+OLD سیشن کے Scratchpad کی گنجائش: 16 MiB تا 8 GiB۔ Default 256 MiB۔
+NEW سیشن کے Scratchpad کی گنجائش: 16 MiB تا 8 GiB۔ ڈیفالٹ 256 MiB۔
+wire.settings.shell_environment.description
+EN What a command the agent runs can see. Resolved once per session, so an edit here applies at the next launch and cannot weaken a session that is already running.
+OLD ایجنٹ کی چلائی command کیا دیکھ سکے۔ فی سیشن ایک بار resolve ہوتا ہے، اس لیے تبدیلی اگلے launch پر لاگو ہوتی ہے اور چلتے سیشن کو کمزور نہیں کر سکتی۔
+NEW ایجنٹ کی چلائی کمانڈ کیا دیکھ سکے۔ فی سیشن ایک بار طے ہوتا ہے، اس لیے تبدیلی اگلے لانچ پر لاگو ہوتی ہے اور چلتے سیشن کو کمزور نہیں کر سکتی۔
+wire.settings.shell_environment.title
+EN Agent shell
+OLD ایجنٹ shell
+NEW ایجنٹ شیل
+wire.settings.shell_environment_exclude.help
+EN Empty = nothing removed. Names never handed to a command the agent runs, in either mode — including the session credential store's own injections, so this is how a variable is denied outright. Covers the bash and eval children only; MCP servers and the harness's own processes are not governed by it.
+OLD خالی = کچھ نہیں نکلتا۔ وہ names جو ایجنٹ command کو کسی mode میں نہیں ملتے — session credential store کی اپنی injections بھی — اس لیے variable کو مکمل روکنے کا طریقہ یہی ہے۔ صرف bash اور eval children؛ MCP servers اور harness کے اپنے processes اس کے تابع نہیں۔
+NEW خالی = کچھ نہیں نکلتا۔ وہ نام جو ایجنٹ کمانڈ کو کسی موڈ میں نہیں ملتے — سیشن کریڈینشل اسٹور کی اپنی انجیکشنز بھی — اس لیے ویریئیبل کو مکمل روکنے کا طریقہ یہی ہے۔ صرف bash اور eval ذیلی پروسیسز؛ MCP سرورز اور ہارنس کے اپنے پروسیسز اس کے تابع نہیں۔
+wire.settings.shell_environment_exclude.label
+EN …removed in both modes
+OLD …دونوں modes میں نکالے گئے
+NEW …دونوں موڈز میں نکالے گئے
+wire.settings.shell_environment_inherit.help
+EN Empty = the safe set alone. Names the allowlist mode keeps ON TOP of the safe set — e.g. LOCAL_OPERATOR_CONFIG_DIR for a shell that must still resolve $(lop secret get NAME), or LANG. Inert in inherit mode.
+OLD خالی = صرف safe set۔ وہ names جو allowlist mode safe set کے علاوہ رکھے — مثلاً ایسے shell کے لیے LOCAL_OPERATOR_CONFIG_DIR جسے $(lop secret get NAME) resolve کرنا ہو، یا LANG۔ inherit mode میں بے اثر۔
+NEW خالی = صرف محفوظ سیٹ۔ وہ نام جو allowlist موڈ محفوظ سیٹ کے علاوہ رکھے — مثلاً ایسے شیل کے لیے LOCAL_OPERATOR_CONFIG_DIR جسے $(lop secret get NAME) حل کرنا ہو، یا LANG۔ inherit موڈ میں بے اثر۔
+wire.settings.shell_environment_inherit.label
+EN …kept in allowlist mode
+OLD …allowlist mode میں رکھے گئے
+NEW …allowlist موڈ میں رکھے گئے
+wire.settings.shell_environment_mode.choice.allowlist.description
+EN the safe set plus the lists below, nothing else
+OLD Safe set اور نیچے کی lists، اور کچھ نہیں
+NEW محفوظ سیٹ اور نیچے کی فہرستیں، اور کچھ نہیں
+wire.settings.shell_environment_mode.choice.inherit.description
+EN your environment, as today (default)
+OLD آپ کا environment، جیسا آج (default)
+NEW آپ کا ماحول، جیسا آج (ڈیفالٹ)
+wire.settings.shell_environment_mode.help
+EN 'inherit' lets a command the agent runs see your environment (gh, aws, npm keep their tokens). 'allowlist' passes only PATH/HOME/SHELL/TERM/USER/LOGNAME plus the two lists beside this, so the provider key this session launched with is not handed to a command the model writes. Read once per session: changing it takes effect at the next launch.
+OLD 'inherit' ایجنٹ command کو آپ کا environment دیکھنے دیتی ہے (gh، aws، npm اپنے tokens رکھتے ہیں)۔ 'allowlist' صرف PATH/HOME/SHELL/TERM/USER/LOGNAME اور ساتھ کی دو lists دیتی ہے، اس لیے سیشن launch کی provider key ماڈل کی لکھی command کو نہیں ملتی۔ فی سیشن ایک بار پڑھی جاتی ہے: تبدیلی اگلے launch پر لاگو ہوتی ہے۔
+NEW 'inherit' ایجنٹ کمانڈ کو آپ کا ماحول دیکھنے دیتی ہے (gh، aws، npm اپنے ٹوکنز رکھتے ہیں)۔ 'allowlist' صرف PATH/HOME/SHELL/TERM/USER/LOGNAME اور ساتھ کی دو فہرستیں دیتی ہے، اس لیے سیشن لانچ کی پرووائیڈر کلید ماڈل کی لکھی کمانڈ کو نہیں ملتی۔ فی سیشن ایک بار پڑھی جاتی ہے: تبدیلی اگلے لانچ پر لاگو ہوتی ہے۔
+wire.settings.shell_environment_mode.label
+EN Agent shell environment
+OLD ایجنٹ shell environment
+NEW ایجنٹ شیل ماحول
+wire.settings.speech.description
+EN How the assistant sounds when it speaks aloud. The descriptor is sent to the hub, which maps it onto whichever voice provider serves; fields a provider cannot express degrade with a note rather than failing. Read on the next spoken message.
+OLD بولنے پر assistant کی آواز کیسی ہو۔ Descriptor hub کو جاتا ہے، جو voice provider کے مطابق بناتا ہے؛ provider سے ناقابل اظہار fields ناکامی کے بجائے note کے ساتھ کم ہوتی ہیں۔ اگلے بولے پیغام پر پڑھی جاتی ہے۔
+NEW بولنے پر اسسٹنٹ کی آواز کیسی ہو۔ آواز کی تفصیل hub کو جاتی ہے، جو اسے دستیاب آواز پرووائیڈر کے مطابق بناتا ہے؛ پرووائیڈر سے ناقابل اظہار فیلڈز ناکامی کے بجائے نوٹ کے ساتھ کم ہوتی ہیں۔ اگلے بولے پیغام پر پڑھی جاتی ہے۔
+wire.settings.speech.title
+EN Speech voicing
+OLD Speech voicing
+NEW تقریر کی آواز
+wire.settings.speech_transcription_cleanup.choice.auto.description
+EN Native, else client rules.
+OLD Native، ورنہ client rules۔
+NEW مقامی، ورنہ کلائنٹ قواعد۔
+wire.settings.speech_transcription_cleanup.choice.client.description
+EN Client rules; request raw copy.
+OLD Client rules؛ raw copy کی درخواست۔
+NEW کلائنٹ قواعد؛ خام نقل کی درخواست۔
+wire.settings.speech_transcription_cleanup.choice.off.description
+EN Verbatim; no filler or cue removal.
+OLD حرف بہ حرف؛ filler یا cue removal نہیں۔
+NEW حرف بہ حرف؛ فلر الفاظ یا غیر گفتار اشارے حذف نہیں۔
+wire.settings.speech_transcription_cleanup.choice.provider.description
+EN Native only where offered.
+OLD صرف جہاں native دستیاب ہو۔
+NEW صرف جہاں مقامی صفائی دستیاب ہو۔
+wire.settings.speech_transcription_cleanup.help
+EN How dictation strips filler words and non-speech cues. auto uses the provider's native cleanup where available and the conservative client rules elsewhere; provider and client each use only one of the two mechanisms; off keeps the verbatim transcript. A per-request `cleanup` field still wins.
+OLD Dictation سے filler words اور غیر speech cues کیسے نکلیں۔ auto جہاں ممکن ہو provider native cleanup، ورنہ conservative client rules استعمال کرتا ہے؛ provider اور client میں سے ہر ایک صرف ایک mechanism استعمال کرتا ہے؛ آف verbatim ٹرانسکرپٹ رکھتا ہے۔ فی-request `cleanup` field بھی اول ہے۔
+NEW املاء سے فلر الفاظ اور غیر گفتار اشارے کیسے نکلیں۔ auto جہاں ممکن ہو پرووائیڈر کی مقامی صفائی، ورنہ محتاط کلائنٹ قواعد استعمال کرتا ہے؛ provider اور client میں سے ہر ایک صرف ایک میکانیزم استعمال کرتا ہے؛ آف حرف بہ حرف ٹرانسکرپٹ رکھتا ہے۔ فی درخواست `cleanup` فیلڈ بھی اول ہے۔
+wire.settings.speech_transcription_cleanup.label
+EN Transcription cleanup
+OLD ٹرانسکرپٹion cleanup
+NEW ٹرانسکرپٹ کی صفائی
+wire.settings.speech_voice_accent.help
+EN A region tag such as en-GB, or empty. Reaches the provider as instructions text.
+OLD مثلاً en-GB جیسا region tag، یا خالی۔ Provider کو instructions text میں جاتا ہے۔
+NEW مثلاً en-GB جیسا علاقائی ٹیگ، یا خالی۔ پرووائیڈر کو ہدایات کے متن میں جاتا ہے۔
+wire.settings.speech_voice_expressiveness.choice.high.description
+EN Lively and expressive.
+OLD زندہ دل اور expressive۔
+NEW جاندار اور اظہار آمیز۔
+wire.settings.speech_voice_expressiveness.choice.medium.description
+EN Today's constant.
+OLD آج کی مستقل قیمت۔
+NEW موجودہ مستقل قیمت۔
+wire.settings.speech_voice_expressiveness.help
+EN How animated the delivery is. Sets ElevenLabs stability; a phrase on OpenAI.
+OLD Delivery کتنی animated ہو۔ ElevenLabs stability مقرر کرے؛ OpenAI پر ایک phrase۔
+NEW ڈیلیوری کتنی جاندار ہو۔ ElevenLabs کا استحکام مقرر کرے؛ OpenAI پر ایک جملہ۔
+wire.settings.speech_voice_expressiveness.label
+EN Expressiveness
+OLD Expressiveness
+NEW اظہاریت
+wire.settings.speech_voice_gender.choice.auto.description
+EN Classify per agent (recommended).
+OLD فی ایجنٹ classify کریں (تجویز کردہ)۔
+NEW ہر ایجنٹ کے لیے درجہ بندی (تجویز کردہ)۔
+wire.settings.speech_voice_gender.choice.female.description
+EN Always use a female voice.
+OLD ہمیشہ female voice استعمال کریں۔
+NEW ہمیشہ نسوانی آواز استعمال کریں۔
+wire.settings.speech_voice_gender.choice.male.description
+EN Always use a male voice.
+OLD ہمیشہ male voice استعمال کریں۔
+NEW ہمیشہ مردانہ آواز استعمال کریں۔
+wire.settings.speech_voice_gender.help
+EN auto picks per agent; a fixed value overrides the classifier.
+OLD auto فی ایجنٹ منتخب کرتی ہے؛ مقررہ قیمت classifier کو override کرتی ہے۔
+NEW auto ہر ایجنٹ کے لیے منتخب کرتی ہے؛ مقررہ قیمت کلاسیفائر کو اووررائیڈ کرتی ہے۔
+wire.settings.speech_voice_gender.label
+EN Voice gender
+OLD Voice gender
+NEW آواز کی جنس
+wire.settings.speech_voice_instructions.help
+EN Free text for how speech should sound (OpenAI only). Empty sends none of our own.
+OLD آواز کیسی ہو، free text (صرف OpenAI)۔ خالی پر ہماری کوئی نہیں جاتی۔
+NEW آواز کی ڈیلیوری کے لیے آزاد متن (صرف OpenAI)۔ خالی ہونے پر ہماری طرف سے کوئی ہدایت نہیں جاتی۔
+wire.settings.speech_voice_instructions.label
+EN Delivery instructions
+OLD Delivery instructions
+NEW ڈیلیوری کی ہدایات
+wire.settings.speech_voice_language.help
+EN auto lets the provider detect; a two-letter code (e.g. es) pins it.
+OLD auto provider کو detect کرنے دیتی ہے؛ دو حرفی code (مثلاً es) مقرر کرتی ہے۔
+NEW auto پرووائیڈر کو شناخت کرنے دیتی ہے؛ دو حرفی کوڈ (مثلاً es) مقرر کرتی ہے۔
+wire.settings.speech_voice_pace.help
+EN Speaking rate, 1.0 being normal. A provider whose own range is narrower clamps.
+OLD بولنے کی رفتار، 1.0 معمول۔ Provider کی تنگ range ہو تو clamp کرے گا۔
+NEW بولنے کی رفتار، 1.0 معمول۔ پرووائیڈر کی تنگ حد ہو تو اسی کے مطابق ڈھال دے گا۔
+wire.settings.speech_voice_tone.choice.warm.label
+EN warm
+OLD warm
+NEW وارم
+wire.settings.speech_voice_tone.help
+EN Warmth of delivery. Honoured as a voice row or emulated in instructions.
+OLD Delivery کی warmth۔ Voice row سے یا instructions میں emulate ہوتی ہے۔
+NEW ڈیلیوری کی گرمجوشی۔ آواز کی قطار سے یا ہدایات میں نقل کر کے لاگو ہوتی ہے۔
+wire.settings.static.description
+EN Extra directories the local server may serve image, audio, video and HTML previews from. The agent home, session folders, uploads and the working directories of your agents and running sessions are always included.
+OLD اضافی directories جن سے local server تصویر، audio، video اور HTML previews دے سکے۔ Agent home، session folders، uploads اور آپ کے ایجنٹس و چلتے سیشنز کی working directories ہمیشہ شامل ہیں۔
+NEW اضافی ڈائریکٹریز جن سے مقامی سرور تصویر، آڈیو، ویڈیو اور HTML پیش نظارہ دے سکے۔ ایجنٹ ہوم، سیشن فولڈرز، اپ لوڈز اور آپ کے ایجنٹس و چلتے سیشنز کی ورکنگ ڈائریکٹریز ہمیشہ شامل ہیں۔
+wire.settings.static.title
+EN File previews
+OLD فائل previews
+NEW فائلوں کے پیش نظارے
+wire.settings.static_roots.help
+EN Empty = only the built-in roots. Consulted only by the fallback posture (a connection that is not loopback): normal loopback previews can serve any readable file. Comma-separated absolute directories; dot-directories below a root are never served.
+OLD خالی = صرف built-in roots۔ صرف fallback posture (غیر loopback connection) استعمال کرتی ہے: معمول کی loopback previews کوئی بھی readable فائل دے سکتی ہیں۔ Comma-separated absolute directories؛ root کے نیچے dot-directories کبھی serve نہیں ہوتیں۔
+NEW خالی = صرف بلٹ اِن روٹس۔ صرف فال بیک انداز (غیر loopback کنکشن) استعمال کرتی ہے: معمول کے loopback پیش نظارہ کوئی بھی قابل خواندگی فائل دے سکتے ہیں۔ کاما سے الگ مطلق ڈائریکٹریز؛ روٹ کے نیچے ڈاٹ ڈائریکٹریز کبھی پیش نہیں ہوتیں۔
+wire.settings.static_roots.label
+EN Extra preview roots
+OLD اضافی preview roots
+NEW اضافی پیش نظارہ روٹس
+wire.settings.static_roots.warning
+EN only applies to the fallback (non-loopback) posture
+OLD صرف fallback (non-loopback) posture پر لاگو
+NEW صرف فال بیک (non-loopback) انداز پر لاگو
+wire.settings.subagents.description
+EN Concurrency cap, child knowledge slimming, who picks a child's model, and the model each tier runs on.
+OLD Concurrency حد، child knowledge کم کرنا، child کا ماڈل کون منتخب کرے، اور ہر tier کا ماڈل۔
+NEW ہم وقت کام کی حد، ذیلی ایجنٹ کا علم مختصر کرنا، اس کا ماڈل کون منتخب کرے، اور ہر درجے کا ماڈل۔
+wire.settings.subagents_max_running.help
+EN Ceiling on concurrent subagents and backgrounded bash, which share one pool.
+OLD Concurrent ذیلی ایجنٹس اور backgrounded bash کی حد، جو ایک pool بانٹتے ہیں۔
+NEW ہم وقت چلنے والے ذیلی ایجنٹس اور پس منظر bash کی حد، جو ایک پول بانٹتے ہیں۔
+wire.settings.subagents_max_running.label
+EN Max background jobs
+OLD زیادہ سے زیادہ background jobs
+NEW زیادہ سے زیادہ پس منظر کام
+wire.settings.subagents_max_team_depth.help
+EN Deepest launch allowed in a tree that runs a team. 1 is the top's children.
+OLD Team چلانے والے tree میں گہرائی کی حد۔ 1 کا مطلب top کے children۔
+NEW ٹیم چلانے والے درخت میں گہرائی کی حد۔ 1 کا مطلب اعلیٰ سطح کے ذیلی ایجنٹس۔
+wire.settings.subagents_max_team_depth.label
+EN Max nested-team depth
+OLD زیادہ سے زیادہ nested-team گہرائی
+NEW نیسٹڈ ٹیم کی زیادہ سے زیادہ گہرائی
+wire.settings.subagents_model_choice.choice.operator.label
+EN the operator
+OLD operator
+NEW آپریٹر
+wire.settings.subagents_model_choice.help
+EN Who picks a subagent's tier; the operator pins one in its profile.
+OLD ذیلی ایجنٹ کی tier کون منتخب کرے؛ operator profile میں مقرر کرتا ہے۔
+NEW ذیلی ایجنٹ کا درجہ کون منتخب کرے؛ operator پروفائل میں مقرر کرتا ہے۔
+wire.settings.subagents_models_hi.help
+EN Bills at that model's rates; 'default': session; empty removes the tier
+OLD اسی ماڈل کی rates سے billing؛ 'default': سیشن؛ خالی tier ہٹاتا ہے
+NEW اسی ماڈل کی نرخوں سے بلنگ؛ 'default': سیشن؛ خالی درجہ ہٹاتا ہے
+wire.settings.subagents_models_lo.help
+EN Bills at that model's rates; 'default': session; empty removes the tier
+OLD اسی ماڈل کی rates سے billing؛ 'default': سیشن؛ خالی tier ہٹاتا ہے
+NEW اسی ماڈل کی نرخوں سے بلنگ؛ 'default': سیشن؛ خالی درجہ ہٹاتا ہے
+wire.settings.subagents_models_med.help
+EN Bills at that model's rates; 'default': session; empty removes the tier
+OLD اسی ماڈل کی rates سے billing؛ 'default': سیشن؛ خالی tier ہٹاتا ہے
+NEW اسی ماڈل کی نرخوں سے بلنگ؛ 'default': سیشن؛ خالی درجہ ہٹاتا ہے
+wire.settings.subagents_slim_child_knowledge.choice.false.description
+EN inherit the parent block as-is
+OLD Parent block ویسا ہی inherit کرے
+NEW پیرنٹ بلاک حرف بہ حرف وراثت میں لے
+wire.settings.subagents_slim_child_knowledge.choice.true.description
+EN keep names, trim the rest
+OLD Names رکھیں، باقی کم کریں
+NEW نام رکھیں، باقی مختصر کریں
+wire.settings.subagents_slim_child_knowledge.help
+EN Keep skill/guide names; trim descriptions and parent extras.
+OLD Skill/guide names رکھیں؛ descriptions اور parent extras کم کریں۔
+NEW مہارت/گائیڈ کے نام رکھیں؛ تفصیلات اور پیرنٹ کا اضافی مواد مختصر کریں۔
+wire.settings.subagents_slim_child_knowledge.label
+EN Slim child knowledge
+OLD Child knowledge کم کریں
+NEW ذیلی ایجنٹ کا علم مختصر کریں
+wire.settings.supplements.description
+EN After an answer, point out the files it produced and, when you turn it on, draw a chart of numbers it showed. Off by environment: LOP_SUPPLEMENTS=0.
+OLD جواب کے بعد بنی فائلیں بتائیں اور، آن کرنے پر، دکھائے نمبروں کا chart بنائیں۔ Environment سے آف: LOP_SUPPLEMENTS=0۔
+NEW جواب کے بعد بنی فائلیں بتائیں اور، آن کرنے پر، دکھائے نمبروں کا چارٹ بنائیں۔ ماحول سے آف: LOP_SUPPLEMENTS=0۔
+wire.settings.supplements.title
+EN Highlights
+OLD Highlights
+NEW نمایاں حصے
+wire.settings.supplements_denyprefixes.help
+EN Needs Highlights on. Comma-separated folders whose files are never listed or sent to a decision model; use it on a machine holding customer data.
+OLD Highlights آن ہوں۔ Comma-separated folders جن کی فائلیں کبھی list یا decision ماڈل کو نہیں جاتی؛ customer data والی machine پر استعمال کریں۔
+NEW نمایاں حصے آن ہوں۔ کاما سے الگ فولڈرز جن کی فائلیں کبھی فہرست میں شامل یا فیصلہ ماڈل کو نہیں بھیجتیں؛ گاہکوں کے ڈیٹا والی مشین پر استعمال کریں۔
+wire.settings.supplements_denyprefixes.label
+EN ↳ never list under
+OLD ↳ ان کے نیچے کبھی list نہ کریں
+NEW ↳ ان کے نیچے کبھی فہرست نہ کریں
+wire.settings.supplements_enabled.help
+EN On: an answer can be followed by a line pointing at the files it made.
+OLD آن: جواب کے بعد اس کی بنائی فائلوں کی طرف اشارہ کرنے والی line آسکتی ہے۔
+NEW آن: جواب کے بعد اس کی بنائی فائلوں کی طرف اشارہ کرنے والی سطر آسکتی ہے۔
+wire.settings.supplements_enabled.label
+EN Highlights
+OLD Highlights
+NEW نمایاں حصے
+wire.settings.supplements_files.choice.false.description
+EN files are never listed
+OLD فائلیں کبھی list نہیں ہوتیں
+NEW فائلیں کبھی فہرست نہیں ہوتیں
+wire.settings.supplements_files.choice.true.description
+EN deliverable files are listed
+OLD Deliverable فائلیں list ہوتی ہیں
+NEW قابل ترسیل فائلیں فہرست میں آتی ہیں
+wire.settings.supplements_files.help
+EN Needs Highlights on. Point out reports and exports an answer produced.
+OLD Highlights آن ہوں۔ جواب کی بنائی reports اور exports بتائیں۔
+NEW نمایاں حصے آن ہوں۔ جواب کی بنائی رپورٹس اور ایکسپورٹس بتائیں۔
+wire.settings.supplements_graphics.choice.false.description
+EN no chart is ever generated
+OLD کبھی chart نہیں بنتا
+NEW کبھی چارٹ نہیں بنتا
+wire.settings.supplements_graphics.choice.true.description
+EN a chart may be generated (spends tokens)
+OLD Chart بن سکتا ہے (tokens خرچ)
+NEW چارٹ بن سکتا ہے (ٹوکنز خرچ)
+wire.settings.supplements_graphics.help
+EN Needs Highlights on. Draw a chart when an answer shows numbers. Spends model tokens.
+OLD Highlights آن ہوں۔ جواب میں نمبرز ہوں تو chart بنائیں۔ ماڈل tokens خرچ ہوتے ہیں۔
+NEW نمایاں حصے آن ہوں۔ جواب میں نمبرز ہوں تو چارٹ بنائیں۔ ماڈل ٹوکنز خرچ ہوتے ہیں۔
+wire.settings.supplements_graphics.label
+EN ↳ graphics
+OLD ↳ graphics
+NEW ↳ گرافکس
+wire.settings.supplements_maxcostusd.help
+EN Needs graphics on. Soft cap on one job's spend.
+OLD Graphics آن ہوں۔ ایک job کے خرچ کی نرم حد۔
+NEW گرافکس آن ہوں۔ ایک کام کے خرچ کی نرم حد۔
+wire.settings.supplements_maxfeatured.help
+EN Needs Highlights on. Files named before the rest fold into 'N more'.
+OLD Highlights آن ہوں۔ اتنی فائلوں کے بعد باقی 'N more' میں سمٹ جائیں۔
+NEW نمایاں حصے آن ہوں۔ اتنی فائلوں کے بعد باقی 'N مزید' میں سمٹ جائیں۔
+wire.settings.supplements_maxoutputtokens.help
+EN Needs graphics on. Output budget per generator turn.
+OLD Graphics آن ہوں۔ فی generator turn output budget۔
+NEW گرافکس آن ہوں۔ فی جنریٹر ٹرن آؤٹ پٹ بجٹ۔
+wire.settings.supplements_maxoutputtokens.label
+EN ↳ max output tokens
+OLD ↳ زیادہ سے زیادہ output tokens
+NEW ↳ زیادہ سے زیادہ آؤٹ پٹ ٹوکنز
+wire.settings.supplements_maxturns.help
+EN Needs graphics on. Model turns per chart, including one repair.
+OLD Graphics آن ہوں۔ فی chart ماڈل turns، ایک repair سمیت۔
+NEW گرافکس آن ہوں۔ فی چارٹ ماڈل ٹرن، ایک مرمت سمیت۔
+wire.settings.supplements_maxturns.label
+EN ↳ max turns
+OLD ↳ زیادہ سے زیادہ turns
+NEW ↳ زیادہ سے زیادہ ٹرن
+wire.settings.supplements_model.help
+EN Needs graphics on. auto picks a cheap fast model; session uses this session's.
+OLD Graphics آن ہوں۔ auto سستا تیز ماڈل چنتا ہے؛ session اسی سیشن کا استعمال کرتا ہے۔
+NEW گرافکس آن ہوں۔ auto سستا تیز ماڈل چنتا ہے؛ session موجودہ سیشن کا ماڈل استعمال کرتا ہے۔
+wire.settings.supplements_model.label
+EN ↳ graphics model
+OLD ↳ graphics ماڈل
+NEW ↳ گرافکس ماڈل
+wire.settings.supplements_timeouts.help
+EN Needs Highlights on. Give up on a whole job after this long.
+OLD Highlights آن ہوں۔ اتنی دیر بعد پوری job چھوڑ دیں۔
+NEW نمایاں حصے آن ہوں۔ اتنی دیر بعد پورا کام چھوڑ دیں۔
+wire.settings.team_bridge.description
+EN Your agent can exchange messages with other members' agents in your organization. Off by default; you can pause or turn it off at any time.
+OLD آپ کا ایجنٹ آپ کی organization میں دوسرے members کے ایجنٹس سے پیغامات بدل سکے۔ Default آف؛ کسی وقت pause یا آف کر سکتے ہیں۔
+NEW آپ کا ایجنٹ آپ کے ادارے میں دوسرے ممبرز کے ایجنٹس سے پیغامات بدل سکے۔ ڈیفالٹ آف؛ کسی وقت روک یا آف کر سکتے ہیں۔
+wire.settings.team_bridge_enabled.help
+EN Off by default. Also needs a Radient sign-in and an eligible organization.
+OLD Default آف۔ Radient sign-in اور اہل organization بھی درکار۔
+NEW ڈیفالٹ آف۔ Radient سائن اِن اور اہل ادارہ بھی درکار۔
+wire.settings.team_bridge_enabled.label
+EN Enabled on this machine
+OLD اس machine پر فعال
+NEW اس مشین پر فعال
+wire.settings.team_bridge_session.help
+EN Session that may be woken for new messages; empty = badge only.
+OLD نئے پیغامات پر جس سیشن کو جگایا جا سکے؛ خالی = صرف badge۔
+NEW نئے پیغامات پر جس سیشن کو جگایا جا سکے؛ خالی = صرف بیج۔
+wire.settings.tool_approval_mode.choice.ask.description
+EN prompt before write/exec tools
+OLD Write/exec ٹولز سے پہلے پوچھیں
+NEW لکھنے/چلانے والے ٹولز سے پہلے پوچھیں
+wire.settings.tool_approval_mode.label
+EN Tool approval mode
+OLD ٹول منظوری mode
+NEW ٹول منظوری موڈ
+wire.settings.tools.description
+EN How the built-in tools execute.
+OLD Built-in ٹولز کیسے چلیں۔
+NEW بلٹ اِن ٹولز کیسے چلیں۔
+wire.settings.tools_defer.help
+EN Keep rarely used tools' schemas out of every request until the agent reads tool://<name> or calls one. The tools stay callable either way. Off sends every schema on every request.
+OLD کم استعمال ٹولز کے schemas ہر request سے باہر رکھیں یہاں تک کہ ایجنٹ tool://<name> پڑھے یا کوئی call کرے۔ ٹولز دونوں صورتوں میں callable رہتے ہیں۔ آف ہر request میں ہر schema بھیجتا ہے۔
+NEW کم استعمال ٹولز کے اسکیما ہر درخواست سے باہر رکھیں یہاں تک کہ ایجنٹ tool://<name> پڑھے یا کوئی کال کرے۔ ٹولز دونوں صورتوں میں کال کیے جا سکتے ہیں۔ آف ہر درخواست میں ہر اسکیما بھیجتا ہے۔
+wire.settings.tools_defer.label
+EN Load rarely used tool schemas on demand
+OLD کم استعمال ٹول schemas ضرورت پر load کریں
+NEW کم استعمال ٹول اسکیما ضرورت پر لوڈ کریں
+wire.settings.tools_search_interception_block.help
+EN On: the command is refused with a suggestion. Off: it runs anyway and the interception is logged, so an operator can watch before enforcing.
+OLD آن: command تجویز کے ساتھ مسترد۔ آف: command پھر بھی چلتی ہے اور interception log ہوتی ہے، تاکہ نفاذ سے پہلے operator دیکھ سکے۔
+NEW آن: کمانڈ تجویز کے ساتھ مسترد۔ آف: کمانڈ پھر بھی چلتی ہے اور روکاوٹ لاگ ہوتی ہے، تاکہ نفاذ سے پہلے آپریٹر دیکھ سکے۔
+wire.settings.tools_search_interception_enabled.help
+EN Refuse a shell `grep`/`rg`/`find` that recurses from a repository root or a vendor/build tree, and point the agent at the `grep` tool. A scoped or single-file search is never touched. Off disables the check.
+OLD Repository root یا vendor/build tree سے recursive shell `grep`/`rg`/`find` روک کر ایجنٹ کو `grep` ٹول بتائیں۔ Scoped یا single-file search متاثر نہیں۔ آف check بند کرتا ہے۔
+NEW ریپوزیٹری روٹ یا وینڈر/بلڈ درخت سے تکراری شیل `grep`/`rg`/`find` روک کر ایجنٹ کو `grep` ٹول بتائیں۔ محدود یا یک فائل تلاش متاثر نہیں۔ آف جانچ بند کرتا ہے۔
+wire.settings.tools_search_interception_enabled.label
+EN Block unbounded searches
+OLD Unbounded searches روکیں
+NEW لامحدود تلاشیں روکیں
+wire.settings.tools_search_interception_rg_excludes.help
+EN Give ripgrep a generated config that skips node_modules/.git/out etc., so an `rg` the guard does not block is still fast. Applies to ripgrep only.
+OLD ripgrep کو generated config دیں جو node_modules/.git/out وغیرہ skip کرے، تاکہ guard کی نہ روکی `rg` بھی تیز رہے۔ صرف ripgrep پر لاگو۔
+NEW ripgrep کو تیار شدہ کنفیگ دیں جو node_modules/.git/out وغیرہ نظر انداز کرے، تاکہ گارڈ کی نہ روکی `rg` بھی تیز رہے۔ صرف ripgrep پر لاگو۔
+wire.settings.tools_search_interception_rg_excludes.label
+EN ...prune vendor trees for ripgrep
+OLD ...ripgrep کے لیے vendor trees prune کریں
+NEW ...ripgrep کے لیے وینڈر درخت حذف کریں
+wire.settings.tui_sidebar_position.help
+EN Which side of the conversation holds the session sidebar.
+OLD سیشن sidebar گفتگو کے کس طرف ہو۔
+NEW سیشن سائڈبار گفتگو کے کس طرف ہو۔
+wire.settings.tui_sidebar_position.label
+EN Sidebar position
+OLD Sidebar کی جگہ
+NEW سائڈبار کی جگہ
+wire.settings.tui_sidebar_show_subagents.choice.true.description
+EN list recent subagent runs
+OLD حالیہ ذیلی ایجنٹ runs list کریں
+NEW حالیہ ذیلی ایجنٹ رنز فہرست کریں
+wire.settings.tui_sidebar_show_subagents.help
+EN List recent subagent runs below your own sessions. Ctrl+A toggles the layer while the sidebar has focus.
+OLD آپ کے سیشنز کے نیچے حالیہ ذیلی ایجنٹ runs list کریں۔ Sidebar focused ہو تو Ctrl+A سے layer بدلیں۔
+NEW آپ کے سیشنز کے نیچے حالیہ ذیلی ایجنٹ رنز فہرست کریں۔ سائڈبار فوکسڈ ہو تو Ctrl+A سے تہہ بدلیں۔
+wire.settings.tui_sidebar_show_subagents.label
+EN Sidebar subagent layer
+OLD Sidebar ذیلی ایجنٹ layer
+NEW سائڈبار ذیلی ایجنٹ تہہ
+wire.settings.tui_sidebar_visible.choice.true.description
+EN show the sidebar
+OLD sidebar دکھائیں
+NEW سائڈبار دکھائیں
+wire.settings.tui_sidebar_visible.help
+EN Active and recent conversations. Ctrl+B toggles the sidebar.
+OLD فعال اور حالیہ گفتگوئیں۔ Ctrl+B سے sidebar بدلیں۔
+NEW فعال اور حالیہ گفتگوئیں۔ Ctrl+B سے سائڈبار بدلیں۔
+wire.settings.tui_sidebar_visible.label
+EN Session sidebar
+OLD سیشن sidebar
+NEW سیشن سائڈبار
+wire.settings.tui_theme.help
+EN Colour ramp. /theme switches it live with an arrow-key preview.
+OLD Colour ramp۔ /theme arrow-key preview کے ساتھ live بدلتی ہے۔
+NEW رنگوں کا تسلسل۔ /theme arrow-key پیش نظارہ کے ساتھ براہ راست بدلتی ہے۔
+wire.settings.tui_theme.label
+EN Theme
+OLD Theme
+NEW تھیم
+wire.settings.wakes.description
+EN When a watched condition goes stale, the assistant is woken to check in rather than left to wait for the daily cadence: the master switch, the per-day budget and spacing, and which sources may fire. Read at the next evaluation pass.
+OLD Watched condition stale ہو تو assistant روزانہ cadence کے انتظار کے بجائے بیدار ہو کر check-in کرے: master switch، روزانہ budget اور وقفہ، اور کون سے sources fire کر سکتے ہیں۔ اگلے evaluation pass پر پڑھی جاتی ہے۔
+NEW زیر نگرانی حالت پرانی ہو تو اسسٹنٹ روزانہ کیڈنس کے انتظار کے بجائے بیدار ہو کر رابطہ کرے: مرکزی سوئچ، روزانہ بجٹ اور وقفہ، اور کون سے ذرائع متحرک ہو سکتے ہیں۔ اگلے جائزہ پاس پر پڑھی جاتی ہے۔
+wire.settings.wakes.title
+EN Wake triggers
+OLD بیداری triggers
+NEW بیداری کے محرکات
+wire.settings.wakes_triggers_enabled.help
+EN Master switch for trigger wakes; off means no check-in is ever created.
+OLD Trigger بیداریاں کا master switch؛ آف پر کوئی check-in نہیں بنتا۔
+NEW محرک بیداریوں کا مرکزی سوئچ؛ آف پر کوئی رابطہ نہیں بنتا۔
+wire.settings.wakes_triggers_max_per_day.help
+EN Per-target rolling 24 h budget for trigger wakes. 0 disables trigger wakes without touching the switch above.
+OLD فی target rolling 24 h میں trigger بیداریاں کا budget۔ 0 اوپر والے switch کو بدلے بغیر trigger بیداریاں بند کرتا ہے۔
+NEW فی ہدف گردشی 24 h میں محرک بیداریوں کا بجٹ۔ 0 اوپر والے سوئچ کو بدلے بغیر محرک بیداریاں بند کرتا ہے۔
+wire.settings.wakes_triggers_max_per_day.label
+EN Max check-in wakes per day
+OLD روزانہ زیادہ سے زیادہ check-in بیداریاں
+NEW روزانہ رابطے کی زیادہ سے زیادہ بیداریاں
+wire.settings.wakes_triggers_min_gap_minutes.help
+EN Minimum spacing between trigger wakes to the same target.
+OLD ایک ہی target کی trigger بیداریاں کے درمیان کم از کم وقفہ۔
+NEW ایک ہی ہدف کی محرک بیداریوں کے درمیان کم از کم وقفہ۔
+wire.settings.wakes_triggers_project_staleness_enabled.help
+EN Wake to check in on projects whose progress went stale. Settled (done/paused/archived) projects are never watched.
+OLD ان پروجیکٹس پر check-in کے لیے بیدار ہوں جن کی progress stale ہو۔ Settled (done/paused/archived) پروجیکٹس کی نگرانی کبھی نہیں۔
+NEW ان پروجیکٹس پر رابطے کے لیے بیدار ہوں جن کی پیش رفت پرانی ہو۔ مکمل (done/paused/archived) پروجیکٹس کی نگرانی کبھی نہیں۔
+wire.settings.wakes_triggers_project_staleness_enabled.label
+EN Project staleness trigger
+OLD پروجیکٹ staleness trigger
+NEW پروجیکٹ کی پرانی پیش رفت کا محرک
+wire.settings.web_fetch.description
+EN Limits and rendering for the fetch tool.
+OLD Fetch ٹول کی حدود اور rendering۔
+NEW فیچ ٹول کی حدود اور رینڈرنگ۔
+wire.settings.web_fetch.title
+EN Web fetch
+OLD Web fetch
+NEW ویب فیچ
+wire.settings.web_fetch_allow_private.choice.false.description
+EN block private targets
+OLD Private targets روکیں
+NEW نجی اہداف روکیں
+wire.settings.web_fetch_allow_private.choice.true.description
+EN allow private targets
+OLD Private targets کی اجازت
+NEW نجی اہداف کی اجازت
+wire.settings.web_fetch_allow_private.help
+EN SSRF guard. On permits loopback, private and link-local targets.
+OLD SSRF guard۔ آن loopback، private اور link-local targets کی اجازت دیتا ہے۔
+NEW SSRF گارڈ۔ آن loopback، نجی اور link-local اہداف کی اجازت دیتا ہے۔
+wire.settings.web_fetch_allow_private.label
+EN Allow private addresses
+OLD Private addresses کی اجازت
+NEW نجی ایڈریسز کی اجازت
+wire.settings.web_fetch_blocked_retry.choice.true.description
+EN retry refusals once
+OLD Refusals پر ایک بار retry
+NEW مسترد ہونے پر ایک بار دوبارہ کوشش
+wire.settings.web_fetch_blocked_retry.help
+EN After a refusal, retry once with browser-shaped headers.
+OLD Refusal کے بعد browser-shaped headers سے ایک بار retry کریں۔
+NEW مسترد ہونے کے بعد براؤزر جیسے ہیڈرز سے ایک بار دوبارہ کوشش کریں۔
+wire.settings.web_fetch_blocked_retry.label
+EN Browser-profile retry
+OLD Browser-profile retry
+NEW براؤزر پروفائل سے دوبارہ کوشش
+wire.settings.web_fetch_cache_ttl_seconds.help
+EN 0 disables the URL cache entirely.
+OLD 0 URL cache مکمل بند کرتا ہے۔
+NEW 0 URL کیشے مکمل بند کرتا ہے۔
+wire.settings.web_fetch_cache_ttl_seconds.label
+EN Cache TTL (s)
+OLD Cache TTL (s)
+NEW کیشے TTL (s)
+wire.settings.web_fetch_enabled.choice.false.description
+EN fetch disabled
+OLD fetch بند
+NEW فیچ بند
+wire.settings.web_fetch_enabled.choice.true.description
+EN fetch available
+OLD fetch دستیاب
+NEW فیچ دستیاب
+wire.settings.web_fetch_enabled.help
+EN Offer the fetch tool and read <url>; off refuses every call.
+OLD Fetch ٹول اور read <url> پیش کریں؛ آف ہر call مسترد کرتا ہے۔
+NEW فیچ ٹول اور read <url> پیش کریں؛ آف ہر کال مسترد کرتا ہے۔
+wire.settings.web_fetch_enabled.label
+EN Web fetch
+OLD Web fetch
+NEW ویب فیچ
+wire.settings.web_fetch_enrich.choice.false.description
+EN scrape HTML directly
+OLD براہ راست HTML scrape کریں
+NEW براہ راست HTML اسکریپ کریں
+wire.settings.web_fetch_enrich.choice.true.description
+EN try cleaner sources first
+OLD پہلے صاف sources آزمائیں
+NEW پہلے صاف ذرائع آزمائیں
+wire.settings.web_fetch_enrich.help
+EN Try .md, llms.txt and content negotiation before scraping HTML.
+OLD HTML scrape سے پہلے .md، llms.txt اور content negotiation آزمائیں۔
+NEW HTML اسکریپ سے پہلے .md، llms.txt اور مواد کی نگوشی ایشن آزمائیں۔
+wire.settings.web_fetch_enrich.label
+EN Enrich before scraping
+OLD Scrape سے پہلے enrich کریں
+NEW اسکریپ سے پہلے بہتر بنائیں
+wire.settings.web_fetch_max_attempts.help
+EN Retries share the call's timeout, so more attempts never take longer.
+OLD Retries call کا timeout بانٹتے ہیں، اس لیے زیادہ attempts زیادہ وقت نہیں لیتے۔
+NEW دوبارہ کوششیں کال کا ٹائم آؤٹ بانٹتی ہیں، اس لیے زیادہ کوششیں زیادہ وقت نہیں لیتیں۔
+wire.settings.web_fetch_max_attempts.label
+EN Attempts per hop
+OLD فی hop attempts
+NEW فی ہاپ کوششیں
+wire.settings.web_fetch_max_bytes.help
+EN Enforced during streaming, so a huge page is cut off rather than buffered.
+OLD Streaming کے دوران نافذ، اس لیے بہت بڑا page buffer کے بجائے cut ہو جاتا ہے۔
+NEW سٹریمنگ کے دوران نافذ، اس لیے بہت بڑا صفحہ بفر کرنے کے بجائے کاٹ دیا جاتا ہے۔
+wire.settings.web_fetch_max_bytes.label
+EN Download ceiling (bytes)
+OLD Download حد (bytes)
+NEW ڈاؤن لوڈ حد (bytes)
+wire.settings.web_fetch_max_redirects.help
+EN Redirect hops followed before giving up.
+OLD ہار ماننے سے پہلے follow کیے redirect hops۔
+NEW ہار ماننے سے پہلے کتنے ری ڈائریکٹ ہاپس فالو کیے جائیں۔
+wire.settings.web_fetch_max_redirects.label
+EN Max redirects
+OLD زیادہ سے زیادہ redirects
+NEW زیادہ سے زیادہ ری ڈائریکٹس
+wire.settings.web_fetch_render_backend.choice.stdlib.description
+EN always the bundled renderer
+OLD ہمیشہ bundled renderer
+NEW ہمیشہ ساتھ دیا گیا رینڈرر
+wire.settings.web_fetch_render_backend.help
+EN Auto uses markdownify when the [fetch] extra is installed.
+OLD [fetch] extra install ہو تو Auto markdownify استعمال کرتا ہے۔
+NEW [fetch] extra انسٹال ہو تو auto markdownify استعمال کرتا ہے۔
+wire.settings.web_fetch_render_backend.label
+EN HTML renderer
+OLD HTML renderer
+NEW HTML رینڈرر
+wire.settings.web_fetch_timeout_seconds.help
+EN Per-request timeout.
+OLD فی-request timeout۔
+NEW فی-درخواست ٹائم آؤٹ۔
+wire.settings.web_fetch_timeout_seconds.label
+EN Timeout (s)
+OLD Timeout (s)
+NEW ٹائم آؤٹ (s)
+wire.settings.web_search.description
+EN Providers and load balancing for the search tool.
+OLD Search ٹول کے providers اور load balancing۔
+NEW تلاش ٹول کے پرووائیڈرز اور لوڈ بیلنسنگ۔
+wire.settings.web_search.title
+EN Web search
+OLD Web search
+NEW ویب تلاش
+wire.settings.web_search_deepseek_evidence.help
+EN Adds a per-page quote and relevance score after a DeepSeek search.
+OLD DeepSeek search کے بعد فی-page quote اور relevance score شامل کریں۔
+NEW DeepSeek تلاش کے بعد فی صفحہ اقتباس اور مطابقت اسکور شامل کریں۔
+wire.settings.web_search_deepseek_evidence.label
+EN DeepSeek page evidence
+OLD DeepSeek page evidence
+NEW DeepSeek صفحہ کا ثبوت
+wire.settings.web_search_enabled.choice.false.description
+EN search disabled
+OLD search بند
+NEW تلاش بند
+wire.settings.web_search_enabled.choice.true.description
+EN search available
+OLD search دستیاب
+NEW تلاش دستیاب
+wire.settings.web_search_enabled.help
+EN Offer the search tool and let it run; off refuses every call.
+OLD Search ٹول پیش کریں اور چلنے دیں؛ آف ہر call مسترد کرتا ہے۔
+NEW تلاش ٹول پیش کریں اور چلنے دیں؛ آف ہر کال مسترد کرتا ہے۔
+wire.settings.web_search_enabled.label
+EN Web search
+OLD Web search
+NEW ویب تلاش
+wire.settings.web_search_excluded_providers.help
+EN Never used, even in the automatic chain. Comma-separated; empty = none excluded.
+OLD Automatic chain میں بھی کبھی استعمال نہیں۔ Comma-separated؛ خالی = کوئی مستثنیٰ نہیں۔
+NEW خودکار زنجیر میں بھی کبھی استعمال نہیں۔ کاما سے الگ؛ خالی = کوئی مستثنیٰ نہیں۔
+wire.settings.web_search_excluded_providers.label
+EN Excluded providers
+OLD مستثنیٰ providers
+NEW مستثنیٰ پرووائیڈرز
+wire.settings.web_search_providers.help
+EN Comma-separated, in priority order; tried before the automatic free providers.
+OLD Comma-separated، ترجیحی ترتیب میں؛ automatic free providers سے پہلے آزمائے جائیں۔
+NEW کاما سے الگ، ترجیحی ترتیب میں؛ خودکار مفت پرووائیڈرز سے پہلے آزمائے جائیں۔
+wire.settings.web_search_providers.label
+EN Providers
+OLD Providers
+NEW پرووائیڈرز
+wire.settings.web_search_read_enabled.help
+EN Offer web_read: answer from pages a search already retrieved, no refetch.
+OLD web_read پیش کریں: پہلے سے retrieved search pages سے جواب، دوبارہ fetch نہیں۔
+NEW web_read پیش کریں: پہلے سے حاصل شدہ تلاش کے صفحات سے جواب، دوبارہ فیچ نہیں۔
+wire.settings.web_search_read_enabled.label
+EN Read from search
+OLD Search سے پڑھیں
+NEW تلاش سے پڑھیں
+wire.settings.web_search_searxng_endpoint.help
+EN Base URL of a self-hosted SearXNG instance.
+OLD Self-hosted SearXNG instance کا base URL۔
+NEW خود ہوسٹ کیے SearXNG سرور کا بیس URL۔
+wire.settings.web_search_searxng_endpoint.label
+EN SearXNG endpoint
+OLD SearXNG base URL
+NEW SearXNG بیس URL
+wire.settings.web_search_strategy.choice.ordered.description
+EN top of the list first, fall through
+OLD List کے اوپر سے پہلے، پھر آگے
+NEW فہرست کے آغاز سے، پھر آگے
+wire.settings.web_search_strategy.choice.round_robin.description
+EN rotate across providers
+OLD Providers میں گھمائیں
+NEW پرووائیڈرز میں باری باری
+wire.settings.web_search_strategy.help
+EN How the provider list is consumed.
+OLD Provider list کیسے استعمال ہو۔
+NEW پرووائیڈر فہرست کیسے استعمال ہو۔
+wire.settings.web_search_strategy.label
+EN Load balancing
+OLD Load balancing
+NEW لوڈ بیلنسنگ
+wire.settings.web_search_timeout_seconds.help
+EN Per-provider request timeout. Clamped to 1-120 when read.
+OLD فی-provider request timeout۔ پڑھتے وقت 1-120 پر clamp۔
+NEW فی-پرووائیڈر درخواست ٹائم آؤٹ۔ پڑھتے وقت 1-120 پر محدود۔
+wire.settings.web_search_timeout_seconds.label
+EN Timeout (s)
+OLD Timeout (s)
+NEW ٹائم آؤٹ (s)
+wire.settings.web_tools.description
+EN Whether the search and fetch tools are offered and allowed to run.
+OLD Search اور fetch ٹولز پیش اور چلنے کی اجازت ہو یا نہیں۔
+NEW تلاش اور فیچ ٹولز پیش کیے اور چلائے جا سکیں یا نہیں۔
+wire.settings.web_tools.title
+EN Web tools
+OLD Web ٹولز
+NEW ویب ٹولز

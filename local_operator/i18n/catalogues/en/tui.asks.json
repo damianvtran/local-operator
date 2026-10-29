@@ -1,0 +1,13 @@
+{
+  "tui.asks.context.messages": "{count, plural, one {# message from you since this was asked (last {time})} other {# messages from you since this was asked (last {time})}}",
+  "tui.asks.dismiss.answered_in_chat": "Answered in chat",
+  "tui.asks.dismiss.answered_in_chat_note": "you already replied in the conversation",
+  "tui.asks.dismiss.fleet_gone": "the ask is no longer in that conversation's log.",
+  "tui.asks.dismiss.hint": "enter dismiss · esc cancel",
+  "tui.asks.dismiss.moot": "No longer needed",
+  "tui.asks.dismiss.moot_note": "stop waiting on it",
+  "tui.asks.dismiss.notice_answered_in_chat": "Dismissed — answered in chat",
+  "tui.asks.dismiss.notice_moot": "Dismissed — no longer needed",
+  "tui.asks.dismiss.notice_no_reply": "Dismissed — no reply sent",
+  "tui.asks.dismiss.title": "Dismiss this ask"
+}

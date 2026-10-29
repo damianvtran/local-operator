@@ -17,11 +17,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Sequence
 
 from local_operator.harness.types import (
     Content,
     CustomMessage,
+    DocumentContent,
     ImageContent,
     Message,
     TextContent,
@@ -30,8 +32,11 @@ from local_operator.harness.types import (
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "ATTACHMENTS_MANIFEST_KEY",
     "CAPTURE_ELISION_FRONTIER_KEY",
     "COMPACTION_MARKER_TYPE",
+    "collect_attachment_manifest",
+    "with_attachment_manifest",
     "build_compaction_marker",
     "capture_elision_frontier",
     "capture_elision_identities",
@@ -72,6 +77,177 @@ def build_compaction_marker(
     if preserve_data is not None:
         details["preserve_data"] = preserve_data
     return CustomMessage(custom_type=COMPACTION_MARKER_TYPE, attribution="system", details=details)
+
+
+#: ``preserve_data`` key for the ATTACHMENTS manifest a pass commits:
+#: ``[{"digest", "filename", "mime_type", "bytes", "path"}, ...]``, newest
+#: last, deduped, capped. WHY IT EXISTS: a compaction summary is a model's
+#: prose, and "usable after a compaction" (contract §4) must not depend on the
+#: summariser happening to copy a file's path. The manifest is data the
+#: harness re-renders verbatim on every later request, so a user can ask
+#: "where is that PDF" three compactions later and get an answer.
+#:
+#: ADDITIVE and OPTIONAL, the same discipline ``capture_elisions`` follows: a
+#: marker with nothing attached omits the key entirely, so a text-only
+#: conversation's marker payload stays byte-identical to before this existed.
+ATTACHMENTS_MANIFEST_KEY = "attachments"
+
+#: Bounds. Twenty files and ~2 kB: a longer list is not a context aid, it is
+#: a second transcript. The caps are enforced on WRITE, so every reader sees
+#: the same bounded payload.
+MAX_MANIFEST_ENTRIES = 20
+MAX_MANIFEST_CHARS = 2_000
+
+
+def collect_attachment_manifest(messages: Sequence[Any]) -> list[dict[str, Any]]:
+    """The attachment entries carried by ``messages``, newest last.
+
+    Two sources, merged in one pass so a pass cannot lose the previous one's
+    record: live ``DocumentContent`` blocks (deduped by digest, else by
+    filename+MIME+size) and the manifest already committed on an earlier
+    marker (``marker_details``). Order is the conversation's, so truncation
+    keeps the LATEST attachments — the ones a follow-up question is most
+    likely about.
+    """
+    entries: list[dict[str, Any]] = []
+
+    def add(entry: dict[str, Any]) -> None:
+        key = (
+            entry.get("digest")
+            or f"{entry.get('filename')}|{entry.get('mime_type')}|{entry.get('bytes')}"
+        )
+        for index, existing in enumerate(entries):
+            existing_key = (
+                existing.get("digest")
+                or f"{existing.get('filename')}|{existing.get('mime_type')}|{existing.get('bytes')}"
+            )
+            if existing_key == key:
+                # Newest provenance wins: a re-send of the same bytes from a
+                # new path should say where the latest send came from.
+                entries[index] = entry
+                return
+        entries.append(entry)
+
+    for message in messages:
+        details = marker_details(message)
+        if details is not None:
+            preserve = details.get("preserve_data")
+            if isinstance(preserve, Mapping):
+                previous = preserve.get(ATTACHMENTS_MANIFEST_KEY)
+                if isinstance(previous, list):
+                    for entry in previous:
+                        if isinstance(entry, Mapping):
+                            add(dict(entry))
+        content = getattr(message, "content", None)
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, DocumentContent):
+                continue
+            add(
+                {
+                    "digest": block.digest,
+                    "filename": block.filename,
+                    "mime_type": block.mime_type,
+                    "bytes": block.bytes,
+                    "path": block.path,
+                }
+            )
+    entries = entries[-MAX_MANIFEST_ENTRIES:]
+    # Character cap: drop the OLDEST until the JSON payload fits. Sizers are
+    # approximate on purpose; the renderer is what the model sees, and it is
+    # derived from the same bounded list.
+    import json as _json
+
+    while entries and len(_json.dumps(entries)) > MAX_MANIFEST_CHARS:
+        entries.pop(0)
+    return entries
+
+
+def with_attachment_manifest(
+    preserve_data: Mapping[str, Any] | None,
+    messages: Sequence[Any],
+    *,
+    world_root: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """``preserve_data`` with this pass's manifest merged in.
+
+    Copied, never mutated: the caller's payload may be shared with a strategy
+    archive. Nothing attached -> the payload is returned as-is (and stays
+    ``None`` when it was ``None``), which is what keeps a text-only marker
+    byte-identical.
+
+    ``world_root`` filters a confined session's paths AT WRITE, so the stored
+    payload itself never carries a path the model must not be shown. That
+    matters because the marker is later rendered by the generic
+    ``harness/render.py`` converter, which has no session and therefore no
+    boundary to consult (contract amendment 8).
+    """
+    entries = collect_attachment_manifest(messages)
+    if not entries:
+        return dict(preserve_data) if preserve_data is not None else None
+    if world_root and str(world_root).strip():
+        from local_operator.tools.confinement import ToolConfinement
+
+        boundary = ToolConfinement.at(world_root)
+        filtered: list[dict[str, Any]] = []
+        for entry in entries:
+            item = dict(entry)
+            path = item.get("path")
+            if isinstance(path, str) and path and not _manifest_path_reachable(boundary, path):
+                item["path"] = None
+            filtered.append(item)
+        entries = filtered
+    merged: dict[str, Any] = dict(preserve_data) if preserve_data else {}
+    merged[ATTACHMENTS_MANIFEST_KEY] = entries
+    return merged
+
+
+def render_attachment_manifest(
+    preserve_data: Mapping[str, Any] | None, *, world_root: str | Path | None = None
+) -> str:
+    """The manifest as the model reads it, or ``""`` when there is none.
+
+    Confinement (contract amendment 8): a path outside the session's accessible
+    world is withheld here exactly as it is in the per-request hint. History
+    may still show it to the user; this is the model-visible render. Judged on
+    the RESOLVED path, the same rule ``attachment_hints._reachable`` applies,
+    and a boundary we cannot resolve counts as outside.
+    """
+    if not isinstance(preserve_data, Mapping):
+        return ""
+    entries = preserve_data.get(ATTACHMENTS_MANIFEST_KEY)
+    if not isinstance(entries, list) or not entries:
+        return ""
+    boundary = None
+    if world_root and str(world_root).strip():
+        from local_operator.tools.confinement import ToolConfinement
+
+        boundary = ToolConfinement.at(world_root)
+    lines = ["Files attached earlier in this conversation:"]
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        filename = str(entry.get("filename") or "an attached file")
+        mime = str(entry.get("mime_type") or "unknown type")
+        size = entry.get("bytes")
+        size_text = f", {size} bytes" if isinstance(size, int) and size > 0 else ""
+        path = entry.get("path")
+        where = ""
+        if isinstance(path, str) and path and _manifest_path_reachable(boundary, path):
+            where = f" — {path}"
+        lines.append(f"- {filename} ({mime}{size_text}){where}")
+    return "\n".join(lines)
+
+
+def _manifest_path_reachable(boundary: Any, path: str) -> bool:
+    if boundary is None:
+        return True
+    from local_operator.session.attachment_hints import _reachable
+
+    if not _reachable(boundary, Path(path)):
+        return False
+    return True
 
 
 #: ``preserve_data`` key for the CAPTURE-ELISION record an epoch commits:
@@ -220,7 +396,12 @@ def _stamp_marker_details(message: Message, marker: CustomMessage) -> Message:
     return message
 
 
-def render_compaction_marker(marker: CustomMessage, entry_id: str | None = None) -> Message:
+def render_compaction_marker(
+    marker: CustomMessage,
+    entry_id: str | None = None,
+    *,
+    world_root: str | Path | None = None,
+) -> Message:
     """Render one compaction marker into an LLM-visible message. ``entry_id``
     (the marker's transcript entry id) rides onto the rendered message.
 
@@ -231,9 +412,16 @@ def render_compaction_marker(marker: CustomMessage, entry_id: str | None = None)
     Snapcompact archives replay via ``history_blocks`` (lazy import; any
     failure degrades to the plain-text summary so a malformed archive never
     breaks the turn).
+
+    The attachments manifest is appended AFTER the summary/archive on both
+    branches and omitted entirely when empty, so a conversation with no
+    files renders byte-identically. ``world_root`` is the session's
+    confinement boundary, used only to withhold an unreachable path from the
+    model-visible render (contract amendment 8).
     """
     summary = marker.details.get("summary", "")
     preserve = marker.details.get("preserve_data") or {}
+    manifest = render_attachment_manifest(preserve, world_root=world_root)
     archive_payload = preserve.get("snapcompact")
     if archive_payload:
         try:
@@ -247,6 +435,8 @@ def render_compaction_marker(marker: CustomMessage, entry_id: str | None = None)
                 elif block["kind"] == "images":
                     for frame_b64 in block["frames"]:
                         content.append(ImageContent(data=frame_b64, mime_type="image/png"))
+            if manifest:
+                content.append(TextContent(text=manifest))
             if content:
                 return _stamp_marker_details(replayed_user_message(content, entry_id), marker)
         except Exception:
@@ -280,7 +470,7 @@ def render_compaction_marker(marker: CustomMessage, entry_id: str | None = None)
                     text="<previous-context-summary>\n"
                     f"{summary}\n"
                     "</previous-context-summary>"
-                    f"{salvage}"
+                    f"{salvage}" + (f"\n\n{manifest}" if manifest else "")
                 )
             ],
             entry_id,

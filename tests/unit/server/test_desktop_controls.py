@@ -20,6 +20,7 @@ from local_operator.agents import AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.jobs import JobManager
 from local_operator.providers import registry
+from local_operator.providers.auth_store import AuthStore
 from local_operator.scheduler_service import SchedulerService
 from local_operator.server.app import desktop_validation_error, managed_desktop_boundary
 from local_operator.server.routes import (
@@ -32,6 +33,7 @@ from local_operator.server.routes import (
     schedules,
     settings,
 )
+from tests.unit.providers.test_radient_account_retention import _verified_login_result
 
 TOKEN = "desktop-contract-test-token"
 pytestmark = pytest.mark.asyncio
@@ -844,9 +846,38 @@ async def test_settings_projection_carries_the_bounded_duration_contract(desktop
     assert hours["default"] == 48 and hours["gated_by"] == "session.cleanup.delegated.enabled"
     assert hours["section"] == rows["session.cleanup.delegated.enabled"]["section"]
     assert rows["session.cleanup.delegated.enabled"]["default"] is True
+    # The scratchpad cap is the second bounded row whose unit a renderer needs.
+    # Pin it explicitly rather than only tolerating it: the projection must carry
+    # bytes and the reader's own 16 MiB–8 GiB bounds.
+    scratchpad = rows["session.scratchpad.max_bytes"]
+    assert (
+        scratchpad["kind"],
+        scratchpad["minimum"],
+        scratchpad["maximum"],
+        scratchpad["unit"],
+    ) == (
+        "int",
+        16 * 1024 * 1024,
+        8 * 1024 * 1024 * 1024,
+        "bytes",
+    )
+    # The compression age is the third bounded row whose unit a renderer needs:
+    # it arrived with the compression setting, and "after 30" is only renderable
+    # as days. Pinned here so the projection's unit set stays CLOSED rather than
+    # "whatever the registry most recently added".
+    compression_age = rows["session.compression.after_days"]
+    assert (
+        compression_age["kind"],
+        compression_age["minimum"],
+        compression_age["maximum"],
+        compression_age["unit"],
+    ) == ("int", 1, 3650, "days")
+    assert compression_age["default"] == 30
+    assert compression_age["gated_by"] == "session.compression.enabled"
+    unit_rows = {hours["key"], scratchpad["key"], compression_age["key"]}
     assert all(
-        row["unit"] == "" for key, row in rows.items() if key != hours["key"]
-    ), "only the hours row declares a unit"
+        row["unit"] == "" for key, row in rows.items() if key not in unit_rows
+    ), "only the hours, bytes and days rows declare a unit"
 
 
 async def test_a_patch_of_a_desktop_hotkey_dispatches_to_the_desktop_rules(desktop):
@@ -1243,9 +1274,15 @@ async def test_provider_census_carries_the_suggested_model(desktop):
     assert rows["deepseek"]["suggested_model"]["id"] == "deepseek-flash"
     assert rows["ollama"]["suggested_model"] is None
     assert rows["typesafe"]["suggested_model"] is None
-    # Per method, because the route decides the spelling (Kimi).
+    # Per method, because the route decides the spelling (Kimi). Both OAuth
+    # entries (kimi.ai and the WeChat entry) reach the same coding host, so
+    # both spell K3 `k3`; only the API-key method uses the mainland `kimi-k3`.
     kimi = {m["method_id"]: m["suggested_model"]["id"] for m in rows["kimi"]["auth_methods"]}
-    assert kimi == {"kimi": "k3", "kimi:api-key": "kimi-k3"}
+    assert kimi == {
+        "kimi": "k3",
+        "kimi-wechat": "k3",
+        "kimi:api-key": "kimi-k3",
+    }
 
 
 async def test_key_save_on_an_empty_config_sets_the_suggested_default(desktop):
@@ -1423,7 +1460,9 @@ def _stub_login(monkeypatch, provider: str, login):
 async def test_the_first_login_reply_carries_the_auth_url(desktop, monkeypatch):
     """The reported bug: the browser never opened until "reopen", because the
     first reply was snapshotted before the flow ran a step (auth_url null)."""
-    client, _ = desktop
+    client, app = desktop
+    # This HTTP boundary test exercises persistence, not parked-service startup.
+    monkeypatch.setattr(AuthStore, "_rearm_parked_tunnel_login", lambda *a, **kw: None)
     release = asyncio.Event()
 
     async def login(callbacks, *, signal=None, **_kwargs):
@@ -1435,7 +1474,9 @@ async def test_the_first_login_reply_carries_the_auth_url(desktop, monkeypatch):
         )
         callbacks.on_auth_url("https://radienthq.com/authorize?x=1", instructions=None)
         await release.wait()
-        return {"type": "oauth", "access": "a", "refresh": "r", "expires": 1}
+        # Preserve the real completion contract and its cancellation binding;
+        # only the upstream responses are synthetic, via MockTransport.
+        return await _verified_login_result(signal=signal)
 
     _stub_login(monkeypatch, "radient", login)
     started = (await client.post("/v1/auth/login", json={"provider": "radient"})).json()["result"]
@@ -1445,9 +1486,22 @@ async def test_the_first_login_reply_carries_the_auth_url(desktop, monkeypatch):
     # The flow's own deadline, not the host's 900 s cap.
     assert 290 <= started["expires_in"] <= 300
     assert started["input_optional"] is False
+    legacy = app.state.desktop_auth.store.upsert_credential(
+        "radient", {"type": "oauth", "access": "synthetic-old", "refresh": "synthetic-old"}
+    )
     release.set()
     done = await wait_for_state(client, started["id"], "succeeded")
     assert done["auth_url"] is None and done["launch_url"] is None
+    # This assertion crosses the actual FastAPI response model and JSON wire,
+    # unlike a LoginOperation.snapshot-only unit assertion.
+    assert done["message"] == "Sign-in complete."
+    assert "Account could not be verified" in done["retained_notice"]
+    # Named by the CURRENT copy, not a bracket token: D4 settled the notation as
+    # "record retained (stored row N)". The semantics this test cares about are
+    # that the record is present and explicitly NOT assigned to the account
+    # that just signed in — a bare [N] drifts the moment the notation changes.
+    assert f"record retained (stored row {legacy.id})" in done["retained_notice"]
+    assert "not been deleted or assigned to that account" in done["retained_notice"]
 
 
 async def test_a_device_flow_publishes_its_user_code(desktop, monkeypatch):
@@ -1695,10 +1749,13 @@ async def test_the_desktop_never_opens_a_system_browser_for_any_provider(desktop
     Anthropic and OpenAI only, so Z.AI and Radient fell back to
     ``webbrowser.open`` and the BACKEND opened a second tab beside the
     renderer's. Every callback provider, through the real registry thunk and the
-    real flow constructor; only ``run`` is replaced, so no network is used."""
+    real flow constructor. Browser waiting is replaced; Radient still obtains
+    its real producer receipt using synthetic MockTransport responses."""
     import webbrowser
 
-    from local_operator.providers.oauth import callback_server
+    from local_operator.providers.oauth import callback_server, radient
+
+    monkeypatch.setattr(AuthStore, "_rearm_parked_tunnel_login", lambda *a, **kw: None)
 
     system_opens: list[str] = []
     monkeypatch.setattr(webbrowser, "open", lambda url, *a, **k: system_opens.append(url))
@@ -1706,6 +1763,8 @@ async def test_the_desktop_never_opens_a_system_browser_for_any_provider(desktop
     async def run(self):
         # What the real `run` does with the opener, minus the network.
         self._open_browser("https://provider.invalid/authorize")
+        if isinstance(self, radient.RadientOAuthFlow):
+            return await _verified_login_result(signal=self._signal)
         return {"type": "oauth", "access": "at", "refresh": "rt", "expires": 1}
 
     monkeypatch.setattr(callback_server.OAuthCallbackFlow, "run", run)

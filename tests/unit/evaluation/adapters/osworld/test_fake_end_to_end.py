@@ -116,11 +116,13 @@ class _AdapterSupervisorShim:
         timeout: float,
         # Accepted for signature parity with ``AdapterSupervisor._call_raw`` and
         # deliberately unused: this double calls the adapter IN PROCESS, so there
-        # is no RPC deadline for the per-action overhead to fund. Dropping the
-        # keyword would be a TypeError the moment a caller sets a rate.
+        # is no RPC deadline for the per-action overhead to fund and no timeout
+        # sentence to contextualise. Dropping a keyword would be a TypeError the
+        # moment a caller sets one.
         execution_overhead_seconds_per_action: float = 0.0,
+        timeout_context: str | None = None,
     ) -> Any:
-        del timeout, execution_overhead_seconds_per_action
+        del timeout, execution_overhead_seconds_per_action, timeout_context
         handler = getattr(self._adapter, method)
         try:
             return await handler(params)

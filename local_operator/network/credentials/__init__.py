@@ -32,11 +32,15 @@ Two facts about a refusal worth keeping beside the code that raises one:
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from local_operator.network.relay import RelayServer
+
+logger = logging.getLogger(__name__)
 
 #: ``network.credentials.grant_ttl_s``: the longest a lent access token lives on a
 #: borrower before it must ask the owner again. The grant also never outlives the
@@ -45,6 +49,15 @@ if TYPE_CHECKING:
 #: owner (build plan §2.4); the Mac↔EC2 grant latency measured in rollout settles
 #: whether it moves (design Q3).
 GRANT_TTL_S = 900.0
+
+#: The borrow rung's own ceiling, deliberately far below classification's 1.5 s
+#: per-call deadline. A local control-socket grant is microseconds to tens of ms
+#: when the owner answers; when the owner is asleep the client says so quickly.
+#: This bound exists for the third case the reviewer measured: a relay that is up
+#: but whose owner is slow could otherwise consume the whole decision budget and
+#: turn a working fallback into ``skipped="timeout"``. A timed-out borrow reads as
+#: "no credential" and is retried on the next resolve.
+BORROW_BUDGET_S = 0.5
 
 #: The owner-side deadline for one ``net_broker`` request (seconds): the provider
 #: refresh's own total budget (``providers.auth_store.PROVIDER_REFRESH_TOTAL_BUDGET_S``,
@@ -75,6 +88,70 @@ def build_auth_store(config_dir: Path | None = None, *, db_path: str | Path | No
     return _build(config_dir, db_path=db_path)
 
 
+async def borrowed_provider_key(
+    provider: str,
+    config_dir: Path | None = None,
+    *,
+    timeout_s: float = BORROW_BUDGET_S,
+) -> str | None:
+    """A provider credential this device may BORROW from a mesh owner, or ``None``.
+
+    THE RUNG THE CLASSIFICATION AND MODEL-LISTING SEAMS WERE MISSING. Those seams
+    historically read ``providers.auth_store.shared_auth_store`` — a plain
+    ``AuthStore`` with no mesh rung — so a provider login that exists only on the
+    head of a mesh was invisible on a node: the Radient leg resolved to nothing and
+    the cascade silently fell through to another vendor, billing the operator on a
+    route they did not choose. ``build_auth_store`` already returns the mesh-aware
+    wrapper on a device with placement; this helper is how a caller that cannot
+    hold that store for the process (the classification probe, the model picker)
+    reaches the same borrow rung once, and closes it.
+
+    ZERO-PEER COST IS ZERO: the placement predicate is checked first, so a device
+    with nothing lent to it never constructs a store, a client or a socket — the
+    pre-slice behaviour, byte for byte.
+
+    THE BORROW IS BOUNDED SEPARATELY FROM THE CALLER'S DEADLINE. Classification
+    resolves this inside its 1.5 s per-call budget, and a slow owner (a relay that
+    is up, a head that is asleep) must cost a traced fallback, not a timed-out
+    answer. ``timeout_s`` caps the borrow well below that budget; a timeout reads
+    as no credential and the next resolve tries again.
+
+    Best-effort by construction. A provider leg that cannot resolve is not a failed
+    turn, so every failure — an unreadable document, a refused broker borrow, a
+    closed relay — returns ``None`` rather than propagating. The VALUE is never
+    logged, receipted or written anywhere outside the credential store it came
+    from; the only thing a log line may name is the provider.
+    """
+    store: Any = None
+    try:
+        from local_operator.network.credentials.placement import placement_for_store
+
+        if placement_for_store(config_dir) is None:
+            return None
+        from local_operator.network.credentials.store import build_auth_store as _build
+
+        # ``config_dir`` does NOT select the database (see ``build_auth_store``'s
+        # own note): an explicit root must spell its own ``auth.db`` or the local
+        # tier silently reads the AMBIENT profile's credentials.
+        store = _build(
+            config_dir, db_path=(config_dir / "auth.db") if config_dir is not None else None
+        )
+        key = await asyncio.wait_for(store.get_api_key(provider, read_only=True), timeout=timeout_s)
+        return key or None
+    except Exception:  # noqa: BLE001 — a leg that cannot resolve is not this leg
+        logger.debug("credentials: borrowed provider key unavailable for %s", provider)
+        return None
+    finally:
+        # A close failure must not turn a resolved key into "no credential": the
+        # borrow already happened, and the connection is released on process exit
+        # regardless. Swallow it rather than letting it replace the return value.
+        if store is not None:
+            try:
+                store.close()
+            except Exception:  # noqa: BLE001
+                logger.debug("credentials: closing the borrow store failed", exc_info=True)
+
+
 class _LocalOps:
     """LEG 1: the control-socket ops a runtime uses to ask its own relay.
 
@@ -99,17 +176,27 @@ class _LocalOps:
         return self._client
 
     def grant(self, frame: dict[str, Any]) -> dict[str, Any]:
+        from local_operator.network.credentials.types import (
+            peer_affinity,
+            peer_credential_ids,
+        )
+
         key = str(frame.get("credential_key") or "")
         provider = str(frame.get("provider") or key)
         client = self._source()
         if client is None:
             return _detail("not_a_holder", key, _no_placement_sentence(provider))
+        # This op forwards fields BY NAME, so a field not read here is silently
+        # dropped before leg 2: the selection inputs must be named explicitly.
         return client.serve_grant(
             key,
             provider=provider,
             session_id=str(frame.get("session_id") or ""),
             model_id=str(frame.get("model_id") or ""),
             force_refresh=bool(frame.get("force_refresh")),
+            exclude_credential_ids=list(peer_credential_ids(frame.get("exclude_credential_ids"))),
+            affinity=peer_affinity(frame.get("affinity")),
+            demote_credential_ids=peer_credential_ids(frame.get("demote_credential_ids")),
         )
 
     def report(self, frame: dict[str, Any]) -> dict[str, Any]:
@@ -162,6 +249,24 @@ class _LocalOps:
             return {"kind": "ack", "key": key, "revoked": 0}
         return {"kind": "ack", "key": key, "revoked": broker.revoke_outstanding(key, holder)}
 
+    def sync_pull(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """Pull ONE copy from its owner now, and report a value-free outcome.
+
+        The member half of ``--repair`` (design §4): placement says this device may
+        copy the key, and the copy has either not arrived or is stale. The answer is
+        ``{ok, state, code}`` — the sync engine's own bounded vocabulary, because
+        the CLI prints it and ``--json`` must never carry a value.
+        """
+        from local_operator.network.credentials.sync import sync_for_relay
+
+        key = str(frame.get("credential_key") or "")
+        if not key:
+            return {"ok": False, "state": "unknown", "code": "missing_key"}
+        engine = sync_for_relay(self._server)
+        if engine is None:
+            return {"ok": False, "state": "unknown", "code": "no_relay"}
+        return engine.pull_now(key)
+
     def placement(self, frame: dict[str, Any]) -> dict[str, Any]:
         """Pull the placement document from each owner this device knows of.
 
@@ -186,6 +291,29 @@ def _no_placement_sentence(provider: str) -> str:
         "this device and nothing here lends it. Ask the device that signed in to it to "
         "share it, or sign in here with 'lop login'."
     )
+
+
+def _stop_slice(server: RelayServer) -> None:
+    """Reap what this slice started on ``server`` (``register_ops``'s ``on_stop``).
+
+    TWO OWNERS, TWO LOOPS, and both are this slice's to close: the broker the peer
+    handler builds on first need (``owner.broker_for_relay``) and the sync engine
+    the cadence and the member announce build (``sync.sync_for_relay``). Neither has
+    any other production caller — the relay's stop hook is the only thing that can
+    say the device is quiet. ``RelayServer.stop()`` runs this BEFORE link teardown,
+    which is the right order: the loops stop while the links are still explainable.
+    A request already in flight can still land during this hook, so both accessors
+    refuse to BUILD a new owner once the relay's ``_stop`` is set; the closed latch
+    on each loop refuses to restart an existing one.
+
+    Broker first: it is the peer-facing front door, and a dispatch already in the
+    broker can still touch the sync engine, whose own ``close`` then runs second.
+    """
+    from local_operator.network.credentials import owner as owner_mod
+    from local_operator.network.credentials import sync as sync_mod
+
+    owner_mod.stop_broker_for_relay(server)
+    sync_mod.stop_engine_for_relay(server)
 
 
 def install(server: RelayServer) -> None:
@@ -221,6 +349,11 @@ def install(server: RelayServer) -> None:
             "credential_report": ops.report,
             "credential_placement": ops.placement,
             "credential_revoke": ops.revoke,
+            "credential_sync_pull": ops.sync_pull,
         },
         slow={"net_broker": BROKER_OP_DEADLINE_S},
+        # THE SLICE OWNS ITS LOOPS' LIFETIME. Registered here because this is
+        # where the ops (and therefore the lazily built owners) first become
+        # reachable from a relay.
+        on_stop={"mesh-credentials": lambda: _stop_slice(server)},
     )

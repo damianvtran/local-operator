@@ -1093,9 +1093,12 @@ REFUSAL_MATRIX: tuple[_DoorRoute, ...] = (
     ),
     _DoorRoute("snapshot", "GET", "/v1/desktop/sessions/{session_id}"),
     _DoorRoute("history", "GET", "/v1/desktop/sessions/{session_id}/history"),
-    # The checkpoint rail's manifest: a READ beside ``history``, and — like it —
-    # it takes a bridge, so the door is its gate and this row is what proves it
-    # rather than only that the route exists.
+    # The checkpoint rail's manifest: a READ beside ``history``. It no longer
+    # takes a bridge (CORE-PROFILE L1: ``DesktopSessions.checkpoints`` answers
+    # from the index without building the cold facade), so it is named in
+    # ``GATED_WITHOUT_THE_DOOR`` below -- and this row is what proves the pool's
+    # own ``assert_admitting`` still refuses it once latched, rather than only
+    # that the route exists.
     _DoorRoute("checkpoints", "GET", "/v1/desktop/sessions/{session_id}/checkpoints"),
     # In-thread find: also a READ under the door. ``q`` is required by the
     # route, so the row carries one — without it the request would be a 422
@@ -1134,6 +1137,19 @@ REFUSAL_MATRIX: tuple[_DoorRoute, ...] = (
         "GET",
         "/v1/desktop/sessions/{session_id}/command-entities",
         query="command=help",
+    ),
+    # Promotion (LOH-9 S4): the copy's SOURCE is a conversation row, so this is a
+    # bridge-taking WRITE on the same seam `entities` reads through — its own row
+    # here, because the gate has to be proved rather than assumed.
+    _DoorRoute(
+        "promote_session_definition",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/promote",
+        {
+            "request_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "kind": "agent",
+            "name": "release-check",
+        },
     ),
     _DoorRoute(
         "prompt",
@@ -1243,10 +1259,12 @@ REFUSAL_MATRIX: tuple[_DoorRoute, ...] = (
 )
 
 #: Routes that refuse WITHOUT the door, because they never take a bridge: a
-#: refusal there is the pool's own (``DesktopSessions.create``) and there is no
-#: other entry. Named and one entry long, so the completeness test below can
-#: assert the whole plane rather than a subset of it.
-GATED_WITHOUT_THE_DOOR = frozenset({"create_session", "draft_mint"})
+#: refusal there is the pool's own (``DesktopSessions.create``, and
+#: ``DesktopSessions.checkpoints`` for the manifest, which reads the index
+#: without a bridge) and there is no other entry. Named, so the completeness
+#: test below can assert the whole plane rather than a subset of it; each still
+#: has a ``REFUSAL_MATRIX`` row driving the real latch.
+GATED_WITHOUT_THE_DOOR = frozenset({"create_session", "draft_mint", "checkpoints"})
 
 _DESKTOP_ROUTER_MODULES = (
     "local_operator.server.routes.desktop_sessions",

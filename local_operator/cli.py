@@ -39,6 +39,7 @@ import os
 import platform
 import re
 import shlex
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -84,6 +85,7 @@ from local_operator.i18n.keys import cli_resume_click_help as _rc
 from local_operator.i18n.keys import cli_send_help as _se
 from local_operator.i18n.keys import cli_serve_help as _sv
 from local_operator.i18n.keys import cli_services_help as _sr
+from local_operator.i18n.keys import cli_services_status as _svc
 from local_operator.i18n.keys import cli_sessions_help as _sh
 from local_operator.i18n.keys import cli_stop_help as _st
 from local_operator.i18n.keys import cli_teams_help as _th
@@ -98,6 +100,7 @@ from local_operator.paths import config_dir
 # `local_operator.resume` is deliberately tiny (pathlib only): importing the
 # session factory here for the same constant dragged the harness and asyncio
 # onto the CLI startup path, which test_import_graph exists to prevent.
+from local_operator.remote_compute.arguments import add_remote_arguments, wants_remote
 from local_operator.resume import RESUME_LATEST
 
 if TYPE_CHECKING:
@@ -757,6 +760,221 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     hub_link.add_argument("--json", action="store_true")
 
+    # ``skills``: the smallest CLI that exercises publish / pull / subscribe /
+    # update for hub skills, including the BUNDLE carrier (--bundle on publish,
+    # the publisher confirmation on public pulls). It drives the SAME service
+    # functions the desktop routes use -- there is no second sync engine.
+    skills_parser = subparsers.add_parser(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "skills",
+        help="Publish, pull and synchronize hub skills (documents and bundles)",
+        description=(
+            "Bundle skills may not contain executables (any execute bit is refused), "
+            "and installing one never runs code."
+        ),
+        parents=[parent_parser],
+    )
+    skills_subparsers = skills_parser.add_subparsers(dest="skills_command", required=True)
+    skills_publish = skills_subparsers.add_parser(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "publish",
+        help="Publish a local skill to the hub (documents; --bundle for binary/asset trees)",
+        parents=[parent_parser],
+    )
+    skills_publish.add_argument(
+        "name",
+        help="The local skill's name",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    skills_publish.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--public",
+        action="store_true",
+        help="Publish to the public catalogue",
+    )
+    skills_publish.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--org",
+        default=None,
+        metavar="TENANT",
+        help="Publish to this organization",
+    )
+    skills_publish.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--bundle",
+        action="store_true",
+        help="Publish as a bundle: a directory whose SKILL.md needs relative binary "
+        "or asset files (plain text skills stay documents)",
+    )
+    skills_publish.add_argument(
+        "--alias",
+        default=None,
+        help="The published name",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    skills_publish.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--no-subscribe",
+        action="store_true",
+        help="Publish without subscribing this machine",
+    )
+    skills_publish.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--yes",
+        action="store_true",
+        help="Confirm the publication without prompting",
+    )
+    skills_publish.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--json",
+        action="store_true",
+        help="Print the machine-readable JSON result",
+    )
+
+    skills_pull = skills_subparsers.add_parser(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "pull",
+        help="Install a hub skill (a bundle needs the publisher/hash confirmation)",
+        parents=[parent_parser],
+    )
+    skills_pull.add_argument(
+        "hub_id",
+        help="The hub skill id",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    skills_pull.add_argument(
+        "--public",
+        action="store_true",
+        help="Pull from the public catalogue",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--org",
+        default=None,
+        metavar="TENANT",
+        help="Pull from this organization",
+    )
+    skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--alias",
+        default=None,
+        help="The local name (defaults to the published name)",
+    )
+    skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--no-subscribe",
+        action="store_true",
+        help="Install without subscribing",
+    )
+    skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--confirm-publisher",
+        default=None,
+        metavar="ID",
+        help="The publisher account id the bundle prompt named",
+    )
+    skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--confirm-hash",
+        default=None,
+        metavar="HASH",
+        help="The bundle archive sha256 the prompt named",
+    )
+    skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--yes",
+        action="store_true",
+        help="Confirm the bundle publisher and hash shown by this command",
+    )
+    skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--reinstall",
+        action="store_true",
+        help="Bundle links only: discard local changes, re-fetch and re-pin the hub's "
+        "current archive (accepts a changed publisher after the confirmation)",
+    )
+    skills_pull.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--json",
+        action="store_true",
+        help="Print the machine-readable JSON result",
+    )
+
+    skills_push = skills_subparsers.add_parser(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "push",
+        help="Republish one linked skill's local changes (documents and bundles)",
+        parents=[parent_parser],
+    )
+    skills_push.add_argument(
+        "name",
+        help="The linked skill's name",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    skills_push.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--yes",
+        action="store_true",
+        help="Push without prompting (required off a terminal)",
+    )
+    skills_push.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--json",
+        action="store_true",
+        help="Print the machine-readable JSON result",
+    )
+
+    skills_sync = skills_subparsers.add_parser(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "sync",
+        help="Check hub skills and fast-forward the ones that are safe to update",
+        parents=[parent_parser],
+    )
+    skills_sync.add_argument(
+        "--name",
+        default=None,
+        help="Only this linked skill",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    skills_sync.add_argument(
+        "--all",
+        action="store_true",
+        help="Every linked skill (the default)",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    skills_sync.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--check",
+        action="store_true",
+        help="Report what would change, writing nothing",
+    )
+    skills_sync.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--yes",
+        action="store_true",
+        help="Accepted for script symmetry; sync never prompts (use --check to preview)",
+    )
+    skills_sync.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--json",
+        action="store_true",
+        help="Print the machine-readable JSON result",
+    )
+
+    skills_status = skills_subparsers.add_parser(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "status",
+        help="Show every linked skill's local/hub state (no network)",
+        parents=[parent_parser],
+    )
+    skills_status.add_argument(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        "--json",
+        action="store_true",
+        help="Print the machine-readable JSON snapshot",
+    )
+
     # Serve command to start the API server
     serve_parser = subparsers.add_parser(
         "serve", help=_sv.serve().envelope(locale=help_locale)["text"], parents=[parent_parser]
@@ -777,6 +995,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--reload",
         action="store_true",
         help=_sv.reload().envelope(locale=help_locale)["text"],
+    )
+    serve_parser.add_argument(
+        "--install-service",
+        action="store_true",
+        help=_svc.install_service_help().envelope(locale=help_locale)["text"],
     )
     serve_parser.add_argument(
         "--listener-fd",
@@ -1147,7 +1370,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # file when the switch is turned off, so that was the incident's shape
     # (QA Q1, UX U2, review R1-5). Every hard guard (live claim/lease, armed
     # wake, unread mail, the 10 most recent) applies whatever the flags.
-    sessions_subparsers = sessions_parser.add_subparsers(dest="sessions_command")
+    # THE METAVAR OMITS THE THREE DEFERRED VERBS (round 1, U2). Registering a
+    # subparser puts its name in argparse's choices metavar, so omitting its
+    # `help=` hides the description but still advertises the verb. This list is
+    # the VISIBLE set; `hold`/`holds`/`unhold` remain callable and are documented
+    # in `guides/configuration/GUIDE.md`. They are added below, after the other
+    # visible commands, and a new visible command must be added here too.
+    sessions_subparsers = sessions_parser.add_subparsers(
+        dest="sessions_command", metavar="{cleanup,reclaim,resume,move,sync}"
+    )
     cleanup_parser = sessions_subparsers.add_parser(
         "cleanup",
         help=_sh.cleanup().envelope(locale=help_locale)["text"],
@@ -1199,6 +1430,30 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="N",
         help=_sh.cleanup_delegated_max_age_hours().envelope(locale=help_locale)["text"],
+    )
+    cleanup_parser.add_argument(
+        "--scratchpads-only",
+        action="store_true",
+        help=_sh.cleanup_scratchpads_only().envelope(locale=help_locale)["text"],
+    )
+    # HELP IS SUPPRESSED, NOT MISSING: these two are rendered in the command
+    # docstring and the configuration guide. New visible help copy needs a
+    # translation wave into every active locale (the coverage allowance is
+    # shrink-only and refuses new English there), and a coder must not
+    # translate/audit their own contribution (i18n guide step 5). Hiding the
+    # prose keeps the flags working and every i18n gate honest; the follow-up
+    # is one help-tranche key per flag.
+    cleanup_parser.add_argument(
+        "--report-non-git-copies",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    cleanup_parser.add_argument(
+        "--reference-repo",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=argparse.SUPPRESS,
     )
     cleanup_parser.add_argument(
         "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
@@ -1367,6 +1622,19 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(_sh.move_queue().envelope(locale=help_locale)["text"]),
     )
+    # THE ROLE-DEFINITION GATE'S OPT-OUT (LOH-9 S2). A conversation with session
+    # roles refuses a move by default because v1 does not carry them; this flag is
+    # the explicit "move it anyway, stash the definitions on this device" — never
+    # silent, because the move's receipt and its refusal name the count and path.
+    #
+    # NO `help=` STRING, DELIBERATELY. Every key in ``cli.sessions_help`` is
+    # already recorded as missing for four ACTIVE locales (es/hi/ru/vi); a new
+    # English key would GROW that coverage allowance, which the shrink-only gate
+    # forbids, and translating the 48-key namespace for four locales is a review
+    # wave of its own. The flag is still listed by argparse and its consequences
+    # are stated by the refusal and the receipt, so the gap is the one-line
+    # description only (disclosed in the LOH-9 S2 PR).
+    move_parser.add_argument("--drop-session-roles", action="store_true")
     move_parser.add_argument(
         "--cancel-queued",
         metavar="SESSION",
@@ -1425,6 +1693,44 @@ def build_cli_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument(
         "--json", action="store_true", help=_sh.json().envelope(locale=help_locale)["text"]
     )
+
+    # `lop sessions hold|holds|unhold`: the operator's VALUE HOLDS. A hold is
+    # the one removal refusal that is not a policy question — an argument that
+    # this conversation is evidence, or is itself the source of truth, so no
+    # age/count/byte limit and no content pass may take it. Recorded in
+    # <config>/sessions/.session-holds.json and read fail-closed by every
+    # remover; releasing one writes a `hold-release` row to the cleanup log,
+    # which is the explicit decision an auditor needs.
+    #
+    # HELP IS DEFERRED, NOT DROPPED (2026-10-20). New visible help copy needs a
+    # translation wave into every active locale plus an independent audit; the
+    # i18n gate refuses brand-new English in an active locale by design
+    # (`check.py`'s allowance-growth rule), and a coder must not translate and
+    # audit their own contribution. Until that wave lands the three commands
+    # are hidden from `lop sessions --help` the way `resume-click` is: their
+    # SUBPARSERS omit `help=`. On a subparser `help=argparse.SUPPRESS` is not
+    # the hide idiom (argparse renders the sentinel verbatim); on an ARGUMENT
+    # it would hide the argument itself — from the usage line and the options
+    # list alike — which is NOT wanted here: the argument NAMES must stay
+    # visible so `lop sessions hold --help` still shows `session`, `--reason`
+    # and `--kind` (round 1, U2). Their descriptions are what the translation
+    # wave will add. Command-local syntax is also documented in the "Value
+    # holds and the store audit" section of `guides/configuration/GUIDE.md`;
+    # the handlers and `session/cleanup.py`'s holds block carry the semantics
+    # for a code reader. Follow-up: one help-tranche key per argument/command.
+    hold_parser = sessions_subparsers.add_parser("hold", parents=[parent_parser])
+    hold_parser.add_argument("session")
+    hold_parser.add_argument("--reason", required=True)
+    hold_parser.add_argument(
+        "--kind",
+        choices=("evidence", "source-of-truth", "operator"),
+        default="operator",
+    )
+    holds_parser = sessions_subparsers.add_parser("holds", parents=[parent_parser])
+    holds_parser.add_argument("--json", action="store_true")
+    unhold_parser = sessions_subparsers.add_parser("unhold", parents=[parent_parser])
+    unhold_parser.add_argument("session")
+    unhold_parser.add_argument("--reason", required=True)
 
     # The kill switch (design §12): end a session from outside it. Top-level
     # like `lop sessions` and `lop send` — the coherence triple is "what is
@@ -2009,6 +2315,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         help=(_eh.supervisor_fd().envelope(locale=help_locale)["text"]),
     )
+    # Tier-1 remote compute (``lop exec --remote``). Registered from its own
+    # module because the flag set is also the classification the refusal reads:
+    # keeping the parser and the "what does this flag mean remotely" table
+    # together is what stops the two from disagreeing.
+    add_remote_arguments(exec_parser, help_locale=help_locale)
 
     # --- Additive auth subcommands (rewrite) -------------------------------
     login_parser = subparsers.add_parser(
@@ -4638,6 +4949,13 @@ def _cleanup_row(candidate: Any, verb: str) -> str:
 #: them all, and the real run's record is ``.cleanup-log.jsonl``.
 _CLEANUP_TEXT_ROWS = 200
 
+#: Text rows the non-git COPY report prints. Smaller than the cleanup listing on
+#: purpose: the report is a decision surface (what is provable, what is waiting,
+#: what is refused), not an inventory — the measured store had 294 rows, of which
+#: two were actioned, and a refused parent repeats its child's bytes at every
+#: depth. ``--json`` carries every row.
+_COPY_REPORT_TEXT_ROWS = 40
+
 
 def _delegated_hours(text: str) -> int:
     """Argparse type for ``--delegated-max-age-hours``: the registry's own range."""
@@ -4658,15 +4976,152 @@ def _delegated_hours(text: str) -> int:
     return value
 
 
-def _print_cleanup_rows(rows: list[Any], verb: str) -> None:
-    for candidate in rows[:_CLEANUP_TEXT_ROWS]:
+class _CleanupStream:
+    """Live output for the ``lop sessions cleanup`` PREVIEW on a terminal.
+
+    WHY: on a 4,700-directory store the preview ran ~390 s (scan 10 s, record
+    decisions and scratchpad-content checks ~57 s, scratchpad audit 319 s) and
+    printed nothing until every pass had finished, which reads as a hang. This
+    prints the policy lines before the first pass, shows ONE updating status line
+    for the scan/decide/content/audit heartbeats, and prints each row as the pass
+    decides it. The rows are the SAME objects the final result lists hold and the
+    final block skips the head it already printed (:func:`_print_cleanup_rows`), so
+    a streamed row can never appear twice. Past the text cap rows are not printed
+    but the status line keeps counting, so the screen never goes quiet.
+
+    A TTY affordance only: ``enabled`` is ``stdout.isatty() and not --json``. A
+    pipe, a file or a script keeps the block layout and section order it always
+    had (the output is parsed), and piped output therefore prints at the END by
+    design; ``--json`` stays ONE object at the end. Non-TTY progress on stderr was
+    considered and rejected: it would put bytes on a stream scripts capture and
+    merge with ``2>&1``.
+
+    The updating line uses ``\r`` + erase-line, so it needs a terminal that
+    honours them: ``animate`` is off for ``TERM=dumb`` and when ``NO_COLOR`` is
+    set (the conventional "plain output" request), and the stream then prints a
+    plain heartbeat LINE at most every few seconds instead, with no control codes.
+    The status line is cut to the terminal width so a narrow pane never wraps it
+    into stacked copies.
+    """
+
+    #: Plain-mode heartbeat spacing: a line every few seconds, never one per update.
+    PLAIN_EVERY_S = 5.0
+
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+        self.animate = enabled and not _plain_terminal()
+        self._live = False
+        self._rows = 0
+        self._kept = 0
+        self._phase_started: dict[str, float] = {}
+        self._plain_last = 0.0
+
+    def _fit(self, text: str) -> str:
+        columns = shutil.get_terminal_size((80, 24)).columns
+        return text if len(text) < columns else text[: max(1, columns - 2)] + "…"
+
+    def status(self, text: str) -> None:
+        """Replace the single status line; never adds a permanent line."""
+        if not self.enabled:
+            return
+        if not self.animate:
+            now = time.monotonic()
+            if now - self._plain_last >= self.PLAIN_EVERY_S:
+                self._plain_last = now
+                print(text.strip(), flush=True)
+            return
+        sys.stdout.write(f"\r\033[K{self._fit(text)}")
+        sys.stdout.flush()
+        self._live = True
+
+    def clear(self, *, newline: bool = False) -> None:
+        """Erase the status line. ``newline`` additionally ends the line, for the
+        interrupt path: the terminal has echoed ``^C`` onto it, and without a
+        newline the traceback starts glued to that echo."""
+        if self._live:
+            sys.stdout.write("\r\033[K" + ("\n" if newline else ""))
+            sys.stdout.flush()
+            self._live = False
+
+    def line(self, text: str = "") -> None:
+        """Print one permanent line (header or row), flushed at once."""
+        self.clear()
+        print(text, flush=True)
+
+    def begin_class(self) -> None:
+        """Reset the per-section row counters (rows are capped per section)."""
+        self._rows = 0
+        self._kept = 0
+
+    def plan_callback(self, verb: str) -> Any:
+        """``on_plan`` for a pass: print each decided row, up to the text cap."""
+
+        def on_plan(candidate: Any) -> None:
+            if self._rows < _CLEANUP_TEXT_ROWS:
+                self.line(_cleanup_row(candidate, verb))
+            self._rows += 1
+
+        return on_plan
+
+    def kept_callback(self) -> Any:
+        def on_kept(name: str, guard: str) -> None:
+            if self._kept < _CLEANUP_TEXT_ROWS:
+                # The name is fitted to the removal rows' session column (12 cells,
+                # the width of a session id), so on a stream where the two
+                # interleave the reasons line up as a table. A longer name (the
+                # fixtures' and hand-made ids) is cut with an ellipsis the way a
+                # long title is in a removal row, rather than pushing the reason
+                # right. Only here: the block layout's kept rows stay byte-identical.
+                shown = name if len(name) <= 12 else name[:11] + "…"
+                self.line(f"  kept         {shown:<12}  ({guard})")
+            self._kept += 1
+
+        return on_kept
+
+    def progress_callback(self) -> Any:
+        """``on_progress`` for the scan, decide and content phases: one updating line."""
+        names = {
+            "scan": "scanning sessions",
+            "rosters": "reading parent rosters",
+            "decide": "deciding",
+            "content": "checking scratchpad content",
+        }
+
+        def on_progress(phase: str, done: int, total: int | None, _elapsed: float) -> None:
+            # Elapsed is PER PHASE (the pass reports time since it began, which
+            # read as "the content check took 19 s" when it had taken 3).
+            began = self._phase_started.setdefault(phase, time.monotonic())
+            of = f"/{total}" if total else ""
+            self.status(
+                f"  {names.get(phase, phase)}… {done}{of} ({time.monotonic() - began:.0f}s)"
+            )
+
+        return on_progress
+
+    def audit_callback(self) -> Any:
+        def on_pad(pad: Any, done: int, total: int) -> None:
+            began = self._phase_started.setdefault("audit", time.monotonic())
+            self.status(f"  auditing scratchpads… {done}/{total} ({time.monotonic() - began:.0f}s)")
+
+        return on_pad
+
+
+def _plain_terminal() -> bool:
+    """Whether the terminal asked for (or cannot do) cursor/erase control codes."""
+    return os.environ.get("TERM", "") in ("dumb", "") or bool(os.environ.get("NO_COLOR"))
+
+
+def _print_cleanup_rows(rows: list[Any], verb: str, *, streamed: bool = False) -> None:
+    # ``streamed``: the head (the first _CLEANUP_TEXT_ROWS rows) was already
+    # printed live by :class:`_CleanupStream`; only the overflow note remains.
+    for candidate in rows[: 0 if streamed else _CLEANUP_TEXT_ROWS]:
         print(_cleanup_row(candidate, verb))
     if len(rows) > _CLEANUP_TEXT_ROWS:
         print(f"  ... and {len(rows) - _CLEANUP_TEXT_ROWS} more (--json lists every row)")
 
 
-def _print_kept(protected: list[tuple[str, str]]) -> None:
-    for name, guard in protected[:_CLEANUP_TEXT_ROWS]:
+def _print_kept(protected: list[tuple[str, str]], *, streamed: bool = False) -> None:
+    for name, guard in protected[: 0 if streamed else _CLEANUP_TEXT_ROWS]:
         print(f"  kept         {name}  ({guard})")
     if len(protected) > _CLEANUP_TEXT_ROWS:
         # The pass caps each kept group at WINDOW_NAMES_CAP while still counting
@@ -4712,7 +5167,51 @@ def _content_row_text(row: Any, verb: str) -> str:
     return f"  {verb:<14} {row.session:<12} {title:<16} {_format_bytes(row.bytes):>8} ({tail})"
 
 
-def _print_content(delegated: Any, verb: str) -> None:
+def _confirmation_answer(prompt: str, *, json_mode: bool) -> str:
+    """Read one typed confirmation; in ``--json`` mode the PROMPT goes to stderr.
+
+    ``input()`` writes its prompt to stdout, which put a human sentence in front
+    of the JSON document on the one path that both asks and emits (QA Q2's
+    ``confirmed``). The answer is read the same way either way; only the prompt's
+    stream moves, so a script that parsed before still parses.
+    """
+    if json_mode:
+        print(prompt, end="", file=sys.stderr)
+        try:
+            return sys.stdin.readline()
+        except (EOFError, KeyboardInterrupt):
+            return ""
+    try:
+        return input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        return ""
+
+
+def _content_switches_off(policy: Any) -> str:
+    """The switch(es) actually keeping the content phase off (QA Q1).
+
+    The gate is ``delegated.enabled AND delegated.scratchpad.enabled``, and the
+    previous sentence named the scratchpad switch unconditionally — wrong when
+    the master delegated switch was the one turned off. Naming what is actually
+    off is the difference between an actionable refusal and a hunt through
+    settings for a row that is already on.
+    """
+    off = [
+        name
+        for name, enabled in (
+            ("session.cleanup.delegated.enabled", policy.delegated_enabled),
+            ("session.cleanup.delegated.scratchpad.enabled", policy.delegated_scratchpad_enabled),
+        )
+        if not enabled
+    ]
+    if not off:
+        return "the delegated content policy"
+    if len(off) == 1:
+        return f"{off[0]} is off"
+    return f"{off[0]} and {off[1]} are both off"
+
+
+def _print_content(delegated: Any, verb: str, policy: Any | None = None) -> None:
     """The scratchpad-content block under the delegated section.
 
     The summary names the pads, the bytes and the per-class counts; the rows
@@ -4723,10 +5222,15 @@ def _print_content(delegated: Any, verb: str) -> None:
     """
     skipped = getattr(delegated, "content_skipped", None)
     if skipped == "disabled":
-        print(
-            "  scratchpad content: off (session.cleanup.delegated.scratchpad.enabled "
-            "is off; --force runs it once)"
+        switch = (
+            _content_switches_off(policy) if policy is not None else "the content switch is off"
         )
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"  scratchpad content: off ({switch}; --force runs it once)"
+        )
+        _print_copy_arm_line(delegated)
         return
     if skipped == "disabled during the pass":
         print("  scratchpad content: switch turned off during the pass (batched stop)")
@@ -4750,9 +5254,384 @@ def _print_content(delegated: Any, verb: str) -> None:
             f"  ... and {len(kept) - _CLEANUP_TEXT_ROWS} more content keeps "
             "(--json lists every row)"
         )
+    _print_copy_arm_line(delegated)
+
+
+def _print_copy_arm_line(delegated: Any) -> None:
+    """One line for the non-git COPY arm, always under the content rows.
+
+    The pass's OWN counters, never a second scan: a preview and the run it
+    explains must agree. ``--report-non-git-copies`` is the separate, whole-store
+    class report (it includes sessions no pass would reach), so this line only
+    says what THIS pass did and why it did nothing.
+    """
+    from local_operator.session.delegated_retention import CONTENT_CLASS_COPY
+
+    skipped = getattr(delegated, "copy_skipped", None)
+    if skipped == "disabled":
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            "  non-git copies: off (session.cleanup.delegated.non_git_copies.enabled "
+            "is off; --report-non-git-copies --dry-run previews the class; hold "
+            "sessions with session.cleanup.delegated.non_git_copies.hold_sessions)"
+        )
+        return
+    pads = sum(
+        1
+        for row in getattr(delegated, "content", [])
+        if CONTENT_CLASS_COPY in getattr(row, "classes", ())
+    )
+    line = (  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+        f"  non-git copies: {getattr(delegated, 'copy_candidates', 0)} candidate(s), "
+        f"~{_format_bytes(getattr(delegated, 'copy_candidate_bytes', 0))}; reclaimable "
+        f"{pads} pad(s) ~{_format_bytes(getattr(delegated, 'copy_reclaimed_bytes', 0))}"
+    )
+    if getattr(delegated, "copy_budget_exhausted", False):
+        line += "; hash budget spent (the rest defers to the next pass)"
+    if skipped == "no reference repository":
+        line += (
+            " (no reference repository: name one with --reference-repo or "
+            "session.cleanup.delegated.non_git_copies.reference_repos)"
+        )
+    elif skipped == "holds unreadable":
+        line += (
+            " (holds unreadable: fix "
+            "session.cleanup.delegated.non_git_copies.hold_sessions; the arm did "
+            "not run)"
+        )
+    print(line)  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+
+
+def _scratchpad_shape_summary(pad: Any, limit: int = 4) -> str:
+    """The compact one-line shape summary for an audit row.
+
+    The largest entries first (the audit sorts them), because the question the
+    section answers is "what is holding the bytes". A link keeps its target and
+    shows the link's own allocation — normally 0 B — rather than the tree it
+    points at: a pad that symlinks ``node_modules`` to a shared store holds no
+    copy, and the whole point of the row is to say which case this is.
+    """
+    parts: list[str] = []
+    for shape in pad.shapes[:limit]:
+        name = shape.path.rsplit("/", 1)[-1]
+        if shape.kind == "link":
+            target = shape.target or "(unresolved)"
+            parts.append(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                f"{name} link → {target} ({_format_bytes(shape.bytes)})"
+            )
+        else:
+            parts.append(f"{name} {_format_bytes(shape.bytes)}")
+    remaining = len(pad.shapes) - limit
+    if remaining > 0:
+        parts.append(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"+{remaining} more"
+        )
+    return "; ".join(parts)
+
+
+def _print_scratchpads(audit: Any) -> None:
+    """The ``== Scratchpads ==`` section: every pad, largest first, capped.
+
+    Read-only by construction (``session/scratchpad_audit.py``), so this is
+    safe on any run and prints even when BOTH cleanup switches are off: the
+    class split is exactly what an operator needs to see before deciding which
+    switch to turn on. Rows are capped like every other listing; ``--json``
+    carries every pad, every shape and the worktree pointers.
+    """
+    from local_operator.session.scratchpad_audit import (
+        DRY_RUN_AUDIT_BUDGET_S,
+        pointer_display,
+    )
+
+    print(
+        # i18n: ignore operator CLI output, English-only; owned by the
+        # sessions-cleanup section; remove when extracted (docs/I18N.md)
+        "== Scratchpads =="
+    )
+    truncated = (
+        f"; {audit.truncated} walk(s) truncated at the depth/entry cap" if audit.truncated else ""
+    )
+    if audit.stopped_early:
+        # A budgeted audit that stopped must SAY so, FIRST: the headline is the
+        # number the eye lands on, so it is the partial count and a floor, not a
+        # store total. The ranking below covers only the pads reached (the walk is
+        # in name order), and the full-audit command sits on its own line so it
+        # copies cleanly.
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"{len(audit.pads)} of {audit.total_pads} session pad(s) audited (partial); "
+            f"at least {_format_bytes(audit.total_bytes)} held; "
+            f"{audit.over_cap} over the {_format_bytes(audit.cap)} cap{truncated}"
+        )
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"audit stopped at its {DRY_RUN_AUDIT_BUDGET_S:.0f} s dry-run budget: the figures "
+            "are a lower bound and the list below ranks only the pads reached"
+        )
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            "  full audit: lop sessions cleanup --scratchpads-only --dry-run"
+        )
+    else:
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"{len(audit.pads)} session pad(s); {_format_bytes(audit.total_bytes)} held; "
+            f"{audit.over_cap} over the {_format_bytes(audit.cap)} cap{truncated}"
+        )
+    for pad in audit.pads[:_CLEANUP_TEXT_ROWS]:
+        tags: list[str] = []
+        if pad.over_cap:
+            tags.append(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                "OVER CAP"
+            )
+        if not pad.user_visible:
+            tags.append(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                "delegated"
+            )
+        tag = f"  [{', '.join(tags)}]" if tags else ""
+        print(f"  {pad.session}  {pad.origin or 'user'}  {_format_bytes(pad.bytes)}{tag}")
+        summary = _scratchpad_shape_summary(pad)
+        if summary:
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                f"    shapes: {summary}"
+            )
+        if pad.over_cap:
+            # UX U1: the shapes are a NAME vocabulary, not an accounting of the
+            # pad. Say where the rest is and how to inspect it from the totals
+            # already measured — a second walk here would double the section's
+            # cost, and implying shape cleanup always brings a pad under cap
+            # would be false.
+            shape_bytes = sum(shape.bytes for shape in pad.shapes)
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                f"    other content: inspect {pad.path} with du; shapes account for "
+                f"{_format_bytes(shape_bytes)} of {_format_bytes(pad.bytes)}"
+            )
+        for marker in pad.git_markers:
+            if marker.kind == "worktree":
+                print(
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                    f"    .git worktree → {pointer_display(marker)}  ({marker.path})"
+                )
+            elif marker.kind == "repository":
+                print(
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                    f"    .git repository  ({marker.path})"
+                )
+            else:
+                print(
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                    f"    .git link → {pointer_display(marker)}  ({marker.path})"
+                )
+    if len(audit.pads) > _CLEANUP_TEXT_ROWS:
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"  ... and {len(audit.pads) - _CLEANUP_TEXT_ROWS} more "
+            "(--json lists every pad)"
+        )
+
+
+def _print_non_git_copy_report(root: Path, policy: Any, *, json_mode: bool) -> int:
+    """``--report-non-git-copies``: the READ-ONLY whole-store copy class report.
+
+    It reports the class, not a plan: every depth-1 non-git directory over the
+    minimum size in every pad, its bytes, how many its reference trees prove,
+    and why the rest would be kept. A scan that produced an impossible result
+    exits 3 with the message on stderr — never a silent 0-candidate report (the
+    measured incident was exactly that being read as success).
+    """
+    import json as _json
+
+    from local_operator.session.delegated_retention import (
+        NonGitCopyScanError,
+        scan_non_git_copies,
+    )
+    from local_operator.session.retention import SESSIONS_DIRNAME
+
+    try:
+        report = scan_non_git_copies(
+            root / SESSIONS_DIRNAME,
+            references=policy.delegated_non_git_copy_references,
+            holds=(
+                None
+                if policy.delegated_non_git_copy_holds_unreadable
+                else policy.delegated_non_git_copy_holds
+            ),
+            now=time.time(),
+            window_hours=policy.delegated_max_age_hours,
+        )
+    except NonGitCopyScanError as exc:
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            f"non-git copy report failed: {exc}", file=sys.stderr
+        )
+        if json_mode:
+            print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+                _json.dumps({"outcome": "error", "error": str(exc)})
+            )
+        return 3
+    if report.errors:
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            f"non-git copy report: {report.errors} candidate(s) could not be scanned",
+            file=sys.stderr,
+        )
+    if json_mode:
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            _json.dumps({"outcome": "report", "non_git_copies": report.as_dict()}, indent=2)
+        )
+        return 3 if report.errors else 0
+    print(
+        # i18n: ignore operator CLI output, English-only; owned by the
+        # sessions-cleanup section; remove when extracted (docs/I18N.md)
+        "== Non-git copies (read-only) =="
+    )
+    # THE SUMMARY RECONCILES BY NOUN (design C1): candidates are top-level
+    # directories, the states are SESSIONS (one session can hold several
+    # provable subtrees), and the kept figure is candidates again — so the
+    # parts are each labelled and never silently mix units.
+    print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+        f"  non-git copies: {report.count} candidate(s) (top-level directories), "
+        f"~{_format_bytes(report.candidate_bytes)}"
+    )
+    print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+        f"    would reclaim now: {report.reclaimable_sessions} session(s) "
+        f"({sum(1 for row in report.candidates if row.would_reclaim)} candidate(s)), "
+        f"~{_format_bytes(report.reclaimable_bytes)}"
+    )
+    print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+        f"    waiting for the {report.window_hours:g}h window: "
+        f"{report.within_window_sessions} session(s) "
+        f"({sum(1 for row in report.candidates if row.waiting)} candidate(s)), "
+        f"~{_format_bytes(report.within_window_bytes)}"
+    )
+    print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+        f"    kept: {report.kept_candidates} candidate(s), "
+        f"~{_format_bytes(report.kept_bytes)}"
+        + (f"; {report.held_sessions} held session(s)" if report.held_sessions else "")
+        + (f"; {report.errors} error(s)" if report.errors else "")
+    )
+    print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+        "  proof: a file is recoverable when its path and content exist in a "
+        "merged reference tree; nothing unproven is removed"
+    )
+    holds = tuple(getattr(policy, "delegated_non_git_copy_holds", ()) or ())
+    if getattr(policy, "delegated_non_git_copy_holds_unreadable", False):
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            "  operator holds: unreadable; fix "
+            "session.cleanup.delegated.non_git_copies.hold_sessions before "
+            "trusting this report"
+        )
+    elif holds:
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            f"  operator holds: {len(holds)} session(s) ({', '.join(holds)})"
+        )
+    else:
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            "  operator holds: none configured (add session ids to "
+            "session.cleanup.delegated.non_git_copies.hold_sessions before enabling)"
+        )
+    if report.skipped == "no store":
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            "  no session store yet: nothing to reclaim"
+        )
+    elif report.skipped == "no reference repository":
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            "  no reference repository: name one with --reference-repo or "
+            "session.cleanup.delegated.non_git_copies.reference_repos"
+        )
+    # The rows an operator acts on come first: the provable ones (reclaimable
+    # now, waiting for the window, or held), the scan errors, then the largest
+    # TOP-LEVEL refusals. Nested rows are in --json only: a refused parent and
+    # its refused child print the SAME bytes three levels deep (measured: one
+    # node-gyp chain filled 40 lines), which buries the two rows that matter.
+    actionable = [
+        row
+        for row in report.candidates
+        if row.would_reclaim or row.proof_ok or row.held or row.error
+    ]
+    actionable.sort(key=lambda row: -row.bytes)
+    refused = [row for row in report.candidates if row.top_level and not row.proof_ok]
+    refused = [row for row in refused if row not in actionable]
+    refused.sort(key=lambda row: -row.bytes)
+    shown = actionable + refused
+    # A NESTED ROW PRINTS ITS PARENT PATH (design C5): ``base-repo`` alone is
+    # ambiguous when its parent ``qa-1232`` is the refused row above it. The
+    # width follows the longest name actually shown, bounded 8..28.
+    displays = [row.path.split("/scratchpad/", 1)[-1] for row in shown]
+    name_width = min(28, max(8, max((len(name) for name in displays), default=8)))
+    for row, display in zip(shown[:_COPY_REPORT_TEXT_ROWS], displays):
+        name = display if len(display) <= name_width else "…" + display[-(name_width - 1) :]
+        if row.error:
+            verb = "error"
+        elif row.held:
+            verb = "hold"
+        elif row.would_reclaim:
+            verb = "would reclaim"
+        elif row.waiting:
+            # Provable, but the session is inside the retention window: the row
+            # is WAITING, not refused — the distinction is the whole point of
+            # the report (the measured class is 12-30 h old against 48 h).
+            verb = "waiting"
+        else:
+            verb = "keep"
+        if row.reason:
+            tail = row.reason
+        else:
+            proved = ", ".join(path.rsplit("/", 1)[-1] for path in row.proved_by[:3])
+            tail = f"{_format_bytes(row.matched_bytes)} proven"
+            if proved:
+                tail += f" against {proved}"
+            if row.unmatched_files:
+                tail += f"; {row.unmatched_files} unmatched file(s) kept"
+        size = "?" if not row.bytes else _format_bytes(row.bytes)
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            f"  {verb:<14} {row.session:<12} {name:<{name_width}} {size:>8} ({tail})"
+        )
+    if len(shown) > _COPY_REPORT_TEXT_ROWS:
+        print(  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
+            f"  {_COPY_REPORT_TEXT_ROWS} of {len(shown)} rows shown " "(--json lists every row)"
+        )
+    return 3 if report.errors else 0
 
 
 def sessions_cleanup_command(args: argparse.Namespace) -> int:
+    """``lop sessions cleanup``: :func:`_sessions_cleanup_run` with a status line that cannot leak.
+
+    The updating status line is erased on EVERY way out, Ctrl-C included, so an
+    interrupt (or any exception) starts its traceback on a clean line instead of
+    after ``scanning sessions… 256/3104 (0s)``.
+    """
+    # Live output is a terminal affordance and never touches ``--json`` (see
+    # :class:`_CleanupStream`): a pipe or file gets the block layout it always had.
+    stream = _CleanupStream(sys.stdout.isatty() and not args.json)
+    try:
+        return _sessions_cleanup_run(args, stream)
+    except BaseException:
+        # Ctrl-C (or any failure): the traceback must start on its own line.
+        stream.clear(newline=True)
+        raise
+    finally:
+        stream.clear()
+
+
+def _sessions_cleanup_run(args: argparse.Namespace, stream: "_CleanupStream") -> int:
     """``lop sessions cleanup [--dry-run] [--force [--yes]]``.
 
     TWO CLASSES, one command (``session/delegated_retention.py`` has the why):
@@ -4774,17 +5653,42 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     directions. That phase is gated by ``session.cleanup.delegated.scratchpad.
     enabled`` (default on; ``--force`` runs it once when off), and content
     reclaims are the only reason a run with no session rows still proceeds to
-    confirmation — with its own confirmation sentence.
+    confirmation — with its own confirmation sentence. Content is reclaimed
+    only from sessions PAST the retention window (``max_age_hours``); a live or
+    recently-touched session keeps its pad whole. Every real reclaim writes a
+    path-level manifest under ``<config>/sessions/.cleanup-manifests/`` before
+    the first removal, and its cleanup-log row names that manifest.
 
     A class runs when its switch is on (or ``--force``); the parent class also
-    needs a limit. A dry run lists both whatever the switches say and notes it.
+    needs a limit. A dry run lists both whatever the switches say and notes it,
+    and then prints the read-only ``== Scratchpads ==`` audit for every pad in
+    the store (parent and delegated) — that section is the one piece that runs
+    with BOTH switches off, because it changes nothing.
+
+    ``--scratchpads-only`` narrows the command to the content layer. With
+    ``--dry-run`` it prints the audit and the reclaim plan and removes nothing;
+    without, it reclaims content from non-live delegated pads past the
+    retention window and NEVER runs the record pass or touches the parent
+    class — so cache-shaped data can go without deleting one transcript.
+    ``--force`` still overrides the delegated switches for that one run; the
+    confirmation says "reclaim scratchpad content" and nothing else.
+
+    ``--report-non-git-copies`` is the READ-ONLY whole-store class report for
+    the fourth content arm (plain non-git directory copies): every candidate in
+    every pad, its size, whether a merged reference tree proves its bytes, and
+    the keep reason. It needs ``--dry-run`` and removes nothing; without it the
+    command refuses with exit 2, because the pass has its own config switch.
+    ``--reference-repo`` adds a merged reference repository for one invocation
+    (repeatable), on top of ``non_git_copies.reference_repos``.
 
     Exit codes: 0 ran (or dry run); 1 nothing to apply (no parent limits and
     delegated cleanup off); 2 refused (parent switch off without ``--force`` and
     nothing else to run, or confirmation declined); 3 ran with errors. ``--json``
     always emits a JSON object on stdout, whatever the outcome; its pre-existing
     keys now cover BOTH classes (rows carry ``origin``) and ``parent`` /
-    ``delegated`` hold the per-class detail.
+    ``delegated`` hold the per-class detail. A dry run and
+    ``--scratchpads-only`` add ``scratchpads``, and the latter adds
+    ``scratchpads_only: true``.
     """
     import dataclasses
     import json as _json
@@ -4793,17 +5697,42 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         CLEANUP_LOG_NAME,
         CleanupResult,
         apply_cleanup,
+        clamp_delegated_hours,
         policy_from_config,
         run_cleanup,
     )
     from local_operator.session.delegated_retention import (
         UNBOUNDED,
         DelegatedResult,
+        effective_window_hours,
         run_delegated_pass,
+    )
+    from local_operator.session.scratchpad_audit import (
+        DRY_RUN_AUDIT_BUDGET_S,
+        audit_scratchpads,
     )
 
     root = config_dir()
     policy = policy_from_config(ConfigManager(root))
+    reference_overrides = tuple(
+        os.path.abspath(os.path.expanduser(path))
+        for path in (getattr(args, "reference_repo", None) or ())
+    )
+    if reference_overrides:
+        # ONE invocation's extra references, APPENDED to the configured set —
+        # the proof only ever gains sources, and a dry run must prove the same
+        # bytes the configured pass would.
+        policy = dataclasses.replace(
+            policy,
+            delegated_non_git_copy_references=(
+                policy.delegated_non_git_copy_references + reference_overrides
+            ),
+        )
+    # ONE invocation's policy overrides — applied BEFORE the report branch so
+    # ``--delegated-max-age-hours`` shapes the report's window too. The delta
+    # it exists for: previewing what the class looks like at a 2 h window a day
+    # before it ages out. The value is CLAMPED here, exactly as the config read
+    # clamps it (a hand-typed 0 must not silently mean "window 0").
     overrides = {
         name: value
         for name, value in (
@@ -4815,13 +5744,34 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         )
         if value is not None
     }
+    if "delegated_max_age_hours" in overrides:
+        overrides["delegated_max_age_hours"] = clamp_delegated_hours(
+            overrides["delegated_max_age_hours"]
+        )
     policy = dataclasses.replace(policy, **overrides)
+
+    if getattr(args, "report_non_git_copies", False):
+        if not args.dry_run:
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                "--report-non-git-copies only reports; run the pass with "
+                "session.cleanup.delegated.non_git_copies.enabled",
+                file=sys.stderr,
+            )
+            return 2
+        return _print_non_git_copy_report(root, policy, json_mode=bool(args.json))
     record_path = root / "sessions" / CLEANUP_LOG_NAME
     switch_hint = (
         "session.cleanup.enabled is off: turn it on in /settings > Session cleanup, "
         "or pass --force to run once"
     )
     force = bool(args.force)
+    # A flag, not a mode switch on the policy: the content layer's own gates
+    # (delegated origin, live claim/lease, armed wake/monitor, current session)
+    # still run inside ``run_delegated_pass``. This only skips the RECORD and
+    # PARENT halves of the command.
+    scratchpads_only = bool(getattr(args, "scratchpads_only", False))
     parent_runs = policy.has_any_limit and (policy.enabled or force)
     delegated_runs = policy.delegated_enabled or force
 
@@ -4831,6 +5781,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         *,
         outcome: str,
         confirmed: bool | None = None,
+        scratchpads: Any | None = None,
+        scratchpads_only: bool = False,
     ) -> None:
         both = [parent] + ([delegated] if delegated is not None else [])
 
@@ -4896,9 +5848,220 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                     "remaining": getattr(delegated, "content_remaining", 0),
                     "skipped": getattr(delegated, "content_skipped", None),
                 },
+                non_git_copies={
+                    "enabled": getattr(delegated, "copy_skipped", None) != "disabled",
+                    "candidates": getattr(delegated, "copy_candidates", 0),
+                    "candidate_bytes": getattr(delegated, "copy_candidate_bytes", 0),
+                    "reclaimed_bytes": getattr(delegated, "copy_reclaimed_bytes", 0),
+                    "budget_exhausted": getattr(delegated, "copy_budget_exhausted", False),
+                    "skipped": getattr(delegated, "copy_skipped", None),
+                },
             )
             payload["delegated"] = detail
+        if scratchpads is not None:
+            payload["scratchpads"] = scratchpads.as_dict()
+        if scratchpads_only:
+            payload["scratchpads_only"] = True
         print(_json.dumps(payload, indent=2))
+
+    if scratchpads_only and args.dry_run:
+        # ONLY the audit and the content plan: the record halves are not part of
+        # this mode, and printing them would offer rows it will never apply.
+        moment = time.time()
+        stream.status("  scanning sessions…")
+        with file_logging():
+            preview = run_delegated_pass(
+                root,
+                lambda: policy,
+                dry_run=True,
+                force=force,
+                actor="cli",
+                trigger="manual",
+                now=moment,
+                only=(),
+                on_progress=stream.progress_callback() if stream.enabled else None,
+            )
+        # UNBUDGETED: this command IS the audit. It streams a per-pad heartbeat
+        # on a terminal instead of going quiet for minutes.
+        audit = audit_scratchpads(
+            root / "sessions", on_pad=stream.audit_callback() if stream.enabled else None
+        )
+        stream.clear()
+        if args.json:
+            emit_json(
+                CleanupResult(dry_run=True, skipped="not run (--scratchpads-only)"),
+                preview,
+                outcome="dry-run",
+                scratchpads=audit,
+                scratchpads_only=True,
+            )
+            return 0
+        _print_scratchpads(audit)
+        print()
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            "== Scratchpad content =="
+        )
+        _print_content(preview, "would reclaim", policy)
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"nothing was removed (dry run); the record of real removals is {record_path}"
+        )
+        return 0
+
+    if scratchpads_only and not args.dry_run:
+        # CONTENT ONLY. The parent class and the record pass are not called at
+        # all, which is the whole point: an operator can reclaim cache-shaped
+        # data without deleting one transcript. ``only=()`` empties the record
+        # candidate list; ``content_only`` re-applies exactly the pads the
+        # preview named, so a pad that became eligible between preview and
+        # confirmation is not taken unseen.
+        content_allowed = force or (
+            policy.delegated_enabled and policy.delegated_scratchpad_enabled
+        )
+        if not content_allowed:
+            if args.json:
+                emit_json(
+                    CleanupResult(skipped="not run (--scratchpads-only)"),
+                    None,
+                    outcome="refused",
+                    scratchpads_only=True,
+                )
+            else:
+                print(
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                    f"refusing to reclaim scratchpad content: "
+                    f"{_content_switches_off(policy)}; turn it on or pass --force to "
+                    "run once",
+                    file=sys.stderr,
+                )
+            return 2
+        moment = time.time()
+        stream.status("  scanning sessions…")
+        with file_logging():
+            preview = run_delegated_pass(
+                root,
+                lambda: policy,
+                dry_run=True,
+                force=force,
+                actor="cli",
+                trigger="manual",
+                now=moment,
+                only=(),
+                on_progress=stream.progress_callback() if stream.enabled else None,
+            )
+        audit = audit_scratchpads(
+            root / "sessions", on_pad=stream.audit_callback() if stream.enabled else None
+        )
+        stream.clear()
+        if not args.json:
+            _print_scratchpads(audit)
+            print()
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                "== Scratchpad content =="
+            )
+            _print_content(preview, "would reclaim", policy)
+        if not preview.content:
+            if args.json:
+                emit_json(
+                    CleanupResult(skipped="not run (--scratchpads-only)"),
+                    preview,
+                    outcome="nothing-to-do",
+                    scratchpads=audit,
+                    scratchpads_only=True,
+                )
+            else:
+                print(
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                    "nothing to reclaim"
+                )
+            return 0
+        # ``--yes`` IS a confirmation of the shown plan, not an absence of one
+        # (QA Q2): the JSON says so, so a script can tell "applied after a typed
+        # yes" from "applied without any confirmation".
+        confirmed: bool | None = True if args.yes else None
+        prompt = (
+            f"Reclaim build/cache content from {len(preview.content)} session(s)? "
+            "Transcripts and conversation records will be kept. Type 'yes' to confirm: "
+        )
+        if not args.yes:
+            if not sys.stdin.isatty():
+                if args.json:
+                    emit_json(
+                        CleanupResult(skipped="not run (--scratchpads-only)"),
+                        preview,
+                        outcome="refused",
+                        confirmed=False,
+                        scratchpads=audit,
+                        scratchpads_only=True,
+                    )
+                else:
+                    print(
+                        # i18n: ignore operator CLI output, English-only; owned by the
+                        # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                        "refusing: not a terminal and --yes was not given, so nothing "
+                        "was removed",
+                        file=sys.stderr,
+                    )
+                return 2
+            answer = _confirmation_answer(prompt, json_mode=bool(args.json))
+            confirmed = answer.strip().lower() == "yes"
+            if not confirmed:
+                if args.json:
+                    emit_json(
+                        CleanupResult(skipped="not run (--scratchpads-only)"),
+                        preview,
+                        outcome="refused",
+                        confirmed=False,
+                        scratchpads=audit,
+                        scratchpads_only=True,
+                    )
+                else:
+                    print("not confirmed; nothing was removed")
+                return 2
+        with file_logging():
+            result = run_delegated_pass(
+                root,
+                lambda: policy,
+                force=force,
+                actor="cli",
+                trigger="manual",
+                now=moment,
+                budget_s=UNBOUNDED,
+                only=(),
+                content_only=[row.session for row in preview.content],
+            )
+        if args.json:
+            emit_json(
+                CleanupResult(skipped="not run (--scratchpads-only)"),
+                result,
+                outcome="removed",
+                confirmed=confirmed,
+                scratchpads=audit,
+                scratchpads_only=True,
+            )
+            return 3 if result.errors else 0
+        print(
+            # i18n: ignore operator CLI output, English-only; owned by the
+            # sessions-cleanup section; remove when extracted (docs/I18N.md)
+            f"Reclaimed scratchpad content from {len(result.content)} session(s); "
+            "no transcripts or conversation records were deleted."
+        )
+        if result.errors:
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                f"  {result.errors} error(s); see the log",
+                file=sys.stderr,
+            )
+        print(f"record: {record_path}")
+        return 3 if result.errors else 0
 
     if not parent_runs and not delegated_runs:
         if not policy.has_any_limit:
@@ -4928,20 +6091,10 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     # The LISTING is always a dry run first, so a real run shows the user the
     # same rows before anything is removed. Both previews share ONE clock.
     moment = time.time()
-    # ``file_logging`` for the preview too: every scratchpad-git keep is a
-    # WARNING by design (one line per kept session, for the log), and on a first
-    # dry run those would interleave with the listing that already names each
-    # one under "kept".
-    with file_logging():
-        if policy.has_any_limit:
-            parent_preview = run_cleanup(
-                root, policy, dry_run=True, force=force, actor="cli", now=moment
-            )
-        else:
-            parent_preview = CleanupResult(dry_run=True, skipped="no limits configured")
-        delegated_preview = run_delegated_pass(
-            root, lambda: policy, dry_run=True, force=force, actor="cli", now=moment
-        )
+    # The policy lines are built BEFORE any pass runs: on a terminal they are the
+    # first thing printed (so output starts at once, not after ~6 minutes), and
+    # the delegated window comes from the same clamp the pass applies
+    # (``effective_window_hours``) so the line cannot promise a different one.
     parent_policy_line = (
         f"policy: enabled={'on' if policy.enabled else 'OFF'} max_sessions={policy.max_sessions} "
         f"max_inactive_days={policy.max_inactive_days} max_total_bytes={policy.max_total_bytes} "
@@ -4951,9 +6104,71 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     )
     delegated_policy_line = (
         f"policy: {'on' if policy.delegated_enabled else 'OFF'}, remove delegated sessions idle "
-        f"over {delegated_preview.hours}h (parent still active, open project, running, armed "
-        "wake/monitor or unpushed git work keeps them)"
+        f"over {effective_window_hours(policy)}h (parent still active, open project, running, "
+        "armed wake/monitor or unpushed git work keeps them)"
     )
+    # The verb a class's rows carry: a class the run will NOT execute renders as
+    # "would remove" (review F1), see ``sections``.
+    row_verb = "would remove" if args.dry_run else "will remove"
+    parent_row_verb = row_verb if parent_runs else "would remove"
+    delegated_row_verb = row_verb if delegated_runs else "would remove"
+    if stream.enabled:
+        stream.line("== Your conversations (parent sessions) ==")
+        stream.line(parent_policy_line)
+        if policy.has_any_limit and not policy.enabled and parent_row_verb == "would remove":
+            stream.line(f"note: {switch_hint}; this is a preview only")
+        stream.begin_class()
+    # ``file_logging`` for the preview too: every scratchpad-git keep is a
+    # WARNING by design (one line per kept session, for the log), and on a first
+    # dry run those would interleave with the listing that already names each
+    # one under "kept".
+    with file_logging():
+        if policy.has_any_limit:
+            stream.status("  scanning your conversations…")
+            parent_preview = run_cleanup(
+                root,
+                policy,
+                dry_run=True,
+                force=force,
+                actor="cli",
+                now=moment,
+                on_plan=stream.plan_callback(parent_row_verb) if stream.enabled else None,
+                on_kept=stream.kept_callback() if stream.enabled else None,
+            )
+        else:
+            parent_preview = CleanupResult(dry_run=True, skipped="no limits configured")
+        if stream.enabled:
+            # The parent section's summary line needs its totals, so on a terminal
+            # it follows the rows that streamed (the block layout prints it first).
+            if parent_preview.skipped == "no limits configured":
+                stream.line("parent class: off")
+            else:
+                stream.line(
+                    f"scanned {parent_preview.scanned} sessions; "
+                    f"{parent_row_verb} {len(parent_preview.removed)}"
+                )
+                _print_cleanup_rows(parent_preview.removed, parent_row_verb, streamed=True)
+                _print_kept(parent_preview.protected, streamed=True)
+            stream.line()
+            stream.line("== Delegated work (subagents and background sessions) ==")
+            stream.line(delegated_policy_line)
+            if not policy.delegated_enabled and delegated_row_verb == "would remove":
+                stream.line("note: delegated cleanup is off in config; this is a preview only")
+            stream.begin_class()
+            stream.status("  scanning sessions…")
+        delegated_preview = run_delegated_pass(
+            root,
+            lambda: policy,
+            dry_run=True,
+            force=force,
+            actor="cli",
+            trigger="manual",
+            now=moment,
+            on_progress=stream.progress_callback() if stream.enabled else None,
+            on_plan=stream.plan_callback(delegated_row_verb) if stream.enabled else None,
+            on_kept=stream.kept_callback() if stream.enabled else None,
+        )
+        stream.clear()
 
     def sections(
         verb: str,
@@ -4969,23 +6184,28 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         # "nothing to remove" in the same output.
         parent_verb = verb if parent_runs else "would remove"
         delegated_verb = verb if delegated_runs else "would remove"
-        print("== Your conversations (parent sessions) ==")
-        print(parent_policy_line)
-        if parent.skipped == "no limits configured":
-            print("parent class: off")
-        else:
-            if not policy.enabled and parent_verb == "would remove":
-                print(f"note: {switch_hint}; this is a preview only")
-            print(f"scanned {parent.scanned} sessions; {parent_verb} {len(parent.removed)}")
-            _print_cleanup_rows(parent.removed, parent_verb)
-            _print_kept(parent.protected)
-        print()
-        print("== Delegated work (subagents and background sessions) ==")
-        print(delegated_policy_line)
+        # ``live``: a terminal run already printed the headers, policy lines and
+        # the HEAD of each row list while the passes ran (:class:`_CleanupStream`);
+        # only what needs the finished result is printed here.
+        live = stream.enabled
+        if not live:
+            print("== Your conversations (parent sessions) ==")
+            print(parent_policy_line)
+            if parent.skipped == "no limits configured":
+                print("parent class: off")
+            else:
+                if not policy.enabled and parent_verb == "would remove":
+                    print(f"note: {switch_hint}; this is a preview only")
+                print(f"scanned {parent.scanned} sessions; {parent_verb} {len(parent.removed)}")
+                _print_cleanup_rows(parent.removed, parent_verb)
+                _print_kept(parent.protected)
+            print()
+            print("== Delegated work (subagents and background sessions) ==")
+            print(delegated_policy_line)
         if delegated.skipped and delegated.skipped.startswith("skipped:"):
             print(f"{delegated.skipped} (nothing removed; fail-closed)")
         else:
-            if not policy.delegated_enabled and delegated_verb == "would remove":
+            if not live and not policy.delegated_enabled and delegated_verb == "would remove":
                 print("note: delegated cleanup is off in config; this is a preview only")
             print(
                 f"{delegated.delegated_total} delegated sessions; {delegated.within_window} "
@@ -4993,19 +6213,48 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 f"{delegated.kept_by_origin} kept by origin; "
                 f"{delegated_verb} {len(delegated.removed)}"
             )
-            _print_cleanup_rows(delegated.removed, delegated_verb)
-            _print_kept(delegated.protected)
+            _print_cleanup_rows(delegated.removed, delegated_verb, streamed=live)
+            # UX U4: on a store with thousands of kept rows the size view is
+            # buried below them. Name the narrower command BEFORE the kept list
+            # so it is discoverable from the top of the section.
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                "  size by pad: lop sessions cleanup --scratchpads-only --dry-run "
+                "(Scratchpads section below)"
+            )
+            _print_kept(delegated.protected, streamed=live)
             if delegated_runs:
                 content_verb = (
                     "would reclaim" if delegated_verb == "would remove" else "will reclaim"
                 )
-                _print_content(delegated, content_verb)
+                _print_content(delegated, content_verb, policy)
 
     if args.dry_run:
+        # The read-only store audit runs here whatever BOTH switches say: it is
+        # the section an operator turns the switches on FROM. It never opens a
+        # path for writing (``session/scratchpad_audit.py``).
+        # BOUNDED here, and only here: the audit measured 319 s over 4,716 pads and
+        # used to run in full on every dry run. A truncated audit says so (the
+        # printer and the JSON both carry it); ``--scratchpads-only --dry-run``
+        # is the unbudgeted audit and the notice points at it.
+        audit = audit_scratchpads(
+            root / "sessions",
+            budget_s=DRY_RUN_AUDIT_BUDGET_S,
+            on_pad=stream.audit_callback() if stream.enabled else None,
+        )
+        stream.clear()
         if args.json:
-            emit_json(parent_preview, delegated_preview, outcome="dry-run")
+            emit_json(
+                parent_preview,
+                delegated_preview,
+                outcome="dry-run",
+                scratchpads=audit,
+            )
             return 0
         sections("would remove", parent_preview, delegated_preview, parent_runs, delegated_runs)
+        print()
+        _print_scratchpads(audit)
         print(f"nothing was removed (dry run); the record of real removals is {record_path}")
         return 0
 
@@ -5040,7 +6289,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
             print("nothing to remove")
         return 0
 
-    confirmed: bool | None = None
+    # Same Q2 rule for the full command: ``--yes`` is a confirmation.
+    confirmed: bool | None = True if args.yes else None
     total = parent_rows + delegated_rows
     if total and content_rows:
         prompt = (
@@ -5051,7 +6301,8 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         prompt = f"remove {total} session(s)? type 'yes' to confirm: "
     else:
         prompt = (
-            f"reclaim scratchpad content from {content_rows} session(s)? " "type 'yes' to confirm: "
+            f"Reclaim build/cache content from {content_rows} session(s)? "
+            "Transcripts and conversation records will be kept. Type 'yes' to confirm: "
         )
     if not args.yes:
         if not sys.stdin.isatty():
@@ -5063,16 +6314,17 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
             return 2
-        try:
-            answer = input(prompt)
-        except (EOFError, KeyboardInterrupt):
-            answer = ""
+        answer = _confirmation_answer(prompt, json_mode=bool(args.json))
         confirmed = answer.strip().lower() == "yes"
         if not confirmed:
             if args.json:
                 emit_json(parent_preview, delegated_preview, outcome="refused", confirmed=False)
             else:
-                print("not confirmed; nothing was removed")
+                print(
+                    # i18n: ignore operator CLI output, English-only; owned by the
+                    # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                    "not confirmed; nothing was removed"
+                )
             return 2
 
     # The removal WARNINGs go to the rotating file (`local-operator.log`),
@@ -5095,6 +6347,7 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
                 lambda: policy,
                 force=force,
                 actor="cli",
+                trigger="manual",
                 now=moment,
                 budget_s=UNBOUNDED,
                 only=[c.session for c in delegated_preview.removed],
@@ -5111,10 +6364,22 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     print(f"removed {len(removed)} session(s)")
     _print_cleanup_rows(removed, "removed")
     if delegated_result.content:
-        print(f"reclaimed scratchpad content from {len(delegated_result.content)} session(s)")
+        if removed:
+            print(f"reclaimed scratchpad content from {len(delegated_result.content)} session(s)")
+        else:
+            print(
+                # i18n: ignore operator CLI output, English-only; owned by the
+                # sessions-cleanup section; remove when extracted (docs/I18N.md)
+                f"Reclaimed scratchpad content from {len(delegated_result.content)} session(s); "
+                "no transcripts or conversation records were deleted."
+            )
     if errors:
         print(f"  {errors} error(s); see the log", file=sys.stderr)
-    print(f"record: {record_path}")
+    print(
+        # i18n: ignore operator CLI output, English-only; owned by the
+        # sessions-cleanup section; remove when extracted (docs/I18N.md)
+        f"record: {record_path}"
+    )
     return 3 if errors else 0
 
 
@@ -5261,9 +6526,17 @@ _REMOTE_ROW_FILL: dict[str, Any] = {
     "heartbeat_age_s": None,
     "version": "",
     "source_ref": "",
+    "waiting_on": 0,
+    "jobs_running": None,
     "subagents_running": None,
     "subagents_queued": None,
     "last_activity_s": None,
+    # THE EXIT RECORD'S THREE READINGS. A remote catalogue row does not carry
+    # them, so the fill keeps the merged list ONE shape: absent is null, exactly
+    # as this table treats every other fact a peer cannot report.
+    "stopped_at_s": None,
+    "stop_reason": "",
+    "stop_requested": None,
     "completion_kind": "",
     "completion_reason": "",
     "leaving": "",
@@ -5697,7 +6970,7 @@ def _carry_lines(result: dict[str, Any]) -> list[str]:
     if not isinstance(carry, dict):
         return []
     lines: list[str] = []
-    for key in ("running_notice", "notice", "monitors_notice"):
+    for key in ("running_notice", "notice", "monitors_notice", "session_roles_notice"):
         text = carry.get(key)
         if isinstance(text, str) and text:
             lines.append(text)
@@ -5744,36 +7017,66 @@ def _sessions_move_words(
         # pre-safe-point reading).
         queue = result["queue"]
         phase = str(result.get("phase") or queue.get("phase") or "queued")
+        # A queued DROP still owes the user its stash promise (QA round 2): the
+        # same carry line the finished move prints, from the record-backed carry.
+        stay_lines = _carry_lines(result)
         to_block_q = result.get("to_device") or {}
         # The caller's own `to` (what they typed) beats an opaque device id, and
         # a product phrase beats both: a raw id means nothing to a person (D9).
         target = str(to_block_q.get("name") or to or "another device")
+        # THE SENTENCE MUST NOT READ AS A COMPLETED MOVE (docs/design/
+        # mesh-move-outcome.md, "Why this exists" item 1): a queued receipt is a
+        # durable INTENT, and several surfaces rendered "queued" as "Moved" — the
+        # reported failure was a move that announced itself and changed nothing. The
+        # raw phase token stays on the record (`--json`); the sentence says where the
+        # move really is, and only ``resumed`` speaks about arrival.
         notes = {
-            "queued": ("waiting for a safe point", "queued"),
+            "queued": "It is waiting for a safe point before it starts.",
             "finishing": (
-                "waiting for the current step to finish (a pending approval holds this up)",
-                "queued",
+                "It is waiting for the current step to finish (a pending approval "
+                "holds this up)."
             ),
-            "paused": ("the move has started", "running"),
-            "copying": ("the move has started", "running"),
-            "resumed": (f"it has arrived on {target}", "arrived"),
+            "paused": "",
+            "copying": "",
+            "resumed": "",
         }
-        note, shape = notes.get(phase, ("", "queued"))
+        note = notes.get(phase, "")
+        if phase in ("resumed",):
+            shape = "arrived"
+        elif phase in ("paused", "copying"):
+            shape = "running"
+        else:
+            shape = "queued"
         head = f"Queued a move of {session_id} to {target}"
-        head += f" — {note}." if note else "."
+        if shape == "running":
+            # THE COPY STARTED, so the cancel hint would be a lie: from ``paused``
+            # on, ``move_queue.cancel`` answers ``too_late``.
+            head += f" — the copy has started (phase: {phase})."
+        elif shape == "queued":
+            head += f" — nothing has moved yet (phase: {phase})."
+        else:
+            head += "."
         if shape == "arrived":
-            return [head, "It is no longer running on this device."]
+            return [
+                head,
+                f"It has arrived on {target}.",
+                "It is no longer running on this device.",
+                *stay_lines,
+            ]
         if shape == "running":
             return [
                 head,
                 f"It can no longer be cancelled; the conversation continues on {target}.",
+                *stay_lines,
             ]
         return [
             head,
+            *([note] if note else []),
             "Windows open on it are told first and get a moment to follow; any that "
             f"can't will be disconnected, and the conversation continues on {target}.",
             f"Cancel the queued move before it starts with "
             f"`lop sessions move --cancel-queued {session_id}`.",
+            *stay_lines,
         ]
 
     to_block = result.get("to_device") or {}
@@ -5809,6 +7112,20 @@ def _sessions_move_words(
         engage_lines = [
             f"{target} was asked to start it as soon as it lands; that device's own "
             "listing is where it shows."
+        ]
+    from local_operator.network import mobility as mobility_mod
+
+    if mobility_mod.move_receipt_state(result) != "completed":
+        # THE SAME RULE, WITHOUT A QUEUE BLOCK: an in-progress receipt is a handoff
+        # whose commit has not landed yet, and no surface may call that "Moved".
+        # NOT "QUEUED" EITHER (QA round 1, Q-3): no producer reaches here through the
+        # queue (that receipt carries a ``queue`` block and is worded above), so the
+        # mechanism word would name the wrong thing — this is a handoff that started
+        # and has not finished.
+        return [
+            f"The move of {session_id} to {target} is still in progress "
+            f"(phase: {result.get('phase') or 'in_progress'}); nothing has landed yet.",
+            "Run this verb again to finish it.",
         ]
     if result.get("mode") == "keep":
         return [
@@ -5902,6 +7219,9 @@ def sessions_move_command(args: argparse.Namespace) -> int:
         # with ``bool(...)`` so a hand-rolled Namespace without the attribute is
         # off, the same contract the parser's default gives it.
         queue=bool(getattr(args, "queue", False)),
+        # ``bool(...)`` so a hand-rolled Namespace without the attribute gets the
+        # protective default (the source refuses; nothing is dropped silently).
+        drop_session_roles=bool(getattr(args, "drop_session_roles", False)),
     )
     if getattr(args, "json", False):
         print(_json.dumps(result, indent=2, sort_keys=True, default=str))
@@ -5914,7 +7234,7 @@ def sessions_move_command(args: argparse.Namespace) -> int:
     )
     if result.get("ok"):
         for line in lines:
-            print(line)
+            print(line)  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
         return 0
     for line in lines:
         print(line, file=sys.stderr)
@@ -5944,6 +7264,185 @@ def sessions_sync_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def sessions_hold_command(args: argparse.Namespace) -> int:
+    """``lop sessions hold`` — record an operator value hold on one conversation.
+
+    A hold outranks every removal policy and the content pass, so the reference
+    is resolved to one id before anything is written: an ambiguous prefix is
+    refused with its candidates rather than holding the wrong conversation.
+    """
+    from local_operator.session.cleanup import resolve_session_reference, set_hold
+
+    # An empty reason is refused BEFORE anything is read or written, with the
+    # same rule `set_hold` enforces (UX round 1, U1). The API check is the
+    # backstop; this one exists so the operator gets an actionable sentence
+    # rather than a logged ERROR plus a generic failure.
+    if not str(args.reason).strip():
+        print(
+            # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+            "hold: --reason must be non-empty: it records why this conversation must survive.",
+            file=sys.stderr,
+        )
+        return 2
+    sessions_dir = config_dir() / "sessions"
+    requested = str(args.session)
+    session_id, candidates = resolve_session_reference(sessions_dir, requested)
+    if session_id is None:
+        if candidates:
+            print(
+                # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+                f"{requested!r} is ambiguous: {len(candidates)} stored sessions match "
+                "(pass the full id):",
+                file=sys.stderr,
+            )
+            for name in candidates[:20]:
+                print(f"  {name}", file=sys.stderr)
+        else:
+            print(
+                f"no session {requested!r} in this store", file=sys.stderr
+            )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+        return 1
+    if not set_hold(
+        sessions_dir, session_id, reason=str(args.reason), by="operator", kind=str(args.kind)
+    ):
+        print(
+            f"could not record the hold on {session_id}", file=sys.stderr
+        )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+        return 1
+    print(
+        f"Held {session_id} ({args.kind}): {str(args.reason).strip()}"
+    )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+    return 0
+
+
+def sessions_holds_command(args: argparse.Namespace) -> int:
+    """``lop sessions holds`` — list the store's value holds.
+
+    Exit 1 on an unreadable holds file, because that is the same state in which
+    every remover refuses: the listing must not render an empty table as "no
+    holds" when the truth is "cannot tell".
+    """
+    import json as _json
+
+    from local_operator.session.cleanup import HoldsUnreadable, read_holds
+
+    sessions_dir = config_dir() / "sessions"
+    try:
+        holds = read_holds(sessions_dir)
+    except HoldsUnreadable as exc:
+        print(
+            f"cannot read the value holds: {exc}", file=sys.stderr
+        )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+        return 1
+    if getattr(args, "json", False):
+        print(_json.dumps({"holds": holds}, indent=2, sort_keys=True))
+        return 0
+    if not holds:
+        print(
+            "no value holds recorded for this store."
+        )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+        return 0
+    for session_id in sorted(holds):
+        entry = holds[session_id]
+        print(
+            f"  {session_id}  {entry.get('kind', '?')}  {entry.get('reason', '')}"
+            f"  ({entry.get('by', '?')}, {entry.get('at', '?')})"
+        )
+    print(
+        f"{len(holds)} value hold(s)."
+    )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+    return 0
+
+
+def sessions_unhold_command(args: argparse.Namespace) -> int:
+    """``lop sessions unhold`` — clear a hold, logging the decision.
+
+    A session directory that is already gone can still have its hold released:
+    the holds file is the record that must be clearable, and refusing because
+    the directory vanished would leave a tombstone no command can remove. The
+    output says the session is gone so the caller is not misled about what
+    remains.
+    """
+    from local_operator.session.cleanup import (
+        HoldsUnreadable,
+        read_holds,
+        release_hold,
+        resolve_session_reference,
+    )
+
+    # THE RELEASE DECISION NEEDS A WHY (UX round 1, U1). A blank reason used to
+    # clear an evidence/source-of-truth hold and write a `hold-release` row
+    # with `"reason": ""` — a decision no later reader can evaluate, made by
+    # the one act that authorizes reaping. Refused before any read or write;
+    # `release_hold` refuses it too, for callers that never come through here.
+    if not str(args.reason).strip():
+        print(
+            # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+            "unhold: --reason must be non-empty: it is the recorded decision to release the hold.",
+            file=sys.stderr,
+        )
+        return 2
+    sessions_dir = config_dir() / "sessions"
+    requested = str(args.session)
+    session_id, candidates = resolve_session_reference(sessions_dir, requested)
+    if candidates:
+        print(
+            # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+            f"{requested!r} is ambiguous: {len(candidates)} stored sessions match "
+            "(pass the full id):",
+            file=sys.stderr,
+        )
+        for name in candidates[:20]:
+            print(f"  {name}", file=sys.stderr)
+        return 1
+    if session_id is None:
+        # No directory: only a literal id-shaped reference can name a hold on a
+        # session that is gone. Anything path-shaped is refused by the same
+        # rule the resolver applies.
+        if not requested or requested in (".", "..") or Path(requested).name != requested:
+            print(
+                f"not a session id: {requested!r}", file=sys.stderr
+            )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+            return 1
+        target = requested
+    else:
+        target = session_id
+    try:
+        holds = read_holds(sessions_dir)
+    except HoldsUnreadable as exc:
+        print(
+            f"cannot read the value holds: {exc}", file=sys.stderr
+        )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+        return 1
+    if target not in holds:
+        print(
+            f"no hold was recorded for {target}", file=sys.stderr
+        )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+        return 1
+    if not release_hold(sessions_dir, target, reason=str(args.reason), actor="cli"):
+        print(
+            f"could not release the hold on {target}", file=sys.stderr
+        )  # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+        return 1
+    # STATE THE CONSEQUENCE, NOT JUST THE EVENT (UX round 1, U3): a release
+    # does not delete anything now, but it removes the reason cleanup and
+    # retention refused this conversation. Say exactly that, and say nothing
+    # stronger (the other guards still apply).
+    if session_id is None:
+        print(
+            # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+            f"Released the hold on {target}; the session directory is gone, "
+            "so nothing remains to retain."
+        )
+    else:
+        print(
+            # i18n: ignore operator CLI output; translation wave deferred (PR 2736)
+            f"Released the hold on {target}. Cleanup and retention may now apply "
+            "to this conversation; its other protections still do."
+        )
+    return 0
+
+
 def sessions_command(args: argparse.Namespace) -> int:
     """``lop sessions`` — list active sessions and their resource usage.
 
@@ -5955,6 +7454,15 @@ def sessions_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "sessions_command", None) == "cleanup":
         return sessions_cleanup_command(args)
+
+    if getattr(args, "sessions_command", None) == "hold":
+        return sessions_hold_command(args)
+
+    if getattr(args, "sessions_command", None) == "holds":
+        return sessions_holds_command(args)
+
+    if getattr(args, "sessions_command", None) == "unhold":
+        return sessions_unhold_command(args)
 
     if getattr(args, "sessions_command", None) == "reclaim":
         return sessions_reclaim_command(args)
@@ -6253,6 +7761,13 @@ def sessions_command(args: argparse.Namespace) -> int:
     )
     if show_stored:
         header += f" {'LAST_ACTIVE':>11}"
+        # STOPPED rides beside LAST_ACTIVE on the same gate: a stored session has
+        # no uptime, so when it LAST MOVED and when it LAST STOPPED are the two
+        # clocks a reader can actually use. The reason cell follows, because the
+        # age alone cannot separate "it idled out" from "I stopped it" — the
+        # question the 2026-09-30 sweep left unanswered (see ``stop_requested``).
+        header += f" {'STOPPED':>11}"
+        header += f" {'STOP_REASON':<{STOP_REASON_COLUMN_WIDTH}}"
     if show_why:
         header += f" {'WHY':<{WHY_COLUMN_WIDTH}}"
     if show_leaving:
@@ -6321,6 +7836,24 @@ def sessions_command(args: argparse.Namespace) -> int:
             stamp = row["last_activity_s"]
             age = "—" if stamp is None else _format_duration(max(0.0, now - stamp))
             line += f" {age:>11}"
+            # A REAL AGE FROM THE EXIT RECORD, and "—" where there is none. The
+            # two are different sentences and the column must not blur them: a
+            # SIGKILLed runtime writes no record, and printing the transcript's
+            # mtime here would invent a departure nobody observed.
+            stopped = row.get("stopped_at_s")
+            stopped_age = (
+                "—" if stopped is None else _format_duration(max(0.0, now - float(stopped)))
+            )
+            line += f" {stopped_age:>11}"
+            # THE REASON, fitted and marked by the same helpers WHY uses — not
+            # character slicing, which is what runs a wide-glyph row into its
+            # neighbour. Only a stored row can carry one; a live row's cell is
+            # blank because nothing has stopped to report.
+            if stored:
+                said = _clamp_reason_cell(row.get("stop_reason") or "—", STOP_REASON_COLUMN_WIDTH)
+            else:
+                said = ""
+            line += f" {_pad_cell(said, STOP_REASON_COLUMN_WIDTH)}"
         if show_why:
             cell = _clamp_reason_cell(why.get(row["session_id"]) or "")
             # `:<{WHY_COLUMN_WIDTH}` would pad this by CHARACTERS and hand a
@@ -6375,7 +7908,7 @@ def sessions_command(args: argparse.Namespace) -> int:
             # ``STOP_RUNG_LABELS`` states for the stop rungs).
             said_held = HELD_CELL if held.get(row["session_id"]) else ""
             line += f" {_pad_cell(said_held, HELD_COLUMN_WIDTH)}"
-        print(line)
+        print(line)  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
     return 0
 
 
@@ -8003,6 +9536,16 @@ def _monitor_rows() -> "list[dict[str, Any]]":
                     # route and the TUI band read.
                     "unavailable_since": raw.get("unavailable_since") or 0,
                     "last_error": raw.get("last_error") or "",
+                    # The blind state and the suppression counts: ``health_hint``
+                    # renders from the INDEX row, so a listing that dropped
+                    # them could only ever say "nothing has changed" for a
+                    # watch that was suppressing changes or comparing a
+                    # truncated result.
+                    "suppressed": (
+                        raw.get("suppressed") if isinstance(raw.get("suppressed"), dict) else {}
+                    ),
+                    "blind": bool(raw.get("blind")),
+                    "blind_reason": raw.get("blind_reason") or "",
                     "created_at": raw.get("created_at") or 0,
                     "dormant": dormant,
                     "due_in_s": None if due is None else (due - now_ms) / 1000.0,
@@ -8037,6 +9580,18 @@ def _monitor_state_word(row: "dict[str, Any]") -> str:
         return "dormant"
     if row["disabled"]:
         return "disabled"
+    # EXPIRED outranks blind (review round 1, F5): a watch past ``until_at``
+    # will not tick again, so "cannot compare" names a failure that can no
+    # longer cost a missed change. The same rule in ``store.health_hint`` and
+    # the TUI band keeps all surfaces on one precedence.
+    until = row.get("until_at")
+    if isinstance(until, int) and not isinstance(until, bool) and until <= int(time.time() * 1000):
+        return "expired"
+    if row.get("blind"):
+        # A blind watch is armed and ticking but reports nothing; like disabled
+        # it outranks the clock, because the due time is the one thing that
+        # still looks healthy.
+        return "blind"
     if row["due_in_s"] is None:
         return "waiting"
     from local_operator.monitors import store as monitor_store
@@ -8047,38 +9602,30 @@ def _monitor_state_word(row: "dict[str, Any]") -> str:
 
 
 def _monitor_detail(row: "dict[str, Any]") -> str:
-    """The monitor row's tail: health FIRST, then the interval and counters.
+    """The monitor row's tail: the interval and counters.
 
-    ORDER IS THE DEGRADATION POLICY (design review round 1, D6). The table is
-    clamped to the terminal, and a hint appended last was the first thing cut —
-    measured at ``COLUMNS=80``, every hint was truncated away while the counters
-    beside it survived. Leading with the health means a narrow row loses the
-    boilerplate instead, and the DUE column's state word (``idle``) carries the
-    short form of the same fact.
+    The health sentence is NOT here (design review round 1, D2). Leading with
+    it was the round-1 degradation policy, but at 60–80 columns the whole row
+    was clipped after the label and counters, so the one fact that must not be
+    lost went first — ``m_supp … · 20 checks, 0 deliveries — 7…``. The hint now
+    prints on its own indented line beneath the row (``monitor_command``),
+    wrapped to the terminal, where no column budget can eat it. The hint is
+    still read here for the duplication rules below (the zero-deliveries hint
+    already names the counters it would otherwise repeat).
     """
     from local_operator.harness.wake import format_duration
     from local_operator.monitors import store as monitor_store
     from local_operator.wakes.display import format_age
 
     now = int(time.time() * 1000)
-    # The hint is shared with the agent tool, the desktop route and the TUI band
-    # (§D6) so one monitor cannot read as healthy on one surface and stalled on
-    # another.
     hint = monitor_store.health_hint(row, now)
 
     parts: list[str] = []
     clause = ""
     if row.get("disabled"):
-        # ``disabled_clause``, not the stored string: it folds the reason into
-        # one line (a live disable carries ``invalid arguments:\n- path: …``,
-        # which printed its continuation at column 0 and broke the table — UX
-        # round 1, U3) and prefers the counters' plain cause to a raw tool
-        # banner (U4). The row leads with it, so it has to be readable.
         clause = monitor_store.disabled_clause(row)
         if clause:
             parts.append(clause)
-    if hint:
-        parts.append(hint)
     if monitor_store.is_idle(row, now) and not (hint and hint.startswith("never checked")):
         # "overdue by 2h — session not open" and "never checked — its session was
         # not open since arming" are ONE fact said twice (D7): the idle detail
@@ -8091,10 +9638,12 @@ def _monitor_detail(row: "dict[str, Any]") -> str:
         parts.append("once")
     if row.get("checks"):
         # The zero-deliveries hint OPENS with the same count ("12 checks, 0
-        # deliveries"), so the standalone counter would say it twice in one row
-        # — the D7 defect in its other form.
+        # deliveries"), and the suppression hint names it inside its news clause
+        # ("7 changes suppressed as non-material (12 checks, 0 deliveries) —
+        # …"). Either spelling means the standalone counter would say it twice
+        # in one row — the D7 defect in its other form (review round 2, F2).
         counter_clause = f"{int(row['checks'])} checks"
-        if not (hint and hint.startswith(counter_clause)):
+        if not (hint and (hint.startswith(counter_clause) or f"({counter_clause}" in hint)):
             parts.append(counter_clause)
     age = row.get("last_check_age_s")
     if age is not None:
@@ -8130,16 +9679,23 @@ def monitor_command(args: argparse.Namespace) -> int:
         return 0
 
     import shutil
+    import textwrap
+
+    from local_operator.monitors import store as monitor_store
 
     # A fixed-width table, matching `lop wake list` right next door rather
     # than inventing a second listing convention. The monitor label is what
     # gets clamped (the reader recognises a name from its opening words);
-    # the state word and the tail are never cut silently.
+    # the state word and the tail are never cut silently. A health hint is not
+    # part of the clampable detail: it prints on its own indented, wrapped line
+    # beneath the row, because at 60–80 columns the row budget cut the hint
+    # AND its reason away (design review round 1, D2).
     term_width = shutil.get_terminal_size((80, 24)).columns
     state_w = max(11, max(len(_monitor_state_word(row)) for row in rows))
     id_w = 13
     detail_w = max(24, term_width - state_w - id_w - 2)
     print(f"{'DUE':>{state_w}} {'SESSION':<{id_w}} MONITOR")
+    now = int(time.time() * 1000)
     for row in rows:
         state = _monitor_state_word(row)
         label = f"{row['monitor_id']} {row['name']}".strip()
@@ -8149,6 +9705,15 @@ def monitor_command(args: argparse.Namespace) -> int:
             detail = detail[: max(detail_w - 1, 1)] + "…"
         line = f"{state:>{state_w}} {_elide_id(row['session_id'], id_w):<{id_w}} {detail}"
         print(line.rstrip())
+        hint = monitor_store.health_hint(row, now)
+        if hint:
+            for wrapped in textwrap.wrap(
+                hint,
+                width=max(20, term_width),
+                initial_indent="  ",
+                subsequent_indent="  ",
+            ):
+                print(wrapped.rstrip())
 
     # One legend under the table rather than the same sentence on every row,
     # and only for the states actually present (the wake list's rule).
@@ -8167,9 +9732,17 @@ def monitor_command(args: argparse.Namespace) -> int:
         # One clause, because the row above already says "session not open"
         # (D7): the legend's job is to say what to DO, not to restate the row.
         legend.append(("idle", "no session is hosting it — reopen it to resume"))
+    if any(row.get("blind") for row in rows) and any(
+        _monitor_state_word(row) == "blind" for row in rows
+    ):
+        legend.append(
+            (
+                "blind",
+                "it cannot compare its full result, so changes are not reported; "
+                "the indented health line beneath its row names the reason",
+            )
+        )
     if legend:
-        import textwrap
-
         legend_w = max(len(word) for word, _ in legend) + 1
         for word, text in legend:
             print()
@@ -8327,6 +9900,21 @@ def _live_state_supersedes_outcome(row: dict[str, Any]) -> bool:
 #: terminal. The full text is one flag away in ``--json``'s
 #: ``completion_reason`` and is what a script should read.
 WHY_COLUMN_WIDTH = 48
+
+
+#: Width of `lop sessions`' trailing STOP_REASON column, in display CELLS.
+#:
+#: THE SECOND HALF of the STOPPED pair. The age column says WHEN the runtime's own
+#: exit path ran; this one says WHY, in the runtime's words (``idle-exit``,
+#: ``retiring for 0.85.0``, ``SIGTERM``). Both are gated on stored rows exactly
+#: like LAST_ACTIVE, because both are facts only a stopped runtime can report.
+#:
+#: Wide enough that every policy reason a runtime produces fits uncut —
+#: ``retiring for 0.85.0@abc1234`` is the long shape at 27 cells — and a longer
+#: one (the probe-unreadable idle exit appends its evidence) is MARKED by
+#: ``_clamp_reason_cell`` rather than silently sliced, because the cell's purpose
+#: is to answer a question and a plausible-looking cut answers it wrongly.
+STOP_REASON_COLUMN_WIDTH = 28
 
 
 #: Width of `lop sessions`' trailing LEAVING column, in display CELLS.
@@ -10380,7 +11968,13 @@ def teams_link_command(args: argparse.Namespace, team_registry: Any, base_dir: P
     # every sync is the two-way conservative merge (A2.3) and needs the caller's
     # acknowledgement. Recording B := L instead would read a later hub DELETION as a
     # plain remote removal and delete text the user wrote.
-    prov.write_baseline(
+    #
+    # ``lop teams link`` is the operator naming the origin THEMSELVES: the row is
+    # linked into an organization, so the link carries that organization's scope
+    # and the CONFIGURED base -- the same identity the resolve dialog would mint
+    # for the same row (no client is involved here, so the configuration names
+    # the destination).
+    prov.attach_origin(
         team_registry.config_dir,
         prov.make_record(
             "team",
@@ -10389,6 +11983,11 @@ def teams_link_command(args: argparse.Namespace, team_registry: Any, base_dir: P
             tenant,
             local,
             "adopt" if identical else prov.UNKNOWN_BASELINE,
+        ),
+        _link_origin(
+            prov.canonical_hub_source(ConfigManager(base_dir)) or "",
+            "org",
+            tenant,
         ),
     )
     print(f"\n\033[1;32mLinked team '{team.name}' to hub team {args.hub_team_id}.\033[0m")
@@ -10555,6 +12154,786 @@ def hub_link_set_command(args: argparse.Namespace, base_dir: Path) -> int:
             f"link {args.link_id}: subscribe={payload['subscribe']} "
             f"auto_push={payload['auto_push']}"
         )
+    return 0
+
+
+def skills_command(args: argparse.Namespace, base_dir: Path) -> int:
+    """``lop skills …`` -- publish / pull / sync / status for hub skills.
+
+    Thin by design: every arm calls the SAME ``hub_sync.service`` function the
+    desktop routes call (``preview_skill_publication`` + ``publish_skill``,
+    ``install_skill``, ``check_items`` + ``apply_items``, ``links_snapshot``), so
+    the CLI can never grow a second sync engine with different safety rules.
+    """
+
+    command = getattr(args, "skills_command", None)
+    if command == "publish":
+        return _skills_publish(args, base_dir)
+    if command == "pull":
+        return _skills_pull(args, base_dir)
+    if command == "push":
+        return _skills_push(args, base_dir)
+    if command == "sync":
+        return _skills_sync(args, base_dir)
+    if command == "status":
+        return _skills_status(args, base_dir)
+    print(
+        f"error: unknown skills command: {command}",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    return 2
+
+
+#: Bundle refusals as "what happened: what to do" (D6). Keyed by the LinkError
+#: code, so every skills arm words the same refusal the same way.
+_SKILL_REFUSAL_TEXT: dict[str, tuple[str, str]] = {
+    "bundle-invalid": (
+        "the bundle archive is not safe to install",
+        "fix the source files (no executables, symlinks or hidden paths) and publish again",
+    ),
+    "bundle-hash-mismatch": (
+        "the downloaded archive does not match the published hash",
+        "pull again; if it repeats, ask the publisher to republish",
+    ),
+    "bundle-too-large": (
+        "the bundle exceeds the carrier's size bound",
+        "trim the archive and republish",
+    ),
+    "bundle-confirmation-required": (
+        "this bundle needs its publisher and archive hash confirmed",
+        "re-run with --confirm-publisher ID --confirm-hash HASH, or --yes after reading "
+        "the facts",
+    ),
+    "bundle-confirmation-mismatch": (
+        "what you confirmed no longer matches the hub row",
+        "re-run the pull to read the current facts",
+    ),
+    "bundle-publisher-changed": (
+        "the hub row now names a different publisher",
+        "run `lop skills pull <id> --reinstall` to accept the change",
+    ),
+    "bundle-publisher-unnamed": (
+        "the hub did not name the publisher of this bundle",
+        "ask the publisher to republish so the revision names an account, then pull again",
+    ),
+    "bundle-local-changes": (
+        "the local bundle changed since it was checked",
+        "run `lop skills sync` or `lop skills push` again",
+    ),
+    "bundle-conflict": (
+        "the local bundle and the hub both changed",
+        "keep a copy, then pull again, or reconcile and push",
+    ),
+    "bundle-alias-rename-unsupported": (
+        "a bundle is installed under its published name",
+        "drop --alias and pull again",
+    ),
+    "bundle-form-changed": (
+        "the skill changed form between document and bundle",
+        "unpull the link and pull it again",
+    ),
+    "bundle-unsupported-server": (
+        "the hub does not support bundles yet",
+        "update the hub, or pull a document skill",
+    ),
+    "no-credential": (
+        "this machine has no hub credential for that scope",
+        "run `lop login radient` and try again",
+    ),
+    "reinstall-unsupported": (
+        "--reinstall applies to bundle links only",
+        "pull a document without --reinstall",
+    ),
+}
+
+
+_CONTROL_OR_FORMAT = re.compile(
+    r"[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]"
+)
+
+
+def _safe(value: Any, *, limit: int = 200) -> str:
+    """Untrusted (remote-derived) text made safe for ONE terminal line.
+
+    Publisher names, ids and file paths come from the hub: a ``"\x1b[2K\r"``
+    there would overwrite the very line the operator is approving (D1). Control
+    and format characters are VISIBLE-ESCAPED (``\x1b``, ``\u202e``) rather
+    than stripped, so a hostile id stays printable and can still be pasted into
+    a confirmation (D15); whitespace collapses to single spaces and the result
+    is bounded. Ordinary Unicode (accents, CJK, emoji) is returned unchanged.
+    """
+
+    text = str(value)
+
+    def escaped(match: re.Match[str]) -> str:
+        return match.group(0).encode("unicode_escape").decode("ascii")
+
+    visible = _CONTROL_OR_FORMAT.sub(escaped, text)
+    return " ".join(visible.split())[:limit]
+
+
+def _skills_fail(args: argparse.Namespace, error: Any) -> int:
+    """A refusal in the MODE the caller asked for (round-2 D11).
+
+    ``--json`` consumers parse this stream: a plain ``error:`` line breaks
+    them, so the same sentence and code are emitted as one JSON object.
+    """
+
+    import json as _json
+
+    code = str(getattr(error, "code", "") or "")
+    sentence = _skills_refusal(error)
+    if getattr(args, "json", False):
+        print(_json.dumps({"error": sentence, "code": code}))
+    else:
+        print(
+            f"error: {sentence}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
+    return 1
+
+
+def _publish_refusal(error: Any) -> Any:
+    """A publish-side refusal with the right verb and the offending path (D10).
+
+    The pull-side wording ("not safe to install") is wrong while publishing and
+    drops the entry name, which on a large skill turns a fix into a search. Only
+    the executable/special-mode refusal is rewritten; everything else passes
+    through to the shared sentence table.
+    """
+
+    from local_operator.hub_sync.identity import LinkError
+
+    match = re.search(r"source entry '([^']+)' is executable", str(error))
+    if match:
+        # A DISTINCT code: the shared table answers ``bundle-invalid`` with the
+        # pull-side sentence, which would drop the path this refusal exists to
+        # name. Not in the table -> the message below is the answer.
+        return LinkError(
+            "bundle-executable",
+            "bundles cannot contain executables: chmod -x "
+            f"{_safe(match.group(1))} and publish again",
+        )
+    return error
+
+
+def _skills_refusal(error: Any) -> str:
+    """A named bundle refusal as a sentence with a next action (D6)."""
+
+    code = str(getattr(error, "code", "") or "")
+    mapped = _SKILL_REFUSAL_TEXT.get(code)
+    if mapped is not None:
+        what, action = mapped
+        return f"{what}: {action} [{code}]"
+    return _safe(str(error))
+
+
+def _scope_label(visibility: str) -> str:
+    """The scope as the operator says it (D4: an org row is never "public")."""
+
+    return "organization" if visibility == "org" else "public"
+
+
+def _quoted_name(value: Any) -> str:
+    """A display name for a quoted segment: quotes and backslashes escaped.
+
+    ``_safe`` strips control/format characters but leaves quotes, so a name like
+    ``Minerva Labs (acct_real)")`` could CLOSE the segment and fabricate the
+    trusted id that follows it on the same line (round-3 r3-m3).
+    """
+
+    return _safe(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _print_pin(pin: Any, *, indent: str = "  ") -> None:
+    """Show the confirmed publisher + archive hash when a link carries one."""
+
+    if not isinstance(pin, Mapping):
+        return
+    name = pin.get("publisher_name")
+    label = _safe(pin.get("publisher_id"))
+    if name:
+        label += f' ("{_quoted_name(name)}")'
+    print(
+        f"{indent}publisher: {label}",
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+    )
+    if pin.get("archive_hash"):
+        print(
+            f"{indent}confirmed archive sha256: {_safe(pin.get('archive_hash'))}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
+
+
+def _bytes_label(value: Any) -> str:
+    """Bytes, or MiB past one MiB, so a 25 MB skill reads as a size (D13)."""
+
+    size = int(value or 0)
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MiB"
+    return f"{size} bytes"
+
+
+def _bundle_lines(
+    bundle: Mapping[str, Any],
+    *,
+    publisher: Mapping[str, Any] | None,
+    indent: str = "  ",
+) -> list[str]:
+    """The human facts of one bundle (D3/D7): sizes, both hashes, file summary."""
+
+    count = int(bundle.get("file_count") or 0)
+    lines = [
+        f"{indent}{count} file{'' if count == 1 else 's'}, "
+        f"{_bytes_label(bundle.get('size'))} packed / "
+        f"{_bytes_label(bundle.get('uncompressed_size'))} unpacked",
+        f"{indent}archive sha256: {_safe(bundle.get('hash'))}",
+        f"{indent}tree hash: {_safe(bundle.get('tree_hash'))}",
+    ]
+    files = bundle.get("files")
+    if isinstance(files, list) and files:
+        names = [
+            _safe(row.get("path") if isinstance(row, Mapping) else row, limit=120) for row in files
+        ]
+        summary = f"{indent}files: " + ", ".join(names)
+        more = int(bundle.get("files_more") or 0)
+        if more:
+            summary += f" (… and {more} more)"
+        lines.append(summary)
+    if publisher:
+        label = _safe(publisher.get("id"))
+        if publisher.get("name"):
+            # QUOTED (D14): a display name can otherwise mimic a trusted id
+            # textually ("Minerva Labs (acct_real)") inside the same line.
+            label += f' ("{_quoted_name(publisher.get("name"))}")'
+        lines.append(
+            f"{indent}publisher: {label}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
+    return lines
+
+
+def _skills_scope(args: argparse.Namespace) -> tuple[str, str | None]:
+    """``--public`` / ``--org TENANT`` as the paired scope the service requires."""
+
+    public = bool(getattr(args, "public", False))
+    tenant = getattr(args, "org", None)
+    if public and tenant:
+        raise ValueError("pass either --public or --org, not both")
+    if not public and not tenant:
+        raise ValueError("pass --public or --org TENANT")
+    return ("public", None) if public else ("org", str(tenant))
+
+
+def _skills_publish(args: argparse.Namespace, base_dir: Path) -> int:
+    import json as _json
+
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkError
+
+    try:
+        visibility, tenant_id = _skills_scope(args)
+    except ValueError as error:
+        print(
+            f"error: {error}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
+        return 2
+    form = "bundle" if bool(getattr(args, "bundle", False)) else "document"
+    alias = getattr(args, "alias", None) or args.name
+    subscribe = not bool(getattr(args, "no_subscribe", False))
+    ctx = svc.sync_context(ConfigManager(base_dir))
+    try:
+        preview = svc.preview_skill_publication(
+            ctx,
+            source_skill=args.name,
+            local_alias=alias,
+            visibility=visibility,  # type: ignore[arg-type]
+            tenant_id=tenant_id,
+            subscribe=subscribe,
+            auto_push=False,
+            confirm_public_egress=False,
+            form=form,
+        )
+    except LinkError as error:
+        return _skills_fail(args, _publish_refusal(error))
+    if not getattr(args, "json", False):
+        print(
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            f"{form} publication of {_safe(args.name)!r} as {_safe(alias)!r} "
+            f"({_scope_label(visibility)})"
+        )
+        if form == "bundle":
+            print(
+                "\n".join(
+                    _bundle_lines(preview.get("bundle") or {}, publisher=preview.get("publisher"))
+                )
+            )
+            for note in preview.get("notes") or []:
+                print(
+                    f"  note: {_safe(note, limit=400)}",
+                    # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+                )
+        if preview.get("reason"):
+            print(
+                "  cannot publish: " f"{_skills_refusal(_reason_error(str(preview['reason'])))}",
+                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            )
+    if preview.get("reason"):
+        # The CODE stays machine-readable; the sentence rides beside it so a
+        # JSON consumer is not left with a bare token (round-2 D6).
+        preview["reason_message"] = _skills_refusal(_reason_error(str(preview["reason"])))
+        if getattr(args, "json", False):
+            print(_json.dumps(preview, indent=2))
+        return 1
+    if not getattr(args, "yes", False):
+        if not sys.stdin.isatty():
+            return _skills_fail(
+                args,
+                LinkError(
+                    "confirmation-required",
+                    "pass --yes to publish (no terminal to confirm on)",
+                ),
+            )
+        answer = input("Publish this skill to the hub? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print(
+                "cancelled",
+                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            )
+            return 1
+    try:
+        result = svc.publish_skill(
+            ctx,
+            source_skill=args.name,
+            local_alias=alias,
+            visibility=visibility,  # type: ignore[arg-type]
+            tenant_id=tenant_id,
+            subscribe=subscribe,
+            auto_push=False,
+            confirm_public_egress=False,
+            preview_receipt=str(preview.get("preview_receipt") or ""),
+            form=form,
+        )
+    except LinkError as error:
+        return _skills_fail(args, _publish_refusal(error))
+    if getattr(args, "json", False):
+        print(_json.dumps(result, indent=2))
+        return 0
+    link = result.get("link") or {}
+    print(
+        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        f"published {_safe(link.get('name') or alias)} ({form}) as "
+        f"{_safe(link.get('hub_id') or '?')}"
+    )
+    return 0
+
+
+def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
+    import json as _json
+
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.identity import LinkError
+    from local_operator.hub_sync.provenance import canonical_hub_source
+
+    try:
+        visibility, tenant_id = _skills_scope(args)
+    except ValueError as error:
+        print(
+            f"error: {error}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
+        return 2
+    subscribe = not bool(getattr(args, "no_subscribe", False))
+    reinstall = bool(getattr(args, "reinstall", False))
+    ctx = svc.sync_context(ConfigManager(base_dir))
+    alias = getattr(args, "alias", None)
+    hub_source = canonical_hub_source(ctx.config_manager) or ""
+    try:
+        preview = svc.install_skill(
+            ctx,
+            hub_source=hub_source,
+            hub_id=args.hub_id,
+            visibility=visibility,  # type: ignore[arg-type]
+            tenant_id=tenant_id,
+            alias=alias,
+            subscribe=subscribe,
+            dry_run=True,
+            reinstall=reinstall,
+        )
+    except LinkError as error:
+        return _skills_fail(args, error)
+    bundle = preview.get("bundle")
+    publisher = preview.get("publisher")
+    confirm_publisher = getattr(args, "confirm_publisher", None)
+    confirm_hash = getattr(args, "confirm_hash", None)
+    if not getattr(args, "json", False):
+        name = (bundle or {}).get("name") or args.hub_id
+        print(
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            f"install {_safe(name)!r} ({'bundle' if bundle else 'document'}) from "
+            f"{_scope_label(visibility)}"
+        )
+        if bundle:
+            print("\n".join(_bundle_lines(bundle.get("bundle") or {}, publisher=publisher)))
+            for note in bundle.get("notes") or []:
+                print(
+                    f"  note: {_safe(note, limit=400)}",
+                    # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+                )
+    if bundle is None and reinstall:
+        return _skills_fail(
+            args,
+            LinkError(
+                "reinstall-unsupported",
+                "--reinstall applies to bundle links: a document has no archive "
+                "to reinstall from",
+            ),
+        )
+    if bundle is not None and visibility == "org" and (confirm_publisher or confirm_hash):
+        # D9: the service does not verify a publisher for org rows, so the CLI
+        # must not pretend it did. Say it plainly and ignore the flags.
+        if not getattr(args, "json", False):
+            print(
+                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+                "  note: an organization install is authorized by membership; "
+                "--confirm-publisher/--confirm-hash do not apply"
+            )
+        confirm_publisher = confirm_hash = None
+    if bundle is not None and visibility == "public" and publisher is None:
+        # BEFORE the prompt and before the flag instruction (D5): no account is
+        # named, so there is no id to confirm and --yes cannot satisfy it.
+        return _skills_fail(
+            args,
+            LinkError(
+                "bundle-publisher-unnamed",
+                "the hub's response names no publisher account for this bundle; ask the "
+                "publisher to republish it so the revision names an account, then pull again",
+            ),
+        )
+    if (
+        bundle
+        and visibility == "public"
+        and getattr(args, "json", False)
+        and not getattr(args, "yes", False)
+        and not (confirm_publisher and confirm_hash)
+    ):
+        # A QUERY, NOT AN ERROR (D2): a non-interactive caller reads the facts
+        # and re-runs with the confirmation; nothing was installed.
+        payload = dict(preview)
+        payload["confirmation_required"] = True
+        print(_json.dumps(payload, indent=2))
+        return 0
+    confirmed = False
+    if bundle is None or visibility == "org":
+        # A DOCUMENT pull carries no bundle confirmation, and an ORG bundle is
+        # authorized by membership (the service verifies/pins only public rows).
+        pass
+    elif bool(getattr(args, "yes", False)):
+        confirmed = True
+    elif confirm_publisher and confirm_hash:
+        # The service compares BOTH against the row it re-reads; the CLI only
+        # forwards them, so a swapped publisher or archive refuses there.
+        pass
+    elif sys.stdin.isatty() and not getattr(args, "json", False):
+        answer = input("Install this bundle? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            print(
+                "cancelled",
+                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            )
+            return 1
+        confirmed = True
+    else:
+        return _skills_fail(
+            args,
+            LinkError(
+                "bundle-confirmation-required",
+                f"this {_scope_label(visibility)} bundle install needs the publisher "
+                "confirmation: pass --confirm-publisher ID --confirm-hash HASH, or --yes",
+            ),
+        )
+    try:
+        result = svc.install_skill(
+            ctx,
+            hub_source=hub_source,
+            hub_id=args.hub_id,
+            visibility=visibility,  # type: ignore[arg-type]
+            tenant_id=tenant_id,
+            alias=alias,
+            subscribe=subscribe,
+            confirm=confirmed,
+            confirm_publisher_id=confirm_publisher,
+            confirm_bundle_hash=confirm_hash,
+            reinstall=reinstall,
+        )
+    except LinkError as error:
+        return _skills_fail(args, error)
+    if getattr(args, "json", False):
+        print(_json.dumps(result, indent=2))
+        return 0
+    link = result.get("link") or {}
+    reports = result.get("reports") or []
+    outcome = str((reports[0] if reports else {}).get("outcome") or "")
+    if outcome == "unchanged":
+        # A plain pull of an already-linked skill REPLAYS the existing link:
+        # saying "installed" would claim a write that never happened (D19).
+        print(
+            f"already installed; no change: {_safe(link.get('name') or args.hub_id)}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
+    else:
+        print(
+            f"installed {_safe(link.get('name') or args.hub_id)}",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
+    _print_pin(link.get("bundle_confirmation"), indent="  ")
+    return 0
+
+
+def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
+    """``lop skills push`` -- republish ONE linked skill through the push engine.
+
+    The manual twin of the runner's tick: a fresh check (the revision the commit
+    conditions on and the local fields it projects), the SAME outbound
+    projection, the SAME per-link transport and the SAME ``push_item`` -- a
+    second publish path would be a second place for the receipt/attestation
+    rules to drift. A bundle additionally uploads its rebuilt archive before
+    the commit, which ``push_item`` enforces through ``bundle_upload_hook``.
+    """
+
+    import asyncio
+    import json as _json
+
+    from local_operator.hub_sync import provenance as prov
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.adapters import publish_document
+    from local_operator.hub_sync.budget import OperationBudget
+    from local_operator.hub_sync.identity import LinkError
+    from local_operator.hub_sync.outbox import Outbox
+    from local_operator.hub_sync.push import push_item
+
+    ctx = svc.sync_context(ConfigManager(base_dir))
+    checks = svc.check_items(ctx, kinds=("skill",), names=[args.name])
+    check = svc.find_check(checks, "skill", args.name)
+    if check is None:
+        return _skills_fail(
+            args,
+            LinkError(
+                "link-not-found",
+                f"no linked skill named {args.name!r} (see `lop skills status`)",
+            ),
+        )
+    record = prov.read_baseline(ctx.config_dir, "skill", check.local_id)
+    if record is None or record.identity is None:
+        return _skills_fail(
+            args,
+            LinkError(
+                "unresolved-link",
+                "this skill link has no confirmed origin; resolve it first",
+            ),
+        )
+    if record.outbound is None:
+        # THE MANUAL FIRST PUBLICATION: seeded by the one service helper the
+        # desktop push route shares, so the two surfaces cannot disagree about
+        # when an explicit push may invent its ancestor.
+        try:
+            record = svc.seed_manual_outbound_receipt(ctx, record, check)
+        except LinkError as error:
+            return _skills_fail(args, error)
+    outbound = record.outbound
+    assert outbound is not None
+    identity = record.identity
+    if identity is None:
+        return _skills_fail(
+            args,
+            LinkError(
+                "unresolved-link",
+                "this skill link has no confirmed origin; resolve it first",
+            ),
+        )
+    is_bundle = "bundle" in (record.fields or {})
+    if is_bundle and not svc._capability_bundle(ctx.store().load(), identity):
+        return _skills_fail(
+            args, LinkError("bundle-unsupported-server", "the hub does not support bundles yet")
+        )
+    expected = check.remote_revision or outbound.remote_revision
+    if not expected:
+        return _skills_fail(
+            args,
+            LinkError(
+                "no-remote-revision",
+                "this link has no remote revision to condition the write on; run a check",
+            ),
+        )
+    if not getattr(args, "yes", False):
+        if not sys.stdin.isatty():
+            return _skills_fail(
+                args,
+                LinkError(
+                    "confirmation-required",
+                    "pass --yes to push (no terminal to confirm on)",
+                ),
+            )
+        form = "bundle" if is_bundle else "document"
+        sent = ""
+        if is_bundle:
+            facts = (check.local or {}).get("bundle") or {}
+            count = int(facts.get("file_count") or 0)
+            sent = (
+                f", {count} file{'' if count == 1 else 's'} / " f"{_bytes_label(facts.get('size'))}"
+            )
+        scope = _scope_label(str(identity.visibility))
+        answer = (
+            input(
+                f"Republish {check.name!r} ({form}{sent}) to the {scope} hub "
+                f"at {expected}? [y/N] "
+            )
+            .strip()
+            .lower()
+        )
+        if answer not in ("y", "yes"):
+            print(
+                "cancelled",
+                # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            )
+            return 1
+    transport, refused = svc.push_transport(ctx, record)
+    if transport is None:
+        return _skills_fail(
+            args, LinkError(str(refused or "no-credential"), "cannot publish this link")
+        )
+    # Manual intent outranks the schedule: a backoff window left by an earlier
+    # outage must not turn an explicit push into a silent skip.
+    svc.clear_retry(ctx, "skill", args.name)
+    operation_id = f"push-skill-{check.local_id}"
+    outcome = asyncio.run(
+        push_item(
+            kind="skill",
+            local_id=check.local_id,
+            captured_local=outbound.local_fields,
+            accepted=outbound.accepted_fields,
+            current_local=check.local or {},
+            remote_latest=check.remote or {},
+            expected_revision=expected,
+            transport=transport,
+            outbox=Outbox(ctx.config_dir),
+            operation_id=operation_id,
+            budget=OperationBudget.start("manual", operation_id, 1),
+            document_builder=lambda fields: publish_document(
+                "skill", ctx.config_dir, check.local_id, fields
+            ),
+            bundle_attested=not is_bundle or svc._capability_bundle(ctx.store().load(), identity),
+            bundle_upload=(svc.bundle_upload_hook(ctx, identity, record) if is_bundle else None),
+        )
+    )
+    svc.record_push_outcome(ctx, check, outcome)
+    payload = {
+        "name": check.name,
+        "form": "bundle" if is_bundle else "document",
+        "state": outcome.state,
+        "reason": outcome.reason,
+        "revision": outcome.revision,
+        "operation_id": outcome.operation_id,
+    }
+    if getattr(args, "json", False):
+        print(_json.dumps(payload, indent=2))
+    else:
+        detail = ""
+        if outcome.reason:
+            detail = f" — {_skills_refusal(_reason_error(outcome.reason))}"
+        print(f"{_safe(check.name)}: {outcome.state}{detail}")
+    return 0 if outcome.state in ("pushed", "no-op") else 1
+
+
+def _reason_error(code: str) -> Any:
+    """A named push refusal as the LinkError the shared wording helper expects."""
+
+    from local_operator.hub_sync.identity import LinkError
+
+    return LinkError(code, code)
+
+
+def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:
+    import json as _json
+
+    from local_operator.hub_sync import service as svc
+
+    names = [args.name] if getattr(args, "name", None) else None
+    ctx = svc.sync_context(ConfigManager(base_dir))
+    checks = svc.check_items(ctx, kinds=("skill",), names=names)
+    if not checks:
+        if getattr(args, "json", False):
+            print(_json.dumps({"checks": [], "reports": []}, indent=2))
+            return 0
+        print(
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            f"No linked skill named {_safe(args.name)!r}."
+            if getattr(args, "name", None)
+            else "No linked skills."
+        )
+        return 0
+    if getattr(args, "check", False):
+        rows = [svc.check_report(c).to_json() for c in checks]
+        if getattr(args, "json", False):
+            print(_json.dumps({"checks": rows}, indent=2))
+            return 0
+        for row in rows:
+            reason = row.get("error_class") or row.get("outcome") or ""
+            print(f"{row.get('name')}: {row.get('outcome')} {reason}".rstrip())
+        return 0
+    report = svc.apply_items(
+        ctx,
+        kind="skill",
+        names=names,
+        all_available=True,
+        auto=False,
+        checks=checks,
+    )
+    payload = report.to_json()
+    if getattr(args, "json", False):
+        print(_json.dumps(payload, indent=2))
+        return 0
+    for item in payload.get("reports") or []:
+        code = str(item.get("error_class") or "")
+        detail = _skills_refusal(_reason_error(code)) if code else str(item.get("outcome") or "")
+        print(
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            f"{_safe(item.get('name'))}: {item.get('outcome')} {detail}".rstrip()
+        )
+    return 0
+
+
+def _skills_status(args: argparse.Namespace, base_dir: Path) -> int:
+    import json as _json
+
+    from local_operator.hub_sync import service as svc
+
+    ctx = svc.sync_context(ConfigManager(base_dir))
+    snapshot = svc.links_snapshot(ctx, kinds=("skill",))
+    if getattr(args, "json", False):
+        print(_json.dumps(snapshot, indent=2))
+        return 0
+    links = snapshot.get("links") or []
+    if not links:
+        print(
+            "No linked skills.",
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+        )
+        return 0
+    for link in links:
+        form = "bundle" if str(link.get("form") or "") == "bundle" else "document"
+        pull = (link.get("pull") or {}) if isinstance(link.get("pull"), dict) else {}
+        print(
+            # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
+            f"{_safe(link.get('name'))} [{form}] "
+            f"{_scope_label(str(link.get('visibility') or 'public'))} "
+            f"state={pull.get('state') or 'unknown'}"
+        )
+        code = str(pull.get("error_class") or "")
+        if code and code in _SKILL_REFUSAL_TEXT:
+            print(f"  {_skills_refusal(_reason_error(code))}")
+        _print_pin(link.get("bundle_confirmation"), indent="  ")
     return 0
 
 
@@ -11348,7 +13727,7 @@ def _ask_for_consent(
         )
         print()
         for line in _wrap_text(_ORG_INTERNAL_OPS_V1_CONSENT, _term_width() - 4, indent="  "):
-            print(line)
+            print(line)  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
         answer = _prompt_line('\nType "yes" to confirm: ')
         if answer is None or answer.strip().lower() != "yes":
             print("\n\033[1;33mConsent not given; nothing was published.\033[0m")
@@ -11483,7 +13862,7 @@ def _render_preview(preview: Mapping[str, Any], *, kind: str, flags: argparse.Na
             # The reminder is only claimable when something WAS removed (ux N1).
             summary += " Removed sections stay removed."
         for line in _wrap_text(summary, width):
-            print(line)
+            print(line)  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
         for unit in removed[:10]:
             _print_resolution_unit(unit, sign="-", width=width)
         if len(removed) > 10:
@@ -11504,7 +13883,7 @@ def _render_preview(preview: Mapping[str, Any], *, kind: str, flags: argparse.Na
             "this is published:"
         )
         for line in _wrap_text(heading, width):
-            print(line)
+            print(line)  # i18n: ignore operator CLI output, English-only; sessions-cleanup section
         print()
         rows: "list[tuple[str, str, str, str, str]]" = []
         for change in changes:
@@ -11680,7 +14059,10 @@ def _confirm_plan(
 
 
 def _seed_after_publish(
-    seed: "tuple[Any, Kind, str, Mapping[str, Any]] | None", result: Any
+    seed: "tuple[Any, Kind, str, Mapping[str, Any]] | None",
+    result: Any,
+    target: "_PublishTarget | None" = None,
+    client: Any = None,
 ) -> None:
     """Seed the outbound receipt after an ACCEPTED CLI publish (parent ruling (A)b).
 
@@ -11688,13 +14070,21 @@ def _seed_after_publish(
     ETag; A is the local input that was published. BEST-EFFORT AND SILENT on
     failure: the publication itself succeeded, and the link honestly stays
     ``no-receipt`` (the inventory says so) until the next seed point.
+
+    The ORIGIN the acceptance proved is seeded with it: the base and the scope
+    the user CHOSE (never the accepted document's ``tenant_id``, which a
+    publicly published row carries as its publisher's). A published row is then
+    a confirmed link rather than one the inventory reports as unresolved.
     """
 
     if not seed or not isinstance(result, Mapping):
         return
     config_dir, kind, local_id, local_fields = seed
     try:
-        from local_operator.hub_sync.service import seed_receipt_after_publish
+        from local_operator.hub_sync.service import (
+            published_hub_id,
+            seed_receipt_after_publish,
+        )
 
         seed_receipt_after_publish(
             config_dir,
@@ -11703,6 +14093,16 @@ def _seed_after_publish(
             accepted=result.get("accepted_document") or {},
             local_fields=dict(local_fields),
             revision=str(result.get("revision") or "") or None,
+            origin=(
+                _link_origin(
+                    _serving_base(client, config_dir),
+                    target.visibility,
+                    target.tenant_id if target.visibility == "org" else None,
+                )
+                if target is not None
+                else None
+            ),
+            hub_id=published_hub_id(kind, result),
         )
     except Exception:  # noqa: BLE001 - seeding is additive, never a publish failure
         return
@@ -11800,7 +14200,7 @@ def _publish_against_old_server(
     except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
         print(f"\n\033[1;31m{_publish_error_label(kind, target)}: {_hub_cause(exc)}\033[0m")
         return 1, None
-    _seed_after_publish(seed, result)
+    _seed_after_publish(seed, result, target, client)
     return 0, result
 
 
@@ -11886,7 +14286,7 @@ def _publish_with_preview(
     while True:
         try:
             result = _commit_publication(client, kind, target, plan)
-            _seed_after_publish(seed, result)
+            _seed_after_publish(seed, result, target, client)
             return 0, result
         except KeyboardInterrupt:
             # The commit was in flight, so unlike the preview the hub may still
@@ -12531,8 +14931,34 @@ def teams_pull_command(args: argparse.Namespace, team_registry: Any, base_dir: P
         outcome,
         document,
         source=f"from organization '{tenant}'",
-        tenant_id=owner or tenant,
+        # The ORGANIZATION arm: the row was served as the signed-in member of
+        # this organization, so the link names that organization.
+        origin=_link_origin(_serving_base(client, base_dir), "org", owner or tenant),
     )
+
+
+def _serving_base(client: Any, base_dir: Path) -> str:
+    """The base a hub client addressed, or the CONFIGURED one when it does not say."""
+
+    from local_operator.hub_sync import provenance as prov
+
+    return prov.serving_base(client, base_dir) or ""
+
+
+def _link_origin(base: str, visibility: str, tenant_id: str | None = None) -> "Any":
+    """The origin a hub operation was served under, or None when it cannot be stated.
+
+    The base is the one the client ADDRESSED. In the canonical case that is the
+    CONFIGURED hub base -- every client here is built from it -- so a link
+    minted by a pull gets the same ``link_id`` the source-resolution dialog
+    would mint for the same row. A non-canonical base names the hub that really
+    answered, which is the base the check reports and the integration and push
+    gates compare the link's source against.
+    """
+
+    from local_operator.hub_sync.identity import link_origin
+
+    return link_origin(base, visibility, tenant_id)
 
 
 def _teams_pull_public(args: argparse.Namespace, team_registry: Any, base_dir: Path) -> int:
@@ -12578,7 +15004,12 @@ def _teams_pull_public(args: argparse.Namespace, team_registry: Any, base_dir: P
         outcome,
         document,
         source="from the public hub",
-        tenant_id=str(document.get("tenant_id") or ""),
+        # The PUBLIC arm: the row was served anonymously by the public
+        # catalogue, so its scope is public and it names NO organization. The
+        # document's own ``tenant_id`` is the PUBLISHER's (a public row carries
+        # it, measured on the live hub), and recording it is what used to put a
+        # public row behind an organization identity.
+        origin=_link_origin(_serving_base(client, base_dir), "public"),
     )
 
 
@@ -12588,14 +15019,15 @@ def _finish_team_pull(
     document: Mapping[str, Any],
     *,
     source: str,
-    tenant_id: str,
+    origin: "Any",
 ) -> int:
     """The shared tail of both pull arms: link, report, name what was stored.
 
     Extracted so the two arms cannot drift on the post-import contract: the
     success sentence, the link warning, the rename notes and the model
     suggestion notice are one implementation; the arms differ only in
-    ``source`` ("from organization 'x'" | "from the public hub").
+    ``source`` ("from organization 'x'" | "from the public hub") and in the
+    ``origin`` each arm was served under.
     """
     team = outcome.team
     # Link the row to its hub document and record what was pulled, so `teams sync`
@@ -12607,7 +15039,8 @@ def _finish_team_pull(
         team_registry.config_dir,
         team_registry.get_team(team.id),
         document,
-        tenant_id=tenant_id,
+        tenant_id=(origin.tenant_id if origin is not None else "") or "",
+        origin=origin,
     )
     print(f"\n\033[1;32mSuccessfully pulled team '{team.name}' (ID: {team.id}) {source}\033[0m")
     if linked is None:
@@ -14527,6 +16960,51 @@ def _seed_sync_command(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _reject_extra_positionals(parser: Any, args: Any) -> None:
+    """Refuse a second positional on ``exec``; ``parser.error`` exits.
+
+    ONE HOME, TWO CALLERS. The positional trap is that a title reads as a second
+    prompt, so ``lop exec "Some Title" "do the work"`` would otherwise silently
+    treat the title as the prompt and run under the wrong brief. The remote
+    dispatch needs the same refusal — it now runs BEFORE the exec branch — and
+    duplicating the wording would let the two paths describe the rule differently.
+    """
+    # `args.command` is never None here: the catch-all `extra` only receives
+    # positionals that follow a first one.
+    extras = getattr(args, "extra", None) or []
+    if not extras:
+        return
+    quoted = [repr(part) for part in (args.command, *extras)]
+    received = (
+        ", ".join(quoted[:-1]) + f" and {quoted[-1]}" if len(quoted) > 2 else " and ".join(quoted)
+    )
+    # Exactly two positionals is the common shape — a title mistaken for the
+    # prompt — and can be repaired with a concrete command. Three or more cannot:
+    # a `--name <title> <prompt>` example would silently DROP the tail, handing
+    # the caller a valid command that runs a different brief than the one they
+    # composed. Those get the rule instead of a misleading example.
+    if len(quoted) == 2:
+        hint = (
+            "The first positional is the prompt, not a title. To name the run, "
+            "pass the title via --name:\n"
+            # shlex.quote, not repr: the suggestion is composed to be pasted into
+            # a shell, and repr's escaping is Python's, not the shell's (a title
+            # like `O'Brien's audit` renders differently under each).
+            f"  lop exec --name {shlex.quote(args.command)} {shlex.quote(extras[0])}\n"
+        )
+    else:
+        hint = (
+            "The first positional is the prompt, not a title: pass the title via "
+            "--name, and quote the prompt as the ONE positional — the extra "
+            "positionals are not consumed.\n"
+        )
+    parser.error(
+        f"exec takes ONE positional prompt, got {len(quoted)} positionals: "
+        f"{received}.\n{hint}"
+        "(--workstream is a flag — it publishes the run and takes no value.)"
+    )
+
+
 def main() -> int:
     # Name this process in the OS process listing. On Linux this is a
     # ~microsecond `prctl` on the current process and nothing else happens; the
@@ -14547,6 +17025,18 @@ def main() -> int:
         # a no-op everywhere else. Placed after the parse so `--version` and
         # `--help` (which argparse exits from inside `parse_args`) never pay it.
         _maybe_brand_process(args)
+
+        if args.subcommand == "serve" and not getattr(args, "reload", False):
+            # (``--reload`` is excluded: uvicorn's reloader re-imports the app in a CHILD
+            # whose only inherited channel is the environment, so it keeps today's env
+            # behaviour. It is a developer mode the desktop app never launches.)
+            # FIRST after branding, before the login-shell PATH probe below spawns anything:
+            # move the desktop bearer out of the environment so no child -- that probe's
+            # shell, a session runtime, a reload successor -- is ever handed it. Why a
+            # descriptor and not the environment: ``server.desktop.TOKEN_FD_ENV``.
+            from local_operator.server.desktop import adopt_spawn_bearer
+
+            adopt_spawn_bearer()
 
         # Prime the login-shell PATH only on paths that actually spawn
         # subprocess work: the interactive session, exec, serve and mobile all
@@ -14571,6 +17061,22 @@ def main() -> int:
         )
         if args.subcommand in _SUBPROCESS_SUBCOMMANDS or args.subcommand is None:
             setup_cross_platform_environment()
+
+        # REMOTE COMPUTE IS DISPATCHED BEFORE `--resume` IS RESOLVED. A remote
+        # invocation is not a session: `--remote --resume x` has to get the
+        # named local-only refusal (it is in LOCAL_ONLY_FLAGS), and it must not
+        # read or backfill the session store — the branch below classifies
+        # pre-existing sessions and stamps title sidecars, which are writes this
+        # command has no business making. `wants_remote` also covers the
+        # flags whose only meaning is remote, so a bare `--remote-status` reaches
+        # the same refusals instead of a local run that ignores it. The heavy
+        # module (client, httpx, exec_mode) is imported HERE, never at the top of
+        # this file.
+        if getattr(args, "subcommand", None) == "exec" and wants_remote(args):
+            _reject_extra_positionals(parser, args)
+            from local_operator.remote_compute.cli import remote_command
+
+            return remote_command(args)
 
         # Resolve `--resume` HERE, before anything is started. Left to the
         # session factory it surfaces inside the TUI as "session failed to
@@ -15000,6 +17506,15 @@ def main() -> int:
                 print(f"\n\033[1;31mError: {str(e)}\033[0m", file=sys.stderr)
                 return 1
         elif args.subcommand == "serve":
+            if args.install_service:
+                # Installation returns before warming a runtime: this command's
+                # product is the user unit, not a second foreground API listener.
+                from local_operator import services
+
+                result = services.install_linux_serve_service(args.port)
+                for line in result["lines"]:
+                    print(line)
+                return 0 if result["ok"] else 1
             # The desktop daemon engages a runtime for every conversation the app
             # opens cold, so it keeps ONE pre-imported standby for its root (see
             # ``session/runtime/standby.py`` for the cost it removes and the
@@ -15024,6 +17539,8 @@ def main() -> int:
                     return hub_link_set_command(args, base_dir)
                 parser.error(f"Invalid hub link command: {args.hub_link_command}")
             parser.error(f"Invalid hub command: {args.hub_command}")
+        elif args.subcommand == "skills":
+            return skills_command(args, base_dir)
         elif args.subcommand == "mobile":
             return mobile_command(args)
         elif args.subcommand == "tunnel":
@@ -15193,48 +17710,13 @@ def main() -> int:
             print("usage: lop install {status, prune, migrate}", file=sys.stderr)
             return 1
         elif args.subcommand == "exec":
-            # Refuse a second positional BEFORE anything else in the branch. The
-            # trap is that a title reads as a second prompt, so
-            # `lop exec "Some Title" "do the work"` would otherwise silently
-            # treat the title as the prompt and run under the wrong brief.
-            # `--workstream` is the flag that publishes a run and takes no value,
-            # which is exactly why the title cannot be passed positionally.
-            # `args.command` is never None here: the catch-all `extra` only
-            # receives positionals that follow a first one.
-            extras = getattr(args, "extra", None) or []
-            if extras:
-                quoted = [repr(part) for part in (args.command, *extras)]
-                received = (
-                    ", ".join(quoted[:-1]) + f" and {quoted[-1]}"
-                    if len(quoted) > 2
-                    else " and ".join(quoted)
-                )
-                # Exactly two positionals is the common shape — a title mistaken
-                # for the prompt — and can be repaired with a concrete command.
-                # Three or more cannot: a `--name <title> <prompt>` example would
-                # silently DROP the tail, handing the caller a valid command that
-                # runs a different brief than the one they composed. Those get the
-                # rule instead of a misleading example.
-                if len(quoted) == 2:
-                    hint = (
-                        "The first positional is the prompt, not a title. To name the run, "
-                        "pass the title via --name:\n"
-                        # shlex.quote, not repr: the suggestion is composed to be pasted
-                        # into a shell, and repr's escaping is Python's, not the shell's
-                        # (a title like `O'Brien's audit` renders differently under each).
-                        f"  lop exec --name {shlex.quote(args.command)} {shlex.quote(extras[0])}\n"
-                    )
-                else:
-                    hint = (
-                        "The first positional is the prompt, not a title: pass the title via "
-                        "--name, and quote the prompt as the ONE positional — the extra "
-                        "positionals are not consumed.\n"
-                    )
-                parser.error(
-                    f"exec takes ONE positional prompt, got {len(quoted)} positionals: "
-                    f"{received}.\n{hint}"
-                    "(--workstream is a flag — it publishes the run and takes no value.)"
-                )
+            # The positional refusal lives in one helper because the remote
+            # dispatch above needs it too; see `_reject_extra_positionals`.
+            # Remote invocations never reach this branch: they are dispatched
+            # above, before `--resume` is resolved, and the predicate there is
+            # the same `wants_remote` — one site, so a remote refusal cannot be
+            # described one way early and another late.
+            _reject_extra_positionals(parser, args)
             # Single-execution mode: headless one-shot (README contract —
             # exit 0 on success, non-zero on error). Working-directory
             # handling matches the legacy pre-run behavior.
@@ -15792,6 +18274,8 @@ def main() -> int:
                     )
                 degraded_reason = ""
                 paint_first_cwd = ""
+                from local_operator.session import compression
+
                 # PAINT FIRST, ATTACH BEHIND for a live owner whose conversation
                 # is on disk: the cold facade below paints it, and the TUI's eager
                 # engage binds it to that owner after the first paint (the bind
@@ -15814,7 +18298,11 @@ def main() -> int:
                     record is not None
                     and frontend_attach_refusal(record) is None
                     and not (initial_model is not None and (birth_args.hosting or birth_args.model))
-                    and (config_directory / "sessions" / session_id / "transcript.jsonl").is_file()
+                    # ANY physical form: a compressed session still has a
+                    # conversation to paint before the bind lands. The plain name
+                    # here would keep a compressed --resume on the slow dial for a
+                    # session whose history is sitting right beside it.
+                    and compression.has_transcript(config_directory / "sessions" / session_id)
                 ):
                     # The owner's directory, not this terminal's: the band paints
                     # it before the bind lands, and a live conversation's cwd is

@@ -23,7 +23,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from local_operator import settings_io
+from local_operator import scratchpad, settings_io
 from local_operator.compaction.thresholds import CompactionSettings
 from local_operator.config import ConfigManager
 from local_operator.config_watch import ConfigWatcher, _reset_for_tests, process_watcher
@@ -42,6 +42,7 @@ from local_operator.mobile.peer_send import journal_unconfirmed_enabled
 from local_operator.model.configure import (
     SessionStreamFn,
     _anthropic_cache_ttl_1h_min_context_tokens,
+    _anthropic_subagent_cache_ttl_1h_min_context_tokens,
     _openai_api_mode,
     _openai_use_max_context_window,
     _openrouter_provider_preferences,
@@ -49,6 +50,7 @@ from local_operator.model.configure import (
 )
 from local_operator.projects import stale_after_s
 from local_operator.providers.failover import RetrySettings
+from local_operator.saver.gate import configured_mode
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.spawn.policy import fork_cmux_placement, fork_mode
@@ -404,6 +406,18 @@ def _deferral_reaches_the_wire(session: Session) -> bool:
     return bool(withheld) and withheld == set(session.deferred_tool_names())
 
 
+def _remote_compute_advertised() -> bool:
+    """Whether the live feature map advertises remote compute right now.
+
+    Reads the default config dir, which the driver points at the watched
+    directory through ``LOCAL_OPERATOR_CONFIG_DIR``. The probe value is ``True``
+    (the default is off), so the bit appearing is the write landing.
+    """
+    from local_operator.server.features import live_feature_flags
+
+    return live_feature_flags().get("remote_compute") == 1
+
+
 def _web_tool_offered(session: Session, name: str) -> bool:
     """Whether ``name`` is in the inventory after the next turn-boundary reconcile.
 
@@ -417,6 +431,19 @@ def _web_tool_offered(session: Session, name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+def _librarian_policy(watcher: Any):
+    """The engine's resolved policy, read from the watcher's own directory."""
+    from local_operator.librarian import proactive
+
+    return proactive.policy(watcher.config_dir)
+
+
+def _librarian_name(watcher: Any) -> str:
+    from local_operator.librarian import bootstrap
+
+    return bootstrap.display_name(watcher.config_dir)
+
+
 # What a non-default value for each LIVE key looks like, and how to observe it
 # ---------------------------------------------------------------------------
 
@@ -426,6 +453,15 @@ def _web_tool_offered(session: Session, name: str) -> bool:
 #: attribute to observe) read the watcher's snapshot — the mapping those
 #: consumers are being pointed at.
 LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
+    # -- scratchpad: re-read from config on every pad-addressed call -----------
+    # Not a session attribute: `scratchpad_budget_bytes()` resolves
+    # `session.scratchpad.max_bytes` through `config_dir()` at call time, which
+    # is exactly why the row is LIVE. The probe observes that function, and
+    # 32 MiB is a non-default value inside the reader's 16 MiB–8 GiB range.
+    "session.scratchpad.max_bytes": (
+        32 * 1024 * 1024,
+        lambda s, w: scratchpad.scratchpad_budget_bytes(),
+    ),
     # -- compaction: the session's typed settings object -----------------------
     "compaction.enabled": (False, lambda s, w: compaction_of(s).enabled),
     "compaction.strategy": ("snapcompact", lambda s, w: compaction_of(s).strategy),
@@ -454,6 +490,10 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "providers.anthropic.cache_ttl_1h_min_context_tokens": (
         999_999,
         lambda s, w: _anthropic_cache_ttl_1h_min_context_tokens(s.routing_settings),
+    ),
+    "providers.anthropic.subagent_cache_ttl_1h_min_context_tokens": (
+        888_888,
+        lambda s, w: _anthropic_subagent_cache_ttl_1h_min_context_tokens(s.routing_settings),
     ),
     # Observed through the same function the client builder calls, not through
     # the raw mapping: what makes this key live is that ``_openai_api_mode``
@@ -575,6 +615,13 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "providers.openrouter.retire_below_tps": (
         40.0,
         lambda s, w: _openrouter_retire_below_tps(s.routing_settings),
+    ),
+    # Radient Saver's gate: probed through the ONE reader the stream's seam
+    # (`SessionStreamFn._apply_saver`) calls per turn, over the session's LIVE
+    # routing mapping. "opt_in" differs from the "off" default.
+    "radient.saver.mode": (
+        "opt_in",
+        lambda s, w: configured_mode(s.routing_settings),
     ),
     # -- failover: what RetrySettings.from_settings reads off the stream --------
     # NOTE the odd one out below: `retry.usageAwareAccountPick` is observed on
@@ -735,6 +782,15 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "tools.defer": (False, lambda s, w: _deferral_reaches_the_wire(s)),
     "web_search.enabled": (False, lambda s, w: _web_tool_offered(s, "web_search")),
     "web_fetch.enabled": (False, lambda s, w: _web_tool_offered(s, "web_fetch")),
+    # -- remote compute (preview): the consent gate for sending work off-device -
+    # LIVE because nothing caches it: ``is_enabled`` re-reads config.yml on every
+    # call and the capability bit is in the per-call live half of the feature
+    # map. Observed through the capability map itself, which is what the GUI and
+    # the phone read, so a write from another process must flip the bit there.
+    "remote_compute.enabled": (
+        True,
+        lambda s, w: _remote_compute_advertised(),
+    ),
     # -- proactive class: the arm path re-reads every bound --------------------
     # The patience bounds guard a HIDDEN mechanism, and the reader is exactly
     # ``patience.policy(config_dir())`` — called at the moment a wait is armed
@@ -762,6 +818,7 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # reader against the watched directory.
     "memory.enabled": (False, lambda s, w: policy(w.config_dir)["enabled"]),
     "memory.capture": (False, lambda s, w: policy(w.config_dir)["capture"]),
+    "memory.capture.locators": (True, lambda s, w: policy(w.config_dir)["locators"]),
     "memory.suggest": (False, lambda s, w: policy(w.config_dir)["suggest"]),
     # -- team_bridge: the local machine prefs, observed through the public
     # bridge settings plumbing the status route's ``local`` block calls -------
@@ -770,7 +827,8 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # ``TeamBridgeSettings.from_config`` (the normalising reader IS what makes
     # a stored value consumable, so the reader is what must move), never the
     # raw document. The CI honesty test failed by name without these:
-    # "LIVE sections with no live-apply probe: ['team_bridge']".
+    # "LIVE sections with no live-apply probe: ['team_bridge']". The shipped
+    # default is OFF (consent hold), hence the probe value is True.
     "team_bridge.enabled": (True, lambda s, w: _bridge_settings().enabled),
     "team_bridge.session": (
         "synthetic-live-probe-session",
@@ -783,6 +841,21 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # is proven end to end in ``tests/unit/asks/test_ask_wire.py``
     # (``test_a_running_session_republishes_when_the_window_changes``).
     "asks.lapsed_visible_for": ("1h", lambda s, w: _lapsed_choice(w)),
+    # -- librarian: the cadence engine's own readers ---------------------------
+    # The pause/at/budget keys are read by ``proactive.policy`` at the next
+    # reconcile; ``librarian.name`` by the receipts' display reader. The
+    # session half is ``_aida_reconcile_now`` dispatching to her engine on the
+    # same watcher tick (proven end to end in
+    # ``tests/unit/librarian/test_librarian_proactive.py``).
+    "librarian.enabled": (False, lambda s, w: _librarian_policy(w).enabled),
+    "librarian.name": ("Archivist", lambda s, w: _librarian_name(w)),
+    "librarian.cadence.at": ("05:00", lambda s, w: _librarian_policy(w).at),
+    "librarian.cadence.paused": (True, lambda s, w: _librarian_policy(w).paused),
+    "librarian.cadence.max_extra_per_day": (
+        3,
+        lambda s, w: _librarian_policy(w).max_extra_per_day,
+    ),
+    "librarian.cadence.min_gap_minutes": (30, lambda s, w: _librarian_policy(w).min_gap_minutes),
 }
 
 #: LIVE sections whose keys have no session-side apply because a HOST owns
@@ -973,7 +1046,17 @@ async def test_a_write_from_another_process_reaches_the_running_session(
         retry.pop("accountSelectionPolicy", None)
         retry.pop("account_selection_policy", None)
         retry["usageAwareAccountPick"] = True
-        manager.set_config_value("retry", retry)
+        # The pops are a DELIBERATE removal, and a mapping write now merges into
+        # the file, so they must be declared or the canonical policy is copied
+        # straight back and the row never tests a legacy config (PR #2819).
+        manager.set_config_value(
+            "retry",
+            retry,
+            drop={
+                ("retry", "accountSelectionPolicy"): "seeding a legacy config",
+                ("retry", "account_selection_policy"): "seeding a legacy config",
+            },
+        )
 
     stream = RebindableStream(dict(ConfigManager(config_dir).get_config().values))
     session = make_session(tmp_path, stream, compaction_settings=CompactionSettings())

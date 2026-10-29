@@ -1177,6 +1177,7 @@ def project_settled_rows(
         turn_cut_tool_call,
         user_row_text,
     )
+    from local_operator.network.credentials.messages import render_binding_notice_repeat
     from local_operator.tui.app import (
         MONITOR_PROMPT_MESSAGE_TYPE,
         RESUME_OLDER_NOTICE,
@@ -1388,8 +1389,31 @@ def project_settled_rows(
         for block in transcript.blocks()
         if isinstance(block, (UserBlock, HubMessageBlock)) and block.navigation_anchor_id
     }
+    # Only ADJACENT account notices may fold: any other row (a real turn above
+    # all) resets this, so two switches a turn apart both paint. Within a run, a
+    # notice identical to the one just painted tells the reader nothing the first
+    # did not — and that was the flood's exact shape: a subagent's account
+    # misattributed to its parent, whose resolves fed the parent's binding.
+    #
+    # THE RUN IS THE UNIT, AND IT NAMES ITS ACCOUNTS (design round 1, D1/D2 + the
+    # manager's group fold). Folding on the row's ``credential_id`` painted a wall
+    # for a real alternation (thousands of rows, one per flip) and folding on the
+    # sentence alone hid a genuine second account behind an elision collision.
+    # Neither is acceptable, so the run folds on what a reader actually sees —
+    # the sentence and its provenance — while the SET of credential ids it
+    # covered is carried along and stated in the marker (``render_binding_notice
+    # _repeat``): ``×20`` for one login, ``×20 · 2 logins`` when the run named
+    # two. The operator gets one row instead of a wall, and the fact that the run
+    # covered two accounts is never silently dropped.
+    #
+    # The tuple is ``(identity, painted block, reproductions, accounts)``: the
+    # block is kept so a repeat can restate it in place (the existing settled-row
+    # seam) rather than append beside it, and the counts are what the marker says.
+    last_binding_notice: tuple[tuple[Any, ...], Any, int, set[Any]] | None = None
     with batch:
         for message in history:
+            if getattr(message, "custom_type", None) != SESSION_BINDING_NOTICE_MESSAGE_TYPE:
+                last_binding_notice = None
             # A mounted replay consumes the actual quiet result at its original
             # ordered seat. Collected pages carry metadata to the list planner.
             replay_call_id = getattr(message, "tool_call_id", None)
@@ -1679,8 +1703,32 @@ def project_settled_rows(
             if getattr(message, "custom_type", None) == SESSION_BINDING_NOTICE_MESSAGE_TYPE:
                 details = getattr(message, "details", None) or {}
                 text = str(details.get("text", "")).strip()
+                identity = (text, details.get("provider"), details.get("owner_device"))
+                # The run's accounts, kept beside the row it paints (see the fold
+                # comment above): absent on a row written without a store id, and
+                # then the count is all the row can honestly say.
+                credential_id = details.get("credential_id")
+                if text and last_binding_notice is not None and identity == last_binding_notice[0]:
+                    seen = last_binding_notice[2] + 1
+                    accounts = last_binding_notice[3]
+                    if credential_id is not None:
+                        accounts.add(credential_id)
+                    block = last_binding_notice[1]
+                    block.restate(
+                        render_binding_notice_repeat(text, seen=seen, accounts=len(accounts)),
+                        "warning",
+                    )
+                    last_binding_notice = (identity, block, seen, accounts)
+                    continue
                 if text:
-                    self._append_block(NoticeBlock(text, kind="warning", fold_width=fold_width))
+                    block = NoticeBlock(text, kind="warning", fold_width=fold_width)
+                    self._append_block(block)
+                    last_binding_notice = (
+                        identity,
+                        block,
+                        1,
+                        {credential_id} if credential_id is not None else set(),
+                    )
                     appended = True
                 continue
             # A SEND THAT WAS NOT ACKNOWLEDGED, written by the opt-in

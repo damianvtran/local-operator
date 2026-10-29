@@ -766,3 +766,18 @@ def test_a_metered_call_without_a_receipt_records_the_rate_table_labels(tmp_path
     rec.flush_for_test()
     # Unstamped usage: the request's own model spec names the provider.
     assert _basis_row(tmp_path, usage) == ("anthropic", "billed", "catalogue")
+
+
+def test_stamped_api_key_basis_overrides_openai_legacy_plan_and_source(tmp_path):
+    store = AnalyticsStore(tmp_path / "basis.db")
+    rec = reset_recorder_for_test(store)
+    request = _request().model_copy(
+        update={"model": ModelSpec(provider="openai", model_id="gpt-test")}
+    )
+    usage = Usage(provider="openai", model_id="gpt-test", billing_basis="billed", usd_cost=0.79)
+    asyncio.run(_drain(_fn("key-call"), request, [StreamEndEvent(stop_reason="stop", usage=usage)]))
+    rec.flush_for_test()
+    with sqlite3.connect(tmp_path / "basis.db") as conn:
+        assert conn.execute(
+            "SELECT billing_basis, cost_source, cost_micro FROM calls"
+        ).fetchone() == ("billed", "provider_reported", 790000)

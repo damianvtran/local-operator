@@ -84,12 +84,12 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, is_dataclass
 from pathlib import Path
+from typing import cast
 
 from pydantic import BaseModel
 
-from local_operator.session import open_trace
+from local_operator.session import compression, open_trace
 from local_operator.session.transcript import (
-    TRANSCRIPT_FILENAME,
     TranscriptPage,
     read_transcript_page,
     validate_page_request,
@@ -122,6 +122,12 @@ PAGE_CACHE_BYTES = 24 * 1024 * 1024
 _PAGE_CACHE_ALLOWANCE = 4096
 
 
+#: Exact types that hold no references the walk follows: none of them is a
+#: ``BaseModel``, a dataclass or a container, so the old chain sized them and
+#: stopped, and the fast path does the same without asking.
+_SCALARS = frozenset({str, int, float, bool, type(None), bytes})
+
+
 def retained_bytes(value: object, limit: int) -> int | None:
     """Bound ``value``'s reachable data, including keys, tool metadata and media.
 
@@ -148,37 +154,68 @@ def retained_bytes(value: object, limit: int) -> int | None:
     values count once within a page and conservatively again across entries.
     Framework class/schema objects are process-global, not retained here.
     """
-    pending = [value]
     # Identity-keyed, and safe only because nothing here is freed mid-walk: the
-    # page and its key are held by `pending`/the caller for the whole traversal,
+    # page and its key are held by `level`/the caller for the whole traversal,
     # so no id() can be recycled into a false "already counted".
     seen: set[int] = set()
     total = 0
-    while pending:
-        item = pending.pop()
-        identity = id(item)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        total += sys.getsizeof(item)
+    # LEVEL BY LEVEL, AND THE COMMON TYPES BY EXACT ``type`` FIRST
+    # (conversation-first-paint R5, 2026-10-27). This runs on the event loop in
+    # every page-cache ``put``, before the open's snapshot: 9-16 ms for a 100-200
+    # row page of the 51.7 MB fixture, 12 ms median under load. A page is almost
+    # entirely ``dict``/``list``/``str`` from ``json.loads``, so an exact-type
+    # test settles nearly every object before the generic ``isinstance`` chain
+    # (``BaseModel`` first, which is an ABC-style check per object), and summing a
+    # whole level through ``map(sys.getsizeof, ...)`` keeps the per-object work
+    # in C. ~40% less CPU, measured on that page.
+    #
+    # THE FIGURE IS UNCHANGED, TO THE BYTE: each object is still charged once
+    # by identity, and the subclass branches below are the old chain in its old
+    # order, so a ``dict`` subclass or a namedtuple descends exactly as before
+    # (``test_retained_bytes_matches_the_reference_walk_on_every_shape`` holds
+    # the old walk as its oracle). One behavioural difference, in the safe
+    # direction: the over-limit check now fires per level rather than per
+    # object, so an oversize page is refused after a few more objects are sized.
+    level: list[object] = [value]
+    while level:
+        fresh: list[object] = []
+        for item in level:
+            identity = id(item)
+            if identity not in seen:
+                seen.add(identity)
+                fresh.append(item)
+        total += sum(map(sys.getsizeof, fresh))
         if total > limit:
             return None
-        if isinstance(item, BaseModel):
-            pending.extend(
-                (
-                    item.__dict__,
-                    item.__pydantic_fields_set__,
-                    item.__pydantic_extra__,
-                    item.__pydantic_private__,
+        level = []
+        descend = level.extend
+        for item in fresh:
+            kind = type(item)
+            # ``cast``: pyright does not narrow on an exact ``type(...) is``.
+            if kind is dict:
+                mapping = cast("dict[object, object]", item)
+                descend(mapping)
+                descend(mapping.values())
+            elif kind is list or kind is tuple:
+                descend(cast("list[object]", item))
+            elif kind in _SCALARS:
+                continue
+            elif isinstance(item, BaseModel):
+                descend(
+                    (
+                        item.__dict__,
+                        item.__pydantic_fields_set__,
+                        item.__pydantic_extra__,
+                        item.__pydantic_private__,
+                    )
                 )
-            )
-        elif is_dataclass(item) and not isinstance(item, type):
-            pending.extend(vars(item).values())
-        elif isinstance(item, dict):
-            pending.extend(item)
-            pending.extend(item.values())
-        elif isinstance(item, (list, tuple, set, frozenset)):
-            pending.extend(item)
+            elif is_dataclass(item) and not isinstance(item, type):
+                descend(vars(item).values())
+            elif isinstance(item, dict):
+                descend(item)
+                descend(item.values())
+            elif isinstance(item, (list, tuple, set, frozenset)):
+                descend(item)
     return total
 
 
@@ -226,7 +263,11 @@ def page_key(
     uncached read, so the caller still gets the reader's own ``FileNotFoundError``
     rather than a second, differently-worded one from this module.
     """
-    path = Path(directory) / TRANSCRIPT_FILENAME
+    # The PHYSICAL source, archive included: a cache keyed on a stat of the
+    # plain name answers ``None`` for every compressed session, which turns
+    # every page read into an uncached one rather than a wrong one — but the
+    # archive carries the same inode/size identity the key needs.
+    path, _codec = compression.transcript_source(Path(directory))
     try:
         stat = path.stat()
     except OSError:

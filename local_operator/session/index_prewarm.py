@@ -64,9 +64,12 @@ import logging
 import os
 import shutil
 import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
+from local_operator.session.cold_metadata import safe_metadata_path
 from local_operator.session.frontend_state import FRONTEND_CHECKPOINT_CUSTOM_TYPE
 from local_operator.session.replay_cache import (
     REPLAY_CACHE_ENTRIES,
@@ -78,6 +81,7 @@ from local_operator.session.replay_cache import (
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE
 from local_operator.session.tail_anchor import (
     build_anchor,
+    preserve_selection_evidence,
     read_anchor,
     validate_anchor,
     write_anchor,
@@ -154,6 +158,8 @@ _ANCHOR_LOCK = threading.Lock()
 #: ``asyncio.create_task`` holds only a weak referent and can be collected
 #: mid-flight.
 _TASKS: set[asyncio.Task[Any]] = set()
+
+_T = TypeVar("_T")
 
 
 def free_bytes(root: str | Path | None = None) -> int | None:
@@ -244,6 +250,8 @@ def sessions_needing_warm(root: str | Path, *, limit: int = PREWARM_JOURNALS) ->
         return []
     journals: list[tuple[float, str]] = []
     for entry in entries:
+        if _is_archived(entry):
+            continue
         try:
             stat = (entry / TRANSCRIPT_FILENAME).stat()
         except OSError:
@@ -293,13 +301,20 @@ def sessions_needing_replay(root: str | Path, *, limit: int = PREWARM_REPLAYS) -
         entries = list(sessions_dir.iterdir())
     except OSError:
         return []
+    # THE SAME POPULATION AS THE MODEL WARM (PR #3009 review MAJOR-1), through
+    # the ONE predicate both selectors share. Without it the newest journal on a
+    # booted store is the daemon's own (Aida, the Librarian, written at boot), and
+    # a loaded host cuts this pass to one journal — so the one replay, and the cold
+    # record it files, went to a session nobody opens. Applied BEFORE the limit,
+    # and the RAM-cache skip below stays per entry: ``_newest_journals`` cuts to
+    # ``limit`` first, so reusing it would let journals this process already holds
+    # spend the budget.
+    service = _service_session_ids(Path(root))
     journals: list[tuple[float, str]] = []
     for entry in entries:
-        try:
-            stat = (entry / TRANSCRIPT_FILENAME).stat()
-        except OSError:
-            continue
-        journals.append((stat.st_mtime, entry.name))
+        mtime = _user_journal_mtime(entry, service)
+        if mtime is not None:
+            journals.append((mtime, entry.name))
     journals.sort(reverse=True)
     candidates: list[str] = []
     for _mtime, session_id in journals:
@@ -386,6 +401,19 @@ async def _write_anchor(root: str | Path, session_id: str) -> None:
         logger.debug("tail anchor not written for %s", session_id, exc_info=True)
 
 
+def _is_archived(directory: Path) -> bool:
+    """Whether this session's transcript is stored compressed.
+
+    Both prewarm selectors walk the store to find journals a READER will scan:
+    a tail anchor names a plain inode, and a warmed index/replay is materialised
+    from plain bytes. An archive is skipped here and restored by the reader that
+    actually opens the session, so the pass never decompresses the store.
+    """
+    from local_operator.session import compression
+
+    return compression.archive_path(directory) is not None
+
+
 def _anchor_current(directory: Path) -> bool:
     """Whether this journal's tail anchor already describes its current version.
 
@@ -396,8 +424,14 @@ def _anchor_current(directory: Path) -> bool:
     every core start: a journal the selector wrongly calls current is simply
     re-checked by ``write_tail_anchor``, which does validate before writing.
     """
-    from local_operator.session.tail_anchor import read_anchor
+    from local_operator.session.tail_anchor import drop_anchor, read_anchor
 
+    if _is_archived(directory):
+        # An anchor cannot describe an archive. Drop a stale one and settle the
+        # question as "nothing to do", or the selector reports this journal as
+        # needing a warm on every pass.
+        drop_anchor(directory)
+        return True
     try:
         stat = (directory / TRANSCRIPT_FILENAME).stat()
     except OSError:
@@ -407,10 +441,62 @@ def _anchor_current(directory: Path) -> bool:
         # Asked and answered in this process: this journal needs no sidecar (see
         # ``_NO_ANCHOR_NEEDED``). Without this the degraded pass spins on it forever.
         return True
+    if _rewritten_since_record(directory, stat):
+        return False
     anchor = read_anchor(directory)
     if anchor is None:
         return False
-    return anchor.inode == stat.st_ino and anchor.size == stat.st_size
+    return anchor.checkpoint_absent and anchor.inode == stat.st_ino and anchor.size == stat.st_size
+
+
+def _rewritten_since_record(directory: Path, journal: os.stat_result) -> bool:
+    """Whether the journal's inode metadata moved after the anchor was published.
+
+    THE PREWARM HALF OF THE DESKTOP REWRITE GUARD
+    (``server.utils.desktop_sessions._checkpoint_proven_absent``, #2941). That reader
+    refuses a record when the journal has not grown and its ``st_ctime_ns`` is at or
+    past the record file's ``st_mtime_ns``: the journal's bytes below the recorded
+    size are trusted by the boundary digest, and a same-size in-place rewrite is the
+    one change that digest cannot see. A plain ``chmod``/``chown`` (or a backup
+    tool's metadata restore) moves ctime the same way, and no reader can tell those
+    apart, so the reader answers "cannot tell" and takes the full walk.
+
+    AT OR PAST, NOT NEWER — copied from the reader, never re-derived. Coarse
+    filesystem timestamps put an untouched journal's ctime EQUAL to the record's
+    mtime, and a strict test there lets a same-tick rewrite through on the open
+    path (CI, #2941 shard test(3.12,2)). Two spellings of one decision would let the
+    reader refuse what this function calls current, and the record would then be
+    trusted by the selector while the open path ignored it, or rebuilt every pass.
+
+    WHY IT IS HERE AT ALL: without it the selector sees an unchanged inode/size and
+    calls the record current, ``write_tail_anchor`` sees ``validate_anchor`` pass
+    and returns early, and a metadata bump would leave the cold open on the full
+    walk for good. Answering "stale" makes the next pass rebuild the record once
+    (one ``build_anchor`` scan, off the hot path), which is exactly the work
+    prewarm exists to do.
+
+    RESIDUAL, disclosed rather than papered over: on a filesystem too coarse to
+    separate the journal's ctime from the newly written record's mtime, the rebuilt
+    record still cannot be trusted, so those journals pay one ``build_anchor`` scan
+    per prewarm pass instead of once. That is a bounded, off-hot-path cost and it is
+    paid rather than weakening the reader; stamping the validated ctime into a new
+    record field would settle it if it ever proves measurable.
+
+    Same-size only: a grown journal is the append path, whose ctime moves by
+    construction and whose suffix the validator already scans.
+    """
+    from local_operator.session.tail_anchor import anchor_path
+
+    try:
+        record = os.stat(anchor_path(directory))
+    except OSError:
+        return False
+    anchor = read_anchor(directory)
+    return (
+        anchor is not None
+        and journal.st_size == anchor.size
+        and journal.st_ctime_ns >= record.st_mtime_ns
+    )
 
 
 async def warm_index_cache(root: str | Path, *, limit: int = PREWARM_JOURNALS) -> int:
@@ -530,6 +616,7 @@ async def warm_replay_cache(root: str | Path, *, limit: int = PREWARM_REPLAYS) -
         key = await asyncio.to_thread(_cold_replay_key, directory)
         if key is None:
             continue
+        record_path = await asyncio.to_thread(_record_path_to_file, root, session_id, key)
         # ``load_cold_replay`` IS the reader's own single-flight: a user who opens
         # this session while its preheat is in flight JOINS this task instead of
         # starting a second parse, and a key already materialized is answered from
@@ -538,13 +625,25 @@ async def warm_replay_cache(root: str | Path, *, limit: int = PREWARM_REPLAYS) -
         try:
             replay = await load_cold_replay(
                 key,
-                lambda directory=directory, key=key: asyncio.to_thread(
+                lambda directory=directory, key=key, record_path=record_path: asyncio.to_thread(
                     build_cold_replay,
                     directory,
                     key=key,
                     want_checkpoint=True,
                     through_id=None,
                     strict_cut=False,
+                    # FILE THE COLD RECORD, at the path ``AttachedSession.cold``
+                    # files it (``root`` is the config dir that owns
+                    # ``sessions/``). The RAM entry above dies with this process;
+                    # the record is the only part of this parse the NEXT start's
+                    # first open can use, and without it most first opens missed
+                    # (a real store: 827 of 850 recently touched journals had
+                    # none). Same witness discipline as the open path, because it
+                    # IS the open path's code: ``build_cold_replay`` files only
+                    # after its after-read re-stat equals ``key``, and only for
+                    # the cold-open request shape this call makes. ``None`` when
+                    # a valid record already stands (``_record_path_to_file``).
+                    metadata_path=record_path,
                 ),
             )
         except Exception:  # noqa: BLE001 — one unreadable journal must not end the preheat
@@ -565,6 +664,32 @@ async def warm_replay_cache(root: str | Path, *, limit: int = PREWARM_REPLAYS) -
     return started
 
 
+def _record_path_to_file(root: str | Path, session_id: str, key: "ReplayKey") -> Path | None:
+    """Where this warm should file ``session_id``'s cold record, or ``None`` to skip.
+
+    ``None`` when the record on disk is ALREADY VALID for ``key`` (PR #3009
+    review MINOR-1): a journal untouched since the last boot would otherwise be
+    re-filed with identical bytes at every start (a temp file plus a rename per
+    journal, per boot). Only the WRITE is skipped. The parse still runs, because
+    the record carries no message list and the RAM entry needs one. The check is
+    the open path's own (``read_cold_metadata`` against ``witness_for(key)``), so
+    a record it calls valid is exactly one the next open would HIT. A record for
+    a moved journal fails it and is replaced. WORKER-THREAD ONLY: it reads and
+    parses the record, which can be ~1 MB.
+    """
+    from local_operator.session.cold_metadata import read_cold_metadata, witness_for
+
+    path = safe_metadata_path(root, session_id)
+    if path is None:
+        return None
+    try:
+        if read_cold_metadata(path, witness_for(key)) is not None:
+            return None
+    except Exception:  # noqa: BLE001 — an unreadable record is one to replace
+        logger.debug("cold record check failed for %s", session_id, exc_info=True)
+    return path
+
+
 def write_tail_anchor(root: str | Path, session_id: str) -> bool:
     """Record that this journal's newest checkpoint row is ABSENT — the cold-read hint.
 
@@ -575,7 +700,15 @@ def write_tail_anchor(root: str | Path, session_id: str) -> bool:
     """
     directory = Path(root) / "sessions" / session_id
     if validate_anchor(directory, read_anchor(directory)) is not None:
-        return False
+        try:
+            journal = (directory / TRANSCRIPT_FILENAME).stat()
+        except OSError:
+            return False
+        if not _rewritten_since_record(directory, journal):
+            return False
+        # Valid but older than the journal's last metadata change: the desktop
+        # reader will not trust it, so rebuild it once (see
+        # ``_rewritten_since_record``).
     # SINGLE-FLIGHT (F15): the expensive half is ``build_anchor``'s whole-file scan
     # for a checkpointless journal, and this writer is reachable from both the
     # startup queue and a warm request. The second caller leaves immediately; the
@@ -598,10 +731,275 @@ def write_tail_anchor(root: str | Path, session_id: str) -> bool:
                 return False
             _NO_ANCHOR_NEEDED[key] = (stat.st_ino, stat.st_size)
             return False
-        return write_anchor(directory, anchor)
+        return write_anchor(directory, preserve_selection_evidence(directory, anchor))
     finally:
         with _ANCHOR_LOCK:
             _ANCHOR_IN_FLIGHT.discard(key)
+
+
+#: How many user conversations the model-metadata warm resolves. The replay
+#: pass's bound, because it targets the same "opened first after a restart" set;
+#: in practice the answer is the same handful of models, so every journal after the
+#: first few costs only its (memoised) selection read.
+PREWARM_MODELS = PREWARM_REPLAYS
+
+#: Wall-clock budget for the WHOLE model warm, in seconds (review MINOR-1). One
+#: resolution is already bounded by discovery's own ceilings (10 s for the
+#: provider listing, 2-3 s for the keyless legs, one shared deadline), but eight
+#: of them in sequence on a blackholed link would be minutes of background
+#: requests after boot. Checked between journals; the one in flight finishes
+#: under its own ceiling.
+PREWARM_MODELS_BUDGET_S = 20.0
+
+
+def _service_session_ids(root: Path) -> set[str]:
+    """The sessions the daemon creates for itself at boot: Aida and the Librarian.
+
+    Their identity is the session id each one's own ``state.json`` names — the
+    same check ``aida.state.is_aida_session`` and
+    ``librarian.state.is_librarian_session`` make. Neither carries an
+    ``origin.json`` (the Librarian deliberately does not, so she stays visible on
+    every surface), so the origin rule below cannot see them, and their
+    transcripts are written at boot, so by mtime they are always the newest.
+    """
+    from local_operator.aida import state as aida_state
+    from local_operator.librarian import state as librarian_state
+
+    ids: set[str] = set()
+    for reader in (aida_state.session_id_of, librarian_state.session_id_of):
+        try:
+            session_id = reader(root)
+        except Exception:  # noqa: BLE001 — an unreadable state file is "no such session"
+            logger.debug("model prewarm: service session state unreadable", exc_info=True)
+            continue
+        if session_id:
+            ids.add(session_id)
+    return ids
+
+
+def _user_journal_mtime(entry: Path, service: set[str]) -> float | None:
+    """``entry``'s plain-journal mtime when it is a USER conversation, else ``None``.
+
+    ONE PREDICATE FOR BOTH BOOT WARMS (the model warm's ``_newest_journals`` and
+    the replay warm's ``sessions_needing_replay``), so the two cannot disagree
+    about which conversations a user opens. They did disagree, and the replay
+    warm's single paced slot went to a boot-created service session (PR #3009
+    review MAJOR-1). Excluded:
+
+    * the service sessions named by their own state files (``service``, from
+      :func:`_service_session_ids`; neither carries an ``origin.json``);
+    * an ARCHIVE, found by the archive-aware resolver rather than a plain-name
+      stat (the ``test_transcript_reads_are_archive_aware`` guard). A codec
+      means only an archive is on disk, and the warms must not decompress the
+      store (see ``_is_archived``). A session holding BOTH a plain journal and an
+      archive resolves to the plain one, as every reader resolves it, so it is
+      kept. A missing journal resolves to the plain path and fails the stat;
+    * any session whose ``origin.json`` is not a user origin
+      (``resume.is_user_session_origin``, THE visibility rule the pickers use).
+      Asked LAST because it reads a file, after the two cheap rejections.
+
+    The runtime STANDBYS a host warms at boot need no rule of their own: a
+    standby has no session directory and no transcript until it is claimed
+    (``session/runtime/standby.py``).
+    """
+    from local_operator.resume import is_user_session_origin, session_origin
+    from local_operator.session import compression
+
+    if entry.name in service:
+        return None
+    journal, codec = compression.transcript_source(entry)
+    if codec is not None:
+        return None
+    try:
+        mtime = journal.stat().st_mtime
+    except OSError:
+        return None
+    if not is_user_session_origin(session_origin(entry)):
+        return None
+    return mtime
+
+
+def _newest_journals(root: str | Path, *, limit: int) -> list[str]:
+    """The ``limit`` most recently modified USER conversations, newest first.
+
+    WHY THE FILTER (QA round 1, Q-1). On a booted store the two newest journals
+    are the daemon's own service sessions, and the load guard then cut the pass
+    to one journal — so the one warmed journal was never one the user opens.
+    Excluded: archived journals; any session whose ``origin.json`` is not a
+    user origin (``resume.is_user_session_origin``, THE visibility rule the
+    pickers use — subagents, agent shells, configuration runs); and the
+    service sessions named by their own state files — all through
+    :func:`_user_journal_mtime`, the predicate the replay warm shares.
+    """
+    root = Path(root)
+    sessions_dir = root / "sessions"
+    try:
+        entries = list(sessions_dir.iterdir())
+    except OSError:
+        return []
+    service = _service_session_ids(root)
+    journals: list[tuple[float, str]] = []
+    for entry in entries:
+        mtime = _user_journal_mtime(entry, service)
+        if mtime is not None:
+            journals.append((mtime, entry.name))
+    journals.sort(reverse=True)
+    return [session_id for _mtime, session_id in journals[:limit]]
+
+
+def _resolve_model(root: str | Path, session_id: str) -> bool:
+    """Run the cold open's model resolution once; ``False`` when a leg could not answer.
+
+    The SAME call ``cold_model.synthesise_cold_state`` makes, so whatever it
+    caches is exactly what the open will look up — the import graph, the
+    metadata memo, the listing document, and the selection memo. Imported here
+    rather than at module scope: ``cold_model`` pulls the model-config stack, and
+    this module is imported on daemon startup.
+
+    The return value is the listing legs' own report
+    (``catalogue.collect_unavailable``): a failed fetch, a backed-off one with no
+    document, or a leg that raised. The pass stops on it, because a network that
+    failed one listing will fail the next seven the same way.
+    """
+    from local_operator.model.catalogue import collect_unavailable
+    from local_operator.session.cold_model import resolve_conversation_model
+
+    with collect_unavailable() as unavailable:
+        resolve_conversation_model(Path(root), Path(root) / "sessions" / session_id)
+    return not unavailable
+
+
+async def _in_daemon_thread(fn: Callable[[], _T]) -> _T:
+    """``await fn()`` on a DAEMON thread, so an in-flight request cannot hold exit.
+
+    ``asyncio.to_thread`` uses the default executor, whose workers are joined at
+    interpreter shutdown — a resolution parked in a provider read would then hold
+    the daemon's exit for up to that request's timeout (review MINOR-1). Cancelling
+    the awaiting task stops the pass; this is what stops the worker from mattering.
+    """
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[_T] = loop.create_future()
+
+    def deliver(outcome: Callable[[], None]) -> None:
+        if not future.done():
+            outcome()
+
+    def run() -> None:
+        try:
+            result = fn()
+        except BaseException as exc:  # noqa: BLE001 — relayed to the awaiting task
+            error = exc
+            loop.call_soon_threadsafe(deliver, lambda: future.set_exception(error))
+        else:
+            loop.call_soon_threadsafe(deliver, lambda: future.set_result(result))
+
+    threading.Thread(target=run, name="lop-model-prewarm", daemon=True).start()
+    return await future
+
+
+async def warm_model_metadata(
+    root: str | Path,
+    *,
+    limit: int = PREWARM_MODELS,
+    budget_s: float = PREWARM_MODELS_BUDGET_S,
+) -> int:
+    """Resolve recently active conversations' models at boot; returns how many resolved.
+
+    WHAT IT DOES ON THE WIRE (review MINOR-2). At daemon boot, with no user
+    action, it resolves the saved models of the ``limit`` most recently active
+    user conversations — including ones nobody opens in this process. That
+    reaches exactly the endpoints, credentials and headers an open of those
+    conversations would (the provider's ``/models`` listing with the stored
+    credential, then the keyless price catalogues), because it IS the open's
+    resolution; nothing new is sent, only sooner.
+
+    WHY (l9-first-open-warm). The first cold open in a fresh daemon spent
+    188-363 ms in ``synthesise_cold_state`` against 1-30 ms on every later open.
+    The cost was not the journal: it was process warmup inside the model
+    resolution. Measured on the 51.7 MB fixture (cProfile, fresh process):
+    a SYNCHRONOUS ``GET /v1/models`` for the saved provider (~130-220 ms, from
+    ``spec_for_target`` -> ``resolve_model_info`` -> discovery, run when no
+    current listing document exists) plus ~25-40 ms of lazy imports
+    (``providers.failover``, ``model.prices``, ``httpcore``, ``h11``). A HEALTHY
+    answer is memoised for the day (``configure._resolve_model_info_cached``)
+    and written as a listing document, so the daemon can pay it at boot rather
+    than on the user's first click. A FAILED one is memoised only for
+    ``configure.DEGRADED_MEMO_TTL_S``, so a boot that ran before the network was
+    up cannot pin a degraded answer onto a later open.
+
+    WHY NOT A NARROWER WARM. Importing the modules alone left the fetch on the
+    open (measured 62-200 ms), and the fetch's target depends on the journal's
+    SAVED selection, so the honest warm is the open's own resolution over the
+    journals most likely to be opened. Any answer it caches is the one the open
+    would have computed itself a moment later, so the first frame is unchanged.
+
+    BOUNDS: sequential, one daemon thread at a time, the loop given a turn
+    between journals; the disk guard refuses it outright; the load guard and
+    ``budget_s`` stop it between journals; the first resolution that reports an
+    unavailable leg stops it (offline, there is no point asking seven more times);
+    and lifespan teardown cancels it (:func:`cancel_prewarm`).
+    """
+    reason = skip_reason(root)
+    if reason is not None:
+        logger.debug("model prewarm skipped (%s)", reason)
+        return 0
+    started = time.monotonic()
+    candidates = await asyncio.to_thread(_newest_journals, root, limit=limit)
+    resolved = 0
+    for position, session_id in enumerate(candidates):
+        stop = pace_reason() if position else None
+        if stop is None and position and time.monotonic() - started >= budget_s:
+            stop = f"budget: {budget_s:.0f}s spent"
+        if stop is not None:
+            logger.debug(
+                "model prewarm stopped after %d of %d user journals (%s)",
+                resolved,
+                len(candidates),
+                stop,
+            )
+            return resolved
+        try:
+            answered = await _in_daemon_thread(
+                lambda session_id=session_id: _resolve_model(root, session_id)
+            )
+        except Exception:  # noqa: BLE001 — a warm-up must never be the failure
+            logger.debug("model prewarm failed for %s", session_id, exc_info=True)
+            await asyncio.sleep(0)
+            continue
+        resolved += 1
+        if not answered:
+            logger.debug(
+                "model prewarm stopped after %d of %d user journals (a listing was unavailable)",
+                resolved,
+                len(candidates),
+            )
+            return resolved
+        await asyncio.sleep(0)
+    logger.debug("model prewarm resolved %d of %d user journals", resolved, len(candidates))
+    return resolved
+
+
+async def cancel_prewarm() -> None:
+    """Cancel every warm this module started and wait for them to unwind.
+
+    For the daemon's lifespan TEARDOWN (review MINOR-1): the warms are optional
+    work nobody is waiting on, and a pass still queued at shutdown would
+    otherwise keep issuing requests while the server drains. Never raises.
+    """
+    tasks = list(_TASKS)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    # A cancelled warm's worker thread may still hold a listing fetch lease; left
+    # standing, the NEXT process's first cold read waits it out (QA round 2,
+    # Q-2: 2209.5 ms). Only an unlink of our own lease files.
+    try:
+        from local_operator.model.catalogue import release_held_leases
+
+        release_held_leases()
+    except Exception:  # noqa: BLE001 — teardown of a warm-up must never be the failure
+        logger.debug("listing lease release failed at shutdown", exc_info=True)
 
 
 def start_index_prewarm(root: str | Path) -> asyncio.Task[Any] | None:
@@ -619,10 +1017,17 @@ def start_index_prewarm(root: str | Path) -> asyncio.Task[Any] | None:
         if reason is not None:
             logger.debug("index prewarm not started (%s)", reason)
             return None
-        task = asyncio.get_running_loop().create_task(warm_index_cache(root))
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(warm_index_cache(root))
+        # ITS OWN TASK, not a step of the index queue: the index and replay passes
+        # take seconds on a real store, and the model warm is mostly a network
+        # wait that overlaps them for free. Queued behind them, a first click a
+        # few seconds after boot would still pay the fetch.
+        model_task = loop.create_task(warm_model_metadata(root))
     except Exception:  # noqa: BLE001 — a warm-up must never be the failure
         logger.debug("index prewarm unavailable at startup", exc_info=True)
         return None
-    _TASKS.add(task)
-    task.add_done_callback(_TASKS.discard)
+    for held in (task, model_task):
+        _TASKS.add(held)
+        held.add_done_callback(_TASKS.discard)
     return task

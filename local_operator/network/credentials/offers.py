@@ -310,7 +310,10 @@ def shape_for_key(key: str, config: Path) -> tuple[str, str, str]:
             try:
                 from local_operator.mcp.auth import McpTokenStorage
 
-                if McpTokenStorage(url, store=store).has_stored_row():
+                # The same held-grant rule as ``credential_here`` (one rule,
+                # F-READY-1 round 1, M1). Both arms return one shape today, so
+                # this keeps the two reads from drifting rather than changing it.
+                if McpTokenStorage(url, store=store).holds_grant():
                     return "mcp-rotating", "mcp-oauth", ""
             except Exception:  # noqa: BLE001 — an unreadable store is "not signed in"
                 pass
@@ -377,7 +380,12 @@ def credential_here(key: str, config: Path) -> bool:
         try:
             from local_operator.mcp.auth import McpTokenStorage
 
-            return bool(McpTokenStorage(url, store=store).has_stored_row())
+            # A ROW IS NOT A HELD LOGIN (F-READY-1 round 1, M1): a registration-
+            # only row was never issued a grant, so the share verb refuses with
+            # "sign in here first" and the join re-check skips it, instead of
+            # placing a share nobody can serve. See ``holds_grant`` for why a
+            # tombstoned grant still counts here.
+            return bool(McpTokenStorage(url, store=store).holds_grant())
         except Exception:  # noqa: BLE001 — an unreadable store is "not signed in"
             return False
         finally:
@@ -470,9 +478,9 @@ def enumerate_candidates(config: Path, *, network_id: str = "") -> list[dict[str
     read — the caller sends an empty offer and records WHY.
     """
     from local_operator.network.credentials.types import (
-        DEVICE_BOUND_PROVIDERS,
         credential_key_for_mcp,
         credential_key_for_secret,
+        is_device_bound_provider,
     )
 
     rows: list[dict[str, Any]] = []
@@ -480,7 +488,7 @@ def enumerate_candidates(config: Path, *, network_id: str = "") -> list[dict[str
     by_provider: dict[str, list[Any]] = {}
     for credential in _strict_provider_rows(config):
         provider = str(getattr(credential, "provider", "") or "")
-        if not provider or provider == "mcp-oauth" or provider in DEVICE_BOUND_PROVIDERS:
+        if not provider or provider == "mcp-oauth" or is_device_bound_provider(provider):
             continue
         by_provider.setdefault(provider, []).append(credential)
     for provider in sorted(by_provider):
@@ -494,10 +502,12 @@ def enumerate_candidates(config: Path, *, network_id: str = "") -> list[dict[str
         if server.get("transport") not in ("http", "sse"):
             continue
         url = str(server.get("url") or "")
-        if not url or server.get("has_row") is not True:
+        if not url or readiness_mod.mcp_server_login_here(server) is not True:
             # No URL, no login to hold and nothing to serve — and a read that
             # cannot open the store reports ``has_row: None``, which must NOT
-            # read as "serve it anyway".
+            # read as "serve it anyway". A registration-only or tombstoned row is
+            # no login either: the runtime here would itself borrow, so offering
+            # an mcp-rotating item would advertise a grant this device cannot mint.
             continue
         rows.append(
             {

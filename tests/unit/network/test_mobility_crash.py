@@ -292,7 +292,11 @@ def test_a_kill_at_each_point_leaves_exactly_one_holder(window: str, tmp_path: P
     elif window == "after_handing_off":
         assert journal_a[session_id]["phase"] == "handing-off"
         assert not tombstone_a, "the crash landed between the journal and the tombstone"
-        assert (root_a / "sessions" / session_id).exists()
+        # THE DIRECTORY HAS ALREADY LEFT THE STORE, and that is the whole point of
+        # the clause-1 order: the commit renames sessions/<id> into
+        # network/handed-away/ BEFORE it writes the tombstone, so this window is "no
+        # live copy here, no record yet" — never two live copies.
+        assert not (root_a / "sessions" / session_id).exists()
         assert (staged / "ready.json").is_file()
     else:
         assert session_id in tombstone_a

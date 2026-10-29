@@ -28,15 +28,20 @@ import logging
 import re
 import time
 import uuid
-from collections import Counter
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections import Counter, deque
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar, cast
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import SecretStr, TypeAdapter, ValidationError
 
 from local_operator.ansi import sanitize_prompt_line
+from local_operator.harness import chrome_prompts as _chrome_prompts
 from local_operator.harness.approval import ApprovalUnavailableError, ask_approval
+from local_operator.harness.degeneration import (
+    DegenerationTrip,
+    StreamDegenerationGuard,
+)
 from local_operator.harness.guard_area import (
     READING_TOOLS,
     exempt_from_escalation,
@@ -49,13 +54,14 @@ from local_operator.harness.intent import (
     sanitize_intent,
     scan_streaming_intent,
 )
-from local_operator.harness.redaction import tool_source
+from local_operator.harness.redaction import PUBLIC_COPY_TOOLS, tool_source
 from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.types import (
     FAULT_ABORTED,
     FAULT_INVALID_ARGUMENTS,
     FAULT_KEY,
     FAULT_SKIPPED,
+    ONE_TURN_SECRET_RECEIPT,
     OUTPUT_LIMIT_ARGUMENTS,
     OUTPUT_LIMIT_KEY,
     OUTPUT_LIMIT_TURN,
@@ -69,10 +75,14 @@ from local_operator.harness.types import (
     AgentToolUpdate,
     ApprovalDescribeFn,
     Aside,
+    AudioContent,
     ChatRequest,
+    ConsumerCut,
     Content,
     CustomMessage,
+    DocumentContent,
     FinalResponseCheck,
+    ImageContent,
     InvalidToolArgumentsError,
     LoopConfig,
     Message,
@@ -82,6 +92,7 @@ from local_operator.harness.types import (
     ModelChangeEvent,
     ModelSpec,
     NoticeEvent,
+    OneTurnSecretScopeError,
     OutputValidationEvent,
     ProviderTurnStartEvent,
     ReasoningDeltaEvent,
@@ -106,6 +117,10 @@ from local_operator.harness.types import (
     TurnEndEvent,
     TurnStartEvent,
     Usage,
+    is_agent_forwarding_call,
+    one_turn_container_has_secret,
+    one_turn_public_text,
+    one_turn_secret_value_is_present,
 )
 from local_operator.i18n.keys import tui_notices as _nt
 from local_operator.i18n.messages import Msg
@@ -123,6 +138,11 @@ from local_operator.model.effort import real_rungs
 COMPOSE_NOTICE_INTERVAL_S = 0.2
 
 logger = logging.getLogger(__name__)
+
+_ONE_TURN_SECRET_CAPTURE_ERROR = "One-turn secret result was refused safely."
+_ONE_TURN_SECRET_FORWARD_ERROR = "Agent forwarding was refused while a one-turn secret was active."
+_ONE_TURN_SECRET_SCRUB_ERROR = "One-turn secret response could not be safely published."
+_ONE_TURN_SECRET_TOOL_ERROR = "Tool failed safely during a one-turn secret scope."
 
 
 def _notice(
@@ -532,6 +552,14 @@ STEERING_INTERRUPT_POLL_S = 0.25
 REPEATED_TOOL_ERROR_WARNING = 3
 REPEATED_TOOL_ERROR_LIMIT = 6
 
+# Successful calls can stall too: an observed wait/ESC cycle ran 824 times
+# without changing its results. Count unchanged occurrences per short cycle,
+# not elapsed time, with headroom for ordinary jobs/wait/monitor polling.
+NO_PROGRESS_WARNING = 12
+NO_PROGRESS_LIMIT = 24
+MAX_NO_PROGRESS_RECOVERIES = 2
+NO_PROGRESS_MAX_PERIOD = 3
+
 #: How many times ONE run re-asks the model after a tool call arrived with no
 #: NAME at all. ``_model_turn`` drops such calls before anything executes them
 #: (a nameless call is wire-illegal, so keeping it killed later requests), and
@@ -543,33 +571,26 @@ REPEATED_TOOL_ERROR_LIMIT = 6
 #: re-buy the same diagnosis.
 MAX_NAMELESS_CALL_RECOVERIES = 2
 
-#: What the loop tells the model after dropping a tool call that arrived with
-#: no name. The drop is invisible to the model otherwise -- there is no call to
-#: attach a result to, and the transcript row cannot be replayed on any wire --
-#: so this message is the only record of why the conversation continues. It
-#: names the one repair the model can make: re-send the call with a name.
-#: Harness chrome -- see ``harness.rows.harness_chrome_prompts``.
-NAMELESS_CALL_RECOVERY_PROMPT = (
-    "Harness recovery notice: a tool call in your last message arrived without "
-    "a tool name. It was not executed, and its result is not in this "
-    "conversation. Re-issue the call with the tool name included, or continue "
-    "without it if it is no longer needed."
+#: RE-EXPORTED, NOT DEFINED HERE. The strings and the recogniser live in the
+#: import-free ``harness.chrome_prompts`` so a host that only has to RECOGNISE a prompt
+#: (``harness.rows``, on every replayed user row) does not import this module and the
+#: tool stack behind it. Historical spellings kept: every call site below and every
+#: test imports them from here.
+NAMELESS_CALL_RECOVERY_PROMPT = _chrome_prompts.NAMELESS_CALL_RECOVERY_PROMPT
+WORDLESS_STOP_RECOVERY_PROMPT = _chrome_prompts.WORDLESS_STOP_RECOVERY_PROMPT
+NO_PROGRESS_RECOVERY_PROMPT = _chrome_prompts.NO_PROGRESS_RECOVERY_PROMPT
+DEGENERATE_STREAM_RECOVERY_PROMPT = _chrome_prompts.DEGENERATE_STREAM_RECOVERY_PROMPT
+LENGTH_STOP_RECOVERY_PROMPT = _chrome_prompts.LENGTH_STOP_RECOVERY_PROMPT
+CONTINUE_TRUNCATED_ANSWER_PROMPT = _chrome_prompts.CONTINUE_TRUNCATED_ANSWER_PROMPT
+CONNECTIVITY_CONTINUATION_PROMPT = _chrome_prompts.CONNECTIVITY_CONTINUATION_PROMPT
+CONNECTIVITY_TOOL_CALL_CONTINUATION_PROMPT = (
+    _chrome_prompts.CONNECTIVITY_TOOL_CALL_CONTINUATION_PROMPT
 )
+_TOOL_CALL_INSTRUCTION_HEAD = _chrome_prompts._TOOL_CALL_INSTRUCTION_HEAD
+_TOOL_CALL_INSTRUCTION_TAIL = _chrome_prompts._TOOL_CALL_INSTRUCTION_TAIL
+_is_continuation_tool_list = _chrome_prompts._is_continuation_tool_list
+is_connectivity_continuation_instruction = _chrome_prompts.is_connectivity_continuation_instruction
 
-#: What the loop tells the model after a turn arrived with no text and no tool
-#: calls on a clean stop. Like the nameless-call notice above it is the only
-#: record of why the conversation continues: the empty message itself is
-#: REMOVED from the wire history (an assistant turn with no content blocks is
-#: illegal on the Anthropic wire and teaches a re-ask to repeat it), so without
-#: this prompt the fact that the turn arrived empty would be invisible to the
-#: model -- and, on a resumed session, to the reader. Harness chrome -- see
-#: ``harness.rows.harness_chrome_prompts``.
-WORDLESS_STOP_RECOVERY_PROMPT = (
-    "Harness recovery notice: your last message arrived with no text and no "
-    "tool calls, so there was nothing to act on and the turn would have ended "
-    "silently. Produce your next tool call, or your final answer if the work "
-    "is done."
-)
 
 #: How many times an EMPTY ``length`` truncation (no text, no tool calls — the
 #: reasoning model that spent its whole output budget thinking) is retried one
@@ -596,22 +617,6 @@ MAX_EMPTY_TRUNCATION_RETRIES = 2
 #: extra model call.
 MAX_WORDLESS_STOP_RECOVERIES = 1
 
-#: What the loop tells the model after a turn was cut off at the output limit
-#: with NOTHING produced, on a model the loop has no cheaper rung to retreat to
-#: (the router's ``auto`` sentinel: the level is delegated to the server, so
-#: ``_lower_effort`` declines — see its docstring). The empty message itself is
-#: REMOVED from the wire history by that arm (an assistant turn with no content
-#: blocks is illegal on the Anthropic wire, and replaying "I said nothing"
-#: teaches the re-ask to say nothing), so without this prompt neither the model
-#: nor a reader of a resumed session can see why the conversation continues.
-#: Harness chrome -- see ``harness.rows.harness_chrome_prompts``.
-LENGTH_STOP_RECOVERY_PROMPT = (
-    "Harness recovery notice: your last message hit your output limit "
-    "before anything visible was produced — no text and no tool calls arrived, "
-    "so the turn would have ended here with nothing to show for it. Continue "
-    "the work: produce your next tool call, or your final answer if the work is "
-    "done, keeping each step well inside the output budget."
-)
 
 #: How many times ONE run re-asks a model whose turn was cut off at the output
 #: limit with nothing visible, on a model with NO cheaper effort rung to retreat
@@ -636,6 +641,23 @@ LENGTH_STOP_RECOVERY_PROMPT = (
 #: the same diagnosis.
 MAX_LENGTH_SILENT_RECOVERIES = 1
 
+#: How many times ONE run re-asks after the in-stream degeneration guard
+#: (``harness.degeneration``) cut a response that had become one passage
+#: repeated verbatim. DISTINCT from the two budgets above, and deliberately not
+#: drawn from them: those buy a cheaper effort rung or a plain re-ask, and the
+#: measured loop (2026-10-26, three consecutive 131,072-token turns, see the
+#: guard's module docstring) recurred identically on BOTH lower-effort retries,
+#: so neither move addresses it. This re-ask keeps the effort and changes the
+#: request instead: the looping turn is dropped and
+#: ``DEGENERATE_STREAM_RECOVERY_PROMPT`` is appended.
+#:
+#: TWO: one loop can be bad luck in sampling, and the steer is cheap -- the guard
+#: stops each loop after ~10 KB rather than the full budget. A THIRD loop in the
+#: same run is the model's steady state on this context, and the run ends NAMED
+#: with an error that says so rather than paying for more. Run-scoped like every
+#: sibling recovery: a fresh allowance per turn would re-buy the same diagnosis.
+MAX_DEGENERATE_STREAM_RECOVERIES = 2
+
 #: How many times ONE run continues an answer that the output limit cut off
 #: mid-prose. A prose truncation is the one length end the loop deliberately did
 #: NOT continue -- the reader was expected to ask -- and for an interactive
@@ -652,16 +674,6 @@ MAX_LENGTH_SILENT_RECOVERIES = 1
 #: (agent review round 1, M-1).
 MAX_TRUNCATED_ANSWER_CONTINUATIONS = 1
 
-#: What the loop tells the model after the output limit cut its answer off
-#: mid-prose. Second person, like its recovery siblings, and it names the one
-#: instruction that matters: continue from the cut, do not restart. Persisted as
-#: harness chrome (see ``harness.rows.harness_chrome_prompts``) so replay shows
-#: the notice rather than attributing the harness's words to the user.
-CONTINUE_TRUNCATED_ANSWER_PROMPT = (
-    "Harness recovery notice: your last message was cut off mid-answer by your "
-    "output limit — the rest of it was never sent. Continue from exactly where "
-    "it stopped, without repeating what you already wrote, and finish the answer."
-)
 
 #: How many times ONE run will continue a turn that the network cut short —
 #: the laptop closed at home and opened at work, which is minutes of no route
@@ -704,39 +716,6 @@ MAX_CONNECTIVITY_CONTINUATIONS = 3
 #: the ordinary path never starts a timer.
 INTERRUPTED_RECOVERY_WINDOW_MS = 600_000.0
 
-#: What the loop tells the model after the network cut its answer short.
-#:
-#: Phrased as an instruction about what the USER can see, because that is the
-#: constraint the model cannot infer: the partial text is in the transcript and
-#: has already been read, so restarting the answer would show it twice. It is a
-#: user-role message rather than a bare trailing assistant turn on purpose —
-#: see the call site: prefilling is rejected by current Claude models.
-CONNECTIVITY_CONTINUATION_PROMPT = (
-    "[system] Your previous response was cut off mid-sentence by a network "
-    "interruption. The partial text above has already been shown to the user. "
-    "Continue it seamlessly from exactly where it stopped — do not repeat any "
-    "of it, do not restart, and do not apologise or mention the interruption."
-)
-
-#: What the loop tells the model when the interruption landed inside a TOOL CALL.
-#:
-#: The prompt above assumes the cut fell in a SENTENCE, and its instruction is
-#: to continue that sentence seamlessly. A call still being dictated when the
-#: socket died is truncated JSON: the continuation branch drops it — it cannot
-#: be run, and cannot be replayed faithfully — so the model's own record of
-#: having chosen that action is erased. Leaving it to the prose prompt then asks
-#: the model to continue a sentence it never finished while the action it had
-#: already decided on is silently lost, which is exactly what happened to the
-#: aborted ``write`` call in the incident. This instruction carries the one fact
-#: the drop erased, names the tool so a multi-call turn is unambiguous, and is
-#: written to stand alone — a cut that produced no prose at all gets it on its
-#: own — as well as to follow the prose prompt above.
-CONNECTIVITY_TOOL_CALL_CONTINUATION_PROMPT = (
-    "[system] A tool call ({tools}) was aborted by the network interruption "
-    "before it finished, so it never ran. If you still need that action, issue "
-    "the call again from scratch."
-)
-
 
 def _continuation_instruction(*, resumable_text: bool, interrupted: list[ToolCall]) -> str:
     """The instruction appended to an interrupted turn, shaped to the cut.
@@ -759,68 +738,6 @@ def _continuation_instruction(*, resumable_text: bool, interrupted: list[ToolCal
         tools = ", ".join(sorted({call.name for call in interrupted}))
         parts.append(CONNECTIVITY_TOOL_CALL_CONTINUATION_PROMPT.format(tools=tools))
     return " ".join(parts)
-
-
-#: The two fixed ends of `CONNECTIVITY_TOOL_CALL_CONTINUATION_PROMPT`, split
-#: around its ``{tools}`` hole. Declared from the template itself so the
-#: recogniser below cannot fall out of step with the string it recognises.
-_TOOL_CALL_INSTRUCTION_HEAD, _, _TOOL_CALL_INSTRUCTION_TAIL = (
-    CONNECTIVITY_TOOL_CALL_CONTINUATION_PROMPT.partition("{tools}")
-)
-
-
-def _is_continuation_tool_list(text: str) -> bool:
-    """Whether ``text`` is a tools list ``_continuation_instruction`` would write.
-
-    The producer writes ``", ".join(sorted({call.name for call in interrupted}))``,
-    so the list is comma-and-space separated and every name is a single
-    whitespace-free token. Checked rather than waved through because the
-    predicate below is what keeps harness chrome out of the user's row: an
-    operator message that merely QUOTES one of these instructions — a whole
-    line, a multi-line paste, a wrapping that put a newline inside the tools
-    list — must stay theirs. A tool name this grammar rejects costs only the
-    pre-fix behaviour (the row paints), never a swallowed operator turn.
-    """
-    names = text.split(", ")
-    return all(name and not any(char.isspace() for char in name) for name in names)
-
-
-def is_connectivity_continuation_instruction(text: str) -> bool:
-    """Whether ``text`` is EXACTLY one of the instructions this module mints.
-
-    :func:`_continuation_instruction` returns three shapes, and the front ends
-    have to recognise all three: the prose prompt alone, the tool-call prompt
-    alone (a cut that produced no prose), and the two joined by a single space
-    (the incident's shape — prose with a call still being dictated).
-
-    Lives HERE, beside the strings it matches, rather than in the shared
-    ``harness.rows`` decision that calls it, for two reasons. The composed shape
-    cannot be enumerated: the tool-call half interpolates the aborted calls'
-    names, so a table of exact strings would have to list every possible tools
-    list. And the shape is a property of the producer, not of a row — the row
-    decision is "does the harness mint this text", and this is how the harness
-    answers that about its own words.
-
-    Deliberately not a loose prefix test on ``[system] ``: that prefix is also
-    minted by the approval and question gates (see
-    ``rows._HARNESS_NOTICE_HEADS``), and an operator is free to type it. What is
-    matched is the fixed sentence each half opens with, plus the exact tail the
-    tool-call half closes with.
-    """
-    stripped = text.strip()
-    if stripped == CONNECTIVITY_CONTINUATION_PROMPT:
-        return True
-    if stripped.startswith(CONNECTIVITY_CONTINUATION_PROMPT + " "):
-        stripped = stripped[len(CONNECTIVITY_CONTINUATION_PROMPT) + 1 :]
-    if not (
-        stripped.startswith(_TOOL_CALL_INSTRUCTION_HEAD)
-        and stripped.endswith(_TOOL_CALL_INSTRUCTION_TAIL)
-    ):
-        return False
-    tools = stripped[
-        len(_TOOL_CALL_INSTRUCTION_HEAD) : len(stripped) - len(_TOOL_CALL_INSTRUCTION_TAIL)
-    ]
-    return _is_continuation_tool_list(tools)
 
 
 # How the loop recognises "this DeepSeek thinking-mode request never carried the
@@ -846,6 +763,28 @@ MAX_REASONING_ECHO_FILL_RETRIES = 1
 #: separate counters are what keep "one of each" true without letting either
 #: alone loop.
 MAX_REASONING_ECHO_RETRIES = 1
+
+
+def _describe_stream_failure(exc: BaseException) -> str:
+    """The diagnosable text for a stream that raised, attribution included.
+
+    Used for the LOG line, not for ``AgentEndEvent.error``: that field is read
+    by ``incidents.classify_incident`` and stays the kind label plus the
+    provider's own words. A log reader needs one sentence that names the model
+    that actually failed, because the log has no sidebar, no incident card and
+    no session model to fall back on — which is how a log line about an OpenAI
+    refusal came to be read as Anthropic's problem.
+
+    ``ProviderError.describe()`` writes that sentence and then repeats
+    ``str(exc)`` — the kind, the status and the provider's words — UNCHANGED.
+    Read through ``getattr`` because this module does not import ``providers``
+    (the loop is deliberately downstream of it); a plain ``httpx`` error or a
+    tool defect takes the old ``str()`` path untouched.
+    """
+    describe = getattr(exc, "describe", None)
+    if callable(describe):
+        return str(describe())
+    return str(exc)
 
 
 def _is_reasoning_echo_rejection(error: str | None) -> bool:
@@ -1073,6 +1012,20 @@ def _consume_claim(claimed: Counter[str], call_id: str) -> bool:
 
 
 @dataclass
+class _OneTurnSecretLease:
+    """Run-local ownership of one native tool's one-request value.
+
+    ``template`` is a SAFE request dump with timing/retry normalization only. It
+    never contains the raw value. The redaction token belongs to this lease alone
+    and is released on request expiry or unconditional run cleanup.
+    """
+
+    value: SecretStr
+    template: tuple[Any, ...] | None = None
+    redaction_token: str | None = None
+
+
+@dataclass
 class LoopContext:
     """Mutable host context the loop reads and extends.
 
@@ -1113,6 +1066,12 @@ class LoopContext:
     # the popped value to ``_redact_content`` -- and popped on cancellation, so it
     # does not outlive the result it belongs to.
     exempt_source_verdicts: dict[str, bool] = field(default_factory=dict)
+    # Never checkpointed or copied to a child. The fixed receipt is already in
+    # ``messages``; these leases are the only route back to a provider-bound value.
+    one_turn_secret_leases: dict[str, _OneTurnSecretLease] = field(default_factory=dict)
+    # Sticky until the run boundary even if every lease expires earlier: the raw
+    # executor-argument map must not become a subsequent-turn back channel.
+    one_turn_secret_run_active: bool = False
 
 
 @dataclass
@@ -1142,6 +1101,7 @@ def _tool_start_event(
     tool_name: str,
     args: dict[str, Any] | None,
     intent: str | None,
+    redact: Callable[[str], str] | None = None,
 ) -> ToolExecutionStartEvent:
     """Build a ``tool_execution_start`` stamped with WHEN the call began.
 
@@ -1163,6 +1123,17 @@ def _tool_start_event(
     ``ToolCard.restore``), so a system-clock adjustment after the seed cannot
     move a counter that is already running.
     """
+    if redact is not None:
+        # Secret-active execution still needs raw arguments privately, but this
+        # event is serialized into live attach/UI state. Failure drops optional
+        # card detail rather than publishing an unscrubbed second carrier.
+        try:
+            args, _ = _scrub_argument_value(args, redact)
+            intent = redact(intent) if intent else intent
+        except Exception as exc:
+            logger.warning("one-turn secret tool-start scrub failed: %s", type(exc).__name__)
+            args = {}
+            intent = None
     if tool_name in ("read", "write", "edit", "memory"):
         from local_operator.memory_privacy import retained_arguments
 
@@ -1305,8 +1276,83 @@ def _error_batch_fingerprint(calls: list[ToolCall], results: list[ToolResult]) -
     return digest.hexdigest()
 
 
+@dataclass
+class _NoProgressGuard:
+    """Bounded streaming detector for unchanged period-1/2/3 tool cycles.
+
+    Keep only the last three digests and three lag-match counts, never output
+    bodies. A changing result breaks that lag's streak; IDs and timing do not
+    count as progress. Work is one serialization/hash plus three comparisons
+    per call, independent of run length (hashing still scales with payload size).
+    """
+
+    history: deque[bytes] = field(default_factory=lambda: deque(maxlen=NO_PROGRESS_MAX_PERIOD))
+    matches: list[int] = field(default_factory=lambda: [0] * NO_PROGRESS_MAX_PERIOD)
+    warned: bool = False
+
+    def observe(self, call: ToolCall, result: ToolResult) -> tuple[int, int]:
+        if result.text in (ABORTED_RESULT_TEXT, SKIPPED_RESULT_TEXT):
+            self.reset()
+            return 1, 0
+        # Include all arguments, with canonical dictionary ordering. Content
+        # includes media content and its type, never capture provenance: a new
+        # revision can still show identical pixels. Whitelist the provider's
+        # media fields so future capture IDs/timestamps cannot disguise a loop.
+        # Hash the inline base64 content without retaining another payload copy;
+        # textual observations keep their existing serialization. Narrow on the
+        # CLASS, not on ``block.type``: the discriminator is a string, so a
+        # comparison leaves the union unnarrowed and the media fields
+        # unreadable to a type checker.
+        payload = json.dumps(
+            [
+                call.name,
+                call.arguments,
+                result.is_error,
+                [
+                    (
+                        {
+                            "type": block.type,
+                            "mime_type": block.mime_type,
+                            "sha256": hashlib.sha256(
+                                block.data.encode("utf-8", "surrogatepass")
+                            ).hexdigest(),
+                        }
+                        if isinstance(block, (ImageContent, AudioContent, DocumentContent))
+                        else block.model_dump(mode="json")
+                    )
+                    for block in result.content
+                ],
+            ],
+            sort_keys=True,
+            default=str,
+        )
+        digest = hashlib.sha256(payload.encode("utf-8", "surrogatepass")).digest()
+        best = (1, 1)
+        for index in range(NO_PROGRESS_MAX_PERIOD):
+            period = index + 1
+            self.matches[index] = (
+                self.matches[index] + 1
+                if len(self.history) >= period and self.history[-period] == digest
+                else 0
+            )
+            repetitions = 1 + self.matches[index] // period
+            if repetitions > best[1]:
+                best = period, repetitions
+        if not any(self.matches):
+            self.warned = False
+        self.history.append(digest)
+        return best
+
+    def reset(self) -> None:
+        self.history.clear()
+        self.matches = [0] * NO_PROGRESS_MAX_PERIOD
+        self.warned = False
+
+
 async def _abortable_stream(
-    stream: AsyncIterator[StreamEvent], signal: AbortSignal | None
+    stream: AsyncIterator[StreamEvent],
+    signal: AbortSignal | None,
+    cut: AbortSignal | None = None,
 ) -> AsyncIterator[StreamEvent]:
     """Yield from ``stream`` but stop as soon as ``signal`` aborts.
 
@@ -1340,8 +1386,20 @@ async def _abortable_stream(
     ``text_parts``, so a transient second reference to data the loop is holding
     anyway cannot change the memory profile. In practice the queue stays near
     empty - the producer is network-bound and the consumer is not.
+
+    ``cut`` is a second, CONSUMER-OWNED stop for this one stream: the loop's
+    in-stream degeneration guard (``harness.degeneration``) fires it when the
+    response has collapsed into a verbatim loop. It ends the stream exactly the
+    way an abort does -- same pump cancellation inside the socket read, same
+    quiet end -- but it is deliberately NOT merged into ``signal``: the
+    caller's signal means "the user stopped the run", the loop reads it after
+    the stream to label the turn ``aborted``, and the provider holds its own
+    reference to it. A guard stop is not a user stop and must reach neither. A
+    watcher per signal rather than ``AbortSignal.any_of``: these watchers die
+    in the ``finally`` below on every exit, so nothing outlives the stream.
     """
-    if signal is None:
+    signals = [s for s in (signal, cut) if s is not None]
+    if not signals:
         async for event in stream:
             yield event
         return
@@ -1364,11 +1422,11 @@ async def _abortable_stream(
     # before it starts, which is the whole difference. (Same hazard the batch
     # drain documents and defends against; this is the second instance of it.)
     task.add_done_callback(lambda _task: finished.set())
-    watcher = asyncio.ensure_future(_cancel_when_aborted(signal, task))
+    watchers = [asyncio.ensure_future(_cancel_when_aborted(s, task)) for s in signals]
     # An abort that has ALREADY fired must not be missed: the watcher only gets
     # to run on the next loop pass, by which time the pump could have consumed
     # the whole stream and spent a request the user had stopped.
-    if signal.aborted:
+    if any(s.aborted for s in signals):
         task.cancel()
 
     try:
@@ -1397,7 +1455,8 @@ async def _abortable_stream(
             if getter in done:
                 yield getter.result()
     finally:
-        watcher.cancel()
+        for watcher in watchers:
+            watcher.cancel()
         if not task.done():
             task.cancel()
         with contextlib.suppress(BaseException):
@@ -1671,7 +1730,11 @@ def _scrub_raw_arguments(raw: str, redact: Callable[[str], str]) -> str:
     return redact(_scrub_json_string_values(raw, redact))
 
 
-def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | None) -> Message:
+def _scrub_history_arguments(
+    message: Message,
+    redact: Callable[[str], str] | None,
+    redact_arguments: Callable[[str], str] | None = None,
+) -> Message:
     """The copy of an assistant turn that history STORES and REPLAYS.
 
     **Why a copy rather than a scrub in place.** ``tool_calls[].arguments`` is
@@ -1694,13 +1757,26 @@ def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | No
     paths never carry tool calls, so a scrubbed copy is only ever produced where
     that check is not in play — but returning a copy unconditionally would leave
     a refused turn in history the moment one of them grew a call.
+
+    **ARGUMENTS USE THEIR OWN PASS** (``redact_arguments``) where the session
+    provides one. This text is CODE: the model wrote it, the harness executes it,
+    and the retained copy is replayed to the provider on every later request — so a
+    shape heuristic that rewrites it rewrites the program the model then reads back
+    and copies. Session 6ccea512c372 measured exactly that: a Python keyword masked
+    as an assignment value in a ``bash`` call, replayed, and copied into new
+    ``eval`` cells that died with ``NameError``. The argument pass keeps the
+    exact-value scrub and a high-confidence shape floor, and skips the
+    name-driven guesses. ``redact`` remains the fallback for a caller that
+    supplies only the result hook, so a store outside this tree keeps its current
+    behaviour rather than losing argument scrubbing entirely.
     """
     # The executor still holds the original assistant/calls. Only the retained
     # copy changes, following this function's existing secret-argument contract.
     from local_operator.memory_privacy import retained_message
 
     message = retained_message(message)
-    if redact is None or not message.tool_calls:
+    scrub = redact_arguments if redact_arguments is not None else redact
+    if scrub is None or not message.tool_calls:
         return message
     calls: list[ToolCall] = []
     changed = False
@@ -1710,9 +1786,9 @@ def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | No
         # carries it), and a hit found here must be reported with the call it
         # came from rather than as an anonymous one.
         with tool_source(call.name, call.arguments):
-            arguments, arguments_changed = _scrub_argument_value(call.arguments, redact)
+            arguments, arguments_changed = _scrub_argument_value(call.arguments, scrub)
             raw = (
-                _scrub_raw_arguments(call.raw_arguments, redact)
+                _scrub_raw_arguments(call.raw_arguments, scrub)
                 if isinstance(call.raw_arguments, str)
                 else None
             )
@@ -2047,6 +2123,9 @@ class AgentLoop:
         signal: AbortSignal | None,
         generation: int = 0,
     ) -> AsyncIterator[AgentEvent]:
+        # A context can be reused after an abandoned run, but a one-turn value
+        # cannot. Drop stale ownership before even the opening-drain early return.
+        self._clear_one_turn_secrets(context)
         # THE OPENING DRAIN (``drain_steering_on_open``): a run opened BECAUSE
         # the steering queue holds a message with no live turn to take it
         # (``Session.steer``'s idle wake) takes the queue ONCE, before its
@@ -2182,9 +2261,14 @@ class AgentLoop:
         run_context_tokens: int | None = None
         last_error_batch: str | None = None
         repeated_error_batches = 0
+        no_progress = _NoProgressGuard()
+        no_progress_recoveries = 0
         # Re-asks this run has spent on turns whose tool calls arrived with no
         # name; see ``MAX_NAMELESS_CALL_RECOVERIES``.
         nameless_call_recoveries = 0
+        # Re-asks this run has spent on streams the degeneration guard cut; see
+        # ``MAX_DEGENERATE_STREAM_RECOVERIES``.
+        degenerate_stream_recoveries = 0
 
         yield AgentStartEvent(generation=generation)
 
@@ -2206,8 +2290,23 @@ class AgentLoop:
                     if pending:
                         last_error_batch = None
                         repeated_error_batches = 0
+                        no_progress.reset()
                     self._drain_pending(pending, context)
                     pending = []
+
+                    # Cancellation can land while an awaited injection collector
+                    # or a commit hook is running. That hook may withdraw its
+                    # own message, but the non-empty local batch has already
+                    # opened this continuation. Re-read the existing latches at
+                    # the actual provider boundary so a suppressed job result
+                    # cannot buy an empty request after abort/departure.
+                    if (signal is not None and signal.aborted) or _graceful_cancel_requested(
+                        config
+                    ):
+                        yield AgentEndEvent(
+                            messages=new_messages, aborted=True, generation=generation
+                        )
+                        return
 
                     gate = config.before_model_call
                     if gate is not None:
@@ -2232,6 +2331,13 @@ class AgentLoop:
                     turn_retryable_interruption = False
                     turn_attempted_selector: "ModelSpec | None" = None
                     nameless_call_drops = 0
+                    turn_degenerate: DegenerationTrip | None = None
+                    # Attribution of THIS call's failure: reset per call for the
+                    # same reason as every other turn-local above. A stale pair
+                    # from a previous iteration would name a model that did not
+                    # produce this end event.
+                    turn_failing_model = ""
+                    turn_failover_from = ""
                     # The spec this call was BUILT with, which is not
                     # ``config.model`` whenever the host resolves per call. The
                     # echo fill below is gated on what was actually sent.
@@ -2275,6 +2381,13 @@ class AgentLoop:
                             turn_retryable_interruption = event.retryable_interruption
                             turn_attempted_selector = event.attempted_selector
                             nameless_call_drops = event.nameless_call_drops
+                            turn_degenerate = event.degenerate
+                            # WHICH model failed, carried to the end event so the
+                            # session's incident and the transcript name it —
+                            # never the model the user selected. Empty on a
+                            # clean turn and on any error with no provenance.
+                            turn_failing_model = event.failure_selector
+                            turn_failover_from = event.failure_failover_from
                         else:
                             yield event
                     if assistant is None:
@@ -2477,7 +2590,9 @@ class AgentLoop:
                                 # ``_scrub_history_arguments`` for why the
                                 # executor keeps the original.
                                 stored = _scrub_history_arguments(
-                                    assistant, config.redact_tool_result
+                                    assistant,
+                                    config.redact_tool_result,
+                                    config.redact_tool_arguments,
                                 )
                                 context.messages.append(stored)
                                 new_messages.append(stored)
@@ -2624,7 +2739,16 @@ class AgentLoop:
                             # path in this loop reaches a TurnEndEvent; this one
                             # must too.
                             yield TurnEndEvent(
-                                message=_scrub_history_arguments(assistant, None), tool_results=[]
+                                message=(
+                                    _scrub_history_arguments(
+                                        assistant,
+                                        config.redact_tool_result,
+                                        config.redact_tool_arguments,
+                                    )
+                                    if context.one_turn_secret_leases
+                                    else _scrub_history_arguments(assistant, None)
+                                ),
+                                tool_results=[],
                             )
                             # The notice states what HAS happened, not what is
                             # hoped for, and it is WRITTEN FOR BOTH FAMILIES the
@@ -2676,7 +2800,9 @@ class AgentLoop:
                         # omits it must not blank a figure the previous call
                         # (or the host's seed) supplied.
                         run_context_tokens = int(assistant.usage.context_tokens)
-                    stored = _scrub_history_arguments(assistant, config.redact_tool_result)
+                    stored = _scrub_history_arguments(
+                        assistant, config.redact_tool_result, config.redact_tool_arguments
+                    )
                     context.messages.append(stored)
                     new_messages.append(stored)
 
@@ -2906,16 +3032,126 @@ class AgentLoop:
                             redact=config.redact_tool_result,
                         )
                         yield TurnEndEvent(
-                            message=_scrub_history_arguments(assistant, None), tool_results=[]
+                            message=(
+                                stored
+                                if context.one_turn_secret_leases
+                                else _scrub_history_arguments(assistant, None)
+                            ),
+                            tool_results=[],
                         )
                         yield AgentEndEvent(
                             messages=new_messages,
                             aborted=aborted,
                             error=stream_error,
+                            failing_model=turn_failing_model,
+                            failover_from=turn_failover_from,
                             generation=generation,
                         )
                         self._discard_pending_custom(pending)
                         return
+
+                    if turn_degenerate is not None:
+                        # THE DEGENERATION ARM (``harness.degeneration``). The
+                        # guard cut this stream because it had become one short
+                        # passage repeated verbatim, so the turn ends as a
+                        # ``length`` stop -- and this arm claims it BEFORE the
+                        # ordinary length arm below, for two reasons. That
+                        # arm's copy ("spent its whole output budget") is false
+                        # here: the stream was stopped after ~10 KB precisely so
+                        # the budget was NOT spent. And its remedy is the wrong
+                        # one: it retreats an effort rung and replays the same
+                        # request, which in the measured trace looped again,
+                        # identically, on both retreats. So the recovery keeps
+                        # the established re-ask SHAPE (drop the turn, append a
+                        # chrome prompt, go round) with its own budget and its
+                        # own words, and an abort still outranks it: an aborted
+                        # stream never reaches here (``stop_reason`` is
+                        # ``aborted``, handled by the branch above).
+                        #
+                        # The looping message leaves the wire history for the
+                        # empty-truncation retry's reason and one of its own:
+                        # replaying ten kilobytes of the loop anchors the retry
+                        # on exactly what it must not continue. Any tool call
+                        # in it never ran and is dropped with it, which is what
+                        # the steer tells the model. Identity is ``stored``, the
+                        # object actually appended above.
+                        if context.messages and context.messages[-1] is stored:
+                            context.messages.pop()
+                        if new_messages and new_messages[-1] is stored:
+                            new_messages.pop()
+                        if _graceful_cancel_requested(config):
+                            # A requested stop outranks the re-ask, as on every
+                            # recovery arm: end the run the way the boundary
+                            # below ends a stopped one.
+                            yield AgentEndEvent(
+                                messages=new_messages, aborted=True, generation=generation
+                            )
+                            self._discard_pending_custom(pending)
+                            return
+                        if degenerate_stream_recoveries >= MAX_DEGENERATE_STREAM_RECOVERIES:
+                            # NAMED, and named for what happened. Not
+                            # ``OUTPUT_LIMIT_CAUSE``: its sentence ("hit the
+                            # model's output limit") is the false claim this arm
+                            # exists to avoid. The error is the record a parent,
+                            # an exec caller and the session's incident read.
+                            yield AgentEndEvent(
+                                messages=new_messages,
+                                error=(
+                                    "Degenerate output: the model's "
+                                    f"{turn_degenerate.channel} fell into a verbatim loop "
+                                    f"(a {turn_degenerate.period}-character passage repeated "
+                                    f"{turn_degenerate.repeats}+ times) on "
+                                    f"{degenerate_stream_recoveries + 1} attempts in this run. "
+                                    "The harness stopped each attempt as soon as the loop was "
+                                    "detected; rephrase the request or switch models."
+                                ),
+                                generation=generation,
+                            )
+                            self._discard_pending_custom(pending)
+                            return
+                        degenerate_stream_recoveries += 1
+                        # ONE steer in the transcript, never a run of them. A
+                        # consecutive trip finds the previous steer as the last
+                        # row (the looping turn it followed was just dropped),
+                        # so it is retired before the fresh one goes in; at the
+                        # cap (above) the existing one stays as the record.
+                        # Without this the next user turn read "your last
+                        # message was stopped…" twice in a row with nothing
+                        # between (review n2). Matched on the text: the steer is
+                        # a fresh ``Message.user`` per trip.
+                        # Only a steer THIS run minted (the tail of both lists):
+                        # a row an earlier run persisted is durable history and
+                        # is never rewritten from here.
+                        last = context.messages[-1] if context.messages else None
+                        if (
+                            isinstance(last, Message)
+                            and last.role == "user"
+                            and last.text == DEGENERATE_STREAM_RECOVERY_PROMPT
+                            and new_messages
+                            and new_messages[-1] is last
+                        ):
+                            context.messages.pop()
+                            new_messages.pop()
+                        # Persisted for the reason every recovery prompt is: a
+                        # resumed session must be able to see why it was
+                        # re-asked. Harness chrome -- see
+                        # ``harness.rows.harness_chrome_prompts``.
+                        recovery = Message.user(DEGENERATE_STREAM_RECOVERY_PROMPT)
+                        context.messages.append(recovery)
+                        new_messages.append(recovery)
+                        # No TurnEndEvent: the turn is not in the transcript, so
+                        # there is no live row to settle (the nameless and
+                        # wordless re-asks' reason). And, unlike those siblings,
+                        # NO NOTICE -- deliberately, and only for now: each of
+                        # them yields catalogue copy, and a new message here
+                        # needs a translated ``tui.notices`` key in every
+                        # carried locale (review m1, deferred to a follow-up
+                        # PR). The record is the ``degenerate_stream`` payload
+                        # on the ``message_end`` already emitted, which every
+                        # surface reads to label the cut row honestly
+                        # (``rows.assistant_stop_notice``), plus the log line.
+                        has_more_tool_calls = True
+                        continue
 
                     if nameless_call_drops:
                         # A tool call with no name cannot execute and cannot be
@@ -3378,6 +3614,15 @@ class AgentLoop:
                             has_more_tool_calls = True
                             continue
 
+                    public_turn_message = _scrub_history_arguments(assistant, None)
+                    public_tool_results = tool_results
+                    if context.one_turn_secret_leases:
+                        public_turn_message = stored
+                        public_tool_results = [
+                            await self._public_one_turn_tool_result(result, context, config)
+                            for result in tool_results
+                        ]
+
                     # Asked HERE, at the boundary, precisely because the tools
                     # that just ran may have pushed a commit or opened a merge
                     # request. A supervisor's cancel stops the run without
@@ -3397,8 +3642,8 @@ class AgentLoop:
                         # stopped: the stop would read as "it kept going, and
                         # then answered".
                         yield TurnEndEvent(
-                            message=_scrub_history_arguments(assistant, None),
-                            tool_results=tool_results,
+                            message=public_turn_message,
+                            tool_results=public_tool_results,
                         )
                         yield AgentEndEvent(
                             messages=new_messages, aborted=True, generation=generation
@@ -3407,8 +3652,8 @@ class AgentLoop:
                         return
 
                     yield TurnEndEvent(
-                        message=_scrub_history_arguments(assistant, None),
-                        tool_results=tool_results,
+                        message=public_turn_message,
+                        tool_results=public_tool_results,
                     )
                     fingerprint = _error_batch_fingerprint(assistant.tool_calls, tool_results)
                     repeated_error_batches = (
@@ -3440,6 +3685,39 @@ class AgentLoop:
                         context.messages.append(recovery)
                         new_messages.append(recovery)
                         yield _notice(_nt.repeated_tool_errors(), kind="warning")
+
+                    # Inspect executed calls across batch boundaries: a model
+                    # may emit a cycle as one batch or as several turns.
+                    recovery_needed = False
+                    if len(assistant.tool_calls) != len(tool_results):
+                        no_progress.reset()
+                    else:
+                        for call, result in zip(assistant.tool_calls, tool_results):
+                            period, repetitions = no_progress.observe(call, result)
+                            if repetitions >= NO_PROGRESS_LIMIT:
+                                yield AgentEndEvent(
+                                    messages=new_messages,
+                                    error=(
+                                        "No progress: repeated tool action or short cycle "
+                                        f"(period {period}) produced unchanged arguments "
+                                        f"and results for {repetitions} repetitions. "
+                                        "The harness stopped this repetition; re-read the "
+                                        "current state and take a different approach."
+                                    ),
+                                    generation=generation,
+                                )
+                                return
+                            if repetitions >= NO_PROGRESS_WARNING and not no_progress.warned:
+                                no_progress.warned = True
+                                recovery_needed = True
+                    if recovery_needed and no_progress_recoveries < MAX_NO_PROGRESS_RECOVERIES:
+                        no_progress_recoveries += 1
+                        recovery = Message.user(NO_PROGRESS_RECOVERY_PROMPT)
+                        context.messages.append(recovery)
+                        new_messages.append(recovery)
+                        yield MessageStartEvent(message=recovery)
+                        yield MessageEndEvent(message=recovery)
+
                     # THE QUIET-TURN END (docs/design/quiet-turns.md §4): a
                     # ``no_reply`` call is an affirmative way to end the turn,
                     # so a batch whose LAST result carries the quiet marker ends
@@ -3635,6 +3913,7 @@ class AgentLoop:
                 generation=generation,
             )
         finally:
+            self._clear_one_turn_secrets(context)
             self._unwire_deadline(deadline_task)
             # The fault-only recovery window dies with the run for the same
             # reason: a timer that outlives it could abort a LATER prompt on
@@ -3726,6 +4005,219 @@ class AgentLoop:
         hint = reader()
         return int(hint) if hint else None
 
+    @staticmethod
+    def _one_turn_request_template(request: ChatRequest) -> tuple[Any, ...]:
+        """Capture the safe request identity used to recognize an exact retry.
+
+        This runs BEFORE arming, so neither equality nor serialization can touch
+        the raw value. Only wall-clock preparation and the observational retry
+        marker are excluded; every provider-affecting field still participates.
+        """
+        return request._one_turn_safe_template()
+
+    def _release_one_turn_secret(self, context: LoopContext, call_id: str) -> None:
+        lease = context.one_turn_secret_leases.pop(call_id, None)
+        if lease is None or lease.redaction_token is None:
+            return
+        try:
+            tool_context = context.tool_context
+            if tool_context is None:
+                raise OneTurnSecretScopeError("redaction owner is unavailable")
+            release = getattr(tool_context.variables, "release_scoped_redaction")
+            release(lease.redaction_token)
+        except Exception as exc:
+            # Tokens and exception args are deliberately absent from logs. The
+            # concrete VariableStore release is non-raising; a foreign sink that
+            # fails here is never allowed to publish the lease or its value.
+            logger.warning("one-turn secret redaction release failed: %s", type(exc).__name__)
+        lease.redaction_token = None
+
+    def _clear_one_turn_secrets(self, context: LoopContext) -> None:
+        """Unconditionally end every lease and raw carrier owned by this run."""
+        for call_id in list(context.one_turn_secret_leases):
+            self._release_one_turn_secret(context, call_id)
+        if context.one_turn_secret_run_active:
+            context.original_call_args.clear()
+            context.one_turn_secret_run_active = False
+
+    def _arm_one_turn_secrets(self, context: LoopContext, request: ChatRequest) -> ChatRequest:
+        """Arm only pending or byte-equivalent safe requests; expire all others."""
+        if not context.one_turn_secret_leases:
+            return request
+        acquired: list[str] = []
+        try:
+            template = self._one_turn_request_template(request)
+            tool_context = context.tool_context
+            if tool_context is None:
+                raise OneTurnSecretScopeError("scoped redaction is unavailable")
+            variables = tool_context.variables
+            if variables is None:
+                raise OneTurnSecretScopeError("scoped redaction is unavailable")
+            acquire = getattr(variables, "acquire_scoped_redaction")
+            release = getattr(variables, "release_scoped_redaction")
+            if not callable(acquire) or not callable(release):
+                raise OneTurnSecretScopeError("scoped redaction is unavailable")
+
+            values: dict[str, SecretStr] = {}
+            for call_id in list(context.one_turn_secret_leases):
+                lease = context.one_turn_secret_leases.get(call_id)
+                if lease is None:
+                    continue
+                if lease.template is not None and lease.template != template:
+                    # Steering, compaction, another tool step, or any other
+                    # semantic change ends the old authorization. Its receipt is
+                    # already the durable history row; a newer lease is independent.
+                    self._release_one_turn_secret(context, call_id)
+                    continue
+                matches = [
+                    message
+                    for message in request.messages
+                    if message.role == "tool" and message.tool_call_id == call_id
+                ]
+                if len(matches) != 1:
+                    raise OneTurnSecretScopeError("secret tool row is missing or ambiguous")
+                if lease.redaction_token is None:
+                    token = acquire(lease.value.get_secret_value())
+                    if not isinstance(token, str) or not token:
+                        raise OneTurnSecretScopeError("scoped redaction returned no token")
+                    lease.redaction_token = token
+                    acquired.append(call_id)
+                lease.template = template
+                values[call_id] = lease.value
+            if values:
+                request.arm_one_turn_secrets(values, redact=variables.redact)
+            return request
+        except Exception as exc:
+            # Roll back only tokens acquired by THIS attempt. Previously live
+            # owners and parallel leases retain their independent registrations.
+            for call_id in acquired:
+                lease = context.one_turn_secret_leases.get(call_id)
+                if lease is None or lease.redaction_token is None:
+                    continue
+                try:
+                    tool_context = context.tool_context
+                    variables = tool_context.variables if tool_context is not None else None
+                    if variables is None:
+                        continue
+                    variables.release_scoped_redaction(lease.redaction_token)
+                except Exception:
+                    pass
+                lease.redaction_token = None
+            logger.warning("one-turn secret request arming refused: %s", type(exc).__name__)
+            raise OneTurnSecretScopeError(
+                "One-turn secret request could not be armed safely."
+            ) from None
+
+    def _finalize_one_turn_secret_assistant(
+        self,
+        assistant: Message,
+        error: str | None,
+        config: LoopConfig,
+        secrets: Sequence[SecretStr],
+    ) -> tuple[Message, Message, str | None, bool]:
+        """Publish one scrubbed final copy while preserving executable arguments.
+
+        This synchronous core is shared by success, provider failure, generator
+        close, and hard cancellation. In particular, cancellation cannot skip an
+        awaited scrub and leave the MessageStart placeholder holding raw text.
+        The returned executor keeps original tool arguments; its content and the
+        public/history copy are both scrubbed because the outer run derives its
+        retained assistant from that executor.
+        """
+        try:
+            redact = config.redact_tool_result
+            if redact is None:
+                raise OneTurnSecretScopeError("assistant redaction is unavailable")
+            argument_scrub = config.redact_tool_arguments or redact
+            needles = [secret.get_secret_value() for secret in secrets]
+            if not needles or any(not needle for needle in needles):
+                raise OneTurnSecretScopeError("secret finalization has no live value")
+            content: list[Content] = []
+            for call in assistant.tool_calls:
+                if any(
+                    one_turn_secret_value_is_present(secrets, text, argument_scrub)
+                    for text in (call.id, call.name)
+                ):
+                    raise OneTurnSecretScopeError("unsafe assistant tool identity")
+            for block in assistant.content:
+                if (
+                    not isinstance(block, TextContent)
+                    or getattr(block, "annotations", None) is not None
+                ):
+                    raise OneTurnSecretScopeError("unsupported secret-active content")
+                content.append(TextContent(text=redact(block.text)))
+
+            # Provider-native payloads are an unknown second carrier. Dropping
+            # them is mandatory even when the explicit text/argument scrub passes.
+            carrier = assistant.model_copy(update={"content": content, "provider_payload": None})
+            public = _scrub_history_arguments(carrier, redact, config.redact_tool_arguments)
+            public.provider_payload = None
+            scrubbed_error = redact(error) if error else error
+
+            # EVERY published carrier goes through the ONE coverage primitive,
+            # not a raw-substring test: with a disconnected or no-op sink the
+            # established scrub leaves a JSON/URL-escaped echo unchanged, and a
+            # substring test would then accept it into history, events and the
+            # next request (review S-10).
+            for block in public.content:
+                if not isinstance(block, TextContent):
+                    raise OneTurnSecretScopeError("unscrubbable public content")
+                if one_turn_secret_value_is_present(secrets, block.text, redact):
+                    raise OneTurnSecretScopeError("assistant text scrub incomplete")
+            for call in public.tool_calls:
+                # Tool identity is the pairing key and the dispatch name. A
+                # secret here cannot be masked into a different valid identity:
+                # refuse the whole turn before execution or publication.
+                if any(
+                    one_turn_secret_value_is_present(secrets, text, redact)
+                    for text in (call.id, call.name)
+                ):
+                    raise OneTurnSecretScopeError("unsafe assistant tool identity")
+                _, arguments_changed = _scrub_argument_value(call.arguments, argument_scrub)
+                raw_changed = (
+                    call.raw_arguments is not None
+                    and _scrub_raw_arguments(call.raw_arguments, argument_scrub)
+                    != call.raw_arguments
+                )
+                if (
+                    # Walk the LEAVES: dumping the container double-escapes an
+                    # embedded JSON string and hides its own spelling (S-12).
+                    one_turn_container_has_secret(secrets, call.arguments, argument_scrub)
+                    or (
+                        call.raw_arguments is not None
+                        and one_turn_container_has_secret(
+                            secrets, call.raw_arguments, argument_scrub
+                        )
+                    )
+                    or arguments_changed
+                    or raw_changed
+                ):
+                    raise OneTurnSecretScopeError("assistant argument scrub incomplete")
+            if scrubbed_error and one_turn_secret_value_is_present(secrets, scrubbed_error, redact):
+                raise OneTurnSecretScopeError("provider error scrub incomplete")
+
+            executing = assistant.model_copy(
+                update={"content": public.content, "provider_payload": None}
+            )
+            # Mutate the placeholder shared with MessageStart subscribers only
+            # AFTER every check passes. They never observe the raw final state.
+            assistant.content = public.content
+            assistant.tool_calls = public.tool_calls
+            assistant.provider_payload = None
+            return executing, assistant, scrubbed_error, False
+        except Exception:
+            # Exception args and traceback locals can contain the raw request or
+            # provider echo, so this boundary logs only a fixed diagnostic.
+            logger.warning("one-turn secret assistant finalization refused safely")
+            # Fail closed with no text, arguments, native payload, or producer
+            # exception detail. Returning this same safe object for both callers
+            # guarantees the outer run cannot execute an unpaired raw call.
+            assistant.content = []
+            assistant.tool_calls = []
+            assistant.provider_payload = None
+            assistant.stop_reason = "error"
+            return assistant, assistant, _ONE_TURN_SECRET_SCRUB_ERROR, True
+
     async def _model_turn(
         self,
         context: LoopContext,
@@ -3762,6 +4254,10 @@ class AgentLoop:
         # Set only by the except arm below, from the exception's own flag: the
         # harness cannot import ``providers`` to classify this itself.
         connectivity_loss = False
+        # The first trip of the degeneration guard on this call, if any; see
+        # where the stream is opened below.
+        degenerate: DegenerationTrip | None = None
+        cut_receipt: ConsumerCut | None = None
         # The spec the request below is BUILT with, captured before the stream
         # starts. Declared here rather than read after the ``try`` for two
         # reasons: the resolved ``model`` is assigned inside it, so a reader
@@ -3774,6 +4270,19 @@ class AgentLoop:
         #: the event field for why it is an eligibility, not a cause.
         retryable_interruption = False
         attempted_selector: "ModelSpec | None" = None
+        #: WHICH model produced ``error``, and what it failed over from, when
+        #: the provider layer knows. The failover controller stamps this on the
+        #: ``ProviderError`` it raises (see ``ProviderError.provenance``); the
+        #: loop only carries it. Both empty means "not known here" — a
+        #: synthesised error, or a build whose driver does not stamp — and
+        #: every consumer then falls back to its previous behaviour rather
+        #: than guessing the session's model.
+        failure_selector = ""
+        failure_failover_from = ""
+        # Provider/prompt setup can fail before the request exists. Cancellation
+        # and finalization must retain their historical behavior in that case.
+        request: ChatRequest | None = None
+        secret_active = False
 
         yield TurnStartEvent()
         yield MessageStartEvent(message=assistant)
@@ -3905,8 +4414,35 @@ class AgentLoop:
                 preparation_ms=(time.monotonic() - preparing_at) * 1000,
                 same_route_retry=same_route_retry,
             )
-            stream = _abortable_stream(config.stream_fn(request, signal), signal)
+            request = self._arm_one_turn_secrets(context, request)
+            secret_active = request.has_one_turn_secrets
+            # THE DEGENERATION GUARD (``harness.degeneration``): one detector on
+            # the REASONING channel, and a cut signal of this call's own. It
+            # stops a stream whose reasoning has become one short passage
+            # repeated verbatim BEFORE the provider bills the rest of the output
+            # budget, which is the only point at which stopping it saves
+            # anything. Visible text is deliberately NOT watched: legitimate
+            # answers (identical-row tables, zero-byte base64, repeated log
+            # lines) are exactly periodic too, and cutting one throws away an
+            # answer the user asked for -- see the module docstring. The cut
+            # ends the stream through the same pump cancellation an abort uses,
+            # but never touches ``signal`` -- see ``_abortable_stream``.
+            degeneration_cut = AbortSignal()
+            reasoning_guard = StreamDegenerationGuard("reasoning")
+            # Armed BEFORE dispatch so the stream fn's decorated copy of this
+            # request shares it: the usage recorder reads it to book the cut
+            # call's spend as an ESTIMATE rather than as unknown (review m3; see
+            # ``ChatRequest._consumer_cut``).
+            cut_receipt = request.arm_consumer_cut()
+            stream = _abortable_stream(config.stream_fn(request, signal), signal, degeneration_cut)
+            from local_operator.providers.failover import _one_turn_scrub_stream_event
+
             async for event in stream:
+                if secret_active:
+                    # Failover already applies this boundary. Reapplying it here
+                    # is idempotent and covers custom/direct streams and test
+                    # hosts, so provider metadata cannot bypass this seam.
+                    event = _one_turn_scrub_stream_event(request, event)
                 if isinstance(event, StreamModelEvent):
                     model = event.model
                     yield ModelChangeEvent(
@@ -3926,13 +4462,14 @@ class AgentLoop:
                     # yielded from a placeholder before the request is even
                     # built, so it cannot carry that meaning.
                     yield ProviderTurnStartEvent(
-                        response_id=event.response_id,
-                        provider=model.provider,
-                        model_id=model.model_id,
+                        response_id=one_turn_public_text(request, event.response_id),
+                        provider=one_turn_public_text(request, model.provider),
+                        model_id=one_turn_public_text(request, model.model_id),
                     )
                 elif isinstance(event, StreamTextDelta):
                     text_parts.append(event.delta)
-                    yield MessageUpdateEvent(message=assistant, delta=event.delta)
+                    if not secret_active:
+                        yield MessageUpdateEvent(message=assistant, delta=event.delta)
                 elif isinstance(event, StreamReasoningDelta):
                     # The model is THINKING, and the user can see it from here.
                     #
@@ -3954,7 +4491,17 @@ class AgentLoop:
                     # when the answer starts -- including across a retry, which
                     # re-emits ``reasoning_delta`` under the same id (see
                     # ``providers/failover._RETRY_SAFE_STREAM_EVENTS``).
-                    yield ReasoningDeltaEvent(message_id=assistant.id, delta=event.delta)
+                    if not secret_active:
+                        yield ReasoningDeltaEvent(message_id=assistant.id, delta=event.delta)
+                    if degenerate is None and (trip := reasoning_guard.feed(event.delta)):
+                        degenerate = trip
+                        # Everything streamed so far is output the provider
+                        # billed: the reasoning up to the trip plus any text
+                        # (none, in the measured shape, but a turn can speak
+                        # first and loop after).
+                        if cut_receipt is not None:
+                            cut_receipt.mark(trip.chars + sum(map(len, text_parts)))
+                        degeneration_cut.abort("degenerate stream")
                 elif isinstance(event, StreamToolCallDelta):
                     state = tool_states.setdefault(
                         event.index,
@@ -4080,13 +4627,14 @@ class AgentLoop:
                             state["supersedes"] = state["key"]
                             state["key"] = state["id"]
                             state["placeholder"] = False
-                            yield ToolCallComposeEvent(
-                                tool_call_id=state["key"],
-                                tool_name=state["name"],
-                                argument_bytes=state["bytes"],
-                                intent=state["intent"],
-                                supersedes_tool_call_id=state["supersedes"],
-                            )
+                            if not secret_active:
+                                yield ToolCallComposeEvent(
+                                    tool_call_id=state["key"],
+                                    tool_name=state["name"],
+                                    argument_bytes=state["bytes"],
+                                    intent=state["intent"],
+                                    supersedes_tool_call_id=state["supersedes"],
+                                )
                             # Stamp the throttle too: the promotion IS this
                             # window's frame. Without it the block below fires
                             # again in the same iteration and emits a second,
@@ -4097,13 +4645,14 @@ class AgentLoop:
                         first = state["announced"] == 0.0
                         if first or now - state["announced"] >= COMPOSE_NOTICE_INTERVAL_S:
                             state["announced"] = now
-                            yield ToolCallComposeEvent(
-                                tool_call_id=state["key"],
-                                tool_name=state["name"],
-                                argument_bytes=state["bytes"],
-                                intent=state["intent"],
-                                supersedes_tool_call_id=state["supersedes"],
-                            )
+                            if not secret_active:
+                                yield ToolCallComposeEvent(
+                                    tool_call_id=state["key"],
+                                    tool_name=state["name"],
+                                    argument_bytes=state["bytes"],
+                                    intent=state["intent"],
+                                    supersedes_tool_call_id=state["supersedes"],
+                                )
                 elif isinstance(event, StreamUsageEvent):
                     usage = event.usage
                 elif isinstance(event, StreamEndEvent):
@@ -4188,14 +4737,15 @@ class AgentLoop:
                         # (a dictation that ends without another delta must still
                         # be told it ended), and this block is the call's last
                         # word in this stream, so nothing reads a stamp from it.
-                        yield ToolCallComposeEvent(
-                            tool_call_id=state["key"] or "compose:0",
-                            tool_name=state["name"],
-                            argument_bytes=state["bytes"],
-                            intent=state["intent"],
-                            supersedes_tool_call_id=state["supersedes"],
-                            dictation_complete=True,
-                        )
+                        if not secret_active:
+                            yield ToolCallComposeEvent(
+                                tool_call_id=state["key"] or "compose:0",
+                                tool_name=state["name"],
+                                argument_bytes=state["bytes"],
+                                intent=state["intent"],
+                                supersedes_tool_call_id=state["supersedes"],
+                                dictation_complete=True,
+                            )
                     stop_reason = event.stop_reason
                     if event.usage is not None:
                         usage = event.usage
@@ -4205,6 +4755,26 @@ class AgentLoop:
                     attempted_selector = (
                         event.attempted_selector if retryable_interruption else None
                     )
+                    if error:
+                        # IN-BAND FAILURES. A provider can END the stream with a
+                        # refusal or an ``error`` finish instead of raising, and
+                        # those are how real clients report a content filter
+                        # (``clients.py`` composes the refusal text on exactly
+                        # this frame). No exception exists to carry provenance,
+                        # so the walk stamps the attempt's own selector here.
+                        #
+                        # READ THE STAMP, not ``model``: ``StreamModelEvent`` is
+                        # published only when the budget changed or the
+                        # credential is OAuth, so on an ordinary API-key hop
+                        # ``model`` is still the SELECTION — which is the defect
+                        # (agent review round 2). No stamp means UNKNOWN, and the
+                        # session then falls back to its old behaviour rather
+                        # than to a guess dressed as provenance.
+                        stamped_selector = getattr(event, "failing_selector", None)
+                        if stamped_selector is not None:
+                            failure_selector = (
+                                f"{stamped_selector.provider}/{stamped_selector.model_id}"
+                            )
                     if isinstance(provider_payload, dict):
                         recovery = provider_payload.get("input_refusal_recovery")
                         if isinstance(recovery, dict):
@@ -4240,6 +4810,26 @@ class AgentLoop:
             # empty text block.
             if text_parts:
                 assistant.content = [TextContent(text="".join(text_parts))]
+            if request is not None and request.has_one_turn_secrets:
+                assistant.stop_reason = "aborted"
+                self._finalize_one_turn_secret_assistant(
+                    assistant,
+                    None,
+                    config,
+                    list(request._one_turn_secrets.values()),
+                )
+            raise
+        except GeneratorExit:
+            if text_parts:
+                assistant.content = [TextContent(text="".join(text_parts))]
+            if request is not None and request.has_one_turn_secrets:
+                assistant.stop_reason = "aborted"
+                self._finalize_one_turn_secret_assistant(
+                    assistant,
+                    None,
+                    config,
+                    list(request._one_turn_secrets.values()),
+                )
             raise
         except Exception as exc:
             # `error` below is handed straight to the UI, which prints it as a
@@ -4247,11 +4837,32 @@ class AgentLoop:
             # traceback duplicated it across whatever was on screen for zero
             # extra information. Unexpected types keep the stack — for a defect
             # the frames are the only clue there is.
-            logger.warning(
-                "model stream failed: %s", exc, exc_info=not isinstance(exc, RenderedStreamError)
-            )
+            if request is not None and request.has_one_turn_secrets:
+                # Provider exceptions may quote the raw request. Keep only the
+                # class here; the one finalizer scrubs the public error string.
+                logger.warning(
+                    "model stream failed during one-turn secret request: %s",
+                    type(exc).__name__,
+                )
+            else:
+                logger.warning(
+                    "model stream failed: %s",
+                    _describe_stream_failure(exc),
+                    exc_info=not isinstance(exc, RenderedStreamError),
+                )
             stop_reason = "aborted" if (signal is not None and signal.aborted) else "error"
+            # The CLASSIFIED text stays exactly what it was: the kind label
+            # plus the provider's own words. Provenance rides BESIDE it, on the
+            # end event, because ``incidents.classify_incident`` reads this
+            # string and a harness-authored prefix is how this file has already
+            # misdiagnosed itself once (see the "provider error" note there).
             error = error or str(exc)
+            # Read off the exception, never re-derived from the request: after a
+            # failover the request's model is the SELECTION, and the whole bug
+            # this carries the fix for was a refusal by one provider reported
+            # against the model the user chose.
+            failure_selector = getattr(exc, "selector", "") or ""
+            failure_failover_from = getattr(exc, "failover_from", "") or ""
             # A stream the NETWORK cut, as opposed to one a provider failed. Read
             # off the exception rather than re-classified here: the single
             # definition lives in ``providers.failover.is_connectivity_loss`` and
@@ -4264,6 +4875,52 @@ class AgentLoop:
             # cancelled socket happened to raise on its way out.
             connectivity_loss = stop_reason == "error" and bool(
                 getattr(exc, "connectivity_loss", False)
+            )
+
+        if degenerate is not None:
+            # The guard cut this stream, so no ``StreamEndEvent`` set a reason
+            # (or one that raced the cut did). ``length`` because that is what
+            # happened -- the response was ended at a bound before it finished
+            # -- and it is the reason every live surface already renders as
+            # "cut off" rather than as a complete answer. The run loop's
+            # degeneration arm claims this turn BEFORE its ordinary length
+            # arm, so none of that arm's "spent its whole output budget" copy
+            # is ever said about a stream that was stopped early. An abort
+            # that landed meanwhile still wins: the check below runs after.
+            #
+            # Whatever the cancelled socket raised on its way out is the cut's
+            # consequence, not a provider failure, so it must not divert the
+            # turn to the connectivity or error arms (which would resend it).
+            stop_reason = "length"
+            error = None
+            connectivity_loss = False
+            retryable_interruption = False
+            # The diagnosable record, on the message's own payload (wire
+            # clients never replay harness keys) and therefore on the
+            # ``message_end`` event every recorder already captures.
+            provider_payload = {
+                **(provider_payload or {}),
+                "degenerate_stream": degenerate.payload(),
+            }
+            # The cut call's SPEND (review m3). No provider usage frame arrives
+            # on a cancelled stream, so the recorder below the loop books an
+            # estimate (``model.configure._estimate_consumer_cut_usage``, basis
+            # ``estimated``) and hands it back on the shared receipt; the same
+            # figure goes on the message so the session's spend band, the turn
+            # aggregate and a parent's child ledger all see the call instead of
+            # a free one. The recorder's ``finally`` has already run: the pump
+            # task it lives in was awaited by ``_abortable_stream`` before the
+            # stream ended. A provider frame that DID arrive before the cut wins.
+            if usage is None and cut_receipt is not None and cut_receipt.estimated_usage:
+                usage = cut_receipt.estimated_usage
+            logger.warning(
+                "degenerate %s stream stopped: a %d-character passage repeated %d+ times "
+                "verbatim after %d characters (unit starts %r)",
+                degenerate.channel,
+                degenerate.period,
+                degenerate.repeats,
+                degenerate.chars,
+                "<withheld>" if secret_active else degenerate.sample,
             )
 
         if signal is not None and signal.aborted:
@@ -4333,11 +4990,11 @@ class AgentLoop:
                 nameless_call_drops += 1
                 logger.warning(
                     "dropping a tool call that arrived with no name "
-                    "(index %d, %d argument bytes, id %r); a nameless call cannot "
+                    "(index %d, %d argument bytes, id %s); a nameless call cannot "
                     "be executed and cannot be replayed to any provider",
                     index,
                     state["bytes"],
-                    state["id"] or "<none>",
+                    ("<withheld>" if secret_active else repr(state["id"] or "<none>")),
                 )
                 continue
             assembled_calls.append(self._assemble_tool_call(state))
@@ -4365,21 +5022,35 @@ class AgentLoop:
         except ImportError:
             pass
 
-        from local_operator.memory_privacy import retained_message
+        if request is not None and request.has_one_turn_secrets:
+            executing, assistant, error, scrub_failed = self._finalize_one_turn_secret_assistant(
+                assistant,
+                error,
+                config,
+                list(request._one_turn_secrets.values()),
+            )
+            if scrub_failed:
+                stop_reason = "error"
+                connectivity_loss = False
+                retryable_interruption = False
+                attempted_selector = None
+                nameless_call_drops = 0
+        else:
+            from local_operator.memory_privacy import retained_message
 
-        # The object published at MessageStartEvent is this same ``assistant``, and every
-        # subscriber holds it by reference, so anything assigned onto it is readable by
-        # them later. For a memory call carrying a recognised sensitive value, publish the
-        # REDACTED shape on that shared object and give the executor a private raw copy: the
-        # memory guard must still see the original to refuse it honestly. Ordinary turns
-        # take the identity branch and are untouched (message identity is a pinned contract).
-        executing = assistant
-        retained = retained_message(assistant)
-        if retained is not assistant:
-            executing = assistant.model_copy()
-            assistant.tool_calls = retained.tool_calls
-            assistant.content = retained.content
-            assistant.provider_payload = retained.provider_payload
+            # The object published at MessageStartEvent is this same ``assistant``, and every
+            # subscriber holds it by reference, so anything assigned onto it is readable by
+            # them later. For a memory call carrying a recognised sensitive value, publish the
+            # REDACTED shape on that shared object and give the executor a private raw copy: the
+            # memory guard must still see the original to refuse it honestly. Ordinary turns
+            # take the identity branch and are untouched (message identity is a pinned contract).
+            executing = assistant
+            retained = retained_message(assistant)
+            if retained is not assistant:
+                executing = assistant.model_copy()
+                assistant.tool_calls = retained.tool_calls
+                assistant.content = retained.content
+                assistant.provider_payload = retained.provider_payload
         yield MessageEndEvent(message=assistant)
         yield _ModelTurnResult(
             message=executing,
@@ -4390,6 +5061,9 @@ class AgentLoop:
             attempted_selector=attempted_selector,
             model=request_model,
             nameless_call_drops=nameless_call_drops,
+            failure_selector=failure_selector,
+            failure_failover_from=failure_failover_from,
+            degenerate=degenerate if stop_reason == "length" else None,
         )
 
     @staticmethod
@@ -4433,7 +5107,11 @@ class AgentLoop:
 
     @staticmethod
     def _not_run_compose_frame(
-        call: ToolCall, reason: str, kind: str | None = None
+        call: ToolCall,
+        reason: str,
+        kind: str | None = None,
+        *,
+        secret_active: bool = False,
     ) -> ToolCallComposeEvent:
         """The terminal compose frame for a call that will never START.
 
@@ -4487,14 +5165,21 @@ class AgentLoop:
             # The assembled argument payload, which is the same measurement the
             # streaming frames reported: their byte count is the sum of the
             # argument deltas, and those are what ``raw_arguments`` joined.
-            argument_bytes=len(call.raw_arguments or ""),
+            # Secret-active calls were never publicly composed. This terminal
+            # frame must not become a second raw-argument carrier.
+            argument_bytes=0 if secret_active else len(call.raw_arguments or ""),
             dictation_complete=True,
             not_run_reason=text,
             not_run_kind=kind,
         )
 
     def _not_run_frames(
-        self, calls: list[ToolCall], reason: str, kind: str | None = None
+        self,
+        calls: list[ToolCall],
+        reason: str,
+        kind: str | None = None,
+        *,
+        secret_active: bool = False,
     ) -> list[ToolCallComposeEvent]:
         """Terminal frames for a set of calls that will never START, one verdict.
 
@@ -4503,7 +5188,11 @@ class AgentLoop:
         (``skipped``). The planning-failure path above carries a per-call reason
         and calls :meth:`_not_run_compose_frame` directly for that reason.
         """
-        return [self._not_run_compose_frame(call, reason, kind=kind) for call in calls if call.name]
+        return [
+            self._not_run_compose_frame(call, reason, kind=kind, secret_active=secret_active)
+            for call in calls
+            if call.name
+        ]
 
     async def _execute_tool_calls(
         self,
@@ -4544,13 +5233,21 @@ class AgentLoop:
             if call.id in seen_ids:
                 # Duplicate call id within one batch: first wins; the duplicate
                 # is paired with a skipped result and never executes.
-                logger.warning("duplicate tool call id %s dropped from batch", call.id)
+                secret_active = bool(context.one_turn_secret_leases)
+                logger.warning(
+                    "duplicate tool call id dropped from batch%s",
+                    "" if secret_active else f": {call.id}",
+                )
                 plan.append(
                     _PlannedCall(
                         call=call,
                         failure=self._synthetic_result(
                             call,
-                            f"Duplicate call id '{call.id}' skipped.",
+                            (
+                                _ONE_TURN_SECRET_SCRUB_ERROR
+                                if secret_active
+                                else f"Duplicate call id '{call.id}' skipped."
+                            ),
                             details={FAULT_KEY: FAULT_DUPLICATE_ID},
                         ),
                     )
@@ -4584,8 +5281,13 @@ class AgentLoop:
                 raw_kind = (failure.failure.details or {}).get(FAULT_KEY)
                 yield self._not_run_compose_frame(
                     failure.call,
-                    failure.failure.text,
+                    (
+                        _ONE_TURN_SECRET_SCRUB_ERROR
+                        if context.one_turn_secret_leases
+                        else failure.failure.text
+                    ),
                     kind=raw_kind if isinstance(raw_kind, str) and raw_kind else None,
+                    secret_active=bool(context.one_turn_secret_leases),
                 )
         index = 0
         first_slot = True
@@ -4644,8 +5346,13 @@ class AgentLoop:
                 # as a steering skip.
                 for frame in self._not_run_frames(
                     [item.call for item in plan[index:] if item.failure is None],
-                    SKIPPED_RESULT_TEXT,
+                    (
+                        _ONE_TURN_SECRET_SCRUB_ERROR
+                        if context.one_turn_secret_leases
+                        else SKIPPED_RESULT_TEXT
+                    ),
                     kind=FAULT_SKIPPED,
+                    secret_active=bool(context.one_turn_secret_leases),
                 ):
                     yield frame
                 break
@@ -4789,7 +5496,12 @@ class AgentLoop:
             try:
                 refusal = tool.refuse_args(args, offered)
             except Exception:
-                logger.warning("plan-time refusal check failed for %s", call.name, exc_info=True)
+                logger.warning(
+                    "plan-time refusal check failed for %s%s",
+                    call.name,
+                    "" if context.one_turn_secret_leases else " (details attached)",
+                    exc_info=not context.one_turn_secret_leases,
+                )
             else:
                 if not isinstance(refusal, str) or not refusal.strip():
                     refusal = None
@@ -4818,7 +5530,12 @@ class AgentLoop:
             except Exception:
                 # Unknown resource identity keeps the legacy exclusive
                 # barrier; a failed optimization must never create a race.
-                logger.debug("tool resource identity failed for %s", call.name, exc_info=True)
+                logger.debug(
+                    "tool resource identity failed for %s%s",
+                    call.name,
+                    "" if context.one_turn_secret_leases else " (details attached)",
+                    exc_info=not context.one_turn_secret_leases,
+                )
         return _PlannedCall(call=call, tool=tool, args=args, intent=intent, resources=resources)
 
     @classmethod
@@ -4852,6 +5569,207 @@ class AgentLoop:
         except Exception:  # noqa: BLE001 — advice must never fail a call
             return True
 
+    @staticmethod
+    def _one_turn_secret_error(
+        call: ToolCall,
+        tool_name: str,
+        *,
+        text: str = _ONE_TURN_SECRET_CAPTURE_ERROR,
+        duration_s: float | None = None,
+        redact: Callable[[str], str] | None = None,
+        secrets: Iterable[SecretStr] = (),
+    ) -> ToolResult:
+        """Return a safe failure without echoing an unsafe provider identity."""
+        active = tuple(secrets)
+        call_id = call.id
+        if one_turn_secret_value_is_present(active, call_id, redact):
+            call_id = "one-turn-secret-withheld"
+        public_name = tool_name
+        if one_turn_secret_value_is_present(active, public_name, redact):
+            public_name = "tool"
+        return ToolResult(
+            tool_call_id=call_id,
+            tool_name=public_name,
+            content=[TextContent(text=text)],
+            details=None,
+            duration_s=duration_s,
+            is_error=True,
+            useless=False,
+        )
+
+    def _capture_one_turn_secret(
+        self,
+        context: LoopContext,
+        call: ToolCall,
+        tool_name: str,
+        result: ToolResult,
+        *,
+        allow: bool,
+    ) -> ToolResult:
+        """Consume a private marker before hooks, events, or history can see it."""
+        marker = getattr(result, "_one_turn_secret", None)
+        if marker is None:
+            return result
+        try:
+            if not allow:
+                raise OneTurnSecretScopeError("nested eval cannot capture a secret")
+            if not isinstance(marker, SecretStr):
+                raise OneTurnSecretScopeError("invalid secret marker")
+            value = marker.get_secret_value()
+            if not isinstance(value, str) or not value:
+                raise OneTurnSecretScopeError("empty secret value")
+            if not call.id or result.tool_call_id != call.id or result.tool_name != tool_name:
+                raise OneTurnSecretScopeError("secret result identity mismatch")
+            if (
+                len(result.content) != 1
+                or not isinstance(result.content[0], TextContent)
+                or result.content[0].text != ONE_TURN_SECRET_RECEIPT
+                or getattr(result.content[0], "annotations", None) is not None
+                or result.details is not None
+                or result.is_error
+                or result.useless
+            ):
+                raise OneTurnSecretScopeError("invalid public secret receipt")
+            if call.id in context.one_turn_secret_leases:
+                # Never overwrite an older live value. Parallel calls have
+                # independent ids; a duplicate is an ambiguity, not a retry.
+                raise OneTurnSecretScopeError("duplicate live secret tool id")
+        except Exception as exc:
+            logger.warning(
+                "one-turn secret capture refused for %s: %s",
+                tool_name,
+                type(exc).__name__,
+            )
+            return self._one_turn_secret_error(call, tool_name, duration_s=result.duration_s)
+
+        context.one_turn_secret_leases[call.id] = _OneTurnSecretLease(value=marker)
+        context.one_turn_secret_run_active = True
+        # A FRESH public model drops the private attribute; model_copy would
+        # preserve it and make the later ToolExecutionEndEvent fail serialization.
+        return ToolResult(
+            tool_call_id=call.id,
+            tool_name=tool_name,
+            content=[TextContent(text=ONE_TURN_SECRET_RECEIPT)],
+            details=None,
+            duration_s=result.duration_s,
+            is_error=False,
+            useless=False,
+        )
+
+    def _public_tool_start_event(
+        self, item: _PlannedCall, context: LoopContext, config: LoopConfig
+    ) -> ToolExecutionStartEvent:
+        redact = None
+        if context.one_turn_secret_leases:
+            redact = config.redact_tool_arguments or config.redact_tool_result
+        return _tool_start_event(
+            tool_call_id=item.call.id,
+            tool_name=item.tool.name if item.tool is not None else item.call.name,
+            args=item.args,
+            intent=item.intent,
+            redact=redact,
+        )
+
+    async def _public_one_turn_tool_result(
+        self, result: ToolResult, context: LoopContext, config: LoopConfig
+    ) -> ToolResult:
+        """Build the live/reporting copy without consuming history guard state."""
+        if not context.one_turn_secret_leases:
+            return result
+        redact = config.redact_tool_result
+        if redact is None:
+            # A fixed receipt is already safe. Anything else fails closed: an
+            # armed response cannot reach tool execution without a final scrub,
+            # but a producer's post-hook/end event still has to publish.
+            if (
+                len(result.content) == 1
+                and isinstance(result.content[0], TextContent)
+                and result.content[0].text == ONE_TURN_SECRET_RECEIPT
+                and result.details is None
+            ):
+                return result
+            return ToolResult(
+                tool_call_id=result.tool_call_id,
+                tool_name=result.tool_name,
+                content=[TextContent(text=_ONE_TURN_SECRET_CAPTURE_ERROR)],
+                details=None,
+                duration_s=result.duration_s,
+                is_error=True,
+                useless=False,
+            )
+        arguments = context.original_call_args.get(result.tool_call_id, {})
+        verdict = context.exempt_source_verdicts.get(result.tool_call_id)
+        try:
+            content = await self._redact_content(
+                list(result.content),
+                redact,
+                result.tool_name,
+                arguments,
+                _session_cwd(context),
+                verdict,
+            )
+            details = await self._redact_details(
+                result.details,
+                redact,
+                result.tool_name,
+                arguments,
+                _session_cwd(context),
+                verdict,
+            )
+            public = result.model_copy(update={"content": content, "details": details})
+            leases = list(context.one_turn_secret_leases.values())
+            if one_turn_container_has_secret([lease.value for lease in leases], public, redact):
+                raise OneTurnSecretScopeError("tool event scrub incomplete")
+            return public
+        except Exception as exc:
+            logger.warning("one-turn secret tool-event scrub failed: %s", type(exc).__name__)
+            return self._one_turn_secret_error(
+                ToolCall(id=result.tool_call_id, name=result.tool_name, arguments={}),
+                result.tool_name,
+                duration_s=result.duration_s,
+                redact=redact,
+                secrets=[lease.value for lease in context.one_turn_secret_leases.values()],
+            )
+
+    def _one_turn_forwarding_refusal(
+        self,
+        item: _PlannedCall,
+        context: LoopContext,
+        config: LoopConfig,
+    ) -> ToolResult | None:
+        """Keep active values out of harness-owned agent forwarding channels."""
+        call = item.call
+        tool = item.tool
+        if (
+            tool is None
+            or not context.one_turn_secret_leases
+            or not is_agent_forwarding_call(tool.name, item.args)
+        ):
+            return None
+        # Sink-INDEPENDENT on purpose (review S-13). Forwarding hands text to
+        # another agent's history, which is a different blast radius from the
+        # local transcript: defence in depth here must not depend on the
+        # configured redactor, and a no-op sink must not open fourteen
+        # dispatch-capable verbs. The primitive recognises the raw and encoded
+        # spellings on its own.
+        secrets = [lease.value for lease in context.one_turn_secret_leases.values()]
+        redact = config.redact_tool_arguments or config.redact_tool_result
+        try:
+            forwarded = one_turn_container_has_secret(secrets, item.args, redact) or (
+                call.raw_arguments is not None
+                and one_turn_container_has_secret(secrets, call.raw_arguments, redact)
+            )
+        except Exception as exc:
+            logger.warning(
+                "one-turn secret forwarding inspection failed for %s: %s",
+                tool.name,
+                type(exc).__name__,
+            )
+            return self._one_turn_secret_error(call, tool.name, text=_ONE_TURN_SECRET_FORWARD_ERROR)
+        if forwarded:
+            return self._one_turn_secret_error(call, tool.name, text=_ONE_TURN_SECRET_FORWARD_ERROR)
+        return None
+
     async def _runner_result(
         self,
         item: _PlannedCall,
@@ -4859,6 +5777,7 @@ class AgentLoop:
         config: LoopConfig,
         signal: AbortSignal | None,
         queue: asyncio.Queue[AgentEvent | _ToolDone | _BatchDone],
+        allow_one_turn_secret: bool = True,
     ) -> ToolResult:
         """Execute one planned call and return its result.
 
@@ -4870,6 +5789,9 @@ class AgentLoop:
         if item.failure is not None or item.tool is None:
             return item.failure or self._synthetic_result(call, "Tool not found.")
         tool = item.tool
+        forwarding_refusal = self._one_turn_forwarding_refusal(item, context, config)
+        if forwarding_refusal is not None:
+            return forwarding_refusal
 
         tool_context = context.tool_context
         # A per-call tier override wins over the tool's static tier: a tool
@@ -4886,6 +5808,20 @@ class AgentLoop:
             and tool_context.request_approval is not None
         ):
             summary = self._approval_summary(tool, call, tool_context.cwd, tool_context)
+            if context.one_turn_secret_leases:
+                try:
+                    if config.redact_tool_result is None:
+                        raise OneTurnSecretScopeError("approval redaction is unavailable")
+                    summary = config.redact_tool_result(summary)
+                except Exception as exc:
+                    logger.warning(
+                        "one-turn secret approval scrub failed for %s: %s",
+                        tool.name,
+                        type(exc).__name__,
+                    )
+                    return self._one_turn_secret_error(
+                        call, tool.name, text=_ONE_TURN_SECRET_TOOL_ERROR
+                    )
             try:
                 approved = await ask_approval(
                     tool_context.request_approval,
@@ -4896,6 +5832,10 @@ class AgentLoop:
             except asyncio.CancelledError:
                 raise
             except ApprovalUnavailableError as exc:
+                if context.one_turn_secret_leases:
+                    return self._one_turn_secret_error(
+                        call, tool.name, text=_ONE_TURN_SECRET_TOOL_ERROR
+                    )
                 # Nobody was asked, so nobody denied anything: render the gate's
                 # own reason and remedies rather than the "User denied" copy
                 # below, which is reserved for a person who answered. A headless
@@ -4916,6 +5856,16 @@ class AgentLoop:
                     details={FAULT_KEY: FAULT_DENIED},
                 )
             except Exception as exc:
+                if context.one_turn_secret_leases:
+                    logger.error(
+                        "approval gate raised during one-turn secret scope for %s: %s; "
+                        "the call was NOT run",
+                        call.name,
+                        type(exc).__name__,
+                    )
+                    return self._one_turn_secret_error(
+                        call, tool.name, text=_ONE_TURN_SECRET_TOOL_ERROR
+                    )
                 # A gate that CRASHED has not decided anything, and reporting it
                 # as "User denied approval" blamed the user for our own bug: the
                 # report that comes back is "it denied my command", so nobody
@@ -4972,6 +5922,12 @@ class AgentLoop:
                 )
 
         def on_update(update: AgentToolUpdate) -> None:
+            if context.one_turn_secret_leases:
+                # Executor arguments are deliberately raw. A synchronous update
+                # callback cannot await the deep redaction adapters, and partial
+                # content has no final-coverage proof, so withhold the transient
+                # frame rather than publishing an unverified second carrier.
+                return
             queue.put_nowait(
                 ToolExecutionUpdateEvent(
                     tool_call_id=call.id, tool_name=tool.name, partial_result=update
@@ -5019,14 +5975,7 @@ class AgentLoop:
                         self._report_tool_call(config, context, planned, failure, origin="nested")
                         return failure.model_dump(mode="json")
                     started = time.monotonic()
-                    queue.put_nowait(
-                        _tool_start_event(
-                            tool_call_id=nested.id,
-                            tool_name=name,
-                            args=planned.args,
-                            intent=planned.intent,
-                        )
-                    )
+                    queue.put_nowait(self._public_tool_start_event(planned, context, config))
                     # The verdict ``_runner_result`` recorded at dispatch, KEPT
                     # for the redaction below. Both record kinds are written
                     # there; only the arguments record is dropped in the
@@ -5043,7 +5992,14 @@ class AgentLoop:
                     # through the ``finally`` below.
                     nested_verdict: bool | None = None
                     try:
-                        result = await self._runner_result(planned, context, config, signal, queue)
+                        result = await self._runner_result(
+                            planned,
+                            context,
+                            config,
+                            signal,
+                            queue,
+                            allow_one_turn_secret=False,
+                        )
                     except asyncio.CancelledError:
                         result = self._synthetic_result(
                             nested, ABORTED_RESULT_TEXT, details={FAULT_KEY: FAULT_ABORTED}
@@ -5054,7 +6010,7 @@ class AgentLoop:
                             ToolExecutionEndEvent(
                                 tool_call_id=nested.id,
                                 tool_name=name,
-                                result=result,
+                                result=self._span_stripped_result(result, context),
                                 duration_s=result.duration_s,
                                 is_error=True,
                             )
@@ -5112,7 +6068,7 @@ class AgentLoop:
                         ToolExecutionEndEvent(
                             tool_call_id=nested.id,
                             tool_name=name,
-                            result=result,
+                            result=self._span_stripped_result(result, context),
                             duration_s=result.duration_s,
                             is_error=result.is_error,
                         )
@@ -5147,7 +6103,25 @@ class AgentLoop:
                     }
                 )
             result = await tool.execute(call.id, item.args, signal, on_update, execution_context)
-            return await self._apply_post_tool_hooks(config, tool.name, item.args, call.id, result)
+            result = self._capture_one_turn_secret(
+                context,
+                call,
+                tool.name,
+                result,
+                allow=allow_one_turn_secret,
+            )
+            # During an active secret scope, ALL native results take their public
+            # redacted form before arbitrary post-hooks. The no-lease branch is
+            # the original object, so ordinary hook timing and identity are intact.
+            result = await self._public_one_turn_tool_result(result, context, config)
+            return await self._apply_post_tool_hooks(
+                config,
+                tool.name,
+                item.args,
+                call.id,
+                result,
+                secret_active=bool(context.one_turn_secret_leases),
+            )
         except asyncio.CancelledError:
             # A CANCELLED call's result never reaches ``_append_results``, so the
             # two records written just above would otherwise be retained for the
@@ -5164,6 +6138,14 @@ class AgentLoop:
             context.exempt_source_verdicts.pop(call.id, None)
             raise
         except InvalidToolArgumentsError as exc:
+            if context.one_turn_secret_leases:
+                logger.debug(
+                    "tool rejected arguments during one-turn secret scope: %s",
+                    type(exc).__name__,
+                )
+                return self._one_turn_secret_error(
+                    call, tool.name, text=_ONE_TURN_SECRET_TOOL_ERROR
+                )
             # An argument-SHAPE rejection raised from inside a tool body. This
             # is the one exception class that carries its own fault
             # classification, and this is the only place it is translated —
@@ -5189,6 +6171,14 @@ class AgentLoop:
                 details={FAULT_KEY: FAULT_INVALID_ARGUMENTS},
             )
         except Exception as exc:
+            if context.one_turn_secret_leases:
+                logger.warning(
+                    "tool raised during one-turn secret scope: %s",
+                    type(exc).__name__,
+                )
+                return self._one_turn_secret_error(
+                    call, tool.name, text=_ONE_TURN_SECRET_TOOL_ERROR
+                )
             logger.warning("tool %s raised", tool.name, exc_info=True)
             return ToolResult(
                 tool_call_id=call.id,
@@ -5204,6 +6194,7 @@ class AgentLoop:
         args: Mapping[str, Any],
         call_id: str,
         result: ToolResult,
+        secret_active: bool = False,
     ) -> ToolResult:
         """Append forwarded ``PostToolUse`` hook context to a real tool result.
 
@@ -5218,11 +6209,28 @@ class AgentLoop:
             notes = await hook(tool_name, args, call_id, result)
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - a hook must never break a turn
-            logger.warning("post-tool hooks raised for %s", tool_name, exc_info=True)
+        except Exception as exc:  # noqa: BLE001 - a hook must never break a turn
+            if secret_active:
+                logger.warning(
+                    "post-tool hooks raised during one-turn secret scope: %s",
+                    type(exc).__name__,
+                )
+            else:
+                logger.warning("post-tool hooks raised for %s", tool_name, exc_info=True)
             return result
         if not notes:
             return result
+        if secret_active:
+            try:
+                if config.redact_tool_result is None:
+                    return result
+                notes = [config.redact_tool_result(note) for note in notes]
+            except Exception as exc:
+                logger.warning(
+                    "post-tool note scrub failed during one-turn secret scope: %s",
+                    type(exc).__name__,
+                )
+                return result
         # The notes may come from either event; the caller knows which one, so
         # the tag reports it rather than labelling a failure note PostToolUse.
         from local_operator.hook_forwarding import (
@@ -5322,6 +6330,7 @@ class AgentLoop:
             result: ToolResult,
             *,
             duration_s: float | None = None,
+            event_result: ToolResult | None = None,
         ) -> None:
             # This executor owns the real start/end boundary. Persisting that
             # fact here keeps every later presenter from timing its own paint.
@@ -5361,14 +6370,15 @@ class AgentLoop:
             # was the drain doing the same thing a moment earlier). The result
             # still parks, so the WIRE stays paired; only the event is withheld.
             started = slot in started_at_by_slot
+            public_result = event_result if event_result is not None else result
             if started:
                 queue.put_nowait(
                     ToolExecutionEndEvent(
                         tool_call_id=item.call.id,
                         tool_name=item.tool.name if item.tool is not None else item.call.name,
-                        result=result,
+                        result=self._span_stripped_result(public_result, context),
                         duration_s=result.duration_s,
-                        is_error=result.is_error,
+                        is_error=public_result.is_error,
                     )
                 )
             # Every tool call the model emitted passes through here exactly
@@ -5377,11 +6387,10 @@ class AgentLoop:
             # the accuracy figure. ``_report_tool_call`` is put_nowait-only and
             # swallows everything: this runs ON THE EVENT LOOP inside a live
             # turn, so analytics may cost neither latency nor a raised turn.
-            self._report_tool_call(config, context, item, result, origin="model")
+            self._report_tool_call(config, context, item, public_result, origin="model")
             queue.put_nowait(_TOOL_DONE)
 
         async def runner(slot: int, item: _PlannedCall) -> None:
-            tool_name = item.tool.name if item.tool is not None else item.call.name
             started_at = time.monotonic()
             started_at_by_slot[slot] = started_at
             await queue.put(
@@ -5391,12 +6400,7 @@ class AgentLoop:
                 # tool row with the intent — the TUI's argument summary scans
                 # values for a row identity — reinstating on the card the
                 # duplication that splitting fact from claim removes.
-                _tool_start_event(
-                    tool_call_id=item.call.id,
-                    tool_name=tool_name,
-                    args=item.args,
-                    intent=item.intent,
-                )
+                self._public_tool_start_event(item, context, config)
             )
             try:
                 result = await self._runner_result(item, context, config, signal, queue)
@@ -5413,20 +6417,18 @@ class AgentLoop:
                     duration_s=time.monotonic() - started_at,
                 )
                 raise
-            park(slot, item, result, duration_s=time.monotonic() - started_at)
+            park(
+                slot,
+                item,
+                result,
+                duration_s=time.monotonic() - started_at,
+                event_result=await self._public_one_turn_tool_result(result, context, config),
+            )
 
         async def interruptible_runner(slot: int, item: _PlannedCall) -> None:
-            tool_name = item.tool.name if item.tool is not None else item.call.name
             started_at = time.monotonic()
             started_at_by_slot[slot] = started_at
-            await queue.put(
-                _tool_start_event(
-                    tool_call_id=item.call.id,
-                    tool_name=tool_name,
-                    args=item.args,
-                    intent=item.intent,
-                )
-            )
+            await queue.put(self._public_tool_start_event(item, context, config))
             tool_task = asyncio.ensure_future(
                 self._runner_result(item, context, config, signal, queue)
             )
@@ -5459,7 +6461,13 @@ class AgentLoop:
                         text,
                         details={FAULT_KEY: FAULT_ABORTED if aborted else FAULT_SKIPPED},
                     )
-                park(slot, item, result, duration_s=time.monotonic() - started_at)
+                park(
+                    slot,
+                    item,
+                    result,
+                    duration_s=time.monotonic() - started_at,
+                    event_result=await self._public_one_turn_tool_result(result, context, config),
+                )
             except asyncio.CancelledError:
                 # THIS coroutine was cancelled from outside — which is what the
                 # batch-wide abort watcher does. Without this the cancellation
@@ -5782,7 +6790,7 @@ class AgentLoop:
                             ToolExecutionEndEvent(
                                 tool_call_id=item.call.id,
                                 tool_name=item.tool.name,
-                                result=result,
+                                result=self._span_stripped_result(result, context),
                                 # Both halves, like the three sibling emitters.
                                 # `duration_s` has no validator ORing it with
                                 # `result.duration_s` the way `_sync_error_flag`
@@ -6081,6 +7089,43 @@ class AgentLoop:
             new_messages.append(message)
 
     @staticmethod
+    def _span_stripped_result(result: ToolResult, context: LoopContext) -> ToolResult:
+        """The copy a LIVE ``ToolExecutionEndEvent`` may carry (LOH-28 R3-1).
+
+        ``_append_results`` redacts the model's copy later, but the event is
+        emitted from the raw result and read by the TUI, the attached client
+        and the operator API. The identifier span's per-session token is
+        protocol, not content: a live reader must never see it (nor a PUA
+        marker), so the event gets a plain-text copy with every own span
+        resolved to its content. The raw result is left untouched for the
+        existing redaction path, which stays the single writer of the
+        model-visible text.
+        """
+        store = getattr(getattr(context, "tool_context", None), "variables", None)
+        strip = getattr(store, "strip_identifier_spans", None)
+        if not callable(strip):
+            return result
+
+        def scrub(value: Any) -> Any:
+            if isinstance(value, str):
+                return strip(value)
+            if isinstance(value, dict):
+                return {key: scrub(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [scrub(item) for item in value]
+            if isinstance(value, tuple):
+                return tuple(scrub(item) for item in value)
+            return value
+
+        content: list[Content] = []
+        for item in result.content:
+            value = getattr(item, "text", None)
+            content.append(
+                item.model_copy(update={"text": strip(value)}) if isinstance(value, str) else item
+            )
+        return result.model_copy(update={"content": content, "details": scrub(result.details)})
+
+    @staticmethod
     async def _redact_content(
         content: list[Content],
         redact: Callable[[str], str],
@@ -6142,6 +7187,14 @@ class AgentLoop:
         texts = [item.text for item in content if isinstance(item, TextContent)]
         if not texts:
             return content  # decided ON THE LOOP: imagery/empty pays no hop
+        # PUBLIC COPY BY POLICY: ``read_public_copy`` is the sanctioned reader for
+        # the i18n catalogues and key maps (docs/security/redaction-policy.md).
+        # The exemption is keyed to the TOOL NAME, never to an argument, and the
+        # tool itself refuses any path outside its allowlist and records every
+        # read. Masking it here would make the route useless; masking every other
+        # tool's result is unchanged.
+        if tool_name in PUBLIC_COPY_TOOLS:
+            return content
 
         def _run() -> list[str]:
             with (
@@ -6209,6 +7262,11 @@ class AgentLoop:
         in the shape report, and a bare executor spelling would drop it.
         """
         if not details:
+            return details
+        # The sibling public-copy rule: the sanctioned reader's structured payload
+        # (path/key/hash) is part of the same public record, not a second channel
+        # to mask. See the block in ``_redact_content``.
+        if tool_name in PUBLIC_COPY_TOOLS:
             return details
         if not any(
             isinstance(details.get(key), str)
@@ -6561,3 +7619,14 @@ class _ModelTurnResult:
     #: row to replay for such a call, so only the run loop can tell the model;
     #: carried out for the recovery in ``run``.
     nameless_call_drops: int = 0
+    #: Set when the in-stream degeneration guard cut this call's stream (see
+    #: ``harness.degeneration``); carried out so the run loop's degeneration
+    #: arm, not its ordinary length arm, decides what happens next.
+    degenerate: "DegenerationTrip | None" = None
+    #: ``provider/model`` of the target that produced ``error``, and the
+    #: selector the walk started from when that target was not the selection.
+    #: Empty when unknown (a synthesised error, or nothing raised). See
+    #: ``ProviderError.provenance``; the run loop copies both onto the end
+    #: event so the session's incident names the model that actually failed.
+    failure_selector: str = ""
+    failure_failover_from: str = ""

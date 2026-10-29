@@ -112,8 +112,6 @@ GAP_TEXT = "… turns in the middle were not read"
 #: the state lives at ``payload["details"]["state"]``.
 CHECKPOINT_CUSTOM_TYPE = "frontend_state_checkpoint_v1"
 
-TRANSCRIPT_NAME = "transcript.jsonl"
-
 #: The glyph every USER-role gutter starts with, whoever the speaker is named
 #: as. The painter inks a user turn by this glyph rather than by the word
 #: ``you``, because an agent-opened session's first turn is a user turn with a
@@ -441,11 +439,41 @@ class SessionPreviews:
         self._unreadable: set[str] = set()
         #: ``stat`` sizes, so the window decision costs one syscall per session.
         self._sizes: dict[str, int] = {}
+        #: The resolved plain transcript per session (``None`` when unreadable).
+        #: One resolver call per session per preview object: a ``None`` here is
+        #: the absence of a readable transcript, never a missing entry.
+        self._paths: dict[str, Path | None] = {}
 
     def unreadable(self, session_id: str) -> bool:
         """True when this session's transcript exists but could not be read."""
         self._size(session_id)
         return session_id in self._unreadable
+
+    def _transcript(self, session_id: str) -> Path | None:
+        """A seekable, PLAIN transcript for ``session_id``, or ``None``.
+
+        THE RESOLVER, because a session's bytes may be an archive: previews are
+        read at byte offsets (a size, a head window, a tail window), so this asks
+        ``compression.transcript_for_read`` for the plain file or its bounded
+        decompressed cache copy and keeps every read below exactly what it was.
+        Answering from the plain name instead is how a compressed session's pane
+        would open on nothing while its conversation sat beside it.
+
+        ``None`` — never a fabricated empty file — when there is nothing to read
+        or the archive cannot be decoded on this build; the caller records the
+        session as unreadable, which is what the pane says.
+        """
+        cached = self._paths.get(session_id)
+        if cached is not None:
+            return cached
+        from local_operator.session import compression
+
+        try:
+            path = compression.transcript_for_read(self._sessions / session_id)
+        except (OSError, compression.ArchiveError):
+            path = None
+        self._paths[session_id] = path
+        return path
 
     def _size(self, session_id: str) -> int:
         """The transcript's size in bytes, or 0 when it cannot be stat-ed.
@@ -456,10 +484,11 @@ class SessionPreviews:
         claiming the conversation is empty.
         """
         if session_id not in self._sizes:
+            transcript = self._transcript(session_id)
             try:
-                self._sizes[session_id] = (
-                    (self._sessions / session_id / TRANSCRIPT_NAME).stat().st_size
-                )
+                if transcript is None:
+                    raise OSError("no transcript")
+                self._sizes[session_id] = transcript.stat().st_size
             except OSError:
                 self._sizes[session_id] = 0
                 self._unreadable.add(session_id)
@@ -469,9 +498,11 @@ class SessionPreviews:
         """The last :data:`PREVIEW_TAIL_BYTES` of the transcript, as whole lines."""
         if session_id in self._lines:
             return self._lines[session_id]
-        transcript = self._sessions / session_id / TRANSCRIPT_NAME
+        transcript = self._transcript(session_id)
         window = b""
         try:
+            if transcript is None:
+                raise OSError("no transcript")
             size = transcript.stat().st_size
             with transcript.open("rb") as handle:
                 if size > PREVIEW_TAIL_BYTES:
@@ -497,9 +528,11 @@ class SessionPreviews:
         """
         if session_id in self._whole_lines:
             return self._whole_lines[session_id]
-        transcript = self._sessions / session_id / TRANSCRIPT_NAME
+        transcript = self._transcript(session_id)
         window = b""
         try:
+            if transcript is None:
+                raise OSError("no transcript")
             with transcript.open("rb") as handle:
                 window = handle.read(2 * PREVIEW_TAIL_BYTES)
         except OSError:
@@ -525,9 +558,11 @@ class SessionPreviews:
         """
         if session_id in self._head_lines:
             return self._head_lines[session_id]
-        transcript = self._sessions / session_id / TRANSCRIPT_NAME
+        transcript = self._transcript(session_id)
         window = b""
         try:
+            if transcript is None:
+                raise OSError("no transcript")
             with transcript.open("rb") as handle:
                 window = handle.read(PREVIEW_TAIL_BYTES)
         except OSError:

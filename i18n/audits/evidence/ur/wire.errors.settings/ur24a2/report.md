@@ -1,0 +1,46 @@
+# Canonical evidence assembly — ur / wire.errors.settings / ur24a2
+
+This is an assembly index, not a new audit and not a replacement for the preserved source report/receipt.
+
+- Source audit ID: ur24a2; original receipt: `ur-core.round2.receipt.json`
+- Round: 2; source revision: `d3f5e21b6b01e82ff20faa4dc49f4f9420a5c40a`; current assembly revision: `5eaddeff1d4cb9bfee9c2a831d1e48938c9cce9f`
+- Auditor: translation-auditor (lopdev team); session `5ebbaba9537e`; actual model `openrouter/moonshotai/kimi-k3.1-pro`; fallback: none
+- Independent peer record: `i18n/audits/evidence/ur/wire.errors.settings/ur24b2/record.json`
+- Current-byte round used for ledger: no — historical evidence retained
+- Source namespace verdict: `clean`; status `passed`; unresolved BLOCKER/MAJOR `0`
+- Original source bundle: `/Users/damian/.local-operator/sessions/5ebbaba9537e/scratchpad/ur-core-round2` (provenance only; canonical tracked companions are in this directory).
+
+## Source namespace row
+
+```json
+{
+  "namespace": "wire.errors.settings",
+  "namespace_key_count": 12,
+  "scoped_keys_read": 4,
+  "changed_keys": 4,
+  "direct_neighbor": false,
+  "en_sha256": "a3d05f4d250d92e8cda0f01a92c356957edbf67de5ddee19f8ec949b5d2f30bf",
+  "ur_sha256": "b15d7f47abe473cfd019e1599e0d84569b9ceeec9159f1f78dc7391fefb1eda2",
+  "context_sha256": null,
+  "hashes_rederived_and_matched": true,
+  "verdict": "clean",
+  "finding_ids": [],
+  "unresolved_blocker_major": 0,
+  "unresolved_minor": 0,
+  "unresolved_nit": 0
+}
+```
+
+## Namespace findings preserved from source findings JSON
+
+```json
+[]
+```
+
+## Rendered/fit follow-ups
+
+```json
+[]
+```
+
+No native TUI, relay, desktop or rendered RTL/design completion is claimed.

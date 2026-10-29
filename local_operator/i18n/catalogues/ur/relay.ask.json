@@ -1,0 +1,13 @@
+{
+  "relay.ask.context.messages": "{count, plural, one {اس سوال کے بعد آپ کا # پیغام (آخری {time})} other {اس سوال کے بعد آپ کے # پیغامات (آخری {time})}}",
+  "relay.ask.dismiss.answered_in_chat": "گفتگو میں جواب دے دیا",
+  "relay.ask.dismiss.answered_in_chat_note": "آپ گفتگو میں پہلے ہی جواب دے چکے ہیں",
+  "relay.ask.dismiss.cancel": "منسوخ کریں",
+  "relay.ask.dismiss.moot": "اب ضرورت نہیں",
+  "relay.ask.dismiss.moot_note": "اب جواب کا انتظار نہیں ہوگا",
+  "relay.ask.dismiss.open": "خارج کریں…",
+  "relay.ask.dismiss.receipt": "خارج کیا گیا — کوئی جواب نہیں بھیجا گیا",
+  "relay.ask.dismiss.receipt_answered_in_chat": "خارج کیا گیا — گفتگو میں جواب موجود ہے",
+  "relay.ask.dismiss.receipt_moot": "خارج کیا گیا — اب ضرورت نہیں",
+  "relay.ask.dismiss.title": "یہ سوال خارج کریں"
+}

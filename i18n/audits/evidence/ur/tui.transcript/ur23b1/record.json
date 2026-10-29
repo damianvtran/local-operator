@@ -1,0 +1,149 @@
+{
+  "schema": 1,
+  "audit_id": "ur23b1",
+  "audit_kind": "independent_core_round_1_audit_evidence",
+  "locale": "ur",
+  "namespace": "tui.transcript",
+  "round": 1,
+  "audit_date": "2026-10-23",
+  "key_count": 17,
+  "source_audit_revision": "2189b61739e08b5f219d317ead68b4a5f4cf709f",
+  "assembly_revision": "5eaddeff1d4cb9bfee9c2a831d1e48938c9cce9f",
+  "current_byte_round_for_ledger": true,
+  "current_bytes_match_audited_hashes": true,
+  "current_byte_peer_audit_id": "ur23a1",
+  "current_byte_peer_record": "i18n/audits/evidence/ur/tui.transcript/ur23a1/record.json",
+  "translator": {
+    "agent": "translator specialist (ur-tui-shell)",
+    "session": "52136848d1fc",
+    "model": "openrouter/moonshotai/kimi-k3.1-pro",
+    "date": "2026-10-23",
+    "integrator_session": "3f68f20b2cad"
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team); independent second core auditor",
+    "session": "3e0f499dc2ee",
+    "model": "openrouter/moonshotai/kimi-k3.1-pro",
+    "independent_from_translator_session": true,
+    "actual_model_source": "Original auditor receipt ur-core-round1-second-audit.receipt.json; served model openrouter/moonshotai/kimi-k3.1-pro; fallback: none observed; the served model recorded above performed this audit"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.transcript.json",
+      "sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.transcript.context.json",
+      "sha256": "3c2252debbbc33c2fab2061a5dcdc9dfa036e07ab5793ba4dabdf889ac7113fc"
+    },
+    "ur": {
+      "path": "local_operator/i18n/catalogues/ur/tui.transcript.json",
+      "sha256": "3772f0bc1cb8f893e261445180c69ac7cc77874a590e48be8aa909fb3116db86"
+    },
+    "policy": [
+      {
+        "path": "i18n/glossary.md",
+        "sha256": "ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd"
+      },
+      {
+        "path": "i18n/style-guides/ur.md",
+        "sha256": "157b1310a090ca98bd9c4b2262a8ebcf7d5ca92cd91fb5f9c7e82d21fe768c9c"
+      }
+    ],
+    "note": "Current assembly inputs are named here. Historical source-receipt hashes remain unchanged in the preserved namespace row; only selected current-byte rounds were required to match."
+  },
+  "source_receipt": {
+    "path": "i18n/audits/evidence/ur/tui.transcript/ur23b1/ur-core-round1-second-audit.receipt.json",
+    "sha256": "ed26fb8ab1944520c4c14f670955f5353a57ec0e9acd84f08d5c271a1d5ab49a"
+  },
+  "source_companions": [
+    "contract-checks.json",
+    "evidence-manifest.json",
+    "fit-rendered.json",
+    "fit.json",
+    "mechanical-summary.json",
+    "plurals-rendered.json",
+    "plurals.json",
+    "repository-checks.log",
+    "tui.transcript.jsonl",
+    "tui.transcript.pairs",
+    "ur-core-round1-second-audit.md",
+    "ur-core-round1-second-audit.receipt.json",
+    "validation.json"
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/tui.transcript/ur23b1/audit.log",
+      "sha256": "78f3e73ce2ad446158b3171b49e58d78ca9f58598bea726fb851d8b8c44985f5"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.transcript/ur23b1/contract-checks.json",
+      "sha256": "e62eab089e36e1426a772714b85250bb27ffb28e396100731a9fe78c9e3a7f2a"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.transcript/ur23b1/evidence-manifest.json",
+      "sha256": "746e6f3bf2a45486837e93f809e28485091363bb9fbe61dd67cc3eec52296ac6"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.transcript/ur23b1/fit-rendered.json",
+      "sha256": "5e48fe2086978bc28d477486ea58d68edd5bf7b97c3335a664211a0df4e089f8"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.transcript/ur23b1/fit.json",
+      "sha256": "6c276e7109b0e53bf6688d531e2bc7b1e9d68805bb1788866eeb50fee45e2d69"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.transcript/ur23b1/mechanical-summary.json",
+      "sha256": "640bd3fead7340a94a296be02bcf20f8ae53f6b0ca8596ddc7e4420b026218b6"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.transcript/ur23b1/plurals-rendered.json",
+      "sha256": "37a1740c6f158a1dea2ebc781b66fe8bac1e1e859c56a894968fff335103ddc0"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.transcript/ur23b1/plurals.json",
+      "sha256": "db1f008d3f7987b684a09a40e95d1262e94df35f18f9b4241f57b0c411a3596d"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.transcript/ur23b1/report.md",
+      "sha256": "039a79b8cc5a4784b24c963b1df16cd3e7b6a60c5414d42a51b0016ef8457239"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.transcript/ur23b1/repository-checks.log",
+      "sha256": "78f3e73ce2ad446158b3171b49e58d78ca9f58598bea726fb851d8b8c44985f5"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.transcript/ur23b1/tui.transcript.jsonl",
+      "sha256": "4f9cd97e02dd0f5d80d3cf4556b1e5d0d115d611679841ba6a302498d69f9bb7"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.transcript/ur23b1/tui.transcript.pairs",
+      "sha256": "c44b39ce2352918e08241c1cb1f8684bda5a4134b3343e1e3d9ee9d56cacadb1"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.transcript/ur23b1/ur-core-round1-second-audit.md",
+      "sha256": "9747ba4c0544ac91e5b1f2ca233cfa4c2bd81aa64b31240e84ed454339025683"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.transcript/ur23b1/ur-core-round1-second-audit.receipt.json",
+      "sha256": "ed26fb8ab1944520c4c14f670955f5353a57ec0e9acd84f08d5c271a1d5ab49a"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/tui.transcript/ur23b1/validation.json",
+      "sha256": "648221da91ea787a7b3bc8d4fd39aaa3cab4542a3d9e11f2b6dba44e7d4c3b48"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "findings_total": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0,
+    "source_verdict": "clean",
+    "rendered_followups": []
+  },
+  "audit_notes_not_execution_log": "report.md is an assembly index. The original source receipt/report and selected evidence companions are preserved byte-for-byte; audit.log distinguishes recorded source output from new execution. Native/rendered RTL and design sign-off were not performed by this assembly."
+}

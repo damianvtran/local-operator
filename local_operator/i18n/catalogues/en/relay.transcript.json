@@ -1,0 +1,21 @@
+{
+  "relay.transcript.turn.condensed": "Turn condensed",
+  "relay.transcript.turn.took": "Took {duration}",
+  "relay.transcript.turn.actions": "{label, select, other {{count, plural, one {{label} action} other {{label} actions}}}}",
+  "relay.transcript.turn.completed": "completed",
+  "relay.transcript.fold.unit": "{kind, select, files {{count, plural, one {# file} other {# files}}} searches {{count, plural, one {# search} other {# searches}}} web {{count, plural, one {# web search} other {# web searches}}} shell {{count, number} shell} python {{count, number} python} edits {{count, plural, one {# edit} other {# edits}}} tasks {{count, plural, one {# task} other {# tasks}}} incoming {{count, plural, one {# incoming message} other {# incoming messages}}} wakes {{count, plural, one {# wake receipt} other {# wake receipts}}} other {{count, number} {name}}}",
+  "relay.transcript.fold.shell": "{count, plural, one {# shell} other {# shell}}",
+  "relay.transcript.fold.python": "{count, plural, one {# python} other {# python}}",
+  "relay.transcript.fold.more": "{count, plural, one {and # other action} other {and # other actions}}",
+  "relay.transcript.fold.failed_label": "Includes a failed action",
+  "relay.transcript.fold.partial_label": "{count, plural, one {At least # action — earlier messages aren’t loaded yet} other {At least # actions — earlier messages aren’t loaded yet}}",
+  "relay.transcript.older.failed": "Couldn’t load earlier messages",
+  "relay.transcript.label.steered": "Steered",
+  "relay.transcript.label.wake": "Wake",
+  "relay.transcript.label.peer": "Peer message",
+  "relay.transcript.label.job": "Job result",
+  "relay.transcript.label.ask": "Ask",
+  "relay.transcript.label.messages": "Messages",
+  "relay.transcript.composer.queued": "{count, plural, one {# queued} other {# queued}}",
+  "relay.transcript.session.unread_refused": "Could not read what is unread — nothing was cleared. Try again."
+}

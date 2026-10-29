@@ -84,7 +84,18 @@ def proto_supported(
 #: both read `0.1.19`. Nothing shipped under it, so the repair is a renumber —
 #: see `docs/store/release-record.md`, v0.1.20. 0.1.21 is the first tree that
 #: serves the structured read actions (`styles`/`hit_test`/`ancestors`).
-EXPECTED_EXTENSION_VERSION = "0.1.21"
+#: 0.1.22 is the first tree whose `snapshot` takes a CSS scope and a line
+#: window (`selector`/`start`/`limit`/`search`), so an agent can ask for one
+#: section of a real settings form instead of a tree it cannot page.
+#: 0.1.23 is the first tree whose `click`/`type` resolve accessibility
+#: locators (`role=`, `label=`, `text=`) against the a11y tree, so a target
+#: can be named by what it IS rather than by a framework-generated id.
+#: 0.1.24 is the first tree that serves `query` (CSS in, element descriptors
+#: out) — the read-only answer to "what is the id of this checkbox?".
+#: 0.1.25 is the first tree whose `element_not_found` carries
+#: `data.candidates` (role/name/locator) on a CSS miss as well as a locator
+#: miss, so the tool can name the closest real elements instead of a bare miss.
+EXPECTED_EXTENSION_VERSION = "0.1.25"
 
 #: The first extension version that serves each capability-gated method.
 #:
@@ -113,6 +124,7 @@ CAPABILITY_MIN_EXTENSION_VERSION: dict[str, str] = {
     "styles": "0.1.21",
     "hit_test": "0.1.21",
     "ancestors": "0.1.21",
+    "query": "0.1.24",
 }
 
 #: The two switches the OPERATOR owns, and the ONE spelling of each label.
@@ -164,7 +176,18 @@ CAPABILITY_SWITCH_LOCATION = (
 #: which the tool can only render as "the bridge broke"; the gate turns the same
 #: peer into a typed, actionable `capability_unsupported` instead.
 CAPABILITY_GATED_METHODS: frozenset[str] = frozenset(
-    {"download", "upload", "styles", "hit_test", "ancestors"}
+    {
+        "download",
+        "upload",
+        "styles",
+        "hit_test",
+        "ancestors",
+        "query",
+        "network_start",
+        "network_stop",
+        "network_read",
+        "network_clear",
+    }
 )
 
 #: The first extension TREE that carried the ``owner_*`` ownership lifecycle
@@ -287,6 +310,14 @@ METHODS = (
     "styles",
     "hit_test",
     "ancestors",
+    # The read-only DOM query: CSS in, bounded descriptors out (tag, id, name,
+    # role, aria-label, rendered text, visibility, checked/disabled, rect). It
+    # exists because the one question that would have unblocked the measured
+    # incident — "what is the id of this checkbox?" — had no route: `read`
+    # returns no attributes, `snapshot` returns an AX tree, and `eval` is not
+    # safe to expose. It never writes, navigates or evaluates caller code, so
+    # it is a READ by construction rather than by promise.
+    "query",
     # Site-permission flow (agent-legible approvals). ``request_access`` raises
     # the pending approval in the extension and returns immediately;
     # ``await_access`` blocks for a BOUNDED slice (the extension caps it well
@@ -336,6 +367,30 @@ METHODS = (
     # answering "not enabled" rather than "not capable".
     "download",
     "upload",
+    # Desktop-host network telemetry. The shared vocabulary is additive so an
+    # older peer keeps protocol 1; capability advertisement/refusal makes an
+    # extension or cmux host degrade explicitly instead of faking a capture.
+    "network_start",
+    "network_stop",
+    "network_read",
+    "network_clear",
+)
+
+#: Wire methods only the DESKTOP app's browser host can serve.
+#:
+#: They stay in ``METHODS`` because the wire vocabulary is shared and additive at
+#: protocol 1, but this build must neither serve nor advertise them: the
+#: extension attaches its debugger for the length of one action, so it holds no
+#: standing session a ``Network`` subscription could live on. The advertisement is
+#: already derived from the extension's handler table, so this constant exists for
+#: the one place that would otherwise grow a second hand-kept list — the
+#: extension's "every wire method has a handler" test. Generated into both
+#: TypeScript targets so the two sides cannot drift.
+DESKTOP_ONLY_METHODS: tuple[str, ...] = (
+    "network_start",
+    "network_stop",
+    "network_read",
+    "network_clear",
 )
 
 
@@ -392,6 +447,9 @@ COMMAND_TIMEOUTS = {
     "styles": 20.0,
     "hit_test": 20.0,
     "ancestors": 20.0,
+    # query runs the same one-shot `executeScript` class as the reads above and
+    # walks at most 50 elements, so it shares their budget.
+    "query": 20.0,
     # request_access only writes the pending record and raises the prompt
     # surfaces — it returns immediately, never waiting on the human.
     "request_access": 20.0,
@@ -417,6 +475,12 @@ COMMAND_TIMEOUTS = {
     # the attach plus the read-back that proves the DOM holds them. A 256 MB
     # attach is the worst case (UPLOAD_MAX_BYTES), not the common one.
     "upload": 60.0,
+    # Network actions only enable/disable CDP collection or read an in-memory
+    # ring; none waits for a page or a human decision.
+    "network_start": 20.0,
+    "network_stop": 20.0,
+    "network_read": 20.0,
+    "network_clear": 20.0,
 }
 
 #: Extra budget granted to a command that is BLOCKED on a human origin

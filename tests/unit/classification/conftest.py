@@ -21,6 +21,42 @@ from tests.unit.classification.support import (
     store_row,
 )
 
+#: A syntactically valid owner device id: the placement document validates its shape.
+OWNER_DEVICE = "d_00000000000000000000000000000001"
+
+
+@pytest.fixture
+def holder_root(tmp_path, monkeypatch):
+    """A config root where ANOTHER device owns ``radient`` and lends it here.
+
+    A real ``PlacementDocument`` plus a minted identity, not a monkeypatched
+    predicate: the trace and the borrow helper read the same files production does
+    (``placement_for_store`` requires a holder row that is NOT this device's own),
+    so faking the document would let both sides agree on a state the disk never
+    has. The owner id is stable and the device id comes from the minted identity.
+    """
+    from local_operator.network.credentials import placement as placement_mod
+    from local_operator.network.identity import mint
+
+    root = tmp_path / "holder"
+    root.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    identity = mint(root, name="node")
+    document = placement_mod.PlacementDocument(
+        "n_classification_borrow", root=root, written_by=OWNER_DEVICE
+    )
+    document.declare(
+        "radient",
+        owner_device=OWNER_DEVICE,
+        owner_device_name="head",
+        provider="radient",
+        identity_label="damian@example.test",
+        by=OWNER_DEVICE,
+    )
+    document.grant("radient", identity.device_id, by=OWNER_DEVICE)
+    document.save()
+    return root
+
 
 @pytest.fixture
 def bare_manager(tmp_path):

@@ -33,7 +33,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["PEAK_BARS", "PEAKS_VERSION", "compute_peaks", "peaks_payload"]
+__all__ = ["PEAK_BARS", "PEAKS_VERSION", "compute_duration", "compute_peaks", "peaks_payload"]
 
 #: The frozen bar count (server-contract-adjacent vocabulary: ``bars: 240``).
 PEAK_BARS = 240
@@ -57,6 +57,67 @@ def _load_miniaudio() -> Any | None:
         return None
 
 
+def _decode(raw: bytes) -> Any | None:
+    """The one guarded decode shared by peaks and duration.
+
+    Same engine, same grid, same degraded state: ``None`` means this host
+    cannot read these bytes, which both callers treat as "no derived fact"
+    rather than as an error. Kept in one place so the two derivations cannot
+    drift onto different decode settings — a duration taken at another sample
+    rate would still be arithmetically right, but a peak grid taken at another
+    rate would not, and one shared SETTING is how that stays impossible.
+
+    ONE DECODE PER CALL, and the callers are honest about it: ``compute_peaks``
+    and ``compute_duration`` each decode, so an artifact that needs both pays
+    two decodes (measured 207 ms for a 98 s clip; recall the peaks docstring's
+    63.7 ms per decode). That is deliberate for now — merging them would change
+    the peaks entry point that every existing caller and the sidecar contract
+    already use — and it is a one-off cost at artifact creation, never in a
+    render loop.
+    """
+    if not raw:
+        return None
+    miniaudio = _load_miniaudio()
+    if miniaudio is None:
+        return None
+    try:
+        return miniaudio.decode(
+            raw,
+            output_format=miniaudio.SampleFormat.FLOAT32,
+            nchannels=1,
+            sample_rate=PEAK_DECODE_SAMPLE_RATE_HZ,
+        )
+    except Exception:  # noqa: BLE001 - undecodable input is ordinary here
+        logger.debug("peaks: decode failed; reporting no waveform", exc_info=True)
+        return None
+
+
+def compute_duration(raw: bytes) -> float | None:
+    """The clip's length in seconds, read from the bytes, or ``None``.
+
+    **THE DURATION IS A PROPERTY OF THE BYTES, NOT OF THE PROVIDER'S RESPONSE.**
+    A provider that states a duration is offering a cross-check; a provider that
+    does not (ElevenLabs' text-to-sound answers with the requested FORMAT and
+    nothing else) must not leave the artifact without one. The consequence of
+    leaving it out is user-visible rather than cosmetic: the sound card needs a
+    length to draw a waveform and a clock, so a null duration renders a record
+    with NO PLAYER — a generated sound the user cannot play, with no error.
+
+    Derived from the same 8 kHz mono decode as the peaks: ``frames / rate`` is
+    exact for any format the decoder accepts, including MP3, whose container
+    padding the decoder accounts for. ``None`` keeps the old degraded state
+    (no engine, undecodable bytes) and callers keep whatever they were given.
+    """
+    decoded = _decode(raw)
+    if decoded is None:
+        return None
+    samples = getattr(decoded, "samples", None)
+    rate = getattr(decoded, "sample_rate", None)
+    if samples is None or not rate:
+        return None
+    return len(samples) / float(rate)
+
+
 def compute_peaks(raw: bytes) -> list[float] | None:
     """240 max-abs bars for ``raw`` audio bytes, or ``None`` when uncomputable.
 
@@ -65,20 +126,8 @@ def compute_peaks(raw: bytes) -> list[float] | None:
     never as an error. A successfully decoded SILENT clip returns 240 zeros,
     which is different from ``None``: silence is a real waveform.
     """
-    if not raw:
-        return None
-    miniaudio = _load_miniaudio()
-    if miniaudio is None:
-        return None
-    try:
-        decoded = miniaudio.decode(
-            raw,
-            output_format=miniaudio.SampleFormat.FLOAT32,
-            nchannels=1,
-            sample_rate=PEAK_DECODE_SAMPLE_RATE_HZ,
-        )
-    except Exception:  # noqa: BLE001 - undecodable input is ordinary here
-        logger.debug("peaks: decode failed; reporting no waveform", exc_info=True)
+    decoded = _decode(raw)
+    if decoded is None:
         return None
     samples = getattr(decoded, "samples", None)
     if samples is None:

@@ -1,0 +1,1029 @@
+{
+  "method": "core render_message(locale=ur); count/amount=1,2; time=19:36; login=Radient; keyed template measured with empty key per sidecar and separately with 25-cell worst-case key; Unicode combining/Cf zero cells; pseudo=ceil(rendered cells*1.30)",
+  "key_count": 54,
+  "actual_overflow_count": 0,
+  "pseudo_30pct_overflow_count": 26,
+  "worst_case_key_overflow_count": 0,
+  "rows": [
+    {
+      "key": "relay.ask.context.messages",
+      "maxCells": 60,
+      "note": "The line under an OPEN ask's state line on the phone, stating how stale the question is: e.g. '3 messages from you since this was asked (last 19:36)'. {count} is an integer >= 1 (the card draws no line at all for 0 or when an older runtime sends no count) and feeds the plural with `#`; {time} is an ALREADY-FORMATTED 24-hour local clock time (HH:MM) supplied by the caller — do not reformat, translate or wrap it in ICU date syntax. Both plural arms must be complete sentences because some languages reorder the parenthetical time; keep the parentheses and their wording inside each arm. It wraps onto more than one line on a narrow phone, so short words and a natural break after 'asked' are welcome.",
+      "en": "{count, plural, one {# message from you since this was asked (last {time})} other {# messages from you since this was asked (last {time})}}",
+      "ur": "{count, plural, one {اس سوال کے بعد آپ کا # پیغام (آخری {time})} other {اس سوال کے بعد آپ کے # پیغامات (آخری {time})}}",
+      "variants": [
+        {
+          "params": {
+            "time": "19:36",
+            "count": 1
+          },
+          "rendered": "اس سوال کے بعد آپ کا 1 پیغام (آخری 19:36)",
+          "cells": 41,
+          "pseudo_30pct_cells": 54,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        },
+        {
+          "params": {
+            "time": "19:36",
+            "count": 2
+          },
+          "rendered": "اس سوال کے بعد آپ کے 2 پیغامات (آخری 19:36)",
+          "cells": 43,
+          "pseudo_30pct_cells": 56,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "relay.ask.dismiss.answered_in_chat",
+      "maxCells": 34,
+      "note": "One of the two reason buttons on an OPEN ask's card on the phone, revealed by 'close…'. It means the operator already answered the question by typing in the conversation, so the agent should read their messages and treat the ask as settled (sent as reason=answered_in_chat). A reason, not a command; no exclamation mark. The buttons sit side by side, so keep it short. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented.",
+      "en": "Answered in chat",
+      "ur": "گفتگو میں جواب دے دیا",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "گفتگو میں جواب دے دیا",
+          "cells": 21,
+          "pseudo_30pct_cells": 28,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "relay.ask.dismiss.cancel",
+      "maxCells": 12,
+      "note": "The quiet button that puts the reason buttons away again on an OPEN ask's card, sending nothing. Lower-case like the card's other quiet controls; no exclamation mark.",
+      "en": "cancel",
+      "ur": "منسوخ کریں",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "منسوخ کریں",
+          "cells": 10,
+          "pseudo_30pct_cells": 13,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "relay.ask.dismiss.moot",
+      "maxCells": 34,
+      "note": "One of the two reason buttons on an OPEN ask's card on the phone, revealed by 'close…'. It means the question no longer matters to the operator (the work moved on, someone else decided), so the agent should drop it (sent as reason=moot). A reason, not a command, and it must not read as an approval or a refusal of the question. The buttons sit side by side, so keep it short. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented.",
+      "en": "No longer needed",
+      "ur": "اب ضرورت نہیں",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "اب ضرورت نہیں",
+          "cells": 13,
+          "pseudo_30pct_cells": 17,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "relay.ask.dismiss.open",
+      "maxCells": 12,
+      "note": "The quiet control on an OPEN ask's card on the phone that reveals the two reasons for putting the question away. It closes the QUESTION, not the screen: keep the trailing ellipsis glyph (…), which is the card's own convention for 'this opens a choice', and keep it lower-case and brief. Use the same verb the terminal uses for this act (dismiss) rather than a second word for it. Nothing is sent until a reason is chosen.",
+      "en": "dismiss…",
+      "ur": "ختم کریں…",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "ختم کریں…",
+          "cells": 9,
+          "pseudo_30pct_cells": 12,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "relay.ask.dismiss.title",
+      "maxCells": 24,
+      "note": "The heading above the two reason buttons on an OPEN ask's card, shown after the operator taps 'dismiss…'. It names the act so the two reasons below read as one choice rather than two more card actions. Same words as the terminal's chooser heading where the language allows; no punctuation at the end, no exclamation mark.",
+      "en": "Dismiss this ask",
+      "ur": "یہ سوال ختم کریں",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "یہ سوال ختم کریں",
+          "cells": 16,
+          "pseudo_30pct_cells": 21,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "relay.ask.dismiss.moot_note",
+      "maxCells": 44,
+      "note": "The one-line explanation drawn UNDER the 'No longer needed' reason button on the phone, in a smaller dim register. It says what happens to the waiting: the agent stops expecting an answer. No trailing punctuation, no em dash (the layout puts it on its own line), and it must not read as an approval or a refusal of the question itself.",
+      "en": "stop waiting on it",
+      "ur": "اب جواب کا انتظار نہیں ہوگا",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "اب جواب کا انتظار نہیں ہوگا",
+          "cells": 27,
+          "pseudo_30pct_cells": 36,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "relay.ask.dismiss.answered_in_chat_note",
+      "maxCells": 44,
+      "note": "The one-line explanation drawn UNDER the 'Answered in chat' reason button on the phone, in a smaller dim register. It names what the operator already did, so they can recognise their own case and cannot mistake the button for 'send my answer'. No trailing punctuation, no em dash (the layout puts it on its own line).",
+      "en": "you already replied in the conversation",
+      "ur": "آپ گفتگو میں پہلے ہی جواب دے چکے ہیں",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "آپ گفتگو میں پہلے ہی جواب دے چکے ہیں",
+          "cells": 36,
+          "pseudo_30pct_cells": 47,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "relay.ask.dismiss.receipt_moot",
+      "maxCells": 44,
+      "note": "The line the asks sheet shows in place of its empty state after the operator dismissed this conversation's last open ask with the 'No longer needed' reason: a receipt for the act, not an absence. Past tense, no exclamation mark, no checkmark wording. WIDTH: 44 cells, the widest receipt line any shipped locale needs (Spanish 42, Vietnamese 44); it is a whole sentence on its own row, not a label sharing a control.",
+      "en": "Dismissed — no longer needed",
+      "ur": "ختم کر دیا گیا — اب ضرورت نہیں",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "ختم کر دیا گیا — اب ضرورت نہیں",
+          "cells": 30,
+          "pseudo_30pct_cells": 39,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "relay.ask.dismiss.receipt_answered_in_chat",
+      "maxCells": 44,
+      "note": "The line the asks sheet shows in place of its empty state after the operator dismissed this conversation's last open ask with the 'Answered in chat' reason. Past tense, no exclamation mark. It must not read as 'your answer was sent': nothing was sent, and that distinction is the point of the two reasons. WIDTH: 44 cells, the widest receipt line any shipped locale needs (Spanish 42, Vietnamese 44); it is a whole sentence on its own row, not a label sharing a control.",
+      "en": "Dismissed — answered in chat",
+      "ur": "ختم کر دیا گیا — گفتگو میں جواب دے دیا گیا",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "ختم کر دیا گیا — گفتگو میں جواب دے دیا گیا",
+          "cells": 42,
+          "pseudo_30pct_cells": 55,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "relay.ask.dismiss.receipt",
+      "maxCells": 44,
+      "note": "The line the asks sheet shows in place of its empty state after a TIMED-OUT ask was dismissed with the card's one-tap control, which carries no reason. Say that the dismissal was recorded and that no reply was sent to the agent — the lapsed door's own promise. Past tense, no exclamation mark. WIDTH: 44 cells, the widest receipt line any shipped locale needs (Spanish 42, Vietnamese 44); it is a whole sentence on its own row, not a label sharing a control.",
+      "en": "Dismissed — no reply sent",
+      "ur": "ختم کر دیا گیا — کوئی جواب نہیں بھیجا",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "ختم کر دیا گیا — کوئی جواب نہیں بھیجا",
+          "cells": 37,
+          "pseudo_30pct_cells": 49,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.asks.context.messages",
+      "maxCells": 78,
+      "note": "The line under an OPEN ask in the terminal's ask list, stating how stale the question is: e.g. '3 messages from you since this was asked (last 19:36)'. {count} is an integer >= 1 (the caller draws no line at all for 0 or for an uncountable ask) and feeds the plural with `#`; {time} is an ALREADY-FORMATTED 24-hour local clock time (HH:MM) supplied by the caller — do not reformat, translate or wrap it in ICU date syntax. Both plural arms must be complete sentences because some languages reorder the parenthetical time; keep the parentheses and their wording inside each arm. This line is CLIPPED to the list's width with an ellipsis, so keep the opening words (the count and 'from you') first: the tail may be cut. The list paints one line per ask plus this line on stale open rows only, so the string must never contain a newline.",
+      "en": "{count, plural, one {# message from you since this was asked (last {time})} other {# messages from you since this was asked (last {time})}}",
+      "ur": "{count, plural, one {# پیغام آپ کی طرف سے، سوال کے بعد سے (آخری {time})} other {# پیغامات آپ کی طرف سے، سوال کے بعد سے (آخری {time})}}",
+      "variants": [
+        {
+          "params": {
+            "time": "19:36",
+            "count": 1
+          },
+          "rendered": "1 پیغام آپ کی طرف سے، سوال کے بعد سے (آخری 19:36)",
+          "cells": 49,
+          "pseudo_30pct_cells": 64,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        },
+        {
+          "params": {
+            "time": "19:36",
+            "count": 2
+          },
+          "rendered": "2 پیغامات آپ کی طرف سے، سوال کے بعد سے (آخری 19:36)",
+          "cells": 51,
+          "pseudo_30pct_cells": 67,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.asks.dismiss.answered_in_chat",
+      "maxCells": 34,
+      "note": "The second of two reasons the operator can give for closing an open ask, chosen with the arrow keys and Enter in the ask list's dismiss chooser. It means the operator already answered the question by typing in the conversation, so the agent should read their messages and treat the ask as settled (it is sent as reason=answered_in_chat). It is a reason, not a command: do not add a verb like 'send' or an exclamation mark. Keep it short — the label shares one painted row with its note. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented.",
+      "en": "Answered in chat",
+      "ur": "گفتگو میں جواب دیدہ",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "گفتگو میں جواب دیدہ",
+          "cells": 19,
+          "pseudo_30pct_cells": 25,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.asks.dismiss.answered_in_chat_note",
+      "maxCells": 44,
+      "note": "The clause after an em dash that explains the 'Answered in chat' reason in the ask list's dismiss chooser, e.g. 'Answered in chat — you already replied in the conversation'. It names what the operator did, in the second person, so they can recognise their own case. The em dash separator is drawn by the code, not part of this value; no trailing punctuation. Clipped with the label on a narrow terminal. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented.",
+      "en": "you already replied in the conversation",
+      "ur": "آپ گفتگو میں پہلے ہی جواب دے چکے ہیں",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "آپ گفتگو میں پہلے ہی جواب دے چکے ہیں",
+          "cells": 36,
+          "pseudo_30pct_cells": 47,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.asks.dismiss.hint",
+      "maxCells": 40,
+      "note": "The key-hint row at the foot of the ask list's dismiss chooser: Enter sends the highlighted reason, Esc goes back to the list without dismissing. Key names (enter, esc) are kept as the terminal spells them and joined with the middle dot separator the terminal's other hint rows use; keep that separator. Esc is named 'cancel' rather than 'back' because the key closes the chooser in place (elsewhere Esc collapses the whole surface), so one word must not name two exits. This row is dropped whole on a terminal too narrow for it, so it must stay one short line.",
+      "en": "enter dismiss · esc cancel",
+      "ur": "enter خارج کریں · esc منسوخ کریں",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "enter خارج کریں · esc منسوخ کریں",
+          "cells": 32,
+          "pseudo_30pct_cells": 42,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.asks.dismiss.moot",
+      "maxCells": 34,
+      "note": "The first of two reasons the operator can give for closing an open ask, chosen with the arrow keys and Enter in the ask list's dismiss chooser. It means the question no longer matters to them (the work moved on, someone else decided), so the agent should drop it (it is sent as reason=moot). It is a reason, not a command, and it must not read as an approval or a refusal of the question itself. Keep it short — the label shares one painted row with its note. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented.",
+      "en": "No longer needed",
+      "ur": "اب ضروری نہیں",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "اب ضروری نہیں",
+          "cells": 13,
+          "pseudo_30pct_cells": 17,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.asks.dismiss.moot_note",
+      "maxCells": 44,
+      "note": "The clause after an em dash that explains the 'No longer needed' reason in the ask list's dismiss chooser, e.g. 'No longer needed — stop waiting on it'. It says what happens to the waiting: the agent stops expecting an answer. The em dash separator is drawn by the code, not part of this value; no trailing punctuation. Clipped with the label on a narrow terminal. WIDTH, corrected after the first independent audit: the two reason controls and their cancel are a FLEX-WRAP row (the phone wraps them to separate lines rather than truncating), and the terminal draws the label and its note on ONE row clipped against the list's width — so 34 cells for a label and 44 for a note is the honest budget, and 'conversation'/'conversación'/'cuộc trò chuyện' fit it where a shorter synonym would have had to be invented.",
+      "en": "stop waiting on it",
+      "ur": "اب جواب کا انتظار نہیں ہوگا",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "اب جواب کا انتظار نہیں ہوگا",
+          "cells": 27,
+          "pseudo_30pct_cells": 36,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.asks.dismiss.title",
+      "maxCells": 60,
+      "note": "The heading of the ask list's dismiss chooser: a line the operator reaches by pressing x on an OPEN ask, asking them to pick why the ask is going away. The code then joins the ask's own question after this heading with a middle dot separator (drawn by the code, not part of this value), so do not end the heading with punctuation or a separator. No exclamation mark; it names the act, it does not celebrate it.",
+      "en": "Dismiss this ask",
+      "ur": "یہ سوال خارج کریں",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "یہ سوال خارج کریں",
+          "cells": 17,
+          "pseudo_30pct_cells": 23,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.asks.dismiss.notice_moot",
+      "maxCells": 44,
+      "note": "The one-line acknowledgement shown after the operator dismisses an open ask with the 'No longer needed' reason. It reports what the queue recorded, in the past tense: the ask is gone from the list and the agent was told it no longer matters. No exclamation mark, no 'success' or checkmark wording; it is a receipt, not praise. WIDTH: 44 cells, the widest receipt any shipped locale needs (Spanish 42, Vietnamese 44); it is a whole line on its own, not a label.",
+      "en": "Dismissed — no longer needed",
+      "ur": "خارج کیا گیا — اب ضرورت نہیں",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "خارج کیا گیا — اب ضرورت نہیں",
+          "cells": 28,
+          "pseudo_30pct_cells": 37,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.asks.dismiss.notice_answered_in_chat",
+      "maxCells": 44,
+      "note": "The one-line acknowledgement shown after the operator dismisses an open ask with the 'Answered in chat' reason. It reports what the queue recorded: the ask is gone and the agent was told the answer is already in the conversation. It must not read as 'your answer was sent' — nothing was sent, and that distinction is the whole point of the two reasons. WIDTH: 44 cells, the widest receipt any shipped locale needs (Spanish 42, Vietnamese 44); it is a whole line on its own, not a label.",
+      "en": "Dismissed — answered in chat",
+      "ur": "خارج کیا گیا — گفتگو میں جواب موجود ہے",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "خارج کیا گیا — گفتگو میں جواب موجود ہے",
+          "cells": 38,
+          "pseudo_30pct_cells": 50,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.asks.dismiss.fleet_gone",
+      "maxCells": 60,
+      "note": "The refusal shown in the all-conversations ask list when a dismissal finds the ask missing from THAT other conversation's log (a swept or reset store). The list's rows belong to other conversations by design, so this sentence must not claim the ask is absent from 'this session' — it is absent from the conversation the row named. It is a TOAST FRAGMENT like the queue's other refusals: lower-case opening, no trailing recovery clause (the row stays on screen and the key can be pressed again, so the surface already shows the way back).",
+      "en": "the ask is no longer in that conversation's log.",
+      "ur": "یہ سوال متعلقہ گفتگو کے لاگ میں اب موجود نہیں۔",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "یہ سوال متعلقہ گفتگو کے لاگ میں اب موجود نہیں۔",
+          "cells": 46,
+          "pseudo_30pct_cells": 60,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.asks.dismiss.notice_no_reply",
+      "maxCells": 44,
+      "note": "The one-line acknowledgement shown after the operator dismisses a TIMED-OUT ask with the list's one-key control, which carries no reason. It must state the same fact the phone states for the same act (both surfaces read 'Dismissed — no reply sent' in English): the ask is gone and nothing was sent to the agent. It must NOT name 'no longer needed' or any other reason — the queue records its own default reason for this door, and that is a record, not a word the operator chose. Past tense, no exclamation mark.",
+      "en": "Dismissed — no reply sent",
+      "ur": "خارج کیا گیا — کوئی جواب نہیں بھیجا گیا",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "خارج کیا گیا — کوئی جواب نہیں بھیجا گیا",
+          "cells": 39,
+          "pseudo_30pct_cells": 51,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.palette.kind_agent",
+      "maxCells": 12,
+      "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments.",
+      "en": "agent",
+      "ur": "ایجنٹ",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "ایجنٹ",
+          "cells": 5,
+          "pseudo_30pct_cells": 7,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.palette.kind_command",
+      "maxCells": 12,
+      "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments.",
+      "en": "command",
+      "ur": "کمانڈ",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "کمانڈ",
+          "cells": 5,
+          "pseudo_30pct_cells": 7,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.palette.kind_session",
+      "maxCells": 12,
+      "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments.",
+      "en": "session",
+      "ur": "سیشن",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "سیشن",
+          "cells": 4,
+          "pseudo_30pct_cells": 6,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.palette.kind_setting",
+      "maxCells": 12,
+      "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments.",
+      "en": "setting",
+      "ur": "ترتیب",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "ترتیب",
+          "cells": 5,
+          "pseudo_30pct_cells": 7,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.palette.kind_team",
+      "maxCells": 12,
+      "note": "One word naming WHAT the hit is, drawn dim to the right of the hit's label: 'command', 'setting', 'session', 'agent', 'team'. Lowercase; it is a tag, never a sentence, and it must not repeat the label. Zero ICU arguments. If 'command' and 'team' would share one word, qualify the team tag rather than the command tag.",
+      "en": "team",
+      "ur": "ٹیم",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "ٹیم",
+          "cells": 3,
+          "pseudo_30pct_cells": 4,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.palette.no_matches",
+      "maxCells": 24,
+      "note": "Shown centred in the palette's list when the typed query matches nothing. A complete standalone sentence fragment in the framework's own phrasing, not an instruction: it states the result, it does not tell the user to retry. Zero ICU arguments.",
+      "en": "No matches found",
+      "ur": "کوئی مماثلت نہیں ملی",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "کوئی مماثلت نہیں ملی",
+          "cells": 20,
+          "pseudo_30pct_cells": 26,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.palette.placeholder",
+      "maxCells": 48,
+      "note": "Grey placeholder inside the palette's search field, naming what a query can reach: slash commands, settings sections, past conversations, and the names of agents and teams. The ellipsis is a single character, not three dots. Must fit the field at a 60-column terminal, so keep it as one short clause; do not add the key that opens the palette. Zero ICU arguments.",
+      "en": "Search commands, settings, sessions, agents…",
+      "ur": "کمانڈز، ترتیبات، سیشنز، ایجنٹس تلاش کریں…",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "کمانڈز، ترتیبات، سیشنز، ایجنٹس تلاش کریں…",
+          "cells": 41,
+          "pseudo_30pct_cells": 54,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.welcome.tip.approvals",
+      "maxCells": 57,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "en": "/approvals <ask|auto> sets whether tools ask first",
+      "ur": "ٹولز کا پہلے پوچھنا: /approvals <ask|auto>",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "ٹولز کا پہلے پوچھنا: /approvals <ask|auto>",
+          "cells": 42,
+          "pseudo_30pct_cells": 55,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.welcome.tip.classification_login",
+      "maxCells": 57,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "en": "lop login <radient|typesafe|openrouter> enables hints",
+      "ur": "اشارے چالو — lop login <radient|typesafe|openrouter>",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "اشارے چالو — lop login <radient|typesafe|openrouter>",
+          "cells": 52,
+          "pseudo_30pct_cells": 68,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.welcome.tip.classification_off",
+      "maxCells": 57,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "en": "lop config edit classification.auto false turns hints off",
+      "ur": "اشارے بند — lop config edit classification.auto false",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "اشارے بند — lop config edit classification.auto false",
+          "cells": 53,
+          "pseudo_30pct_cells": 69,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.welcome.tip.cmux",
+      "maxCells": 57,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "en": "Under cmux, Where it opens sets workspace or surface",
+      "ur": "cmux میں “کہاں کھلے” سے ورک اسپیس یا سرفیس مقرر ہوتا ہے",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "cmux میں “کہاں کھلے” سے ورک اسپیس یا سرفیس مقرر ہوتا ہے",
+          "cells": 55,
+          "pseudo_30pct_cells": 72,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.welcome.tip.esc",
+      "maxCells": 57,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "en": "esc stops the agent without ending the session",
+      "ur": "esc ایجنٹ روکتا ہے، سیشن ختم کیے بغیر",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "esc ایجنٹ روکتا ہے، سیشن ختم کیے بغیر",
+          "cells": 37,
+          "pseudo_30pct_cells": 49,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.welcome.tip.fork",
+      "maxCells": 57,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "en": "/fork branches; /fork <message> starts divergent work",
+      "ur": "/fork شاخ بناتا ہے؛ /fork <message> الگ کام شروع کرتا ہے",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "/fork شاخ بناتا ہے؛ /fork <message> الگ کام شروع کرتا ہے",
+          "cells": 56,
+          "pseudo_30pct_cells": 73,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.welcome.tip.fork_placement",
+      "maxCells": 57,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "en": "/settings → Fork → Where a fork opens sets placement",
+      "ur": "/settings → Fork → “فورک کہاں کھلے” سے مقام طے ہوتا ہے",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "/settings → Fork → “فورک کہاں کھلے” سے مقام طے ہوتا ہے",
+          "cells": 54,
+          "pseudo_30pct_cells": 71,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.welcome.tip.hotkeys",
+      "maxCells": 57,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "en": "/settings → Hotkeys remaps these keys",
+      "ur": "/settings → Hotkeys سے یہ کلیدیں بدلیں",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "/settings → Hotkeys سے یہ کلیدیں بدلیں",
+          "cells": 38,
+          "pseudo_30pct_cells": 50,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.welcome.tip.key_new_session",
+      "maxCells": 32,
+      "note": "reserves {key} for a REMAPPABLE chord; the 32-cell budget excludes the substitution, which is measured at a 25-cell worst-case key (KEY_BUDGET_CELLS), keeping the painted row within the pool's 59",
+      "en": "'{key}' starts a new conversation",
+      "ur": "'{key}' سے نئی گفتگو شروع ہوتی ہے",
+      "variants": [
+        {
+          "params": {
+            "key": ""
+          },
+          "rendered": "{key} سے نئی گفتگو شروع ہوتی ہے",
+          "cells": 31,
+          "pseudo_30pct_cells": 41,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": {
+        "params": {
+          "key": "xxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        "rendered": "{key} سے نئی گفتگو شروع ہوتی ہے",
+        "cells": 31,
+        "fits_57": true
+      }
+    },
+    {
+      "key": "tui.welcome.tip.key_resume",
+      "maxCells": 32,
+      "note": "reserves {key} for a REMAPPABLE chord; the 32-cell budget excludes the substitution, which is measured at a 25-cell worst-case key (KEY_BUDGET_CELLS), keeping the painted row within the pool's 59",
+      "en": "'{key}' reopens a recent conversation",
+      "ur": "'{key}' سے حالیہ گفتگو کھولیں",
+      "variants": [
+        {
+          "params": {
+            "key": ""
+          },
+          "rendered": "{key} سے حالیہ گفتگو کھولیں",
+          "cells": 27,
+          "pseudo_30pct_cells": 36,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": {
+        "params": {
+          "key": "xxxxxxxxxxxxxxxxxxxxxxxxx"
+        },
+        "rendered": "{key} سے حالیہ گفتگو کھولیں",
+        "cells": 27,
+        "fits_57": true
+      }
+    },
+    {
+      "key": "tui.welcome.tip.mesh",
+      "maxCells": 57,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "en": "/network new <name> makes a mesh other devices can join",
+      "ur": "/network new <name> سے دوسرے ڈیوائسز کا میش بنائیں",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "/network new <name> سے دوسرے ڈیوائسز کا میش بنائیں",
+          "cells": 50,
+          "pseudo_30pct_cells": 65,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.welcome.tip.model",
+      "maxCells": 57,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "en": "/model <provider>/<id> switches this session only",
+      "ur": "/model <provider>/<id> صرف اسی سیشن پر لاگو ہوتا ہے",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "/model <provider>/<id> صرف اسی سیشن پر لاگو ہوتا ہے",
+          "cells": 51,
+          "pseudo_30pct_cells": 67,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.welcome.tip.paste",
+      "maxCells": 57,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "en": "ctrl+v attaches an image from the system clipboard",
+      "ur": "ctrl+v سسٹم کلپ بورڈ سے تصویر منسلک کرتا ہے",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "ctrl+v سسٹم کلپ بورڈ سے تصویر منسلک کرتا ہے",
+          "cells": 43,
+          "pseudo_30pct_cells": 56,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.welcome.tip.resume",
+      "maxCells": 57,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "en": "/resume picks up a recent session where you left off",
+      "ur": "/resume سے حالیہ سیشن وہیں سے جاری رکھیں",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "/resume سے حالیہ سیشن وہیں سے جاری رکھیں",
+          "cells": 40,
+          "pseudo_30pct_cells": 52,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.welcome.tip.setup",
+      "maxCells": 57,
+      "note": "first-run opening frame, in place of TIPS[0]: same 59-cell painted budget as the pool (TIP_MIN_WIDTH measures it)",
+      "en": "New here? {login} is one browser sign-in; no key to paste",
+      "ur": "نئے ہیں؟ {login} براؤزر سائن ان ہے؛ کلید پیسٹ نہیں کرنی",
+      "variants": [
+        {
+          "params": {
+            "login": "Radient"
+          },
+          "rendered": "نئے ہیں؟ Radient براؤزر سائن ان ہے؛ کلید پیسٹ نہیں کرنی",
+          "cells": 55,
+          "pseudo_30pct_cells": 72,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.welcome.tip.shell",
+      "maxCells": 57,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "en": "! on an empty composer runs a shell command",
+      "ur": "خالی کمپوزر میں ! شیل کمانڈ چلاتا ہے",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "خالی کمپوزر میں ! شیل کمانڈ چلاتا ہے",
+          "cells": 36,
+          "pseudo_30pct_cells": 47,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.welcome.tip.subagents",
+      "maxCells": 57,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "en": "Ask for parallel work and the agent fans out subagents",
+      "ur": "متوازی کام کہیں؛ ایجنٹ کام ذیلی ایجنٹس میں بانٹ دیتا ہے",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "متوازی کام کہیں؛ ایجنٹ کام ذیلی ایجنٹس میں بانٹ دیتا ہے",
+          "cells": 55,
+          "pseudo_30pct_cells": 72,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "tui.welcome.tip.team",
+      "maxCells": 57,
+      "note": "splash tip pool: painted cells (glyph + space + text) must stay ≤ 59, the threshold TIP_MIN_WIDTH pins in tests/unit/tui/test_keymap_pilot.py — the longest entry sets it and a longer one takes the row from narrow terminals",
+      "en": "/team <name> <message> sends work to the manager",
+      "ur": "/team <name> <message> مینیجر کو کام بھیجتا ہے",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "/team <name> <message> مینیجر کو کام بھیجتا ہے",
+          "cells": 46,
+          "pseudo_30pct_cells": 60,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.help",
+      "maxCells": 58,
+      "note": "Shown as '<help> · default: 7d' on the settings page's 74-cell detail line at 80 columns; keep the help within 58 cells so the default clause fits. Display only: hiding never answers or deletes the ask.",
+      "en": "How long an unanswered ask stays shown past its deadline.",
+      "ur": "بلا جواب سوال آخری مہلت کے بعد کتنی دیر نظر آئے۔",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "بلا جواب سوال آخری مہلت کے بعد کتنی دیر نظر آئے۔",
+          "cells": 48,
+          "pseudo_30pct_cells": 63,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "wire.settings.asks_lapsed_visible_for.label",
+      "maxCells": 29,
+      "note": "Row label; 29 cells is the settings page's label budget (_LABEL_BUDGET). 'Timed-out' = the ask's deadline passed with no answer. The row only changes how long such an ask stays SHOWN; it does not change whether the agent hears a late answer.",
+      "en": "Show timed-out asks for",
+      "ur": "وقت ختم سوالات دکھائیں",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "وقت ختم سوالات دکھائیں",
+          "cells": 22,
+          "pseudo_30pct_cells": 29,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "wire.settings.session_scratchpad.title",
+      "maxCells": 12,
+      "note": "Section heading for the scratchpad size cap. 'Scratchpad' is the product noun for a session's own scratch area (scratchpad://); keep it one word.",
+      "en": "Scratchpad",
+      "ur": "Scratchpad",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "Scratchpad",
+          "cells": 10,
+          "pseudo_30pct_cells": 13,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "wire.settings.session_scratchpad_max_bytes.label",
+      "maxCells": 29,
+      "note": "Row label; 29 cells is the settings page's label budget. It names the MAXIMUM bytes one session's scratchpad may hold (not the current size) and carries the unit because the desktop collapses help behind a disclosure (design D1). Every locale must fit the same 29-cell budget.",
+      "en": "Scratchpad size cap (bytes)",
+      "ur": "Scratchpad حد (bytes)",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "Scratchpad حد (bytes)",
+          "cells": 21,
+          "pseudo_30pct_cells": 28,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "wire.settings.session_compression.title",
+      "maxCells": 34,
+      "note": "Section heading for transcript compression, a third storage control beside the two cleanup sections. Keep it short enough for the settings header's 34-cell value column.",
+      "en": "Transcript compression",
+      "ur": "ٹرانسکرپٹ کمپریشن",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "ٹرانسکرپٹ کمپریشن",
+          "cells": 17,
+          "pseudo_30pct_cells": 23,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": true
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "wire.settings.session_compression_after_days.label",
+      "maxCells": 29,
+      "note": "Sub-row label with the page's '↳' prefix, within the 29-cell budget. Names the threshold in DAYS; the stored value is always days.",
+      "en": "↳ compress after (days)",
+      "ur": "↳ اتنے دن بعد کمپریس کریں",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "↳ اتنے دن بعد کمپریس کریں",
+          "cells": 25,
+          "pseudo_30pct_cells": 33,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    },
+    {
+      "key": "wire.settings.session_compression_enabled.label",
+      "maxCells": 29,
+      "note": "Row label within the settings page's 29-cell label budget (_LABEL_BUDGET). Boolean master switch: ON compresses transcripts older than the age row below.",
+      "en": "Compress old transcripts",
+      "ur": "پرانے ٹرانسکرپٹس کمپریس کریں",
+      "variants": [
+        {
+          "params": {},
+          "rendered": "پرانے ٹرانسکرپٹس کمپریس کریں",
+          "cells": 28,
+          "pseudo_30pct_cells": 37,
+          "fits_maxCells": true,
+          "pseudo_fits_maxCells": false
+        }
+      ],
+      "worst_case_key": null
+    }
+  ]
+}

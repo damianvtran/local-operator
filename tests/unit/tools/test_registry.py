@@ -84,6 +84,11 @@ async def _allow_quiet() -> None:
     return None
 
 
+async def _allow_notify(**_kwargs: Any) -> str:
+    """Presence-only inbox door for ``notify``; the builder reads no more."""
+    return "Notified."
+
+
 def _engine_context(**kwargs) -> ToolContext:
     """A context carrying every capability the default surface reads, so the
     whole table can build: the wake scheduler, the subagent launcher, the job
@@ -127,6 +132,9 @@ def _engine_context(**kwargs) -> ToolContext:
         # same rule as the doors above, so the fully-capable surface is the
         # one DEFAULT_TOOL_NAMES describes.
         bridge_runtime=object(),
+        # The inbox door (docs/design/notifications-inbox.md §3.2): presence-
+        # only, the ONE fact ``build_notify_tool``'s createIf gate reads.
+        notify_inbox=_allow_notify,
     )
     base.update(kwargs)
     return ToolContext(cwd=".", **base)
@@ -157,6 +165,9 @@ def _force_browser_available(monkeypatch):
     pair's gate reads the machine's video credentials
     (``video.availability``); the job manager their second gate reads is
     already on this factory's context (``jobs`` is in the default table).
+
+    ``artifact_data`` joined them with the claude.ai artifact store: its gate
+    reads the machine's stored ``anthropic`` OAuth grant.
     """
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
     monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
@@ -177,6 +188,9 @@ def _force_browser_available(monkeypatch):
     monkeypatch.setattr(
         audio_tool.audio_availability, "sound_effect_reachable", lambda *a, **k: True
     )
+    from local_operator.tools import artifact_data_tool
+
+    monkeypatch.setattr(artifact_data_tool, "anthropic_grant_stored", lambda *a, **k: True)
 
 
 def test_default_set_builds_all_builtin_tools() -> None:
@@ -281,6 +295,22 @@ def test_default_set_drops_no_reply_without_the_quiet_end_door() -> None:
     assert without == [name for name in withdoor if name != "no_reply"]
 
 
+def test_notify_follows_the_inbox_door_and_nothing_else() -> None:
+    """The door is the session's ONE availability fact for ``notify``.
+
+    The session binds it to ``None`` for a delegated child, a session the
+    listings hide, a one-shot host, an output-contract session and under
+    ``LOP_NOTIFY=0`` (``Session._notify_inbox_callable``), so from the
+    registry's point of view those are one predicate, asserted here as a delta
+    against the fully-capable surface. The session-side binding of each case is
+    pinned in tests/unit/notifications/test_notify_tool.py.
+    """
+    withdoor = [tool.name for tool in create_tools(_engine_context())]
+    without = [tool.name for tool in create_tools(_engine_context(notify_inbox=None))]
+    assert "notify" in withdoor
+    assert without == [name for name in withdoor if name != "notify"]
+
+
 def test_the_newest_appends_stay_last_in_both_tables() -> None:
     """Appending never shifts a provider-visible array prefix — the prompt
     cache keys on that array — so both tables must END with the newest
@@ -293,20 +323,36 @@ def test_the_newest_appends_stay_last_in_both_tables() -> None:
     Bridge CoS tool, createIf-gated on the session's bridge runtime) appended
     after it, and the sound-generation wave's audio pair
     (``generate_voiceover``/``generate_sound_effect``, each createIf-gated on
-    a per-direction credential) is the newest append and now ends both
-    tables."""
-    assert DEFAULT_TOOL_NAMES[-2:] == ["generate_voiceover", "generate_sound_effect"]
-    assert list(TOOL_BUILDERS)[-2:] == ["generate_voiceover", "generate_sound_effect"]
-    assert DEFAULT_TOOL_NAMES[-3] == "bridge"
-    assert list(TOOL_BUILDERS)[-3] == "bridge"
-    assert DEFAULT_TOOL_NAMES[-4] == "setting"
-    assert list(TOOL_BUILDERS)[-4] == "setting"
-    assert DEFAULT_TOOL_NAMES[-5] == "video_status"
-    assert list(TOOL_BUILDERS)[-5] == "video_status"
-    assert DEFAULT_TOOL_NAMES[-6] == "generate_video"
-    assert list(TOOL_BUILDERS)[-6] == "generate_video"
-    assert DEFAULT_TOOL_NAMES[-7] == "no_reply"
-    assert list(TOOL_BUILDERS)[-7] == "no_reply"
+    a per-direction credential) appended after that — and V2-4's ``tags`` (the
+    session-tag category tool, unconditional because the store sits beside
+    every config root) appended after that — and ``artifact_data`` (the
+    claude.ai artifact data store, createIf-gated on a stored anthropic OAuth
+    grant) appended after that — and ``notify`` (the operator's inbox,
+    createIf-gated on the session's inbox door) is the newest append and now
+    ends the DEFAULT table. The configuration run's opt-in ``skill`` is the
+    newest BUILDER append and ends ``TOOL_BUILDERS`` only: it is absent from
+    ``DEFAULT_TOOL_NAMES`` on purpose (see ``test_skill_is_opt_in_only``), so
+    the builder table's tail is the default tail plus ``skill``."""
+    assert list(TOOL_BUILDERS)[-1] == "skill"
+    builders = list(TOOL_BUILDERS)[:-1]
+    assert DEFAULT_TOOL_NAMES[-1] == "notify"
+    assert builders[-1] == "notify"
+    assert DEFAULT_TOOL_NAMES[-2] == "artifact_data"
+    assert builders[-2] == "artifact_data"
+    assert DEFAULT_TOOL_NAMES[-3] == "tags"
+    assert builders[-3] == "tags"
+    assert DEFAULT_TOOL_NAMES[-5:-3] == ["generate_voiceover", "generate_sound_effect"]
+    assert builders[-5:-3] == ["generate_voiceover", "generate_sound_effect"]
+    assert DEFAULT_TOOL_NAMES[-6] == "bridge"
+    assert builders[-6] == "bridge"
+    assert DEFAULT_TOOL_NAMES[-7] == "setting"
+    assert builders[-7] == "setting"
+    assert DEFAULT_TOOL_NAMES[-8] == "video_status"
+    assert builders[-8] == "video_status"
+    assert DEFAULT_TOOL_NAMES[-9] == "generate_video"
+    assert builders[-9] == "generate_video"
+    assert DEFAULT_TOOL_NAMES[-10] == "no_reply"
+    assert builders[-10] == "no_reply"
 
 
 def _invalid_enum_nodes(node: Any) -> list[str]:
@@ -461,9 +507,43 @@ def test_enabled_empty_list_gives_no_tools() -> None:
     assert create_tools(ToolContext(cwd="."), []) == []
 
 
+#: Builders that are in the table but deliberately NOT default: a host that
+#: declares one builds it (``Session._merge_capability_tools``); no other session
+#: does. Each entry is a reviewed decision, so the set is spelled out here.
+OPT_IN_ONLY_TOOLS = {"skill"}
+
+
 def test_default_names_cover_builder_table() -> None:
-    """The default surface is the whole table today; drift is deliberate."""
-    assert set(DEFAULT_TOOL_NAMES) == set(TOOL_BUILDERS)
+    """The default surface is the whole table minus the named opt-in builders;
+    drift is deliberate."""
+    assert set(DEFAULT_TOOL_NAMES) == set(TOOL_BUILDERS) - OPT_IN_ONLY_TOOLS
+    assert not OPT_IN_ONLY_TOOLS & set(DEFAULT_TOOL_NAMES)
+
+
+def test_skill_is_opt_in_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The configuration run's ``skill`` tool never enters an ordinary session.
+
+    The ordinary surface is what the prompt cache keys on, so this compares the
+    WHOLE default tools array (names, order, schemas) with and without the
+    ``skill`` builder in the table: adding it must not move a single byte. Built
+    from a context that WOULD satisfy the skill factory (a profile root), so the
+    absence is the default list's doing, not the factory's createIf.
+    """
+    import json
+
+    context = _engine_context()
+    context.memory_config_dir = "/nonexistent-profile-root"
+    assert TOOL_BUILDERS["skill"](context) is not None, "the factory itself must build"
+
+    def wire(tools: list[Any]) -> str:
+        return json.dumps(
+            [[tool.name, tool.description, tool.parameters] for tool in tools], sort_keys=False
+        )
+
+    assert "skill" not in [tool.name for tool in create_tools(context)]
+    with_skill = wire(create_tools(context))
+    monkeypatch.delitem(TOOL_BUILDERS, "skill")
+    assert with_skill == wire(create_tools(context))
 
 
 def test_the_console_tool_is_absent_without_the_app(monkeypatch) -> None:

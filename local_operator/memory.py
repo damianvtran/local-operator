@@ -16,14 +16,17 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import logging
 import os
 import re
+import shlex
+import shutil
 import sqlite3
 import tempfile
 import time
 import unicodedata
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,7 +37,14 @@ from local_operator.compaction.tokens import count_text_tokens
 from local_operator.redaction_shapes import match_shape_names
 from local_operator.supplements.denylist import is_sensitive
 
+logger = logging.getLogger(__name__)
+
 SESSION_EXPORT_NAME = "memory-session.jsonl"
+#: ``source.author`` of an automatic capture (``memory_capture.persist``). Such a
+#: fact is UNREVIEWED only while it is still a ``candidate`` in the session that
+#: captured it; any deliberate act on it (an edit through ``put``, a move) makes
+#: it a deliberate fact, and deliberate facts never auto-expire (decision D2).
+CAPTURE_AUTHOR = "deterministic-capture"
 SCOPES = ("global", "session", "team", "agent")
 DEFAULT_EXCLUDED_DEVICES: tuple[str, ...] = ()
 # One protocol definition shared by publication, execution and pre-journal retention.
@@ -42,9 +52,16 @@ DEFAULT_EXCLUDED_DEVICES: tuple[str, ...] = ()
 # an opaque credential that no named text-field guard ever inspects (R6 residual).
 MEMORY_TOOL_OPS = ("store", "recall")
 MEMORY_TOOL_REQUIRED = ("op", "text")
+#: The ONLY scopes the plain-text ``memory`` tool accepts, default ``session``.
+#: Two values, not the four URL scopes: PR #2414 removed a model-selected FOUR-way
+#: scope because it mis-routed personal facts, and team/agent need registry
+#: identity that the URL form (``memory://team``) already owns. The default is
+#: session because a global default filled the shared bank with work state and
+#: then refused writes in every session (2026-10-27, global at 15,892/16,000).
+MEMORY_TOOL_SCOPES = ("session", "global")
 MEMORY_TOOL_CONTRACT_ERROR = (
-    "Invalid memory contract. Use op=store|recall and text only for durable personal/global "
-    "memory; scoped work uses read/write/edit memory://. No scope argument is accepted."
+    "Invalid memory contract. Use op=store|recall, text, and optional "
+    "scope=session|global (default session); other scopes use read/write/edit memory://."
 )
 
 
@@ -52,21 +69,140 @@ def valid_memory_tool_arguments(value: Any) -> bool:
     return (
         isinstance(value, dict)
         and set(MEMORY_TOOL_REQUIRED).issubset(value)
-        and not set(value) - {*MEMORY_TOOL_REQUIRED, "i"}
+        and not set(value) - {*MEMORY_TOOL_REQUIRED, "scope", "i"}
         and isinstance(value["op"], str)
         and value["op"] in MEMORY_TOOL_OPS
         and isinstance(value["text"], str)
         and ("i" not in value or isinstance(value["i"], str))
+        # An enum check, never a coercion: a team/agent/unknown scope stays a
+        # contract error the retained-copy path redacts, not a silent session write.
+        and ("scope" not in value or value["scope"] in MEMORY_TOOL_SCOPES)
     )
 
 
-ITEM_TOKENS = 256
+#: Per-fact cap in CONTENT tokens: title + body + subject + tags + aliases. It was
+#: 256 WIRE tokens, which charged the ~75-token JSON envelope (source, timestamps,
+#: status keys) to the writer: a 689-character goal (164 body tokens, 273 wire)
+#: was refused. 512 content tokens is about 2,000 characters — a multi-line goal
+#: or decision record still fits as ONE atomic fact, while recall's hard cap
+#: (``RECALL_HARD_TOKENS``) still holds two max-size items.
+ITEM_TOKENS = 512
+#: The wire/storage guard, deliberately unchanged: 512 content tokens plus the
+#: envelope is ~2.4 KB of ASCII and ~1.5 KB of CJK body, both well under it.
 ITEM_BYTES = 8192
+#: The item bound builds before ``memory-item-512`` enforced, in WIRE tokens of
+#: ``_dump(fact)``. Only mesh compatibility reads it: ``network.memory.batch``
+#: withholds a fact over it from a peer that did not advertise the new cap, because
+#: that peer's ``validate_fact`` would refuse the WHOLE batch and then sit behind a
+#: permanent sequence gap. Never use it to validate a local write.
+LEGACY_ITEM_WIRE_TOKENS = 256
+
+
+def legacy_log_note(count: int) -> str:
+    """The warning for session-log facts an un-updated build cannot import.
+
+    WHY a warning and not a format change: ``memory-session.jsonl`` is read line
+    by line by every build, each line an op, so ANY marker line would break old
+    imports of every log, and a sibling marker file would trip an old build's
+    ``unlisted_content`` move guard. An old importer refuses only the logs that
+    really hold such a fact, with its own item-cap message; this note names that
+    cause and the remedy at the moment such a fact is placed in a session log.
+    """
+    return (
+        f"Note: {count} fact(s) here exceed the item limit of builds before "
+        "memory-item-512. A device still on such a build refuses that "
+        "session's memory log (it reports an item over 256 tokens); run lop-update there."
+    )
+
+
+#: Token caps per scope. One authority: the write gate (``_quota``), the move
+#: destination check, the warning state and inventory/status all read these, so
+#: a reported headroom cannot disagree with the number a write is refused on.
+#: Global is the shared bank everyone reads; every other scope is per-owner.
+#: Deliberately still 16,000. The global bank filled to 99% with MISROUTED work
+#: state (fixed by session-default routing and `lop memory triage`, which takes the
+#: live bank to ~9.5k), not with demand. A raise is deferred, not rejected: the
+#: RECEIVER enforces the sender's quota on apply (``apply_ops`` -> ``_quota``), so a
+#: sender with a bigger cap would make every un-updated peer refuse the batch that
+#: crosses 16,000 and stall its whole stream behind it. Raise it only once receivers
+#: stop enforcing the sender's quota on apply, or once the fleet has updated.
+GLOBAL_TOKENS = 16000
+OWNER_TOKENS = 50000
+#: Percent thresholds that warn ONCE on the write that crosses them, highest
+#: first: a write jumping straight past both reports the endangering one.
+WARNING_THRESHOLDS = (90, 80)
 RECALL_TOKENS = 1200
 RECALL_HARD_TOKENS = 2000
-MAX_DB_BYTES = 64 * 1024 * 1024
+#: Hard cap on the main database file, enforced as ``max_page_count`` in
+#: :meth:`MemoryStore.connection`. Reaching it makes SQLite refuse a write with
+#: SQLITE_FULL instead of growing the file. This is a SEPARATE budget from the
+#: token quotas above: a store can hold token headroom and still be out of bytes,
+#: which is why `lop memory status` reports both and why the refusal names the
+#: byte cap.
+#:
+#: INTERIM (2026-10-24): this was 64 MiB, raised to 128 MiB only to restore this
+#: host's ability to write facts. The store had run out of room under the old
+#: bound: 62.9 MiB of 64 MiB (16,096 of 16,384 pages, 98.2%, freelist 0) when
+#: two sync failures were observed, and at its cap later. The raise does NOT
+#: restore peer sync by itself, and neither failure was caused by this cap: peer
+#: ``d_1bb8...`` refuses our pushes because ITS OWN store is full, and
+#: ``d_3836...`` refuses one operation on content grounds (``Sensitive path
+#: refused``, retrying on an 1800 s floor).
+#:
+#: The defect this does NOT fix: ``ops`` is append-only and has no retention
+#: bound of any kind. It is 38.2 MiB / 50,377 rows against 3.28 MiB of live
+#: facts, 93% of it this device's own origin, and no age, cursor or capacity
+#: mechanism removes anything. Raising the cap buys room; it does not bound the
+#: journal.
+#:
+#: It comes back down when the bounded-journal design lands (all-heads +
+#: tombstones retention with a snapshot/re-baseline path) AND the store drains
+#: below 64 MiB, measured as ``storage_bytes`` from `lop memory status` after a
+#: VACUUM. The VACUUM must come first: ``PRAGMA max_page_count`` silently clamps
+#: to the current page count, so lowering it on a store whose file is still
+#: larger — including one with reclaimable pages — does nothing. Nothing lowers
+#: this at runtime: no code path writes a smaller ``max_page_count``, so
+#: removing this raise is a deliberate follow-up change, not an automatic
+#: behaviour. Treat any further raise the same way.
+#:
+#: STILL 128 MiB AFTER AUTOMATIC COMPACTION LANDED (2026-10-27, operator
+#: decision D7), deliberately. The automatic pass
+#: (:mod:`local_operator.memory_maintenance`) plus the peer-echo filter drain a
+#: measured clone of this host's store from 75.2 MB to 44.6 MB, which meets the
+#: drain condition on THIS host — but the fleet is mixed-version: a peer that
+#: has not updated has neither the echo filter nor the auto pass, so its store
+#: keeps the old growth curve, and a lower cap shipped now re-creates the
+#: original outage there. The cap also has no growth data behind a new number
+#: yet. Revisit after about two weeks of post-fix ``journal_prune`` /
+#: ``storage_bytes`` history across the fleet.
+#:
+#: Accepted side effect: :meth:`MemoryStore._page_cap_refusal` keeps the generic
+#: refusal when the host filesystem reports no more free space than this cap
+#: (``disk_free <= cap_bytes``). Raising the cap to 128 MiB means a host with
+#: 64-128 MiB free now loses the cap diagnosis it previously got; the guard is
+#: deliberate (it avoids advising "forget facts" on a genuinely full disk), so
+#: this is recorded rather than "fixed".
+MAX_DB_BYTES = 128 * 1024 * 1024
+#: Page size the cap is expressed against in :meth:`MemoryStore.connection`.
+#: ``PRAGMA max_page_count`` takes pages, so the enforced byte cap is
+#: ``(MAX_DB_BYTES // 4096) * page_size`` — for a default 4096-byte store that
+#: is just MAX_DB_BYTES floored to a page. Status and the refusal report this
+#: enforced number, never the unfloored constant, so 100% cannot sit beside a
+#: cap SQLite does not apply.
+CAP_PAGE_SIZE = 4096
+#: Percent of the byte cap at which `lop memory status` says the store is near
+#: full. The token thresholds warn ONCE on the write that crosses them; this one
+#: is a status-surface warning, because a store at the byte cap refuses the next
+#: write outright — there is no later write to carry the warning.
+STORAGE_WARNING_PERCENT = 90
 MAX_OWNER_OPS = 20000
 MAX_REVISIONS = 128
+#: One confirmed filter-based forget accepts this many facts. The human preview
+#: must refuse ABOVE it rather than print a confirmation the store will reject:
+#: a command that cannot run is worse than no command. Reachable within the caps
+#: (measured in review round 1: 205 minimal facts fit the global 16,000-token
+#: bank), so the preview checks it before offering anything.
+MAX_BULK_FORGET = 200
 MAX_TOMBSTONES = 5000
 MAX_BATCH_BYTES = 256 * 1024
 INVENTORY_HELP = (
@@ -177,87 +313,309 @@ def _fold(text: str) -> str:
 # is therefore UPPERCASE-ONLY here (`MR`, `MRs`); the lowercase form is never a tracker
 # word. GitLab work uses `!N`, which is matched absolutely.
 #
+# Live global-bank evidence (5 rows an agent stored as "durable" while it was
+# really session work): every miss was ONE missing shape, not a missing classifier,
+# and each fix below is scoped to the shape that let its row through —
+#   `Saver releases so far: agent-server #233 live`  → the word list was singular-only,
+#     so a real tracker ref had no work word beside it;
+#   `PR3078 R1 remediation: …`                        → an unspaced ref (see _WORK_REF);
+#   `Session todo: query …`, `next action is mcp__cloudflare_whoami`,
+#     `task progress on this workstream`               → plan/progress phrases with no
+#     status verb and no locator to sit beside (see _SESSION_TODO/_TASK_PROGRESS).
+#
 # KNOWN BOUNDARY (documented, not debt): this is a bounded SHAPE rule, so prose work
 # text with no locator (`Fleet scratchpad purge 2026-10-15/16: …`) and hyphenated keys
 # (`LOH-13`, `PR34`) still pass. Catching those needs a classifier, which the design
 # deliberately rejects; the guide states this bound rather than overclaiming.
+#
+# Round 1 review (B-1/M-1) and QA (Q-1..Q-4) narrowed this widening in one
+# direction: a word list is not a shape. Every arm below now needs the SAME work
+# context its neighbours always needed, and the person-level nouns a widening swept
+# in (`tickets`, `issues`, `branches`) are work only beside a work VERB or a REVIEW
+# state — `tickets` is a box office, `issues` a medical file, `branches` a storm's
+# damage. Every boundary has a negative test drawn from ordinary prose (and, where
+# one exists, from the live global bank's personal rows), and each arm below was
+# measured against that bank.
+#
+# THE BIAS IN DOUBT IS "STORE THE FACT", and the asymmetry is NOT covered by a safety
+# net: `lop memory triage` decides with the same `fact_markers` this guard uses (see
+# `memory_triage`), so it cannot surface a note the guard let through. A slip is
+# therefore found only by a human reading `lop memory show`, and the remedy is a manual
+# `lop memory move` or a re-worded note. A personal fact a shape rule refuses, by
+# contrast, is silent data loss — the writer is told to rephrase and the fact is gone if
+# they do not. Both sides are expensive; the refusal is the irreversible one, so when a
+# candidate arm needs a new English word to catch one more work row, the answer is
+# usually no. That is why `push`, `squash`, `check`, `ticket`, `issue`, `sprint`,
+# `milestone` and `deliverable` are not work context anywhere below — each was measured
+# refusing ordinary prose.
+#
+#: Nouns that are work vocabulary in ANY sentence: nobody keeps a "PR", a "release"
+#: or a "deploy" in the ordinary-prose sense. The label is what a refusal reports.
+_WORK_NOUN_PARTS: tuple[tuple[str, str], ...] = (
+    ("pr", r"prs?"),
+    ("MR", r"(?-i:MRs?)"),
+    ("release", r"releases?"),
+    ("merge", r"merges?"),
+    ("ci", r"ci"),
+    ("deploy", r"deploys?"),
+    ("rollout", r"rollouts?"),
+    ("pipeline", r"pipelines?"),
+    ("worktree", r"worktrees?"),
+    ("lane", r"lanes?"),
+)
+_WORK_NOUN = "|".join(part for _, part in _WORK_NOUN_PARTS)
+#: A person-level noun that is a work subject only beside a review state: `branch` is
+#: also a tree's, and QA round 1 (Q-1) is why the singular must stay matchable while
+#: `Heavy snow can hold the branches down` must not be.
+_BRANCH_NOUN = r"branch(?:es)?"
+#: Unambiguous work context: no ordinary-English meaning, so one of these next to a
+#: `next step`/`next action` phrase IS work text. There is deliberately NO verb list
+#: here. `push`, `squash`, `merge`, `deploy` and `cherry-pick` are English verbs —
+#: `push the pram`, `squash the tomatoes`, `cherry-pick the ripe fruit`, `merge the
+#: two jars of jam` — and two review rounds proved the point by refusing exactly that
+#: prose (review round 2, M-1; QA round 2, QA2-1). A word list cannot tell work from
+#: cooking, so the dimension is gone rather than widened again. `rebase`, `worktree`,
+#: `pipeline` and `mcp__…` are safe because no personal sentence uses them.
+_WORK_TOKEN = (
+    r"\b(?:prs?|(?-i:MRs?)|commits?|sha|ci|pipelines?|worktrees?|rebase[sd]?|deploys?|"
+    r"rollouts?)\b"
+    r"|\bmcp__\w+\b"
+    r"|(?<![\w#])#\d{1,6}\b"
+)
+#: A review state, the one cue that makes a person-level noun a work subject.
+_REVIEW_STATE = r"pending|review|reviewed|awaiting|blocked|approved|checks"
+
 _WORK_WORD = (
-    r"pr|pull request|merge request|(?-i:MRs?)|issue|ticket|ci|pipeline|build|commit|"
-    r"sha|branch|rebase|squash|deploy|release|rollout|lane|backlog|sprint|milestone|"
-    r"tracker|jira|linear|holding|blocked|pending|awaiting|drivable|wip"
+    r"prs?|pull requests?|merge requests?|(?-i:MRs?)|issue|ticket|ci|pipelines?|"
+    r"builds?|commits?|sha|branch(?:es)?|rebase[sd]?|squash(?:ed)?|deploys?|releases?|"
+    r"rollouts?|lane|backlogs?|sprints?|milestones?|tracker|jira|linear|holding|blocked|"
+    r"pending|awaiting|drivable|wip"
 )
 _WORK_REF = re.compile(
     r"\b(?:" + _WORK_WORD + r")\b[^.\n]{0,24}(?<![\w#])#\d{1,6}\b"
     r"|(?<![\w#])#\d{1,6}\b[^.\n]{0,24}\b(?:" + _WORK_WORD + r")\b"
-    r"|(?<![\w!])!\d{1,6}\b",
-    re.I,
+    r"|(?<![\w!])!\d{1,6}\b"
+    # Unspaced shorthand needs the shape a status line has — `PR3078` at the START of
+    # a line — not just the token. Ungated, `PR` + 3-6 digits is also how personal
+    # identifiers are written: `PR` is Philippine Airlines' IATA code (`Flight PR102
+    # Manila to Sydney`), and policy, medical-record and bay numbers are written the
+    # same way (review round 1, B-1). The row this arm exists for opens with it:
+    # `PR3078 R1 remediation: all source edits done`, including the list form an agent
+    # writes a note in (`- PR3078 …`, `1. PR3078 …`). A mid-sentence `PR3078` is
+    # therefore NOT a marker, and a personal identifier that OPENS a line
+    # (`PR1234 is the bay I use`) IS refused — the cost of keying on position, stated
+    # in the guide as well as here so it is not only in a PR thread.
+    r"|^[ \t]*(?:[-*+][ \t]+|\d+[.)][ \t]+)?(?-i:PR|MR)\d{3,6}\b",
+    re.I | re.M,
 )
 # A named commit needs a LETTER in the hash: `commit 5000000` is ordinary prose, an
 # all-letter abbreviation (`cafebabe`) is not.
-_WORK_NOUN = r"pr|(?-i:MRs?)|release|merge|ci|branch|tag|deploy|lane|ticket|issue"
 _WORK_SHA = re.compile(r"\b(?:commit|sha|head)\s+(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b", re.I)
-_WORK_STATUS = re.compile(
-    r"\b(?:ci|pipeline|build|checks)\b[^.\n]{0,24}\b(?:green|red|pass(?:ed|ing)?|fail(?:ed|ing)?)"
-    r"\b"
-    r"|\b(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b[^.\n]{0,20}"
-    r"\b(?:pr|(?-i:MRs?)|#\d|into main)\b"
-    # Noun-then-verb needs TIGHT adjacency, or only a copula/auxiliary between:
-    # `PR`/`MR` are also permanent residency, public relations and a person
-    # (`My PR application merged into the family one`, `The PR agency merged with a rival`),
-    # while `the PR was merged` / `MRs rebased onto main` are real work text.
-    r"|\b(?:pr|(?-i:MRs?))\b(?:\s+(?:was|is|are|were|been|has|had|gets?|got|now))?\s{0,4}"
-    r"(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b"
-    r"|\b(?:cut|land|ship|tag)\b[^.\n]{0,20}\b(?:(?:the )?release|v\d)"
-    r"|\bnext (?:step|lane)\b[^.\n]{0,40}\b(?:" + _WORK_NOUN + r")\b"
-    r"|\b(?:the )?(?:" + _WORK_NOUN + r")\b[^.\n]{0,24}\bnext (?:step|lane)\b"
-    r"|\bremaining work\b",
+_CI_STATUS = re.compile(
+    r"\b(?:ci|pipeline|build|checks)\b[^.\n]{0,24}"
+    r"\b(?:green|red|pass(?:ed|ing)?|fail(?:ed|ing)?)\b",
     re.I,
 )
-# A work-context HOLD: the token must concern a PR/MR/release/lane/merge/CI, not a
-# bank/parcel/dry-cleaner hold an ordinary person records.
-_WORK_HOLD = re.compile(
-    r"(?<![\w-])HOLD(?![\w-])[^.\n]{0,30}\b(?:" + _WORK_NOUN + r")\b"
-    r"|\b(?:" + _WORK_NOUN + r")\b[^.\n]{0,30}(?<![\w-])HOLD(?![\w-])",
+# `PR`/`MR` are also permanent residency, public relations and a person
+# (`My PR application merged into the family one`, `The PR agency merged with a rival`),
+# so noun-then-verb needs TIGHT adjacency, or only a copula/auxiliary between.
+_MERGE_STATUS = re.compile(
+    r"\b(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b[^.\n]{0,20}"
+    r"\b(?:prs?|(?-i:MRs?)|#\d|into main)\b"
+    r"|\b(?:prs?|(?-i:MRs?))\b(?:\s+(?:was|is|are|were|been|has|had|gets?|got|now))?\s{0,4}"
+    r"(?:merged|merge[sd]?|rebase[sd]?|squash(?:ed)?)\b",
     re.I,
+)
+_RELEASE_CUT = re.compile(r"\b(?:cut|land|ship|tag)\b[^.\n]{0,20}\b(?:(?:the )?release|v\d)", re.I)
+# `next action` needs the SAME work context as `next step`, never standing alone (QA
+# round 1, M-1: `next step is to fold in the flour` is personal prose), and that
+# context must be a token with no ordinary-English meaning — see `_WORK_TOKEN`. The
+# REVERSE order (`the release lane next step is the merge`) keeps the work-noun set:
+# there the noun is the locator and `next step` only confirms it, and no ordinary
+# sentence puts a household noun in front of that phrase.
+_NEXT_STEP = re.compile(
+    r"\bnext (?:step|lane|action)\b[^.\n]{0,40}(?:" + _WORK_TOKEN + r")"
+    r"|\b(?:the )?(?:" + _WORK_NOUN + r")\b[^.\n]{0,24}\bnext (?:step|lane)\b",
+    re.I,
+)
+# `session todo` is the phrase an agent uses for its own queue; `todo` alone is
+# ordinary prose (`the todo list for the trip is on the fridge`). Operator decision
+# on QA round 1 Q-3: KEEP refusing it — a global fact should never carry
+# session-narration framing — but the refusal has to be actionable, which is why
+# `scope_fit` now points the writer at the fact itself without the prefix.
+_SESSION_TODO = re.compile(r"\bsession todos?\b", re.I)
+# The live row that motivated the plan/progress widening reads `task progress on this
+# workstream`, and the noun list beside it is gone (review round 2, m-1: `sprint
+# training`, `marathon milestones` and `wedding deliverables` are ordinary prose).
+# What is left is the REPORT shape, never the bare phrase: the operator's own stored
+# boundaries preference reads `… not task progress, release status, transient approvals
+# …`, a prohibition list rather than a report, and refusing it is the silent data loss
+# this guard exists to prevent (live row 01a141b9). The arms are exactly a colon or
+# `is`/`was`/`on` after the phrase — those four, no more. `for` was tried and dropped
+# (review round 3, r3-1): `my task progress for the 10k plan is fine` is a personal
+# statement, so the arm is enumerated, not guessed, and each arm has a test.
+_TASK_PROGRESS = re.compile(r"\btask progress\b\s*(?::|\bis\b|\bwas\b|\bon\b)", re.I)
+_REMAINING_WORK = re.compile(r"\bremaining work\b", re.I)
+
+
+def _hold_shape(noun: str) -> re.Pattern[str]:
+    """`HOLD` next to ONE work noun, either order — the arm that names that noun."""
+    return re.compile(
+        r"(?<![\w-])HOLD(?![\w-])[^.\n]{0,30}\b(?:" + noun + r")\b"
+        r"|\b(?:" + noun + r")\b[^.\n]{0,30}(?<![\w-])HOLD(?![\w-])",
+        re.I,
+    )
+
+
+#: A work-context HOLD: the token must concern a PR/MR/release/lane/merge/CI/deploy,
+#: not a bank/parcel/dry-cleaner hold an ordinary person records. `lane` stays
+#: SINGULAR here: with `lanes` a stored disk-reclaim rule (`while other lanes hold the
+#: uv cache lock`) became a match on the plural alone. Person-level nouns are absent
+#: for the same reason (`a HOLD on the concert tickets`, `a hold on all issues of the
+#: newsletter`) — a branch reaches this arm only through its review-state cue below.
+_HOLD_NOUN_PARTS: tuple[tuple[str, str], ...] = (
+    ("pr", r"prs?"),
+    ("MR", r"(?-i:MRs?)"),
+    ("release", r"releases?"),
+    ("merge", r"merges?"),
+    ("ci", r"ci"),
+    ("deploy", r"deploys?"),
+    ("rollout", r"rollouts?"),
+    ("lane", r"lane"),
+)
+# `HOLD pending review on the branch` is work text (base refused it and must keep
+# refusing it, QA round 1 Q-1), while `Heavy snow can hold the branches down` is not:
+# the branch needs a review state to be a work subject. Only `branch` gets this arm —
+# `tickets` and `issues` are box-office and medical-file words, so they stay out of
+# every HOLD arm (review round 1, m-1).
+_HOLD_BRANCH = re.compile(
+    r"(?<![\w-])HOLD(?![\w-])[^.\n]{0,20}\b(?:"
+    + _REVIEW_STATE
+    + r")\b[^.\n]{0,30}\b"
+    + _BRANCH_NOUN
+    + r"\b"
+    r"|\b"
+    + _BRANCH_NOUN
+    + r"\b[^.\n]{0,20}\b(?:"
+    + _REVIEW_STATE
+    + r")\b[^.\n]{0,30}(?<![\w-])HOLD(?![\w-])",
+    re.I,
+)
+
+# Three narrow SHAPES the original four missed on the live global bank (2026-10-27:
+# they flagged 2 of 78 rows, while 28 were plainly one session's work). Each is a
+# shape, not a topic, and each was checked against the bank's personal rows
+# (contacts, handles, preferences, disk rules), none of which it matches.
+# A 12-hex session ID, bare after "session" or parenthesised: a global fact that
+# names a session is session-scoped by construction.
+# The parenthesised form needs a hex LETTER: a 12-digit phone or account number
+# in parentheses is personal data, not a session ID.
+_SESSION_SELF_REF = re.compile(
+    r"\bsession\s+[0-9a-f]{12}\b|\(\s*(?=[0-9]*[a-f])[0-9a-f]{12}\s*\)", re.I
+)
+# A line that OPENS as a goal statement ("Session goal (…):", "Lane goal:").
+_GOAL_STATEMENT = re.compile(
+    r"^\s*(?:session |lane |programme |campaign )?goal\b[^\n]{0,30}[:(]", re.I | re.M
+)
+# An ISO date within 200 characters of a delivery noun: a dated work log, which
+# a durable personal fact ("born 1990-04-02") does not carry. `lane` is matched
+# lowercase only: a capitalised "Lane" is a street ("Miikan Lane"), which made a
+# verified registered address read as work on the live bank (2026-10-27).
+_DATED_WORK_NOUN = (
+    r"(?:\b(?:PR|MR|merged|release|QA|review|round|worktree|CI|gate)\b"
+    r"|\b(?-i:lane)\b|\bv\d+\.\d+\.\d+\b)"
+)
+_DATED_WORK_LOG = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}\b[\s\S]{0,200}?"
+    + _DATED_WORK_NOUN
+    + r"|"
+    + _DATED_WORK_NOUN
+    + r"[\s\S]{0,200}?\b\d{4}-\d{2}-\d{2}\b",
+    re.I,
+)
+
+#: The closed vocabulary a refusal reports, one row per SHAPE. Splitting them is what
+#: lets a refusal name the shape that matched (`session-todo`, `hold-branch`) instead
+#: of a coarse bucket (QA round 1, Q-4), and `memory_inspect`/`memory triage` read the
+#: names straight out of this table.
+_WORK_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("tracker-ref", _WORK_REF),
+    ("named-commit", _WORK_SHA),
+    ("ci-status", _CI_STATUS),
+    ("merge-status", _MERGE_STATUS),
+    ("release-cut", _RELEASE_CUT),
+    ("next-step", _NEXT_STEP),
+    ("session-todo", _SESSION_TODO),
+    ("task-progress", _TASK_PROGRESS),
+    ("remaining-work", _REMAINING_WORK),
+    ("hold-branch", _HOLD_BRANCH),
+    *tuple((f"hold-{name}", _hold_shape(noun)) for name, noun in _HOLD_NOUN_PARTS),
+    ("session-self-reference", _SESSION_SELF_REF),
+    ("goal-statement", _GOAL_STATEMENT),
+    ("dated-work-log", _DATED_WORK_LOG),
 )
 
 
 def work_progress_markers(text: str) -> list[str]:
-    """Names of work/lane/progress markers in ``text`` — value-free, never the match."""
-    folded = _fold(text)
-    found: list[str] = []
-    for name, pattern in (
-        ("tracker-ref", _WORK_REF),
-        ("named-commit", _WORK_SHA),
-        ("ci-release-status", _WORK_STATUS),
-        ("hold-token", _WORK_HOLD),
-    ):
-        if pattern.search(folded):
-            found.append(name)
-    return found
+    """Names of work/lane/progress shapes in ``text`` — value-free, never the match.
 
-
-def scope_fit(scope: str, fact: dict[str, Any]) -> None:
-    """Refuse work/lane/progress content in the GLOBAL bank, before any write.
-
-    A bounded SHAPE rule, not a classifier: it catches a tracker ref, a named commit,
-    a CI/release status verb or a `next step` phrase. Global is for durable personal
-    facts, contacts, preferences, environment; work state belongs in a session bank.
-    Value-free refusal (no offending text echoed); explicit session/team/agent writes
-    and every wire/import path are untouched, and forget is never reached here.
+    One name per SHAPE out of the closed vocabulary in :data:`_WORK_SHAPES`, so a
+    refusal can say which shape fired (``session-todo``, ``hold-branch``) instead of a
+    coarse bucket that mixes a plan phrase with a CI status (QA round 1, Q-4). The
+    names are the whole output; no matched text leaves this function.
     """
-    if scope != "global" or not isinstance(fact, dict):
-        return
+    folded = _fold(text)
+    return [name for name, pattern in _WORK_SHAPES if pattern.search(folded)]
+
+
+def fact_markers(fact: dict[str, Any]) -> list[str]:
+    """Work-marker NAMES over a fact's text fields — the one haystack definition.
+
+    ``scope_fit`` (the write refusal), ``memory_inspect`` (the candidate column) and
+    ``lop memory triage`` (the move plan) all read this, so a row one of them calls
+    work-shaped is exactly a row a new global write would refuse.
+    """
     haystack = "\n".join(str(fact.get(key) or "") for key in ("title", "body", "subject"))
     for key in ("tags", "aliases"):
         value = fact.get(key) or []
         if isinstance(value, list):
             haystack += "\n" + "\n".join(str(item) for item in value)
-    if work_progress_markers(haystack):
+    return work_progress_markers(haystack)
+
+
+def scope_fit(scope: str, fact: dict[str, Any]) -> None:
+    """Refuse work/lane/progress content in the GLOBAL bank, before any write.
+
+    A bounded SHAPE rule, not a classifier. It refuses, and NAMES, a tracker ref
+    (``PR #12``, ``!1234``, a line that OPENS with ``PR3078``), a named commit, a
+    CI/merge/release status verb, a ``next step``/``next action`` phrase carrying work
+    context, a ``session todo`` line, a ``task progress`` report (``task progress:``,
+    ``task progress on …``, ``task progress is …``), a
+    work-context ``HOLD``, a session self-reference, a goal statement and a dated work
+    log — see :data:`_WORK_SHAPES`. Global is for durable personal facts, contacts,
+    preferences, environment; work state belongs in a session bank.
+
+    Value-free refusal (no offending text echoed, only the shape names); explicit
+    session/team/agent writes and every wire/import path are untouched, and forget is
+    never reached here.
+    """
+    if scope != "global" or not isinstance(fact, dict):
+        return
+    markers = fact_markers(fact)
+    if markers:
+        # Marker NAMES only (a closed vocabulary), never the matched text, and both
+        # routes that work: the tool's scope and the URL form.
+        # Actionable, not just a refusal (QA round 1, Q-3): the shape is named, and
+        # the writer is told to keep the FACT and drop the session framing. Sending a
+        # personal reminder to `session` alone would let it die with the conversation,
+        # which is the harm; a global fact should simply not carry `Session todo:`.
         raise MemoryError(
-            "This looks like session-scoped work (a tracker reference, CI/release "
-            "status or a next step). Store work state in memory://session; global is "
-            "for durable personal facts, contacts, preferences and environment."
+            f"This looks like session work ({', '.join(markers)}). It was not stored. "
+            "Store the fact itself in global — drop the session framing (a "
+            "`Session todo:` or `next step:` prefix) and keep the reminder body; for "
+            'state that should live with the conversation use `scope="session"` '
+            "(memory://session) instead. Global is for durable personal facts, contacts, "
+            "preferences and environment."
         )
 
 
@@ -352,7 +710,10 @@ def _looks_sensitive(text: str, *, opaque: bool) -> bool:
     return False
 
 
-_STOP = set(
+#: Words that carry no discriminating evidence. Public because the read-only
+#: duplicate preview in ``memory_duplicates`` must weigh the SAME vocabulary the
+#: search ranker drops; a second private copy would drift and score differently.
+STOP_WORDS = frozenset(
     (
         "a an and are as at be by can could did do does for from have how i in is it me my of on "
         "or our please should that the their this to use was we what when where which who will "
@@ -476,15 +837,34 @@ def guard(value: Any, *, opaque: bool = False) -> None:
 
 
 def origin_label(fact: dict[str, Any]) -> str:
-    """``captured`` = automatic compaction capture still awaiting a human or an explicit
-    store; ``stated`` = anything a user or agent deliberately wrote or corrected.
+    """``captured`` = the fact's status is ``candidate``; ``stated`` = anything else.
+
     Shown everywhere a fact is listed so unreviewed candidates are never mistaken for
-    verified knowledge (UX round 1: U1)."""
+    verified knowledge (UX round 1: U1). WHY the test is the STATUS and not "who touched
+    it": a deliberateness act that is not an edit (a move, an agent edit) keeps
+    ``candidate``, so a deliberate capture still lists as ``captured`` — the guide says
+    so, and this is the one place that decides it."""
     return "captured" if fact.get("status") == "candidate" else "stated"
 
 
 def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def format_bytes(value: int) -> str:
+    """Human-readable binary size for the byte cap and its usage.
+
+    Binary units because the cap is a power of two; one decimal so the round
+    64.0 MiB cap reads as the same number in `status`, the refusal and the
+    documentation. Byte-sized values stay integers so a nearly-empty store does
+    not claim to hold "0.0 KiB".
+    """
+    size = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if size < 1024 or unit == "TiB":
+            return f"{int(size)}B" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TiB"
 
 
 #: Total wire budget for the suggestion tail: the WHOLE block, wrapper
@@ -550,6 +930,54 @@ def _suggestion_key(fact: Mapping[str, Any]) -> str:
     # ASCII, so this is the correctness of the collapse rule, not a behaviour
     # change for existing rows.
     return " ".join(text.casefold().split())
+
+
+def unreviewed_capture(fact: dict[str, Any] | None, owner: str) -> bool:
+    """Whether ``fact`` is an automatic capture nobody has acted on yet.
+
+    The one definition the expiry pass, the session-delete forget and capture's
+    own refresh guard share, so "deliberate" cannot drift between them. The
+    ``source.session == owner`` clause is what makes a MOVED capture deliberate
+    even though the move keeps its provenance byte-for-byte.
+    """
+    if not fact:
+        return False
+    source = fact.get("source") or {}
+    return (
+        fact.get("status") == "candidate"
+        and source.get("author") == CAPTURE_AUTHOR
+        and source.get("session") == owner
+    )
+
+
+def expiry_tombstone_id(entity: str, parent: str, origin: str) -> str:
+    """The op id an EXPIRY tombstone carries: derived, so any host can recognise it.
+
+    WHY THE ID AND NOT A FIELD OR A LOCAL MARK. Capture must tell "this text went
+    stale" (re-learnable when the session resumes) from "a person or an agent
+    forgot this" (final), and the tombstone reaches other hosts by sync. The op
+    schema is closed (``validate_op`` refuses unknown keys, so a ``reason`` field
+    would be refused by every peer still on the old schema), the tombstone redacts
+    its parents' bodies so the forgotten fact cannot be inspected, and a local
+    ``meta`` mark does not replicate (review round 2, M3-r2: a peer's expiry
+    arrived unmarked and locked the text out for good). The op id is free-form
+    (one safe segment, as capture's own sha256 op ids already are), so a hash of
+    ``(entity, parent, origin)`` is wire-compatible and self-proving. A deliberate
+    forget mints a UUID (:func:`_id`) and can never match. The origin is part of
+    the hash so two hosts that both expire one revision cannot mint the same id
+    with different content, which ``apply_ops`` would refuse as identity reuse.
+    """
+    return hashlib.sha256(f"capture-expired|{entity}|{parent}|{origin}".encode()).hexdigest()
+
+
+def is_expiry_tombstone(op: dict[str, Any]) -> bool:
+    """Whether ``op`` is a tombstone the capture-expiry path wrote (any host)."""
+    return (
+        op.get("kind") == "tombstone"
+        and len(op.get("parents") or []) == 1
+        and op.get("op_id")
+        == expiry_tombstone_id(op["entity_id"], op["parents"][0], op["origin_device"])
+    )
 
 
 def _id() -> str:
@@ -695,10 +1123,28 @@ def validate_fact(raw: Any) -> dict[str, Any]:
         safe_segment(source["session"])
     if fact["replaces"]:
         safe_segment(fact["replaces"])
-    wire = _dump(fact)
-    if len(wire.encode()) > ITEM_BYTES or count_text_tokens(wire) > ITEM_TOKENS:
+    # Two bounds, two questions. CONTENT tokens are what the writer chose to say,
+    # so the envelope (source, timestamps, status keys) is never charged to them;
+    # wire BYTES are what storage, the session export and the mesh carry. Each
+    # refusal names its bound and the overage — counts only, so it stays value-free.
+    # A title that merely repeats the body's opening (the plain-text tool derives it
+    # from the first line) adds no content, so it is not charged a second time:
+    # otherwise a single-line store paid ~27 tokens for its own first 100 characters.
+    title = "" if fact["body"].lstrip().startswith(fact["title"].strip()) else fact["title"]
+    # Empty parts are dropped before joining: each would add a separator token,
+    # and a text measured at exactly the limit must not be refused at limit + 2.
+    parts = [title, fact["body"], fact["subject"], *fact["tags"], *fact["aliases"]]
+    content = count_text_tokens("\n".join(part for part in parts if part))
+    if content > ITEM_TOKENS:
         raise MemoryError(
-            "Memory item exceeds 256 tokens/8192 bytes including metadata. Split or consolidate it."
+            f"Memory item is {content} content tokens; the limit is {ITEM_TOKENS} "
+            f"({content - ITEM_TOKENS} over). Split it into atomic facts or shorten it."
+        )
+    size = len(_dump(fact).encode())
+    if size > ITEM_BYTES:
+        raise MemoryError(
+            f"Memory item is {size} bytes stored; the limit is {ITEM_BYTES} "
+            f"({size - ITEM_BYTES} over). Split it into atomic facts or shorten it."
         )
     return fact
 
@@ -786,7 +1232,157 @@ CREATE TABLE IF NOT EXISTS causal_edges(op_id TEXT,parent TEXT,PRIMARY KEY(op_id
 CREATE INDEX IF NOT EXISTS causal_edges_parent ON causal_edges(parent);
 CREATE TABLE IF NOT EXISTS captures(session TEXT,compaction TEXT,status TEXT,n INTEGER,
  PRIMARY KEY(session,compaction));
+CREATE TABLE IF NOT EXISTS journal_prune(at REAL NOT NULL,origin TEXT NOT NULL,
+ ops INTEGER NOT NULL,bytes INTEGER NOT NULL,reason TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS journal_prune_at ON journal_prune(at);
 """
+
+#: B5 recall telemetry. NOT in ``_SCHEMA``: created on the first recorded read, so
+#: a store that never records one pays no pages for it (the byte cap is enforced
+#: in pages, and a fixed schema cost moves every store toward it). ``WITHOUT
+#: ROWID`` keeps it ONE b-tree — a rowid table with a TEXT primary key is two (the
+#: table plus its autoindex). Local only: never in ``ops``, never exported/synced.
+_RECALL_STATS_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS recall_stats(entity TEXT PRIMARY KEY,"
+    "last_at REAL NOT NULL,n INTEGER NOT NULL) WITHOUT ROWID"
+)
+
+
+#: The relief sentence and its command hint for a near-cap scope, shared by the
+#: write warning and `lop memory status`. ONE function because the two surfaces
+#: drifted: the write warning learned that a session->session move is refused,
+#: while status kept prescribing `--to session` at session scope — an impossible
+#: instruction at the exact moment the operator is out of space.
+def quota_relief(scope: str) -> tuple[str, str]:
+    """``(advice, command hint)`` for relieving ``scope`` at 80% or more.
+
+    Every branch returns both halves, and the hint is the command that actually
+    works at that scope: global moves work state to session, session forgets
+    (a session->session move is refused), and team/agent move only facts that
+    belong elsewhere.
+    """
+    if scope == "global":
+        # Triage, not `move ID`: an agent (or a human at 99%) cannot know WHICH
+        # ids are work state; triage previews them grouped by source session.
+        return (
+            "Consolidate stale facts with forget, or move work-state facts back to "
+            "their source sessions.",
+            "`lop memory triage --scope global`",
+        )
+    if scope == "session":
+        return (
+            "Consolidate this session's stale facts with forget — completed steps, "
+            "superseded values and next-step notes from earlier turns are the stale ones; "
+            "move only facts that belong in another scope.",
+            "`lop memory forget SCOPE/ID --revision REV --yes`",
+        )
+    return (
+        "Consolidate stale facts with forget; move only facts that belong in another " "scope.",
+        "`lop memory move ID --to SCOPE`",
+    )
+
+
+def _contains_unbounded_repeat(text: str) -> bool:
+    """Whether ``text`` contains an unbounded repeat outside a character class."""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "[":
+            # A quantifier inside a character class is a literal, not a repeat.
+            index += 1
+            if index < len(text) and text[index] == "^":
+                index += 1
+            if index < len(text) and text[index] == "]":
+                index += 1
+            while index < len(text) and text[index] != "]":
+                index += 2 if text[index] == "\\" else 1
+            index += 1
+            continue
+        if char in "*+":
+            return True
+        if char == "{" and re.match(r"\{\d+,\}", text[index:]):
+            return True
+        index += 1
+    return False
+
+
+def _nested_unbounded_repeat(pattern: str) -> bool:
+    """Whether a repeated group contains an unbounded repeat, e.g. ``(a+)+``.
+
+    WHY refuse instead of compile: that shape backtracks exponentially in the
+    subject (measured in review round 1: ``(a+)+$`` on 29 characters ran longer
+    than three seconds), and Python's ``re`` has no timeout. This is a lexical
+    HEURISTIC, not a proof — an overlapping alternation such as ``(a|aa)+`` is not
+    detected — so the contract is "recognised catastrophic shapes are refused",
+    not "every accepted pattern runs in bounded time". Filter subjects are
+    bounded by the store (title <= 160 chars, item <= ITEM_BYTES).
+    """
+    stack: list[int] = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "[":
+            index += 1
+            if index < len(pattern) and pattern[index] == "^":
+                index += 1
+            if index < len(pattern) and pattern[index] == "]":
+                index += 1
+            while index < len(pattern) and pattern[index] != "]":
+                index += 2 if pattern[index] == "\\" else 1
+            index += 1
+            continue
+        if char == "(":
+            stack.append(index)
+        elif char == ")" and stack:
+            start = stack.pop()
+            following = pattern[index + 1 : index + 2]
+            repeated = following in ("*", "+") or bool(re.match(r"\{\d+,\}", pattern[index + 1 :]))
+            if repeated and _contains_unbounded_repeat(pattern[start + 1 : index]):
+                return True
+        index += 1
+    return False
+
+
+#: SQL predicate that honours the documented ``replaces`` edge: the outer
+#: ``current`` row must not be the TARGET of an explicit replacement from an
+#: authorised sibling. Shared by every read that hides a replaced fact
+#: (``search`` and ``tagged``) so two readers cannot develop two definitions of
+#: "replaced"; the outer table must be aliased ``c``.
+_NOT_REPLACED_SQL = (
+    "NOT EXISTS (SELECT 1 FROM ops p "
+    "JOIN causal_edges e ON e.parent=p.op_id JOIN ops child ON child.op_id=e.op_id "
+    "WHERE p.entity_id=c.entity_id AND child.entity_id<>c.entity_id "
+    "AND p.scope=c.scope AND p.owner=c.owner "
+    "AND child.scope=c.scope AND child.owner=c.owner)"
+)
+
+
+@dataclass
+class _EchoBatch:
+    """Per-batch indexes :meth:`MemoryStore._compacted_echo` reads, built once.
+
+    ``arriving`` resolves a parent that is a same-entity op of this batch;
+    ``children`` finds a cross-entity child whose edge is not stored yet.
+    """
+
+    arriving: dict[str, list[dict[str, Any]]]
+    children: dict[str, set[str]]
+
+    @classmethod
+    def of(cls, batch: list[dict[str, Any]]) -> _EchoBatch:
+        arriving: dict[str, list[dict[str, Any]]] = {}
+        children: dict[str, set[str]] = {}
+        for op in batch:
+            arriving.setdefault(op["entity_id"], []).append(op)
+            for parent in op["parents"]:
+                children.setdefault(parent, set()).add(op["entity_id"])
+        return cls(arriving, children)
 
 
 class MemoryStore:
@@ -826,7 +1422,7 @@ class MemoryStore:
             db.execute("PRAGMA secure_delete=ON")
             db.execute("PRAGMA journal_size_limit=1048576")
             db.execute("PRAGMA wal_autocheckpoint=64")
-            db.execute(f"PRAGMA max_page_count={MAX_DB_BYTES // 4096}")
+            db.execute(f"PRAGMA max_page_count={MAX_DB_BYTES // CAP_PAGE_SIZE}")
             db.executescript(_SCHEMA)
         except sqlite3.Error as exc:
             db.close()
@@ -840,8 +1436,174 @@ class MemoryStore:
             ) from exc
         try:
             yield db
+        except sqlite3.OperationalError as exc:
+            # SQLITE_FULL has two causes and only one is this store's own cap:
+            # the host disk can be full too. Translate it only when the cap is
+            # implicated (see _page_cap_refusal); every other failure keeps the
+            # caller's generic store-unavailable path.
+            budget = self._page_cap_refusal(db, exc)
+            if budget is not None:
+                raise MemoryError(self._store_full_message(*budget)) from exc
+            raise
         finally:
             db.close()
+
+    @contextmanager
+    def _reader(self) -> Iterator[sqlite3.Connection]:
+        """A connection that only reads: no schema block, no DDL, no store creation.
+
+        WHY this exists beside ``connection()``: that one re-runs ``_SCHEMA``,
+        which CREATES ``journal_prune`` on a store written before this pass — so
+        a preview through it mutates the store it promises to leave alone, and on
+        a read-only copy (file mode 0444, exactly what an operator inspects
+        before a destructive pass) it fails with "Memory store unavailable"
+        instead of reporting the plan.
+
+        ``mode=ro`` still reads WAL correctly; ``immutable=1`` would not and must
+        not be used on a live store.
+        """
+        db = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+        try:
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=5000")
+            yield db
+        finally:
+            db.close()
+
+    @staticmethod
+    def _page_budget(db: sqlite3.Connection) -> tuple[int, int, int, int]:
+        """``(page_count, page_size, max_page_count, freelist_count)`` as enforced.
+
+        Read through PRAGMAs rather than derived from ``MAX_DB_BYTES`` so an
+        overridden cap (tests) and a non-default page size are measured as
+        SQLite enforces them.
+        """
+        return (
+            int(db.execute("PRAGMA page_count").fetchone()[0]),
+            int(db.execute("PRAGMA page_size").fetchone()[0]),
+            int(db.execute("PRAGMA max_page_count").fetchone()[0]),
+            int(db.execute("PRAGMA freelist_count").fetchone()[0]),
+        )
+
+    @staticmethod
+    def _at_page_cap(pages: int, page_size: int, cap: int, free: int, *, batch: bool) -> bool:
+        """The ONE definition of "the byte cap is what refuses writes here".
+
+        Free pages always make a store not-full: SQLite reuses the freelist for
+        any table, so a store at ``max_page_count`` with freed pages still
+        accepts writes. This is why a successful remedy (forget/VACUUM) must
+        not leave status claiming FULL.
+
+        ``batch`` widens the headroom horizon for the REFUSAL path only. One
+        transaction can need several pages at once, so SQLite returns
+        SQLITE_FULL while a page or two are still unallocated (measured: the
+        failed commit left 30 of 32 pages allocated). Status uses
+        ``batch=False``: that transient state still accepts smaller writes and
+        is reported by the near-cap warning instead of a false FULL.
+
+        Cost of the ``free == 0`` rule on the refusal path: a SQLITE_FULL while
+        free pages remain reports the generic refusal, even at the cap where a
+        transaction may have exhausted a small freelist mid-flight. That is
+        accepted: translating it would put a cap diagnosis on a state that can
+        still accept writes. The ``free == 0, pages < cap`` case IS translated,
+        with the near-cap arm of the refusal message that states the remaining
+        headroom; only ``free > 0`` stays generic.
+        """
+        slack = MAX_BATCH_BYTES // page_size if batch else 0
+        return free == 0 and cap - pages <= slack
+
+    def _page_cap_refusal(
+        self, db: sqlite3.Connection, exc: sqlite3.OperationalError
+    ) -> tuple[int, int, int] | None:
+        """``(page_count, page_size, max_page_count)`` when this FULL is the cap.
+
+        The tuple (rather than a bare cap figure) is what lets the message say
+        which of the two states it fired in: at the cap, or below it with the
+        batch too large for the remaining headroom.
+
+        When the host filesystem reports less free space than this store's own
+        cap, the disk itself may be the cause; that case deliberately keeps the
+        generic refusal, because telling an operator whose disk is full to forget
+        facts would be advice for the wrong problem. QA confirmed that guard is
+        load-bearing: on a genuine disk-full image the page test would otherwise
+        pass.
+        """
+        code = getattr(exc, "sqlite_errorcode", None)
+        if code != sqlite3.SQLITE_FULL and "database or disk is full" not in str(exc):
+            return None
+        try:
+            pages, page_size, cap, free = self._page_budget(db)
+            cap_bytes = cap * page_size
+            disk_free = shutil.disk_usage(self.root).free
+        except (sqlite3.Error, OSError):
+            return None
+        if disk_free <= cap_bytes:
+            return None
+        if not self._at_page_cap(pages, page_size, cap, free, batch=True):
+            return None
+        return pages, page_size, cap
+
+    def _store_full_message(self, pages: int, page_size: int, cap: int) -> str:
+        """The refusal for a proven cap failure, worded for the state it fired in.
+
+        TWO arms, because one sentence is false in one of them (round-3 review):
+
+        * ``pages >= cap``: the store has reached the cap. Writes that need a new
+          page are refused until space is freed; small writes that fit the last
+          page can still succeed (round 2 proved this).
+        * ``pages < cap``: the batch needed more pages than remain. Saying "has
+          reached its cap" here would be false — writes needing new pages were
+          measured succeeding immediately afterwards — so this arm states the
+          remaining headroom and that a smaller write may still succeed.
+
+        Generic on purpose for everything else: an unavailable store can be a
+        permissions, disk or FTS problem, and telling that operator to forget
+        facts would be wrong. These messages are only reached once the cap is
+        proven, so they can be prescriptive.
+        """
+        cap_bytes = cap * page_size
+        remedies = (
+            "Inspect usage with `lop memory status`, reclaim space with "
+            "`lop memory forget SCOPE/ID --revision REV --yes`, and compact the file "
+            f"with `sqlite3 {shlex.quote(str(self.path))} 'VACUUM'`. Run that VACUUM "
+            "first if the forget is also refused. See guide://memory."
+        )
+        if pages >= cap:
+            return (
+                f"Memory store is full: {self.path} has reached its "
+                f"{format_bytes(cap_bytes)} cap, so writes that need a new page are "
+                f"refused until space is freed. {remedies}"
+            )
+        headroom = (cap - pages) * page_size
+        return (
+            f"Memory store is near its cap: this request needs more pages than the "
+            f"{format_bytes(headroom)} remaining under the {format_bytes(cap_bytes)} "
+            "cap, so it was refused and nothing was saved; a smaller write may still "
+            f"succeed. {remedies}"
+        )
+
+    def _storage_view(self, db: sqlite3.Connection) -> dict[str, Any]:
+        """Bytes the store holds against the byte cap, measured from its pages.
+
+        WHY ``page_count * page_size`` and not the ``memory.db*`` file sizes: the
+        cap is enforced on the database's page count, while the WAL and SHM
+        siblings have their own journal bound. Summing the files could report
+        more than the cap while a write still succeeds (or miss the state that
+        refuses it); page_count is the number SQLITE_FULL is decided from.
+        The cap is ``max_page_count * page_size`` — the enforced number, which
+        is page-floored when ``MAX_DB_BYTES`` is not page-aligned.
+        """
+        pages, page_size, cap, free = self._page_budget(db)
+        used = pages * page_size
+        cap_bytes = cap * page_size
+        return {
+            "storage_bytes": used,
+            "storage_cap_bytes": cap_bytes,
+            "storage_percent": round(100.0 * used / cap_bytes, 1) if cap_bytes else 0.0,
+            "storage_free_bytes": free * page_size,
+            "storage_full": self._at_page_cap(pages, page_size, cap, free, batch=False),
+            "database_path": str(self.path),
+        }
 
     def _origin(self, db: sqlite3.Connection) -> str:
         if self.origin:
@@ -857,6 +1619,58 @@ class MemoryStore:
         value = load_or_mint(self.root.parent).device_id
         db.execute("INSERT INTO meta VALUES ('origin',?)", (value,))
         return value
+
+    #: ``meta`` key holding one origin's highest sequence number ever ALLOCATED.
+    #: The ops table alone cannot carry this: journal compaction deletes rows, so
+    #: ``max(seq)`` stops being monotone and a later allocation would mint a
+    #: ``(origin, seq)`` identity a peer already holds — which `apply_ops` treats
+    #: as "already seen" and silently drops. See :meth:`_note_seq`.
+    SEQ_HIGH_WATER = "origin-high-water:"
+
+    @classmethod
+    def _seq_high_water(cls, db: sqlite3.Connection, origin: str) -> int:
+        """The highest sequence number ``origin`` may already have used.
+
+        ``max(seq)`` alone is NOT that number after a compaction: the row holding
+        it can legitimately be deleted (a superseded revision, or a put under a
+        forgotten entity), and the counter then goes backwards. The persisted
+        high-water is the part of the counter that survives the pass, so it is
+        read here as the first term rather than as a cache.
+        """
+        row = db.execute("SELECT value FROM meta WHERE key=?", (cls.SEQ_HIGH_WATER + origin,))
+        persisted = (row.fetchone() or [0])[0]
+        stored = db.execute(
+            "SELECT coalesce(max(seq),0) FROM ops WHERE origin=?", (origin,)
+        ).fetchone()[0]
+        return max(int(persisted), int(stored))
+
+    @classmethod
+    def _note_seq(cls, db: sqlite3.Connection, origin: str, seq: int) -> None:
+        """Raise ``origin``'s persisted high-water to at least ``seq``.
+
+        Never lowers it: the row is a floor for the allocator and for the
+        contiguous-arrival check, and a compaction that deletes the newest row
+        must not be able to move it down. The guarded upsert keeps that true
+        without a read-modify-write race inside the caller's transaction.
+        """
+        key = cls.SEQ_HIGH_WATER + origin
+        db.execute(
+            "INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value "
+            "WHERE CAST(excluded.value AS INTEGER) > CAST(meta.value AS INTEGER)",
+            (key, str(int(seq))),
+        )
+
+    @classmethod
+    def _next_seq(cls, db: sqlite3.Connection, origin: str) -> int:
+        """Allocate and persist ``origin``'s next sequence number.
+
+        ONE allocator for every local write (put, bulk forget, move, promote).
+        Allocating from ``max(seq)+1`` directly is what made a compacted store
+        re-issue a number a peer already held.
+        """
+        seq = cls._seq_high_water(db, origin) + 1
+        cls._note_seq(db, origin, seq)
+        return seq
 
     @staticmethod
     def _ops(db: sqlite3.Connection, entity: str) -> list[dict[str, Any]]:
@@ -889,6 +1703,13 @@ class MemoryStore:
         db.execute("DELETE FROM current WHERE entity_id=?", (entity,))
         db.execute("DELETE FROM associations WHERE entity=?", (entity,))
         if any(op["kind"] == "tombstone" for op in ops):
+            # Recall telemetry for a dead id is noise. A LOCAL delete (the side
+            # table is never journalled); absent on a store that never recorded a
+            # read, which SQLite reports as an error that aborts nothing here.
+            try:
+                db.execute("DELETE FROM recall_stats WHERE entity=?", (entity,))
+            except sqlite3.OperationalError:
+                pass
             # Forgotten IDs are permanently dead. Bodies in old puts are removed
             # too; keeping their hash and ancestry still permits convergence.
             for op in ops:
@@ -931,10 +1752,90 @@ class MemoryStore:
             )
 
     @staticmethod
-    def _quota(db: sqlite3.Connection, scope: str, owner: str, *, relief: bool = False) -> None:
+    def token_cap(scope: str) -> int:
+        return GLOBAL_TOKENS if scope == "global" else OWNER_TOKENS
+
+    @classmethod
+    def _quota_view(cls, db: sqlite3.Connection, scope: str, owner: str) -> dict[str, Any]:
+        """Used/percent/headroom for one owner, from the same ``current`` rows ``_quota`` counts."""
+        used = db.execute(
+            "SELECT coalesce(sum(tokens),0) FROM current WHERE scope=? AND owner=?",
+            (scope, owner),
+        ).fetchone()[0]
+        cap = cls.token_cap(scope)
+        return {
+            "scope": scope,
+            "owner": owner,
+            "used_tokens": used,
+            "cap_tokens": cap,
+            "percent": round(100.0 * used / cap, 1) if cap else 0.0,
+            "headroom_tokens": cap - used,
+        }
+
+    @classmethod
+    def _quota_notice(
+        cls, db: sqlite3.Connection, scope: str, owner: str
+    ) -> tuple[dict[str, Any], str | None]:
+        """Return the quota view plus a warning only on a NEW 80/90% crossing.
+
+        The state is the highest threshold this owner has been WARNED about, kept
+        beside the store so it survives restarts: without it every subsequent
+        write over the line nags, and with it a drop back below 80% (forget/move
+        out) clears the state so a later recrossing warns again. Writes are the
+        only caller — a read path must never mutate meta or carry a warning.
+        """
+        view = cls._quota_view(db, scope, owner)
+        key = "quota-warn:" + scope + ":" + owner
+        row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        stored = int(row[0]) if row else 0
+        reached = next((line for line in WARNING_THRESHOLDS if view["percent"] >= line), 0)
+        if not reached:
+            if stored:
+                db.execute("DELETE FROM meta WHERE key=?", (key,))
+            return view, None
+        if reached <= stored:
+            return view, None
+        db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, str(reached)))
+        # The relief must be actionable WHERE it is offered: a session->session move
+        # is refused, so telling a session owner to "move to session" is noise; for
+        # team/agent only a fact that belongs elsewhere can move. The sentences live
+        # in `quota_relief` so the status page cannot drift from this warning.
+        advice, hint = quota_relief(scope)
+        relief = advice + (f" ({hint})" if hint else "")
+        if reached >= 90:
+            guidance = "Consolidate now: writes are refused once the cap is reached. " + relief
+        else:
+            guidance = relief
+        shortfall = "" if view["headroom_tokens"] >= 0 else " (OVER CAP)"
+        return view, (
+            f"Memory quota warning: {scope} crossed {reached}% "
+            f"({view['used_tokens']}/{view['cap_tokens']} tokens, "
+            f"{view['headroom_tokens']} left{shortfall}, {view['percent']}% used). " + guidance
+        )
+
+    @staticmethod
+    def _quota(
+        db: sqlite3.Connection,
+        scope: str,
+        owner: str,
+        *,
+        relief: bool = False,
+        needed: int | None = None,
+    ) -> None:
         """Refuse growth past the caps. ``relief`` (a forget) skips the OP/TOMBSTONE counts:
         a tombstone is the only way to remove a sensitive body, so refusing it at the cap
-        would make the cap a trap. The token quota still applies, and a forget only shrinks it."""
+        would make the cap a trap. The token quota still applies, and a forget only shrinks it.
+
+        Runs AFTER the write's rows are inserted, inside the uncommitted transaction,
+        so the counts include the refused write; ``needed`` is that write's own token
+        charge, reported so the reader knows how much room to make.
+
+        One message per cause, because the remedies differ: tokens need consolidation
+        or a move, history needs `compact`, tombstones need an export (compaction
+        never drops them). Each names the bank, the usage and the remedy from
+        ``quota_relief`` — counts and an 8-character owner prefix only, like
+        ``_store_full_message``, so the refusal stays value-free.
+        """
         count = db.execute(
             "SELECT count(*) FROM ops WHERE scope=? AND owner=?", (scope, owner)
         ).fetchone()[0]
@@ -945,12 +1846,29 @@ class MemoryStore:
         tokens = db.execute(
             "SELECT coalesce(sum(tokens),0) FROM current WHERE scope=? AND owner=?", (scope, owner)
         ).fetchone()[0]
-        if (not relief and (count > MAX_OWNER_OPS or tombs > MAX_TOMBSTONES)) or tokens > (
-            16000 if scope == "global" else 50000
-        ):
+        bank = "global bank" if scope == "global" else f"{scope} bank {owner[:8]}"
+        tail = " Nothing was stored or evicted."
+        cap = GLOBAL_TOKENS if scope == "global" else OWNER_TOKENS
+        if tokens > cap:
+            advice, hint = quota_relief(scope)
+            used = tokens - (needed or 0)
+            need = f"; this item needs {needed}" if needed is not None else ""
             raise MemoryError(
-                "Memory quota reached (including history/tombstones). Inspect memory://, "
-                "consolidate explicitly, or export history; no facts were evicted."
+                f"Memory quota reached: {bank} {used:,}/{cap:,} tokens "
+                f"({100.0 * used / cap:.1f}%){need}.{tail} Remedy: {advice.rstrip('.')} ({hint})."
+            )
+        if relief:
+            return
+        if count > MAX_OWNER_OPS:
+            raise MemoryError(
+                f"Memory quota reached: {bank} has {count:,}/{MAX_OWNER_OPS:,} history "
+                f"operations.{tail} Remedy: compact the journal (`lop memory compact`)."
+            )
+        if tombs > MAX_TOMBSTONES:
+            raise MemoryError(
+                f"Memory quota reached: {bank} has {tombs:,}/{MAX_TOMBSTONES:,} tombstones."
+                f"{tail} Remedy: compaction keeps tombstones, so export that history and "
+                "consolidate the bank (`lop memory compact` first frees other history)."
             )
 
     def prepare_fact(self, fact: Any) -> dict[str, Any]:
@@ -993,6 +1911,17 @@ class MemoryStore:
         list (``show``) opts in explicitly.
         """
         owner = self.identity.owner(scope)
+        if forget and merge:
+            # A merge forget builds a multi-parent tombstone, which is
+            # indistinguishable on the wire from a move's source tombstone — the
+            # peer-side move guard would refuse a legitimate forget. No shipping
+            # surface passes both (the CLI's --resolve is correction-only), so
+            # refuse the shape instead of keeping a latent false positive: resolve
+            # the conflict with an edit, then forget the revision that was read.
+            raise MemoryError(
+                "Forget cannot merge concurrent revisions. Resolve them with an edit "
+                "(--resolve), then forget the revision you read."
+            )
         if entity is not None:
             safe_segment(entity)
             if not expected_version:
@@ -1005,6 +1934,14 @@ class MemoryStore:
         # Retention creation is not verification; unknown external source time
         # stays null. Every writer uses the same pure, value-free validator.
         clean = None if forget else self.prepare_fact(fact)
+        if clean is not None and clean["source"].get("author") == CAPTURE_AUTHOR:
+            # EVERY ``put`` revision is deliberate: capture writes its ops itself
+            # (``memory_capture.persist``) and never comes through here. An agent
+            # that edits a captured fact as read would otherwise carry the
+            # capture's author forward, so its correction would still expire on
+            # the capture's schedule and the next capture refresh could overwrite
+            # it. The writer becomes the author, as the CLI edit already does.
+            clean["source"] = dict(clean["source"], author=self.identity.agent_id or "anonymous")
         if clean is not None:
             # Scope-fit refusal BEFORE any DB/index/oplog write (and before the
             # session export): global is for durable personal facts, not work state.
@@ -1033,6 +1970,7 @@ class MemoryStore:
                         "scope": scope,
                         "status": "active",
                         "deduplicated": True,
+                        "quota": self._quota_view(db, scope, owner),
                     }
             heads: list[dict[str, Any]] = []
             if ops:
@@ -1052,9 +1990,22 @@ class MemoryStore:
                         "Memory revision cap reached; consolidate into a new "
                         "explicitly linked fact."
                     )
+                selected = next(head for head in heads if head["op_id"] == expected_version)
                 if clean and "created_at" not in fact:
-                    selected = next(head for head in heads if head["op_id"] == expected_version)
                     clean["created_at"] = selected["fact"]["created_at"]
+                previous = selected["fact"] or {}
+                if (
+                    clean
+                    and previous.get("source", {}).get("author") == CAPTURE_AUTHOR
+                    and previous.get("expires_at") is not None
+                    and clean["expires_at"] == previous["expires_at"]
+                ):
+                    # The deadline belonged to the capture being UNREVIEWED (D2);
+                    # this revision is deliberate (see above), so a deadline merely
+                    # carried over from the read would hide the fact from every
+                    # read path 14 days after capture. A NEW deadline the writer
+                    # chose is kept.
+                    clean["expires_at"] = None
                 # Editing the displayed head does not silently resolve unseen
                 # concurrent siblings. Only that explicitly read revision parents
                 # the correction; all other heads stay inspectable conflicts.
@@ -1083,9 +2034,7 @@ class MemoryStore:
                     )
                 parents = list(dict.fromkeys([*parents, self._heads(target)[0]["op_id"]]))
             origin = self._origin(db)
-            seq = db.execute(
-                "SELECT coalesce(max(seq),0)+1 FROM ops WHERE origin=?", (origin,)
-            ).fetchone()[0]
+            seq = self._next_seq(db, origin)
             last = db.execute("SELECT value FROM meta WHERE key='clock'").fetchone()
             now = int(time.time() * 1000)
             clock = max(now, int(last[0]) + 1 if last else 0)
@@ -1113,8 +2062,19 @@ class MemoryStore:
                 (op["op_id"], entity, origin, seq, scope, owner, op["kind"], _dump(op)),
             )
             db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
+            # The write's own charge, so a refusal can say how much room to make: a
+            # correction is charged its growth over the row it replaces, not its size.
+            replaced = db.execute(
+                "SELECT coalesce(sum(tokens),0) FROM current WHERE entity_id=?", (entity,)
+            ).fetchone()[0]
             self._reindex(db, entity)
-            self._quota(db, scope, owner, relief=forget)
+            grown = db.execute(
+                "SELECT coalesce(sum(tokens),0) FROM current WHERE entity_id=?", (entity,)
+            ).fetchone()[0]
+            self._quota(db, scope, owner, relief=forget, needed=grown - replaced)
+            # Headroom/percent every write, but a warning only on a NEW crossing;
+            # the state lives in meta, committed with the write it describes.
+            quota, warning = self._quota_notice(db, scope, owner)
             # A session's portable log is fsync'd before the index commit. If
             # that commit crashes, lazy import reconstructs it idempotently.
             if scope == "session" and self.session_dir:
@@ -1124,12 +2084,1066 @@ class MemoryStore:
                 db.execute("INSERT INTO recall(recall) VALUES ('optimize')")
                 db.commit()
                 db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        return {
+        result: dict[str, Any] = {
             "id": entity,
             "version": op["op_id"],
             "scope": scope,
             "status": "forgotten" if clean is None else clean["status"],
+            "quota": quota,
         }
+        if warning:
+            result["warning"] = warning
+        # Only for a session write that is over the OLD item bound: that is the one
+        # row an un-updated build importing this session's portable log refuses.
+        # Every other store stays quiet, so the note is never noise.
+        if (
+            scope == "session"
+            and clean is not None
+            and count_text_tokens(_dump(clean)) > LEGACY_ITEM_WIRE_TOKENS
+        ):
+            result["compatibility"] = legacy_log_note(1)
+        return result
+
+    def forget_many(
+        self, scope: str, expected: dict[str, str], *, capture_reason: str | None = None
+    ) -> dict[str, Any]:
+        """Forget a set of facts in ONE transaction, refusing if any revision moved.
+
+        WHY this exists: the human bulk-forget preview is only honest if the
+        confirmed run cannot leave half the set deleted. ``put(forget=True)`` is
+        one fact per call and commits each, so looping it would make a partial
+        failure permanent. This method re-reads every head inside a single
+        ``BEGIN IMMEDIATE`` transaction and inserts every tombstone there: a
+        mismatch on any entry refuses the WHOLE set with nothing written.
+
+        ``expected`` maps entity id to the head revision the caller previewed —
+        the same token ``put`` takes. The write lock is taken before the first
+        re-read, which closes the window between a caller's SELECT and commit; a
+        concurrent correction therefore surfaces as a refusal, never as a
+        silently forgotten fact under a filter that merely still matched it.
+
+        ``capture_reason`` (``expired`` | ``session-deleted``) is the unattended callers' mode
+        (:mod:`local_operator.memory_maintenance`). It additionally SKIPS (counted in ``skipped``)
+        any entity that is not, inside this transaction, ONE head that is an
+        :func:`unreviewed_capture`: a tombstone ends the whole entity, so a concurrent deliberate
+        revision (a peer's correction beside a local capture refresh) must never be closed by an
+        automatic pass — the same all-heads rule compaction keeps. ``expired`` mints the tombstone's
+        id with :func:`expiry_tombstone_id`, which is how capture on ANY host recognises the text
+        as re-learnable later.
+        """
+        if capture_reason not in (None, "expired", "session-deleted"):
+            raise MemoryError("Unknown capture forget reason.")
+        if capture_reason is not None and scope != "session":
+            raise MemoryError("Only session captures are forgotten automatically.")
+        if not isinstance(expected, dict) or not expected:
+            raise MemoryError("Bulk forget needs at least one memory ID and revision.")
+        if len(expected) > MAX_BULK_FORGET:
+            raise MemoryError(f"A bulk forget accepts at most {MAX_BULK_FORGET} memories at once.")
+        owner = self.identity.owner(scope)
+        for entity, revision in expected.items():
+            # Neither value is free text; refusing a malformed one here keeps the
+            # transaction from opening on a request that cannot succeed.
+            safe_segment(entity)
+            safe_segment(revision)
+        if scope == "session" and self.session_dir:
+            self.import_session()
+        if not self.path.exists():
+            raise MemoryError("Memory not found in the authorized scope.")
+        forgotten: list[dict[str, Any]] = []
+        tokens = 0
+        skipped = 0
+        with self.connection() as db:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                origin = self._origin(db)
+                last = db.execute("SELECT value FROM meta WHERE key='clock'").fetchone()
+                clock = max(int(time.time() * 1000), int(last[0]) + 1 if last else 0)
+                for entity in sorted(expected):
+                    ops = self._ops(db, entity)
+                    heads = self._heads(ops) if ops else []
+                    if capture_reason is not None and (
+                        any(op["scope"] != scope or op["owner_key"] != owner for op in ops)
+                        or any(op["kind"] == "tombstone" for op in ops)
+                        or len(heads) != 1
+                        or heads[0]["op_id"] != expected[entity]
+                        or not unreviewed_capture(heads[0]["fact"], owner)
+                    ):
+                        # The unattended mode SKIPS rather than refuses: one entity
+                        # that a person, an agent or a peer touched since the pass
+                        # read it must neither be forgotten nor hold back the rest
+                        # of the batch (a refused chunk would refuse again on every
+                        # pass while that conflict stands).
+                        skipped += 1
+                        continue
+                    if not ops or any(
+                        op["scope"] != scope or op["owner_key"] != owner for op in ops
+                    ):
+                        raise MemoryError("Memory not found in the authorized scope.")
+                    if any(op["kind"] == "tombstone" for op in ops):
+                        raise MemoryError(
+                            "Memory was forgotten concurrently. Read the current set and "
+                            "retry; no fact in this bulk forget was changed."
+                        )
+                    if not heads or heads[0]["op_id"] != expected[entity]:
+                        raise MemoryError(
+                            "Memory changed concurrently. Read its current revision and retry; "
+                            "no fact in this bulk forget was changed."
+                        )
+                    seq = self._next_seq(db, origin)
+                    # One strictly increasing HLC per tombstone in this transaction:
+                    # two ops sharing a clock would make head order depend on op_id.
+                    clock = max(clock + 1, int(time.time() * 1000))
+                    op = {
+                        "v": 1,
+                        "op_id": (
+                            expiry_tombstone_id(entity, expected[entity], origin)
+                            if capture_reason == "expired"
+                            else _id()
+                        ),
+                        "entity_id": entity,
+                        "origin_device": origin,
+                        "seq": seq,
+                        "hlc": [clock, 0, origin],
+                        "parents": [expected[entity]],
+                        "kind": "tombstone",
+                        "scope": scope,
+                        "owner_key": owner,
+                        "fact": None,
+                        "body_sha": heads[0]["body_sha"],
+                    }
+                    validate_op(op)
+                    db.execute(
+                        "INSERT INTO ops VALUES (?,?,?,?,?,?,?,?)",
+                        (op["op_id"], entity, origin, seq, scope, owner, op["kind"], _dump(op)),
+                    )
+                    db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
+                    row = db.execute(
+                        "SELECT tokens FROM current WHERE entity_id=?", (entity,)
+                    ).fetchone()
+                    tokens += int(row[0]) if row else 0
+                    self._reindex(db, entity)
+                    forgotten.append(
+                        {
+                            "id": entity,
+                            "version": op["op_id"],
+                            "scope": scope,
+                            "status": "forgotten",
+                        }
+                    )
+                self._quota(db, scope, owner, relief=True)
+                quota, warning = self._quota_notice(db, scope, owner)
+                if scope == "session" and self.session_dir:
+                    self._export(db, owner)
+                db.commit()
+            except BaseException:
+                # sqlite would roll back on close as well; being explicit keeps a
+                # caller's error handler from seeing a half-applied batch if the
+                # connection is ever reused or pooled.
+                db.rollback()
+                raise
+            db.execute("INSERT INTO recall(recall) VALUES ('optimize')")
+            db.commit()
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        result: dict[str, Any] = {"forgotten": forgotten, "tokens": tokens, "quota": quota}
+        if capture_reason is not None:
+            result["skipped"] = skipped
+        if warning:
+            result["warning"] = warning
+        return result
+
+    # -------------------------------------------------------------- compaction
+    #
+    # The journal carries STATE, not history. ``_reindex`` rebuilds ``current``,
+    # ``recall`` and ``associations`` from an entity's ops and materialises
+    # ``_heads(ops)[0]``, so a non-head revision is unreadable by every read
+    # path. Retaining one op per entity therefore reproduces the store exactly;
+    # measured on a 65,929,216 B store: 50,377 ops -> 25,188, ``current`` rebuilt
+    # 4,084/4,084 with 0 missing/extra/mismatched, 0 of 25,188 entities changed
+    # state, ``causal_edges`` 7.7 MB -> 3 rows, file 32,411,648 B.
+    #
+    # WHY this needs no peer acknowledgement: the rule is a function of the local
+    # op set alone, which is the property that matters here — the failure it
+    # fixes is a full store that cannot accept a peer's push, so any rule that
+    # waits for an ack cannot run. A rule phrased as "newer than the oldest peer
+    # cursor" is dead on arrival: the cursor this store holds for a peer
+    # describes what it RECEIVED from that peer (``network/memory.py``), so the
+    # minimum over our own origin is always 0 and such a rule frees zero bytes.
+    #
+    # Protocol safety: a compacted journal is a legal stream. ``batch()`` emits
+    # content-free skip ranges for absent sequence numbers and ``receive()``
+    # only requires ops+skips to be contiguous, never an op per sequence — so
+    # this pass needs no generation bump and no wire change.
+
+    def _retained(self, ops: list[dict[str, Any]]) -> set[str]:
+        """The op ids ONE entity keeps when its journal is compacted.
+
+        See the compaction note above for why one op per entity is state
+        preserving. TWO RULES MUST NOT BE SIMPLIFIED:
+
+        * ALL heads, never ``self._heads(ops)[0]``. One head reproduces
+          ``current`` and silently resolves visible conflicts: ``show()``'s
+          conflict list and ``put(merge=...)`` both read the head SET, so
+          keeping one would turn a concurrent edit into an invisible one and
+          make a later merge resolve against the wrong parent.
+        * A forgotten entity keeps EVERY tombstone and no puts. ``_reindex``
+          clears an entity only on seeing a tombstone, so a peer that received
+          the put and not the tombstone would hold a fact that nothing will
+          ever clear. Puts under a tombstone are unreachable (``_reindex``
+          returns before writing ``current``) and were 44% of this journal.
+        """
+        if any(op["kind"] == "tombstone" for op in ops):
+            return {op["op_id"] for op in ops if op["kind"] == "tombstone"}
+        return {op["op_id"] for op in self._heads(ops)}
+
+    @staticmethod
+    def _pins(db: sqlite3.Connection) -> set[str]:
+        """Op ids that are endpoints of a CROSS-entity causal edge.
+
+        ``_NOT_REPLACED_SQL`` (``search``/``tagged``) and ``show()``'s
+        ``moved_from`` read a replacement/move edge by joining BOTH endpoints,
+        so an op that looks like a superseded revision can be the parent half of
+        a live replacement. ``causal_edges`` is the authority rather than the op
+        bodies because an edge survives body redaction, and it is the one table
+        that still knows a parent whose own row is already gone.
+        """
+        pinned: set[str] = set()
+        for child, parent, child_entity, parent_entity in db.execute(
+            "SELECT e.op_id, e.parent, c.entity_id, p.entity_id FROM causal_edges e "
+            "JOIN ops c ON c.op_id=e.op_id JOIN ops p ON p.op_id=e.parent"
+        ):
+            if child_entity != parent_entity:
+                pinned.update((child, parent))
+        return pinned
+
+    @staticmethod
+    def _journal_fingerprint(victims: list[str]) -> str:
+        """Short digest of the exact op set a preview would delete.
+
+        The confirmed run recomputes it inside its write transaction: any
+        concurrent write that would change what is deleted (a new revision, a
+        forget, a received op) changes the victim set and is refused. Hashing
+        victims only is deliberate — a write that only ADDS retained state does
+        not change the outcome and must not make the operator's preview stale.
+        """
+        digest = hashlib.sha256()
+        for op_id in sorted(victims):
+            digest.update(op_id.encode() + b"\n")
+        return digest.hexdigest()[:12]
+
+    @staticmethod
+    def _empty_journal_plan(path: Path) -> dict[str, Any]:
+        """The plan shape for a store that does not exist (nothing to compact)."""
+        return {
+            "exists": False,
+            "database_path": str(path),
+            "ops": {"before": 0, "kept": 0, "dropped": 0},
+            "entities": {"live": 0, "forgotten": 0},
+            "retained": {"ops": 0, "payload_bytes": 0, "tombstones": 0, "pinned": 0},
+            "dropped": {
+                "superseded": 0,
+                "under_forgotten": 0,
+                "payload_bytes": 0,
+            },
+            "causal_edges": {"rows": 0, "kept": 0, "dropped": 0},
+            "storage": {
+                "bytes_before": 0,
+                "pages_before": 0,
+                "page_size": CAP_PAGE_SIZE,
+                "freelist_pages": 0,
+                "page_cap": MAX_DB_BYTES // CAP_PAGE_SIZE,
+                "headroom_before": (MAX_DB_BYTES // CAP_PAGE_SIZE) * CAP_PAGE_SIZE,
+                "bytes_after_estimate": 0,
+                "pages_after_estimate": 0,
+                "reclaim_estimate": 0,
+                "estimate_basis": "none",
+            },
+            "last_pass": None,
+            "fingerprint": MemoryStore._journal_fingerprint([]),
+        }
+
+    @staticmethod
+    def _journal_estimate(
+        db: sqlite3.Connection,
+        keep: set[str],
+        sizes: dict[str, int],
+        surviving_edges: int,
+        total_edges: int,
+        pages: int,
+        page_size: int,
+    ) -> tuple[int, str]:
+        """``(predicted bytes after the pass, which model produced it)``.
+
+        ``dbstat`` is the only view of how many pages each b-tree actually
+        holds, and the ops table is where a payload-only model is badly wrong:
+        deleted rows leave free space INSIDE pages, which only ``VACUUM`` packs
+        away, so "before - dropped payload" understates the reclaim by
+        megabytes. Scaling every object by its own retained share is an upper
+        bound (packing can only make the result smaller) and measured 13% high
+        on the real store: 36,564,992 predicted vs 32,411,648 attained.
+
+        ``dbstat`` is a compile option (``SQLITE_ENABLE_DBSTAT_VTAB``), not a
+        SQLite version guarantee. Without it the payload-only lower bound is
+        returned with a different ``basis`` so the preview can say which number
+        the operator is reading rather than pass an estimate off as a
+        measurement.
+        """
+        retained_bytes = sum(sizes[op_id] for op_id in keep)
+        total_bytes = sum(sizes.values())
+        try:
+            stats = db.execute("SELECT name, sum(pgsize) FROM dbstat GROUP BY name").fetchall()
+        except sqlite3.OperationalError:
+            return max(0, pages * page_size - (total_bytes - retained_bytes)), "payload"
+        if not total_bytes:
+            return pages * page_size, "dbstat"
+        index_table = {
+            name: table
+            for name, table in db.execute(
+                "SELECT name, tbl_name FROM sqlite_schema WHERE type='index'"
+            )
+        }
+        kept_rows = len(keep)
+        rows = len(sizes)
+        predicted_pages = 0
+        for name, size in stats:
+            if not size:
+                continue
+            held = -(-int(size) // page_size)
+            table = "ops" if name == "ops" else index_table.get(name)
+            if name == "ops":
+                scaled = -(-held * retained_bytes // total_bytes)
+            elif table == "ops":
+                scaled = -(-held * kept_rows // rows)
+            elif name == "causal_edges" or table == "causal_edges":
+                scaled = -(-held * surviving_edges // total_edges) if total_edges else held
+            else:
+                scaled = held
+            predicted_pages += max(1, scaled)
+        return predicted_pages * page_size, "dbstat"
+
+    def _journal_plan(
+        self, db: sqlite3.Connection
+    ) -> tuple[dict[str, Any], list[str], set[str], dict[str, int]]:
+        """``(preview, victims, owners, highest seq per origin)`` for one pass.
+
+        ONE scan over ``ops`` rather than ``_ops`` per entity: the measured
+        store has 25,188 entities, and the per-entity reader would be 25,188
+        round trips for the same bytes. ``_retained``/``_heads`` — the only
+        definition of a head — still decides; this only supplies their input,
+        plus the accounting (bytes, entity, scope/owner) a receipt, the export
+        rewrite and the sequence high-water need.
+
+        The fourth value is the sequence floor the pass must persist BEFORE it
+        deletes: an origin's newest row is exactly what a deletion can remove,
+        and ``max(seq)`` is what the allocator used to trust.
+        """
+        rows = db.execute(
+            "SELECT op_id, entity_id, owner, scope, data, length(CAST(data AS BLOB)) FROM ops"
+        ).fetchall()
+        by_entity: dict[str, list[dict[str, Any]]] = {}
+        entity_of: dict[str, str] = {}
+        size_of: dict[str, int] = {}
+        place_of: dict[str, tuple[str, str]] = {}
+        by_op: dict[str, dict[str, Any]] = {}
+        for op_id, entity, owner, scope, data, size in rows:
+            operation = json.loads(data)
+            by_entity.setdefault(entity, []).append(operation)
+            by_op[op_id] = operation
+            entity_of[op_id] = entity
+            size_of[op_id] = int(size)
+            place_of[op_id] = (scope, owner)
+        pinned = self._pins(db)
+        keep = set(pinned)
+        # `_heads` is per entity (a cross-entity parent does not make an op a
+        # non-head), so the child graph is built per entity too.
+        head_ids: set[str] = set()
+        children: dict[str, list[str]] = {}
+        for ops in by_entity.values():
+            keep |= self._retained(ops)
+            ids = {op["op_id"] for op in ops}
+            head_ids.update(op["op_id"] for op in self._heads(ops))
+            for operation in ops:
+                for parent in operation["parents"]:
+                    if parent in ids:
+                        children.setdefault(parent, []).append(operation["op_id"])
+        dead = {
+            entity
+            for entity, ops in by_entity.items()
+            if any(op["kind"] == "tombstone" for op in ops)
+        }
+        # Defence in depth for the sequence floor: keep each origin's newest
+        # operation even when it is a superseded revision. The meta row is what
+        # actually guarantees monotonicity (it survives any later deletion of
+        # that op); this keeps the counter readable from the journal itself.
+        newest: dict[str, int] = {}
+        for operation in by_op.values():
+            origin, seq = operation["origin_device"], operation["seq"]
+            if seq > newest.get(origin, 0):
+                newest[origin] = seq
+        keep.update(
+            op["op_id"] for op in by_op.values() if newest[op["origin_device"]] == op["seq"]
+        )
+        # A retained NON-head whose children all went is promoted to a head by
+        # `_heads`; close the set so a pin (or the newest-op floor above) never
+        # fabricates a conflict.
+        closure_ops = self._close_over_children(keep, by_op, children, head_ids)
+        victims = [op_id for op_id in size_of if op_id not in keep]
+        superseded = sum(1 for op_id in victims if entity_of[op_id] not in dead)
+        tombstones = sum(
+            1 for entity in dead for op in by_entity[entity] if op["kind"] == "tombstone"
+        )
+        edges = db.execute("SELECT op_id, parent FROM causal_edges").fetchall()
+        surviving_edges = sum(1 for child, parent in edges if child in keep and parent in keep)
+        pages, page_size, free = self._journal_pages(db)
+        # The enforced page cap, from the constant `connection()` sets: a reader
+        # must not ask PRAGMA max_page_count, which is per-connection and would
+        # report SQLite's default (2^30) rather than this store's cap.
+        cap = MAX_DB_BYTES // CAP_PAGE_SIZE
+        after_estimate, basis = self._journal_estimate(
+            db, keep, size_of, surviving_edges, len(edges), pages, page_size
+        )
+        try:
+            last = db.execute(
+                "SELECT at, ops, bytes FROM journal_prune ORDER BY at DESC LIMIT 1"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # An older store has no journal_prune yet, and a preview must not be
+            # the thing that creates it.
+            last = None
+        dropped_bytes = sum(size_of[op_id] for op_id in victims)
+        before = pages * page_size
+        plan = {
+            "exists": True,
+            "database_path": str(self.path),
+            "ops": {"before": len(size_of), "kept": len(keep), "dropped": len(victims)},
+            "entities": {"live": len(by_entity) - len(dead), "forgotten": len(dead)},
+            "retained": {
+                "ops": len(keep),
+                "payload_bytes": sum(size_of[op_id] for op_id in keep),
+                "tombstones": tombstones,
+                "pinned": len(pinned),
+                "closure_ops": closure_ops,
+            },
+            "dropped": {
+                "superseded": superseded,
+                "under_forgotten": len(victims) - superseded,
+                "payload_bytes": dropped_bytes,
+            },
+            "causal_edges": {
+                "rows": len(edges),
+                "kept": surviving_edges,
+                "dropped": len(edges) - surviving_edges,
+            },
+            "storage": {
+                "bytes_before": before,
+                "pages_before": pages,
+                "page_size": page_size,
+                "freelist_pages": free,
+                "page_cap": cap,
+                "headroom_before": cap * page_size - before,
+                "bytes_after_estimate": after_estimate,
+                "pages_after_estimate": -(-after_estimate // page_size),
+                "reclaim_estimate": max(0, before - after_estimate),
+                "estimate_basis": basis,
+            },
+            "last_pass": ({"at": last[0], "ops": last[1], "bytes": last[2]} if last else None),
+            "fingerprint": self._journal_fingerprint(victims),
+        }
+        owners = {place_of[op_id][1] for op_id in victims if place_of[op_id][0] == "session"}
+        return plan, victims, owners, newest
+
+    @staticmethod
+    def _journal_pages(db: sqlite3.Connection) -> tuple[int, int, int]:
+        """``(page_count, page_size, freelist_count)`` — read-only safe.
+
+        Separate from ``_page_budget`` because the cap is NOT readable from a
+        read-only connection (``max_page_count`` is per-connection state).
+        """
+        return (
+            int(db.execute("PRAGMA page_count").fetchone()[0]),
+            int(db.execute("PRAGMA page_size").fetchone()[0]),
+            int(db.execute("PRAGMA freelist_count").fetchone()[0]),
+        )
+
+    @staticmethod
+    def _close_over_children(
+        keep: set[str],
+        by_op: dict[str, dict[str, Any]],
+        children: dict[str, list[str]],
+        head_ids: set[str],
+    ) -> int:
+        """Retain a path from every retained NON-head up to its full-set head.
+
+        WHY: `_heads` decides head-ness from the operations PRESENT in an
+        entity, so deleting a retained operation's only child PROMOTES it. A
+        `replaces` pin is exactly that shape — it names the target's head as it
+        was at write time, and later edits above it are non-heads — so without
+        this closure a compaction fabricates a second head: `show().conflicts`
+        reports a conflict nobody made and `merge` records a false confluence
+        naming a revision no one edited.
+
+        Returns how many operations the closure added (0 on a store with no
+        retained non-heads, which is the common case).
+        """
+        added = 0
+        pending = [op_id for op_id in keep if op_id not in head_ids]
+        while pending:
+            op_id = pending.pop()
+            heirs = children.get(op_id, [])
+            if any(child in keep for child in heirs):
+                continue
+            if not heirs:
+                # A full-set non-head always has a child; defensive only.
+                continue
+            # Shortest path first (a head ends the walk), then anything already
+            # kept, then the earliest revision as a deterministic tie-break.
+            child = min(
+                heirs,
+                key=lambda candidate: (
+                    candidate not in head_ids,
+                    candidate not in keep,
+                    by_op[candidate]["hlc"],
+                    candidate,
+                ),
+            )
+            keep.add(child)
+            added += 1
+            if child not in head_ids:
+                pending.append(child)
+        return added
+
+    def journal_plan(self) -> dict[str, Any]:
+        """What :meth:`compact` would delete and roughly what it would free.
+
+        Genuinely read-only: it opens the file read-only, so it performs no DDL,
+        no INSERT/UPDATE/DELETE, creates no store when none exists, and works on
+        a 0444 copy. ``connection()`` would re-run ``_SCHEMA`` and create
+        ``journal_prune`` — a preview that mutates is a trap on the full store
+        whose operator is previewing a destructive pass. This is that operator's
+        preview: the pass refuses to run without the fingerprint it prints.
+        """
+        if not self.path.exists():
+            return {**self._empty_journal_plan(self.path), "read_only": True}
+        with self._reader() as db:
+            plan, _victims, _owners, _newest = self._journal_plan(db)
+        return {**plan, "read_only": True}
+
+    def compact(
+        self, *, expect: str, reason: str = "operator", vacuum: bool = True
+    ) -> dict[str, Any]:
+        """Apply the previewed journal compaction in one pass.
+
+        ``reason`` is what ``journal_prune`` records: ``operator`` for the
+        confirmed CLI pass, ``auto`` for the maintenance pass in
+        :mod:`local_operator.memory_maintenance`, so the cadence gate and a
+        human reading the table can tell an unattended pass from a requested
+        one. ``vacuum=False`` is that pass's low-disk mode: VACUUM rewrites the
+        whole file and needs about its size again in free space, while the
+        DELETE alone already returns pages to the freelist, which every table
+        reuses — so writes recover without the rewrite and only the file size
+        waits for a pass with room.
+
+        ``expect`` is the ``fingerprint`` of the preview the operator read; the
+        plan is recomputed inside the write transaction and a mismatch refuses
+        the WHOLE pass with nothing deleted (the same optimistic-confirmation
+        shape as a bulk forget's ``--expect``). Requiring it is deliberate: old
+        revisions are unrecoverable afterwards, and a call without a preview is
+        a call whose operator has not seen what it deletes.
+
+        Serialisation: ``BEGIN IMMEDIATE`` takes the write lock BEFORE the plan
+        is read, so ``apply_ops`` (also IMMEDIATE) lands wholly before or wholly
+        after; ``busy_timeout=5000`` from ``connection()`` is what waits. A push
+        that loses that race and read a pre-compaction sequence state gets one
+        ``Memory sequence gap/overlap`` refusal on the receiver and succeeds on
+        its next tick against the compacted stream — the journal announces the
+        absent numbers as skip ranges, so the stream stays legal.
+
+        Export ordering: the deletes commit first, then every affected session's
+        portable ``memory-session.jsonl`` is rewritten. A crash between the two
+        leaves an export that still holds dropped ops; ``import_session``
+        re-applies them and the next pass drops them again, so the residue is
+        bytes, never wrong state.
+
+        Sequence identity: this is the one pass that makes ``max(seq)`` stop
+        being a counter, so every origin's high-water is persisted in the same
+        transaction BEFORE the delete and allocation reads that floor. Without
+        it, a store whose newest row is dropped re-issues ``(origin, seq)`` for a
+        NEW operation, and a peer already at that cursor skips the op as one it
+        has seen: silent, permanent divergence from an ordinary forget.
+
+        ``VACUUM`` cannot run inside a transaction, and is skipped when the pass
+        dropped nothing and the freelist is already empty — that is what makes a
+        second run a no-op instead of a full file rewrite. It is also what makes
+        the reclaim real: the DELETE only returns pages to the freelist.
+        """
+        if not self.path.exists():
+            raise MemoryError("Memory not found: there is no journal to compact.")
+        if not expect:
+            raise MemoryError(
+                "Compaction needs the fingerprint from its preview. Nothing was deleted. "
+                "Run the preview first."
+            )
+        if reason not in ("operator", "auto"):
+            raise MemoryError("Unknown compaction reason; use operator or auto.")
+        with self.connection() as db:
+            try:
+                db.execute("BEGIN IMMEDIATE")
+                plan, victims, owners, newest = self._journal_plan(db)
+                if plan["fingerprint"] != expect:
+                    raise MemoryError(
+                        "The journal changed since the preview you confirmed (fingerprint "
+                        "mismatch). Nothing was deleted; run the preview again."
+                    )
+                if victims:
+                    # Persist the sequence floor BEFORE the delete, in the same
+                    # transaction: an origin's newest row is exactly what the
+                    # delete can remove, and `max(seq)` must not move backwards
+                    # or a later allocation re-issues a number a peer holds.
+                    for origin, seq in sorted(newest.items()):
+                        self._note_seq(db, origin, seq)
+                    db.executemany("DELETE FROM ops WHERE op_id=?", [(op,) for op in victims])
+                    # An edge row is inert iff either endpoint is gone: the only
+                    # reader (``_NOT_REPLACED_SQL``) INNER JOINs both ops, so
+                    # deleting these cannot change a query result. They are also
+                    # the second-largest object in the store, so they are pruned
+                    # rather than left to rot.
+                    db.execute(
+                        "DELETE FROM causal_edges WHERE op_id NOT IN (SELECT op_id FROM ops) "
+                        "OR parent NOT IN (SELECT op_id FROM ops)"
+                    )
+                    db.execute(
+                        "INSERT INTO journal_prune VALUES (?,?,?,?,?)",
+                        (
+                            time.time(),
+                            self._origin(db),
+                            len(victims),
+                            plan["dropped"]["payload_bytes"],
+                            reason,
+                        ),
+                    )
+                db.commit()
+                if victims:
+                    for owner in sorted(owners):
+                        directory = self._session_directory(owner, db)
+                        if directory is None:
+                            continue
+                        try:
+                            self._export(db, owner, directory)
+                        except (MemoryError, OSError) as exc:
+                            raise MemoryError(
+                                "The journal was compacted, but rewriting session "
+                                f"{owner[:8]}'s portable export failed ({exc}). The store is "
+                                "correct; that export still holds the dropped operations and "
+                                "the next pass rewrites it."
+                            ) from exc
+                    db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+            free_before = plan["storage"]["freelist_pages"]
+        vacuumed = False
+        if vacuum and (plan["ops"]["dropped"] or free_before):
+            try:
+                with self.connection() as db:
+                    db.execute("VACUUM")
+                vacuumed = True
+            except sqlite3.OperationalError as exc:
+                raise MemoryError(
+                    "The journal was compacted, but the file could not be rebuilt (VACUUM: "
+                    f"{exc}). The freed pages are already reusable, so writes are not "
+                    "blocked; free disk space and run the pass again to shrink the file."
+                ) from exc
+        with self.connection() as db:
+            pages, page_size, cap, free = self._page_budget(db)
+        after = pages * page_size
+        return {
+            **plan,
+            "action": "compact",
+            "read_only": False,
+            "applied": True,
+            "vacuumed": vacuumed,
+            "storage": {
+                **plan["storage"],
+                "bytes_after": after,
+                "pages_after": pages,
+                "freelist_pages": free,
+                "reclaimed_bytes": max(0, plan["storage"]["bytes_before"] - after),
+                "headroom_after": cap * page_size - after,
+            },
+            "confirmation": expect,
+        }
+
+    def move(
+        self,
+        targets: str | list[str],
+        destination: str,
+        *,
+        expected_version: str | None = None,
+        scope: str | None = None,
+        destination_owner: str | None = None,
+    ) -> dict[str, Any]:
+        """Move one or more facts to ``destination`` atomically, preserving the fact.
+
+        ``destination_owner`` sends a ``session`` move to a NAMED session instead of
+        the caller's own — how ``lop memory triage`` returns a misrouted global fact
+        to the session that wrote it. It is a human/CLI affordance only: the agent
+        routes (``memory_tools``) never pass it, the store refuses it when this
+        identity is bound to a session (an agent's store always is), and the named
+        session's directory must exist so its portable log can be written.
+        Ownership is otherwise unchanged: the source-scope checks below still use
+        this identity.
+
+        WHY this exists: a fact written to the wrong scope could previously only be
+        forgotten (destroys it) or edited (scope is immutable). The global bank filled
+        to its cap with work state while session scope sat empty, and an agent could
+        not act on the advice to "use session scope instead".
+
+        DESIGN CONSTRAINT: ``apply_ops`` refuses an entity whose ops change scope, so
+        a move cannot rewrite an entity in place. It is represented as two ordinary
+        ops that OLD PEERS ALREADY UNDERSTAND (no protocol bump): a ``put`` at the
+        destination whose first revision PARENTS the source head, and a ``tombstone``
+        at the source. The destination fact is byte-identical (text, created_at and every
+        other timestamp — an automatic capture is the one exception, because a move is a
+        deliberate act: its deadline goes and its author becomes the mover, D2),
+        ``show`` reports ``moved_from`` from the cross-entity root parent, and the
+        ordinary op stream replicates it. A new
+        op kind was rejected deliberately: a peer running an older release would
+        refuse the whole batch and then sit behind a permanent sequence gap.
+
+        The source tombstone is destructive exactly like a forget — it ends that
+        entity. A move therefore refuses a source that already has unmerged
+        concurrent revisions, and ``apply_ops`` refuses a move tombstone that would
+        destroy a revision the moving device never saw (the tombstone names the
+        destination op as a second parent, which is how a peer tells it apart from a
+        forget without a protocol change).
+
+        All-or-nothing: every target is resolved and validated, the destination
+        quota and the source's history caps are checked, before the single
+        ``BEGIN IMMEDIATE`` transaction inserts any op; any failure before commit
+        leaves the store untouched.
+        """
+        if isinstance(targets, str):
+            targets = [targets]
+        if not targets:
+            raise MemoryError("A move needs at least one memory ID.")
+        if len(targets) > 64:
+            raise MemoryError("A move accepts at most 64 memories at once.")
+        if destination not in SCOPES:
+            raise MemoryError("Unknown move destination; use session, team, agent or global.")
+        if destination_owner is None:
+            dest_owner = self.identity.owner(destination)
+        else:
+            if destination != "session" or self.identity.session_id:
+                # Only an unbound (CLI) identity may address another owner, and only
+                # a session: a bound agent store must never write into a session
+                # it does not own, and team/agent owners come from the registry.
+                raise MemoryError(
+                    "A named destination owner is a human `lop memory triage` move to a "
+                    "session only."
+                )
+            dest_owner = safe_segment(destination_owner)
+            if not self.is_session(dest_owner):
+                raise MemoryError(
+                    f"Session {dest_owner[:8]} is not a conversation on this device (no "
+                    "transcript); its facts stay in place."
+                )
+        if expected_version is not None:
+            safe_segment(expected_version)
+        resolved: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for target in targets:
+            if not isinstance(target, str) or not target.strip():
+                raise MemoryError("Every move target must be an explicit memory ID.")
+            source_scope, entity = self.resolve(target, scope)
+            if (source_scope, entity) in seen:
+                raise MemoryError(
+                    f"{source_scope}/{entity} is listed twice; a move takes each fact once."
+                )
+            seen.add((source_scope, entity))
+            if source_scope == destination:
+                raise MemoryError(
+                    f"{source_scope}/{entity} is already in {destination}; "
+                    "moving it there would do nothing."
+                )
+            resolved.append((source_scope, entity))
+        if expected_version is not None and len(resolved) != 1:
+            raise MemoryError("A revision guards one fact; omit it when moving a batch.")
+        if destination == "session" or any(source == "session" for source, _ in resolved):
+            # A moved/opened session's portable log may hold rows the local index
+            # has not rebuilt yet; moving against a stale index could miss a
+            # conflict or resurrect a forgotten fact on the next import.
+            self.import_session()
+        if destination_owner is not None:
+            # The commit below re-exports the named session's portable log FROM THE
+            # INDEX. Rows that only exist in that log (written while the index was
+            # elsewhere) would be overwritten, so fold the log in first, exactly as
+            # that session would on its own next open.
+            MemoryStore(
+                self.root.parent,
+                MemoryIdentity(dest_owner),
+                self._session_directory(dest_owner),
+                origin=self.origin,
+            ).import_session()
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            origin = self._origin(db)
+            # Validate EVERY target before writing anything, so a refusal later in
+            # the batch cannot leave an earlier move half-applied.
+            prepared: list[tuple[str, str, dict[str, Any], dict[str, Any]]] = []
+            needed = 0
+            legacy_large = 0
+            batch_facts: set[str] = set()
+            source_counts: dict[tuple[str, str], int] = {}
+            for source_scope, entity in resolved:
+                source_owner = self.identity.owner(source_scope)
+                ops = self._ops(db, entity)
+                if not ops or any(
+                    op["scope"] != source_scope or op["owner_key"] != source_owner for op in ops
+                ):
+                    raise MemoryError("Memory not found in the authorized scope.")
+                if any(op["kind"] == "tombstone" for op in ops):
+                    raise MemoryError(
+                        f"{source_scope}/{entity} was forgotten; it cannot be moved. Store it "
+                        "again in the destination scope instead."
+                    )
+                heads = self._heads(ops)
+                if len(heads) > 1:
+                    # Concurrent sibling revisions are a decision a human has to
+                    # make. Moving the newest and tombstoning the entity would
+                    # silently discard the others, so refuse while it is ambiguous.
+                    raise MemoryError(
+                        f"{source_scope}/{entity} has {len(heads)} concurrent revisions; "
+                        "resolve the conflict (edit with --resolve) before moving it."
+                    )
+                head = heads[0]
+                if expected_version is not None and head["op_id"] != expected_version:
+                    raise MemoryError(
+                        "Memory changed concurrently. Read its current revision and retry."
+                    )
+                fact = dict(head["fact"])
+                if fact["source"].get("author") == CAPTURE_AUTHOR:
+                    # Moving a capture is a deliberate act (D2). TWO stamps are needed,
+                    # and the author is the load-bearing one: every deliberateness
+                    # predicate reads it (``unreviewed_capture``, the expiry sweep's
+                    # ``source.session = owner`` clause, ``_evict``'s author filter), so
+                    # nulling the deadline alone was only true while the fact sat
+                    # outside its own session. A capture moved A -> global -> A matched
+                    # ``unreviewed_capture`` again and the expiry sweep derived a legacy
+                    # deadline from ``source_time``, so the round trip still expired
+                    # (and a session delete still forgot it) — #3086 review r2, m1. The
+                    # rewrite is the same one ``put`` performs on every deliberate
+                    # revision; provenance is otherwise kept as-is.
+                    fact["expires_at"] = None
+                    fact["source"] = dict(
+                        fact["source"], author=self.identity.agent_id or "anonymous"
+                    )
+                # A move must never be a route around the guards ``put`` enforces.
+                # The strongest of them is scope-fit: work/lane/progress content is
+                # refused in the global bank, and moving it there would defeat it.
+                scope_fit(destination, fact)
+                if fact["replaces"]:
+                    # ``replaces`` is a same-scope lineage link; carrying it across
+                    # scopes is refused by ``put``'s replacement check. Say so plainly
+                    # rather than fail mid-transaction.
+                    raise MemoryError(
+                        f"{source_scope}/{entity} supersedes another fact in the same "
+                        "scope, so a cross-scope move would break that link. Resolve the "
+                        "supersession first (forget the superseded fact, or keep this "
+                        "one in place)."
+                    )
+                duplicate = db.execute(
+                    "SELECT entity_id FROM current WHERE scope=? AND owner=? "
+                    "AND json_remove(fact,'$.created_at')=json_remove(?,'$.created_at') LIMIT 1",
+                    (destination, dest_owner, _dump(fact)),
+                ).fetchone()
+                if duplicate:
+                    raise MemoryError(
+                        f"{source_scope}/{entity} already has an identical fact at "
+                        f"{destination}/{duplicate[0]}; a move would silently merge them. "
+                        "Resolve one of the two first."
+                    )
+                needed += count_text_tokens(_dump(fact))
+                if count_text_tokens(_dump(fact)) > LEGACY_ITEM_WIRE_TOKENS:
+                    legacy_large += 1
+                # Two byte-identical facts in one batch would create two identical
+                # destination rows: ``put``'s idempotence would have refused the
+                # second, and ``move`` bypasses ``put``, so refuse it here.
+                signature = _dump(
+                    {key: value for key, value in fact.items() if key != "created_at"}
+                )
+                if signature in batch_facts:
+                    raise MemoryError(
+                        "Two targets in this batch hold the same fact; moving both would "
+                        "duplicate it at the destination. Keep one."
+                    )
+                batch_facts.add(signature)
+                source_counts[(source_scope, source_owner)] = (
+                    source_counts.get((source_scope, source_owner), 0) + 1
+                )
+                prepared.append((source_scope, entity, head, fact))
+            cap = self.token_cap(destination)
+            current_tokens = db.execute(
+                "SELECT coalesce(sum(tokens),0) FROM current WHERE scope=? AND owner=?",
+                (destination, dest_owner),
+            ).fetchone()[0]
+            if current_tokens + needed > cap:
+                raise MemoryError(
+                    f"Memory move refused: {destination} would exceed its {cap}-token cap "
+                    f"(current {current_tokens} tokens, needs {needed} tokens, cap {cap}). "
+                    "Consolidate the destination or move fewer facts; no fact was truncated "
+                    "and nothing was changed."
+                )
+            destination_ops = db.execute(
+                "SELECT count(*) FROM ops WHERE scope=? AND owner=?",
+                (destination, dest_owner),
+            ).fetchone()[0]
+            if destination_ops + len(prepared) > MAX_OWNER_OPS:
+                raise MemoryError(
+                    f"Memory move refused: {destination} would exceed its operation history "
+                    "cap. Consolidate or export the destination history first."
+                )
+            # The source gains one tombstone per moved fact. Refuse rather than push
+            # a scope past the history caps: the next write there would then be
+            # refused, and tombstones are never collected (review MINOR-5).
+            for (source_scope, source_owner), count in source_counts.items():
+                source_ops = db.execute(
+                    "SELECT count(*) FROM ops WHERE scope=? AND owner=?",
+                    (source_scope, source_owner),
+                ).fetchone()[0]
+                source_tombs = db.execute(
+                    "SELECT count(*) FROM ops WHERE scope=? AND owner=? AND kind='tombstone'",
+                    (source_scope, source_owner),
+                ).fetchone()[0]
+                if source_ops + count > MAX_OWNER_OPS or source_tombs + count > MAX_TOMBSTONES:
+                    raise MemoryError(
+                        f"Memory move refused: {source_scope} would exceed its operation/"
+                        "tombstone history cap. Consolidate or export that history first; "
+                        "nothing was changed."
+                    )
+            seq = self._next_seq(db, origin)
+            last = db.execute("SELECT value FROM meta WHERE key='clock'").fetchone()
+            clock = max(int(time.time() * 1000), int(last[0]) + 1 if last else 0)
+            moved: list[dict[str, Any]] = []
+            affected_sessions: set[str] = set()
+            for source_scope, entity, head, fact in prepared:
+                new_id = _id()
+                operation = {
+                    "v": 1,
+                    "op_id": _id(),
+                    "entity_id": new_id,
+                    "origin_device": origin,
+                    "seq": seq,
+                    "hlc": [clock, 0, origin],
+                    "parents": [head["op_id"]],
+                    "kind": "put",
+                    "scope": destination,
+                    "owner_key": dest_owner,
+                    "fact": fact,
+                    "body_sha": hashlib.sha256(_dump(fact).encode()).hexdigest(),
+                }
+                validate_op(operation)
+                db.execute(
+                    "INSERT INTO ops VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        operation["op_id"],
+                        new_id,
+                        origin,
+                        seq,
+                        destination,
+                        dest_owner,
+                        "put",
+                        _dump(operation),
+                    ),
+                )
+                self._reindex(db, new_id)
+                moved.append(
+                    {
+                        "from": f"{source_scope}/{entity}",
+                        "to": f"{destination}/{new_id}",
+                        "version": operation["op_id"],
+                        "title": fact["title"],
+                        "tokens": count_text_tokens(_dump(fact)),
+                    }
+                )
+                seq += 1
+                clock += 1
+                tombstone = {
+                    "v": 1,
+                    "op_id": _id(),
+                    "entity_id": entity,
+                    "origin_device": origin,
+                    "seq": seq,
+                    "hlc": [clock, 0, origin],
+                    "parents": [head["op_id"], operation["op_id"]],
+                    "kind": "tombstone",
+                    "scope": source_scope,
+                    "owner_key": self.identity.owner(source_scope),
+                    "fact": None,
+                    "body_sha": head["body_sha"],
+                }
+                validate_op(tombstone)
+                db.execute(
+                    "INSERT INTO ops VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        tombstone["op_id"],
+                        entity,
+                        origin,
+                        seq,
+                        source_scope,
+                        tombstone["owner_key"],
+                        "tombstone",
+                        _dump(tombstone),
+                    ),
+                )
+                self._reindex(db, entity)
+                seq += 1
+                clock += 1
+                if source_scope == "session":
+                    affected_sessions.add(tombstone["owner_key"])
+                if destination == "session":
+                    affected_sessions.add(dest_owner)
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('clock',?)", (str(clock),))
+            self._quota(db, destination, dest_owner, needed=needed)
+            quota, warning = self._quota_notice(db, destination, dest_owner)
+            # Move-out relief must reset the SOURCE's crossing state exactly like a
+            # forget does, or a later recross into that scope warns nothing.
+            for (source_scope, source_owner), _count in source_counts.items():
+                self._quota_notice(db, source_scope, source_owner)
+            # Mirror ``put``/``apply_ops``: a session's portable log is written
+            # before the index commit, so a crash is repaired by lazy import.
+            for owner in sorted(affected_sessions):
+                directory = (
+                    self.session_dir
+                    if owner == self.identity.session_id
+                    else self._session_directory(owner, db)
+                )
+                if directory is not None:
+                    if directory.is_dir() or owner == self.identity.session_id:
+                        self._export(db, owner, directory)
+            db.commit()
+        result: dict[str, Any] = {
+            "action": "moved",
+            "destination": destination,
+            "moved": moved,
+            "quota": quota,
+        }
+        if destination == "session" and legacy_large:
+            result["compatibility"] = legacy_log_note(legacy_large)
+        if warning:
+            result["warning"] = warning
+        return result
+
+    #: Files that make a directory under ``sessions/`` a CONVERSATION: a transcript,
+    #: plain or archived by retention compression. A bare directory (a subagent's
+    #: memory namespace, or one a writer could name in ``source.session``) is not a
+    #: session a human can open, so a named-owner move must not target it.
+    SESSION_MARKERS = ("transcript.jsonl", "transcript.jsonl.zst", "transcript.jsonl.gz")
+
+    def is_session(self, owner: str, db: sqlite3.Connection | None = None) -> bool:
+        """Whether ``owner`` names a real conversation on this device."""
+        directory = self._session_directory(owner, db)
+        return directory is not None and any(
+            (directory / name).is_file() for name in self.SESSION_MARKERS
+        )
 
     def _session_directory(self, owner: str, db: sqlite3.Connection | None = None) -> Path | None:
         if owner == self.identity.session_id and self.session_dir:
@@ -1248,9 +3262,6 @@ class MemoryStore:
             db.execute("BEGIN IMMEDIATE")
             if promote:
                 origin = self._origin(db)
-                seq = db.execute(
-                    "SELECT coalesce(max(seq),0) FROM ops WHERE origin=?", (origin,)
-                ).fetchone()[0]
                 clock_row = db.execute("SELECT value FROM meta WHERE key='clock'").fetchone()
                 clock = max(int(time.time() * 1000), int(clock_row[0]) if clock_row else 0)
                 prefix = self.identity.session_id + "|"
@@ -1275,7 +3286,7 @@ class MemoryStore:
                     fact = operation["fact"]
                     if fact and fact["replaces"]:
                         fact = dict(fact, replaces=remap(fact["replaces"]))
-                    seq += 1
+                    seq = self._next_seq(db, origin)
                     clock += 1
                     rewritten = dict(
                         operation,
@@ -1299,6 +3310,8 @@ class MemoryStore:
                 tombs = {op["entity_id"] for op in batch if op["kind"] == "tombstone"}
             changed: set[str] = set()
             filled_gap = False
+            dropped = 0
+            echo_batch = _EchoBatch.of(batch)
             owners: set[tuple[str, str]] = (
                 {("session", self.identity.session_id)} if portable else set()
             )
@@ -1326,18 +3339,32 @@ class MemoryStore:
                             "Memory operation identity cannot be reused with different content."
                         )
                     continue
+                if op["kind"] == "tombstone":
+                    # A move's tombstone must not erase a revision the mover never
+                    # saw; a forget's own guarantee is untouched (see the helper).
+                    conflict = self._move_tombstone_conflict(db, op, old_ops)
+                    if conflict:
+                        raise MemoryError(conflict)
+                echo = self._compacted_echo(db, op, old_ops, echo_batch)
                 if contiguous:
-                    seq = db.execute(
-                        "SELECT coalesce(max(seq),0)+1 FROM ops WHERE origin=?",
-                        (op["origin_device"],),
-                    ).fetchone()[0]
-                    if op["seq"] != seq:
+                    seq = self._seq_high_water(db, op["origin_device"]) + 1
+                    # A dropped echo at or below the floor is a re-send of history
+                    # this store already accounted for: idempotent, like the
+                    # held-op dedup above, never a gap.
+                    if op["seq"] != seq and not (echo and op["seq"] < seq):
                         raise MemoryError("Memory sequence gap; refresh peer state and retry.")
+                if echo:
+                    # Accepted, not stored: the seq is still evidence of the origin's
+                    # counter, so the floor moves exactly as for an insert and the next
+                    # contiguous arrival from this origin is not refused as a gap. No
+                    # `filled_gap`: nothing below a peer's cursor was added, so bumping
+                    # `stream-generation` would only make every peer resend everything.
+                    dropped += 1
+                    self._note_seq(db, op["origin_device"], op["seq"])
+                    continue
                 if len(old_ops) >= MAX_REVISIONS and op["kind"] != "tombstone":
                     raise MemoryError("Memory revision cap reached; no conflicts discarded.")
-                previous_max = db.execute(
-                    "SELECT coalesce(max(seq),0) FROM ops WHERE origin=?", (op["origin_device"],)
-                ).fetchone()[0]
+                previous_max = self._seq_high_water(db, op["origin_device"])
                 filled_gap |= op["seq"] < previous_max
                 stored = dict(op, fact=None) if dead and op["kind"] == "put" else op
                 try:
@@ -1357,6 +3384,11 @@ class MemoryStore:
                 except sqlite3.IntegrityError as exc:
                     raise MemoryError("Memory origin sequence reused; refresh peer state.") from exc
                 changed.add(entity)
+                # A received op is evidence of its origin's counter: persist it, so a
+                # later compaction that deletes this row cannot let the next
+                # contiguous arrival be refused as a gap (or, on the local origin,
+                # let an allocation reuse this number).
+                self._note_seq(db, op["origin_device"], op["seq"])
                 owners.add((op["scope"], op["owner_key"]))
                 if op["kind"] != "tombstone":
                     growing.add((op["scope"], op["owner_key"]))
@@ -1386,11 +3418,97 @@ class MemoryStore:
                     if directory and directory.is_dir():
                         self._export(db, owner, directory)
             db.commit()
+            if dropped:
+                # Counts only: op ids/entities are local identifiers with no place in a log.
+                logger.info("memory apply_ops dropped_compacted=%d of %d", dropped, len(batch))
             if tombs:
                 db.execute("INSERT INTO recall(recall) VALUES ('optimize')")
                 db.commit()
                 db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             return len(changed)
+
+    def _compacted_echo(
+        self,
+        db: sqlite3.Connection,
+        op: dict[str, Any],
+        old_ops: list[dict[str, Any]],
+        batch: _EchoBatch,
+    ) -> bool:
+        """Whether ``op`` (absent here) is a put compaction removed and must not re-admit.
+
+        WHY: ``apply_ops`` dedups by op id alone, so an op :meth:`compact` deleted
+        looks NEW the next time a peer that still holds it pushes it. Measured on
+        the 10-24 compaction: one peer re-sent 22,551 of the 25,192 dropped ops
+        within ~100 minutes (22,403 redacted puts under tombstones, 148 superseded
+        revisions), undoing the pass and bumping ``stream-generation`` per batch.
+
+        THE RULE: a put for an entity with a STORED tombstone. ``_reindex`` returns
+        before writing ``current`` for a tombstoned entity, ``show`` and
+        ``_move_tombstone_conflict`` return early for one, so the put is unreachable
+        by every reader of ITS entity. A tombstone that is only in this batch does
+        not count: ``_move_tombstone_conflict`` would then judge that tombstone
+        against a head set missing the put, and could let a move erase a sibling it
+        should have refused.
+
+        WHAT THIS GUARANTEES, and no more: the drop changes nothing any reader sees
+        now or after any later op, so two stores that exchange ops converge exactly
+        as they did without the filter. It is NOT "equivalent to admit-then-compact":
+        compaction may delete what a LATER op still needs; ingress must not. So the
+        put is still admitted when it may be one half of a cross-entity edge — the
+        only way a reader outside the dead entity resolves it by op id:
+
+        * a parent this store cannot resolve to the same entity, stored or in this
+          batch. The put is redacted, so ``replaces`` is unreadable; an unknown parent
+          may be the head of a LIVE fact this forgotten put replaced, and
+          ``_NOT_REPLACED_SQL`` stops hiding that fact if the child row is missing
+          when its head arrives later. Measured on the incident echo: 1,288 of
+          22,403 dead puts arrive with an unresolvable parent (all same-entity
+          revisions compaction removed), so this costs ~6% of the saving.
+        * a stored or in-batch child in another entity, or a known parent in one.
+        * a parent of a stored move-shaped tombstone (one naming a parent outside
+          this entity): a move's destination put may still arrive, and
+          ``show().moved_from`` reads the source head through that edge.
+
+        WHY SUPERSEDED REVISIONS OF LIVE ENTITIES ARE DELIBERATELY NOT DROPPED (the
+        other 148 of the echo; review round 1 on PR #3058, M1 and M2). A revision
+        with a stored descendant is unreadable today, but two readers resolve a
+        revision by op id when a LATER op names it: ``_NOT_REPLACED_SQL`` joins the
+        parent row of a ``replaces`` edge, and ``_move_tombstone_conflict`` counts a
+        move tombstone's same-entity parents as "covered". Dropping the revision
+        makes a later replacement fail to hide its target, and lets a later move
+        erase a correction the mover never saw — on this peer only, permanently.
+        Re-adding that rule needs a persisted ``(op_id -> entity_id)`` ledger of
+        dropped revisions (and ideally of compaction victims), consulted by BOTH
+        readers so a dropped parent resolves as covered/replaced rather than
+        unknown. Without it, do not drop a put of a live entity here.
+
+        Cost: one stored-entity read the caller already did, at most two indexed
+        lookups, and the entity's stored ops — never a store-wide walk.
+        """
+        if op["kind"] != "put" or not any(x["kind"] == "tombstone" for x in old_ops):
+            return False
+        entity, op_id = op["entity_id"], op["op_id"]
+        own = {existing["op_id"] for existing in old_ops} | {
+            other["op_id"] for other in batch.arriving[entity]
+        }
+        if any(parent not in own for parent in op["parents"]):
+            return False
+        if any(child_entity != entity for child_entity in batch.children.get(op_id, ())):
+            return False
+        if db.execute(
+            "SELECT 1 FROM causal_edges e JOIN ops c ON c.op_id=e.op_id "
+            "WHERE e.parent=? AND c.entity_id<>? LIMIT 1",
+            (op_id, entity),
+        ).fetchone():
+            return False
+        for tomb in old_ops:
+            if (
+                tomb["kind"] == "tombstone"
+                and op_id in tomb["parents"]
+                and any(parent not in own and parent != op_id for parent in tomb["parents"])
+            ):
+                return False
+        return True
 
     def import_session(self) -> None:
         if not self.session_dir or not self.identity.session_id:
@@ -1478,8 +3596,11 @@ class MemoryStore:
                 [*values, len(target), target],
             ).fetchall()
         if len(rows) > 1:
+            # The query is capped, so a full page means "at least this many" — a
+            # bare count would understate an ambiguity the caller must widen.
+            count = "at least 4" if len(rows) == 4 else str(len(rows))
             raise MemoryError(
-                f"'{target}' matches {len(rows)} memories; type more of the ID "
+                f"'{target}' matches {count} memories; type more of the ID "
                 "(or use the full SCOPE/ID shown by list)."
             )
         if not rows:
@@ -1551,8 +3672,96 @@ class MemoryStore:
                     ]
                 ),
                 "revisions": len(ops),
+                "moved_from": None if tombs else self._moved_from(db, entity, ops),
                 "untrusted": True,
             }
+
+    def _moved_from(
+        self, db: sqlite3.Connection, entity: str, ops: list[dict[str, Any]]
+    ) -> dict[str, str] | None:
+        """The source of a moved fact, from the cross-entity parent ``move`` writes.
+
+        Derived from the entity's ROOT revision, not its head: an ordinary
+        correction parents only the same entity, so after the first edit the head
+        no longer names the move and the receipt's promise would silently vanish.
+        An ordinary creation has no parents, and a ``replaces`` creation's parent
+        is a supersession link (not a move), so this cannot mislabel either.
+        """
+        revisions = [op for op in ops if op["kind"] == "put"]
+        ids = {op["op_id"] for op in revisions}
+        # A root revision has no SAME-ENTITY parent; a correction does.
+        roots = sorted(
+            (op for op in revisions if not any(parent in ids for parent in op["parents"])),
+            key=lambda op: (op["hlc"], op["op_id"]),
+        )
+        if not roots:
+            return None
+        root_fact = roots[0]["fact"] or {}
+        replaced = root_fact.get("replaces") or ""
+        for parent in roots[0]["parents"]:
+            row = db.execute("SELECT scope,entity_id FROM ops WHERE op_id=?", (parent,)).fetchone()
+            if row and row[1] != entity and row[1] != replaced:
+                return {"scope": row[0], "id": row[1]}
+        return None
+
+    def _move_tombstone_conflict(
+        self,
+        db: sqlite3.Connection,
+        op: dict[str, Any],
+        old_ops: list[dict[str, Any]],
+    ) -> str | None:
+        """Refuse a MOVE's source tombstone when it would erase an unseen revision.
+
+        ``move`` names its destination ``put`` as a second parent of the source
+        tombstone; a forget tombstone's parents are all same-entity revisions. That
+        is the protocol-safe marker: an old peer still reads the op as an ordinary
+        tombstone, while a peer that holds a concurrent correction can refuse
+        instead of redacting it. A move is advertised as a relocation, so losing an
+        edit the mover never saw is not a documented forget.
+
+        The destination op may be absent here when this peer's ``network.memory.scopes``
+        filters out the destination scope; the second, unresolvable parent still
+        identifies the op as move-shaped, and coverage comes from the same-entity
+        parents the mover DID send — an unseen sibling is exactly a local head that
+        is not among them.
+
+        Deliberately returns a refusal only for that marker: a real forget must
+        still replicate and redact unconditionally (a tombstone is the only way to
+        remove a sensitive body). An entity already tombstoned locally is allowed
+        through — there is no live revision left to protect.
+        """
+        if any(existing["kind"] == "tombstone" for existing in old_ops):
+            return None
+        local = {existing["op_id"] for existing in old_ops}
+        covered = {parent for parent in op["parents"] if parent in local}
+        unresolved = [parent for parent in op["parents"] if parent not in local]
+        if not unresolved:
+            return None  # an ordinary forget: every parent is a local revision
+        move = False
+        for parent in unresolved:
+            row = db.execute("SELECT data FROM ops WHERE op_id=?", (parent,)).fetchone()
+            if not row:
+                continue
+            foreign = json.loads(row[0])
+            if foreign["entity_id"] != op["entity_id"] and foreign["kind"] == "put":
+                move = True
+        if not move and len(op["parents"]) > 1 and covered:
+            # The destination scope was filtered out of this peer's sync config, so
+            # the destination op never arrived. A forget's parents are ALL local by
+            # construction; a second, unresolvable parent is move-shaped.
+            move = True
+        if not move:
+            return None
+        unseen = [head for head in self._heads(old_ops) if head["op_id"] not in covered]
+        if not unseen:
+            return None
+        return (
+            "Memory move refused: a move from another device would replace a revision "
+            "this device holds but the moving device never saw. Read that revision and "
+            "keep anything it adds (or forget the source fact). Memory sync retries "
+            "automatically after about 30 minutes; restarting this device picks the retry up "
+            "sooner."
+        )
 
     def inventory(
         self, scope: str | None = None, *, limit: int = 20, cursor: str | None = None
@@ -1569,7 +3778,18 @@ class MemoryStore:
                 "available_scopes": [name for name, _ in self.identity.scopes()],
                 "active_tokens": 0,
                 "ops": 0,
-                "limits": {"global_tokens": 16000, "owner_tokens": 50000, "item_tokens": 256},
+                "quotas": [],
+                "storage_bytes": 0,
+                "storage_cap_bytes": (MAX_DB_BYTES // CAP_PAGE_SIZE) * CAP_PAGE_SIZE,
+                "storage_percent": 0.0,
+                "storage_free_bytes": 0,
+                "storage_full": False,
+                "database_path": str(self.path),
+                "limits": {
+                    "global_tokens": GLOBAL_TOKENS,
+                    "owner_tokens": OWNER_TOKENS,
+                    "item_tokens": ITEM_TOKENS,
+                },
             }
         with self.connection() as db:
             page_where = where + (" AND entity_id<?" if cursor else "")
@@ -1583,6 +3803,24 @@ class MemoryStore:
                 f"SELECT coalesce(sum(tokens),0) FROM current WHERE {where}", values
             ).fetchone()[0]
             count = db.execute(f"SELECT count(*) FROM ops WHERE {where}", values).fetchone()[0]
+            pairs = [(scope, self.identity.owner(scope))] if scope else self.identity.scopes()
+            quotas = []
+            for name, owner in pairs:
+                used = db.execute(
+                    "SELECT coalesce(sum(tokens),0) FROM current WHERE scope=? AND owner=?",
+                    (name, owner),
+                ).fetchone()[0]
+                cap = self.token_cap(name)
+                quotas.append(
+                    {
+                        "scope": name,
+                        "owner": owner,
+                        "used_tokens": used,
+                        "cap_tokens": cap,
+                        "percent": round(100.0 * used / cap, 1) if cap else 0.0,
+                        "headroom_tokens": cap - used,
+                    }
+                )
             return {
                 "items": [
                     {
@@ -1597,14 +3835,13 @@ class MemoryStore:
                 ],
                 "active_tokens": usage,
                 "ops": count,
+                "quotas": quotas,
                 "next_cursor": rows[-1][0] if len(rows) == limit else None,
-                "storage_bytes": sum(
-                    p.stat().st_size for p in self.root.glob("memory.db*") if p.is_file()
-                ),
+                **self._storage_view(db),
                 "limits": {
-                    "global_tokens": 16000,
-                    "owner_tokens": 50000,
-                    "item_tokens": 256,
+                    "global_tokens": GLOBAL_TOKENS,
+                    "owner_tokens": OWNER_TOKENS,
+                    "item_tokens": ITEM_TOKENS,
                     "owner_ops": MAX_OWNER_OPS,
                     "revisions": MAX_REVISIONS,
                     "storage_bytes": MAX_DB_BYTES,
@@ -1612,6 +3849,175 @@ class MemoryStore:
                 "help": INVENTORY_HELP,
                 "available_scopes": [name for name, _ in self.identity.scopes()],
             }
+
+    def scan(self, scope: str | None = None) -> list[dict[str, Any]]:
+        """Every current fact in the authorised scope(s), flattened for a preview.
+
+        WHY not ``search()``: a maintenance preview must see the WHOLE scope —
+        including facts the FTS ranker would not return together and rows whose
+        status is candidate/disputed/expired, which are precisely the ones a
+        cleanup is asked to retire. Read-only by construction: it checks for the
+        file before ``connection()`` (which would create an empty store) and runs
+        one SELECT, so ``consolidate`` can promise it changed nothing.
+        """
+        where, values = self._where(scope)
+        if not self.path.exists():
+            return []
+        with self.connection() as db:
+            rows = db.execute(
+                f"SELECT entity_id,scope,op_id,fact,tokens FROM current WHERE {where} "
+                "ORDER BY entity_id DESC",
+                values,
+            ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            fact = json.loads(row[3])
+            items.append(
+                {
+                    "id": row[0],
+                    "scope": row[1],
+                    "version": row[2],
+                    "title": fact["title"],
+                    "body": fact["body"],
+                    "tags": fact["tags"],
+                    "status": fact["status"],
+                    "created_at": fact["created_at"],
+                    "verified_at": fact["verified_at"],
+                    "tokens": row[4],
+                }
+            )
+        return items
+
+    def select(
+        self,
+        scope: str,
+        *,
+        older_than: float | None = None,
+        unverified: bool = False,
+        tags: list[str] | None = None,
+        title_matches: str | None = None,
+        body_matches: str | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Predicate selection over one scope for a bulk-forget preview.
+
+        Composable: predicate KINDS are ANDed, repeated ``tags`` are ANY-of.
+        Regexes are case-insensitive and length-capped; a group repeated around an
+        unbounded repeat (``(a+)+``) is refused before compilation because Python's
+        ``re`` has no timeout and that shape backtracks exponentially. The check is
+        a lexical heuristic, not a proof (see ``_nested_unbounded_repeat``), so the
+        contract is "recognised catastrophic shapes are refused", never "every
+        accepted pattern is bounded". Read-only: the caller prints the result and
+        hands the returned ``(id, version)`` pairs to :meth:`forget_many`, which
+        re-checks every revision at commit time.
+        """
+        patterns: dict[str, re.Pattern[str]] = {}
+        for name, value in (("title", title_matches), ("body", body_matches)):
+            if value:
+                if len(value) > 500:
+                    raise MemoryError(f"--{name}-matches is limited to 500 characters.")
+                if _nested_unbounded_repeat(value):
+                    raise MemoryError(
+                        f"--{name}-matches repeats a group that itself contains an "
+                        "unbounded repeat (for example '(a+)+'); that shape can backtrack "
+                        "exponentially, so it is refused rather than run. Rewrite it "
+                        "without nesting repetitions."
+                    )
+                try:
+                    patterns[name] = re.compile(value, re.IGNORECASE)
+                except re.error:
+                    # Never echo the pattern: a half-typed value may be a secret.
+                    raise MemoryError(
+                        f"--{name}-matches is not a valid regular expression."
+                    ) from None
+        current = time.time() if now is None else now
+        cutoff = None
+        if older_than is not None:
+            if older_than <= 0:
+                raise MemoryError("--older-than needs a positive duration.")
+            cutoff = current - older_than
+        wanted = {tag.lower() for tag in (tags or [])}
+        rows = self.scan(scope)
+        matched: list[dict[str, Any]] = []
+        for row in rows:
+            created = row["created_at"]
+            # A fact with no retention timestamp cannot be shown to be old; a
+            # time filter must not quietly treat it as ancient.
+            if cutoff is not None and not (isinstance(created, (int, float)) and created <= cutoff):
+                continue
+            if unverified and row["verified_at"] is not None:
+                continue
+            if wanted and not wanted & {tag.lower() for tag in row["tags"]}:
+                continue
+            if "title" in patterns and not patterns["title"].search(row["title"]):
+                continue
+            if "body" in patterns and not patterns["body"].search(row["body"]):
+                continue
+            matched.append(row)
+        return {
+            "scope": scope,
+            "items": matched,
+            "total": len(rows),
+            "tokens": sum(row["tokens"] for row in matched),
+            "total_tokens": sum(row["tokens"] for row in rows),
+        }
+
+    def tagged(self, tag: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Current facts carrying ``tag``, NEWEST CREATED first, bounded by ``limit``.
+
+        A read pure and simple: no write, no index, no second store. It exists
+        because recall ranks by relevance, which is the wrong order for a caller
+        that wants the most recent decisions, and because ``scan`` has no date
+        order at all.
+
+        **EXPLICIT replacement is honoured; content-based supersession is not.**
+        A fact replaced through the documented ``replaces`` edge is hidden,
+        exactly as :meth:`search` hides it — both use
+        :data:`_NOT_REPLACED_SQL`, so the two readers cannot develop two
+        definitions of "replaced". What the store does NOT do is DERIVE that
+        two facts say the same thing: content is never compared, so a
+        contradicted decision with no explicit edge may still appear. Callers
+        must label the rest "most recently written", never "in force".
+
+        Also excluded, because the store already treats them as settled: a past
+        ``expires_at``, a stored ``expired`` status, and a stored
+        ``superseded`` status. That is status the store was TOLD, not an
+        inference about content.
+        """
+        if not isinstance(tag, str) or not tag or len(tag) > 64:
+            raise MemoryError("A memory tag is a short non-empty string.")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise MemoryError("Tagged reads accept 1-100 results.")
+        if not self.path.exists():
+            return []
+        where, values = self._where(None)
+        with self.connection() as db:
+            rows = db.execute(
+                f"SELECT c.entity_id,c.scope,c.fact FROM current c WHERE {where} "
+                "AND EXISTS (SELECT 1 FROM json_each(json_extract(c.fact,'$.tags')) "
+                "AS tag_row WHERE tag_row.value=?) "
+                f"AND {_NOT_REPLACED_SQL} "
+                "AND (json_extract(c.fact,'$.expires_at') IS NULL "
+                "OR json_extract(c.fact,'$.expires_at')>?) "
+                "AND json_extract(c.fact,'$.status') NOT IN ('expired','superseded') "
+                "ORDER BY json_extract(c.fact,'$.created_at') DESC, c.entity_id DESC "
+                "LIMIT ?",
+                [*values, tag, time.time(), limit],
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            fact = json.loads(row[2])
+            out.append(
+                {
+                    "id": row[0],
+                    "scope": row[1],
+                    "body": fact.get("body", ""),
+                    "tags": list(fact.get("tags") or ()),
+                    "created_at": fact.get("created_at"),
+                    "status": fact.get("status"),
+                }
+            )
+        return out
 
     def search(
         self,
@@ -1642,7 +4048,7 @@ class MemoryStore:
             raise MemoryError("Search accepts ≤2048 characters, 1–20 results and 1–2000 tokens.")
         where, values = self._where(scope)
         words = [t.lower() for t in re.findall(r"[\w]+", query) if len(t) >= 2]
-        terms = list(dict.fromkeys(t for t in words if t not in _STOP))[:24]
+        terms = list(dict.fromkeys(t for t in words if t not in STOP_WORDS))[:24]
         if not self.path.exists():
             return []
         if words and not suggest:
@@ -1652,7 +4058,7 @@ class MemoryStore:
             # suggestion path keeps its generic-word suppression.
             where_alias, alias_values = self._where(scope)
             with self.connection() as db:
-                for word in dict.fromkeys(w for w in words if w in _STOP):
+                for word in dict.fromkeys(w for w in words if w in STOP_WORDS):
                     hit = db.execute(
                         "SELECT 1 FROM recall JOIN current c ON c.entity_id=recall.entity_id "
                         "WHERE recall MATCH ? AND "
@@ -1669,11 +4075,7 @@ class MemoryStore:
             rows = db.execute(
                 "SELECT c.entity_id,c.scope,c.op_id,c.fact FROM recall JOIN current c "
                 "ON c.entity_id=recall.entity_id WHERE recall MATCH ? AND "
-                f"{where} AND NOT EXISTS (SELECT 1 FROM ops p "
-                "JOIN causal_edges e ON e.parent=p.op_id JOIN ops child ON child.op_id=e.op_id "
-                "WHERE p.entity_id=c.entity_id AND child.entity_id<>c.entity_id "
-                "AND p.scope=c.scope AND p.owner=c.owner "
-                "AND child.scope=c.scope AND child.owner=c.owner) "
+                f"{where} AND {_NOT_REPLACED_SQL} "
                 "AND (json_extract(c.fact,'$.expires_at') IS NULL "
                 "OR json_extract(c.fact,'$.expires_at')>?) "
                 "AND (?=0 OR json_extract(c.fact,'$.status')<>'disputed') "
@@ -1766,6 +4168,130 @@ class MemoryStore:
                 if len(result) >= min(limit, 3 if suggest else limit):
                     break
             return result
+
+    #: Recall-telemetry dedup window. Several reads of one fact inside one turn are
+    #: one recall: a turn that searches, then shows, then re-searches the same fact
+    #: is one use of it, and counting three would bias the next round's ranking
+    #: (bm25 x recency x importance) toward chatty turns. CLASS-level because the
+    #: tool path builds a fresh ``MemoryStore`` per call (``store_for``); keyed by
+    #: (database, session) so sessions hosted in one process never share a window.
+    #: Each key keeps its last ``_RECALL_TURNS_KEPT`` turns rather than one,
+    #: because agent reads (keyed by the tool turn) and suggestion renders (keyed by
+    #: the user entry) interleave inside one turn and must not reset each other.
+    #: At most ``_RECALL_KEYS_KEPT`` (database, session) keys are held, oldest
+    #: dropped first, so a long-lived host process does not grow one per session.
+    _recall_turns: dict[tuple[str, str], dict[str, set[str]]] = {}
+    _RECALL_TURNS_KEPT = 4
+    _RECALL_KEYS_KEPT = 256
+    #: Lock wait for the telemetry write, in milliseconds. The write is best-effort
+    #: and runs on the agent's read path, so it must never queue behind a writer:
+    #: under ``busy_timeout=5000`` a held write lock (a capture pass's eviction
+    #: drain, sync apply, journal compaction) stalled a plain ``show`` for 5.17 s
+    #: (review round 1, M4). A lost bump is acceptable; a stalled read is not.
+    _RECALL_BUSY_MS = 25
+
+    def begin_recall_turn(self, turn: str) -> None:
+        """Name the turn the next :meth:`note_recall` calls on THIS instance belong to.
+
+        Callers pass the identity the host already mints per turn: the tool context's
+        ``send_turn_id`` (rebuilt each attention turn) and, for suggestion renders, the
+        latest user entry id. An instance that never names a turn uses the "" window.
+        """
+        self._recall_turn = turn
+
+    def _recall_window(self) -> set[str]:
+        key = (str(self.path), self.identity.session_id)
+        windows = MemoryStore._recall_turns.pop(key, {})
+        # Re-inserted so dict order is recency order for the key bound below.
+        MemoryStore._recall_turns[key] = windows
+        while len(MemoryStore._recall_turns) > self._RECALL_KEYS_KEPT:
+            MemoryStore._recall_turns.pop(next(iter(MemoryStore._recall_turns)))
+        turn = getattr(self, "_recall_turn", "")
+        if turn not in windows:
+            windows[turn] = set()
+            while len(windows) > self._RECALL_TURNS_KEPT:
+                windows.pop(next(iter(windows)))
+        return windows[turn]
+
+    def note_recall(self, entities: Iterable[str]) -> None:
+        """B5 recall telemetry: bump ``recall_stats(entity, last_at, n)``, once per turn.
+
+        WHY: there is no recall signal today, so the design measured "was this fact
+        ever used" from a transcript grep (212 of 7,883 captured IDs). The next round
+        ranks and expires candidates on real reads, which needs this table first.
+
+        WHO calls it: the AGENT read tool and the rendered suggestion block only —
+        never ``show``/``search`` themselves, which also serve ``lop memory`` and the
+        CLI edit path. A human inspecting memory is not the agent recalling it, and
+        counting those reads would bias the "never recalled" signal (review m1).
+
+        Constraints: LOCAL ONLY — a plain side table never written to ``ops``, never
+        exported to a session log and never synced, so it is no protocol change and
+        carries no fact content (an entity id, a timestamp and a counter). NEVER
+        BLOCKING: a dedicated connection waits at most ``_RECALL_BUSY_MS`` for the
+        write lock and otherwise drops the bump. The entities are marked seen either
+        way, so a turn that lost its bump does not retry (and wait) on every read.
+        """
+        seen = self._recall_window()
+        fresh = [e for e in dict.fromkeys(entities) if e not in seen]
+        if not fresh:
+            return
+        seen.update(fresh)
+        if not self.path.exists():
+            return
+        try:
+            # Not ``connection()``: that one waits up to 5 s for a lock and re-runs
+            # the whole schema script. The page cap is restated here because it is
+            # a per-connection pragma, and this connection must honour it too.
+            db = sqlite3.connect(self.path, timeout=self._RECALL_BUSY_MS / 1000)
+        except sqlite3.Error:
+            return
+        try:
+            db.execute(f"PRAGMA busy_timeout={self._RECALL_BUSY_MS}")
+            db.execute(f"PRAGMA max_page_count={MAX_DB_BYTES // CAP_PAGE_SIZE}")
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(_RECALL_STATS_SCHEMA)
+            now = time.time()
+            db.executemany(
+                "INSERT INTO recall_stats VALUES (?,?,1) ON CONFLICT(entity) DO UPDATE SET "
+                "last_at=excluded.last_at, n=recall_stats.n+1",
+                [(entity, now) for entity in fresh],
+            )
+            db.commit()
+        except sqlite3.Error:
+            return
+        finally:
+            db.close()
+
+    def recall_summary(self) -> dict[str, Any]:
+        """Aggregate recall telemetry for ``lop memory status --json``; never per-fact rows.
+
+        ``recalled`` counts LIVE facts with at least one recorded read, against
+        ``live`` facts in total, split by origin (captured candidate vs stated);
+        ``reads`` is the summed counter. Rows for forgotten entities stay in the side
+        table (it is never pruned by a forget) but are not counted here.
+        """
+        empty = {"live": 0, "recalled": 0, "reads": 0, "captured_recalled": 0}
+        if not self.path.exists():
+            return empty
+        with self.connection() as db:
+            if not db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='recall_stats'"
+            ).fetchone():
+                live = db.execute("SELECT count(*) FROM current").fetchone()[0]
+                return dict(empty, live=int(live))
+            row = db.execute(
+                "SELECT count(*), count(r.entity), coalesce(sum(r.n),0), "
+                "coalesce(sum(r.entity IS NOT NULL AND "
+                "json_extract(c.fact,'$.source.author')='deterministic-capture'),0) "
+                "FROM current c LEFT JOIN recall_stats r ON r.entity=c.entity_id"
+            ).fetchone()
+        return {
+            "live": int(row[0]),
+            "recalled": int(row[1]),
+            "reads": int(row[2]),
+            "captured_recalled": int(row[3]),
+        }
 
 
 def parse_url(url: str) -> tuple[str | None, str | None, dict[str, str]]:
