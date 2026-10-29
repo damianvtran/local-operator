@@ -33,8 +33,7 @@ translators and the auditor. Wave 1 locale.
   `wire.settings.account_policy` 3, `wire.host_speed` 2), including the required
   `no garantiza un acierto de caché` in `wire.settings.account_policy` — a
   string this wave ships. The guide now agrees with the shipped state; follow
-  `caché` rather than reopening the split. (The 35 `cache` tokens in the English
-  sources are the source-side count, not this one.)
+  `caché` rather than reopening the split.
 
 ## Locale calls (es)
 

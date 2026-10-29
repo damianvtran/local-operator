@@ -8032,7 +8032,7 @@
         "findings": 0
       },
       "status": "passed",
-      "note": "es W1 backfill: 17 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). This namespace's bytes did NOT move during remediation: round 1 (`w1a2`) and round 2 (`w1a3`, a full pass) both read the same file, and `w1a3` binds exactly the shipped bytes with 0 unresolved blocker/major. Evidence: i18n/audits/evidence/es/wire.exec/w1a2/ and …/w1a3/. Open minor/nit findings are dispositioned in the w1a3 report.md."
+      "note": "es W1 backfill: 17 keys. Translated by an `i18n-translator` agent and audited by a different `i18n-auditor` agent (both sessions on the `radient/auto` route after provider-quota fallbacks — disclosed, not pinned). This namespace's bytes did NOT move during remediation: round 1 (`w1a1`) and round 2 (`w1a3`, a full pass) both read the same file, and `w1a3` binds exactly the shipped bytes with 0 unresolved blocker/major. Evidence: i18n/audits/evidence/es/wire.exec/w1a1/ and …/w1a3/. Open minor/nit findings are dispositioned in the w1a3 report.md."
     },
     {
       "locale": "es",
