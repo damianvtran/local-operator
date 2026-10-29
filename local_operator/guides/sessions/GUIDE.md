@@ -41,12 +41,13 @@ device) narrows the view. With no mesh, or a relay that is not answering,
 could be; a peer that did not answer is named. `info`, `peek`, `spawn`,
 `resume` and `stop` take `peer` (a device name or id) and act ON that device's
 runtime: `spawn` mints the session there; `resume` warms it, or with `prompt`
-drives a turn there and returns the owner's reply; `stop` ends it where it
-lives — this tool sends no force (the CLI's `lop network sessions --stop <id>
---force` is the escalation). `peek` reads only the newest `steps` rows where
-the session LIVES, live sessions only — a stored one refuses with the warm-up
-named — and `query`/`regex`/`digest` stay local. Message delivery to a session
-on another device is `send` with `peer`; `guide://peer-messaging` carries it.
+drives a turn there and returns the owner's reply; `stop` is ALWAYS REFUSED for
+a `peer` target — an idle-only, no-signal remote stop is not on the wire yet, so
+nothing is sent and the operator stops it on that device. `peek` reads only the
+newest `steps` rows where the session LIVES, live sessions only — a stored one
+refuses with the warm-up named — and `query`/`regex`/`digest` stay local.
+Message delivery to a session on another device is `send` with `peer`;
+`guide://peer-messaging` carries it.
 
 ## Visibility: `spawn` is listed by default
 
@@ -65,8 +66,13 @@ that decision.
 resumed session keeps its visibility. A hidden session stays hidden; the remedy
 is a new workstream, not an edit.
 
-`stop` runs the graceful ladder and releases the session lease. Restart is two
-auditable calls (`stop` + `resume`); this version has no force option.
+`stop` ends an IDLE local session and releases its session lease. It never
+signals and never cuts work: a session that is working (a turn, an approval, a
+subagent or a job), one due a wake inside the hold window, or an older owner
+that cannot promise an idle-only stop is REFUSED, and the refusal names which.
+Restart is two auditable calls (`stop` + `resume`). There is no force option and
+no way to stop a session that is mid-run from this tool — the escalation stays
+the operator's, in the CLI.
 
 ## Resume — the canonical flow
 
