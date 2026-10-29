@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "audit_id": "le28r2-remed",
+  "locale": "ru",
+  "namespace": "wire.settings",
+  "audit_date": "2026-10-28",
+  "scope": "delta: the corrected keys only, plus their direct sentence",
+  "remediation_commit": "4d38a1d4b8e9a36fa0a38f4833ecf86263da45db",
+  "parent_revision": "9495f8a6c3bf2b5438ef5c33d7274cf519435dda",
+  "previous_target_sha256": "f282f919845af17f0ee837083ee9e452796573c3af0d2b37580b775d3a0f963d",
+  "target_sha256": "5185479b62b911f6db52d90e20356c0b002704738553bba44f7d90caf79d37e1",
+  "en_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+  "key_count_in_namespace": 820,
+  "keys_reaudited": 4,
+  "routed_receipt": {
+    "path": "local_operator/i18n/catalogues/ru/wire.settings.json",
+    "session": "c754bf63ab2a",
+    "ts": "2026-10-29T00:24:37Z",
+    "tool": "read_public_copy",
+    "policy": "docs/security/redaction-policy.md",
+    "chars": 88375,
+    "sha256": "c07e9c4616a2104517ad8fee7ecc0d200a1e778a36978fe66e1e7ef1a010c04b"
+  },
+  "routed_receipt_digest_recomputed": "c07e9c4616a2104517ad8fee7ecc0d200a1e778a36978fe66e1e7ef1a010c04b",
+  "findings": [
+    {
+      "key": "wire.settings.subagents_max_running.label",
+      "severity_raised": "major",
+      "disposition": "fixed",
+      "resolved": true,
+      "new_value": "Макс. фоновых заданий",
+      "en": "Max background jobs",
+      "note": "job → «задание» per the ru guide; «задача» stays for todos."
+    },
+    {
+      "key": "wire.settings.supplements_maxcostusd.help",
+      "severity_raised": "major",
+      "disposition": "fixed",
+      "resolved": true,
+      "new_value": "Требует включённых графиков. Мягкий потолок расходов на одно задание.",
+      "en": "Needs graphics on. Soft cap on one job's spend.",
+      "note": "job → «задание»."
+    },
+    {
+      "key": "wire.settings.supplements_timeouts.help",
+      "severity_raised": "major",
+      "disposition": "fixed",
+      "resolved": true,
+      "new_value": "Требует включённых дополнений. Отказаться от всего задания по истечении этого срока.",
+      "en": "Needs Highlights on. Give up on a whole job after this long.",
+      "note": "job → «задание»."
+    },
+    {
+      "key": "wire.settings.librarian_enabled.help",
+      "severity_raised": "major",
+      "disposition": "fixed",
+      "resolved": true,
+      "new_value": "Считывается при запуске и в /v1/desktop/librarian; если отключено, её сессия не создаётся.",
+      "en": "Read at boot and by /v1/desktop/librarian; a disabled install never creates her session.",
+      "note": "session → «сессия»; feminine «её» matches the English \"her session\" and the aida precedent."
+    }
+  ],
+  "verdict": "PASS",
+  "auditor": {
+    "agent": "translation-reviewer (independent; did not translate)",
+    "session": "bc5209588225",
+    "models": "anthropic/claude-sonnet-5-5 for the original wire.settings audits; openai/gpt-6-astra for reconciliation and packaging; provider fallbacks disclosed in the pair record",
+    "independence": "The remediation was authored in a separate translator session (c57356a6dc11 lane); this audit only judged the resulting bytes."
+  },
+  "limitations": [
+    "Delta scope only: the 809 unchanged keys keep their le28r2 judgement.",
+    "No native-speaker certification; Hindi idiom would need one.",
+    "Scalar text/ICU checks, not a rendered frame."
+  ]
+}

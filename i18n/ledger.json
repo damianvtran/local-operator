@@ -8284,7 +8284,7 @@
         "read_route_verified": false
       },
       "status": "passed",
-      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/fr/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
+      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 0 B/M. Record: i18n/audits/evidence/fr/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only. | 2026-10-28 remediation 4d38a1d4b8e applies the 2 adjudicated correction(s) for this locale; delta re-audit le28r2-remed: PASS, 0 unresolved B/M. Record: i18n/audits/evidence/fr/wire.settings/le28r2-remed/findings.json."
     },
     {
       "locale": "ru",
@@ -8299,13 +8299,13 @@
         "agent": "audit-ru-wire-settings (independent reviewer) / 65c6fbd8893a",
         "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
         "date": "2026-10-28",
-        "result": "blocked",
+        "result": "passed",
         "findings": 7,
-        "unresolved_blocker_major": 4,
+        "unresolved_blocker_major": 0,
         "read_route_verified": false
       },
-      "status": "blocked",
-      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 4 B/M. Record: i18n/audits/evidence/ru/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
+      "status": "passed",
+      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 4 B/M. Record: i18n/audits/evidence/ru/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only. | 2026-10-28 remediation 4d38a1d4b8e applies the 4 adjudicated correction(s) for this locale; delta re-audit le28r2-remed: PASS, 0 unresolved B/M. Record: i18n/audits/evidence/ru/wire.settings/le28r2-remed/findings.json."
     },
     {
       "locale": "vi",
@@ -8320,13 +8320,13 @@
         "agent": "audit-vi-wire-settings (independent reviewer) / 270888f1305d",
         "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
         "date": "2026-10-28",
-        "result": "blocked",
+        "result": "passed",
         "findings": 6,
-        "unresolved_blocker_major": 3,
+        "unresolved_blocker_major": 0,
         "read_route_verified": false
       },
-      "status": "blocked",
-      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 3 B/M. Record: i18n/audits/evidence/vi/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
+      "status": "passed",
+      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 3 B/M. Record: i18n/audits/evidence/vi/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only. | 2026-10-28 remediation 4d38a1d4b8e applies the 3 adjudicated correction(s) for this locale; delta re-audit le28r2-remed: PASS, 0 unresolved B/M. Record: i18n/audits/evidence/vi/wire.settings/le28r2-remed/findings.json."
     },
     {
       "locale": "hi",
@@ -8341,13 +8341,13 @@
         "agent": "audit-hi-wire-settings (independent reviewer) / a4374e8bfa88",
         "model": "anthropic/claude-sonnet-5-5; openai/gpt-6-astra final adjudication",
         "date": "2026-10-28",
-        "result": "blocked",
+        "result": "passed",
         "findings": 4,
-        "unresolved_blocker_major": 1,
+        "unresolved_blocker_major": 0,
         "read_route_verified": false
       },
-      "status": "blocked",
-      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 1 B/M. Record: i18n/audits/evidence/hi/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only."
+      "status": "passed",
+      "note": "2026-10-28 fresh independent current-byte audit; FINDINGS, 1 B/M. Record: i18n/audits/evidence/hi/wire.settings/le28r2/record.json. Historical rows retained; no lost geometry/native proof recreated. Human/native sign-off waived, not an audit waiver. Routed receipts (en source + locale catalogue) in the record; en context sidecar not routable. Judgement was direct-read; receipts confirm bytes only. | 2026-10-28 remediation 4d38a1d4b8e applies the 2 adjudicated correction(s) for this locale; delta re-audit le28r2-remed: PASS, 0 unresolved B/M. Record: i18n/audits/evidence/hi/wire.settings/le28r2-remed/findings.json."
     }
   ]
 }

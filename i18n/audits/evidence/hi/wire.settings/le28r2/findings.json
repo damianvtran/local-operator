@@ -2,7 +2,7 @@
   "locale": "hi",
   "namespace": "wire.settings",
   "result": "FINDINGS",
-  "gate_status": "blocked",
+  "gate_status": "passed",
   "counts": {
     "blocker": 0,
     "major": 1,
@@ -130,5 +130,17 @@
   "publication_hold_reasons": [
     "unresolved semantic/glossary majors",
     "en context sidecar not routable"
-  ]
+  ],
+  "remediation": {
+    "audit_id": "le28r2-remed",
+    "record": "i18n/audits/evidence/hi/wire.settings/le28r2-remed/findings.json",
+    "commit": "4d38a1d4b8e9a36fa0a38f4833ecf86263da45db",
+    "keys": [
+      "wire.settings.proactive_patience_episode_ttl_ms.help",
+      "wire.settings.shell_environment_exclude.help"
+    ],
+    "verdict": "PASS",
+    "target_sha256_before": "01dd65f601e84c69728cf6104609f3e5487bf7026579c5fa5c11026d487286f7",
+    "target_sha256_after": "c99c7f088fe7b836f7610fb67215ba9701712d6ffd886d38dbe15cce52f42155"
+  }
 }

@@ -24,7 +24,7 @@ sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
 rows={ (r['locale'],r['namespace']):r for r in new[-24:]}
 records=sorted((root/'i18n/audits/evidence').glob('*/*/le28r2/record.json'))
 assert len(records)==len(rows)==24
-files=0;inputs=0;majors=0;counts={};routed=0
+files=0;inputs=0;counts={};routed=0;remediated=0;resolved_majors=0;majors_raised=0;majors_unresolved=0
 for path in records:
     d=json.loads(path.read_text());b=path.parent
     r=json.loads((b/'receipt.json').read_text())
@@ -33,7 +33,8 @@ for path in records:
         assert sha(b/name)==h,(str(b),name)
         files+=1
     for name,p in d['input_paths'].items():
-        assert sha(root/p)==d['input_hashes'][name],(str(b),name)
+        base_bytes=subprocess.check_output(['git','show',base+':'+p])
+        assert hashlib.sha256(base_bytes).hexdigest()==d['input_hashes'][name],(str(b),name,'audited base bytes')
         inputs+=1
     row=rows[d['locale'],d['namespace']]
     assert row['source_sha256']==d['input_hashes']['en']
@@ -52,10 +53,22 @@ for path in records:
     assert len(coverage['keys'])==coverage['keys_read']==d['key_count']
     f=json.loads((b/'findings.json').read_text())
     assert f['unresolved_blocker_major']==sum(x['severity'] in ('blocker','major') for x in f['findings'])
-    majors+=f['unresolved_blocker_major']
+    raised=sum(x['severity'] in ('blocker','major') for x in f['findings'])
+    majors_raised+=raised
+    rem=b.parent/'le28r2-remed'
+    if rem.is_dir():
+        rf=json.loads((rem/'findings.json').read_text())
+        assert rf['verdict']=='PASS' and all(x['resolved'] for x in rf['findings'])
+        rr=json.loads((rem/'route-receipt.json').read_text())
+        blob=subprocess.check_output(['git','show',rr['recomputed_from_commit']+':'+rr['path']])
+        assert hashlib.sha256(json.dumps(json.loads(blob),ensure_ascii=False,indent=1).encode()).hexdigest()==rr['sha256']
+        remediated+=len(rf['findings'])
+        resolved_majors+=sum(x['severity_raised'] in ('blocker','major') and x['resolved'] for x in rf['findings'])
+    else:
+        majors_unresolved+=raised
     counts[d['current_report_verdict']]=counts.get(d['current_report_verdict'],0)+1
 # A hashed companion cannot be changed without detection (counterfactual local
 # byte-only control, no mutation of tracked evidence).
 p=records[0].parent/'report.md'
 assert hashlib.sha256(p.read_bytes()+b'\nCORRUPTION-CONTROL\n').hexdigest()!=sha(p)
-print(json.dumps({'result':'PASS','pairs':24,'original_rows_preserved':len(old),'historical_notes_appended':changed,'current_rows_appended':24,'companions_verified':files,'input_hashes_verified':inputs,'semantic_verdicts':counts,'unresolved_semantic_blocker_major':majors,'routed_file_receipts':routed,'pairs_with_context_refusal':24,'byte_corruption_negative_control':'detected','scope':'Integrity/history only; no sanctioned-reader or native/rendered certification.'},indent=2))
+print(json.dumps({'result':'PASS','pairs':24,'original_rows_preserved':len(old),'historical_notes_appended':changed,'current_rows_appended':24,'companions_verified':files,'input_hashes_verified':inputs,'semantic_verdicts':counts,'majors_raised_before_remediation':majors_raised,'majors_resolved_by_remediation':resolved_majors,'unresolved_after_remediation':majors_unresolved,'remediated_findings_verified':remediated,'routed_file_receipts':routed,'pairs_with_context_refusal':24,'byte_corruption_negative_control':'detected','scope':'Integrity/history only; no sanctioned-reader or native/rendered certification.'},indent=2))

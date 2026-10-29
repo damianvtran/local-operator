@@ -7,10 +7,14 @@
   "companions_verified": 345,
   "input_hashes_verified": 120,
   "semantic_verdicts": {
-    "FINDINGS": 11,
-    "PASS": 13
+    "FINDINGS": 7,
+    "PASS": 13,
+    "PASS (after remediation delta audit)": 4
   },
-  "unresolved_semantic_blocker_major": 8,
+  "majors_raised_before_remediation": 8,
+  "majors_resolved_by_remediation": 8,
+  "unresolved_after_remediation": 0,
+  "remediated_findings_verified": 11,
   "routed_file_receipts": 48,
   "pairs_with_context_refusal": 24,
   "byte_corruption_negative_control": "detected",

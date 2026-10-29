@@ -43,9 +43,9 @@
   "current_bytes_match_audited_hashes": true,
   "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
   "target_sha256": "01dd65f601e84c69728cf6104609f3e5487bf7026579c5fa5c11026d487286f7",
-  "current_report_verdict": "FINDINGS",
-  "ledger_status": "blocked",
-  "unresolved_blocker_major": 1,
+  "current_report_verdict": "PASS (after remediation delta audit)",
+  "ledger_status": "passed",
+  "unresolved_blocker_major": 0,
   "finding_counts": {
     "blocker": 0,
     "major": 1,
@@ -99,9 +99,17 @@
     "sanctioned_route_verified_reason": "en source and locale catalogue are routed; the en context sidecar is structurally refused by read_public_copy (non-string values), so this pair is not fully routed.",
     "receipts_obtained_after_judgement": true
   },
-  "publication_hold_reasons": [
-    "unresolved semantic/glossary majors",
-    "en context sidecar not routable"
-  ],
-  "linguistic_status_before_route_hold": "blocked"
+  "linguistic_status_before_route_hold": "blocked",
+  "remediation": {
+    "audit_id": "le28r2-remed",
+    "record": "i18n/audits/evidence/hi/wire.settings/le28r2-remed/findings.json",
+    "commit": "4d38a1d4b8e9a36fa0a38f4833ecf86263da45db",
+    "keys": [
+      "wire.settings.proactive_patience_episode_ttl_ms.help",
+      "wire.settings.shell_environment_exclude.help"
+    ],
+    "verdict": "PASS",
+    "target_sha256_before": "01dd65f601e84c69728cf6104609f3e5487bf7026579c5fa5c11026d487286f7",
+    "target_sha256_after": "c99c7f088fe7b836f7610fb67215ba9701712d6ffd886d38dbe15cce52f42155"
+  }
 }

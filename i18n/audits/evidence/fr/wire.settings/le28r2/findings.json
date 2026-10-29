@@ -139,5 +139,17 @@
   "linguistic_gate_status": "passed",
   "publication_hold_reasons": [
     "en context sidecar not routable"
-  ]
+  ],
+  "remediation": {
+    "audit_id": "le28r2-remed",
+    "record": "i18n/audits/evidence/fr/wire.settings/le28r2-remed/findings.json",
+    "commit": "4d38a1d4b8e9a36fa0a38f4833ecf86263da45db",
+    "keys": [
+      "wire.settings.local_providers.base_url.label",
+      "wire.settings.local_providers.models.label"
+    ],
+    "verdict": "PASS",
+    "target_sha256_before": "b40cae2e2b2bdce3fdfe52c0107e682aa5acfbe2d9d24f27586ba4bb95ae4e49",
+    "target_sha256_after": "14ea05608da7c9c0480f5399f1f87c380dc96c0484fe538ec5a182676aafee18"
+  }
 }
