@@ -62,9 +62,9 @@ def _sign_in_remedy(value: str) -> None:
     """Raise unless an expired sign-in keeps its start-again instruction."""
     lowered = value.lower()
     assert "ya no está disponible" in lowered, f"the state is 'no longer available': {value!r}"
-    assert "empieza de nuevo" in lowered, (
-        f"the remedy is 'Start again'; a dead end leaves the user stuck: {value!r}"
-    )
+    assert (
+        "empieza de nuevo" in lowered
+    ), f"the remedy is 'Start again'; a dead end leaves the user stuck: {value!r}"
 
 
 def _ttl_range(value: str) -> None:
