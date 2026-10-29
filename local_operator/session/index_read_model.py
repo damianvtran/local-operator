@@ -239,7 +239,13 @@ def header(root: str | Path, sid: str) -> Result:
             # No companion for THIS derivation: the caller takes base's path.
             return Result("missing")
         publication = Publication(Path(root), sid, values, _identity(st), st.st_mtime, path, token)
-        # These fields attest the actual journal scan, never a fresh guessed stat.
+        # THE JOURNAL ITSELF IS WITNESSED HERE (round-3 N1). The cached document
+        # and its companion describe the scan they were built from; an append
+        # moves neither of those two files, so a manifest served on their word
+        # alone answered `ready N` forever while the journal had grown. One stat
+        # of the journal is the difference between "this projection is the
+        # current derivation" and "this projection is old but internally
+        # consistent", and it is the same signature the derivation token uses.
         sig = publication.signature
         if (
             type(sig[0]) is not int
@@ -247,11 +253,24 @@ def header(root: str | Path, sid: str) -> Result:
             or not isinstance(sig[2], (int, float))
         ):
             return Result("corrupt")
+        live = _journal_signature(Path(root), sid)
+        if live is not None and live != sig:
+            # A moved journal makes this a PREVIOUS derivation: the caller takes
+            # base's refresh path (which is what makes the append visible at all).
+            return Result("stale", publication)
         return Result("ready", publication)
     except FileNotFoundError:
         return Result("missing")
     except (OSError, ValueError, KeyError, TypeError, IndexError):
         return Result("unsupported")
+
+
+def _journal_signature(root: Path, sid: str) -> tuple[int, int, float] | None:
+    """The live journal's signature, or ``None`` when there is no journal."""
+    st = ti._stat_or_none(ti._journal_path(root, sid))
+    if st is None:
+        return None
+    return (st.st_ino, st.st_size, st.st_mtime)
 
 
 def _current(pub: Publication) -> bool:
@@ -336,8 +355,7 @@ def publish(root: str | Path, sid: str, index: ti.TranscriptIndex) -> str | None
     }
     try:
         with closing(sqlite3.connect(temp)) as db:
-            db.executescript(
-                """
+            db.executescript("""
                 -- 1024-byte pages: this file is thousands of TINY rows and the
                 -- default 4 KiB page left most of every page as slack.
                 PRAGMA page_size=1024;
@@ -355,8 +373,7 @@ def publish(root: str | Path, sid: str, index: ti.TranscriptIndex) -> str | None
                 CREATE TABLE checkpoints(position INTEGER PRIMARY KEY, id TEXT, seq INTEGER,
                                          payload BLOB NOT NULL);
                 CREATE INDEX checkpoints_id ON checkpoints(id, position);
-            """
-            )
+            """)
             db.execute("INSERT INTO meta VALUES (?)", (json.dumps(meta),))
             # Only the rows the opener proof can consult carry a role: a genuine
             # user or assistant doc, never a tool body or an injected doc.
@@ -743,8 +760,10 @@ def schedule_materialize(root: str | Path, sid: str, index: ti.TranscriptIndex) 
     source = source_of(index)
     if failed(root, sid, source):
         return
-    token = ti._read_resume_head(root, sid)
-    if token is not None and _companion_exists(root, sid, index):
+    # ONE head read, not two (round-3 N2): the token this pass would publish is
+    # derived from the index it was handed, and the head only has to say whether
+    # that exact derivation is already on disk.
+    if _companion_exists(root, sid, index):
         return
     try:
         loop = asyncio.get_running_loop()
@@ -795,20 +814,15 @@ def schedule_materialize(root: str | Path, sid: str, index: ti.TranscriptIndex) 
 
 
 def _companion_exists(root: str | Path, sid: str, index: ti.TranscriptIndex) -> bool:
-    head = ti._read_resume_head(root, sid)
-    if head is None:
-        return False
-    sig, scan, generation, _size = head
-    token = _token_for(
-        {
-            "version": ti.TRANSCRIPT_INDEX_VERSION,
-            "sig": sig,
-            "scan": scan.to_payload(),
-            "journal_generation": generation,
-        }
-    )
+    """Whether a companion already exists for THIS index's derivation.
+
+    Deliberately does not consult the canonical head: the caller holds the
+    completed derivation, so the only question left is whether its token is
+    published — and the head would be a second read of the same document the
+    caller just wrote.
+    """
     try:
-        return _path(Path(root), sid, token).is_file()
+        return _path(Path(root), sid, token_for(index)).is_file()
     except ValueError:
         return False
 
@@ -925,8 +939,12 @@ def checkpoint_manifest(root: str | Path, sid: str) -> Result:
     with _MEMO_LOCK:
         memo = _MANIFEST_MEMO.get(key)
     if memo is not None:
-        identity, naming_identity, built_at, checkpoints, naming = memo
-        if identity == probe.value.identity and _naming_identity(probe.value) == naming_identity:
+        identity, naming_identity, built_at, journal, checkpoints, naming = memo
+        if (
+            identity == probe.value.identity
+            and _naming_identity(probe.value) == naming_identity
+            and journal == _journal_signature(probe.value.root, sid)
+        ):
             pub = Publication(
                 probe.value.root,
                 sid,
@@ -962,6 +980,7 @@ def checkpoint_manifest(root: str | Path, sid: str) -> Result:
             resolved.identity,
             _naming_identity(resolved),
             resolved.built_at,
+            _journal_signature(resolved.root, sid),
             checkpoints,
             naming,
         )

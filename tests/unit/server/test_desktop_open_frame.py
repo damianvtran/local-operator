@@ -489,13 +489,9 @@ async def test_frame_index_fallback_preserves_ready_facts_without_projection(
         previous = ti.refresh_index(harness.root, harness.session_id)
         assert previous is not None
         cache = ti.index_path(harness.root, harness.session_id)
-        # Exercise _frame_index itself, not the earlier summary fast path, with
-        # NO companion available for this publication.
-        _publish(harness.root, harness.session_id, previous)
-        for companion in (cache.parent / "read-models" / harness.session_id).glob("*.sqlite"):
-            companion.unlink()
-        for sidecar in (cache.parent / "read-models" / harness.session_id).glob("*.json"):
-            sidecar.unlink()
+        # Exercise _frame_index itself, not the earlier summary fast path, and with
+        # NO companion published for this publication (nothing calls publish here),
+        # so the fallback is the only source — which is the case under test.
         if cache_state != "small_disk":
             with cache.open("a", encoding="utf-8") as handle:
                 handle.write(" " * (6 << 20))
@@ -514,7 +510,11 @@ async def test_frame_index_fallback_preserves_ready_facts_without_projection(
             async with harness.pool.session(harness.session_id, read=True) as bridge:
                 with monkeypatch.context() as patch:
                     patch.setattr(asyncio, "wait", record_wait)
-                    index = await bridge._frame_index(time.monotonic() + 0.12)
+                    # A GENEROUS budget, because this test observes the wait SEAM
+                    # (recorded by the spy above), not milliseconds: on a loaded
+                    # host a 0.12 s deadline turned the assertion below into a coin
+                    # flip (round-3 M1).
+                    index = await bridge._frame_index(time.monotonic() + 5.0)
                 entry = ti._IN_FLIGHT.get(ti._key(harness.root, harness.session_id))
                 task = entry[1] if entry is not None else None
                 if cache_state == "large_disk":
@@ -1140,13 +1140,37 @@ async def test_a_frame_whose_index_lands_during_the_hunt_is_the_steady_frame(
         params = {"limit": limit, "open_frame": 1}
 
         original = DesktopSessionBridge._frame_index
-        # Remove the optional summary to exercise the original late-index path.
+        # The RESIDENT entry must stay: it is what makes the retry cheap enough
+        # to land inside the hunt, and the case under test is a retry that
+        # SUCCEEDS. Establishing it HERE rather than inheriting whatever
+        # ``warm()`` happened to leave makes the precondition explicit — a
+        # competition-era read can serve the manifest without remembering the
+        # resident, and this test then failed for a reason it does not measure
+        # (round-3 M1). Only the on-disk document (and so the companion) goes, so
+        # the first attempt has nothing and must answer None.
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        key = ti._key(harness.root, harness.session_id)
+        ti._remember(key, index, ti.index_path(harness.root, harness.session_id).stat().st_mtime)
         ti.index_path(harness.root, harness.session_id).unlink()
         calls: list[int] = []
 
         async def _lands_during_the_hunt(self: Any, deadline: float) -> Any:
             calls.append(1)
-            return None if len(calls) == 1 else await original(self, deadline)
+            if len(calls) == 1:
+                return None
+            # LAND the index inside this call instead of betting on a background
+            # refresh fitting the open budget: the case under test is "the index
+            # arrives during the hunt", and the arrival must be deterministic
+            # (round-3 M1: the old shape failed or passed on scheduling luck).
+            arrival = await asyncio.to_thread(ti.refresh_index, harness.root, harness.session_id)
+            if arrival is not None:
+                ti._remember(
+                    key,
+                    arrival,
+                    ti.index_path(harness.root, harness.session_id).stat().st_mtime,
+                )
+            return await original(self, deadline)
 
         monkeypatch.setattr(DesktopSessionBridge, "_frame_index", _lands_during_the_hunt)
         first = (await harness.client.get(url, params=params)).json()["result"]
@@ -1199,6 +1223,43 @@ async def test_projection_journal_ordinals_match_the_resident_join(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_a_warm_checkpoint_manifest_reflects_a_later_append(tmp_path: Path) -> None:
+    """Round-3 N1: the rail must not answer the PRE-append list forever.
+
+    Warmed first on purpose: the cached manifest is keyed on the canonical
+    document and the naming sidecar, and an append moves neither file, so a
+    cache that consults only those two keeps answering `ready N` while the
+    journal has grown (QA's "append loses facts", base answers `ready N+2`).
+    """
+    async with _Harness(tmp_path) as harness:
+        harness.seed(turns=3)
+        index = ti.refresh_index(harness.root, harness.session_id)
+        assert index is not None
+        _publish(harness.root, harness.session_id, index)
+        assert harness.client is not None
+        url = f"/v1/desktop/sessions/{harness.session_id}/checkpoints"
+        warm = (await harness.client.get(url)).json()["result"]
+        assert warm["index"]["state"] == "ready"
+        before = len(warm["checkpoints"])
+        directory = harness.root / "sessions" / harness.session_id
+        await Transcript(directory).append_message(
+            Message(role="user", content=[TextContent(text="after the warm cache")])
+        )
+        await Transcript(directory).append_message(
+            Message(role="assistant", content=[TextContent(text="answered")])
+        )
+        after = (await harness.client.get(url)).json()["result"]
+        polled = [after]
+        for _ in range(2):
+            polled.append((await harness.client.get(url)).json()["result"])
+        assert all(poll["index"]["state"] == "ready" for poll in polled)
+        assert all(len(poll["checkpoints"]) == before + 2 for poll in polled), [
+            len(poll["checkpoints"]) for poll in polled
+        ]
+        assert len({len(poll["checkpoints"]) for poll in polled}) == 1
+
+
+@pytest.mark.asyncio
 async def test_an_append_warm_reopen_still_reaches_final_runs(tmp_path: Path) -> None:
     """Q5: the companion must not cost the append path its ready first frame.
 
@@ -1222,9 +1283,14 @@ async def test_an_append_warm_reopen_still_reaches_final_runs(tmp_path: Path) ->
         params = {"limit": 50, "open_frame": 1}
         first = (await harness.client.get(url, params=params)).json()["result"]
         steady = (await harness.client.get(url, params=params)).json()["result"]
-        if first["runs_state"] != "ready":
-            # An honest building answer is allowed, but ONLY with no facts: what
-            # is forbidden is a ready frame whose runs are the pre-append set.
-            assert first["runs"] == []
         assert steady["runs_state"] == "ready"
-        assert first["runs"] == steady["runs"]
+        if first["runs_state"] == "ready":
+            # The discriminator: a READY first frame must carry the appended runs,
+            # never the pre-append set a stale companion would have served.
+            assert first["runs"] == steady["runs"], "a ready frame carried stale runs"
+        else:
+            # An honest building answer is allowed under host load, but ONLY with
+            # no facts — an incomplete ready frame is the forbidden case, and this
+            # branch used to compare itself against steady unconditionally, which
+            # made the test fail for the very answer it permits (round-3 M1).
+            assert first["runs"] == [], "a building frame carried facts"

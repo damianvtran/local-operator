@@ -30,8 +30,8 @@ def _materialize(root: Path, index: ti.TranscriptIndex) -> str:
     return token
 
 
-def _rows(count: int) -> list[dict]:
-    rows: list[dict] = []
+def _rows(count: int) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
     for turn in range(1, count + 1):
         rows.append(
             {
@@ -56,7 +56,7 @@ def _rows(count: int) -> list[dict]:
     return rows
 
 
-def _journal(root: Path, rows: list[dict] | None = None) -> Path:
+def _journal(root: Path, rows: list[dict[str, object]] | None = None) -> Path:
     path = root / "sessions" / SID / "transcript.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(row) + "\n" for row in (rows or _rows(2))), encoding="utf-8")
@@ -71,6 +71,14 @@ def publication(tmp_path):
     _materialize(tmp_path, index)
     yield tmp_path, index
     ti._reset_for_tests()
+
+
+def _pub(root: Path, sid: str = SID) -> rm.Publication:
+    """The publication a read resolved, asserting it is ready (pyright cannot)."""
+    probe = rm.header(root, sid)
+    assert probe.state == "ready", probe.reason
+    assert isinstance(probe.value, rm.Publication)
+    return probe.value
 
 
 def _source(index: ti.TranscriptIndex) -> tuple[int, int, float]:
@@ -91,18 +99,22 @@ def test_the_canonical_document_names_no_marker_and_the_companion_hides_beside_i
     directory = ti.index_path(root, SID).parent / "read-models" / SID
     assert (directory / f"{token}.sqlite").is_file()
     assert (directory / f"{token}.naming.json").is_file()
-    assert ti._read_resume_head(root, SID)[:3] == (index.sig, index.scan, index.journal_generation)
+    head = ti._read_resume_head(root, SID)
+    assert head is not None
+    assert head[:3] == (index.sig, index.scan, index.journal_generation)
 
 
 def test_a_naming_patch_reuses_the_companion_and_refreshes_only_the_sidecar(publication):
     root, _ = publication
-    before = rm.header(root, SID).value
+    before = _pub(root)
     assert ti.patch_naming(root, SID, {"u2": {"name": "Named", "summary": "s"}})
-    after = rm.header(root, SID).value
+    after = _pub(root)
     assert before.path == after.path, "a naming write must not mint another companion body"
     manifest = rm.checkpoint_manifest(root, SID)
     assert manifest.state == "ready"
-    assert manifest.value["checkpoints"][-1]["naming"]["name"] == "Named"
+    manifest_value = manifest.value
+    assert manifest_value is not None
+    assert manifest_value["checkpoints"][-1]["naming"]["name"] == "Named"
 
 
 def test_repeated_manifest_polls_are_consistently_cached(publication, monkeypatch):
@@ -292,8 +304,11 @@ def test_a_changed_journal_has_no_companion_for_its_new_derivation(publication, 
         replacement = path.with_suffix(".new")
         replacement.write_bytes(content)
         replacement.replace(path)
-    assert rm.checkpoint_manifest(root, SID).state != "ready"
-    assert rm.header(root, SID).value.token_id == rm.token_for(index)
+    # The document and its companion describe the PREVIOUS derivation, and the
+    # journal witness in ``header`` is what says so (round-3 N1): nothing is served
+    # from them, and the consumer takes base's refresh path instead.
+    assert rm.checkpoint_manifest(root, SID).state == "stale"
+    assert rm.header(root, SID).state == "stale"
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +361,7 @@ def test_companion_metadata_mismatch_is_never_ready(publication):
     import sqlite3
 
     root, _ = publication
-    pub = rm.header(root, SID).value
+    pub = _pub(root)
     with sqlite3.connect(pub.path) as db:
         (payload,) = db.execute("SELECT payload FROM meta").fetchone()
         meta = json.loads(payload)
@@ -359,7 +374,7 @@ def test_missing_checkpoint_is_not_complete_ready(publication):
     import sqlite3
 
     root, _ = publication
-    pub = rm.header(root, SID).value
+    pub = _pub(root)
     with sqlite3.connect(pub.path) as db:
         db.execute("DELETE FROM checkpoints WHERE position=0")
     assert rm.checkpoint_manifest(root, SID).state == "corrupt"
@@ -367,12 +382,18 @@ def test_missing_checkpoint_is_not_complete_ready(publication):
 
 def test_corrupt_companion_never_becomes_an_empty_ready_manifest(publication):
     root, _ = publication
-    rm.header(root, SID).value.path.write_bytes(b"not sqlite")
+    _pub(root).path.write_bytes(b"not sqlite")
     assert rm.checkpoint_manifest(root, SID).state == "corrupt"
 
 
 def test_duplicate_checkpoint_ids_use_the_last_position(tmp_path):
-    """R4: MAX -> MIN must fail this. Bounds come from the LAST duplicate."""
+    """A duplicated checkpoint id keeps the LAST position, like the derivation.
+
+    Caveat: `MAX(position)` -> `MIN(position)` survives this test, because the
+    reference derivation applies the same last-position rule and the duplicate is
+    never the row a page's bounds depend on. What is checked is that the
+    projection keeps every checkpoint row and agrees with the derivation.
+    """
     from dataclasses import replace
 
     from local_operator.session import open_frame as frame
@@ -406,18 +427,27 @@ def test_duplicate_checkpoint_ids_use_the_last_position(tmp_path):
     )
     assert facts.state == "ready", facts.reason
     bounds = frame.page_seq_bounds(duplicate, [{"id": "u1"}], reaches_eof=False)
-    assert facts.value.runs == frame.publish_runs(
+    assert bounds is not None
+    facts_value = facts.value
+    assert facts_value is not None
+    assert facts_value.runs == frame.publish_runs(
         duplicate, first_seq=bounds[0], last_seq=bounds[1]
     )
     manifest = rm.checkpoint_manifest(root, SID)
-    assert len(manifest.value["checkpoints"]) == len(duplicate.checkpoints)
+    manifest_value = manifest.value
+    assert manifest_value is not None
+    assert len(manifest_value["checkpoints"]) == len(duplicate.checkpoints)
 
 
 def test_the_following_run_boundary_is_materialized(publication):
-    """R4: `first_seq >` -> `>=`/absent must fail this.
+    """A bounded page's runs match the full derivation exactly.
 
-    A page that stops at the first run must publish the runs up to the NEXT run's
-    first ordinal, exactly as the full derivation does.
+    NOT a mutation discriminator, and it does not claim to be: replacing the
+    `first_seq >` helper query with `>=` survives this test, because the run tail
+    is materialised from `first_seq <= min(seqs) - 1` onward and the boundary is
+    owned by `frame.page_seq_bounds`. The equality with the resident derivation is
+    what is checked here; see the round-3 remediation comment for the measured
+    non-discrimination.
     """
     from local_operator.session import open_frame as frame
 
@@ -435,9 +465,12 @@ def test_the_following_run_boundary_is_materialized(publication):
     )
     assert facts.state == "ready", facts.reason
     bounds = frame.page_seq_bounds(index, page, reaches_eof=False)
+    assert bounds is not None
     expected = frame.publish_runs(index, first_seq=bounds[0], last_seq=bounds[1])
     assert bounds[1] is not None, "the fixture must have a following run to publish"
-    assert facts.value.runs == expected
+    facts_value = facts.value
+    assert facts_value is not None
+    assert facts_value.runs == expected
 
     # THE BOUNDARY THAT DISCRIMINATES `>` FROM `>=` needs a store whose run tail
     # is CAPPED: below ``OPEN_FRAME_MAX_ROWS`` the projection loads every run and
@@ -447,11 +480,16 @@ def test_the_following_run_boundary_is_materialized(publication):
 
 
 def test_the_following_run_helper_is_the_strict_boundary(tmp_path):
-    """R4: `first_seq >` -> `>=` must fail this, on a CAPPED run tail."""
+    """A capped run tail still matches the full derivation.
+
+    Same caveat as ``test_the_following_run_boundary_is_materialized``: the
+    `first_seq >` helper query is redundant inside the cap, so `>=` survives here
+    too. Recorded rather than silently overstated.
+    """
     from local_operator.session import open_frame as frame
 
     turns = frame.OPEN_FRAME_MAX_ROWS + 20
-    rows: list[dict] = []
+    rows: list[dict[str, object]] = []
     for turn in range(1, turns + 1):
         rows.append(
             {
@@ -490,8 +528,11 @@ def test_the_following_run_helper_is_the_strict_boundary(tmp_path):
     )
     assert facts.state == "ready", facts.reason
     bounds = frame.page_seq_bounds(index, page, reaches_eof=False)
+    assert bounds is not None
     assert bounds[1] is None
-    assert facts.value.runs == frame.publish_runs(index, first_seq=bounds[0], last_seq=bounds[1])
+    facts_value = facts.value
+    assert facts_value is not None
+    assert facts_value.runs == frame.publish_runs(index, first_seq=bounds[0], last_seq=bounds[1])
 
 
 def test_restored_mtime_is_explicit_existing_witness_limit(publication):
@@ -557,6 +598,7 @@ def test_the_naming_merge_happens_inside_the_lock(publication, monkeypatch):
     monkeypatch.setattr(ti, "preserved_naming", slow_merge)
     writer = threading.Thread(target=lambda: ti.write_index(root, SID, index), daemon=True)
     writer.start()
+    patcher: threading.Thread | None = None
     try:
         assert entered.wait(10)
         patcher = threading.Thread(
@@ -569,7 +611,8 @@ def test_the_naming_merge_happens_inside_the_lock(publication, monkeypatch):
     finally:
         release.set()
         writer.join(10)
-        patcher.join(10)
+        if patcher is not None:
+            patcher.join(10)
     assert json.loads(ti.index_path(root, SID).read_text())["naming"]["items"]["u1"]["name"] == (
         "Raced"
     )
@@ -610,7 +653,9 @@ def test_a_failed_replace_keeps_the_previous_document_and_reports(publication, m
         return real_replace(self, destination)
 
     monkeypatch.setattr(Path, "replace", refuse)
-    ti.write_index(root, SID, ti.read_index(root, SID))
+    parsed = ti.read_index(root, SID)
+    assert parsed is not None
+    ti.write_index(root, SID, parsed)
     assert path.read_bytes() == before
     assert "could not write the transcript index" in caplog.text
     assert any(record.levelname == "ERROR" for record in caplog.records)
@@ -624,7 +669,7 @@ def test_collection_keeps_the_referenced_token(publication):
         ti.write_index(root, SID, index)
     directory = ti.index_path(root, SID).parent / "read-models" / SID
     assert (directory / f"{index_read_token(root)}.sqlite").is_file()
-    assert rm.header(root, SID).value.token_id == index_read_token(root)
+    assert _pub(root).token_id == index_read_token(root)
     assert token == index_read_token(root)
     kept = sorted(path.stem for path in directory.glob("*.sqlite"))
     assert len(kept) <= rm._RETAIN_PREVIOUS + 1
@@ -697,7 +742,7 @@ def test_the_companion_stays_a_small_fraction_of_the_index(tmp_path):
     and the projection must store the WITNESSES of those rows (ordinals, roles,
     packed records), never a second copy of the prose.
     """
-    rows: list[dict] = []
+    rows: list[dict[str, object]] = []
     for turn in range(1, 801):
         rows.append(
             {

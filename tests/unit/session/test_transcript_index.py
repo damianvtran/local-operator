@@ -2265,6 +2265,7 @@ async def test_disk_fallback_keeps_original_admission_and_derives_all_facts(tmp_
     assert ti._read_resume_head(tmp_path, SID) is not None
     release = ti.hold_paint(tmp_path, SID)
     task = None
+    built = None
     try:
         task, started = ti.start_refresh(tmp_path, SID)
         assert started and not ti.refresh_deferred(tmp_path, SID)
