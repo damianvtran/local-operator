@@ -7996,25 +7996,6 @@
       },
       "status": "passed",
       "note": "Independent zh-CN audit, 13 keys, clean: 0 blocker/major/minor/nit. Evidence i18n/audits/evidence/zh-CN/relay.account_policy/zhc1. Auditor read the English source and sidecar at the hashes recorded there; route and marker scan recorded in record.json (worktree reads per docs/security/redaction-policy.md 2.2; 0 markers; assignment tokens verified by ordinals). Translator session 809b6f2773e0, auditor session e139d7f8f30c; both ran on radient/auto after anthropic quota fallbacks. No native-speaker pass claimed."
-    },
-    {
-      "locale": "zh-CN",
-      "namespace": "wire.settings.account_policy",
-      "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
-      "translator": {
-        "agent": "translator (lopdev team)",
-        "model": "radient/auto",
-        "date": "2026-10-28"
-      },
-      "auditor": {
-        "agent": "translation-auditor (lopdev team)",
-        "model": "radient/auto",
-        "date": "2026-10-28",
-        "result": "passed",
-        "findings": 0
-      },
-      "status": "passed",
-      "note": "Independent zh-CN audit, 14 keys: 0 blocker, 0 major, 1 minor (ZH-SETAP-R1-001 reset_soonest.description unknown-reports wording), remediated in the same commit as this row. Evidence i18n/audits/evidence/zh-CN/wire.settings.account_policy/zhc1; route and marker scan in record.json; ordinals verified. Translator session 809b6f2773e0, auditor session e139d7f8f30c (radient/auto after quota fallbacks). No native-speaker pass claimed."
     }
   ]
 }

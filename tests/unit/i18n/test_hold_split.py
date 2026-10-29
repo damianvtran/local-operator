@@ -102,7 +102,13 @@ def test_active_ledger_carries_the_released_chinese_candidate() -> None:
     # The mobile ask card's `Other` row adds one key to `relay.asks`; the ledger
     # is append-only, so a fresh zh-CN row lands at the new English bytes and the
     # earlier row stays at its superseded hash: one more.
-    assert len(chinese) == 93
+    # The independently audited `relay.account_policy` backfill (13 keys, PR
+    # #3121) is the ninety-third. The three other namespaces that wave was
+    # tasked with stay deliberately English-only: `wire.settings.account_policy`
+    # is pinned to en by the settings registry (`settings_io._t()`), and the two
+    # SDK exception namespaces require a caller-contract migration first, so no
+    # ledger row exists for them.
+    assert len(chinese) == 94
     assert all(entry["status"] == "passed" for entry in chinese)
     carried = set(catalogues.namespaces("zh-CN"))
     assert {entry["namespace"] for entry in chinese} == carried
