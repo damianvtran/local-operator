@@ -1678,29 +1678,45 @@ class ConversationAdmitIn(ConversationOwnerIn):
     body_hash: str = Field(min_length=1, max_length=128)
 
 
-class ConversationReactIn(ConversationOwnerIn):
+class ConversationReactIn(_Strict):
     """The reaction PUT body: the captured DATA-owner receipt, REQUIRED.
 
-    Unlike the legacy conversation writes (whose receipt stays optional so an
-    older renderer keeps working), no shipped renderer ever called the reaction
-    routes: the UI held them closed (`TEAM_BRIDGE_REACTIONS_SHIPPED_IN_THIS_BUILD`)
+    DELIBERATELY NOT a subclass of :class:`ConversationOwnerIn`, on the rule
+    :class:`MessageAdmission` states for its own fields: that base declares
+    ``expected_account_id`` and ``tenant_id`` OPTIONAL (the legacy conversation
+    writes stay compatible with an older renderer that omits them), and
+    narrowing a mutable field to required in a subclass is not a narrowing at
+    all — pyright's ``reportIncompatibleVariableOverride`` refuses it, rightly,
+    because the inherited annotation would still advertise the optional
+    contract on a route that refuses to run without it. A field type here is the
+    API contract for the renderer, so both receipt fields are stated in full.
+
+    Unlike the legacy conversation writes, no shipped renderer ever called the
+    reaction routes: the UI held them closed (`TEAM_BRIDGE_REACTIONS_SHIPPED_IN_THIS_BUILD`)
     because the old path had never been reviewed for account/retry safety. So
     there is no legacy caller to stay compatible with, and an OPTIONAL guard
     would regress the first time a new renderer forgot it (the attachment
-    routes' #2772 B1 rule). The inherited validator then also requires an
-    explicit target ``tenant_id``: a guarded write names the tenant of the
-    captured data, never the picker's default organization.
+    routes' #2772 B1 rule). ``tenant_id`` is required for the same reason the
+    base's validator requires it once a receipt is present: a guarded write
+    names the tenant of the captured data, never the picker's default
+    organization.
 
     There is still no ``actor_endpoint_id`` here, so the renderer cannot react
     as an agent (``_Strict`` refuses the extra key).
     """
 
     expected_account_id: str = Field(min_length=1, max_length=128)
+    tenant_id: str = Field(min_length=1, max_length=128)
 
     @model_validator(mode="after")
-    def _account_grammar(self) -> "ConversationReactIn":
+    def _receipt_grammar(self) -> "ConversationReactIn":
         if not is_account_id(self.expected_account_id):
             raise ValueError("expected_account_id is outside the accepted grammar")
+        # ``min_length`` admits a whitespace-only tenant; the guarded write
+        # needs a real organization, exactly as ``ConversationOwnerIn`` refuses
+        # a blank one.
+        if not self.tenant_id.strip():
+            raise ValueError("a guarded mutation needs an explicit tenant_id")
         return self
 
 
