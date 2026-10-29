@@ -40,7 +40,7 @@ import threading
 import time
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Collection
 
 from local_operator.network.credentials import mcp_state
 from local_operator.network.credentials.messages import render_broker_error
@@ -605,8 +605,15 @@ class MeshCredentialClient:
         model_id: str = "",
         force_refresh: bool = False,
         provider: str = "",
+        affinity: tuple[int, int] | None = None,
+        demote_credential_ids: Collection[int] = (),
     ) -> Grant | BrokerError:
         """Borrow a bearer for ``key``. Blocking; call from a thread.
+
+        ``affinity`` is this session's warm-account anchor ``(owner row id, row
+        created_at)`` and ``demote_credential_ids`` the owner rows this session just
+        saw fail server-side; both come from ``MeshAwareAuthStore`` and only steer
+        the owner's choice (``owner.grant`` step 2e).
 
         THE ORDER IS THE CONTRACT: a live grant, then a cached refusal, then the
         dial. Checking the cache before the grant would serve a stale "no" over a
@@ -662,6 +669,8 @@ class MeshCredentialClient:
                 # Only when there is something to hide, so the frame an older relay
                 # or owner reads is byte-identical to the one it always read.
                 extra["exclude_credential_ids"] = excluded
+            # The same only-when-present rule for the selection inputs.
+            extra.update(_selection_fields(affinity, demote_credential_ids))
             reply = control_request(
                 record,
                 "credential_grant",
@@ -727,6 +736,8 @@ class MeshCredentialClient:
         model_id: str = "",
         force_refresh: bool = False,
         exclude_credential_ids: list[int] | None = None,
+        affinity: tuple[int, int] | None = None,
+        demote_credential_ids: Collection[int] = (),
     ) -> dict[str, Any]:
         """Answer a leg-1 ``credential_grant``. Returns a ``detail`` object.
 
@@ -775,6 +786,7 @@ class MeshCredentialClient:
             # older owner simply ignores it, which costs one more 429, never a wrong
             # account (it is a narrowing, never a widening).
             frame["exclude_credential_ids"] = list(exclude_credential_ids)
+        frame.update(_selection_fields(affinity, demote_credential_ids))
         direct = self._ask_owner_directly(owner, frame)
         if direct is not None:
             return self._detail_from_owner(
@@ -1530,6 +1542,8 @@ class MeshCredentialClient:
         model_id: str = "",
         force_refresh: bool = False,
         provider: str = "",
+        affinity: tuple[int, int] | None = None,
+        demote_credential_ids: Collection[int] = (),
     ) -> Grant | BrokerError:
         """``request_grant_sync`` off the event loop.
 
@@ -1545,7 +1559,29 @@ class MeshCredentialClient:
             model_id=model_id,
             force_refresh=force_refresh,
             provider=provider,
+            affinity=affinity,
+            demote_credential_ids=tuple(demote_credential_ids),
         )
+
+
+def _selection_fields(
+    affinity: tuple[int, int] | None, demote_credential_ids: Collection[int]
+) -> dict[str, Any]:
+    """The optional lend-selection fields, present ONLY when they carry something.
+
+    The ``exclude_credential_ids`` rule (#3066): a frame with nothing to say is
+    byte-identical to the one an older relay or owner always read, and an older
+    owner that receives them ignores them, which is today's lend.
+    """
+    fields: dict[str, Any] = {}
+    if affinity is not None:
+        fields["affinity"] = {
+            "account_id": int(affinity[0]),
+            "account_created_at": int(affinity[1]),
+        }
+    if demote_credential_ids:
+        fields["demote_credential_ids"] = sorted({int(i) for i in demote_credential_ids})
+    return fields
 
 
 def key_for(*, provider: str = "", mcp_url: str = "") -> str:

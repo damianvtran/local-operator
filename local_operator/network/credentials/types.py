@@ -317,6 +317,31 @@ def peer_credential_ids(value: Any) -> tuple[int, ...]:
     return tuple(ids[:MAX_EXCLUDED_CREDENTIAL_IDS])
 
 
+def peer_affinity(value: Any) -> tuple[int, int] | None:
+    """A peer's ``affinity`` anchor: ``(account_id, account_created_at)`` or ``None``.
+
+    The same strictness as :func:`peer_credential_ids`, for the same reason: both
+    numbers are an IDENTITY (an owner row and its immutable creation stamp), so a
+    coerced ``"1"`` or ``1.0`` is not one an honest borrower sends. Anything
+    malformed reads as "no anchor", which is the pre-affinity lend \u2014 the
+    anchor is only ever a preference among rows the peer may already be lent.
+    """
+    if not isinstance(value, dict):
+        return None
+    account_id = value.get("account_id")
+    created_at = value.get("account_created_at")
+    if not (
+        isinstance(account_id, int)
+        and isinstance(created_at, int)
+        and not isinstance(account_id, bool)
+        and not isinstance(created_at, bool)
+        and 0 < account_id <= PEER_NUMBER_CEILING
+        and 0 < created_at <= PEER_NUMBER_CEILING
+    ):
+        return None
+    return (account_id, created_at)
+
+
 def _bounded_narrowing(value: Any) -> dict[str, Any]:
     """A ``Grant.narrowing`` map a peer sent, bounded to shapes this build reads.
 
@@ -636,6 +661,12 @@ class CredentialRef:
     provider: str
     kind: str  # 'oauth' | 'api_key' | 'mcp-oauth' | 'github-app'
     credential_id: int
+    #: The owner row's immutable ``created_at`` (ms). With ``credential_id`` it is
+    #: the identity a borrower's account-affinity receipt names, so a row deleted
+    #: and re-created under a reused id can never be anchored by an old receipt.
+    #: ``0`` from an owner that predates it: the borrower then records no receipt
+    #: and sends no anchor, which is the pre-affinity behaviour.
+    account_created_at: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -738,6 +769,7 @@ class Grant:
                 provider=str(ref_row.get("provider") or ""),
                 kind=str(ref_row.get("kind") or "oauth"),
                 credential_id=peer_int(ref_row.get("credential_id")),
+                account_created_at=peer_int(ref_row.get("account_created_at")),
             ),
             served_by=str(detail.get("served_by") or ""),
             refreshed=bool(detail.get("refreshed")),
